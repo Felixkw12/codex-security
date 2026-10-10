@@ -7911,7 +7911,7 @@ describe("patch change tracking", () => {
             if (
               change === "vanished" &&
               !removed &&
-              args[0] === "ls-files" &&
+              args.includes("ls-files") &&
               args.includes("--ignored")
             ) {
               await rm(join(directory, source));
