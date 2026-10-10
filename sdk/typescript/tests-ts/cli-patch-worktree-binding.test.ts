@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import {
   repositoryGit,
@@ -87,7 +87,12 @@ test.each(
     const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
       currentDirectory: root,
       onRepositoryCommand: (command, args, cwd, options) => {
-        if (args.includes(join(nested, ".git")) && args.includes("ls-files"))
+        const gitDirectory = args.indexOf("--git-dir");
+        if (
+          args.includes("ls-files") &&
+          gitDirectory >= 0 &&
+          resolve(args[gitDirectory + 1]!) === join(nested, ".git")
+        )
           nestedInventory.push([...args]);
         return runGitRepositoryCommand(command, args, cwd, options);
       },
