@@ -203,7 +203,8 @@ async function canonicalPath(path: string): Promise<string> {
   if (canonical !== undefined) return canonical;
   const parent = dirname(path);
   if (parent === path) return path;
-  return join(await canonicalPath(parent), path.slice(parent.length));
+  // A missing intermediate component must not collapse into an existing file.
+  return `${await canonicalPath(parent)}${path.slice(parent.length)}`;
 }
 
 async function readableGitParent(
@@ -233,7 +234,10 @@ async function readableGitParent(
       const end = separator < 0 ? path.length : separator;
       const prefix = path.subarray(0, end);
       if (
-        (!gitlink || !exact || end !== path.length) &&
+        (!gitlink ||
+          !exact ||
+          end !== path.length ||
+          process.platform !== "win32") &&
         (
           await lstat(
             Buffer.concat([Buffer.from(`${checkout}${sep}`), prefix]),
@@ -501,7 +505,9 @@ export async function capturePatchGitControls(
           // active includes. An inaccessible conditional path was not selected.
           if (
             key.startsWith("includeif.") &&
-            (error as NodeJS.ErrnoException).code === "EACCES"
+            ["EACCES", "ELOOP"].includes(
+              (error as NodeJS.ErrnoException).code ?? "",
+            )
           ) {
             inaccessibleIncludes.add(includePath);
             continue;
@@ -585,7 +591,12 @@ export async function capturePatchGitControls(
           const canonical = await canonicalPath(path);
           await stat(canonical).catch(missing);
         } catch (error) {
-          if ((error as NodeJS.ErrnoException).code === "EACCES") continue;
+          if (
+            ["EACCES", "ELOOP"].includes(
+              (error as NodeJS.ErrnoException).code ?? "",
+            )
+          )
+            continue;
           throw error;
         }
         throw new Error(
@@ -771,8 +782,9 @@ export async function capturePatchGitControls(
       )) {
         if (symlinkedAncestors.some((ancestor) => inside(ancestor, candidate)))
           continue;
+        // Git for Windows follows directory junctions as directories.
         if (
-          !gitlink &&
+          (!gitlink || process.platform !== "win32") &&
           (await lstat(candidate).catch(missing))?.isSymbolicLink()
         ) {
           symlinkedAncestors.push(candidate);
