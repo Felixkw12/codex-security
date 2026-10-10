@@ -230,6 +230,40 @@ for (const [kind, contents] of [
   );
 }
 
+test.skipIf(process.platform !== "linux")(
+  "patch discovery keeps a missing raw-byte gitfile target as ordinary fixture data",
+  async () => {
+    const selected = await repository("patch-discovery-raw-missing-target-");
+    const marker = join(selected.root, "source", ".git");
+    const contents = Buffer.concat([
+      Buffer.from("gitdir: ../absent-administration-"),
+      Buffer.from([0xff]),
+      Buffer.from("\n"),
+    ]);
+    await writeFile(marker, contents);
+    const index = await readFile(join(selected.root, ".git", "index"));
+    let launches = 0;
+    const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
+      currentDirectory: selected.root,
+      onRepositoryCommand: runGitRepositoryCommand,
+      onCodex: async (_args, output) => {
+        launches++;
+        await writeFile(join(selected.root, "app.ts"), "after\n");
+        output?.stdout.write("Synthetic patch complete.\n");
+        return 0;
+      },
+    });
+    expect(outcome.exitCode, outcome.stderr).toBe(0);
+    expect(launches).toBe(1);
+    expect(JSON.parse(outcome.stdout).files).toEqual(["app.ts"]);
+    expect(await readFile(marker)).toEqual(contents);
+    expect(await readFile(join(selected.root, ".git", "index"))).toEqual(index);
+    expect(await readFile(join(selected.root, "app.ts"), "utf8")).toBe(
+      "after\n",
+    );
+  },
+);
+
 test.each([false, true])(
   "patch discovery rejects newly selected foreign Git administration before bookkeeping (invalid ancestor: %p)",
   async (invalidAncestor) => {
@@ -350,8 +384,7 @@ for (const hostileConfig of ["malformed", "hook"] as const) {
       expect(launches).toBe(1);
       expect(
         probes.some(
-          ({ cwd, args }) =>
-            cwd === selected.root && args.at(-1) === foreignAdmin,
+          ({ cwd, args }) => cwd === selected.root && args.at(-1) === marker,
         ),
       ).toBe(true);
       expect(
