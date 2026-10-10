@@ -203,6 +203,8 @@ async function markerDirectories(
 
 // Git permits include files and hook directories that do not exist yet.
 async function canonicalPath(path: string): Promise<string> {
+  // Match realpath's Windows separators when a path no longer exists.
+  if (sep === "\\") path = path.replaceAll("/", sep);
   // Some realpath implementations collapse file/.. even when lookup fails.
   const canonical = await stat(path)
     .then(() => realControlPath(path))
