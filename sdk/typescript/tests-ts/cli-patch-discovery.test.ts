@@ -174,6 +174,62 @@ test.each([
   },
 );
 
+for (const [kind, contents] of [
+  ["empty directory", null],
+  ["missing target", "gitdir: ../absent-administration\n"],
+  ["empty target", "gitdir: "],
+  ["empty target with newline", "gitdir: \n"],
+] as const) {
+  test.skipIf(process.platform !== "linux")(
+    `patch discovery keeps a raw-byte source directory with ${kind} Git placeholder data usable`,
+    async () => {
+      const selected = await repository("patch-discovery-raw-placeholder-");
+      const source = Buffer.concat([
+        Buffer.from(`${selected.root}/source-`),
+        Buffer.from([0xff]),
+      ]);
+      const marker = Buffer.concat([source, Buffer.from("/.git")]);
+      await rename(join(selected.root, "source"), source);
+      selected.git("add", "--all");
+      selected.git("commit", "-m", "Synthetic raw source baseline");
+      if (contents === null) await mkdir(marker);
+      else await writeFile(marker, contents);
+      const index = await readFile(join(selected.root, ".git", "index"));
+      let launches = 0;
+      const outcome = await runWorkflow(
+        ["patch", "Synthetic issue", "--json"],
+        {
+          currentDirectory: selected.root,
+          onRepositoryCommand: runGitRepositoryCommand,
+          onCodex: async (_args, output) => {
+            launches++;
+            await writeFile(join(selected.root, "app.ts"), "after\n");
+            output?.stdout.write("Synthetic patch complete.\n");
+            return 0;
+          },
+        },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(launches).toBe(1);
+      expect(JSON.parse(outcome.stdout).files).toEqual(["app.ts"]);
+      expect(await readFile(join(selected.root, ".git", "index"))).toEqual(
+        index,
+      );
+      expect(await readFile(join(selected.root, "app.ts"), "utf8")).toBe(
+        "after\n",
+      );
+      expect(
+        await readFile(
+          Buffer.concat([source, Buffer.from("/deep/input.ts")]),
+          "utf8",
+        ),
+      ).toBe("fixture source\n");
+      if (contents === null) expect(await readdir(marker)).toEqual([]);
+      else expect(await readFile(marker, "utf8")).toBe(contents);
+    },
+  );
+}
+
 test.each([false, true])(
   "patch discovery rejects newly selected foreign Git administration before bookkeeping (invalid ancestor: %p)",
   async (invalidAncestor) => {

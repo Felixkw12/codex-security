@@ -8815,6 +8815,7 @@ async function nestedPatchGitDependencies(
   dependencies: CliDependencies,
   checkout: string,
   gitDirectory?: string,
+  inspectWorktreeBinding = false,
 ): Promise<CliDependencies> {
   const root =
     (await gitMarkerRoot(repository, undefined, "outermost")) ?? repository;
@@ -8839,12 +8840,11 @@ async function nestedPatchGitDependencies(
         command,
         [
           "-C",
-          directory,
+          inspectWorktreeBinding ? checkout : directory,
           "--git-dir",
           // Git resolves relative gitfile contents from the last slash in this path.
           (gitDirectory ?? join(checkout, ".git")).split(sep).join("/"),
-          "--work-tree",
-          checkout,
+          ...(inspectWorktreeBinding ? [] : ["--work-tree", checkout]),
           ...args,
         ],
         root,
@@ -9758,7 +9758,15 @@ async function runSkill(
           const selected =
             root === checkout
               ? current
-              : await nestedPatchGitDependencies(root, current, checkout);
+              : await nestedPatchGitDependencies(
+                  root,
+                  current,
+                  checkout,
+                  undefined,
+                  args.length === 2 &&
+                    args[0] === "rev-parse" &&
+                    args[1] === "--show-toplevel",
+                );
           return selected.runRepositoryCommand(
             "git",
             args.includes("ls-files")
