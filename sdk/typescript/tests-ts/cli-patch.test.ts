@@ -6845,20 +6845,26 @@ describe("inherited patch publication context", () => {
           currentDirectory: directory,
           onWorkbench: () => savedScan(result, "scan-1", directory),
           onCodex,
-          onRepositoryCommand: (command, args, cwd, options) =>
-            command === "git"
-              ? runGitRepositoryCommand(command, args, cwd, options)
-              : existing === "remote" || existing === "push remote"
-                ? "[]"
-                : JSON.stringify([
-                    {
-                      url: "https://github.example.test/example/repository/pull/1",
-                      head: git("rev-parse", "HEAD"),
-                      repository: "synthetic-origin-id",
-                      crossRepository: false,
-                      state: existing,
-                    },
-                  ]),
+          onRepositoryCommand: (command, args, cwd, options) => {
+            if (command === "git")
+              return runGitRepositoryCommand(command, args, cwd, options);
+            if (args[0] === "repo") {
+              expect(args).toEqual(["repo", "set-default", "--view"]);
+              return "";
+            }
+            expect(args.slice(0, 2)).toEqual(["pr", "list"]);
+            return existing === "remote" || existing === "push remote"
+              ? "[]"
+              : JSON.stringify([
+                  {
+                    url: "https://github.example.test/example/repository/pull/1",
+                    head: git("rev-parse", "HEAD"),
+                    repositoryId: "synthetic-origin-id",
+                    crossRepository: false,
+                    state: existing,
+                  },
+                ]);
+          },
         },
       );
       expect(outcome.exitCode).toBe(2);
