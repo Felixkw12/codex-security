@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import {
   appendFile,
+  chmod,
   cp,
   symlink,
   mkdir,
@@ -25,6 +26,80 @@ import {
 describe("patch Git administration", () => {
   const fixtures = createTemporaryDirectories(true);
   afterEach(fixtures.cleanup);
+
+  for (const active of [false, true]) {
+    test.skipIf(process.platform === "win32")(
+      `requires access to conditional Git includes only when active: ${active}`,
+      async () => {
+        const root = await fixtures.create("patch-inaccessible-include-");
+        const git = repositoryGit(root);
+        git("init", "--initial-branch=main");
+        git("config", "user.name", "Synthetic User");
+        git("config", "user.email", "synthetic@example.test");
+        await writeFile(join(root, "app.txt"), "before\n");
+        git("add", ".");
+        git("commit", "-m", "Synthetic inaccessible include baseline");
+        const configuration = await fixtures.create("patch-private-config-");
+        const blocked = join(configuration, "blocked");
+        await mkdir(blocked);
+        await writeFile(
+          join(blocked, "config"),
+          "# Synthetic configuration.\n",
+        );
+        const global = join(configuration, "global-config");
+        const selected = active ? root : join(root, "unrelated-checkout");
+        await writeFile(
+          global,
+          `[includeIf ${JSON.stringify(`gitdir:${selected.split(sep).join("/")}/`)}]\n path = ${JSON.stringify(join(blocked, "config"))}\n`,
+        );
+        const environment = {
+          ...process.env,
+          GIT_CONFIG_GLOBAL: global,
+          GIT_CONFIG_NOSYSTEM: "1",
+          LC_ALL: "C",
+        };
+        await chmod(blocked, 0o000);
+        try {
+          const ordinaryGit = () =>
+            execFileSync("git", ["status", "--porcelain"], {
+              cwd: root,
+              env: environment,
+              encoding: "utf8",
+              stdio: ["ignore", "pipe", "pipe"],
+            });
+          if (active) expect(ordinaryGit).toThrow("Permission denied");
+          else expect(ordinaryGit()).toBe("");
+          let launches = 0;
+          const outcome = await runWorkflow(
+            ["patch", "Synthetic issue", "--json"],
+            {
+              currentDirectory: root,
+              environment,
+              onRepositoryCommand: (command, args, cwd, options) =>
+                runGitRepositoryCommand(command, args, cwd, {
+                  ...options,
+                  environment: { ...environment, ...options?.environment },
+                }),
+              onCodex: async (_args, output) => {
+                launches++;
+                await writeFile(join(root, "app.txt"), "after\n");
+                output?.stdout.write("Fixed.\n");
+                return 0;
+              },
+            },
+          );
+          expect(outcome.exitCode, outcome.stderr).toBe(active ? 2 : 0);
+          expect(launches).toBe(active ? 0 : 1);
+          if (active) expect(outcome.stderr).toContain("Permission denied");
+          expect(await readFile(join(root, "app.txt"), "utf8")).toBe(
+            active ? "before\n" : "after\n",
+          );
+        } finally {
+          await chmod(blocked, 0o700);
+        }
+      },
+    );
+  }
 
   test.each([false, true])(
     "expands unknown-user includes only when their Git condition is active: %p",

@@ -544,6 +544,11 @@ process.exit(result.status ?? 1);
     "uses the push repository for $transport: resume=$resume, own PR=$ownIncluded",
     async ({ transport, resume, ownIncluded }) => {
       const { directory, git, remote } = await publicationRepository();
+      await writeFile(
+        join(directory, ".git", "hosting-config"),
+        "# Synthetic included Git configuration.\n",
+      );
+      git("config", "include.path", "hosting-config");
       const configuredCommand = 'ssh -F "synthetic config"';
       const coreCommand = transport.includes("core")
         ? configuredCommand
@@ -754,7 +759,7 @@ process.exit(result.status ?? 1);
                   code: 1,
                 });
               }
-              if (args[2] === "codex-security-ssh-config") {
+              if (args[0] === "-c" && args[2] === "codex-security-ssh-config") {
                 sshLookups++;
                 expect(args.slice(0, 3)).toEqual([
                   "-c",
