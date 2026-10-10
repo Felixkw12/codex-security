@@ -462,12 +462,10 @@ export async function capturePatchGitControls(
     });
   };
   const rememberHook = async (path: string): Promise<void> => {
-    try {
-      // Directories are ordinary data; a file appearing here remains bound.
+    if (await hookIsAvailable(path)) {
       await rememberControl(path, false);
-    } catch (error) {
-      // Git skips hooks that fail access(X_OK), including unreadable paths.
-      if (await hookIsAvailable(path)) throw error;
+    } else {
+      // Git ignores inactive entries; reject their activation before bookkeeping.
       inaccessibleHooks.add(path);
     }
   };

@@ -143,7 +143,7 @@ test.each([false, true])(
     if (activate) {
       expect(outcome.exitCode, outcome.stderr).toBe(2);
       expect(outcome.stderr).toContain(
-        "Git configuration or hooks changed location during the patch",
+        "Git hook became accessible during the patch",
       );
       expect(afterTurn).toEqual([]);
       expect(await readFile(join(root, "retained-app.ts"), "utf8")).toBe(
@@ -220,7 +220,7 @@ test.each([false, true])(
     if (activate) {
       expect(outcome.exitCode, outcome.stderr).toBe(2);
       expect(outcome.stderr).toContain(
-        "Git configuration or hooks changed location during the patch",
+        "Git hook became accessible during the patch",
       );
       expect(afterTurn).toEqual([]);
       expect(
