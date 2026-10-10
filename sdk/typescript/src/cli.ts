@@ -53,7 +53,10 @@ import { promisify, stripVTControlCharacters } from "node:util";
 import { Cli, z } from "incur";
 import { formatCliHelp } from "./cli-help.js";
 import { scanLogsJson } from "./cli-scan-logs-json.js";
-import { capturePatchGitControls } from "./patch-git-controls.js";
+import {
+  capturePatchGitControls,
+  withPatchGitIndex,
+} from "./patch-git-controls.js";
 import {
   ARTIFACT_EXPORT_FILENAMES,
   exportEnvironment,
@@ -9324,39 +9327,30 @@ async function snapshotPatchTree(
   repository: string,
   dependencies: CliDependencies,
 ): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), "codex-security-patch-tree-"));
-  const environment = { GIT_INDEX_FILE: join(root, "index") };
-  const run = (args: string[], input?: string) =>
-    dependencies.runRepositoryCommand("git", args, repository, {
-      environment,
-      input,
-    });
-  try {
-    const heads = await run(["rev-parse", "--revs-only", "HEAD"]);
-    await run(["read-tree", ...(heads ? ["HEAD"] : ["--empty"])]);
-    const entries = await dependencies.runRepositoryCommand(
-      "git",
-      [
-        "--no-literal-pathspecs",
-        "ls-files",
-        "--stage",
-        "--full-name",
-        "-z",
-        "--",
-        ":/",
-      ],
-      repository,
-      { trim: false, maxBuffer: Infinity },
-    );
-    await run(
-      ["update-index", "-z", "--index-info"],
-      entries.replaceAll(/(^|\0)([0-7]+ [a-f\d]+) [123]\t/gu, "$1$2 0\t"),
-    );
-    await run(["--literal-pathspecs", "add", "--all"]);
-    return await run(["write-tree"]);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
+  return withPatchGitIndex(
+    (args, options) =>
+      dependencies.runRepositoryCommand(
+        "git",
+        args[0] === "ls-files"
+          ? ["--no-literal-pathspecs", ...args, "--", ":/"]
+          : args,
+        repository,
+        {
+          trim: false,
+          maxBuffer: options?.indexFile === undefined ? Infinity : undefined,
+          encoding: options?.encoding,
+          input: options?.input,
+          environment:
+            options?.indexFile === undefined
+              ? {}
+              : { GIT_INDEX_FILE: options.indexFile },
+        },
+      ),
+    async (run) => {
+      await run(["--literal-pathspecs", "add", "--all"]);
+      return (await run(["write-tree"])).trim();
+    },
+  );
 }
 
 async function resolvePatchValidationPrompt(
@@ -9750,7 +9744,7 @@ async function runSkill(
   const gitControls = patch
     ? await capturePatchGitControls(
         directory,
-        async (root, checkout, args, encoding, nestedProbe) => {
+        async (root, checkout, args, commandOptions) => {
           const current =
             options.patchGitContext === undefined
               ? dependencies
@@ -9794,23 +9788,30 @@ async function runSkill(
               : checkout,
             {
               trim: false,
-              encoding,
+              encoding: commandOptions?.encoding,
+              input: commandOptions?.input,
               maxBuffer: Infinity,
               environment: {
                 LC_ALL: "C",
                 ...(root === checkout ? {} : { GIT_INDEX_FILE: undefined }),
-                ...(nestedProbe
+                ...(commandOptions?.nestedProbe
                   ? {
                       ...NESTED_PATCH_GIT_ENVIRONMENT,
                       GIT_OBJECT_DIRECTORY:
                         await configuredPatchObjectDirectory(root, current),
                     }
                   : {}),
+                ...(commandOptions?.indexFile === undefined
+                  ? {}
+                  : { GIT_INDEX_FILE: commandOptions.indexFile }),
+                ...commandOptions?.environment,
               },
             },
           );
         },
-        dependencies.environment["GIT_DIR"] === undefined,
+        environmentValue(dependencies.environment, "GIT_DIR") === undefined,
+        environmentValue(dependencies.environment, "GIT_COMMON_DIR") ===
+          undefined,
       )
     : undefined;
   const patchPermissions =

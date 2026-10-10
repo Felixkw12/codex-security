@@ -309,6 +309,7 @@ describe("patch change tracking", () => {
         onRepositoryCommand: (command, args, cwd, options) => {
           if (
             afterTurn &&
+            !args.includes("core.hooksPath=/dev/null") &&
             args.some((value) =>
               ["add", "read-tree", "update-index", "write-tree"].includes(
                 value,
@@ -465,6 +466,7 @@ describe("patch change tracking", () => {
           onRepositoryCommand: (command, args, cwd, options) => {
             if (
               afterTurn &&
+              !args.includes("core.hooksPath=/dev/null") &&
               args.some((value) =>
                 ["add", "read-tree", "update-index", "write-tree"].includes(
                   value,
@@ -1140,6 +1142,7 @@ describe("patch change tracking", () => {
           onRepositoryCommand: (command, args, cwd, options) => {
             if (
               afterTurn &&
+              !args.includes("core.hooksPath=/dev/null") &&
               args.some((value) =>
                 ["add", "read-tree", "update-index", "write-tree"].includes(
                   value,
@@ -1160,12 +1163,18 @@ describe("patch change tracking", () => {
             const index = options?.environment?.["GIT_INDEX_FILE"];
             if (index !== undefined) {
               expect(cwd).toBe(root);
-              if (
+              const checkout = selectedWorktree;
+              if (args.includes("core.hooksPath=/dev/null")) {
+                expect(args).toContain("core.fsmonitor=false");
+                if (args.includes("read-tree") || args.includes("update-index"))
+                  expect(index).not.toBe(join(checkout, ".git", "index"));
+                if (args.includes("read-tree") || args.includes("update-index"))
+                  expect(index).not.toBe(alternateIndex);
+              } else if (
                 gitEnvironment.GIT_INDEX_FILE === undefined ||
                 resolve(options?.directory ?? cwd, index) !==
                   resolve(target, gitEnvironment.GIT_INDEX_FILE)
               ) {
-                const checkout = selectedWorktree;
                 const indices = snapshots.get(checkout) ?? new Set<string>();
                 indices.add(index);
                 snapshots.set(checkout, indices);
@@ -1181,11 +1190,17 @@ describe("patch change tracking", () => {
               expect(environment["GIT_DIR"]).toBeUndefined();
               expect(environment["GIT_WORK_TREE"]).toBeUndefined();
               const objects = environment["GIT_OBJECT_DIRECTORY"];
+              const setupDirectoryProbe =
+                args.slice(-4).join(" ") ===
+                  "rev-parse --path-format=absolute --git-path objects" &&
+                options?.environment?.["GIT_OBJECT_DIRECTORY"] === ".";
               expect(
-                objects === undefined
+                objects === undefined || setupDirectoryProbe
                   ? objects
                   : resolve(options?.directory ?? cwd, objects),
-              ).toBe(gitEnvironment.GIT_OBJECT_DIRECTORY);
+              ).toBe(
+                setupDirectoryProbe ? "." : gitEnvironment.GIT_OBJECT_DIRECTORY,
+              );
               expect(environment["GIT_COMMON_DIR"]).toBeUndefined();
             } else {
               if (index === undefined)

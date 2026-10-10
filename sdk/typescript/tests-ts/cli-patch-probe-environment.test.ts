@@ -9,7 +9,7 @@ const fixtures = createTemporaryDirectories(true);
 afterEach(fixtures.cleanup);
 
 test.each(["GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY"] as const)(
-  "patch structural probes preserve the selected and nested %s context",
+  "patch discovery preserves %s while treating ordinary nested source as data",
   async (setting) => {
     const root = await fixtures.create("patch-probe-environment-");
     const support = await fixtures.create("patch-probe-administration-");
@@ -124,9 +124,7 @@ test.each(["GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY"] as const)(
         launches++;
         const controls = output?.appServer?.permissions?.readOnlyPaths;
         expect(controls).toBeDefined();
-        if (setting === "GIT_OBJECT_DIRECTORY")
-          expect(controls).toContain(marker);
-        else expect(controls).not.toContain(marker);
+        expect(controls).not.toContain(marker);
         await writeFile(source, "after\n");
         output?.stdout.write("Synthetic patch complete.\n");
         return 0;

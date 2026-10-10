@@ -80,7 +80,7 @@ test("patch discovery does not execute a workspace fsmonitor rewritten by the mo
 
   expect(outcome.exitCode, outcome.stderr).toBe(0);
   expect(launches).toBe(1);
-  expect(nestedInventory.length).toBeGreaterThan(0);
+  expect(nestedInventory).toEqual([]);
   expect(await readFile(effect, "utf8").catch(() => undefined)).toBeUndefined();
   expect(beforeTurnEffect).toBeUndefined();
   expect(await readFile(hook, "utf8")).toBe(script("model-rewritten"));
