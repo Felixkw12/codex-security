@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
 import {
   cp,
   symlink,
@@ -24,28 +25,58 @@ describe("patch Git administration", () => {
   const fixtures = createTemporaryDirectories(true);
   afterEach(fixtures.cleanup);
 
-  test("selects the same protected profile for the native thread and sandbox startup probe", async () => {
-    const directory = await fixtures.create("patch-profile-protocol-");
-    const source = `
+  test.each([false, true])(
+    "preserves workspace settings before selecting patch permissions: %p",
+    async (configured) => {
+      const directory = await fixtures.create("patch-profile-protocol-");
+      const protectedPath = join(directory, ".git");
+      const extraRoot = join(directory, "build-cache");
+      const inherited = configured
+        ? {
+            network_access: true,
+            writable_roots: [extraRoot],
+            exclude_tmpdir_env_var: true,
+            exclude_slash_tmp: true,
+          }
+        : {};
+      const policy = {
+        type: "workspaceWrite",
+        writableRoots: configured ? [extraRoot] : [],
+        networkAccess: configured,
+        excludeTmpdirEnvVar: configured,
+        excludeSlashTmp: configured,
+      };
+      const source = `
 const assert = require("node:assert/strict");
 const lines = require("node:readline").createInterface({ input: process.stdin });
 const send = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
+let configured = false;
+let preflight = false;
 lines.on("line", (line) => {
   const request = JSON.parse(line);
   if (request.method === "initialize") {
     assert.equal(request.params.capabilities.experimentalApi, true);
     send({ id: 1, result: {} });
+  } else if (request.method === "config/read") {
+    assert.equal(request.params.cwd, ${JSON.stringify(directory)});
+    assert.equal(request.params.includeLayers, true);
+    configured = true;
+    send({ id: 4, result: { config: { permissions: { codex_security_patch: { description: null, extends: ":workspace", filesystem: { glob_scan_max_depth: null, [${JSON.stringify(protectedPath)}]: { ".": "read" } } } }, sandbox_workspace_write: ${JSON.stringify(inherited)} } } });
   } else if (request.method === "thread/start") {
-    assert.deepEqual(request.params, { threadSource: "security_remediation", approvalPolicy: "never", permissions: "codex_security_patch" });
-    send({ id: 2, result: { thread: { id: "patch-thread" }, sandbox: { type: "workspaceWrite", writableRoots: [], networkAccess: false } } });
+    assert.equal(configured, true);
+    assert.deepEqual(request.params, { threadSource: "security_remediation", approvalPolicy: "never", sandbox: "workspace-write", config: { permissions: { codex_security_patch: { extends: ":workspace", network: { enabled: ${configured} }, workspace_roots: ${JSON.stringify(configured ? { [extraRoot]: true } : {})}, filesystem: { [${JSON.stringify(protectedPath)}]: { ".": "read" }, ...${JSON.stringify(configured ? { ":tmpdir": {}, ":slash_tmp": {} } : {})} } } } } });
+    send({ id: 2, result: { thread: { id: "patch-thread" }, sandbox: ${JSON.stringify(policy)} } });
   } else if (request.method === "command/exec") {
-    assert.equal(request.params.permissionProfile, "codex_security_patch");
-    assert.equal(Object.hasOwn(request.params, "sandboxPolicy"), false);
+    assert.deepEqual(request.params.sandboxPolicy, ${JSON.stringify(policy)});
+    assert.equal(Object.hasOwn(request.params, "permissionProfile"), false);
+    preflight = true;
     assert.equal(request.params.cwd, ${JSON.stringify(directory)});
     assert.deepEqual(request.params.command, [process.execPath, "-e", ""]);
     send({ id: 5, result: { exitCode: 0, stdout: "", stderr: "" } });
   } else if (request.method === "turn/start") {
+    assert.equal(preflight, true);
     assert.equal(request.params.threadId, "patch-thread");
+    assert.equal(request.params.permissions, "codex_security_patch");
     assert.equal(Object.hasOwn(request.params, "sandboxPolicy"), false);
     send({ id: 3, result: { turn: { id: "patch-turn" } } });
     send({ method: "item/completed", params: { threadId: "patch-thread", turnId: "patch-turn", item: { type: "agentMessage", text: "Synthetic patch complete." } } });
@@ -53,35 +84,37 @@ lines.on("line", (line) => {
   }
 });
 `;
-    const stdout = capture();
-    const stderr = capture();
-    expect(
-      await runCodexSkillCommand(
-        ["-e", source],
-        {
-          command: "patch",
-          stdout: stdout.stream,
-          stderr: stderr.stream,
-          appServer: {
-            directory,
-            prompt: "Fix the synthetic issue.",
-            threadSource: "security_remediation",
-            permissions: "codex_security_patch",
+      const stdout = capture();
+      const stderr = capture();
+      expect(
+        await runCodexSkillCommand(
+          ["-e", source],
+          {
+            command: "patch",
+            stdout: stdout.stream,
+            stderr: stderr.stream,
+            appServer: {
+              directory,
+              prompt: "Fix the synthetic issue.",
+              threadSource: "security_remediation",
+              permissions: "codex_security_patch",
+            },
           },
-        },
-        { command: process.execPath },
-        { PATH: process.env["PATH"] },
-      ),
-    ).toBe(0);
-    expect(stdout.text()).toBe("Synthetic patch complete.\n");
-    expect(stderr.text()).toBe("");
-  });
+          { command: process.execPath },
+          { PATH: process.env["PATH"] },
+        ),
+      ).toBe(0);
+      expect(stdout.text()).toBe("Synthetic patch complete.\n");
+      expect(stderr.text()).toBe("");
+    },
+  );
 
   test.each([
     ["new", 0],
     ["new", 1],
     ["new", 130],
     ["recursive", 0],
+    ["untracked", 0],
     ["replacement", 0],
   ] as const)(
     "checks %s Git control state before bookkeeping after turn exit %d",
@@ -91,7 +124,12 @@ lines.on("line", (line) => {
       git("init", "--initial-branch=main");
       git("config", "user.name", "Synthetic User");
       git("config", "user.email", "synthetic@example.test");
-      const nestedPath = mode === "recursive" ? "nested/child" : "nested";
+      const nestedPath =
+        mode === "recursive"
+          ? "nested/child"
+          : mode === "untracked"
+            ? "parent/nested"
+            : "nested";
       const nested = join(root, nestedPath);
       await mkdir(nested, { recursive: true });
       const child = repositoryGit(nested);
@@ -117,7 +155,7 @@ lines.on("line", (line) => {
         metadata,
         "config",
         "core.hooksPath",
-        "../data/metadata/hooks",
+        `${relative(nested, metadata).split(sep).join("/")}/hooks`,
       );
       await writeFile(
         join(metadata, "hooks", "post-index-change"),
@@ -142,12 +180,13 @@ lines.on("line", (line) => {
         parent("commit", "-m", "Synthetic parent gitlink");
         topRevision = parent("rev-parse", "HEAD");
       }
-      git(
-        "update-index",
-        "--add",
-        "--cacheinfo",
-        `160000,${topRevision},nested`,
-      );
+      if (mode !== "untracked")
+        git(
+          "update-index",
+          "--add",
+          "--cacheinfo",
+          `160000,${topRevision},nested`,
+        );
       git("commit", "-m", "Synthetic metadata as ordinary input files");
       const marker = `${relative(nested, metadata).split(sep).join("/")}`;
       if (mode === "replacement")
@@ -230,70 +269,324 @@ lines.on("line", (line) => {
       expect(await readFile(join(root, "outer.txt"), "utf8")).toBe("fixed\n");
     },
   );
-  test("protects referenced configuration and hooks while preserving trusted execution", async () => {
-    const root = await fixtures.create("patch-referenced-[literal]-");
-    const git = repositoryGit(root);
-    git("init", "--initial-branch=main");
-    git("config", "user.name", "Synthetic User");
-    git("config", "user.email", "synthetic@example.test");
-    const hooks = join(root, "hook-files");
-    const target = join(root, "hook-target");
-    await mkdir(hooks);
-    await writeFile(
-      target,
-      "#!/bin/sh\nprintf 'trusted\\n' >> .git/trusted-hook\n",
-      { mode: 0o755 },
-    );
-    const hook = join(hooks, "post-index-change");
-    if (process.platform === "win32") await cp(target, hook);
-    else await symlink("../hook-target", hook);
-    const configuration = join(root, "patch-config");
-    await writeFile(
-      configuration,
-      "[core]\n hooksPath = hook-files\n[include]\n path = missing-config\n",
-    );
-    git("config", "include.path", "../patch-config");
+  test.each(["hook-files", "scripts", "."])(
+    "protects hooks in %s while keeping unrelated source writable",
+    async (hookDirectory) => {
+      const root = await fixtures.create("patch-referenced-[literal]-");
+      const git = repositoryGit(root);
+      git("init", "--initial-branch=main");
+      git("config", "user.name", "Synthetic User");
+      git("config", "user.email", "synthetic@example.test");
+      const hooks = join(root, hookDirectory);
+      const target = join(root, "hook-target");
+      await mkdir(hooks, { recursive: true });
+      await writeFile(join(hooks, "source.txt"), "before\n");
+      await writeFile(
+        target,
+        "#!/bin/sh\nprintf 'trusted\\n' >> .git/trusted-hook\n",
+        { mode: 0o755 },
+      );
+      const hook = join(hooks, "post-index-change");
+      if (process.platform === "win32") await cp(target, hook);
+      else await symlink(relative(hooks, target), hook);
+      const configuration = join(root, "patch-config");
+      await writeFile(
+        configuration,
+        `[core]\n hooksPath = ${hookDirectory === "." ? root.split(sep).join("/") : hookDirectory}\n[include]\n path = missing-config\n`,
+      );
+      git("config", "include.path", "../patch-config");
+      await writeFile(join(root, "app.txt"), "before\n");
+      git("add", ".");
+      git("commit", "-m", "Synthetic trusted hook configuration");
+      let before = "";
+      const outcome = await runWorkflow(
+        ["patch", "Synthetic issue", "--json"],
+        {
+          currentDirectory: root,
+          onRepositoryCommand: runGitRepositoryCommand,
+          onCodex: async (args, output) => {
+            const definition = args.find((value) =>
+              value.startsWith("permissions.codex_security_patch="),
+            )!;
+            const profile = (
+              parseToml(definition) as {
+                permissions: {
+                  codex_security_patch: {
+                    filesystem: Record<string, { ".": string }>;
+                  };
+                };
+              }
+            ).permissions.codex_security_patch;
+            const controls = profile.filesystem;
+            for (const path of [
+              configuration,
+              hook,
+              ...(process.platform === "win32" ? [] : [target]),
+            ])
+              expect(controls[await realpath(path)]).toEqual({ ".": "read" });
+            expect(
+              controls[join(await realpath(root), "missing-config")],
+            ).toBeUndefined();
+            expect(controls[await realpath(root)]).toBeUndefined();
+            expect(controls[await realpath(hooks)]).toBeUndefined();
+            expect(
+              controls[await realpath(join(hooks, "source.txt"))],
+            ).toBeUndefined();
+            before = await readFile(join(root, ".git", "trusted-hook"), "utf8");
+            await writeFile(join(root, "app.txt"), "after\n");
+            await writeFile(join(hooks, "source.txt"), "after\n");
+            output?.stdout.write("Fixed.\n");
+            return 0;
+          },
+        },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      const after = await readFile(join(root, ".git", "trusted-hook"), "utf8");
+      expect(after.startsWith(before)).toBe(true);
+      expect(after.length).toBeGreaterThan(before.length);
+      expect(await readFile(join(root, "app.txt"), "utf8")).toBe("after\n");
+      expect(await readFile(join(hooks, "source.txt"), "utf8")).toBe("after\n");
+    },
+  );
+  test.skipIf(process.platform === "win32")(
+    "checks raw-byte Git markers without rejecting ordinary raw-byte paths",
+    async () => {
+      for (const marker of [false, true]) {
+        const root = await fixtures.create("patch-raw-administration-");
+        const git = repositoryGit(root);
+        git("init", "--initial-branch=main");
+        git("config", "user.name", "Synthetic User");
+        git("config", "user.email", "synthetic@example.test");
+        await writeFile(join(root, "outer.txt"), "before\n");
+        const child = join(root, "child");
+        await mkdir(child);
+        const nested = repositoryGit(child);
+        nested("init", "--initial-branch=main");
+        nested("config", "user.name", "Synthetic User");
+        nested("config", "user.email", "synthetic@example.test");
+        await writeFile(join(child, "app.txt"), "before\n");
+        nested("add", ".");
+        nested("commit", "-m", "Synthetic nested baseline");
+        const revision = nested("rev-parse", "HEAD");
+        const metadata = join(root, "metadata");
+        await rename(join(child, ".git"), metadata);
+        git(
+          "--git-dir",
+          metadata,
+          "config",
+          "core.hooksPath",
+          "../metadata/hooks",
+        );
+        await writeFile(
+          join(metadata, "hooks/post-index-change"),
+          "#!/bin/sh\nprintf 'unexpected\\n' >> ../.git/hook-ran\n",
+          { mode: 0o755 },
+        );
+        const name = Buffer.concat([
+          Buffer.from("nested-"),
+          Buffer.from([0xff]),
+        ]);
+        const directory = Buffer.concat([Buffer.from(`${root}/`), name]);
+        await rename(child, directory);
+        git("add", "metadata", "outer.txt");
+        if (marker) {
+          execFileSync("git", ["update-index", "-z", "--index-info"], {
+            cwd: root,
+            input: Buffer.concat([
+              Buffer.from(`160000 ${revision}\t`),
+              name,
+              Buffer.from([0]),
+            ]),
+          });
+        } else git("add", "--all");
+        git("commit", "-m", "Synthetic raw path baseline");
+        let afterTurn = false;
+        const bookkeeping: string[][] = [];
+        const outcome = await runWorkflow(
+          ["patch", "Synthetic issue", "--json"],
+          {
+            currentDirectory: root,
+            onRepositoryCommand: (command, args, cwd, options) => {
+              if (
+                afterTurn &&
+                args.some((value) =>
+                  ["add", "read-tree", "update-index", "write-tree"].includes(
+                    value,
+                  ),
+                )
+              )
+                bookkeeping.push([...args]);
+              return runGitRepositoryCommand(command, args, cwd, options);
+            },
+            onCodex: async (_args, output) => {
+              if (marker)
+                await writeFile(
+                  Buffer.concat([directory, Buffer.from("/.git")]),
+                  "gitdir: ../metadata\n",
+                );
+              await writeFile(
+                Buffer.concat([directory, Buffer.from("/app.txt")]),
+                "after\n",
+              );
+              await writeFile(join(root, "outer.txt"), "after\n");
+              output?.stdout.write("Fixed.\n");
+              afterTurn = true;
+              return 0;
+            },
+          },
+        );
+        if (marker) {
+          expect(outcome.exitCode).toBe(2);
+          expect(outcome.stderr).toContain("checkout path is not valid UTF-8");
+          expect(bookkeeping).toEqual([]);
+        } else expect(outcome.exitCode, outcome.stderr).toBe(0);
+        expect(
+          await readFile(join(root, ".git", "hook-ran")).catch(() => null),
+        ).toBeNull();
+        expect(
+          await readFile(
+            Buffer.concat([directory, Buffer.from("/app.txt")]),
+            "utf8",
+          ),
+        ).toBe("after\n");
+      }
+    },
+  );
+  test.skipIf(process.platform === "win32")(
+    "retains literal Unicode and quoted bytes in trusted nested checkout names",
+    async () => {
+      const root = await fixtures.create("patch-quoted-administration-");
+      const git = repositoryGit(root);
+      git("init", "--initial-branch=main");
+      git("config", "user.name", "Synthetic User");
+      git("config", "user.email", "synthetic@example.test");
+      const child = join(root, "nested-\ufffd-é-\\377-tail");
+      await mkdir(child);
+      const nested = repositoryGit(child);
+      nested("init", "--initial-branch=main");
+      nested("config", "user.name", "Synthetic User");
+      nested("config", "user.email", "synthetic@example.test");
+      await writeFile(join(child, "app.txt"), "before\n");
+      nested("add", ".");
+      nested("commit", "-m", "Synthetic quoted checkout");
+      git("add", ".");
+      git("commit", "-m", "Synthetic parent");
+      const source = `
+        import { execFileSync } from "node:child_process";
+        import { realpath, writeFile } from "node:fs/promises";
+        import { capturePatchGitControls } from ${JSON.stringify(new URL("../src/patch-git-controls.ts", import.meta.url).href)};
+        const root = ${JSON.stringify(root)};
+        const child = ${JSON.stringify(child)};
+        const controls = await capturePatchGitControls(root, async (repository, checkout, args) => execFileSync("git", repository === checkout ? args : ["-C", checkout, ...args], {cwd: repository, encoding:"utf8"}), true);
+        await writeFile(child + "/app.txt", "after\\n");
+        await controls.validate();
+        process.stdout.write(JSON.stringify({ paths: controls.readOnlyPaths, expected: await realpath(child + "/.git") }));
+      `;
+      const protectedPaths = JSON.parse(
+        execFileSync(
+          "node",
+          ["--experimental-strip-types", "--input-type=module", "-e", source],
+          { encoding: "utf8" },
+        ),
+      ) as { paths: string[]; expected: string };
+      expect(protectedPaths.paths).toContain(protectedPaths.expected);
+      expect(await readFile(join(child, "app.txt"), "utf8")).toBe("after\n");
+    },
+  );
+  test("keeps directory patching available with translated Git diagnostics", async () => {
+    const root = await fixtures.create("patch-translated-git-");
     await writeFile(join(root, "app.txt"), "before\n");
-    git("add", ".");
-    git("commit", "-m", "Synthetic trusted hook configuration");
-    let before = "";
+    const environment = {
+      ...process.env,
+      LANG: "de_DE.UTF-8",
+      LANGUAGE: "de",
+      LC_ALL: "de_DE.UTF-8",
+    };
+    let launches = 0;
     const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
       currentDirectory: root,
-      onRepositoryCommand: runGitRepositoryCommand,
-      onCodex: async (args, output) => {
-        const definition = args.find((value) =>
-          value.startsWith("permissions.codex_security_patch="),
-        )!;
-        const profile = (
-          parseToml(definition) as {
-            permissions: {
-              codex_security_patch: {
-                filesystem: Record<string, { ".": string }>;
-              };
-            };
-          }
-        ).permissions.codex_security_patch;
-        const controls = profile.filesystem;
-        for (const path of [
-          configuration,
-          hooks,
-          ...(process.platform === "win32" ? [] : [target]),
-        ])
-          expect(controls[await realpath(path)]).toEqual({ ".": "read" });
-        expect(controls[join(await realpath(root), "missing-config")]).toEqual({
-          ".": "read",
+      environment,
+      onRepositoryCommand: (command, args, cwd, options) => {
+        if (args.includes("--show-toplevel"))
+          expect(options?.environment?.["LC_ALL"]).toBe("C");
+        return runGitRepositoryCommand(command, args, cwd, {
+          ...options,
+          environment: { ...environment, ...options?.environment },
         });
-        expect(controls[await realpath(root)]).toBeUndefined();
-        before = await readFile(join(root, ".git", "trusted-hook"), "utf8");
+      },
+      onCodex: async (_args, output) => {
+        launches++;
         await writeFile(join(root, "app.txt"), "after\n");
         output?.stdout.write("Fixed.\n");
         return 0;
       },
     });
     expect(outcome.exitCode, outcome.stderr).toBe(0);
-    const after = await readFile(join(root, ".git", "trusted-hook"), "utf8");
-    expect(after.startsWith(before)).toBe(true);
-    expect(after.length).toBeGreaterThan(before.length);
+    expect(launches).toBe(1);
+    expect(environment.LC_ALL).toBe("de_DE.UTF-8");
     expect(await readFile(join(root, "app.txt"), "utf8")).toBe("after\n");
   });
+  test.each(["ordinary", "hook", "configuration"])(
+    "checks newly created Git references while allowing ordinary source: %s",
+    async (change) => {
+      const root = await fixtures.create("patch-absent-references-");
+      const git = repositoryGit(root);
+      git("init", "--initial-branch=main");
+      git("config", "user.name", "Synthetic User");
+      git("config", "user.email", "synthetic@example.test");
+      git("config", "core.hooksPath", "hooks");
+      git("config", "include.path", "../missing-config");
+      await writeFile(join(root, "app.txt"), "before\n");
+      git("add", ".");
+      git("commit", "-m", "Synthetic absent references");
+      const index = await readFile(join(root, ".git/index"));
+      let afterTurn = false;
+      const laterCommands: string[][] = [];
+      const outcome = await runWorkflow(
+        ["patch", "Synthetic issue", "--json"],
+        {
+          currentDirectory: root,
+          onRepositoryCommand: (command, args, cwd, options) => {
+            if (afterTurn) laterCommands.push([...args]);
+            return runGitRepositoryCommand(command, args, cwd, options);
+          },
+          onCodex: async (_args, output) => {
+            await mkdir(join(root, "hooks"));
+            await writeFile(join(root, "hooks/source.ts"), "fixed\n");
+            await writeFile(join(root, "app.txt"), "after\n");
+            if (change === "hook")
+              await writeFile(
+                join(root, "hooks/post-index-change"),
+                "#!/bin/sh\nprintf unexpected > .git/hook-ran\n",
+                { mode: 0o755 },
+              );
+            if (change === "configuration")
+              await writeFile(
+                join(root, "missing-config"),
+                "[core]\n hooksPath = hooks\n",
+              );
+            output?.stdout.write("Fixed.\n");
+            afterTurn = true;
+            return 0;
+          },
+        },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(
+        change === "ordinary" ? 0 : 2,
+      );
+      if (change !== "ordinary") {
+        expect(outcome.stderr).toContain(
+          "Git configuration or hooks changed location",
+        );
+        expect(laterCommands).toEqual([]);
+      }
+      expect(
+        await readFile(join(root, ".git/hook-ran")).catch(() => null),
+      ).toBeNull();
+      expect(await readFile(join(root, ".git/index"))).toEqual(index);
+      expect(await readFile(join(root, "hooks/source.ts"), "utf8")).toBe(
+        "fixed\n",
+      );
+    },
+  );
 });

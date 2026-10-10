@@ -1,5 +1,37 @@
-import { lstat, readFile, readdir, realpath, stat } from "node:fs/promises";
+import { lstat, readFile, realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+
+// Git hook entrypoints: https://git-scm.com/docs/githooks
+const GIT_HOOKS = [
+  "applypatch-msg",
+  "pre-applypatch",
+  "post-applypatch",
+  "pre-commit",
+  "pre-merge-commit",
+  "prepare-commit-msg",
+  "commit-msg",
+  "post-commit",
+  "pre-rebase",
+  "post-checkout",
+  "post-merge",
+  "pre-push",
+  "pre-receive",
+  "update",
+  "proc-receive",
+  "post-receive",
+  "post-update",
+  "reference-transaction",
+  "push-to-checkout",
+  "pre-auto-gc",
+  "post-rewrite",
+  "sendemail-validate",
+  "fsmonitor-watchman",
+  "p4-changelist",
+  "p4-prepare-changelist",
+  "p4-post-changelist",
+  "p4-pre-submit",
+  "post-index-change",
+];
 
 type RunGit = (
   root: string,
@@ -69,6 +101,53 @@ async function canonicalPath(path: string): Promise<string> {
   const parent = dirname(path);
   if (parent === path) return path;
   return join(await canonicalPath(parent), path.slice(parent.length));
+}
+
+function quotedGitPath(path: string): Buffer {
+  if (!path.startsWith('"')) return Buffer.from(path);
+  // core.quotePath encodes non-ASCII bytes as C octal escapes.
+  const bytes: string = JSON.parse(
+    path.replace(/\\(?:[0-3][0-7]{2}|[\s\S])/gu, (escape) =>
+      !/^\\(?:[0-3][0-7]{2}|a|v)$/u.test(escape)
+        ? escape
+        : `\\u${(escape === "\\a" ? 7 : escape === "\\v" ? 11 : Number.parseInt(escape.slice(1), 8)).toString(16).padStart(4, "0")}`,
+    ),
+  );
+  return Buffer.from(bytes, "latin1");
+}
+
+async function checkRawGitDirectories(
+  checkout: string,
+  output: string,
+  tracked: boolean,
+): Promise<void> {
+  const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+  for (const line of output.split("\n").filter(Boolean)) {
+    let path = quotedGitPath(
+      tracked ? line.slice(line.indexOf("\t") + 1) : line,
+    );
+    const directory = tracked ? line.startsWith("160000 ") : path.at(-1) === 47;
+    if (path.at(-1) === 47) path = path.subarray(0, -1);
+    if (!directory) path = path.subarray(0, Math.max(0, path.lastIndexOf(47)));
+    while (path.length > 0) {
+      try {
+        utf8.decode(path);
+        break;
+      } catch {
+        /* Inspect the actual byte path before rejecting it. */
+      }
+      const marker = Buffer.concat([
+        Buffer.from(`${checkout}${sep}`),
+        path,
+        Buffer.from(`${sep}.git`),
+      ]);
+      if ((await lstat(marker).catch(missing)) !== undefined)
+        throw new Error(
+          "Patch cannot safely use Git administration whose checkout path is not valid UTF-8.",
+        );
+      path = path.subarray(0, Math.max(0, path.lastIndexOf(47)));
+    }
+  }
 }
 
 export async function capturePatchGitControls(
@@ -163,13 +242,14 @@ export async function capturePatchGitControls(
         ])
       ).replace(/\n$/u, ""),
     );
-    await rememberControl(hooks);
-    for (const entry of (await readdir(hooks, { withFileTypes: true }).catch(
-      missing,
-    )) ?? []) {
-      // Git can execute a symlinked hook outside the configured directory.
-      if (entry.isSymbolicLink())
-        await rememberControl(join(hooks, entry.name));
+    const hookDirectory = await stat(hooks).catch(missing);
+    if (hookDirectory !== undefined && !hookDirectory.isDirectory()) {
+      // A file such as /dev/null disables hooks; keep that binding intact.
+      await rememberControl(hooks);
+    } else {
+      // Remember absent entrypoints to reject newly installed hooks before Git.
+      // Resolving each entry also protects executable symlink targets.
+      for (const hook of GIT_HOOKS) await rememberControl(join(hooks, hook));
     }
   };
   const selectedDirectories: string[] = [];
@@ -269,12 +349,39 @@ export async function capturePatchGitControls(
         run(root, checkout, [
           "ls-files",
           "--others",
-          "--directory",
           "--exclude-standard",
           "--full-name",
           "-z",
         ]),
       ]);
+      // The command adapter returns UTF-8 strings. Recover quoted byte paths
+      // when decoding may have replaced bytes, before inspecting any marker.
+      if (tracked.includes("\ufffd"))
+        await checkRawGitDirectories(
+          checkout,
+          await run(root, checkout, [
+            "-c",
+            "core.quotePath=true",
+            "ls-files",
+            "--cached",
+            "--stage",
+            "--full-name",
+          ]),
+          true,
+        );
+      if (untracked.includes("\ufffd"))
+        await checkRawGitDirectories(
+          checkout,
+          await run(root, checkout, [
+            "-c",
+            "core.quotePath=true",
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "--full-name",
+          ]),
+          false,
+        );
       const candidates = new Set<string>();
       const add = (path: string, directory: boolean): void => {
         let candidate = resolve(checkout, path);
@@ -311,7 +418,15 @@ export async function capturePatchGitControls(
     readOnlyPaths: [
       ...new Set([
         ...administrationRoots.keys(),
-        ...[...controlPaths.values()].map(({ canonical }) => canonical),
+        ...[...controlPaths.values()]
+          .filter(({ identity }) => identity !== undefined)
+          .map(({ canonical }) => canonical)
+          .filter(
+            (path) =>
+              ![...administrationRoots.keys()].some((root) =>
+                inside(root, path),
+              ),
+          ),
       ]),
     ],
     validate: () => discover(false),

@@ -442,10 +442,15 @@ describe("patch change tracking", () => {
         ...new Set([directory, join(directory, "nested"), nested]),
       ].map((path) => join(path, ".git/index"));
       const before = await Promise.all(indexes.map((path) => readFile(path)));
+      const originalChildIndex =
+        before[indexes.indexOf(join(nested, ".git/index"))]!;
       const result = resultWithFindings(["high"]);
       const reported = `${nestedPath}/${change === "rename" ? "new.ts" : "app.ts"}`;
       result.findings.findings[0]!.locations[0]!.path = `${nestedPath}/app.ts`;
       let assessments = 0;
+      let retiredAdministration: string | undefined;
+      let afterTurn = false;
+      const bookkeeping: string[][] = [];
       const outcome = await runWorkflow(
         [
           "patch",
@@ -457,7 +462,18 @@ describe("patch change tracking", () => {
           currentDirectory:
             scope === "root" ? directory : join(directory, "package"),
           onWorkbench: () => savedScan(result, "scan-1", directory),
-          onRepositoryCommand: runGitRepositoryCommand,
+          onRepositoryCommand: (command, args, cwd, options) => {
+            if (
+              afterTurn &&
+              args.some((value) =>
+                ["add", "read-tree", "update-index", "write-tree"].includes(
+                  value,
+                ),
+              )
+            )
+              bookkeeping.push([...args]);
+            return runGitRepositoryCommand(command, args, cwd, options);
+          },
           onCodex: async (_args, output) => {
             if (
               output?.appServer?.prompt.includes(
@@ -517,6 +533,14 @@ describe("patch change tracking", () => {
               return 0;
             }
             if (change === "rename") await rm(join(nested, "app.ts"));
+            if (change === "replace") {
+              retiredAdministration = join(
+                await fixtures.create("patch-retired-administration-"),
+                "git",
+              );
+              // Keep the old inode live while constructing a distinct replacement.
+              await rename(join(nested, ".git"), retiredAdministration);
+            }
             if (change === "replace" || change === "remove")
               await rm(nested, { recursive: true });
             if (change === "replace") {
@@ -548,12 +572,27 @@ describe("patch change tracking", () => {
                 ],
               }),
             );
+            afterTurn = true;
             return 0;
           },
         },
       );
-      expect(outcome.exitCode, outcome.stderr).toBe(0);
-      expect(assessments).toBe(1);
+      expect(outcome.exitCode, outcome.stderr).toBe(
+        change === "replace" ? 2 : 0,
+      );
+      expect(assessments).toBe(change === "replace" ? 0 : 1);
+      if (change === "replace") {
+        expect(outcome.stderr).toContain(
+          "Git metadata outside the pre-patch administration directories",
+        );
+        expect(bookkeeping).toEqual([]);
+        expect(await readFile(join(directory, reported), "utf8")).toBe(
+          "original\nuser change\npatch change\n",
+        );
+        expect(await readFile(join(retiredAdministration!, "index"))).toEqual(
+          originalChildIndex,
+        );
+      }
       for (const [index, path] of indexes.entries()) {
         if (change === "remove" && path === join(nested, ".git/index"))
           continue;
@@ -1045,18 +1084,31 @@ describe("patch change tracking", () => {
       }
       const parentIndex = await readFile(join(root, ".git", "index"));
       let childIndex = await readFile(join(nested, ".git", "index"));
+      const originalChildIndex = childIndex;
       if (settings === "alternate-index") {
         await writeFile(alternateIndex, parentIndex);
         await writeFile(join(nested, "build.log"), "ignored baseline\n");
       }
       const snapshots = new Map<string, Set<string>>();
       let boundToRoot = false;
+      let afterTurn = false;
+      let retiredAdministration: string | undefined;
+      const bookkeeping: string[][] = [];
       const outcome = await runWorkflow(
         ["patch", "Synthetic issue", "--json"],
         {
           currentDirectory: target,
           environment: gitEnvironment,
           onRepositoryCommand: (command, args, cwd, options) => {
+            if (
+              afterTurn &&
+              args.some((value) =>
+                ["add", "read-tree", "update-index", "write-tree"].includes(
+                  value,
+                ),
+              )
+            )
+              bookkeeping.push([...args]);
             if (target !== root && cwd === root) boundToRoot = true;
             expect(cwd).not.toBe(nested);
             if (args[0] === "-C") {
@@ -1131,6 +1183,13 @@ describe("patch change tracking", () => {
               return 0;
             }
             await writeFile(join(directory, "app.ts"), "fixed\n");
+            if (operation === "replace") {
+              retiredAdministration = join(
+                await fixtures.create("patch-retired-administration-"),
+                "git",
+              );
+              await rename(join(nested, ".git"), retiredAdministration);
+            }
             if (operation !== "modify") await rm(nested, { recursive: true });
             if (operation === "replace") {
               await mkdir(nested);
@@ -1151,10 +1210,34 @@ describe("patch change tracking", () => {
               childIndex = await readFile(join(nested, ".git", "index"));
             }
             output?.stdout.write("Fixed and checked.");
+            afterTurn = true;
             return 0;
           },
         },
       );
+      if (operation === "replace") {
+        expect(outcome.exitCode).toBe(2);
+        expect(outcome.stderr).toContain(
+          "Git metadata outside the pre-patch administration directories",
+        );
+        expect(bookkeeping).toEqual([]);
+        expect(await readFile(join(directory, "app.ts"), "utf8")).toBe(
+          "fixed\n",
+        );
+        expect(await readFile(join(nested, "app.ts"), "utf8")).toBe("fixed\n");
+        expect(await readFile(join(root, ".git", "index"))).toEqual(
+          parentIndex,
+        );
+        expect(await readFile(join(nested, ".git", "index"))).toEqual(
+          childIndex,
+        );
+        expect(await readFile(join(retiredAdministration!, "index"))).toEqual(
+          originalChildIndex,
+        );
+        expect(snapshots.get(root)!.size).toBe(1);
+        expect(snapshots.get(nested)!.size).toBe(1);
+        return;
+      }
       expect(outcome.exitCode, outcome.stderr).toBe(
         operation === "ignored" ? 2 : 0,
       );

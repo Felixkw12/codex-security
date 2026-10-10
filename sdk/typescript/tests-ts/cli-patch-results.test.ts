@@ -263,6 +263,7 @@ const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
 lines.on("line", (line) => {
   const request = JSON.parse(line);
   if (request.method === "initialize" || request.method === "account/login/start") send({ id: request.id, result: {} });
+  if (request.method === "config/read") send({ id: request.id, result: { config: { permissions: { codex_security_patch: { extends: ":workspace" } } } } });
   if (request.method === "thread/start") send({ id: request.id, result: { thread: { id: "thread" }, sandbox: { type: "workspaceWrite", writableRoots: [], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false } } });
   if (request.method === "command/exec") {
     assert.equal(request.params.sandboxPolicy.type, "workspaceWrite");
