@@ -561,11 +561,41 @@ export async function capturePatchGitControls(
             `Patch selected Git metadata outside the pre-patch administration directories: ${checkout}`,
           );
         }
-        const worktree = await realControlPath(
-          (
-            await runControl(root, checkout, ["rev-parse", "--show-toplevel"])
-          ).replace(/\n$/u, ""),
-        );
+        const config = join(directories.at(-1)!, "config");
+        if ((await stat(config).catch(missing))?.isFIFO())
+          throw new Error(
+            `Patch cannot safely inspect non-regular Git metadata: ${config}`,
+          );
+        let worktree: string;
+        try {
+          worktree = await realControlPath(
+            (
+              await runControl(root, checkout, ["rev-parse", "--show-toplevel"])
+            ).replace(/\n$/u, ""),
+          );
+        } catch (error) {
+          if (!(error instanceof Error)) throw error;
+          const failure = error as Error & {
+            code?: unknown;
+            status?: unknown;
+            stderr?: unknown;
+          };
+          const diagnostic = Buffer.isBuffer(failure.stderr)
+            ? failure.stderr.toString("utf8")
+            : failure.stderr;
+          if (
+            (failure.code !== 128 && failure.status !== 128) ||
+            typeof diagnostic !== "string" ||
+            !/fatal: this operation must be run in a work tree\r?\n$/u.test(
+              diagnostic,
+            )
+          )
+            throw error;
+          // Bare fixtures have no worktree inventory, but their administration
+          // and referenced configuration remain protected during the patch.
+          if (capture) await captureReferences(checkout);
+          return;
+        }
         if (relative(canonical, worktree) !== "")
           throw new Error(
             "Git's worktree root does not match the selected checkout's .git marker. Select the intended checkout explicitly or fix its Git configuration.",
