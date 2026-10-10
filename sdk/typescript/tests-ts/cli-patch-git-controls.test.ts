@@ -27,6 +27,114 @@ describe("patch Git administration", () => {
   afterEach(fixtures.cleanup);
 
   test.each([false, true])(
+    "expands unknown-user includes only when their Git condition is active: %p",
+    async (active) => {
+      const root = await fixtures.create("patch-conditional-include-");
+      const git = repositoryGit(root);
+      git("init", "--initial-branch=main");
+      git("config", "user.name", "Synthetic User");
+      git("config", "user.email", "synthetic@example.test");
+      await writeFile(join(root, "app.txt"), "before\n");
+      git("add", ".");
+      git("commit", "-m", "Synthetic conditional include baseline");
+      const selected = active ? root : join(root, "unrelated-checkout");
+      await appendFile(
+        join(root, ".git/config"),
+        `\n[includeIf ${JSON.stringify(`gitdir:${selected.split(sep).join("/")}/`)}]\n path = ~synthetic_missing_patch_user_1251/config\n`,
+      );
+      if (!active) expect(git("status", "--porcelain")).toBe("");
+      let launches = 0;
+      const outcome = await runWorkflow(
+        ["patch", "Synthetic issue", "--json"],
+        {
+          currentDirectory: root,
+          onRepositoryCommand: runGitRepositoryCommand,
+          onCodex: async (_args, output) => {
+            launches++;
+            await writeFile(join(root, "app.txt"), "after\n");
+            output?.stdout.write("Fixed.\n");
+            return 0;
+          },
+        },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(active ? 2 : 0);
+      expect(launches).toBe(active ? 0 : 1);
+      if (active)
+        expect(outcome.stderr).toContain("could not expand include path");
+      expect(await readFile(join(root, "app.txt"), "utf8")).toBe(
+        active ? "before\n" : "after\n",
+      );
+    },
+  );
+
+  for (const validShadow of [false, true]) {
+    test.skipIf(process.platform !== "linux")(
+      `does not discover an ignored replacement-character shadow of a raw source path: valid checkout ${validShadow}`,
+      async () => {
+        const root = await fixtures.create("patch-raw-source-shadow-");
+        const git = repositoryGit(root);
+        git("init", "--initial-branch=main");
+        git("config", "user.name", "Synthetic User");
+        git("config", "user.email", "synthetic@example.test");
+        await writeFile(join(root, "outer.txt"), "before\n");
+        const rawDirectory = Buffer.concat([
+          Buffer.from(`${root}/source-`),
+          Buffer.from([0xff]),
+        ]);
+        await mkdir(rawDirectory);
+        const rawSource = Buffer.concat([rawDirectory, Buffer.from("/app.ts")]);
+        await writeFile(rawSource, "raw source\n");
+        git("add", ".");
+        git("commit", "-m", "Synthetic distinct raw source baseline");
+        const shadow = join(root, "source-\ufffd");
+        await appendFile(
+          join(root, ".git/info/exclude"),
+          "\n/source-\ufffd/\n",
+        );
+        await mkdir(shadow);
+        if (validShadow) repositoryGit(shadow)("init", "--initial-branch=main");
+        else await writeFile(join(shadow, ".git"), "Synthetic fixture data.\n");
+        await writeFile(join(shadow, "app.ts"), "ignored shadow\n");
+        const shadowMarker = await realpath(join(shadow, ".git"));
+        let launches = 0;
+        const outcome = await runWorkflow(
+          ["patch", "Synthetic issue", "--json"],
+          {
+            currentDirectory: root,
+            onRepositoryCommand: runGitRepositoryCommand,
+            onCodex: async (args, output) => {
+              launches++;
+              const definition = args.find((value) =>
+                value.startsWith("permissions.codex_security_patch="),
+              )!;
+              const profile = parseToml(definition) as {
+                permissions: {
+                  codex_security_patch: { filesystem: Record<string, unknown> };
+                };
+              };
+              expect(
+                profile.permissions.codex_security_patch.filesystem[
+                  shadowMarker
+                ],
+              ).toBeUndefined();
+              await writeFile(join(root, "outer.txt"), "after\n");
+              output?.stdout.write("Fixed.\n");
+              return 0;
+            },
+          },
+        );
+        expect(outcome.exitCode, outcome.stderr).toBe(0);
+        expect(launches).toBe(1);
+        expect(await readFile(join(root, "outer.txt"), "utf8")).toBe("after\n");
+        expect(await readFile(rawSource, "utf8")).toBe("raw source\n");
+        expect(await readFile(join(shadow, "app.ts"), "utf8")).toBe(
+          "ignored shadow\n",
+        );
+      },
+    );
+  }
+
+  test.each([false, true])(
     "preserves workspace settings before selecting patch permissions: %p",
     async (configured) => {
       const directory = await fixtures.create("patch-profile-protocol-");

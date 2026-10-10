@@ -82,22 +82,37 @@ const realControlPath = async (path: string) =>
 const relativeFile = (directory: string, path: string) =>
   isAbsolute(path) ? path : `${directory}${sep}${path}`;
 
+async function readGitMarker(
+  marker: string | Buffer,
+): Promise<Buffer | true | undefined> {
+  const metadata = await stat(marker).catch(missing);
+  if (metadata === undefined) return undefined;
+  if (metadata.isDirectory()) return true;
+  const contents = await readFile(marker);
+  return contents.subarray(0, 8).equals(Buffer.from("gitdir: "))
+    ? contents
+    : undefined;
+}
+
 async function markerDirectories(
   directory: string,
 ): Promise<string[] | undefined> {
   const marker = join(directory, ".git");
-  const metadata = await stat(marker).catch(missing);
-  if (metadata === undefined) return undefined;
-  let gitDirectory: string;
-  if (metadata.isDirectory()) gitDirectory = await realControlPath(marker);
-  else {
-    const contents = controlPathText(await readFile(marker));
-    if (!contents.startsWith("gitdir: "))
-      throw new Error(`Invalid Git metadata marker: ${marker}`);
-    gitDirectory = await realControlPath(
-      relativeFile(directory, contents.slice(8).replace(/[\r\n]+$/u, "")),
-    );
-  }
+  const contents = await readGitMarker(marker);
+  if (contents === undefined) return undefined;
+  const gitDirectory = await (
+    contents === true
+      ? realControlPath(marker)
+      : realControlPath(
+          relativeFile(
+            directory,
+            controlPathText(contents)
+              .slice(8)
+              .replace(/[\r\n]+$/u, ""),
+          ),
+        )
+  ).catch(missing);
+  if (gitDirectory === undefined) return undefined;
   const commonBytes = await readFile(join(gitDirectory, "commondir")).catch(
     missing,
   );
@@ -122,51 +137,57 @@ async function canonicalPath(path: string): Promise<string> {
   return join(await canonicalPath(parent), path.slice(parent.length));
 }
 
-function quotedGitPath(path: string): Buffer {
-  if (!path.startsWith('"')) return Buffer.from(path);
-  // core.quotePath encodes non-ASCII bytes as C octal escapes.
-  const bytes: string = JSON.parse(
-    path.replace(/\\(?:[0-3][0-7]{2}|[\s\S])/gu, (escape) =>
-      !/^\\(?:[0-3][0-7]{2}|a|v)$/u.test(escape)
-        ? escape
-        : `\\u${(escape === "\\a" ? 7 : escape === "\\v" ? 11 : Number.parseInt(escape.slice(1), 8)).toString(16).padStart(4, "0")}`,
-    ),
-  );
-  return Buffer.from(bytes, "latin1");
-}
-
-async function checkRawGitDirectories(
+async function readableGitParent(
   checkout: string,
-  output: string,
-  tracked: boolean,
-): Promise<void> {
+  path: Buffer,
+  directory: boolean,
+  gitlink: boolean,
+): Promise<{ path: string; exact: boolean } | undefined> {
   const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
-  for (const line of output.split("\n").filter(Boolean)) {
-    let path = quotedGitPath(
-      tracked ? line.slice(line.indexOf("\t") + 1) : line,
-    );
-    const directory = tracked ? line.startsWith("160000 ") : path.at(-1) === 47;
-    if (path.at(-1) === 47) path = path.subarray(0, -1);
-    if (!directory) path = path.subarray(0, Math.max(0, path.lastIndexOf(47)));
-    while (path.length > 0) {
-      try {
-        utf8.decode(path);
-        break;
-      } catch {
-        /* Inspect the actual byte path before rejecting it. */
-      }
-      const marker = Buffer.concat([
-        Buffer.from(`${checkout}${sep}`),
-        path,
-        Buffer.from(`${sep}.git`),
-      ]);
-      if ((await lstat(marker).catch(missing)) !== undefined)
-        throw new Error(
-          "Patch cannot safely use Git administration whose checkout path is not valid UTF-8.",
-        );
-      path = path.subarray(0, Math.max(0, path.lastIndexOf(47)));
+  if (path.at(-1) === 47) path = path.subarray(0, -1);
+  if (!directory) path = path.subarray(0, Math.max(0, path.lastIndexOf(47)));
+  let exact = true;
+  while (path.length > 0) {
+    try {
+      return { path: utf8.decode(path), exact };
+    } catch {
+      // Check the actual byte path; never inspect its replacement-decoded alias.
     }
+    // Ordinary symlink replacements are data, including raw-byte ancestors.
+    let skippedSymlink = false;
+    for (let offset = 0; offset < path.length;) {
+      const separator = path.indexOf(47, offset);
+      const end = separator < 0 ? path.length : separator;
+      const prefix = path.subarray(0, end);
+      if (
+        (!gitlink || !exact || end !== path.length) &&
+        (
+          await lstat(
+            Buffer.concat([Buffer.from(`${checkout}${sep}`), prefix]),
+          ).catch(missing)
+        )?.isSymbolicLink()
+      ) {
+        path = prefix.subarray(0, Math.max(0, prefix.lastIndexOf(47)));
+        exact = false;
+        skippedSymlink = true;
+        break;
+      }
+      offset = end + 1;
+    }
+    if (skippedSymlink) continue;
+    const marker = Buffer.concat([
+      Buffer.from(`${checkout}${sep}`),
+      path,
+      Buffer.from(`${sep}.git`),
+    ]);
+    if ((await readGitMarker(marker)) !== undefined)
+      throw new Error(
+        "Patch cannot safely use Git administration whose checkout path is not valid UTF-8.",
+      );
+    path = path.subarray(0, Math.max(0, path.lastIndexOf(47)));
+    exact = false;
   }
+  return undefined;
 }
 
 export async function capturePatchGitControls(
@@ -242,15 +263,39 @@ export async function capturePatchGitControls(
         "--null",
         "--show-origin",
         "--includes",
-        "--type=path",
         "--get-regexp",
         "^(include|includeif\\..*)\\.path$",
       ]);
       for (let index = 0; index + 1 < paths.length; index += 2) {
         const origin = paths[index]!;
         const value = paths[index + 1]!;
-        const path = configPath(value.slice(value.indexOf("\n") + 1));
+        const separator = value.indexOf("\n");
+        const key = value.slice(0, separator);
+        let path = configPath(value.slice(separator + 1));
         if (path.length === 0) continue;
+        try {
+          // Expand each value with Git without expanding inactive values as a group.
+          path = (
+            await runControl(root, checkout, [
+              "-c",
+              `codexsecurity.patchcontrolpath=${path}`,
+              "config",
+              "--null",
+              "--type=path",
+              "--get",
+              "codexsecurity.patchcontrolpath",
+            ])
+          ).replace(/\0$/u, "");
+        } catch (error) {
+          // Active includes already passed Git's normal --includes read above.
+          if (
+            key.startsWith("includeif.") &&
+            error instanceof Error &&
+            error.message.includes("failed to expand user dir")
+          )
+            continue;
+          throw error;
+        }
         const relativeTo = origin.startsWith("file:")
           ? dirname(relativeFile(checkout, configPath(origin.slice(5))))
           : checkout;
@@ -348,7 +393,6 @@ export async function capturePatchGitControls(
           "Nested Git checkout resolves outside the selected repository.",
         );
       if (visited.has(canonical)) return;
-      visited.add(canonical);
       if (canonical !== root) {
         const directories = await markerDirectories(checkout);
         if (directories === undefined) return;
@@ -363,16 +407,17 @@ export async function capturePatchGitControls(
           );
         }
       }
+      visited.add(canonical);
       if (capture) await captureReferences(checkout);
       const [tracked, untracked] = await Promise.all([
-        run(root, checkout, [
+        runBytes(root, checkout, [
           "ls-files",
           "--cached",
           "--stage",
           "--full-name",
           "-z",
         ]),
-        run(root, checkout, [
+        runBytes(root, checkout, [
           "ls-files",
           "--others",
           "--exclude-standard",
@@ -380,50 +425,55 @@ export async function capturePatchGitControls(
           "-z",
         ]),
       ]);
-      // The command adapter returns UTF-8 strings. Recover quoted byte paths
-      // when decoding may have replaced bytes, before inspecting any marker.
-      if (tracked.includes("\ufffd"))
-        await checkRawGitDirectories(
+      const candidates = new Map<string, boolean>();
+      const add = async (
+        path: string,
+        directory: boolean,
+        gitlink: boolean,
+      ): Promise<void> => {
+        const readable = await readableGitParent(
           checkout,
-          await run(root, checkout, [
-            "-c",
-            "core.quotePath=true",
-            "ls-files",
-            "--cached",
-            "--stage",
-            "--full-name",
-          ]),
-          true,
+          Buffer.from(path, "latin1"),
+          directory,
+          gitlink,
         );
-      if (untracked.includes("\ufffd"))
-        await checkRawGitDirectories(
-          checkout,
-          await run(root, checkout, [
-            "-c",
-            "core.quotePath=true",
-            "ls-files",
-            "--others",
-            "--exclude-standard",
-            "--full-name",
-          ]),
-          false,
-        );
-      const candidates = new Set<string>();
-      const add = (path: string, directory: boolean): void => {
-        let candidate = resolve(checkout, path);
-        if (!directory) candidate = dirname(candidate);
+        if (readable === undefined) return;
+        let candidate = resolve(checkout, readable.path);
+        gitlink &&= readable.exact;
         while (candidate !== checkout && inside(checkout, candidate)) {
-          candidates.add(candidate);
+          candidates.set(
+            candidate,
+            (candidates.get(candidate) ?? false) || gitlink,
+          );
+          gitlink = false;
           candidate = dirname(candidate);
         }
       };
-      for (const entry of tracked.split("\0").filter(Boolean))
-        add(entry.slice(entry.indexOf("\t") + 1), entry.startsWith("160000 "));
-      for (const path of untracked.split("\0").filter(Boolean))
-        add(path, path.endsWith("/"));
-      for (const candidate of [...candidates].sort(
-        (a, b) => a.length - b.length,
+      for (const entry of tracked
+        .toString("latin1")
+        .split("\0")
+        .filter(Boolean)) {
+        const gitlink = entry.startsWith("160000 ");
+        await add(entry.slice(entry.indexOf("\t") + 1), gitlink, gitlink);
+      }
+      for (const path of untracked
+        .toString("latin1")
+        .split("\0")
+        .filter(Boolean))
+        await add(path, path.endsWith("/"), false);
+      const symlinkedAncestors: string[] = [];
+      for (const [candidate, gitlink] of [...candidates].sort(
+        ([a], [b]) => a.length - b.length,
       )) {
+        if (symlinkedAncestors.some((ancestor) => inside(ancestor, candidate)))
+          continue;
+        if (
+          !gitlink &&
+          (await lstat(candidate).catch(missing))?.isSymbolicLink()
+        ) {
+          symlinkedAncestors.push(candidate);
+          continue;
+        }
         if (
           [...visited].some(
             (path) =>
