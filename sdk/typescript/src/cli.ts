@@ -53,6 +53,7 @@ import { promisify, stripVTControlCharacters } from "node:util";
 import { Cli, z } from "incur";
 import { formatCliHelp } from "./cli-help.js";
 import { scanLogsJson } from "./cli-scan-logs-json.js";
+import { capturePatchGitControls } from "./patch-git-controls.js";
 import {
   ARTIFACT_EXPORT_FILENAMES,
   exportEnvironment,
@@ -1035,6 +1036,7 @@ interface SkillCommandOutput {
     readonly prompt: string;
     readonly threadSource: SkillThreadSource;
     readonly sandbox?: "read-only" | "workspace-write";
+    readonly permissions?: string;
     readonly externalSandbox?: boolean;
     readonly onEvent?: (event: Readonly<Record<string, unknown>>) => void;
   };
@@ -1071,6 +1073,7 @@ const findingVerificationSchema = z.object({
 type FindingVerification = z.infer<typeof findingVerificationSchema>;
 
 interface SkillRunOptions {
+  readonly patchGitContext?: GitPatchState["context"];
   externalSandbox?: boolean;
   readonly auth?: ScanAuthMode;
   serviceTier?: JsonValue;
@@ -1177,6 +1180,7 @@ interface CliDependencies {
       directory?: string;
       protectedRoots?: readonly string[];
       trim?: boolean;
+      encoding?: "base64";
       environment?: NodeJS.ProcessEnv;
       maxBuffer?: number;
       input?: string;
@@ -1274,6 +1278,7 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
       cwd: options?.directory ?? repository,
       env: { ...executable.environment, ...options?.environment },
       maxBuffer: options?.maxBuffer,
+      encoding: options?.encoding === "base64" ? "buffer" : "utf8",
       windowsHide: true,
     });
     const input =
@@ -1283,8 +1288,25 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
             execution.child.stdin!.once("error", reject);
             execution.child.stdin!.end(options.input, resolve);
           });
-    const [{ stdout }] = await Promise.all([execution, input]);
-    return options?.trim === false ? stdout : stdout.trim();
+    const [{ stdout }] = await Promise.all([execution, input]).catch(
+      (error: unknown) => {
+        // Keep command diagnostics as text when stdout was requested as bytes.
+        if (error instanceof Error) {
+          for (const field of ["stdout", "stderr"] as const) {
+            const value = (error as Error & Record<typeof field, unknown>)[
+              field
+            ];
+            if (Buffer.isBuffer(value))
+              Object.assign(error, { [field]: value.toString("utf8") });
+          }
+        }
+        throw error;
+      },
+    );
+    const output = Buffer.isBuffer(stdout)
+      ? stdout.toString(options?.encoding ?? "utf8")
+      : stdout;
+    return options?.trim === false ? output : output.trim();
   },
   exportFindings: runArtifactExport,
   runWorkbench: async (args, input, signal, pythonPath) => {
@@ -1648,6 +1670,7 @@ export async function runCodexSkillCommand(
                       threadSource: output.appServer.threadSource,
                       input: invocation.stdin!,
                       sandbox: output.appServer.sandbox,
+                      permissions: output.appServer.permissions,
                       externalSandbox: output.appServer.externalSandbox,
                       onEvent: output.appServer.onEvent,
                     },
@@ -5529,6 +5552,7 @@ export async function main(
               auth: options.auth,
               externalSandbox: options.externalSandbox,
               validationPrompt,
+              patchGitContext: commandContext,
             },
           );
           if (!jsonOutput) output.write(report.text());
@@ -9414,6 +9438,7 @@ async function runFindingPatches(
         {
           ...options,
           directory: selected.repository,
+          patchGitContext: base instanceof Map ? undefined : base.context,
           findings: [finding],
           findingInstructions: instruction?.trim()
             ? { [finding.occurrenceId]: instruction }
@@ -9715,11 +9740,56 @@ async function runSkill(
     ].join("\n");
   }
   const patch = skill === "fix-finding";
+  const gitControls = patch
+    ? await capturePatchGitControls(
+        directory,
+        async (root, checkout, args, encoding) => {
+          const current =
+            options.patchGitContext === undefined
+              ? dependencies
+              : (
+                  await bindPatchCommandContext(
+                    directory,
+                    options.patchGitContext.root,
+                    options.patchGitContext,
+                    dependencies,
+                  )
+                ).dependencies;
+          const selected =
+            root === checkout
+              ? current
+              : await nestedPatchGitDependencies(root, current, checkout);
+          return selected.runRepositoryCommand(
+            "git",
+            args.includes("ls-files")
+              ? ["--literal-pathspecs", ...args, "--", checkout]
+              : args,
+            root === checkout
+              ? (options.patchGitContext?.root ?? checkout)
+              : checkout,
+            {
+              trim: false,
+              encoding,
+              maxBuffer: Infinity,
+              environment: {
+                LC_ALL: "C",
+                ...(root === checkout ? {} : { GIT_INDEX_FILE: undefined }),
+              },
+            },
+          );
+        },
+        dependencies.environment["GIT_DIR"] === undefined,
+      )
+    : undefined;
+  const patchPermissions =
+    gitControls === undefined || options.externalSandbox
+      ? undefined
+      : "codex_security_patch";
   const appServer = patch || verify || assess;
   const threadSource = patch
     ? CODEX_SECURITY_THREAD_SOURCES.remediation
     : CODEX_SECURITY_THREAD_SOURCES.validation;
-  return dependencies.runCodex(
+  const status = await dependencies.runCodex(
     [
       ...(appServer
         ? ["app-server"]
@@ -9754,6 +9824,20 @@ async function runSkill(
       ...(verify || assess
         ? ["--config", 'approvals_reviewer="auto_review"']
         : []),
+      ...(patchPermissions === undefined
+        ? []
+        : [
+            "--config",
+            `permissions.${patchPermissions}=${inlineToml({
+              extends: ":workspace",
+              filesystem: Object.fromEntries(
+                gitControls!.readOnlyPaths.map((path) => [
+                  path,
+                  { ".": "read" },
+                ]),
+              ),
+            })}`,
+          ]),
       ...Object.entries(
         codexSecurityRequestMetadata(
           "cli",
@@ -9803,6 +9887,9 @@ async function runSkill(
               threadSource,
               ...(options.externalSandbox ? { externalSandbox: true } : {}),
               ...(verify || assess ? { sandbox: "read-only" as const } : {}),
+              ...(patchPermissions === undefined
+                ? {}
+                : { permissions: patchPermissions }),
               ...(options.onEvent === undefined
                 ? {}
                 : { onEvent: options.onEvent }),
@@ -9813,6 +9900,8 @@ async function runSkill(
     options.environment ?? dependencies.environment,
     appServer ? undefined : prompt,
   );
+  await gitControls?.validate();
+  return status;
 }
 
 export async function readSkillCommandOutput(
@@ -9826,6 +9915,7 @@ export async function readSkillCommandOutput(
     readonly threadSource: SkillThreadSource;
     readonly input: NodeJS.WritableStream;
     readonly sandbox?: "read-only" | "workspace-write";
+    readonly permissions?: string;
     readonly externalSandbox?: boolean;
     readonly onEvent?: (event: Readonly<Record<string, unknown>>) => void;
   },
@@ -9853,7 +9943,11 @@ export async function readSkillCommandOutput(
       method: "turn/start",
       params: {
         threadId: threadId!,
-        ...(externalSandbox ? { sandboxPolicy: externalSandbox } : {}),
+        ...(externalSandbox
+          ? { sandboxPolicy: externalSandbox }
+          : appServer?.permissions === undefined
+            ? {}
+            : { permissions: appServer.permissions }),
         input: [{ type: "text", text: appServer!.prompt, text_elements: [] }],
       },
     });
@@ -9872,7 +9966,7 @@ export async function readSkillCommandOutput(
           : { modelProvider: appServer.modelProvider }),
         approvalPolicy:
           appServer?.sandbox === "read-only" ? "on-request" : "never",
-        sandbox: appServer?.sandbox ?? "workspace-write",
+        sandbox: appServer.sandbox ?? "workspace-write",
         ...(config === undefined ? {} : { config }),
       },
     });
@@ -9881,7 +9975,12 @@ export async function readSkillCommandOutput(
     send({
       id: 1,
       method: "initialize",
-      params: { clientInfo: { name: "codex-security", version: VERSION } },
+      params: {
+        clientInfo: { name: "codex-security", version: VERSION },
+        ...(appServer.permissions === undefined
+          ? {}
+          : { capabilities: { experimentalApi: true } }),
+      },
     });
   }
 
@@ -9928,10 +10027,15 @@ export async function readSkillCommandOutput(
               continue;
             }
           }
-          if (appServer.sandbox === "read-only") {
+          if (
+            appServer.sandbox === "read-only" ||
+            appServer.permissions !== undefined
+          ) {
             if (appServer.directory === undefined) {
               error =
-                "Codex did not receive the repository directory required for read-only verification.";
+                appServer.permissions === undefined
+                  ? "Codex did not receive the repository directory required for read-only verification."
+                  : "Codex did not receive the repository directory required for patch permissions.";
               appServer.input.end();
               continue;
             }
@@ -9946,6 +10050,54 @@ export async function readSkillCommandOutput(
           } else {
             startThread();
           }
+        } else if (value["id"] === 4 && appServer.permissions !== undefined) {
+          const result = value["result"];
+          const config = isJsonObject(result) ? result["config"] : undefined;
+          const profiles = isJsonObject(config)
+            ? config["permissions"]
+            : undefined;
+          const profile = isJsonObject(profiles)
+            ? profiles[appServer.permissions]
+            : undefined;
+          if (!isJsonObject(config) || !isJsonObject(profile)) {
+            error =
+              "Codex did not provide the patch permission profile configuration.";
+            appServer.input.end();
+            continue;
+          }
+          const workspace = isJsonObject(config["sandbox_workspace_write"])
+            ? config["sandbox_workspace_write"]
+            : {};
+          const filesystem = isJsonObject(profile["filesystem"])
+            ? { ...profile["filesystem"] }
+            : {};
+          // Native config reads represent absent TOML options with null.
+          if (filesystem["glob_scan_max_depth"] === null)
+            delete filesystem["glob_scan_max_depth"];
+          // Extend the effective native workspace policy without resetting its settings.
+          startThread({
+            permissions: {
+              [appServer.permissions]: {
+                extends: ":workspace",
+                network: { enabled: workspace["network_access"] === true },
+                workspace_roots: Object.fromEntries(
+                  ((workspace["writable_roots"] ?? []) as string[]).map(
+                    (root) => [root, true],
+                  ),
+                ),
+                filesystem: {
+                  ...filesystem,
+                  // Remove implicit temp grants without narrowing explicit writable roots.
+                  ...(workspace["exclude_tmpdir_env_var"] === true
+                    ? { ":tmpdir": {} }
+                    : {}),
+                  ...(workspace["exclude_slash_tmp"] === true
+                    ? { ":slash_tmp": {} }
+                    : {}),
+                },
+              },
+            },
+          });
         } else if (value["id"] === 4 && appServer.sandbox === "read-only") {
           const result = value["result"];
           const layers =

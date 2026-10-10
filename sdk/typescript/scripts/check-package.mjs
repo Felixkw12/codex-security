@@ -148,6 +148,7 @@ const allowedFiles = new Set([
     "cli",
     "cli-help",
     "cli-scan-logs-json",
+    "patch-git-controls",
     "cli-signals",
     "classify-severity",
     "classify-scan-severity",

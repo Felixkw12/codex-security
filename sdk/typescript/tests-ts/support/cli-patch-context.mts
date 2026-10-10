@@ -31,13 +31,22 @@ for (const kind of [
     GIT_CONFIG_GLOBAL: join(directory, "gitconfig"),
     GIT_CONFIG_NOSYSTEM: "1",
   };
-  const git = (args: string[], cwd = repository, env = environment) =>
-    execFileSync("git", args, {
+  const git = (
+    args: string[],
+    cwd = repository,
+    env = environment,
+    encoding?: "base64",
+  ) => {
+    const result = execFileSync("git", args, {
       cwd,
       env,
-      encoding: "utf8",
+      encoding: encoding === "base64" ? "buffer" : "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     });
+    return Buffer.isBuffer(result)
+      ? result.toString(encoding ?? "utf8")
+      : result;
+  };
   git(["init", "--initial-branch=main"]);
   git(["config", "user.name", "Synthetic User"]);
   git(["config", "user.email", "synthetic@example.test"]);
@@ -144,6 +153,7 @@ for (const kind of [
             args,
             options?.directory ?? cwd,
             selectedEnvironment,
+            options?.encoding,
           );
           return options?.trim === false ? result : result.trim();
         }

@@ -252,10 +252,14 @@ describe("patch change tracking", () => {
                 cwd,
                 env: { ...environment, ...options?.environment },
                 maxBuffer: options?.maxBuffer,
+                encoding: options?.encoding === "base64" ? "buffer" : "utf8",
               });
               child.child.stdin?.end(options?.input);
               const { stdout } = await child;
-              return options?.trim === false ? stdout : stdout.trim();
+              const text = Buffer.isBuffer(stdout)
+                ? stdout.toString(options?.encoding ?? "utf8")
+                : stdout;
+              return options?.trim === false ? text : text.trim();
             },
             onCodex: async (_args, output) => {
               models++;
@@ -397,10 +401,14 @@ process.exit(result.status ?? 1);
                 cwd: options?.directory ?? cwd,
                 env: { ...process.env, ...options?.environment },
                 maxBuffer: options?.maxBuffer,
+                encoding: options?.encoding === "base64" ? "buffer" : "utf8",
               });
               execution.child.stdin?.end(options?.input);
               const { stdout } = await execution;
-              return options?.trim === false ? stdout : stdout.trim();
+              const text = Buffer.isBuffer(stdout)
+                ? stdout.toString(options?.encoding ?? "utf8")
+                : stdout;
+              return options?.trim === false ? text : text.trim();
             }
             return args[0] === "repo"
               ? "synthetic-origin-id"

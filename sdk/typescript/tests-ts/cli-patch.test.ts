@@ -496,6 +496,17 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
           );
         git("init", "--bare", remote);
         git("remote", "add", "origin", remote);
+        let patchCalls = 0;
+        let assessmentCalls = 0;
+        let patchFinished = false;
+        const postPatchGitWrites: string[][] = [];
+        const postPatchPublication: string[][] = [];
+        let selectedBeforePatch:
+          | { head: string; index: Buffer<ArrayBuffer>; objects: string }
+          | undefined;
+        let nestedAfterPatch:
+          | { head: string; index: Buffer<ArrayBuffer>; objects: string }
+          | undefined;
         const outcome = await runWorkflow(
           [
             "patch",
@@ -534,6 +545,7 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
                   "$codex-security:assess-patch-risk",
                 )
               ) {
+                assessmentCalls++;
                 expect(
                   resolve(
                     execFileSync("git", ["rev-parse", "--show-toplevel"], {
@@ -561,6 +573,13 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
                 expect(patch).toContain("a/shared.ts");
                 output.stdout.write(patchRiskAssessment().report);
               } else {
+                patchCalls++;
+                if (nestedMetadata)
+                  selectedBeforePatch = {
+                    head: git("rev-parse", "HEAD"),
+                    index: await readFile(join(repository, ".git/index")),
+                    objects: git("count-objects", "-v"),
+                  };
                 if (removesComponent) {
                   await rm(subdirectory, { recursive: true });
                   if (kind.includes("replaced by a file"))
@@ -590,17 +609,39 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
                     nested("config", "user.email", "synthetic@example.test");
                     nested("add", ".");
                     nested("commit", "-m", "Synthetic nested checkout");
+                    nestedAfterPatch = {
+                      head: nested("rev-parse", "HEAD"),
+                      index: await readFile(join(subdirectory, ".git/index")),
+                      objects: nested("count-objects", "-v"),
+                    };
                   }
                 }
                 await writeFile(join(repository, "shared.ts"), "fixed\n");
                 for (const file of extraFiles)
                   await writeFile(join(repository, file), "fixed\n");
                 output?.stdout.write("Patch complete.");
+                patchFinished = true;
               }
               return 0;
             },
             onRepositoryCommand: async (command, args, directory, options) => {
               if (command === "git") {
+                if (
+                  nestedMetadata &&
+                  patchFinished &&
+                  args.some((argument) =>
+                    [
+                      "add",
+                      "read-tree",
+                      "update-index",
+                      "write-tree",
+                      "commit",
+                      "push",
+                      "update-ref",
+                    ].includes(argument),
+                  )
+                )
+                  postPatchGitWrites.push([...args]);
                 if (kind === "long checkout root")
                   expect(args.join(" ").length).toBeLessThan(32767);
                 if (
@@ -629,6 +670,8 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
                   },
                 });
               }
+              if (nestedMetadata && patchFinished)
+                postPatchPublication.push([...args]);
               const configName =
                 providerEnvironment.GH_CONFIG_DIR !== undefined
                   ? "GH_CONFIG_DIR"
@@ -653,6 +696,35 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
             },
           },
         );
+        if (nestedMetadata) {
+          expect(outcome.exitCode, outcome.stderr).toBe(2);
+          expect(outcome.stderr).toContain(
+            "Git metadata outside the pre-patch administration directories",
+          );
+          expect(patchCalls).toBe(1);
+          expect(assessmentCalls).toBe(0);
+          expect(postPatchGitWrites).toEqual([]);
+          expect(postPatchPublication).toEqual([]);
+          expect(git("rev-parse", "HEAD")).toBe(selectedBeforePatch!.head);
+          expect(await readFile(join(repository, ".git/index"))).toEqual(
+            selectedBeforePatch!.index,
+          );
+          expect(git("count-objects", "-v")).toBe(selectedBeforePatch!.objects);
+          expect(git("ls-remote", "origin")).toBe("");
+          const nested = repositoryGit(subdirectory);
+          expect(nested("rev-parse", "HEAD")).toBe(nestedAfterPatch!.head);
+          expect(await readFile(join(subdirectory, ".git/index"))).toEqual(
+            nestedAfterPatch!.index,
+          );
+          expect(nested("count-objects", "-v")).toBe(nestedAfterPatch!.objects);
+          expect(await readFile(join(subdirectory, "app.ts"), "utf8")).toBe(
+            "fixed\n",
+          );
+          expect(await readFile(join(repository, "shared.ts"), "utf8")).toBe(
+            "fixed\n",
+          );
+          return;
+        }
         const missingConfiguration = kind.includes(
           "removed provider configuration",
         );
@@ -1720,19 +1792,25 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
       ],
       {
         onWorkbench: () => savedScan(result, "scan-1", directory),
-        onRepositoryCommand: (command, args) => {
+        onRepositoryCommand: (command, args, _cwd, options) => {
           repositoryCommands.push({ command, args });
           if (command === "git") {
+            const encoded = (value: string) =>
+              options?.encoding === "base64"
+                ? Buffer.from(value).toString("base64")
+                : value;
             if (
               args.includes("--show-toplevel") ||
               args.includes("--absolute-git-dir")
             )
-              return directory;
+              return encoded(directory);
             if (args[0] === "diff" && args.includes("--cached")) return "";
             if (args[0] === "remote") {
               return "https://github.example.test/example/repository.git";
             }
-            return args.includes("--name-only") ? "src/finding-1.ts\0" : "";
+            return encoded(
+              args.includes("--name-only") ? "src/finding-1.ts\0" : "",
+            );
           }
           return args[1] === "create"
             ? "https://github.example.test/example/repository/pull/15"
@@ -3162,19 +3240,25 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
         {
           currentDirectory: directory,
           result: resultWithFindings(["high"]),
-          onRepositoryCommand: (command, args) => {
+          onRepositoryCommand: (command, args, _cwd, options) => {
+            const encoded = (value: string) =>
+              options?.encoding === "base64"
+                ? Buffer.from(value).toString("base64")
+                : value;
             published ||= command === "gh" && args[1] === "create";
             if (
               args.includes("--show-toplevel") ||
               args.includes("--absolute-git-dir")
             )
-              return directory;
+              return encoded(directory);
             if (args.includes("--cached")) return "";
-            return command === "gh" && args[1] === "create"
-              ? url
-              : args.includes("--name-only")
-                ? "src/finding-1.ts\0"
-                : "";
+            return encoded(
+              command === "gh" && args[1] === "create"
+                ? url
+                : args.includes("--name-only")
+                  ? "src/finding-1.ts\0"
+                  : "",
+            );
           },
         },
         {
@@ -3279,23 +3363,29 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
         {
           environment,
           onWorkbench: () => savedScan(result, "scan-1", directory),
-          onRepositoryCommand: (command, args, target) => {
+          onRepositoryCommand: (command, args, target, options) => {
             expect(target).toBe(directory);
             if (command === "git") {
+              const encoded = (value: string) =>
+                options?.encoding === "base64"
+                  ? Buffer.from(value).toString("base64")
+                  : value;
               if (
                 args.includes("--show-toplevel") ||
                 args.includes("--absolute-git-dir")
               )
-                return directory;
+                return encoded(directory);
               if (args.includes("--cached")) return "";
               if (args[0] === "remote") {
                 expect([
                   ["remote", "get-url", "--push", "--all", "origin"],
                   ["remote", "get-url", "origin"],
                 ]).toContainEqual([...args]);
-                return origin;
+                return encoded(origin);
               }
-              return args.includes("--name-only") ? "src/finding-1.ts\0" : "";
+              return encoded(
+                args.includes("--name-only") ? "src/finding-1.ts\0" : "",
+              );
             }
             expect(command).toBe(client);
             publicationCommands.push(args);
@@ -5327,6 +5417,7 @@ describe("patch publication integrity", () => {
               cwd: directory,
               env: { ...process.env, ...options?.environment },
               maxBuffer: options?.maxBuffer,
+              encoding: options?.encoding === "base64" ? "buffer" : "utf8",
             });
             execution.child.stdin?.end(options?.input);
             const { stdout } = await execution;
@@ -5336,8 +5427,15 @@ describe("patch publication integrity", () => {
                 args.at(-1) ?? "",
               )
             )
-              gitTrace.push({ args, cwd: directory, stdout });
-            return options?.trim === false ? stdout : stdout.trim();
+              gitTrace.push({
+                args,
+                cwd: directory,
+                stdout: stdout.toString(),
+              });
+            const output = Buffer.isBuffer(stdout)
+              ? stdout.toString(options?.encoding ?? "utf8")
+              : stdout;
+            return options?.trim === false ? output : output.trim();
           } catch (error) {
             const failure = error as Error & {
               code?: unknown;
@@ -5979,14 +6077,18 @@ const runGitRepositoryCommand: NonNullable<
   NonNullable<Parameters<typeof dependencies>[0]>["onRepositoryCommand"]
 > = (command, args, workingDirectory, options) => {
   expect(command).toBe("git");
-  const result = gitText(args, {
+  const result = execFileSync("git", args, {
+    encoding: options?.encoding === "base64" ? "buffer" : "utf8",
     cwd: options?.directory ?? workingDirectory,
     env: { ...process.env, ...options?.environment },
     maxBuffer: options?.maxBuffer,
     input: options?.input,
     stdio: [options?.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
   });
-  return options?.trim === false ? result : result.trim();
+  const output = Buffer.isBuffer(result)
+    ? result.toString(options?.encoding ?? "utf8")
+    : result;
+  return options?.trim === false ? output : output.trim();
 };
 
 test.each(["untracked", "tracked"])(
@@ -7437,10 +7539,14 @@ describe("patch change tracking", () => {
             cwd: options?.directory ?? cwd,
             env: { ...process.env, ...environment, ...options?.environment },
             maxBuffer: options?.maxBuffer,
+            encoding: options?.encoding === "base64" ? "buffer" : "utf8",
           });
           execution.child.stdin?.end(options?.input);
           const { stdout } = await execution;
-          return options?.trim === false ? stdout : stdout.trim();
+          const output = Buffer.isBuffer(stdout)
+            ? stdout.toString(options?.encoding ?? "utf8")
+            : stdout;
+          return options?.trim === false ? output : output.trim();
         };
         expect(
           await runGit("git", ["ls-remote", "origin"], directory),
@@ -9125,6 +9231,9 @@ describe("ordinary patch snapshot context", () => {
       let modelCalls = 0;
       let assessmentCalls = 0;
       let redirectedSnapshotCommands = 0;
+      const gitfileBookkeeping: string[][] = [];
+      const gitfilePublication: string[][] = [];
+      let selectedBeforeTurn: { head: string; objects: string } | undefined;
       const outcome = await runWorkflow(
         [...argv, ...(flag ? [flag] : []), "--json"],
         {
@@ -9134,6 +9243,22 @@ describe("ordinary patch snapshot context", () => {
           onWorkbench: () => savedScan(scan, "scan-1", directory),
           onRepositoryCommand: (command, args, cwd, options) => {
             if (command === "git") {
+              if (
+                operation === "gitfile" &&
+                modelCalls > 0 &&
+                args.some((argument) =>
+                  [
+                    "add",
+                    "read-tree",
+                    "update-index",
+                    "write-tree",
+                    "commit",
+                    "push",
+                    "update-ref",
+                  ].includes(argument),
+                )
+              )
+                gitfileBookkeeping.push([...args]);
               if (
                 operation === "replace" &&
                 modelCalls > 0 &&
@@ -9145,6 +9270,8 @@ describe("ordinary patch snapshot context", () => {
                 environment: { ...environment, ...options?.environment },
               });
             }
+            if (operation === "gitfile" && modelCalls > 0)
+              gitfilePublication.push([...args]);
             if (args[1] === "list") return "[]";
             expect(options?.environment?.["GH_CONFIG_DIR"]).toBe(
               resolve(directory, "provider-config"),
@@ -9177,6 +9304,11 @@ describe("ordinary patch snapshot context", () => {
             }
             modelCalls++;
             expect(output?.appServer?.directory).toBe(directory);
+            if (operation === "gitfile" && modelCalls === 1)
+              selectedBeforeTurn = {
+                head: git("rev-parse", "HEAD"),
+                objects: git("count-objects", "-v"),
+              };
             await writeFile(join(root, "app.ts"), "fixed\n");
             if (
               route !== "ordinary" &&
@@ -9220,10 +9352,11 @@ describe("ordinary patch snapshot context", () => {
           },
         },
       );
-      expect(modelCalls).toBe(operation === "gitfile" ? 2 : 1);
+      expect(modelCalls).toBe(1);
       expect(assessmentCalls).toBe(
         flag === "--assess-patch-risk" &&
           operation !== "replace" &&
+          operation !== "gitfile" &&
           !selectedDirectoryRemoved
           ? 1
           : 0,
@@ -9238,6 +9371,26 @@ describe("ordinary patch snapshot context", () => {
       expect(await readFile(join(foreign, "untracked.ts"), "utf8")).toBe(
         "unrelated local content\n",
       );
+      if (operation === "gitfile") {
+        expect(outcome.exitCode, outcome.stderr).toBe(2);
+        expect(outcome.stderr).toContain(
+          "Git metadata outside the pre-patch administration directories",
+        );
+        expect(gitfileBookkeeping).toEqual([]);
+        expect(gitfilePublication).toEqual([]);
+        expect(await readFile(join(root, ".git/index"))).toEqual(index);
+        expect(git("rev-parse", "HEAD")).toBe(selectedBeforeTurn!.head);
+        expect(git("count-objects", "-v")).toBe(selectedBeforeTurn!.objects);
+        expect(git("ls-remote", "origin")).toBe("");
+        expect(await readFile(join(root, "app.ts"), "utf8")).toBe("fixed\n");
+        expect(await readFile(join(directory, "keep.ts"), "utf8")).toBe(
+          "fixed component 1\n",
+        );
+        expect(await readFile(join(directory, ".git"), "utf8")).toBe(
+          `gitdir: ${join(foreign, ".git")}\n`,
+        );
+        return;
+      }
       if (operation === "replace") {
         expect(outcome.exitCode, outcome.stderr).toBe(2);
         expect(outcome.stderr).toContain(
@@ -10025,7 +10178,7 @@ describe("patch Git metadata identity", () => {
         );
         if (kind === "retargeted")
           expect(outcome.stderr).toContain(
-            "Git directory changed during patching",
+            "Git configuration or hooks changed location during the patch",
           );
         else
           expect(JSON.parse(outcome.stdout)).toMatchObject({
