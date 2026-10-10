@@ -53,6 +53,7 @@ import { promisify, stripVTControlCharacters } from "node:util";
 import { Cli, z } from "incur";
 import { formatCliHelp } from "./cli-help.js";
 import { scanLogsJson } from "./cli-scan-logs-json.js";
+import { capturePatchGitControls } from "./patch-git-controls.js";
 import {
   ARTIFACT_EXPORT_FILENAMES,
   exportEnvironment,
@@ -1035,6 +1036,7 @@ interface SkillCommandOutput {
     readonly prompt: string;
     readonly threadSource: SkillThreadSource;
     readonly sandbox?: "read-only" | "workspace-write";
+    readonly permissions?: string;
     readonly externalSandbox?: boolean;
     readonly onEvent?: (event: Readonly<Record<string, unknown>>) => void;
   };
@@ -1071,6 +1073,7 @@ const findingVerificationSchema = z.object({
 type FindingVerification = z.infer<typeof findingVerificationSchema>;
 
 interface SkillRunOptions {
+  readonly patchGitContext?: GitPatchState["context"];
   externalSandbox?: boolean;
   readonly auth?: ScanAuthMode;
   serviceTier?: JsonValue;
@@ -1648,6 +1651,7 @@ export async function runCodexSkillCommand(
                       threadSource: output.appServer.threadSource,
                       input: invocation.stdin!,
                       sandbox: output.appServer.sandbox,
+                      permissions: output.appServer.permissions,
                       externalSandbox: output.appServer.externalSandbox,
                       onEvent: output.appServer.onEvent,
                     },
@@ -5529,6 +5533,7 @@ export async function main(
               auth: options.auth,
               externalSandbox: options.externalSandbox,
               validationPrompt,
+              patchGitContext: commandContext,
             },
           );
           if (!jsonOutput) output.write(report.text());
@@ -9414,6 +9419,7 @@ async function runFindingPatches(
         {
           ...options,
           directory: selected.repository,
+          patchGitContext: base instanceof Map ? undefined : base.context,
           findings: [finding],
           findingInstructions: instruction?.trim()
             ? { [finding.occurrenceId]: instruction }
@@ -9715,11 +9721,53 @@ async function runSkill(
     ].join("\n");
   }
   const patch = skill === "fix-finding";
+  const gitControls = patch
+    ? await capturePatchGitControls(
+        directory,
+        async (root, checkout, args) => {
+          const current =
+            options.patchGitContext === undefined
+              ? dependencies
+              : (
+                  await bindPatchCommandContext(
+                    directory,
+                    options.patchGitContext.root,
+                    options.patchGitContext,
+                    dependencies,
+                  )
+                ).dependencies;
+          const selected =
+            root === checkout
+              ? current
+              : await nestedPatchGitDependencies(root, current, checkout);
+          return selected.runRepositoryCommand(
+            "git",
+            args,
+            root === checkout
+              ? (options.patchGitContext?.root ?? checkout)
+              : checkout,
+            {
+              trim: false,
+              maxBuffer: Infinity,
+              environment: {
+                LC_ALL: "C",
+                ...(root === checkout ? {} : { GIT_INDEX_FILE: undefined }),
+              },
+            },
+          );
+        },
+        dependencies.environment["GIT_DIR"] === undefined,
+      )
+    : undefined;
+  const patchPermissions =
+    gitControls === undefined || options.externalSandbox
+      ? undefined
+      : "codex_security_patch";
   const appServer = patch || verify || assess;
   const threadSource = patch
     ? CODEX_SECURITY_THREAD_SOURCES.remediation
     : CODEX_SECURITY_THREAD_SOURCES.validation;
-  return dependencies.runCodex(
+  const status = await dependencies.runCodex(
     [
       ...(appServer
         ? ["app-server"]
@@ -9754,6 +9802,20 @@ async function runSkill(
       ...(verify || assess
         ? ["--config", 'approvals_reviewer="auto_review"']
         : []),
+      ...(patchPermissions === undefined
+        ? []
+        : [
+            "--config",
+            `permissions.${patchPermissions}=${inlineToml({
+              extends: ":workspace",
+              filesystem: Object.fromEntries(
+                gitControls!.readOnlyPaths.map((path) => [
+                  path,
+                  { ".": "read" },
+                ]),
+              ),
+            })}`,
+          ]),
       ...Object.entries(
         codexSecurityRequestMetadata(
           "cli",
@@ -9803,6 +9865,9 @@ async function runSkill(
               threadSource,
               ...(options.externalSandbox ? { externalSandbox: true } : {}),
               ...(verify || assess ? { sandbox: "read-only" as const } : {}),
+              ...(patchPermissions === undefined
+                ? {}
+                : { permissions: patchPermissions }),
               ...(options.onEvent === undefined
                 ? {}
                 : { onEvent: options.onEvent }),
@@ -9813,6 +9878,8 @@ async function runSkill(
     options.environment ?? dependencies.environment,
     appServer ? undefined : prompt,
   );
+  await gitControls?.validate();
+  return status;
 }
 
 export async function readSkillCommandOutput(
@@ -9826,6 +9893,7 @@ export async function readSkillCommandOutput(
     readonly threadSource: SkillThreadSource;
     readonly input: NodeJS.WritableStream;
     readonly sandbox?: "read-only" | "workspace-write";
+    readonly permissions?: string;
     readonly externalSandbox?: boolean;
     readonly onEvent?: (event: Readonly<Record<string, unknown>>) => void;
   },
@@ -9872,7 +9940,9 @@ export async function readSkillCommandOutput(
           : { modelProvider: appServer.modelProvider }),
         approvalPolicy:
           appServer?.sandbox === "read-only" ? "on-request" : "never",
-        sandbox: appServer?.sandbox ?? "workspace-write",
+        ...(appServer.permissions === undefined
+          ? { sandbox: appServer.sandbox ?? "workspace-write" }
+          : { permissions: appServer.permissions }),
         ...(config === undefined ? {} : { config }),
       },
     });
@@ -9881,7 +9951,12 @@ export async function readSkillCommandOutput(
     send({
       id: 1,
       method: "initialize",
-      params: { clientInfo: { name: "codex-security", version: VERSION } },
+      params: {
+        clientInfo: { name: "codex-security", version: VERSION },
+        ...(appServer.permissions === undefined
+          ? {}
+          : { capabilities: { experimentalApi: true } }),
+      },
     });
   }
 
@@ -10021,7 +10096,11 @@ export async function readSkillCommandOutput(
               params: {
                 command: [process.execPath, "-e", ""],
                 cwd: appServer.directory!,
-                sandboxPolicy: externalSandbox ?? result.sandbox,
+                ...(externalSandbox !== undefined
+                  ? { sandboxPolicy: externalSandbox }
+                  : appServer.permissions === undefined
+                    ? { sandboxPolicy: result.sandbox }
+                    : { permissionProfile: appServer.permissions }),
               },
             });
             continue;

@@ -254,7 +254,9 @@ describe("patch change tracking", () => {
 
   test.each(
     ["root", "package", "recursive"].flatMap((scope) =>
-      ["move", "flatten", "revision"].map((change) => [scope, change] as const),
+      ["move", "registered-move", "flatten", "revision"].map(
+        (change) => [scope, change] as const,
+      ),
     ),
   )("assesses coherent nested %s content after %s", async (scope, change) => {
     const { directory, git } = await publicationRepository();
@@ -278,16 +280,44 @@ describe("patch change tracking", () => {
       parentGit("add", "child");
       parentGit("commit", "-m", "Synthetic parent");
     }
+    if (change === "registered-move") {
+      const name = scope === "recursive" ? "child" : "nested";
+      parentGit("config", "-f", ".gitmodules", `submodule.${name}.path`, name);
+      parentGit(
+        "config",
+        "-f",
+        ".gitmodules",
+        `submodule.${name}.url`,
+        "https://example.test/synthetic.git",
+      );
+      parentGit("add", ".gitmodules", name);
+      parentGit("submodule", "init");
+      parentGit("submodule", "absorbgitdirs", name);
+    }
     git("add", "nested");
     git("commit", "-m", "Synthetic gitlink");
-    const destination = change === "move" ? `${path}-moved` : path;
+    const moving = change === "move" || change === "registered-move";
+    const destination = moving ? `${path}-moved` : path;
     let assessments = 0;
+    let afterTurn = false;
+    const bookkeeping: string[][] = [];
     const outcome = await runWorkflow(
       ["patch", "Synthetic issue", "--assess-patch-risk", "--json"],
       {
         currentDirectory:
           scope === "package" ? join(directory, "package") : directory,
-        onRepositoryCommand: runGitRepositoryCommand,
+        onRepositoryCommand: (command, args, cwd, options) => {
+          if (
+            afterTurn &&
+            args.some((value) =>
+              ["add", "read-tree", "update-index", "write-tree"].includes(
+                value,
+              ),
+            )
+          )
+            bookkeeping.push([...args]);
+          return runGitRepositoryCommand(command, args, cwd, options);
+        },
         onCodex: async (_args, output) => {
           if (
             output?.appServer?.prompt.includes(
@@ -315,7 +345,7 @@ describe("patch change tracking", () => {
             expect(
               await readAppliedText(join(verification, destination, "app.ts")),
             ).toBe(change === "revision" ? "before\n" : "after\n");
-            if (change === "move")
+            if (moving)
               expect(
                 await readFile(join(verification, path, "app.ts")).catch(
                   () => null,
@@ -330,7 +360,13 @@ describe("patch change tracking", () => {
           if (change === "revision")
             nestedGit("commit", "--allow-empty", "-m", "Synthetic revision");
           else {
-            if (change === "move")
+            if (change === "registered-move")
+              parentGit(
+                "mv",
+                scope === "recursive" ? "child" : "nested",
+                scope === "recursive" ? "child-moved" : "nested-moved",
+              );
+            else if (change === "move")
               await rename(nested, join(directory, destination));
             else {
               parentGit(
@@ -347,12 +383,25 @@ describe("patch change tracking", () => {
             }
           }
           output?.stdout.write("Fixed.");
+          afterTurn = true;
           return 0;
         },
       },
     );
-    expect(outcome.exitCode, outcome.stderr).toBe(0);
-    expect(assessments).toBe(1);
+    if (change === "move") {
+      expect(outcome.exitCode, outcome.stderr).toBe(2);
+      expect(outcome.stderr).toContain(
+        "Git metadata outside the pre-patch administration directories",
+      );
+      expect(assessments).toBe(0);
+      expect(bookkeeping).toEqual([]);
+      expect(
+        await readFile(join(directory, destination, "app.ts"), "utf8"),
+      ).toBe("after\n");
+    } else {
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(assessments).toBe(1);
+    }
   });
 
   test.each(
