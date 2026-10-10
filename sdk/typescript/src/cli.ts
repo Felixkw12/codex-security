@@ -9188,6 +9188,11 @@ export async function readSkillCommandOutput(
   const externalSandbox = appServer?.externalSandbox
     ? { type: "externalSandbox", networkAccess: "enabled" }
     : undefined;
+  // A fresh name prevents inactive repository profiles from merging in grants.
+  const permissionProfile =
+    appServer?.permissions === undefined
+      ? undefined
+      : `${appServer.permissions.name}_${randomUUID()}`;
   const send = (request: JsonObject): void => {
     appServer?.input.write(`${JSON.stringify(request)}\n`);
   };
@@ -9199,9 +9204,9 @@ export async function readSkillCommandOutput(
         threadId: threadId!,
         ...(externalSandbox
           ? { sandboxPolicy: externalSandbox }
-          : appServer?.permissions === undefined
+          : permissionProfile === undefined
             ? {}
-            : { permissions: appServer.permissions.name }),
+            : { permissions: permissionProfile }),
         input: [{ type: "text", text: appServer!.prompt, text_elements: [] }],
       },
     });
@@ -9307,12 +9312,6 @@ export async function readSkillCommandOutput(
         } else if (value["id"] === 4 && appServer.permissions !== undefined) {
           const result = value["result"];
           const config = isJsonObject(result) ? result["config"] : undefined;
-          const profiles = isJsonObject(config)
-            ? config["permissions"]
-            : undefined;
-          const profile = isJsonObject(profiles)
-            ? profiles[appServer.permissions.name]
-            : undefined;
           if (!isJsonObject(config)) {
             error =
               "Codex did not provide the patch permission profile configuration.";
@@ -9322,24 +9321,16 @@ export async function readSkillCommandOutput(
           const workspace = isJsonObject(config["sandbox_workspace_write"])
             ? config["sandbox_workspace_write"]
             : {};
-          const filesystem =
-            isJsonObject(profile) && isJsonObject(profile["filesystem"])
-              ? { ...profile["filesystem"] }
-              : {};
-          for (const path of appServer.permissions.readOnlyPaths) {
-            const configured = filesystem[path];
-            filesystem[path] = {
-              ...(isJsonObject(configured) ? configured : {}),
-              ".": "read",
-            };
-          }
-          // Native config reads represent absent TOML options with null.
-          if (filesystem["glob_scan_max_depth"] === null)
-            delete filesystem["glob_scan_max_depth"];
+          const filesystem = Object.fromEntries(
+            appServer.permissions.readOnlyPaths.map((path) => [
+              path,
+              { ".": "read" },
+            ]),
+          );
           // Extend the effective native workspace policy without resetting its settings.
           startThread({
             permissions: {
-              [appServer.permissions.name]: {
+              [permissionProfile!]: {
                 extends: ":workspace",
                 network: { enabled: workspace["network_access"] === true },
                 workspace_roots: Object.fromEntries(
