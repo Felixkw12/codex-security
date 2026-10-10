@@ -47,6 +47,7 @@ type RunGit = (
   directory: string,
   args: string[],
   encoding?: "base64",
+  nestedProbe?: boolean,
 ) => Promise<string>;
 
 export interface PatchGitControls {
@@ -213,8 +214,16 @@ export async function capturePatchGitControls(
   run: RunGit,
   usesWorktreeMarker: boolean,
 ): Promise<PatchGitControls | undefined> {
-  const runBytes = async (root: string, checkout: string, args: string[]) =>
-    Buffer.from(await run(root, checkout, args, "base64"), "base64");
+  const runBytes = async (
+    root: string,
+    checkout: string,
+    args: string[],
+    nestedProbe?: boolean,
+  ) =>
+    Buffer.from(
+      await run(root, checkout, args, "base64", nestedProbe),
+      "base64",
+    );
   const runControl = async (root: string, checkout: string, args: string[]) =>
     controlPathText(await runBytes(root, checkout, args));
   // Config records contain unrelated keys too. Split bytes before decoding paths.
@@ -242,6 +251,7 @@ export async function capturePatchGitControls(
   const isGitDirectory = async (
     path: string,
     markerContents?: Buffer | true,
+    nestedProbe = false,
   ): Promise<boolean> => {
     let administration: Buffer | undefined = Buffer.from(path);
     if (Buffer.isBuffer(markerContents)) {
@@ -271,7 +281,12 @@ export async function capturePatchGitControls(
     try {
       // This early rev-parse mode only checks filesystem structure. It does not
       // select the candidate repository or load its configuration and hooks.
-      await runBytes(root, root, ["rev-parse", "--resolve-git-dir", path]);
+      await runBytes(
+        root,
+        root,
+        ["rev-parse", "--resolve-git-dir", path],
+        nestedProbe,
+      );
       return true;
     } catch (error) {
       if (!(error instanceof Error)) throw error;
@@ -325,7 +340,7 @@ export async function capturePatchGitControls(
       // The symlink preserves byte names and relative gitfile resolution while
       // giving the native filesystem-only probe a representable argument.
       await symlink(checkout, alias);
-      return await isGitDirectory(join(alias, ".git"), markerContents);
+      return await isGitDirectory(join(alias, ".git"), markerContents, true);
     } finally {
       await rm(temporary, { recursive: true, force: true });
     }
@@ -530,7 +545,10 @@ export async function capturePatchGitControls(
         );
       if (visited.has(canonical)) return;
       if (canonical !== root) {
-        const directories = await markerDirectories(checkout, isGitDirectory);
+        const directories = await markerDirectories(
+          checkout,
+          (path, contents) => isGitDirectory(path, contents, true),
+        );
         if (directories === undefined) return;
         if (capture) for (const path of directories) await remember(path);
         else if (

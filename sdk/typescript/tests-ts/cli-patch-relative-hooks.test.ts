@@ -1,7 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { isAbsolute, join, relative, sep } from "node:path";
-import { parse as parseToml } from "smol-toml";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import {
   repositoryGit,
@@ -63,7 +62,8 @@ test.each([
         mode === "relative" ? "hooks" : hookDirectory,
       );
     // All three paths identify a functional trusted hook before the patch runs.
-    hookGit("update-index", "--refresh");
+    hookGit("update-index", "--assume-unchanged", "app.txt");
+    hookGit("update-index", "--no-assume-unchanged", "app.txt");
     expect(await readFile(effect, "utf8")).toContain("operator");
     const rootHead = git("rev-parse", "HEAD");
     const nestedHead = nestedGit("rev-parse", "HEAD");
@@ -75,7 +75,8 @@ test.each([
       ? { ...process.env, GIT_DIR: join(root, ".git"), GIT_WORK_TREE: root }
       : process.env;
     let launches = 0;
-    let profile = "";
+    let permissions:
+      { name: string; readOnlyPaths: readonly string[] } | undefined;
     let beforeTurnEffects = "";
     const bookkeeping: string[][] = [];
     const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
@@ -94,12 +95,9 @@ test.each([
           environment: { ...environment, ...options?.environment },
         });
       },
-      onCodex: async (args, output) => {
+      onCodex: async (_args, output) => {
         launches++;
-        profile =
-          args.find((arg) =>
-            arg.startsWith("permissions.codex_security_patch="),
-          ) ?? "";
+        permissions = output?.appServer?.permissions;
         beforeTurnEffects = await readFile(effect, "utf8");
         if (replace) {
           await rename(hook, join(support, "original-hook"));
@@ -112,21 +110,13 @@ test.each([
     });
     expect(launches).toBe(1);
     expect(outcome.exitCode, outcome.stderr).toBe(replace ? 2 : 0);
-    const filesystem = (
-      parseToml(profile) as {
-        permissions: {
-          codex_security_patch: { filesystem: Record<string, { ".": string }> };
-        };
-      }
-    ).permissions.codex_security_patch.filesystem;
+    expect(permissions).toBeDefined();
+    expect(permissions!.name).toBe("codex_security_patch");
     expect(
-      Object.entries(filesystem).some(([path, access]) => {
+      permissions!.readOnlyPaths.some((path) => {
         const from = relative(path, hook);
         return (
-          access["."] === "read" &&
-          from !== ".." &&
-          !from.startsWith(`..${sep}`) &&
-          !isAbsolute(from)
+          from !== ".." && !from.startsWith(`..${sep}`) && !isAbsolute(from)
         );
       }),
     ).toBe(true);

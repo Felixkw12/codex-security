@@ -1172,7 +1172,12 @@ describe("patch change tracking", () => {
               }
             }
             const environment = { ...gitEnvironment, ...options?.environment };
-            if (selectedWorktree === nested) {
+            if (
+              selectedWorktree === nested ||
+              (args[0] === "rev-parse" &&
+                args[1] === "--resolve-git-dir" &&
+                args[2] === join(nested, ".git"))
+            ) {
               expect(environment["GIT_DIR"]).toBeUndefined();
               expect(environment["GIT_WORK_TREE"]).toBeUndefined();
               const objects = environment["GIT_OBJECT_DIRECTORY"];
