@@ -459,7 +459,8 @@ export async function capturePatchGitControls(
     } else {
       // Remember absent entrypoints to reject newly installed hooks before Git.
       // Resolving each entry also protects executable symlink targets.
-      for (const hook of GIT_HOOKS) await rememberControl(join(hooks, hook));
+      for (const hook of GIT_HOOKS)
+        await rememberControl(relativeFile(hooks, hook));
     }
   };
   const selectedDirectories: string[] = [];
