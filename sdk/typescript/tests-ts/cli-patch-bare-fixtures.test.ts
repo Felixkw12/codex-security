@@ -17,7 +17,7 @@ test.each([
   { included: true, replaced: true, introduced: false },
   { included: false, replaced: false, introduced: true },
 ])(
-  "patches ordinary files around a bare Git fixture (included config: $included, replaced: $replaced, introduced child: $introduced)",
+  "patches ordinary tracked data containing bare Git fixtures (included config: $included, replaced: $replaced, introduced child: $introduced)",
   async ({ included, replaced, introduced }) => {
     const root = await fixtures.create("patch-bare-fixture-");
     const source = join(root, "source");
@@ -61,25 +61,30 @@ test.each([
     const bareHead = await readFile(join(administration, "HEAD"));
     const bareConfig = await readFile(join(administration, "config"));
     let launches = 0;
-    const afterTurnCommands: string[][] = [];
+    const nestedCommands: string[][] = [];
     const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
       currentDirectory: root,
       onRepositoryCommand: (command, args, cwd, options) => {
-        if (launches > 0) afterTurnCommands.push([...args]);
+        if (
+          [source, child, administration, join(child, ".git")].some(
+            (path) => cwd === path || args.includes(path),
+          )
+        )
+          nestedCommands.push([...args]);
         return runGitRepositoryCommand(command, args, cwd, options);
       },
       onCodex: async (_args, output) => {
         launches++;
-        expect(output?.appServer?.permissions?.readOnlyPaths).toContain(
+        expect(output?.appServer?.permissions?.readOnlyPaths).not.toContain(
           administration,
         );
         if (introduced) initializeChild();
         else
-          expect(output?.appServer?.permissions?.readOnlyPaths).toContain(
+          expect(output?.appServer?.permissions?.readOnlyPaths).not.toContain(
             join(child, ".git"),
           );
         if (included) {
-          expect(output?.appServer?.permissions?.readOnlyPaths).toContain(
+          expect(output?.appServer?.permissions?.readOnlyPaths).not.toContain(
             configuration,
           );
         }
@@ -93,35 +98,14 @@ test.each([
         return 0;
       },
     });
-    expect(outcome.exitCode, outcome.stderr).toBe(
-      replaced || introduced ? 2 : 0,
-    );
+    expect(outcome.exitCode, outcome.stderr).toBe(0);
     expect(launches).toBe(1);
-    if (replaced) {
-      expect(outcome.stderr).toContain(
-        "Git configuration or hooks changed location during the patch",
-      );
-      expect(afterTurnCommands).toEqual([]);
-    } else if (introduced) {
-      expect(outcome.stderr).toContain(
-        "Patch selected Git metadata outside the pre-patch administration directories",
-      );
-      expect(
-        afterTurnCommands.filter((args) =>
-          args.some((arg) =>
-            ["add", "read-tree", "update-index", "write-tree"].includes(arg),
-          ),
-        ),
-      ).toEqual([]);
-    } else {
-      expect(JSON.parse(outcome.stdout).files.sort()).toEqual([
-        "app.ts",
-        "source/app.ts",
-      ]);
-      expect(git("-C", source, "rev-parse", "--is-bare-repository")).toBe(
-        "true",
-      );
-    }
+    expect(nestedCommands).toEqual([]);
+    expect(JSON.parse(outcome.stdout).files.sort()).toEqual([
+      "app.ts",
+      "source/app.ts",
+      ...(replaced ? ["source/bare-settings", "source/original-settings"] : []),
+    ]);
     expect(git("rev-parse", "HEAD")).toBe(head);
     expect(await readFile(join(root, ".git", "index"))).toEqual(index);
     expect(await readFile(join(administration, "HEAD"))).toEqual(bareHead);

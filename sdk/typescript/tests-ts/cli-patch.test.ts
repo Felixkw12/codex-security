@@ -501,9 +501,7 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
         let patchFinished = false;
         const postPatchGitWrites: string[][] = [];
         const postPatchPublication: string[][] = [];
-        let selectedBeforePatch:
-          | { head: string; index: Buffer<ArrayBuffer>; objects: string }
-          | undefined;
+        let selectedBeforePatch: string | undefined;
         let nestedAfterPatch:
           | { head: string; index: Buffer<ArrayBuffer>; objects: string }
           | undefined;
@@ -575,11 +573,7 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
               } else {
                 patchCalls++;
                 if (nestedMetadata)
-                  selectedBeforePatch = {
-                    head: git("rev-parse", "HEAD"),
-                    index: await readFile(join(repository, ".git/index")),
-                    objects: git("count-objects", "-v"),
-                  };
+                  selectedBeforePatch = git("rev-parse", "HEAD");
                 if (removesComponent) {
                   await rm(subdirectory, { recursive: true });
                   if (kind.includes("replaced by a file"))
@@ -697,20 +691,12 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
           },
         );
         if (nestedMetadata) {
-          expect(outcome.exitCode, outcome.stderr).toBe(2);
-          expect(outcome.stderr).toContain(
-            "Git metadata outside the pre-patch administration directories",
-          );
+          expect(outcome.exitCode, outcome.stderr).toBe(0);
           expect(patchCalls).toBe(1);
-          expect(assessmentCalls).toBe(0);
-          expect(postPatchGitWrites).toEqual([]);
-          expect(postPatchPublication).toEqual([]);
-          expect(git("rev-parse", "HEAD")).toBe(selectedBeforePatch!.head);
-          expect(await readFile(join(repository, ".git/index"))).toEqual(
-            selectedBeforePatch!.index,
-          );
-          expect(git("count-objects", "-v")).toBe(selectedBeforePatch!.objects);
-          expect(git("ls-remote", "origin")).toBe("");
+          expect(assessmentCalls).toBe(1);
+          expect(postPatchGitWrites.length).toBeGreaterThan(0);
+          expect(postPatchPublication.length).toBeGreaterThan(0);
+          expect(git("rev-parse", "HEAD^")).toBe(selectedBeforePatch!);
           const nested = repositoryGit(subdirectory);
           expect(nested("rev-parse", "HEAD")).toBe(nestedAfterPatch!.head);
           expect(await readFile(join(subdirectory, ".git/index"))).toEqual(
@@ -723,7 +709,6 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
           expect(await readFile(join(repository, "shared.ts"), "utf8")).toBe(
             "fixed\n",
           );
-          return;
         }
         const missingConfiguration = kind.includes(
           "removed provider configuration",
@@ -9233,7 +9218,8 @@ describe("ordinary patch snapshot context", () => {
       let redirectedSnapshotCommands = 0;
       const gitfileBookkeeping: string[][] = [];
       const gitfilePublication: string[][] = [];
-      let selectedBeforeTurn: { head: string; objects: string } | undefined;
+      const foreignCommands: string[][] = [];
+      let selectedBeforeTurn: string | undefined;
       const outcome = await runWorkflow(
         [...argv, ...(flag ? [flag] : []), "--json"],
         {
@@ -9243,6 +9229,15 @@ describe("ordinary patch snapshot context", () => {
           onWorkbench: () => savedScan(scan, "scan-1", directory),
           onRepositoryCommand: (command, args, cwd, options) => {
             if (command === "git") {
+              if (
+                operation === "gitfile" &&
+                (cwd === foreign ||
+                  options?.directory === foreign ||
+                  args.includes(foreign) ||
+                  args.includes(join(foreign, ".git")) ||
+                  options?.environment?.["GIT_DIR"] === join(foreign, ".git"))
+              )
+                foreignCommands.push([...args]);
               if (
                 operation === "gitfile" &&
                 modelCalls > 0 &&
@@ -9305,10 +9300,7 @@ describe("ordinary patch snapshot context", () => {
             modelCalls++;
             expect(output?.appServer?.directory).toBe(directory);
             if (operation === "gitfile" && modelCalls === 1)
-              selectedBeforeTurn = {
-                head: git("rev-parse", "HEAD"),
-                objects: git("count-objects", "-v"),
-              };
+              selectedBeforeTurn = git("rev-parse", "HEAD");
             await writeFile(join(root, "app.ts"), "fixed\n");
             if (
               route !== "ordinary" &&
@@ -9352,11 +9344,10 @@ describe("ordinary patch snapshot context", () => {
           },
         },
       );
-      expect(modelCalls).toBe(1);
+      expect(modelCalls).toBe(operation === "gitfile" ? 2 : 1);
       expect(assessmentCalls).toBe(
         flag === "--assess-patch-risk" &&
           operation !== "replace" &&
-          operation !== "gitfile" &&
           !selectedDirectoryRemoved
           ? 1
           : 0,
@@ -9372,24 +9363,27 @@ describe("ordinary patch snapshot context", () => {
         "unrelated local content\n",
       );
       if (operation === "gitfile") {
-        expect(outcome.exitCode, outcome.stderr).toBe(2);
-        expect(outcome.stderr).toContain(
-          "Git metadata outside the pre-patch administration directories",
-        );
-        expect(gitfileBookkeeping).toEqual([]);
-        expect(gitfilePublication).toEqual([]);
-        expect(await readFile(join(root, ".git/index"))).toEqual(index);
-        expect(git("rev-parse", "HEAD")).toBe(selectedBeforeTurn!.head);
-        expect(git("count-objects", "-v")).toBe(selectedBeforeTurn!.objects);
-        expect(git("ls-remote", "origin")).toBe("");
+        expect(foreignCommands).toEqual([]);
+        expect(gitfileBookkeeping.length).toBeGreaterThan(0);
+        if (flag === "--create-pr") {
+          expect(gitfilePublication.length).toBeGreaterThan(0);
+          expect(git("rev-parse", "HEAD^")).toBe(selectedBeforeTurn!);
+          expect(git("show", "HEAD:package/keep.ts")).toBe("fixed component 2");
+          expect(git("ls-remote", "origin")).toContain(
+            git("rev-parse", "HEAD"),
+          );
+        } else {
+          expect(gitfilePublication).toEqual([]);
+          expect(git("rev-parse", "HEAD")).toBe(selectedBeforeTurn!);
+          expect(git("ls-remote", "origin")).toBe("");
+        }
         expect(await readFile(join(root, "app.ts"), "utf8")).toBe("fixed\n");
         expect(await readFile(join(directory, "keep.ts"), "utf8")).toBe(
-          "fixed component 1\n",
+          "fixed component 2\n",
         );
         expect(await readFile(join(directory, ".git"), "utf8")).toBe(
           `gitdir: ${join(foreign, ".git")}\n`,
         );
-        return;
       }
       if (operation === "replace") {
         expect(outcome.exitCode, outcome.stderr).toBe(2);

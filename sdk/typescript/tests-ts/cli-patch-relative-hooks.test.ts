@@ -206,11 +206,11 @@ import { readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { capturePatchGitControls } from ${JSON.stringify(new URL("../src/patch-git-controls.ts", import.meta.url).href)};
 const root = ${JSON.stringify(root)};
-const controls = await capturePatchGitControls(root, async (repository, checkout, args, encoding) => {
+const controls = await capturePatchGitControls(root, async (repository, checkout, args, options) => {
   // Use the child adapter's relative hook query without changing its working directory.
   const query = args.length === 4 && args[0] === "rev-parse" && args[1] === "--path-format=absolute" && args[2] === "--git-path" && args[3] === "hooks"
     ? ["rev-parse", "--git-path", "hooks"] : args;
-  return execFileSync("git", query, { cwd: repository }).toString(encoding ?? "utf8");
+  return execFileSync("git", query, { cwd: repository, input: options?.input, env: { ...process.env, ...(options?.indexFile === undefined ? {} : { GIT_INDEX_FILE: options.indexFile }), ...options?.environment } }).toString(options?.encoding ?? "utf8");
 }, true);
 if (!controls) throw new Error("Synthetic repository was not discovered.");
 const beforeTurnEffects = await readFile(${JSON.stringify(effect)}, "utf8");
