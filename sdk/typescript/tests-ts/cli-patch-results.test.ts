@@ -18,13 +18,16 @@ async function repositoryFixture({ initializeGit = true } = {}) {
   > = async (command, args, cwd, options) => {
     const child = execFileAsync(command, [...args], {
       cwd,
-      encoding: "utf8",
+      encoding: options?.encoding === "base64" ? "buffer" : "utf8",
       env: { ...process.env, ...options?.environment },
       windowsHide: true,
     });
     child.child.stdin?.end(options?.input);
     const { stdout } = await child;
-    return options?.trim === false ? stdout : stdout.trim();
+    const output = Buffer.isBuffer(stdout)
+      ? stdout.toString(options?.encoding ?? "utf8")
+      : stdout;
+    return options?.trim === false ? output : output.trim();
   };
   const git = (...args: string[]) =>
     runRepositoryCommand("git", args, directory);

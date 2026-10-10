@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import {
+  appendFile,
   cp,
   symlink,
   mkdir,
@@ -452,6 +453,171 @@ lines.on("line", (line) => {
       }
     },
   );
+  test.skipIf(process.platform !== "linux")(
+    "keeps unrelated raw-byte Git subsection names available for patching",
+    async () => {
+      const root = await fixtures.create("patch-raw-remote-name-");
+      const git = repositoryGit(root);
+      git("init", "--initial-branch=main");
+      git("config", "user.name", "Synthetic User");
+      git("config", "user.email", "synthetic@example.test");
+      await writeFile(join(root, "app.txt"), "before\n");
+      git("add", ".");
+      git("commit", "-m", "Synthetic raw subsection baseline");
+      await appendFile(
+        join(root, ".git", "config"),
+        Buffer.concat([
+          Buffer.from('\n[remote "unrelated-'),
+          Buffer.from([0xff]),
+          Buffer.from('"]\n url = https://example.test/synthetic.git\n'),
+        ]),
+      );
+      let launches = 0;
+      const outcome = await runWorkflow(
+        ["patch", "Synthetic issue", "--json"],
+        {
+          currentDirectory: root,
+          onRepositoryCommand: runGitRepositoryCommand,
+          onCodex: async (_args, output) => {
+            launches++;
+            await writeFile(join(root, "app.txt"), "after\n");
+            output?.stdout.write("Fixed.\n");
+            return 0;
+          },
+        },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(launches).toBe(1);
+      expect(await readFile(join(root, "app.txt"), "utf8")).toBe("after\n");
+    },
+  );
+  for (const reference of [
+    "include",
+    "hooks",
+    "gitfile",
+    "commondir",
+  ] as const) {
+    for (const raw of [false, true]) {
+      test.skipIf(raw && process.platform !== "linux")(
+        `checks ${raw ? "raw-byte" : "literal replacement-character"} ${reference} control references before patch launch`,
+        async () => {
+          const root = await fixtures.create("patch-control-reference-");
+          const git = repositoryGit(root);
+          git("init", "--initial-branch=main");
+          git("config", "user.name", "Synthetic User");
+          git("config", "user.email", "synthetic@example.test");
+          await writeFile(join(root, "app.txt"), "before\n");
+          git("add", ".");
+          git("commit", "-m", "Synthetic control reference baseline");
+          const name = Buffer.concat([
+            Buffer.from("control-"),
+            raw ? Buffer.from([0xff]) : Buffer.from("\ufffd"),
+          ]);
+          const path = Buffer.concat([Buffer.from(`${root}${sep}`), name]);
+          const metadata = join(root, ".git");
+          let expectedControl = path;
+          if (reference === "include") {
+            await writeFile(path, "# Synthetic included configuration.\n");
+            await appendFile(
+              join(metadata, "config"),
+              Buffer.concat([
+                Buffer.from("\n[include]\n path = ../"),
+                name,
+                Buffer.from("\n"),
+              ]),
+            );
+          } else if (reference === "hooks") {
+            await mkdir(path);
+            expectedControl = Buffer.concat([
+              path,
+              Buffer.from(`${sep}post-index-change`),
+            ]);
+            await writeFile(expectedControl, "#!/bin/sh\nexit 0\n", {
+              mode: 0o755,
+            });
+            await appendFile(
+              join(metadata, "config"),
+              Buffer.concat([
+                Buffer.from("\n[core]\n hooksPath = "),
+                name,
+                Buffer.from("\n"),
+              ]),
+            );
+          } else {
+            const head = await readFile(join(metadata, "HEAD"));
+            const index = await readFile(join(metadata, "index"));
+            await rename(metadata, path);
+            if (reference === "gitfile") {
+              await writeFile(
+                metadata,
+                Buffer.concat([
+                  Buffer.from("gitdir: "),
+                  name,
+                  Buffer.from("\n"),
+                ]),
+              );
+            } else {
+              await mkdir(metadata);
+              await writeFile(join(metadata, "HEAD"), head);
+              await writeFile(join(metadata, "index"), index);
+              await writeFile(
+                join(metadata, "commondir"),
+                Buffer.concat([Buffer.from("../"), name, Buffer.from("\n")]),
+              );
+            }
+          }
+          let launches = 0;
+          const outcome = await runWorkflow(
+            ["patch", "Synthetic issue", "--json"],
+            {
+              currentDirectory: root,
+              onRepositoryCommand: runGitRepositoryCommand,
+              onCodex: async (args, output) => {
+                launches++;
+                if (!raw) {
+                  const definition = args.find((value) =>
+                    value.startsWith("permissions.codex_security_patch="),
+                  )!;
+                  const profile = (
+                    parseToml(definition) as {
+                      permissions: {
+                        codex_security_patch: {
+                          filesystem: Record<string, unknown>;
+                        };
+                      };
+                    }
+                  ).permissions.codex_security_patch;
+                  expect(
+                    profile.filesystem[
+                      await realpath(expectedControl.toString("utf8"))
+                    ],
+                  ).toEqual({ ".": "read" });
+                }
+                await writeFile(join(root, "app.txt"), "after\n");
+                output?.stdout.write("Fixed.\n");
+                return 0;
+              },
+            },
+          );
+          if (raw) {
+            expect(outcome.exitCode, outcome.stderr).toBe(2);
+            expect(outcome.stderr).toContain("not valid UTF-8");
+            expect(launches).toBe(0);
+            expect(await readFile(join(root, "app.txt"), "utf8")).toBe(
+              "before\n",
+            );
+          } else {
+            expect(outcome.exitCode, outcome.stderr).toBe(0);
+            expect(launches).toBe(1);
+            expect(await readFile(join(root, "app.txt"), "utf8")).toBe(
+              "after\n",
+            );
+          }
+        },
+      );
+    }
+  }
+
   test.skipIf(process.platform === "win32")(
     "retains literal Unicode and quoted bytes in trusted nested checkout names",
     async () => {
@@ -477,7 +643,7 @@ lines.on("line", (line) => {
         import { capturePatchGitControls } from ${JSON.stringify(new URL("../src/patch-git-controls.ts", import.meta.url).href)};
         const root = ${JSON.stringify(root)};
         const child = ${JSON.stringify(child)};
-        const controls = await capturePatchGitControls(root, async (repository, checkout, args) => execFileSync("git", repository === checkout ? args : ["-C", checkout, ...args], {cwd: repository, encoding:"utf8"}), true);
+        const controls = await capturePatchGitControls(root, async (repository, checkout, args, encoding) => execFileSync("git", repository === checkout ? args : ["-C", checkout, ...args], {cwd: repository}).toString(encoding ?? "utf8"), true);
         await writeFile(child + "/app.txt", "after\\n");
         await controls.validate();
         process.stdout.write(JSON.stringify({ paths: controls.readOnlyPaths, expected: await realpath(child + "/.git") }));

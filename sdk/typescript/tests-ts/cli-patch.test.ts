@@ -2073,19 +2073,25 @@ describe("scan and patch workflow", () => {
         {
           environment,
           onWorkbench: () => savedScan(result, "scan-1", repository),
-          onRepositoryCommand: (command, args, target) => {
+          onRepositoryCommand: (command, args, target, options) => {
             expect(target).toBe(repository);
             if (command === "git") {
-              if (args.includes("--show-toplevel")) return repository;
+              const encoded = (value: string) =>
+                options?.encoding === "base64"
+                  ? Buffer.from(value).toString("base64")
+                  : value;
+              if (args.includes("--show-toplevel")) return encoded(repository);
               if (args.includes("--cached")) return "";
               if (args[0] === "remote") {
                 expect([
                   ["remote", "get-url", "--push", "--all", "origin"],
                   ["remote", "get-url", "origin"],
                 ]).toContainEqual([...args]);
-                return origin;
+                return encoded(origin);
               }
-              return args.includes("--name-only") ? "src/finding-1.ts\0" : "";
+              return encoded(
+                args.includes("--name-only") ? "src/finding-1.ts\0" : "",
+              );
             }
             expect(command).toBe(client);
             publicationCommands.push(args);

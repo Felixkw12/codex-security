@@ -1,4 +1,3 @@
-import { gitText } from "./support/shell.js";
 import { expect } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -154,14 +153,18 @@ export const runGitRepositoryCommand: NonNullable<
   NonNullable<Parameters<typeof dependencies>[0]>["onRepositoryCommand"]
 > = (command, args, workingDirectory, options) => {
   expect(command).toBe("git");
-  const result = gitText(args, {
+  const result = execFileSync("git", args, {
+    encoding: options?.encoding === "base64" ? "buffer" : "utf8",
     cwd: workingDirectory,
     env: { ...process.env, ...options?.environment },
     maxBuffer: options?.maxBuffer,
     input: options?.input,
     stdio: [options?.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
   });
-  return options?.trim === false ? result : result.trim();
+  const output = Buffer.isBuffer(result)
+    ? result.toString(options?.encoding ?? "utf8")
+    : result;
+  return options?.trim === false ? output : output.trim();
 };
 
 export async function publicationRepository(

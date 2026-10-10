@@ -37,6 +37,7 @@ type RunGit = (
   root: string,
   directory: string,
   args: string[],
+  encoding?: "base64",
 ) => Promise<string>;
 
 export interface PatchGitControls {
@@ -61,6 +62,22 @@ function inside(root: string, path: string): boolean {
   );
 }
 
+function controlPathText(bytes: Uint8Array): string {
+  try {
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
+      bytes,
+    );
+  } catch (cause) {
+    throw new Error(
+      "Patch cannot safely use Git configuration or administration paths that are not valid UTF-8.",
+      { cause },
+    );
+  }
+}
+
+const realControlPath = async (path: string) =>
+  controlPathText(await realpath(path, { encoding: "buffer" }));
+
 // Append before realpath so a link/.. path keeps the filesystem's meaning.
 const relativeFile = (directory: string, path: string) =>
   isAbsolute(path) ? path : `${directory}${sep}${path}`;
@@ -72,23 +89,25 @@ async function markerDirectories(
   const metadata = await stat(marker).catch(missing);
   if (metadata === undefined) return undefined;
   let gitDirectory: string;
-  if (metadata.isDirectory()) gitDirectory = await realpath(marker);
+  if (metadata.isDirectory()) gitDirectory = await realControlPath(marker);
   else {
-    const contents = await readFile(marker, "utf8");
+    const contents = controlPathText(await readFile(marker));
     if (!contents.startsWith("gitdir: "))
       throw new Error(`Invalid Git metadata marker: ${marker}`);
-    gitDirectory = await realpath(
+    gitDirectory = await realControlPath(
       relativeFile(directory, contents.slice(8).replace(/[\r\n]+$/u, "")),
     );
   }
-  const common = await readFile(join(gitDirectory, "commondir"), "utf8").catch(
+  const commonBytes = await readFile(join(gitDirectory, "commondir")).catch(
     missing,
   );
+  const common =
+    commonBytes === undefined ? undefined : controlPathText(commonBytes);
   return common === undefined
     ? [gitDirectory]
     : [
         gitDirectory,
-        await realpath(
+        await realControlPath(
           relativeFile(gitDirectory, common.replace(/[\r\n]+$/u, "")),
         ),
       ];
@@ -96,7 +115,7 @@ async function markerDirectories(
 
 // Git permits include files and hook directories that do not exist yet.
 async function canonicalPath(path: string): Promise<string> {
-  const canonical = await realpath(path).catch(missing);
+  const canonical = await realControlPath(path).catch(missing);
   if (canonical !== undefined) return canonical;
   const parent = dirname(path);
   if (parent === path) return path;
@@ -155,14 +174,23 @@ export async function capturePatchGitControls(
   run: RunGit,
   usesWorktreeMarker: boolean,
 ): Promise<PatchGitControls | undefined> {
+  const runBytes = async (root: string, checkout: string, args: string[]) =>
+    Buffer.from(await run(root, checkout, args, "base64"), "base64");
+  const runControl = async (root: string, checkout: string, args: string[]) =>
+    controlPathText(await runBytes(root, checkout, args));
+  // Config records contain unrelated keys too. Split bytes before decoding paths.
+  const runConfigFields = async (checkout: string, args: string[]) =>
+    (await runBytes(root, checkout, args)).toString("latin1").split("\0");
+  const configPath = (field: string) =>
+    controlPathText(Buffer.from(field, "latin1"));
   let root: string;
   try {
-    const output = await run(directory, directory, [
+    const output = await runControl(directory, directory, [
       "rev-parse",
       "--show-toplevel",
     ]);
     if (output.length === 0) return undefined;
-    root = await realpath(output.replace(/\n$/u, ""));
+    root = await realControlPath(output.replace(/\n$/u, ""));
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (
@@ -190,43 +218,41 @@ export async function capturePatchGitControls(
     });
   };
   const captureReferences = async (checkout: string): Promise<void> => {
-    const origins = (
-      await run(root, checkout, [
-        "config",
-        "--null",
-        "--show-origin",
-        "--includes",
-        "--list",
-        "--name-only",
-      ])
-    ).split("\0");
+    const origins = await runConfigFields(checkout, [
+      "config",
+      "--null",
+      "--show-origin",
+      "--includes",
+      "--list",
+      "--name-only",
+    ]);
     let includes = false;
     for (let index = 0; index + 1 < origins.length; index += 2) {
       const origin = origins[index]!;
       if (origin.startsWith("file:"))
-        await rememberControl(relativeFile(checkout, origin.slice(5)));
+        await rememberControl(
+          relativeFile(checkout, configPath(origin.slice(5))),
+        );
       if (/^(include|includeif\..*)\.path$/u.test(origins[index + 1]!))
         includes = true;
     }
     if (includes) {
-      const paths = (
-        await run(root, checkout, [
-          "config",
-          "--null",
-          "--show-origin",
-          "--includes",
-          "--type=path",
-          "--get-regexp",
-          "^(include|includeif\\..*)\\.path$",
-        ])
-      ).split("\0");
+      const paths = await runConfigFields(checkout, [
+        "config",
+        "--null",
+        "--show-origin",
+        "--includes",
+        "--type=path",
+        "--get-regexp",
+        "^(include|includeif\\..*)\\.path$",
+      ]);
       for (let index = 0; index + 1 < paths.length; index += 2) {
         const origin = paths[index]!;
         const value = paths[index + 1]!;
-        const path = value.slice(value.indexOf("\n") + 1);
+        const path = configPath(value.slice(value.indexOf("\n") + 1));
         if (path.length === 0) continue;
         const relativeTo = origin.startsWith("file:")
-          ? dirname(relativeFile(checkout, origin.slice(5)))
+          ? dirname(relativeFile(checkout, configPath(origin.slice(5))))
           : checkout;
         await rememberControl(relativeFile(relativeTo, path));
       }
@@ -234,7 +260,7 @@ export async function capturePatchGitControls(
     const hooks = relativeFile(
       checkout,
       (
-        await run(root, checkout, [
+        await runControl(root, checkout, [
           "rev-parse",
           "--path-format=absolute",
           "--git-path",
@@ -254,12 +280,12 @@ export async function capturePatchGitControls(
   };
   const selectedDirectories: string[] = [];
   for (const argument of ["--absolute-git-dir", "--git-common-dir"]) {
-    const output = await run(root, root, [
+    const output = await runControl(root, root, [
       "rev-parse",
       "--path-format=absolute",
       argument,
     ]);
-    const path = await realpath(output.replace(/\n$/u, ""));
+    const path = await realControlPath(output.replace(/\n$/u, ""));
     selectedDirectories.push(path);
     await remember(path);
   }
@@ -316,7 +342,7 @@ export async function capturePatchGitControls(
     }
     const visited = new Set<string>();
     const visit = async (checkout: string): Promise<void> => {
-      const canonical = await realpath(checkout);
+      const canonical = await realControlPath(checkout);
       if (!inside(root, canonical))
         throw new Error(
           "Nested Git checkout resolves outside the selected repository.",
