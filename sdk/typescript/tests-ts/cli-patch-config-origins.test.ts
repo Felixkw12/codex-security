@@ -186,7 +186,9 @@ for (const included of [false, true]) {
         expect(outcome.stderr).toContain(
           "Git configuration or hooks changed location during the patch",
         );
-        expect(outcome.stderr).toContain(activeConfig);
+        expect(outcome.stderr.replaceAll("\\", "/")).toContain(
+          activeConfig.replaceAll("\\", "/"),
+        );
         expect(bookkeeping).toEqual([]);
         expect(operatorAfter).toBe(operatorBefore);
         expect(await readFile(activeConfig, "utf8")).toBe(

@@ -3330,6 +3330,8 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
       const directory = await repositories.create(
         "patch-provider-publication-",
       );
+      const git = repositoryGit(directory);
+      git("init", "--initial-branch=main");
       const result = resultWithFindings(["high"]);
       const url =
         client === "glab"
@@ -3355,11 +3357,19 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
                 options?.encoding === "base64"
                   ? Buffer.from(value).toString("base64")
                   : value;
+              if (args.includes("--show-toplevel")) return encoded(directory);
               if (
-                args.includes("--show-toplevel") ||
-                args.includes("--absolute-git-dir")
+                args[0] === "rev-parse" &&
+                args.some((argument) =>
+                  [
+                    "--git-dir",
+                    "--absolute-git-dir",
+                    "--git-common-dir",
+                    "--git-path",
+                  ].includes(argument),
+                )
               )
-                return encoded(directory);
+                return runGitRepositoryCommand(command, args, target, options);
               if (args.includes("--cached")) return "";
               if (args[0] === "remote") {
                 expect([
@@ -7693,6 +7703,13 @@ describe("patch change tracking", () => {
       "--git-path",
       "index",
     );
+    const hookPath = git("rev-parse", "--git-path", `hooks/${hook}`);
+    const absoluteHook = resolve(directory, hookPath);
+    await writeFile(
+      absoluteHook,
+      "#!/bin/sh\necho 'Synthetic hook failure' >&2\nexit 1\n",
+    );
+    await chmod(absoluteHook, 0o755);
     const result = resultWithFindings(["high"]);
     const outcome = await runWorkflow(
       ["patch", "--scan", "scan-1", "--create-pr", "--json"],
@@ -7710,13 +7727,6 @@ describe("patch change tracking", () => {
           await rm(join(directory, "src/finding-1.ts"));
           await mkdir(dirname(join(directory, file)), { recursive: true });
           await writeFile(join(directory, file), "fixed\n");
-          const hookPath = git("rev-parse", "--git-path", `hooks/${hook}`);
-          const absoluteHook = resolve(directory, hookPath);
-          await writeFile(
-            absoluteHook,
-            "#!/bin/sh\necho 'Synthetic hook failure' >&2\nexit 1\n",
-          );
-          await chmod(absoluteHook, 0o755);
           output?.stdout.write(
             JSON.stringify({
               patches: [

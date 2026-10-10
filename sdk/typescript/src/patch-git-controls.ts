@@ -203,7 +203,12 @@ async function markerDirectories(
 
 // Git permits include files and hook directories that do not exist yet.
 async function canonicalPath(path: string): Promise<string> {
-  const canonical = await realControlPath(path).catch(missing);
+  // Match realpath's Windows separators when a path no longer exists.
+  if (sep === "\\") path = path.replaceAll("/", sep);
+  // Some realpath implementations collapse file/.. even when lookup fails.
+  const canonical = await stat(path)
+    .then(() => realControlPath(path))
+    .catch(missing);
   if (canonical !== undefined) return canonical;
   const parent = dirname(path);
   if (parent === path) return path;
@@ -354,10 +359,13 @@ export async function capturePatchGitControls(
           );
       }
     }
+    // Git's early gitfile reader finds relative targets using slash separators.
+    const gitPath =
+      process.platform === "win32" ? path.replaceAll("\\", "/") : path;
     try {
       // This early rev-parse mode only checks filesystem structure. It does not
       // select the candidate repository or load its configuration and hooks.
-      await runBytes(root, root, ["rev-parse", "--resolve-git-dir", path], {
+      await runBytes(root, root, ["rev-parse", "--resolve-git-dir", gitPath], {
         nestedProbe,
       });
       return true;
@@ -372,20 +380,20 @@ export async function capturePatchGitControls(
         ? failure.stderr.toString("utf8")
         : failure.stderr;
       const negatives = [
-        `fatal: not a gitdir '${path}'`,
-        `fatal: gitfile does not point to a valid repository: ${path}`,
-        `fatal: no path in gitfile: ${path}`,
+        `fatal: not a gitdir '${gitPath}'`,
+        `fatal: gitfile does not point to a valid repository: ${gitPath}`,
+        `fatal: no path in gitfile: ${gitPath}`,
       ];
       if (Buffer.isBuffer(markerContents)) {
         // This text is used only to recognize Git's diagnostic, never as a path
         // for filesystem access. Match the subprocess's UTF-8 error decoding.
-        const target = relativeFile(
-          dirname(path),
-          markerContents
-            .subarray(8)
-            .toString("utf8")
-            .replace(/[\r\n]+$/u, ""),
-        );
+        const configured = markerContents
+          .subarray(8)
+          .toString("utf8")
+          .replace(/[\r\n]+$/u, "");
+        const target = isAbsolute(configured)
+          ? configured
+          : `${gitPath.slice(0, gitPath.lastIndexOf("/") + 1)}${configured}`;
         negatives.push(`fatal: not a git repository: ${target}`);
       }
       if (
