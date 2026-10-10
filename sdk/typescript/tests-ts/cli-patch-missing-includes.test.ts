@@ -34,8 +34,7 @@ for (const blocker of ["missing", "ordinary file"] as const) {
       const head = git("rev-parse", "HEAD");
       const index = await readFile(join(root, ".git", "index"));
       const config = await readFile(join(root, ".git", "config"));
-      // Bun's realpath normalizes missing/.. lexically; Node preserves the
-      // filesystem traversal used by Git and the supported CLI runtime.
+      // Exercise the supported Node CLI runtime with native Git path lookups.
       const program = `
 import { execFileSync } from "node:child_process";
 import { mkdir, rm, writeFile } from "node:fs/promises";

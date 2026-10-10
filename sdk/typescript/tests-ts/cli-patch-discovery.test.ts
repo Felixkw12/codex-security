@@ -11,7 +11,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import {
   repositoryGit,
@@ -388,7 +388,8 @@ for (const hostileConfig of ["malformed", "hook"] as const) {
       expect(launches).toBe(1);
       expect(
         probes.some(
-          ({ cwd, args }) => cwd === selected.root && args.at(-1) === marker,
+          ({ cwd, args }) =>
+            cwd === selected.root && resolve(args.at(-1)!) === marker,
         ),
       ).toBe(true);
       expect(

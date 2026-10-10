@@ -2055,6 +2055,8 @@ describe("scan and patch workflow", () => {
     "publishes saved-finding patches for origin %s with environment %j using %s",
     async (origin, environment, client) => {
       const repository = await fixtures.create("patch-provider-repository-");
+      const git = repositoryGit(repository);
+      git("init", "--initial-branch=main");
       const result = resultWithFindings(["high"]);
       const url =
         client === "glab"
@@ -2081,6 +2083,17 @@ describe("scan and patch workflow", () => {
                   ? Buffer.from(value).toString("base64")
                   : value;
               if (args.includes("--show-toplevel")) return encoded(repository);
+              if (
+                args[0] === "rev-parse" &&
+                args.some((argument) =>
+                  [
+                    "--absolute-git-dir",
+                    "--git-common-dir",
+                    "--git-path",
+                  ].includes(argument),
+                )
+              )
+                return encoded(git(...args));
               if (args.includes("--cached")) return "";
               if (args[0] === "remote") {
                 expect([
@@ -2107,7 +2120,7 @@ describe("scan and patch workflow", () => {
         },
       );
 
-      expect(outcome.exitCode).toBe(0);
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
       expect(publicationCommands.map((args) => args[1])).toEqual([
         "list",
         "list",
@@ -3496,6 +3509,13 @@ describe("patch change tracking", () => {
       "--git-path",
       "index",
     );
+    const hookPath = git("rev-parse", "--git-path", `hooks/${hook}`);
+    const absoluteHook = resolve(directory, hookPath);
+    await writeFile(
+      absoluteHook,
+      "#!/bin/sh\necho 'Synthetic hook failure' >&2\nexit 1\n",
+    );
+    await chmod(absoluteHook, 0o755);
     const result = resultWithFindings(["high"]);
     const outcome = await runWorkflow(
       ["patch", "--scan", "scan-1", "--create-pr", "--json"],
@@ -3512,13 +3532,6 @@ describe("patch change tracking", () => {
           await rm(join(directory, "src/finding-1.ts"));
           await mkdir(dirname(join(directory, file)), { recursive: true });
           await writeFile(join(directory, file), "fixed\n");
-          const hookPath = git("rev-parse", "--git-path", `hooks/${hook}`);
-          const absoluteHook = resolve(directory, hookPath);
-          await writeFile(
-            absoluteHook,
-            "#!/bin/sh\necho 'Synthetic hook failure' >&2\nexit 1\n",
-          );
-          await chmod(absoluteHook, 0o755);
           output?.stdout.write(
             JSON.stringify({
               patches: [

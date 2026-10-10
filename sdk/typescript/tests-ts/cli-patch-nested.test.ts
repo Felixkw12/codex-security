@@ -1137,7 +1137,7 @@ describe("patch change tracking", () => {
               (args[0] === "-C" && args[1] === nested) ||
               (args[0] === "rev-parse" &&
                 args[1] === "--resolve-git-dir" &&
-                args[2] === join(nested, ".git"))
+                resolve(args[2]!) === join(nested, ".git"))
             ) {
               expect(environment["GIT_DIR"]).toBeUndefined();
               expect(environment["GIT_WORK_TREE"]).toBeUndefined();

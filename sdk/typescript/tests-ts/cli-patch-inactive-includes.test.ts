@@ -62,8 +62,10 @@ for (const mode of [
     );
     const index = await readFile(join(root, ".git", "index"));
     const configuration = await readFile(join(root, ".git", "config"));
+    // Git for Windows ignores this unresolved junction include; Unix reports ELOOP.
+    const nativeRejectsLoop = mode === "active" && process.platform !== "win32";
     let nativeFailure = "";
-    if (mode === "active") {
+    if (nativeRejectsLoop) {
       try {
         git("config", "--includes", "--list");
         throw new Error(
@@ -77,7 +79,7 @@ for (const mode of [
       }
     } else {
       expect(git("config", "--includes", "--list")).toContain(
-        "includeif.onbranch:future-branch.path=../control-loop/included",
+        `includeif.onbranch:${mode === "active" ? "main" : "future-branch"}.path=../control-loop/included`,
       );
     }
     let launches = 0;
@@ -106,7 +108,10 @@ for (const mode of [
       },
     });
     const effectsAfter = await readFile(effect, "utf8").catch(() => "");
-    if (mode === "unchanged inactive") {
+    if (
+      mode === "unchanged inactive" ||
+      (mode === "active" && !nativeRejectsLoop)
+    ) {
       expect(outcome.exitCode, outcome.stderr).toBe(0);
       expect(launches).toBe(1);
       expect(JSON.parse(outcome.stdout).files).toEqual(["app.ts"]);
@@ -138,7 +143,7 @@ for (const mode of [
     expect(await readFile(join(root, ".git", "config"))).toEqual(configuration);
     expect(await readFile(hook, "utf8")).toBe(script);
     expect(await readFile(join(root, "app.ts"), "utf8")).toBe(
-      mode === "active" ? "before\n" : "after\n",
+      nativeRejectsLoop ? "before\n" : "after\n",
     );
   });
 }

@@ -63,6 +63,7 @@ test.each([
     const head = selectedGit("rev-parse", "HEAD");
     const index = await readFile(join(administration, "index"));
     const otherIndex = await readFile(join(otherAdministration, "index"));
+    const otherContents = await readFile(join(other, "app.ts"));
     const selectedMarker = await readFile(join(selected, ".git"));
     const otherMarker = await readFile(join(other, ".git"));
     const afterTurnCommands: string[][] = [];
@@ -119,7 +120,7 @@ test.each([
       stale,
     );
     expect(await readFile(join(selected, "app.ts"), "utf8")).toBe("after\n");
-    expect(await readFile(join(other, "app.ts"), "utf8")).toBe("before\n");
+    expect(await readFile(join(other, "app.ts"))).toEqual(otherContents);
   },
 );
 

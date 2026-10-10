@@ -23,12 +23,17 @@ async function resolvePatchProfile(configured: boolean) {
   execFileSync("git", ["init", "--quiet", repository]);
   const administration = join(repository, ".git");
   const configBefore = await readFile(join(administration, "config"));
+  // Native Windows legacy workspace policies require an enabled sandbox backend.
+  const windows =
+    process.platform === "win32"
+      ? 'windows = { sandbox = "unelevated" }\n'
+      : "";
   await writeFile(
     join(home, "config.toml"),
     `model_provider = "synthetic"
 model = "synthetic-local-only"
 sandbox_mode = "workspace-write"
-[analytics]
+${windows}[analytics]
 enabled = false
 [features]
 plugins = false
