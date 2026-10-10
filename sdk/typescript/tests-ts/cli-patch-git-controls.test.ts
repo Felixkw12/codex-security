@@ -526,7 +526,7 @@ lines.on("line", (line) => {
       expect(await readFile(join(hooks, "source.txt"), "utf8")).toBe("after\n");
     },
   );
-  test.skipIf(process.platform === "win32")(
+  test.skipIf(process.platform !== "linux")(
     "checks raw-byte Git markers without rejecting ordinary raw-byte paths",
     async () => {
       for (const marker of [false, true]) {
