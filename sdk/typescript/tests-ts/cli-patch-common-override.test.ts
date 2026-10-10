@@ -134,6 +134,10 @@ for (const selector of ["GIT_DIR", "GIT_COMMON_DIR"] as const) {
       git("config", "user.name", "Synthetic User");
       git("config", "user.email", "synthetic@example.test");
       await writeFile(join(root, "app.ts"), "before\n");
+      await writeFile(
+        join(root, ".gitignore"),
+        "selected-administration\noriginal-administration\n",
+      );
       git("add", ".");
       git("commit", "-m", "Synthetic selector baseline");
       const replacement = join(support, "replacement");
