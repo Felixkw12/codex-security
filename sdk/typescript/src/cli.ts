@@ -9767,11 +9767,21 @@ async function runSkill(
                     args[0] === "rev-parse" &&
                     args[1] === "--show-toplevel",
                 );
+          // Relative hooks execute in the worktree, even when Git retains the
+          // caller's original command context.
+          const gitArgs =
+            args.length === 4 &&
+            args[0] === "rev-parse" &&
+            args[1] === "--path-format=absolute" &&
+            args[2] === "--git-path" &&
+            args[3] === "hooks"
+              ? ["rev-parse", "--git-path", "hooks"]
+              : args;
           return selected.runRepositoryCommand(
             "git",
             args.includes("ls-files")
               ? ["--literal-pathspecs", ...args, "--", checkout]
-              : args,
+              : gitArgs,
             root === checkout
               ? (options.patchGitContext?.root ?? checkout)
               : checkout,
