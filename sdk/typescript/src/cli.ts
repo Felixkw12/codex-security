@@ -9742,7 +9742,9 @@ async function runSkill(
               : await nestedPatchGitDependencies(root, current, checkout);
           return selected.runRepositoryCommand(
             "git",
-            args,
+            args.includes("ls-files")
+              ? ["--literal-pathspecs", ...args, "--", checkout]
+              : args,
             root === checkout
               ? (options.patchGitContext?.root ?? checkout)
               : checkout,
@@ -9921,7 +9923,11 @@ export async function readSkillCommandOutput(
       method: "turn/start",
       params: {
         threadId: threadId!,
-        ...(externalSandbox ? { sandboxPolicy: externalSandbox } : {}),
+        ...(externalSandbox
+          ? { sandboxPolicy: externalSandbox }
+          : appServer?.permissions === undefined
+            ? {}
+            : { permissions: appServer.permissions }),
         input: [{ type: "text", text: appServer!.prompt, text_elements: [] }],
       },
     });
@@ -9940,9 +9946,7 @@ export async function readSkillCommandOutput(
           : { modelProvider: appServer.modelProvider }),
         approvalPolicy:
           appServer?.sandbox === "read-only" ? "on-request" : "never",
-        ...(appServer.permissions === undefined
-          ? { sandbox: appServer.sandbox ?? "workspace-write" }
-          : { permissions: appServer.permissions }),
+        sandbox: appServer.sandbox ?? "workspace-write",
         ...(config === undefined ? {} : { config }),
       },
     });
@@ -10003,10 +10007,15 @@ export async function readSkillCommandOutput(
               continue;
             }
           }
-          if (appServer.sandbox === "read-only") {
+          if (
+            appServer.sandbox === "read-only" ||
+            appServer.permissions !== undefined
+          ) {
             if (appServer.directory === undefined) {
               error =
-                "Codex did not receive the repository directory required for read-only verification.";
+                appServer.permissions === undefined
+                  ? "Codex did not receive the repository directory required for read-only verification."
+                  : "Codex did not receive the repository directory required for patch permissions.";
               appServer.input.end();
               continue;
             }
@@ -10021,6 +10030,54 @@ export async function readSkillCommandOutput(
           } else {
             startThread();
           }
+        } else if (value["id"] === 4 && appServer.permissions !== undefined) {
+          const result = value["result"];
+          const config = isJsonObject(result) ? result["config"] : undefined;
+          const profiles = isJsonObject(config)
+            ? config["permissions"]
+            : undefined;
+          const profile = isJsonObject(profiles)
+            ? profiles[appServer.permissions]
+            : undefined;
+          if (!isJsonObject(config) || !isJsonObject(profile)) {
+            error =
+              "Codex did not provide the patch permission profile configuration.";
+            appServer.input.end();
+            continue;
+          }
+          const workspace = isJsonObject(config["sandbox_workspace_write"])
+            ? config["sandbox_workspace_write"]
+            : {};
+          const filesystem = isJsonObject(profile["filesystem"])
+            ? { ...profile["filesystem"] }
+            : {};
+          // Native config reads represent absent TOML options with null.
+          if (filesystem["glob_scan_max_depth"] === null)
+            delete filesystem["glob_scan_max_depth"];
+          // Extend the effective native workspace policy without resetting its settings.
+          startThread({
+            permissions: {
+              [appServer.permissions]: {
+                extends: ":workspace",
+                network: { enabled: workspace["network_access"] === true },
+                workspace_roots: Object.fromEntries(
+                  ((workspace["writable_roots"] ?? []) as string[]).map(
+                    (root) => [root, true],
+                  ),
+                ),
+                filesystem: {
+                  ...filesystem,
+                  // Remove implicit temp grants without narrowing explicit writable roots.
+                  ...(workspace["exclude_tmpdir_env_var"] === true
+                    ? { ":tmpdir": {} }
+                    : {}),
+                  ...(workspace["exclude_slash_tmp"] === true
+                    ? { ":slash_tmp": {} }
+                    : {}),
+                },
+              },
+            },
+          });
         } else if (value["id"] === 4 && appServer.sandbox === "read-only") {
           const result = value["result"];
           const layers =
@@ -10096,11 +10153,7 @@ export async function readSkillCommandOutput(
               params: {
                 command: [process.execPath, "-e", ""],
                 cwd: appServer.directory!,
-                ...(externalSandbox !== undefined
-                  ? { sandboxPolicy: externalSandbox }
-                  : appServer.permissions === undefined
-                    ? { sandboxPolicy: result.sandbox }
-                    : { permissionProfile: appServer.permissions }),
+                sandboxPolicy: externalSandbox ?? result.sandbox,
               },
             });
             continue;
