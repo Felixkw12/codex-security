@@ -1180,6 +1180,7 @@ interface CliDependencies {
       directory?: string;
       protectedRoots?: readonly string[];
       trim?: boolean;
+      encoding?: "base64";
       environment?: NodeJS.ProcessEnv;
       maxBuffer?: number;
       input?: string;
@@ -1277,6 +1278,7 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
       cwd: options?.directory ?? repository,
       env: { ...executable.environment, ...options?.environment },
       maxBuffer: options?.maxBuffer,
+      encoding: options?.encoding === "base64" ? "buffer" : "utf8",
       windowsHide: true,
     });
     const input =
@@ -1286,8 +1288,25 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
             execution.child.stdin!.once("error", reject);
             execution.child.stdin!.end(options.input, resolve);
           });
-    const [{ stdout }] = await Promise.all([execution, input]);
-    return options?.trim === false ? stdout : stdout.trim();
+    const [{ stdout }] = await Promise.all([execution, input]).catch(
+      (error: unknown) => {
+        // Keep command diagnostics as text when stdout was requested as bytes.
+        if (error instanceof Error) {
+          for (const field of ["stdout", "stderr"] as const) {
+            const value = (error as Error & Record<typeof field, unknown>)[
+              field
+            ];
+            if (Buffer.isBuffer(value))
+              Object.assign(error, { [field]: value.toString("utf8") });
+          }
+        }
+        throw error;
+      },
+    );
+    const output = Buffer.isBuffer(stdout)
+      ? stdout.toString(options?.encoding ?? "utf8")
+      : stdout;
+    return options?.trim === false ? output : output.trim();
   },
   exportFindings: runArtifactExport,
   runWorkbench: async (args, input, signal, pythonPath) => {
@@ -9724,7 +9743,7 @@ async function runSkill(
   const gitControls = patch
     ? await capturePatchGitControls(
         directory,
-        async (root, checkout, args) => {
+        async (root, checkout, args, encoding) => {
           const current =
             options.patchGitContext === undefined
               ? dependencies
@@ -9750,6 +9769,7 @@ async function runSkill(
               : checkout,
             {
               trim: false,
+              encoding,
               maxBuffer: Infinity,
               environment: {
                 LC_ALL: "C",
