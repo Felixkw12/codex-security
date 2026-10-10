@@ -1023,6 +1023,11 @@ type SkillThreadSource = Extract<
   | typeof CODEX_SECURITY_THREAD_SOURCES.validation
 >;
 
+interface SkillPermissions {
+  readonly name: string;
+  readonly readOnlyPaths: readonly string[];
+}
+
 interface SkillCommandOutput {
   readonly directory?: string;
   readonly auth?: ScanAuthMode;
@@ -1036,7 +1041,7 @@ interface SkillCommandOutput {
     readonly prompt: string;
     readonly threadSource: SkillThreadSource;
     readonly sandbox?: "read-only" | "workspace-write";
-    readonly permissions?: string;
+    readonly permissions?: SkillPermissions;
     readonly externalSandbox?: boolean;
     readonly onEvent?: (event: Readonly<Record<string, unknown>>) => void;
   };
@@ -8810,6 +8815,17 @@ async function configuredPatchObjectDirectory(
       ).replace(/\n$/u, "");
 }
 
+const NESTED_PATCH_GIT_ENVIRONMENT = Object.fromEntries(
+  [...GIT_REPOSITORY_ENVIRONMENT]
+    .filter(
+      (name) =>
+        name !== "GIT_ALTERNATE_OBJECT_DIRECTORIES" &&
+        name !== "GIT_NO_REPLACE_OBJECTS" &&
+        name !== "GIT_REPLACE_REF_BASE",
+    )
+    .map((name) => [name, undefined]),
+);
+
 async function nestedPatchGitDependencies(
   repository: string,
   dependencies: CliDependencies,
@@ -8851,16 +8867,7 @@ async function nestedPatchGitDependencies(
         {
           ...options,
           environment: {
-            ...Object.fromEntries(
-              [...GIT_REPOSITORY_ENVIRONMENT]
-                .filter(
-                  (name) =>
-                    name !== "GIT_ALTERNATE_OBJECT_DIRECTORIES" &&
-                    name !== "GIT_NO_REPLACE_OBJECTS" &&
-                    name !== "GIT_REPLACE_REF_BASE",
-                )
-                .map((name) => [name, undefined]),
-            ),
+            ...NESTED_PATCH_GIT_ENVIRONMENT,
             GIT_OBJECT_DIRECTORY: objectDirectory,
             ...(alternateObjects === undefined
               ? {}
@@ -9743,7 +9750,7 @@ async function runSkill(
   const gitControls = patch
     ? await capturePatchGitControls(
         directory,
-        async (root, checkout, args, encoding) => {
+        async (root, checkout, args, encoding, nestedProbe) => {
           const current =
             options.patchGitContext === undefined
               ? dependencies
@@ -9767,11 +9774,21 @@ async function runSkill(
                     args[0] === "rev-parse" &&
                     args[1] === "--show-toplevel",
                 );
+          // Relative hooks execute in the worktree, even when Git retains the
+          // caller's original command context.
+          const gitArgs =
+            args.length === 4 &&
+            args[0] === "rev-parse" &&
+            args[1] === "--path-format=absolute" &&
+            args[2] === "--git-path" &&
+            args[3] === "hooks"
+              ? ["rev-parse", "--git-path", "hooks"]
+              : args;
           return selected.runRepositoryCommand(
             "git",
             args.includes("ls-files")
               ? ["--literal-pathspecs", ...args, "--", checkout]
-              : args,
+              : gitArgs,
             root === checkout
               ? (options.patchGitContext?.root ?? checkout)
               : checkout,
@@ -9782,6 +9799,13 @@ async function runSkill(
               environment: {
                 LC_ALL: "C",
                 ...(root === checkout ? {} : { GIT_INDEX_FILE: undefined }),
+                ...(nestedProbe
+                  ? {
+                      ...NESTED_PATCH_GIT_ENVIRONMENT,
+                      GIT_OBJECT_DIRECTORY:
+                        await configuredPatchObjectDirectory(root, current),
+                    }
+                  : {}),
               },
             },
           );
@@ -9832,20 +9856,6 @@ async function runSkill(
       ...(verify || assess
         ? ["--config", 'approvals_reviewer="auto_review"']
         : []),
-      ...(patchPermissions === undefined
-        ? []
-        : [
-            "--config",
-            `permissions.${patchPermissions}=${inlineToml({
-              extends: ":workspace",
-              filesystem: Object.fromEntries(
-                gitControls!.readOnlyPaths.map((path) => [
-                  path,
-                  { ".": "read" },
-                ]),
-              ),
-            })}`,
-          ]),
       ...Object.entries(
         codexSecurityRequestMetadata(
           "cli",
@@ -9897,7 +9907,12 @@ async function runSkill(
               ...(verify || assess ? { sandbox: "read-only" as const } : {}),
               ...(patchPermissions === undefined
                 ? {}
-                : { permissions: patchPermissions }),
+                : {
+                    permissions: {
+                      name: patchPermissions,
+                      readOnlyPaths: gitControls!.readOnlyPaths,
+                    },
+                  }),
               ...(options.onEvent === undefined
                 ? {}
                 : { onEvent: options.onEvent }),
@@ -9923,7 +9938,7 @@ export async function readSkillCommandOutput(
     readonly threadSource: SkillThreadSource;
     readonly input: NodeJS.WritableStream;
     readonly sandbox?: "read-only" | "workspace-write";
-    readonly permissions?: string;
+    readonly permissions?: SkillPermissions;
     readonly externalSandbox?: boolean;
     readonly onEvent?: (event: Readonly<Record<string, unknown>>) => void;
   },
@@ -9955,7 +9970,7 @@ export async function readSkillCommandOutput(
           ? { sandboxPolicy: externalSandbox }
           : appServer?.permissions === undefined
             ? {}
-            : { permissions: appServer.permissions }),
+            : { permissions: appServer.permissions.name }),
         input: [{ type: "text", text: appServer!.prompt, text_elements: [] }],
       },
     });
@@ -10065,9 +10080,9 @@ export async function readSkillCommandOutput(
             ? config["permissions"]
             : undefined;
           const profile = isJsonObject(profiles)
-            ? profiles[appServer.permissions]
+            ? profiles[appServer.permissions.name]
             : undefined;
-          if (!isJsonObject(config) || !isJsonObject(profile)) {
+          if (!isJsonObject(config)) {
             error =
               "Codex did not provide the patch permission profile configuration.";
             appServer.input.end();
@@ -10076,16 +10091,24 @@ export async function readSkillCommandOutput(
           const workspace = isJsonObject(config["sandbox_workspace_write"])
             ? config["sandbox_workspace_write"]
             : {};
-          const filesystem = isJsonObject(profile["filesystem"])
-            ? { ...profile["filesystem"] }
-            : {};
+          const filesystem =
+            isJsonObject(profile) && isJsonObject(profile["filesystem"])
+              ? { ...profile["filesystem"] }
+              : {};
+          for (const path of appServer.permissions.readOnlyPaths) {
+            const configured = filesystem[path];
+            filesystem[path] = {
+              ...(isJsonObject(configured) ? configured : {}),
+              ".": "read",
+            };
+          }
           // Native config reads represent absent TOML options with null.
           if (filesystem["glob_scan_max_depth"] === null)
             delete filesystem["glob_scan_max_depth"];
           // Extend the effective native workspace policy without resetting its settings.
           startThread({
             permissions: {
-              [appServer.permissions]: {
+              [appServer.permissions.name]: {
                 extends: ":workspace",
                 network: { enabled: workspace["network_access"] === true },
                 workspace_roots: Object.fromEntries(
