@@ -51,6 +51,7 @@ export interface PatchGitCommandOptions {
   readonly nestedProbe?: boolean;
   readonly indexFile?: string;
   readonly input?: string;
+  readonly environment?: NodeJS.ProcessEnv;
 }
 
 type RunGit = (
@@ -281,17 +282,29 @@ export async function capturePatchGitControls(
     root: string,
     checkout: string,
     args: string[],
-    nestedProbe?: boolean,
+    options?: PatchGitCommandOptions,
   ) =>
     Buffer.from(
-      await run(root, checkout, args, { encoding: "base64", nestedProbe }),
+      await run(root, checkout, args, { ...options, encoding: "base64" }),
       "base64",
     );
-  const runControl = async (root: string, checkout: string, args: string[]) =>
-    controlPathText(await runBytes(root, checkout, args));
+  const runControl = async (
+    root: string,
+    checkout: string,
+    args: string[],
+    options?: PatchGitCommandOptions,
+  ) => controlPathText(await runBytes(root, checkout, args, options));
+  // GIT_CONFIG selects a file only for git-config, not snapshot bookkeeping.
+  const configurationEnvironment = { GIT_CONFIG: undefined };
   // Config records contain unrelated keys too. Split bytes before decoding paths.
   const runConfigFields = async (checkout: string, args: string[]) =>
-    (await runBytes(root, checkout, args)).toString("latin1").split("\0");
+    (
+      await runBytes(root, checkout, args, {
+        environment: configurationEnvironment,
+      })
+    )
+      .toString("latin1")
+      .split("\0");
   const configPath = (field: string) =>
     controlPathText(Buffer.from(field, "latin1"));
   let root: string;
@@ -344,12 +357,9 @@ export async function capturePatchGitControls(
     try {
       // This early rev-parse mode only checks filesystem structure. It does not
       // select the candidate repository or load its configuration and hooks.
-      await runBytes(
-        root,
-        root,
-        ["rev-parse", "--resolve-git-dir", path],
+      await runBytes(root, root, ["rev-parse", "--resolve-git-dir", path], {
         nestedProbe,
-      );
+      });
       return true;
     } catch (error) {
       if (!(error instanceof Error)) throw error;
@@ -425,11 +435,15 @@ export async function capturePatchGitControls(
   >();
   const inaccessibleIncludes = new Set<string>();
   const inaccessibleHooks = new Set<string>();
-  const hookIsAvailable = async (path: string): Promise<boolean> =>
-    access(path, constants.X_OK).then(
+  const hookIsAvailable = async (path: string): Promise<boolean> => {
+    const executable = await access(path, constants.X_OK).then(
       () => true,
       () => false,
     );
+    if (!executable) return false;
+    const metadata = await stat(path).catch(missing);
+    return metadata !== undefined && !metadata.isDirectory();
+  };
   const rememberControl = async (
     path: string,
     protectDirectory = true,
@@ -495,15 +509,20 @@ export async function capturePatchGitControls(
         try {
           // Expand each value with Git without expanding inactive values as a group.
           path = (
-            await runControl(root, checkout, [
-              "-c",
-              `codexsecurity.patchcontrolpath=${path}`,
-              "config",
-              "--null",
-              "--type=path",
-              "--get",
-              "codexsecurity.patchcontrolpath",
-            ])
+            await runControl(
+              root,
+              checkout,
+              [
+                "-c",
+                `codexsecurity.patchcontrolpath=${path}`,
+                "config",
+                "--null",
+                "--type=path",
+                "--get",
+                "codexsecurity.patchcontrolpath",
+              ],
+              { environment: configurationEnvironment },
+            )
           ).replace(/\0$/u, "");
         } catch (error) {
           // Active includes already passed Git's normal --includes read above.
@@ -612,7 +631,8 @@ export async function capturePatchGitControls(
       for (const path of inaccessibleIncludes) {
         try {
           const canonical = await canonicalPath(path);
-          await stat(canonical).catch(missing);
+          const metadata = await stat(canonical).catch(missing);
+          if (metadata === undefined || metadata.isDirectory()) continue;
         } catch (error) {
           if (
             ["EACCES", "ELOOP"].includes(

@@ -9035,6 +9035,7 @@ async function runSkill(
                 ...(commandOptions?.indexFile === undefined
                   ? {}
                   : { GIT_INDEX_FILE: commandOptions.indexFile }),
+                ...commandOptions?.environment,
               },
             },
           ),
