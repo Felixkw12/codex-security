@@ -88,6 +88,7 @@ async function readGitMarker(
   const metadata = await stat(marker).catch(missing);
   if (metadata === undefined) return undefined;
   if (metadata.isDirectory()) return true;
+  if (!metadata.isFile()) return undefined;
   const contents = await readFile(marker);
   return contents.subarray(0, 8).equals(Buffer.from("gitdir: "))
     ? contents
@@ -96,6 +97,7 @@ async function readGitMarker(
 
 async function markerDirectories(
   directory: string,
+  isGitDirectory: (path: string) => Promise<boolean>,
 ): Promise<string[] | undefined> {
   const marker = join(directory, ".git");
   const contents = await readGitMarker(marker);
@@ -113,6 +115,11 @@ async function markerDirectories(
         )
   ).catch(missing);
   if (gitDirectory === undefined) return undefined;
+  if (
+    !(await stat(gitDirectory)).isDirectory() ||
+    !(await isGitDirectory(gitDirectory))
+  )
+    return undefined;
   const commonBytes = await readFile(join(gitDirectory, "commondir")).catch(
     missing,
   );
@@ -221,6 +228,33 @@ export async function capturePatchGitControls(
       return undefined;
     throw error;
   }
+  const isGitDirectory = async (path: string): Promise<boolean> => {
+    try {
+      // This early rev-parse mode only checks filesystem structure. It does not
+      // select the candidate repository or load its configuration and hooks.
+      await runControl(root, root, ["rev-parse", "--resolve-git-dir", path]);
+      return true;
+    } catch (error) {
+      if (!(error instanceof Error)) throw error;
+      const failure = error as Error & {
+        code?: unknown;
+        status?: unknown;
+        stderr?: unknown;
+      };
+      const diagnostic = Buffer.isBuffer(failure.stderr)
+        ? failure.stderr.toString("utf8")
+        : failure.stderr;
+      const negative = `fatal: not a gitdir '${path}'`;
+      if (
+        (failure.code === 128 || failure.status === 128) &&
+        typeof diagnostic === "string" &&
+        (diagnostic.endsWith(`${negative}\n`) ||
+          diagnostic.endsWith(`${negative}\r\n`))
+      )
+        return false;
+      throw error;
+    }
+  };
   const administrationRoots = new Map<string, { dev: bigint; ino: bigint }>();
   const remember = async (path: string): Promise<void> => {
     const metadata = await stat(path, { bigint: true });
@@ -230,6 +264,7 @@ export async function capturePatchGitControls(
     string,
     { canonical: string; identity: { dev: bigint; ino: bigint } | undefined }
   >();
+  const inaccessibleIncludes = new Set<string>();
   const rememberControl = async (path: string): Promise<void> => {
     const canonical = await canonicalPath(path);
     const metadata = await stat(canonical, { bigint: true }).catch(missing);
@@ -299,7 +334,21 @@ export async function capturePatchGitControls(
         const relativeTo = origin.startsWith("file:")
           ? dirname(relativeFile(checkout, configPath(origin.slice(5))))
           : checkout;
-        await rememberControl(relativeFile(relativeTo, path));
+        const includePath = relativeFile(relativeTo, path);
+        try {
+          await rememberControl(includePath);
+        } catch (error) {
+          // Git's successful --includes read above already required access to
+          // active includes. An inaccessible conditional path was not selected.
+          if (
+            key.startsWith("includeif.") &&
+            (error as NodeJS.ErrnoException).code === "EACCES"
+          ) {
+            inaccessibleIncludes.add(includePath);
+            continue;
+          }
+          throw error;
+        }
       }
     }
     const hooks = relativeFile(
@@ -335,7 +384,7 @@ export async function capturePatchGitControls(
     await remember(path);
   }
   const selectedMarker = usesWorktreeMarker
-    ? await markerDirectories(root)
+    ? await markerDirectories(root, isGitDirectory)
     : undefined;
   const discover = async (capture: boolean): Promise<void> => {
     const protectedRoots = capture
@@ -354,6 +403,18 @@ export async function capturePatchGitControls(
           )
         ).filter((path): path is string => path !== undefined);
     if (!capture) {
+      for (const path of inaccessibleIncludes) {
+        try {
+          const canonical = await canonicalPath(path);
+          await stat(canonical).catch(missing);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "EACCES") continue;
+          throw error;
+        }
+        throw new Error(
+          `Git conditional include became accessible during the patch: ${path}`,
+        );
+      }
       for (const [path, expected] of controlPaths) {
         const canonical = await canonicalPath(path);
         const metadata = await stat(canonical, { bigint: true }).catch(missing);
@@ -372,7 +433,7 @@ export async function capturePatchGitControls(
       const marker =
         selectedMarker === undefined
           ? undefined
-          : await markerDirectories(root);
+          : await markerDirectories(root, isGitDirectory);
       if (
         selectedDirectories.some((path) => !protectedRoots.includes(path)) ||
         (selectedMarker !== undefined &&
@@ -394,7 +455,7 @@ export async function capturePatchGitControls(
         );
       if (visited.has(canonical)) return;
       if (canonical !== root) {
-        const directories = await markerDirectories(checkout);
+        const directories = await markerDirectories(checkout, isGitDirectory);
         if (directories === undefined) return;
         if (capture) for (const path of directories) await remember(path);
         else if (
