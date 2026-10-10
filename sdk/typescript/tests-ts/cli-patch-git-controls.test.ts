@@ -13,7 +13,6 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
-import { parse as parseToml } from "smol-toml";
 import { runCodexSkillCommand } from "../src/cli.js";
 import { capture } from "./cli-fixtures.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
@@ -22,6 +21,19 @@ import {
   runGitRepositoryCommand,
   runWorkflow,
 } from "./cli-patch-fixtures.js";
+
+function patchReadOnlyPaths(args: readonly string[], permissions: unknown) {
+  expect(
+    args.filter((value) =>
+      value.startsWith("permissions.codex_security_patch="),
+    ),
+  ).toEqual([]);
+  expect(permissions).toEqual({
+    name: "codex_security_patch",
+    readOnlyPaths: expect.any(Array),
+  });
+  return (permissions as { readOnlyPaths: readonly string[] }).readOnlyPaths;
+}
 
 describe("patch Git administration", () => {
   const fixtures = createTemporaryDirectories(true);
@@ -179,19 +191,9 @@ describe("patch Git administration", () => {
             onRepositoryCommand: runGitRepositoryCommand,
             onCodex: async (args, output) => {
               launches++;
-              const definition = args.find((value) =>
-                value.startsWith("permissions.codex_security_patch="),
-              )!;
-              const profile = parseToml(definition) as {
-                permissions: {
-                  codex_security_patch: { filesystem: Record<string, unknown> };
-                };
-              };
               expect(
-                profile.permissions.codex_security_patch.filesystem[
-                  shadowMarker
-                ],
-              ).toBeUndefined();
+                patchReadOnlyPaths(args, output?.appServer?.permissions),
+              ).not.toContain(shadowMarker);
               await writeFile(join(root, "outer.txt"), "after\n");
               output?.stdout.write("Fixed.\n");
               return 0;
@@ -214,6 +216,7 @@ describe("patch Git administration", () => {
     async (configured) => {
       const directory = await fixtures.create("patch-profile-protocol-");
       const protectedPath = join(directory, ".git");
+      const previousPath = join(directory, "previous-control");
       const extraRoot = join(directory, "build-cache");
       const inherited = configured
         ? {
@@ -245,10 +248,10 @@ lines.on("line", (line) => {
     assert.equal(request.params.cwd, ${JSON.stringify(directory)});
     assert.equal(request.params.includeLayers, true);
     configured = true;
-    send({ id: 4, result: { config: { permissions: { codex_security_patch: { description: null, extends: ":workspace", filesystem: { glob_scan_max_depth: null, [${JSON.stringify(protectedPath)}]: { ".": "read" } } } }, sandbox_workspace_write: ${JSON.stringify(inherited)} } } });
+    send({ id: 4, result: { config: { permissions: { codex_security_patch: { description: null, extends: ":workspace", filesystem: { glob_scan_max_depth: ${configured ? "8" : "null"}, [${JSON.stringify(protectedPath)}]: { ".": "write", "private/**": "deny" }, [${JSON.stringify(previousPath)}]: { ".": "read" } } } }, sandbox_workspace_write: ${JSON.stringify(inherited)} } } });
   } else if (request.method === "thread/start") {
     assert.equal(configured, true);
-    assert.deepEqual(request.params, { threadSource: "security_remediation", approvalPolicy: "never", sandbox: "workspace-write", config: { permissions: { codex_security_patch: { extends: ":workspace", network: { enabled: ${configured} }, workspace_roots: ${JSON.stringify(configured ? { [extraRoot]: true } : {})}, filesystem: { [${JSON.stringify(protectedPath)}]: { ".": "read" }, ...${JSON.stringify(configured ? { ":tmpdir": {}, ":slash_tmp": {} } : {})} } } } } });
+    assert.deepEqual(request.params, { threadSource: "security_remediation", approvalPolicy: "never", sandbox: "workspace-write", config: { permissions: { codex_security_patch: { extends: ":workspace", network: { enabled: ${configured} }, workspace_roots: ${JSON.stringify(configured ? { [extraRoot]: true } : {})}, filesystem: { [${JSON.stringify(protectedPath)}]: { ".": "read", "private/**": "deny" }, [${JSON.stringify(previousPath)}]: { ".": "read" }, ...${JSON.stringify(configured ? { glob_scan_max_depth: 8, ":tmpdir": {}, ":slash_tmp": {} } : {})} } } } } });
     send({ id: 2, result: { thread: { id: "patch-thread" }, sandbox: ${JSON.stringify(policy)} } });
   } else if (request.method === "command/exec") {
     assert.deepEqual(request.params.sandboxPolicy, ${JSON.stringify(policy)});
@@ -281,7 +284,10 @@ lines.on("line", (line) => {
               directory,
               prompt: "Fix the synthetic issue.",
               threadSource: "security_remediation",
-              permissions: "codex_security_patch",
+              permissions: {
+                name: "codex_security_patch",
+                readOnlyPaths: [protectedPath],
+              },
             },
           },
           { command: process.execPath },
@@ -397,27 +403,9 @@ lines.on("line", (line) => {
             return runGitRepositoryCommand(command, args, cwd, options);
           },
           onCodex: async (args, output) => {
-            const definition = args.find((value) =>
-              value.startsWith("permissions.codex_security_patch="),
-            );
-            expect(definition).toBeDefined();
-            const profile = (
-              parseToml(definition!) as {
-                permissions: {
-                  codex_security_patch: {
-                    extends: string;
-                    filesystem: Record<string, { ".": string }>;
-                  };
-                };
-              }
-            ).permissions.codex_security_patch;
-            expect(profile.extends).toBe(":workspace");
             expect(
-              profile.filesystem[
-                await realpath(git("rev-parse", "--absolute-git-dir"))
-              ],
-            ).toEqual({ ".": "read" });
-            expect(output?.appServer?.permissions).toBe("codex_security_patch");
+              patchReadOnlyPaths(args, output?.appServer?.permissions),
+            ).toContain(await realpath(git("rev-parse", "--absolute-git-dir")));
             beforeHooks = await readFile(join(root, ".git", "hook-ran")).catch(
               () => null,
             );
@@ -489,33 +477,24 @@ lines.on("line", (line) => {
           currentDirectory: root,
           onRepositoryCommand: runGitRepositoryCommand,
           onCodex: async (args, output) => {
-            const definition = args.find((value) =>
-              value.startsWith("permissions.codex_security_patch="),
-            )!;
-            const profile = (
-              parseToml(definition) as {
-                permissions: {
-                  codex_security_patch: {
-                    filesystem: Record<string, { ".": string }>;
-                  };
-                };
-              }
-            ).permissions.codex_security_patch;
-            const controls = profile.filesystem;
+            const controls = patchReadOnlyPaths(
+              args,
+              output?.appServer?.permissions,
+            );
             for (const path of [
               configuration,
               hook,
               ...(process.platform === "win32" ? [] : [target]),
             ])
-              expect(controls[await realpath(path)]).toEqual({ ".": "read" });
-            expect(
-              controls[join(await realpath(root), "missing-config")],
-            ).toBeUndefined();
-            expect(controls[await realpath(root)]).toBeUndefined();
-            expect(controls[await realpath(hooks)]).toBeUndefined();
-            expect(
-              controls[await realpath(join(hooks, "source.txt"))],
-            ).toBeUndefined();
+              expect(controls).toContain(await realpath(path));
+            expect(controls).not.toContain(
+              join(await realpath(root), "missing-config"),
+            );
+            expect(controls).not.toContain(await realpath(root));
+            expect(controls).not.toContain(await realpath(hooks));
+            expect(controls).not.toContain(
+              await realpath(join(hooks, "source.txt")),
+            );
             before = await readFile(join(root, ".git", "trusted-hook"), "utf8");
             await writeFile(join(root, "app.txt"), "after\n");
             await writeFile(join(hooks, "source.txt"), "after\n");
@@ -758,23 +737,9 @@ lines.on("line", (line) => {
               onCodex: async (args, output) => {
                 launches++;
                 if (!raw) {
-                  const definition = args.find((value) =>
-                    value.startsWith("permissions.codex_security_patch="),
-                  )!;
-                  const profile = (
-                    parseToml(definition) as {
-                      permissions: {
-                        codex_security_patch: {
-                          filesystem: Record<string, unknown>;
-                        };
-                      };
-                    }
-                  ).permissions.codex_security_patch;
                   expect(
-                    profile.filesystem[
-                      await realpath(expectedControl.toString("utf8"))
-                    ],
-                  ).toEqual({ ".": "read" });
+                    patchReadOnlyPaths(args, output?.appServer?.permissions),
+                  ).toContain(await realpath(expectedControl.toString("utf8")));
                 }
                 await writeFile(join(root, "app.txt"), "after\n");
                 output?.stdout.write("Fixed.\n");

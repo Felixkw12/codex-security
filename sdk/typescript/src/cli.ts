@@ -1019,6 +1019,11 @@ type SkillThreadSource = Extract<
   | typeof CODEX_SECURITY_THREAD_SOURCES.validation
 >;
 
+interface SkillPermissions {
+  readonly name: string;
+  readonly readOnlyPaths: readonly string[];
+}
+
 interface SkillCommandOutput {
   readonly directory?: string;
   readonly auth?: ScanAuthMode;
@@ -1032,7 +1037,7 @@ interface SkillCommandOutput {
     readonly prompt: string;
     readonly threadSource: SkillThreadSource;
     readonly sandbox?: "read-only" | "workspace-write";
-    readonly permissions?: string;
+    readonly permissions?: SkillPermissions;
     readonly externalSandbox?: boolean;
     readonly onEvent?: (event: Readonly<Record<string, unknown>>) => void;
   };
@@ -9022,7 +9027,7 @@ async function runSkill(
   const gitControls = patch
     ? await capturePatchGitControls(
         directory,
-        (root, checkout, args, encoding) =>
+        (root, checkout, args, encoding, nestedProbe) =>
           dependencies.runRepositoryCommand(
             "git",
             root === checkout ? args : ["-C", checkout, ...args],
@@ -9033,7 +9038,7 @@ async function runSkill(
               maxBuffer: Infinity,
               environment: {
                 LC_ALL: "C",
-                ...(root === checkout
+                ...(root === checkout && !nestedProbe
                   ? {}
                   : {
                       ...NESTED_PATCH_GIT_ENVIRONMENT,
@@ -9088,20 +9093,6 @@ async function runSkill(
       ...(verify || assess
         ? ["--config", 'approvals_reviewer="auto_review"']
         : []),
-      ...(patchPermissions === undefined
-        ? []
-        : [
-            "--config",
-            `permissions.${patchPermissions}=${inlineToml({
-              extends: ":workspace",
-              filesystem: Object.fromEntries(
-                gitControls!.readOnlyPaths.map((path) => [
-                  path,
-                  { ".": "read" },
-                ]),
-              ),
-            })}`,
-          ]),
       ...Object.entries(
         codexSecurityRequestMetadata(
           "cli",
@@ -9153,7 +9144,12 @@ async function runSkill(
               ...(verify || assess ? { sandbox: "read-only" as const } : {}),
               ...(patchPermissions === undefined
                 ? {}
-                : { permissions: patchPermissions }),
+                : {
+                    permissions: {
+                      name: patchPermissions,
+                      readOnlyPaths: gitControls!.readOnlyPaths,
+                    },
+                  }),
               ...(options.onEvent === undefined
                 ? {}
                 : { onEvent: options.onEvent }),
@@ -9179,7 +9175,7 @@ export async function readSkillCommandOutput(
     readonly threadSource: SkillThreadSource;
     readonly input: NodeJS.WritableStream;
     readonly sandbox?: "read-only" | "workspace-write";
-    readonly permissions?: string;
+    readonly permissions?: SkillPermissions;
     readonly externalSandbox?: boolean;
     readonly onEvent?: (event: Readonly<Record<string, unknown>>) => void;
   },
@@ -9211,7 +9207,7 @@ export async function readSkillCommandOutput(
           ? { sandboxPolicy: externalSandbox }
           : appServer?.permissions === undefined
             ? {}
-            : { permissions: appServer.permissions }),
+            : { permissions: appServer.permissions.name }),
         input: [{ type: "text", text: appServer!.prompt, text_elements: [] }],
       },
     });
@@ -9321,9 +9317,9 @@ export async function readSkillCommandOutput(
             ? config["permissions"]
             : undefined;
           const profile = isJsonObject(profiles)
-            ? profiles[appServer.permissions]
+            ? profiles[appServer.permissions.name]
             : undefined;
-          if (!isJsonObject(config) || !isJsonObject(profile)) {
+          if (!isJsonObject(config)) {
             error =
               "Codex did not provide the patch permission profile configuration.";
             appServer.input.end();
@@ -9332,16 +9328,24 @@ export async function readSkillCommandOutput(
           const workspace = isJsonObject(config["sandbox_workspace_write"])
             ? config["sandbox_workspace_write"]
             : {};
-          const filesystem = isJsonObject(profile["filesystem"])
-            ? { ...profile["filesystem"] }
-            : {};
+          const filesystem =
+            isJsonObject(profile) && isJsonObject(profile["filesystem"])
+              ? { ...profile["filesystem"] }
+              : {};
+          for (const path of appServer.permissions.readOnlyPaths) {
+            const configured = filesystem[path];
+            filesystem[path] = {
+              ...(isJsonObject(configured) ? configured : {}),
+              ".": "read",
+            };
+          }
           // Native config reads represent absent TOML options with null.
           if (filesystem["glob_scan_max_depth"] === null)
             delete filesystem["glob_scan_max_depth"];
           // Extend the effective native workspace policy without resetting its settings.
           startThread({
             permissions: {
-              [appServer.permissions]: {
+              [appServer.permissions.name]: {
                 extends: ":workspace",
                 network: { enabled: workspace["network_access"] === true },
                 workspace_roots: Object.fromEntries(

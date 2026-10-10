@@ -60,11 +60,15 @@ test("patch discovery does not execute a workspace fsmonitor rewritten by the mo
     },
     onCodex: async (args, streams) => {
       launches++;
-      const profile = args.find((arg) =>
-        arg.startsWith("permissions.codex_security_patch="),
+      expect(
+        args.some((arg) => arg.startsWith("permissions.codex_security_patch=")),
+      ).toBe(false);
+      expect(streams?.appServer?.permissions?.name).toBe(
+        "codex_security_patch",
       );
-      expect(profile).toBeDefined();
-      expect(profile).not.toContain(JSON.stringify(hook));
+      expect(streams?.appServer?.permissions?.readOnlyPaths).not.toContain(
+        hook,
+      );
       beforeTurnEffect = await readFile(effect, "utf8").catch(() => undefined);
       await rm(effect, { force: true });
       await writeFile(hook, script("model-rewritten"));
