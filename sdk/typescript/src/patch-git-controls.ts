@@ -1,4 +1,6 @@
+import { constants, type Stats } from "node:fs";
 import {
+  access,
   lstat,
   mkdtemp,
   readFile,
@@ -40,7 +42,9 @@ const GIT_HOOKS = [
   "p4-post-changelist",
   "p4-pre-submit",
   "post-index-change",
-];
+].flatMap((hook) =>
+  process.platform === "win32" ? [hook, `${hook}.exe`] : [hook],
+);
 
 export interface PatchGitCommandOptions {
   readonly encoding?: "base64";
@@ -414,6 +418,12 @@ export async function capturePatchGitControls(
     { canonical: string; identity: { dev: bigint; ino: bigint } | undefined }
   >();
   const inaccessibleIncludes = new Set<string>();
+  const inaccessibleHooks = new Set<string>();
+  const hookIsAvailable = async (path: string): Promise<boolean> =>
+    access(path, constants.X_OK).then(
+      () => true,
+      () => false,
+    );
   const rememberControl = async (path: string): Promise<void> => {
     const canonical = await canonicalPath(path);
     const metadata = await stat(canonical, { bigint: true }).catch(missing);
@@ -421,6 +431,15 @@ export async function capturePatchGitControls(
       canonical,
       identity: metadata && { dev: metadata.dev, ino: metadata.ino },
     });
+  };
+  const rememberHook = async (path: string): Promise<void> => {
+    try {
+      await rememberControl(path);
+    } catch (error) {
+      // Git skips hooks that fail access(X_OK), including unreadable paths.
+      if (await hookIsAvailable(path)) throw error;
+      inaccessibleHooks.add(path);
+    }
   };
   const captureReferences = async (checkout: string): Promise<void> => {
     const origins = await runConfigFields(checkout, [
@@ -505,22 +524,23 @@ export async function capturePatchGitControls(
     const hooks = relativeFile(
       checkout,
       (
-        await runControl(root, checkout, [
-          "rev-parse",
-          "--path-format=absolute",
-          "--git-path",
-          "hooks",
-        ])
+        await runControl(root, checkout, ["rev-parse", "--git-path", "hooks"])
       ).replace(/\n$/u, ""),
     );
-    const hookDirectory = await stat(hooks).catch(missing);
+    let hookDirectory: Stats | undefined;
+    try {
+      hookDirectory = await stat(hooks).catch(missing);
+    } catch (error) {
+      if (await hookIsAvailable(hooks)) throw error;
+    }
     if (hookDirectory !== undefined && !hookDirectory.isDirectory()) {
       // A file such as /dev/null disables hooks; keep that binding intact.
-      await rememberControl(hooks);
+      await rememberHook(hooks);
     } else {
       // Remember absent entrypoints to reject newly installed hooks before Git.
       // Resolving each entry also protects executable symlink targets.
-      for (const hook of GIT_HOOKS) await rememberControl(join(hooks, hook));
+      for (const hook of GIT_HOOKS)
+        await rememberHook(relativeFile(hooks, hook));
     }
   };
   const selectedDirectories: string[] = [];
@@ -571,6 +591,12 @@ export async function capturePatchGitControls(
           )
         ).filter((path): path is string => path !== undefined);
     if (!capture) {
+      for (const path of inaccessibleHooks) {
+        if (await hookIsAvailable(path))
+          throw new Error(
+            `Git hook became accessible during the patch: ${path}`,
+          );
+      }
       for (const path of inaccessibleIncludes) {
         try {
           const canonical = await canonicalPath(path);
