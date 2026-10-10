@@ -36,12 +36,13 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const paths = JSON.parse(fs.readFileSync(path.join(__dirname, "expected-paths.json"), "utf8"));
-assert.equal(process.argv.some((arg) => arg.includes("permissions.codex_security_patch=")), false);
+assert.equal(process.argv.some((arg) => arg.includes("permissions.codex_security_patch")), false);
 assert.equal(process.argv.some((arg) => Buffer.byteLength(arg) >= 128 * 1024), false);
 const lines = require("node:readline").createInterface({ input: process.stdin });
 const send = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
 let configured = false;
 let preflight = false;
+let permissionProfile;
 lines.on("line", (line) => {
   const request = JSON.parse(line);
   if (request.method === "initialize") {
@@ -51,7 +52,11 @@ lines.on("line", (line) => {
     send({ id: request.id, result: { config: {} } });
   } else if (request.method === "thread/start") {
     assert.equal(configured, true);
-    assert.deepEqual(request.params.config, { permissions: { codex_security_patch: {
+    const profiles = Object.keys(request.params.config.permissions);
+    assert.equal(profiles.length, 1);
+    permissionProfile = profiles[0];
+    assert.match(permissionProfile, /^codex_security_patch_[a-f0-9-]+$/);
+    assert.deepEqual(request.params.config, { permissions: { [permissionProfile]: {
       extends: ":workspace", network: { enabled: false }, workspace_roots: {},
       filesystem: Object.fromEntries(paths.map((value) => [value, { ".": "read" }]))
     } } });
@@ -66,7 +71,7 @@ lines.on("line", (line) => {
     send({ id: request.id, result: { exitCode: 0, stdout: "", stderr: "" } });
   } else if (request.method === "turn/start") {
     assert.equal(preflight, true);
-    assert.equal(request.params.permissions, "codex_security_patch");
+    assert.equal(request.params.permissions, permissionProfile);
     assert.equal(request.params.threadId, "large-profile-thread");
     send({ id: request.id, result: { turn: { id: "large-profile-turn" } } });
     send({ method: "item/completed", params: { threadId: "large-profile-thread", turnId: "large-profile-turn", item: { type: "agentMessage", text: "All synthetic paths received." } } });

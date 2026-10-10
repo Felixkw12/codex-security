@@ -212,7 +212,7 @@ describe("patch Git administration", () => {
   }
 
   test.each([false, true])(
-    "preserves workspace settings before selecting patch permissions: %p",
+    "preserves workspace settings without activating an unused profile: %p",
     async (configured) => {
       const directory = await fixtures.create("patch-profile-protocol-");
       const protectedPath = join(directory, ".git");
@@ -239,6 +239,7 @@ const lines = require("node:readline").createInterface({ input: process.stdin })
 const send = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
 let configured = false;
 let preflight = false;
+let permissionProfile;
 lines.on("line", (line) => {
   const request = JSON.parse(line);
   if (request.method === "initialize") {
@@ -251,7 +252,11 @@ lines.on("line", (line) => {
     send({ id: 4, result: { config: { permissions: { codex_security_patch: { description: null, extends: ":workspace", filesystem: { glob_scan_max_depth: ${configured ? "8" : "null"}, [${JSON.stringify(protectedPath)}]: { ".": "write", "private/**": "deny" }, [${JSON.stringify(previousPath)}]: { ".": "read" } } } }, sandbox_workspace_write: ${JSON.stringify(inherited)} } } });
   } else if (request.method === "thread/start") {
     assert.equal(configured, true);
-    assert.deepEqual(request.params, { threadSource: "security_remediation", approvalPolicy: "never", sandbox: "workspace-write", config: { permissions: { codex_security_patch: { extends: ":workspace", network: { enabled: ${configured} }, workspace_roots: ${JSON.stringify(configured ? { [extraRoot]: true } : {})}, filesystem: { [${JSON.stringify(protectedPath)}]: { ".": "read", "private/**": "deny" }, [${JSON.stringify(previousPath)}]: { ".": "read" }, ...${JSON.stringify(configured ? { glob_scan_max_depth: 8, ":tmpdir": {}, ":slash_tmp": {} } : {})} } } } } });
+    const profiles = Object.keys(request.params.config.permissions);
+    assert.equal(profiles.length, 1);
+    permissionProfile = profiles[0];
+    assert.match(permissionProfile, /^codex_security_patch_[a-f0-9-]+$/);
+    assert.deepEqual(request.params, { threadSource: "security_remediation", approvalPolicy: "never", sandbox: "workspace-write", config: { permissions: { [permissionProfile]: { extends: ":workspace", network: { enabled: ${configured} }, workspace_roots: ${JSON.stringify(configured ? { [extraRoot]: true } : {})}, filesystem: { [${JSON.stringify(protectedPath)}]: { ".": "read" }, ...${JSON.stringify(configured ? { ":tmpdir": {}, ":slash_tmp": {} } : {})} } } } } });
     send({ id: 2, result: { thread: { id: "patch-thread" }, sandbox: ${JSON.stringify(policy)} } });
   } else if (request.method === "command/exec") {
     assert.deepEqual(request.params.sandboxPolicy, ${JSON.stringify(policy)});
@@ -263,7 +268,7 @@ lines.on("line", (line) => {
   } else if (request.method === "turn/start") {
     assert.equal(preflight, true);
     assert.equal(request.params.threadId, "patch-thread");
-    assert.equal(request.params.permissions, "codex_security_patch");
+    assert.equal(request.params.permissions, permissionProfile);
     assert.equal(Object.hasOwn(request.params, "sandboxPolicy"), false);
     send({ id: 3, result: { turn: { id: "patch-turn" } } });
     send({ method: "item/completed", params: { threadId: "patch-thread", turnId: "patch-turn", item: { type: "agentMessage", text: "Synthetic patch complete." } } });
@@ -915,7 +920,9 @@ lines.on("line", (line) => {
       );
       if (change !== "ordinary") {
         expect(outcome.stderr).toContain(
-          "Git configuration or hooks changed location",
+          change === "hook"
+            ? "Git hook became accessible"
+            : "Git configuration or hooks changed location",
         );
         expect(laterCommands).toEqual([]);
       }

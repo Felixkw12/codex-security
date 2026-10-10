@@ -104,7 +104,9 @@ for (const mode of ["existing native", "new native", "ordinary exe"] as const) {
       } else {
         expect(outcome.exitCode, outcome.stderr).toBe(2);
         expect(outcome.stderr).toContain(
-          "Git configuration or hooks changed location during the patch",
+          mode === "new native"
+            ? "Git hook became accessible during the patch"
+            : "Git configuration or hooks changed location during the patch",
         );
         if (mode === "existing native") expect(protectedPaths).toContain(hook);
         expect(postTurnWrites).toEqual([]);
