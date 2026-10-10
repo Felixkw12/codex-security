@@ -1,4 +1,4 @@
-import { constants, type Stats } from "node:fs";
+import { constants } from "node:fs";
 import {
   access,
   lstat,
@@ -415,7 +415,12 @@ export async function capturePatchGitControls(
   };
   const controlPaths = new Map<
     string,
-    { canonical: string; identity: { dev: bigint; ino: bigint } | undefined }
+    {
+      canonical: string;
+      identity: { dev: bigint; ino: bigint } | undefined;
+      directory: boolean | undefined;
+      readOnly: boolean;
+    }
   >();
   const inaccessibleIncludes = new Set<string>();
   const inaccessibleHooks = new Set<string>();
@@ -424,17 +429,27 @@ export async function capturePatchGitControls(
       () => true,
       () => false,
     );
-  const rememberControl = async (path: string): Promise<void> => {
+  const rememberControl = async (
+    path: string,
+    protectDirectory = true,
+  ): Promise<void> => {
     const canonical = await canonicalPath(path);
     const metadata = await stat(canonical, { bigint: true }).catch(missing);
+    const directory = metadata?.isDirectory();
     controlPaths.set(path, {
       canonical,
       identity: metadata && { dev: metadata.dev, ino: metadata.ino },
+      directory,
+      readOnly:
+        protectDirectory ||
+        !directory ||
+        controlPaths.get(path)?.readOnly === true,
     });
   };
   const rememberHook = async (path: string): Promise<void> => {
     try {
-      await rememberControl(path);
+      // Track directories by identity so ordinary descendants remain writable.
+      await rememberControl(path, false);
     } catch (error) {
       // Git skips hooks that fail access(X_OK), including unreadable paths.
       if (await hookIsAvailable(path)) throw error;
@@ -521,27 +536,23 @@ export async function capturePatchGitControls(
         }
       }
     }
+    // A complete entry preserves Git's empty hooksPath semantics; querying
+    // only the hooks directory would turn that setting into the checkout.
     const hooks = relativeFile(
       checkout,
-      (
-        await runControl(root, checkout, ["rev-parse", "--git-path", "hooks"])
-      ).replace(/\n$/u, ""),
+      dirname(
+        (
+          await runControl(root, checkout, [
+            "rev-parse",
+            "--git-path",
+            "hooks/post-index-change",
+          ])
+        ).replace(/\n$/u, ""),
+      ),
     );
-    let hookDirectory: Stats | undefined;
-    try {
-      hookDirectory = await stat(hooks).catch(missing);
-    } catch (error) {
-      if (await hookIsAvailable(hooks)) throw error;
-    }
-    if (hookDirectory !== undefined && !hookDirectory.isDirectory()) {
-      // A file such as /dev/null disables hooks; keep that binding intact.
-      await rememberHook(hooks);
-    } else {
-      // Remember absent entrypoints to reject newly installed hooks before Git.
-      // Resolving each entry also protects executable symlink targets.
-      for (const hook of GIT_HOOKS)
-        await rememberHook(relativeFile(hooks, hook));
-    }
+    // A non-directory hooks parent is ordinary data. Bind its absent entries
+    // so validation detects hooks added after it becomes a directory.
+    for (const hook of GIT_HOOKS) await rememberHook(relativeFile(hooks, hook));
   };
   const selectedDirectories: string[] = [];
   for (const argument of ["--absolute-git-dir", "--git-common-dir"]) {
@@ -623,7 +634,8 @@ export async function capturePatchGitControls(
             inside(root, expected.canonical),
           ) &&
             (metadata?.dev !== expected.identity?.dev ||
-              metadata?.ino !== expected.identity?.ino))
+              metadata?.ino !== expected.identity?.ino ||
+              metadata?.isDirectory() !== expected.directory))
         )
           throw new Error(
             `Git configuration or hooks changed location during the patch: ${path}`,
@@ -825,7 +837,9 @@ export async function capturePatchGitControls(
       ...new Set([
         ...administrationRoots.keys(),
         ...[...controlPaths.values()]
-          .filter(({ identity }) => identity !== undefined)
+          .filter(
+            ({ identity, readOnly }) => identity !== undefined && readOnly,
+          )
           .map(({ canonical }) => canonical)
           .filter(
             (path) =>
