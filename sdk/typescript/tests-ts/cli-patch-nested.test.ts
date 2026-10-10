@@ -29,81 +29,228 @@ describe("patch change tracking", () => {
   afterEach(fixtures.cleanup);
   const publicationRepository = () => createPublicationRepository(fixtures);
 
-  test("publishes a committed nested update after assessing its content", async () => {
-    const { directory, git, remote } = await publicationRepository();
-    const nested = join(directory, "nested");
-    await mkdir(nested);
-    const nestedGit = repositoryGit(nested);
-    nestedGit("init", "--initial-branch=main");
-    nestedGit("config", "user.name", "Synthetic User");
-    nestedGit("config", "user.email", "synthetic@example.test");
-    await writeFile(join(nested, "app.ts"), "original\n");
-    nestedGit("add", ".");
-    nestedGit("commit", "-m", "Synthetic nested baseline");
-    git("add", "nested");
-    git("commit", "-m", "Synthetic gitlink");
-    const before = nestedGit("rev-parse", "HEAD");
-    let after = before;
-    let nestedIndex = await readFile(join(nested, ".git/index"));
-    let assessments = 0;
-    const outcome = await runWorkflow(
-      [
-        "patch",
-        "Synthetic issue",
-        "--assess-patch-risk",
-        "--create-pr",
-        "--json",
-      ],
-      {
-        currentDirectory: directory,
-        onRepositoryCommand: (command, args, cwd, options) =>
-          command === "git"
-            ? runGitRepositoryCommand(command, args, cwd, options)
-            : args[1] === "list"
-              ? "[]"
-              : "https://github.example.test/example/repository/pull/1",
-        onCodex: async (_args, output) => {
-          if (
-            output?.appServer?.prompt.includes(
-              "$codex-security:assess-patch-risk",
-            )
-          ) {
-            assessments++;
-            const artifact = JSON.parse(
-              output.appServer.prompt
-                .split("\n")
-                .find((line) => line.startsWith('{"path":'))!,
-            );
-            const patch = await readFile(artifact.path, "utf8");
-            expect(patch).toContain("-original");
-            expect(patch).toContain("+fixed");
-            expect(artifact.changedFiles).toContain("nested/app.ts");
-            output.stdout.write(patchRiskAssessment().report);
+  test.each([
+    "published",
+    "missing",
+    "published-deinit",
+    "missing-deinit",
+    "published-deinit-dangling",
+    "missing-deinit-dangling",
+    "published-deinit-renamed",
+    "missing-deinit-renamed",
+    "published-deinit-renamed-other-store",
+    "missing-deinit-renamed-other-store",
+    "push-no",
+    "submodule-false",
+  ])(
+    "publishes assessed nested updates with %s commits/settings",
+    async (mode) => {
+      const missing = mode.startsWith("missing");
+      const deinitialized = mode.includes("deinit");
+      const dangling = mode.endsWith("-dangling");
+      const renamed = mode.includes("-renamed");
+      const otherStore = mode.endsWith("-other-store");
+      const { directory, git, remote } = await publicationRepository();
+      const nested = join(directory, "nested");
+      await mkdir(nested);
+      const nestedGit = repositoryGit(nested);
+      nestedGit("init", "--initial-branch=main");
+      nestedGit("config", "user.name", "Synthetic User");
+      nestedGit("config", "user.email", "synthetic@example.test");
+      await writeFile(join(nested, "app.ts"), "original\n");
+      nestedGit("add", ".");
+      nestedGit("commit", "-m", "Synthetic nested baseline");
+      const nestedRemote = await fixtures.create("patch-nested-origin-");
+      git("clone", "--bare", nested, nestedRemote);
+      nestedGit("remote", "add", "origin", nestedRemote);
+      nestedGit("fetch", "origin");
+      git("config", "-f", ".gitmodules", "submodule.nested.path", "nested");
+      git("config", "-f", ".gitmodules", "submodule.nested.url", nestedRemote);
+      git("add", ".gitmodules");
+      git("add", "nested");
+      git("commit", "-m", "Synthetic gitlink");
+      git("submodule", "init");
+      git("submodule", "absorbgitdirs", "--", "nested");
+      const nestedGitDirectory = nestedGit("rev-parse", "--absolute-git-dir");
+      const nestedIndexPath = join(nestedGitDirectory, "index");
+      if (mode === "push-no") git("config", "push.recurseSubmodules", "no");
+      if (mode === "submodule-false")
+        git("config", "submodule.recurse", "false");
+      const before = nestedGit("rev-parse", "HEAD");
+      let after = before;
+      let nestedIndex = await readFile(nestedIndexPath);
+      let assessments = 0;
+      let creations = 0;
+      const onRepositoryCommand: NonNullable<
+        NonNullable<Parameters<typeof dependencies>[0]>["onRepositoryCommand"]
+      > = (command, args, cwd, options) => {
+        if (command === "git")
+          return runGitRepositoryCommand(command, args, cwd, options);
+        if (args[1] === "list") return "[]";
+        creations++;
+        return "https://github.example.test/example/repository/pull/1";
+      };
+      const outcome = await runWorkflow(
+        [
+          "patch",
+          "Synthetic issue",
+          "--assess-patch-risk",
+          "--create-pr",
+          "--json",
+        ],
+        {
+          currentDirectory: directory,
+          onRepositoryCommand,
+          onCodex: async (_args, output) => {
+            if (
+              output?.appServer?.prompt.includes(
+                "$codex-security:assess-patch-risk",
+              )
+            ) {
+              assessments++;
+              const artifact = JSON.parse(
+                output.appServer.prompt
+                  .split("\n")
+                  .find((line) => line.startsWith('{"path":'))!,
+              );
+              const patch = await readFile(artifact.path, "utf8");
+              expect(patch).toContain("-original");
+              expect(patch).toContain("+fixed");
+              expect(artifact.changedFiles).toContain("nested/app.ts");
+              output.stdout.write(patchRiskAssessment().report);
+              return 0;
+            }
+            if (dangling) nestedGit("checkout", "--detach");
+            await writeFile(join(nested, "app.ts"), "fixed\n");
+            nestedGit("commit", "-am", "Synthetic nested update");
+            after = nestedGit("rev-parse", "HEAD");
+            if (mode.startsWith("published"))
+              nestedGit("push", "origin", `${after}:refs/heads/main`);
+            nestedIndex = await readFile(nestedIndexPath);
+            if (deinitialized) {
+              git("add", "nested");
+              if (dangling) {
+                nestedGit("checkout", "--detach", before);
+                nestedIndex = await readFile(nestedIndexPath);
+              }
+              git("submodule", "deinit", "--force", "--", "nested");
+              if (renamed) {
+                git(
+                  "config",
+                  "--file",
+                  ".gitmodules",
+                  "--rename-section",
+                  "submodule.nested",
+                  "submodule.renamed",
+                );
+                if (otherStore) {
+                  const other = join(directory, ".git", "modules", "renamed");
+                  git("clone", "--bare", nestedGitDirectory, other);
+                  git(
+                    "--git-dir",
+                    other,
+                    "update-ref",
+                    "refs/remotes/other/main",
+                    after,
+                  );
+                }
+              }
+            }
+            output?.stdout.write("Fixed and checked.");
             return 0;
-          }
-          await writeFile(join(nested, "app.ts"), "fixed\n");
-          nestedGit("commit", "-am", "Synthetic nested update");
-          after = nestedGit("rev-parse", "HEAD");
-          nestedIndex = await readFile(join(nested, ".git/index"));
-          output?.stdout.write("Fixed and checked.");
-          return 0;
+          },
         },
-      },
-    );
-    expect(outcome.exitCode, outcome.stderr).toBe(0);
-    expect(assessments).toBe(1);
-    expect(after).not.toBe(before);
-    expect(git("ls-tree", "HEAD", "nested")).toBe(
-      `160000 commit ${after}\tnested`,
-    );
-    expect(
-      repositoryGit(remote)("ls-tree", git("rev-parse", "HEAD"), "nested"),
-    ).toBe(`160000 commit ${after}\tnested`);
-    expect(git("ls-remote", "origin")).toContain(git("rev-parse", "HEAD"));
-    expect(git("status", "--porcelain")).toBe("");
-    expect(await readFile(join(nested, ".git/index"))).toEqual(nestedIndex);
-    expect(await readFile(join(nested, "app.ts"), "utf8")).toBe("fixed\n");
-  });
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(missing ? 2 : 0);
+      const savedCommit = git("rev-parse", "HEAD");
+      if (missing) {
+        expect(outcome.stderr).toContain("--resume-pr");
+        expect(outcome.stderr).toContain(
+          deinitialized
+            ? "not available in its remote-tracking refs"
+            : "not be found on any remote",
+        );
+        expect(creations).toBe(0);
+        expect(git("ls-remote", "origin")).toBe("");
+        if (deinitialized) {
+          const refused = await runWorkflow(
+            ["patch", "--resume-pr", git("branch", "--show-current"), "--json"],
+            {
+              currentDirectory: directory,
+              onRepositoryCommand,
+              onCodex: () => {
+                throw new Error("Resuming must reuse the saved commit");
+              },
+            },
+          );
+          expect(refused.exitCode, refused.stderr).toBe(2);
+          expect(git("rev-parse", "HEAD")).toBe(savedCommit);
+          expect(git("ls-remote", "origin")).toBe("");
+          expect(creations).toBe(0);
+        }
+        nestedGit(
+          "--git-dir",
+          nestedGitDirectory,
+          "push",
+          "origin",
+          `${after}:refs/heads/main`,
+        );
+        const resumed = await runWorkflow(
+          ["patch", "--resume-pr", git("branch", "--show-current"), "--json"],
+          {
+            currentDirectory: directory,
+            onRepositoryCommand,
+            onCodex: () => {
+              throw new Error("Resuming must reuse the saved commit");
+            },
+          },
+        );
+        expect(resumed.exitCode, resumed.stderr).toBe(0);
+        expect(git("rev-parse", "HEAD")).toBe(savedCommit);
+      }
+      expect(creations).toBe(1);
+      expect(git("config", "--list")).not.toContain(
+        "push.recursesubmodules=check",
+      );
+      if (mode.startsWith("published") || missing) {
+        const checkout = await fixtures.create("patch-nested-checkout-");
+        git(
+          "clone",
+          "--branch",
+          git("branch", "--show-current"),
+          remote,
+          checkout,
+        );
+        repositoryGit(checkout)(
+          "-c",
+          "protocol.file.allow=always",
+          "submodule",
+          "update",
+          "--init",
+        );
+        expect(await readAppliedText(join(checkout, "nested/app.ts"))).toBe(
+          "fixed\n",
+        );
+      }
+      expect(assessments).toBe(1);
+      expect(after).not.toBe(before);
+      expect(git("ls-tree", "HEAD", "nested")).toBe(
+        `160000 commit ${after}\tnested`,
+      );
+      expect(
+        repositoryGit(remote)("ls-tree", git("rev-parse", "HEAD"), "nested"),
+      ).toBe(`160000 commit ${after}\tnested`);
+      expect(git("ls-remote", "origin")).toContain(git("rev-parse", "HEAD"));
+      expect(git("status", "--porcelain")).toBe("");
+      expect(await readFile(nestedIndexPath)).toEqual(nestedIndex);
+      if (deinitialized)
+        await expect(readFile(join(nested, "app.ts"))).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+      else
+        expect(await readFile(join(nested, "app.ts"), "utf8")).toBe("fixed\n");
+    },
+  );
 
   test.each(
     ["root", "package", "recursive"].flatMap((scope) =>
@@ -471,12 +618,14 @@ describe("patch change tracking", () => {
           "init-delete",
           "deinit",
           "deinit-dirty",
+          "deinit-commit",
         ].map((operation) => ({ recursive, scope, operation })),
       ),
     ),
   )(
     "reports submodule content changes for $operation from $scope: recursive=$recursive",
     async ({ recursive, scope, operation }) => {
+      const commitChange = operation.endsWith("-commit");
       const root = await fixtures.create("synthetic-submodule-state-");
       const origin = await fixtures.create("synthetic-submodule-origin-");
       const leaf = recursive
@@ -488,7 +637,7 @@ describe("patch change tracking", () => {
         git("config", "user.name", "Synthetic User");
         git("config", "user.email", "synthetic@example.test");
         await writeFile(join(directory, "app.ts"), "baseline\n");
-        if (operation === "init-commit") {
+        if (commitChange) {
           await writeFile(join(directory, "gone.ts"), "remove\n");
           await writeFile(join(directory, "unchanged.ts"), "unchanged\n");
         }
@@ -540,8 +689,8 @@ describe("patch change tracking", () => {
       }
       await writeFile(join(root, "unrelated.txt"), "staged local content\n");
       git("add", "unrelated.txt");
-      const index = await readFile(join(root, ".git/index"));
-      const staged = git("diff", "--cached");
+      let index = await readFile(join(root, ".git/index"));
+      let staged = git("diff", "--cached");
       const head = git("rev-parse", "HEAD");
       const onCodex = mock(
         async (
@@ -562,6 +711,7 @@ describe("patch change tracking", () => {
               `${prefix}/unchanged.ts`,
             );
             expect(artifact.changedFiles).toContain(`${prefix}/gone.ts`);
+            expect(artifact.changedFiles).toContain(`${prefix}/added.ts`);
             const verification = await fixtures.create(
               "initialized-risk-apply-",
             );
@@ -597,14 +747,20 @@ describe("patch change tracking", () => {
                 "utf8",
               ),
             ).toBe("unchanged\n");
+            expect(
+              await readAppliedText(join(verification, prefix, "added.ts")),
+            ).toBe("added\n");
+            expect(await readFile(join(root, ".git/index"))).toEqual(index);
             output.stdout.write(patchRiskAssessment().report);
             return 0;
           }
           if (operation.startsWith("init")) initialize();
-          if (operation === "init-commit") {
+          if (commitChange) {
             await writeFile(join(nested, "app.ts"), "fixed\n");
             await rm(join(nested, "gone.ts"));
+            await writeFile(join(nested, "added.ts"), "added\n");
             const child = repositoryGit(nested);
+            child("add", ".");
             child(
               "-c",
               "user.name=Synthetic User",
@@ -620,6 +776,21 @@ describe("patch change tracking", () => {
           if (operation === "init-new")
             await writeFile(join(nested, "new.ts"), "new fix\n");
           if (operation === "init-delete") await rm(join(nested, "app.ts"));
+          if (operation === "deinit-commit") {
+            if (recursive)
+              repositoryGit(join(root, "vendor"))(
+                "-c",
+                "user.name=Synthetic User",
+                "-c",
+                "user.email=synthetic@example.test",
+                "commit",
+                "-am",
+                "Synthetic recursive update",
+              );
+            git("add", "vendor");
+            index = await readFile(join(root, ".git/index"));
+            staged = git("diff", "--cached");
+          }
           if (operation.startsWith("deinit"))
             git("submodule", "deinit", "-f", "--all");
           output?.stdout.write("Prepared dependencies and checked the result.");
@@ -631,7 +802,7 @@ describe("patch change tracking", () => {
         [
           "patch",
           "Synthetic issue",
-          ...(operation === "init-commit" ? ["--assess-patch-risk"] : []),
+          ...(commitChange ? ["--assess-patch-risk"] : []),
           "--json",
         ],
         {
@@ -682,19 +853,23 @@ describe("patch change tracking", () => {
         applied: !clean,
         files: clean
           ? []
-          : operation === "init-commit"
-            ? [prefix, `${prefix}/app.ts`, `${prefix}/gone.ts`].map((file) =>
-                scope === "package" ? `../${file}` : file,
-              )
+          : commitChange
+            ? [
+                ...(operation === "deinit-commit" && recursive
+                  ? ["vendor"]
+                  : []),
+                prefix,
+                `${prefix}/added.ts`,
+                `${prefix}/app.ts`,
+                `${prefix}/gone.ts`,
+              ].map((file) => (scope === "package" ? `../${file}` : file))
             : operation === "init-new"
               ? [`${prefix}/new.ts`]
               : operation === "deinit-dirty"
                 ? [`${prefix}/app.ts`, `${prefix}/new.ts`]
                 : [`${prefix}/app.ts`],
       });
-      expect(onCodex, diagnostics).toHaveBeenCalledTimes(
-        operation === "init-commit" ? 2 : 1,
-      );
+      expect(onCodex, diagnostics).toHaveBeenCalledTimes(commitChange ? 2 : 1);
       expect(await readFile(join(root, ".git/index"))).toEqual(index);
       expect(git("diff", "--cached")).toBe(staged);
       expect(git("rev-parse", "HEAD")).toBe(head);

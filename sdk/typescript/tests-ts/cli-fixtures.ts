@@ -203,6 +203,7 @@ export class FakeSignals {
 
 export function dependencies(
   options: {
+    bulkScan?: MainDependencies["bulkScan"];
     onConfig?: (config: CodexSecurityConfig) => void;
     onTurn?: (repository: string, options: ScanOptions) => void;
     onRun?: () => void;
@@ -214,7 +215,6 @@ export function dependencies(
     onRepositoryCommand?: (
       ...arguments_: Parameters<MainDependencies["runRepositoryCommand"]>
     ) => string | Promise<string>;
-    bulkScan?: MainDependencies["bulkScan"];
     onWorkbench?: (
       args: readonly string[],
       input?: string,
