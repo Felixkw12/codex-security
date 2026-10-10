@@ -25,7 +25,7 @@ export interface InspectedExecutable {
 export async function resolveTrustedExecutable(
   candidate: string,
   environment: Readonly<Record<string, string | undefined>>,
-  protectedRoot: string,
+  protectedRoot: string | readonly string[],
   additionalProtectedRoots: readonly string[] = [],
 ): Promise<TrustedExecutable | null> {
   const inspected = await inspectTrustedExecutable(
@@ -42,15 +42,16 @@ export async function resolveTrustedExecutable(
 export async function inspectTrustedExecutable(
   candidate: string,
   environment: Readonly<Record<string, string | undefined>>,
-  protectedRoot: string,
+  protectedRoot: string | readonly string[],
   additionalProtectedRoots: readonly string[] = [],
 ): Promise<InspectedExecutable> {
   const roots = await Promise.all(
-    [protectedRoot, ...additionalProtectedRoots].map((root) =>
-      realpath(root).catch(() => resolve(root)),
-    ),
+    [
+      ...(typeof protectedRoot === "string" ? [protectedRoot] : protectedRoot),
+      ...additionalProtectedRoots,
+    ].map((root) => realpath(root).catch(() => resolve(root))),
   );
-  const protectedPath = (path: string) =>
+  const isProtected = (path: string) =>
     roots.some((root) => isWithin(root, path));
   const path =
     environment["PATH"] ??
@@ -68,7 +69,7 @@ export async function inspectTrustedExecutable(
     }
     if (entry.length === 0) continue;
     const canonical = await realpath(entry).catch(() => null);
-    if (canonical === null || protectedPath(canonical)) continue;
+    if (canonical === null || isProtected(canonical)) continue;
     if (!entries.includes(canonical)) entries.push(canonical);
   }
 
@@ -95,7 +96,10 @@ export async function inspectTrustedExecutable(
   const candidates = pathLike
     ? extensions.map((extension) => ({
         entry: null,
-        path: resolve(`${candidate}${extension.suffix}`),
+        path:
+          process.platform === "win32"
+            ? resolve(`${candidate}${extension.suffix}`)
+            : candidate,
         runnable: extension.runnable,
       }))
     : entries.flatMap((entry) =>
@@ -110,7 +114,7 @@ export async function inspectTrustedExecutable(
   for (const current of candidates) {
     const canonical = await realpath(current.path).catch(() => null);
     if (canonical === null) continue;
-    if (protectedPath(canonical)) {
+    if (isProtected(canonical)) {
       if (current.entry !== null) unsafeEntries.add(current.entry);
       continue;
     }
@@ -130,8 +134,7 @@ export async function inspectTrustedExecutable(
         ? join(await realpath(dirname(current.path)), basename(current.path))
         : current.path;
       executable ??=
-        pathLike &&
-        (protectedPath(current.path) || protectedPath(invocationPath))
+        pathLike && (isProtected(current.path) || isProtected(invocationPath))
           ? canonical
           : invocationPath;
     } catch {

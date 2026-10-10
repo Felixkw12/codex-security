@@ -487,12 +487,15 @@ process.exit(result.status ?? 1);
       "ssh-uri-git+ssh-api-port",
       "ssh-uri-ssh+git-api-port",
       "ssh-enterprise",
+      "ssh-enterprise-www",
+      "https-enterprise-www",
       "scp",
       "scp-userless",
       "scp-ipv6",
       "scp-ipv6-userless",
       "scp-ipv6-api",
       "scp-expanded-ipv6-api",
+      "ssh-uri-alias-ipv6-api",
       "scp-ipv6-scoped",
       "scp-ipv6-scoped-userless",
       "scp-percent",
@@ -550,17 +553,18 @@ process.exit(result.status ?? 1);
         environment["GIT_SSH_COMMAND"] ??
         coreCommand ??
         (environment["GIT_SSH"] === undefined ? "ssh" : '"$GIT_SSH"');
-      const alias = transport.includes("ipv6")
-        ? transport.includes("scoped")
-          ? "[fe80::1%lo]"
-          : transport.endsWith("ipv6-api")
-            ? transport.includes("expanded")
-              ? "[0:0:0:0:0:0:0:1]"
-              : "[::1]"
-            : "[2001:db8::1]"
-        : transport.endsWith("-mixed")
-          ? "GitHub-Work"
-          : "github-work";
+      const alias =
+        transport.includes("ipv6") && transport !== "ssh-uri-alias-ipv6-api"
+          ? transport.includes("scoped")
+            ? "[fe80::1%lo]"
+            : transport.endsWith("ipv6-api")
+              ? transport.includes("expanded")
+                ? "[0:0:0:0:0:0:0:1]"
+                : "[::1]"
+              : "[2001:db8::1]"
+          : transport.endsWith("-mixed")
+            ? "GitHub-Work"
+            : "github-work";
       const localFirst = [
         "local-first",
         "file-first",
@@ -571,9 +575,11 @@ process.exit(result.status ?? 1);
       const apiPort = transport.endsWith("-api-port") ? ":8443" : "";
       const hostingHost = transport.endsWith("ipv6-api")
         ? "[::1]"
-        : transport === "ssh-enterprise" || apiPort
-          ? "enterprise.example.test"
-          : "github.com";
+        : transport.endsWith("-www")
+          ? "www.enterprise.example.test"
+          : transport === "ssh-enterprise" || apiPort
+            ? "enterprise.example.test"
+            : "github.com";
       const hostingUrl = `https://${hostingHost}${apiPort}`;
       if (apiPort)
         environment["GH_REPO"] = `${hostingHost}${apiPort}/upstream/repository`;
@@ -591,7 +597,7 @@ process.exit(result.status ?? 1);
         ? "example/repository%2Dname.git"
         : "example/repository.git";
       const pushRemote =
-        transport === "https-api-port"
+        transport === "https-api-port" || transport === "https-enterprise-www"
           ? `${hostingUrl}/push-owner/repository.git`
           : transport === "www-scp"
             ? "git@www.github.com:push-owner/repository.git"
@@ -618,8 +624,8 @@ process.exit(result.status ?? 1);
                           : transport === "ssh-api" ||
                               transport === "ssh-api-port"
                             ? `git@${hostingHost}:push-owner/repository.git`
-                            : transport === "ssh-enterprise"
-                              ? "git@enterprise.example.test:push-owner/other-repository.git"
+                            : transport.startsWith("ssh-enterprise")
+                              ? `git@${hostingHost}:push-owner/other-repository.git`
                               : transport.startsWith("scp")
                                 ? `${remoteUser}@${alias}:${transport.includes("absolute") ? "/" : ""}${repositoryPath}`
                                 : transport.startsWith("ssh-uri")
@@ -642,7 +648,7 @@ process.exit(result.status ?? 1);
               ? `${hostingHost}/push-owner/old-name`
               : transport === "transferred"
                 ? `${hostingHost}/old-owner/repository`
-                : transport === "ssh-enterprise"
+                : transport.startsWith("ssh-enterprise")
                   ? `${hostingHost}/push-owner/other-repository`
                   : localFirst ||
                       mirror ||
@@ -656,12 +662,13 @@ process.exit(result.status ?? 1);
                         "ssh-api",
                         "ssh-api-port",
                         "https-api-port",
+                        "https-enterprise-www",
                       ].includes(transport)
                     ? `${hostingHost}${apiPort}/push-owner/repository`
                     : `${hostingHost}${apiPort}/example/${transport === "scp-percent" ? "repository%2Dname" : transport === "ssh-uri-percent" ? "repository-name" : "repository"}`;
       const sshArguments = [
         ...(transport.startsWith("ssh-uri") ? ["-p", "2222"] : []),
-        transport.includes("ipv6")
+        alias.startsWith("[")
           ? `${transport.endsWith("userless") ? "" : "git@"}${alias.slice(1, -1)}`
           : transport === "scp-userless"
             ? "github.com"
@@ -787,6 +794,7 @@ process.exit(result.status ?? 1);
                 pushes++;
                 expect(args).toEqual([
                   "push",
+                  "--recurse-submodules=check",
                   "--set-upstream",
                   `--force-with-lease=refs/heads/${branch}:`,
                   "origin",
@@ -796,6 +804,7 @@ process.exit(result.status ?? 1);
                   command,
                   [
                     "push",
+                    "--recurse-submodules=check",
                     "--set-upstream",
                     `--force-with-lease=refs/heads/${branch}:`,
                     remote,
