@@ -4,13 +4,19 @@ import {
   lstat,
   mkdir,
   readFile,
+  readlink,
   rename,
+  symlink,
   unlink,
   writeFile,
 } from "node:fs/promises";
 import { join } from "node:path";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
-import { repositoryGit, type runWorkflow } from "./cli-patch-fixtures.js";
+import {
+  repositoryGit,
+  runGitRepositoryCommand,
+  runWorkflow,
+} from "./cli-patch-fixtures.js";
 
 const fixtures = createTemporaryDirectories(true);
 afterEach(fixtures.cleanup);
@@ -46,10 +52,10 @@ async function runBounded(script: string, cwd: string) {
   }
 }
 
-for (const name of ["HEAD", "commondir"] as const) {
+for (const name of ["HEAD", "commondir", "config"] as const) {
   for (const introduced of [false, true]) {
     test.skipIf(process.platform === "win32")(
-      `patch rejects a ${name} FIFO before nested Git reads (introduced during turn: ${introduced})`,
+      `patch rejects a ${name} FIFO before reading it (introduced during turn: ${introduced})`,
       async () => {
         const root = await fixtures.create("patch-special-metadata-");
         const support = await fixtures.create("patch-special-metadata-probe-");
@@ -81,9 +87,10 @@ for (const name of ["HEAD", "commondir"] as const) {
         const nestedIndex = await readFile(join(metadata, "index"));
         const head = git("rev-parse", "HEAD");
         const saved = join(support, "administration");
-        if (introduced) await rename(metadata, saved);
-        else {
-          if (name === "HEAD") await unlink(join(metadata, name));
+        if (introduced && name !== "config") await rename(metadata, saved);
+        else if (!introduced) {
+          if (name === "HEAD" || name === "config")
+            await unlink(join(metadata, name));
           execFileSync("mkfifo", [join(metadata, name)]);
         }
         const script = join(support, "probe.test.ts");
@@ -106,15 +113,17 @@ process.stdout.write("PROBE_READY\\n");
 const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
   currentDirectory: root,
   onRepositoryCommand: (command, args, cwd, options) => {
-    if (args.some((arg) => arg === nested || arg.startsWith(metadata))) nestedCommands.push(args);
+    if (args.some((arg) => arg === nested || arg.startsWith(metadata))) nestedCommands.push({ cwd, args });
     if (launches > 0 && args.some((arg) => ["add", "read-tree", "update-index", "write-tree"].includes(arg))) bookkeeping.push(args);
     return runGitRepositoryCommand(command, args, cwd, options);
   },
   onCodex: async (_args, output) => {
     launches++;
     if (${introduced}) {
-      await rename(${JSON.stringify(saved)}, metadata);
-      if (${JSON.stringify(name)} === "HEAD") await unlink(join(metadata, ${JSON.stringify(name)}));
+      // Existing config was valid during capture; observe only post-mutation reads.
+      if (${JSON.stringify(name)} === "config") nestedCommands.length = 0;
+      else await rename(${JSON.stringify(saved)}, metadata);
+      if (["HEAD", "config"].includes(${JSON.stringify(name)})) await unlink(join(metadata, ${JSON.stringify(name)}));
       execFileSync("mkfifo", [join(metadata, ${JSON.stringify(name)})]);
     }
     await writeFile(join(root, "app.ts"), "after\\n");
@@ -134,7 +143,7 @@ process.stdout.write(JSON.stringify({ ...outcome, launches, nestedCommands, book
         expect(result.code, result.stderr).toBe(0);
         const outcome: Awaited<ReturnType<typeof runWorkflow>> & {
           launches: number;
-          nestedCommands: string[][];
+          nestedCommands: { cwd: string; args: string[] }[];
           bookkeeping: string[][];
         } = JSON.parse(result.stdout.slice(readyOffset + readyMarker.length));
         expect(outcome.exitCode, outcome.stderr).toBe(2);
@@ -143,7 +152,16 @@ process.stdout.write(JSON.stringify({ ...outcome, launches, nestedCommands, book
         );
         expect(outcome.stderr).toContain(join(metadata, name));
         expect(outcome.launches).toBe(introduced ? 1 : 0);
-        expect(outcome.nestedCommands).toEqual([]);
+        expect(outcome.nestedCommands).toEqual(
+          name === "config"
+            ? [
+                {
+                  cwd: root,
+                  args: ["rev-parse", "--resolve-git-dir", metadata],
+                },
+              ]
+            : [],
+        );
         expect(outcome.bookkeeping).toEqual([]);
         expect((await lstat(join(metadata, name))).isFIFO()).toBe(true);
         expect(
@@ -163,3 +181,56 @@ process.stdout.write(JSON.stringify({ ...outcome, launches, nestedCommands, book
     );
   }
 }
+
+test.skipIf(process.platform === "win32")(
+  "patch accepts an empty nested Git configuration supplied by /dev/null",
+  async () => {
+    const root = await fixtures.create("patch-empty-device-config-");
+    const nested = join(root, "source");
+    await mkdir(nested);
+    await writeFile(join(root, "app.ts"), "before\n");
+    await writeFile(join(nested, "input.ts"), "fixture source\n");
+    const initialize = (directory: string) => {
+      const git = repositoryGit(directory);
+      git("init", "--initial-branch=main");
+      git("config", "user.name", "Synthetic User");
+      git("config", "user.email", "synthetic@example.test");
+      git("add", ".");
+      git("commit", "-m", "Synthetic device config baseline");
+      return git;
+    };
+    const git = initialize(root);
+    const nestedGit = initialize(nested);
+    const config = join(nested, ".git", "config");
+    await unlink(config);
+    await symlink("/dev/null", config);
+    expect(nestedGit("rev-parse", "--show-toplevel")).toBe(nested);
+    const head = git("rev-parse", "HEAD");
+    const nestedHead = nestedGit("rev-parse", "HEAD");
+    const index = await readFile(join(root, ".git", "index"));
+    const nestedIndex = await readFile(join(nested, ".git", "index"));
+    let launches = 0;
+    const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
+      currentDirectory: root,
+      onRepositoryCommand: runGitRepositoryCommand,
+      onCodex: async (_args, output) => {
+        launches++;
+        await writeFile(join(root, "app.ts"), "after\n");
+        output?.stdout.write("Synthetic patch complete.\n");
+        return 0;
+      },
+    });
+    expect(outcome.exitCode, outcome.stderr).toBe(0);
+    expect(launches).toBe(1);
+    expect(JSON.parse(outcome.stdout).files).toEqual(["app.ts"]);
+    expect(await readlink(config)).toBe("/dev/null");
+    expect(git("rev-parse", "HEAD")).toBe(head);
+    expect(nestedGit("rev-parse", "HEAD")).toBe(nestedHead);
+    expect(await readFile(join(root, ".git", "index"))).toEqual(index);
+    expect(await readFile(join(nested, ".git", "index"))).toEqual(nestedIndex);
+    expect(await readFile(join(nested, "input.ts"), "utf8")).toBe(
+      "fixture source\n",
+    );
+    expect(await readFile(join(root, "app.ts"), "utf8")).toBe("after\n");
+  },
+);
