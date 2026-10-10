@@ -420,6 +420,7 @@ export async function capturePatchGitControls(
       identity: { dev: bigint; ino: bigint } | undefined;
       directory: boolean | undefined;
       readOnly: boolean;
+      allowDirectoryChanges: boolean;
     }
   >();
   const inaccessibleIncludes = new Set<string>();
@@ -436,19 +437,19 @@ export async function capturePatchGitControls(
     const canonical = await canonicalPath(path);
     const metadata = await stat(canonical, { bigint: true }).catch(missing);
     const directory = metadata?.isDirectory();
+    const previous = controlPaths.get(path);
     controlPaths.set(path, {
       canonical,
       identity: metadata && { dev: metadata.dev, ino: metadata.ino },
       directory,
-      readOnly:
-        protectDirectory ||
-        !directory ||
-        controlPaths.get(path)?.readOnly === true,
+      readOnly: protectDirectory || !directory || previous?.readOnly === true,
+      allowDirectoryChanges:
+        !protectDirectory && previous?.allowDirectoryChanges !== false,
     });
   };
   const rememberHook = async (path: string): Promise<void> => {
     try {
-      // Track directories by identity so ordinary descendants remain writable.
+      // Directories are ordinary data; a file appearing here remains bound.
       await rememberControl(path, false);
     } catch (error) {
       // Git skips hooks that fail access(X_OK), including unreadable paths.
@@ -519,7 +520,7 @@ export async function capturePatchGitControls(
           : checkout;
         const includePath = relativeFile(relativeTo, path);
         try {
-          await rememberControl(includePath);
+          await rememberControl(includePath, !key.startsWith("includeif."));
         } catch (error) {
           // Git's successful --includes read above already required access to
           // active includes. An inaccessible conditional path was not selected.
@@ -628,6 +629,14 @@ export async function capturePatchGitControls(
       for (const [path, expected] of controlPaths) {
         const canonical = await canonicalPath(path);
         const metadata = await stat(canonical, { bigint: true }).catch(missing);
+        // An absent entry or directory cannot supply hook/configuration bytes.
+        // Keep file activation and overlapping configuration roles bound.
+        if (
+          expected.allowDirectoryChanges &&
+          (expected.identity === undefined || expected.directory === true) &&
+          (metadata === undefined || metadata.isDirectory())
+        )
+          continue;
         if (
           canonical !== expected.canonical ||
           (![...administrationRoots.keys()].some((root) =>
