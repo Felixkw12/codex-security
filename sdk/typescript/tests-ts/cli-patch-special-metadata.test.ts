@@ -52,10 +52,16 @@ async function runBounded(script: string, cwd: string) {
   }
 }
 
-for (const name of ["HEAD", "commondir", "config"] as const) {
+for (const name of [
+  "HEAD",
+  "commondir",
+  "config",
+  "config.worktree",
+  "included-config",
+] as const) {
   for (const introduced of [false, true]) {
     test.skipIf(process.platform === "win32")(
-      `patch rejects a ${name} FIFO before reading it (introduced during turn: ${introduced})`,
+      `patch leaves a ${name} FIFO in ordinary tracked fixture data unread (introduced during turn: ${introduced})`,
       async () => {
         const root = await fixtures.create("patch-special-metadata-");
         const support = await fixtures.create("patch-special-metadata-probe-");
@@ -83,11 +89,16 @@ for (const name of ["HEAD", "commondir", "config"] as const) {
           { mode: 0o755 },
         );
         nestedGit("config", "core.fsmonitor", hook);
+        if (name === "config.worktree")
+          nestedGit("config", "extensions.worktreeConfig", "true");
+        if (name === "included-config")
+          nestedGit("config", "include.path", name);
         const index = await readFile(join(root, ".git", "index"));
         const nestedIndex = await readFile(join(metadata, "index"));
         const head = git("rev-parse", "HEAD");
         const saved = join(support, "administration");
-        if (introduced && name !== "config") await rename(metadata, saved);
+        const moveAdministration = name === "HEAD" || name === "commondir";
+        if (introduced && moveAdministration) await rename(metadata, saved);
         else if (!introduced) {
           if (name === "HEAD" || name === "config")
             await unlink(join(metadata, name));
@@ -108,21 +119,19 @@ const metadata = ${JSON.stringify(metadata)};
 test("bounded special metadata probe", async () => {
 let launches = 0;
 const nestedCommands = [];
-const bookkeeping = [];
+let controls = [];
 process.stdout.write("PROBE_READY\\n");
 const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
   currentDirectory: root,
   onRepositoryCommand: (command, args, cwd, options) => {
     if (args.some((arg) => arg === nested || arg.startsWith(metadata))) nestedCommands.push({ cwd, args });
-    if (launches > 0 && args.some((arg) => ["add", "read-tree", "update-index", "write-tree"].includes(arg))) bookkeeping.push(args);
     return runGitRepositoryCommand(command, args, cwd, options);
   },
   onCodex: async (_args, output) => {
     launches++;
+    controls = output?.appServer?.permissions?.readOnlyPaths ?? [];
     if (${introduced}) {
-      // Existing config was valid during capture; observe only post-mutation reads.
-      if (${JSON.stringify(name)} === "config") nestedCommands.length = 0;
-      else await rename(${JSON.stringify(saved)}, metadata);
+      if (${moveAdministration}) await rename(${JSON.stringify(saved)}, metadata);
       if (["HEAD", "config"].includes(${JSON.stringify(name)})) await unlink(join(metadata, ${JSON.stringify(name)}));
       execFileSync("mkfifo", [join(metadata, ${JSON.stringify(name)})]);
     }
@@ -131,7 +140,7 @@ const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
     return 0;
   },
 });
-process.stdout.write(JSON.stringify({ ...outcome, launches, nestedCommands, bookkeeping }));
+process.stdout.write(JSON.stringify({ ...outcome, launches, nestedCommands, controls }));
 }, 30_000);
 `,
         );
@@ -144,25 +153,13 @@ process.stdout.write(JSON.stringify({ ...outcome, launches, nestedCommands, book
         const outcome: Awaited<ReturnType<typeof runWorkflow>> & {
           launches: number;
           nestedCommands: { cwd: string; args: string[] }[];
-          bookkeeping: string[][];
+          controls: string[];
         } = JSON.parse(result.stdout.slice(readyOffset + readyMarker.length));
-        expect(outcome.exitCode, outcome.stderr).toBe(2);
-        expect(outcome.stderr).toContain(
-          "Patch cannot safely inspect non-regular Git metadata:",
-        );
-        expect(outcome.stderr).toContain(join(metadata, name));
-        expect(outcome.launches).toBe(introduced ? 1 : 0);
-        expect(outcome.nestedCommands).toEqual(
-          name === "config"
-            ? [
-                {
-                  cwd: root,
-                  args: ["rev-parse", "--resolve-git-dir", metadata],
-                },
-              ]
-            : [],
-        );
-        expect(outcome.bookkeeping).toEqual([]);
+        expect(outcome.exitCode, outcome.stderr).toBe(0);
+        expect(outcome.launches).toBe(1);
+        expect(outcome.nestedCommands).toEqual([]);
+        expect(outcome.controls).not.toContain(metadata);
+        expect(JSON.parse(outcome.stdout).files).toEqual(["app.ts"]);
         expect((await lstat(join(metadata, name))).isFIFO()).toBe(true);
         expect(
           await readFile(join(nested, "hook-effect")).catch(() => null),
@@ -173,9 +170,7 @@ process.stdout.write(JSON.stringify({ ...outcome, launches, nestedCommands, book
         expect(await readFile(join(nested, "input.ts"), "utf8")).toBe(
           "fixture source\n",
         );
-        expect(await readFile(join(root, "app.ts"), "utf8")).toBe(
-          introduced ? "after\n" : "before\n",
-        );
+        expect(await readFile(join(root, "app.ts"), "utf8")).toBe("after\n");
       },
       15_000,
     );

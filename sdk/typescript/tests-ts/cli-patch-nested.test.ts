@@ -309,6 +309,7 @@ describe("patch change tracking", () => {
         onRepositoryCommand: (command, args, cwd, options) => {
           if (
             afterTurn &&
+            !args.includes("core.hooksPath=/dev/null") &&
             args.some((value) =>
               ["add", "read-tree", "update-index", "write-tree"].includes(
                 value,
@@ -465,6 +466,7 @@ describe("patch change tracking", () => {
           onRepositoryCommand: (command, args, cwd, options) => {
             if (
               afterTurn &&
+              !args.includes("core.hooksPath=/dev/null") &&
               args.some((value) =>
                 ["add", "read-tree", "update-index", "write-tree"].includes(
                   value,
@@ -1102,6 +1104,7 @@ describe("patch change tracking", () => {
           onRepositoryCommand: (command, args, cwd, options) => {
             if (
               afterTurn &&
+              !args.includes("core.hooksPath=/dev/null") &&
               args.some((value) =>
                 ["add", "read-tree", "update-index", "write-tree"].includes(
                   value,
@@ -1119,9 +1122,15 @@ describe("patch change tracking", () => {
             if (index !== undefined) {
               expect(cwd).toBe(root);
               const checkout = args[0] === "-C" ? args[1]! : cwd;
-              const indices = snapshots.get(checkout) ?? new Set<string>();
-              indices.add(index);
-              snapshots.set(checkout, indices);
+              if (args.includes("core.hooksPath=/dev/null")) {
+                expect(args).toContain("core.fsmonitor=false");
+                expect(index).not.toBe(join(checkout, ".git", "index"));
+                expect(index).not.toBe(alternateIndex);
+              } else {
+                const indices = snapshots.get(checkout) ?? new Set<string>();
+                indices.add(index);
+                snapshots.set(checkout, indices);
+              }
             }
             const environment = { ...gitEnvironment, ...options?.environment };
             if (

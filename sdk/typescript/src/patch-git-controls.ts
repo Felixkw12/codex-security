@@ -42,13 +42,48 @@ const GIT_HOOKS = [
   "post-index-change",
 ];
 
+export interface PatchGitCommandOptions {
+  readonly encoding?: "base64";
+  readonly nestedProbe?: boolean;
+  readonly indexFile?: string;
+  readonly input?: string;
+}
+
 type RunGit = (
   root: string,
   directory: string,
   args: string[],
-  encoding?: "base64",
-  nestedProbe?: boolean,
+  options?: PatchGitCommandOptions,
 ) => Promise<string>;
+
+type RunIndexGit = (
+  args: string[],
+  options?: PatchGitCommandOptions,
+) => Promise<string>;
+
+export async function withPatchGitIndex<T>(
+  run: RunIndexGit,
+  inspect: (run: RunIndexGit) => Promise<T>,
+): Promise<T> {
+  const directory = await mkdtemp(join(tmpdir(), "codex-security-patch-tree-"));
+  const indexFile = join(directory, "index");
+  const indexed: RunIndexGit = (args, options) =>
+    run(args, { ...options, indexFile });
+  try {
+    const heads = await indexed(["rev-parse", "--revs-only", "HEAD"]);
+    await indexed(["read-tree", ...(heads.trim() ? ["HEAD"] : ["--empty"])]);
+    const entries = await run(["ls-files", "--stage", "--full-name", "-z"]);
+    await indexed(["update-index", "-z", "--index-info"], {
+      input: entries.replaceAll(
+        /(^|\0)([0-7]+ [a-f\d]+) [123]\t/gu,
+        "$1$2 0\t",
+      ),
+    });
+    return await inspect(indexed);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
 
 export interface PatchGitControls {
   readonly readOnlyPaths: readonly string[];
@@ -105,9 +140,27 @@ async function readGitMarker(
     : undefined;
 }
 
+function hasNoWorktree(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const failure = error as Error & {
+    code?: unknown;
+    status?: unknown;
+    stderr?: unknown;
+  };
+  const diagnostic = Buffer.isBuffer(failure.stderr)
+    ? failure.stderr.toString("utf8")
+    : failure.stderr;
+  return (
+    (failure.code === 128 || failure.status === 128) &&
+    typeof diagnostic === "string" &&
+    /fatal: this operation must be run in a work tree\r?\n$/u.test(diagnostic)
+  );
+}
+
 async function markerDirectories(
   directory: string,
   isGitDirectory: (path: string, contents?: Buffer | true) => Promise<boolean>,
+  commonDirectory?: string,
 ): Promise<string[] | undefined> {
   const marker = join(directory, ".git");
   const contents = await readGitMarker(marker);
@@ -127,6 +180,7 @@ async function markerDirectories(
   ).catch(missing);
   if (gitDirectory === undefined) return undefined;
   if (!(await stat(gitDirectory)).isDirectory()) return undefined;
+  if (commonDirectory !== undefined) return [gitDirectory, commonDirectory];
   const commonBytes = await readFile(join(gitDirectory, "commondir")).catch(
     missing,
   );
@@ -213,6 +267,7 @@ export async function capturePatchGitControls(
   directory: string,
   run: RunGit,
   usesWorktreeMarker: boolean,
+  usesCommonDirectoryMarker = true,
 ): Promise<PatchGitControls | undefined> {
   const runBytes = async (
     root: string,
@@ -221,7 +276,7 @@ export async function capturePatchGitControls(
     nestedProbe?: boolean,
   ) =>
     Buffer.from(
-      await run(root, checkout, args, "base64", nestedProbe),
+      await run(root, checkout, args, { encoding: "base64", nestedProbe }),
       "base64",
     );
   const runControl = async (root: string, checkout: string, args: string[]) =>
@@ -473,8 +528,25 @@ export async function capturePatchGitControls(
     selectedDirectories.push(path);
     await remember(path);
   }
+  const selectedCommonDirectory = usesCommonDirectoryMarker
+    ? undefined
+    : selectedDirectories[1];
+  for (const argument of [
+    ...(usesWorktreeMarker ? [] : ["--git-dir"]),
+    ...(usesCommonDirectoryMarker ? [] : ["--git-common-dir"]),
+  ]) {
+    await rememberControl(
+      relativeFile(
+        root,
+        (await runControl(root, root, ["rev-parse", argument])).replace(
+          /\n$/u,
+          "",
+        ),
+      ),
+    );
+  }
   const selectedMarker = usesWorktreeMarker
-    ? await markerDirectories(root, isGitDirectory)
+    ? await markerDirectories(root, isGitDirectory, selectedCommonDirectory)
     : undefined;
   const discover = async (capture: boolean): Promise<void> => {
     const protectedRoots = capture
@@ -523,7 +595,11 @@ export async function capturePatchGitControls(
       const marker =
         selectedMarker === undefined
           ? undefined
-          : await markerDirectories(root, isGitDirectory);
+          : await markerDirectories(
+              root,
+              isGitDirectory,
+              selectedCommonDirectory,
+            );
       if (
         selectedDirectories.some((path) => !protectedRoots.includes(path)) ||
         (selectedMarker !== undefined &&
@@ -544,6 +620,7 @@ export async function capturePatchGitControls(
           "Nested Git checkout resolves outside the selected repository.",
         );
       if (visited.has(canonical)) return;
+      let naturalWorktree = true;
       if (canonical !== root) {
         const directories = await markerDirectories(
           checkout,
@@ -565,7 +642,7 @@ export async function capturePatchGitControls(
           throw new Error(
             `Patch cannot safely inspect non-regular Git metadata: ${config}`,
           );
-        let worktree: string;
+        let worktree: string | undefined;
         try {
           worktree = await realControlPath(
             (
@@ -573,56 +650,68 @@ export async function capturePatchGitControls(
             ).replace(/\n$/u, ""),
           );
         } catch (error) {
-          if (!(error instanceof Error)) throw error;
-          const failure = error as Error & {
-            code?: unknown;
-            status?: unknown;
-            stderr?: unknown;
-          };
-          const diagnostic = Buffer.isBuffer(failure.stderr)
-            ? failure.stderr.toString("utf8")
-            : failure.stderr;
-          if (
-            (failure.code !== 128 && failure.status !== 128) ||
-            typeof diagnostic !== "string" ||
-            !/fatal: this operation must be run in a work tree\r?\n$/u.test(
-              diagnostic,
-            )
-          )
-            throw error;
-          // Bare fixtures have no worktree inventory, but their administration
-          // and referenced configuration remain protected during the patch.
-          if (capture) await captureReferences(checkout);
-          return;
+          if (!hasNoWorktree(error)) throw error;
+          naturalWorktree = false;
         }
-        if (relative(canonical, worktree) !== "")
+        if (worktree !== undefined && relative(canonical, worktree) !== "")
           throw new Error(
             "Git's worktree root does not match the selected checkout's .git marker. Select the intended checkout explicitly or fix its Git configuration.",
           );
       }
-      visited.add(canonical);
       if (capture) await captureReferences(checkout);
-      const [tracked, untracked] = await Promise.all([
-        runBytes(root, checkout, [
-          "-c",
-          "core.fsmonitor=false",
-          "ls-files",
-          "--cached",
-          "--stage",
-          "--full-name",
-          "-z",
-        ]),
-        runBytes(root, checkout, [
-          "-c",
-          "core.fsmonitor=false",
-          "ls-files",
-          "--others",
-          "--exclude-standard",
-          "--full-name",
-          "-z",
-        ]),
-      ]);
-      const candidates = new Map<string, boolean>();
+      let tracked: Buffer;
+      let untracked: Buffer;
+      try {
+        [tracked, untracked] = await withPatchGitIndex(
+          (args, options) =>
+            run(
+              root,
+              checkout,
+              [
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "core.fsmonitor=false",
+                ...args,
+              ],
+              options,
+            ),
+          async (indexed) => {
+            const outputs = await Promise.all([
+              indexed(
+                ["ls-files", "--cached", "--stage", "--full-name", "-z"],
+                {
+                  encoding: "base64",
+                },
+              ),
+              indexed(
+                [
+                  "ls-files",
+                  "--others",
+                  "--exclude-standard",
+                  "--full-name",
+                  "-z",
+                ],
+                {
+                  encoding: "base64",
+                },
+              ),
+            ]);
+            return outputs.map((output) => Buffer.from(output, "base64")) as [
+              Buffer,
+              Buffer,
+            ];
+          },
+        );
+      } catch (error) {
+        if (!naturalWorktree && hasNoWorktree(error)) return;
+        throw error;
+      }
+      visited.add(canonical);
+      const candidates = new Map<
+        string,
+        { gitlink: boolean; selected: boolean }
+      >();
       const add = async (
         path: string,
         directory: boolean,
@@ -639,11 +728,13 @@ export async function capturePatchGitControls(
         let candidate = resolve(checkout, readable.path);
         gitlink &&= readable.exact;
         while (candidate !== checkout && inside(checkout, candidate)) {
-          candidates.set(
-            candidate,
-            (candidates.get(candidate) ?? false) || gitlink,
-          );
+          const previous = candidates.get(candidate);
+          candidates.set(candidate, {
+            gitlink: (previous?.gitlink ?? false) || gitlink,
+            selected: (previous?.selected ?? false) || readable.exact,
+          });
           gitlink = false;
+          readable.exact = false;
           candidate = dirname(candidate);
         }
       };
@@ -651,16 +742,16 @@ export async function capturePatchGitControls(
         .toString("latin1")
         .split("\0")
         .filter(Boolean)) {
-        const gitlink = entry.startsWith("160000 ");
-        await add(entry.slice(entry.indexOf("\t") + 1), gitlink, gitlink);
+        if (entry.startsWith("160000 "))
+          await add(entry.slice(entry.indexOf("\t") + 1), true, true);
       }
       for (const path of untracked
         .toString("latin1")
         .split("\0")
         .filter(Boolean))
-        await add(path, path.endsWith("/"), false);
+        if (path.endsWith("/")) await add(path, true, false);
       const symlinkedAncestors: string[] = [];
-      for (const [candidate, gitlink] of [...candidates].sort(
+      for (const [candidate, { gitlink, selected }] of [...candidates].sort(
         ([a], [b]) => a.length - b.length,
       )) {
         if (symlinkedAncestors.some((ancestor) => inside(ancestor, candidate)))
@@ -681,7 +772,10 @@ export async function capturePatchGitControls(
           )
         )
           continue;
-        if ((await lstat(join(candidate, ".git")).catch(missing)) !== undefined)
+        if (
+          selected &&
+          (await lstat(join(candidate, ".git")).catch(missing)) !== undefined
+        )
           await visit(candidate);
       }
     };

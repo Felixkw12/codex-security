@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import {
@@ -21,9 +21,14 @@ async function initialize(directory: string) {
   return git;
 }
 
-test.each([false, true])(
-  "patch discovery binds nested administration to its actual worktree: foreign=%p",
-  async (foreign) => {
+test.each([
+  { foreign: false, gitlink: false },
+  { foreign: true, gitlink: false },
+  { foreign: false, gitlink: true },
+  { foreign: true, gitlink: true },
+])(
+  "patch discovery binds selected nested administration: %p",
+  async ({ foreign, gitlink }) => {
     const root = await fixtures.create("patch-worktree-selected-");
     const nested = join(root, "source");
     await mkdir(nested);
@@ -45,7 +50,7 @@ test.each([false, true])(
       );
     }
     const effect = join(worktree, "hook-effect");
-    if (process.platform !== "win32") {
+    if (!gitlink && process.platform !== "win32") {
       const hook = join(worktree, ".git", "hooks", "synthetic-fsmonitor");
       await writeFile(
         hook,
@@ -59,7 +64,14 @@ test.each([false, true])(
     const head = git("rev-parse", "HEAD");
     const index = await readFile(join(worktree, ".git", "index"));
     const source = await readFile(join(worktree, "app.ts"));
+    if (gitlink) {
+      const parent = repositoryGit(root);
+      parent("rm", "--cached", "source/app.ts");
+      parent("update-index", "--add", "--cacheinfo", `160000,${head},source`);
+      parent("commit", "-m", "Synthetic selected gitlink");
+    }
     const selectedIndex = await readFile(join(root, ".git", "index"));
+    await rm(effect, { force: true });
     const nestedInventory: string[][] = [];
     let launches = 0;
     let beforeTurnEffect: string | undefined;
@@ -81,9 +93,9 @@ test.each([false, true])(
       },
     });
 
-    expect(outcome.exitCode, outcome.stderr).toBe(foreign ? 2 : 0);
-    expect(launches).toBe(foreign ? 0 : 1);
-    if (foreign) expect(nestedInventory).toEqual([]);
+    expect(outcome.exitCode, outcome.stderr).toBe(foreign && gitlink ? 2 : 0);
+    expect(launches).toBe(foreign && gitlink ? 0 : 1);
+    if (foreign || !gitlink) expect(nestedInventory).toEqual([]);
     else expect(nestedInventory.length).toBeGreaterThan(0);
     expect(beforeTurnEffect).toBeUndefined();
     expect(
@@ -94,9 +106,9 @@ test.each([false, true])(
     expect(await readFile(join(worktree, "app.ts"))).toEqual(source);
     expect(await readFile(join(root, ".git", "index"))).toEqual(selectedIndex);
     expect(await readFile(join(root, "outer.txt"), "utf8")).toBe(
-      foreign ? "before\n" : "after\n",
+      foreign && gitlink ? "before\n" : "after\n",
     );
-    if (!foreign && process.platform !== "win32") {
+    if (!foreign && !gitlink && process.platform !== "win32") {
       git("ls-files", "--cached");
       expect(await readFile(effect, "utf8")).toBe("effect");
     }

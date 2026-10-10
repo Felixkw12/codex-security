@@ -11,7 +11,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import {
   repositoryGit,
@@ -283,8 +283,10 @@ test.each([false, true])(
       selected.root,
       "source",
       ...(invalidAncestor ? ["deep"] : []),
+      "newrepo",
       ".git",
     );
+    await mkdir(dirname(marker), { recursive: true });
     const contents = `gitdir: ${join(foreign.root, ".git")}\n`;
     let launches = 0;
     const bookkeeping: string[][] = [];
@@ -293,6 +295,7 @@ test.each([false, true])(
       onRepositoryCommand: (command, args, cwd, options) => {
         if (
           launches > 0 &&
+          !args.includes("core.hooksPath=/dev/null") &&
           args.some((value) =>
             ["add", "read-tree", "update-index", "write-tree"].includes(value),
           )
@@ -335,7 +338,8 @@ for (const hostileConfig of ["malformed", "hook"] as const) {
     async () => {
       const selected = await repository("patch-discovery-probe-selected-");
       const foreign = await repository("patch-discovery-probe-foreign-");
-      const marker = join(selected.root, "source", ".git");
+      const marker = join(selected.root, "source", "newrepo", ".git");
+      await mkdir(dirname(marker), { recursive: true });
       const foreignAdmin = join(foreign.root, ".git");
       const effect = join(foreign.root, "hook-effect");
       const selectedIndex = await readFile(
@@ -454,7 +458,7 @@ for (const linked of [false, true]) {
       const index = await readFile(join(selected.root, ".git", "index"));
       const source = `
 import { writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { runGitRepositoryCommand, runWorkflow } from ${JSON.stringify(new URL("./cli-patch-fixtures.ts", import.meta.url).href)};
 const root = ${JSON.stringify(selected.root)};
 let launches = 0;

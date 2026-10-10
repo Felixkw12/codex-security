@@ -51,7 +51,10 @@ import { promisify, stripVTControlCharacters } from "node:util";
 import { Cli, z } from "incur";
 import { formatCliHelp } from "./cli-help.js";
 import { scanLogsJson } from "./cli-scan-logs-json.js";
-import { capturePatchGitControls } from "./patch-git-controls.js";
+import {
+  capturePatchGitControls,
+  withPatchGitIndex,
+} from "./patch-git-controls.js";
 import {
   ARTIFACT_EXPORT_FILENAMES,
   exportEnvironment,
@@ -8612,48 +8615,32 @@ async function snapshotPatchTree(
   dependencies: CliDependencies,
   commandRoot = repository,
 ): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), "codex-security-patch-tree-"));
-  const environment = {
-    GIT_INDEX_FILE: join(root, "index"),
-    ...(commandRoot === repository ? {} : NESTED_PATCH_GIT_ENVIRONMENT),
-  };
-  const run = (args: string[], input?: string) =>
-    dependencies.runRepositoryCommand(
-      "git",
-      commandRoot === repository ? args : ["-C", repository, ...args],
-      commandRoot,
-      {
-        environment,
-        input,
-      },
-    );
-  try {
-    const heads = await run(["rev-parse", "--revs-only", "HEAD"]);
-    await run(["read-tree", ...(heads ? ["HEAD"] : ["--empty"])]);
-    const entries = await dependencies.runRepositoryCommand(
-      "git",
-      commandRoot === repository
-        ? ["ls-files", "--stage", "--full-name", "-z"]
-        : ["-C", repository, "ls-files", "--stage", "--full-name", "-z"],
-      commandRoot,
-      {
-        maxBuffer: Infinity,
-        trim: false,
-        environment:
-          commandRoot === repository
-            ? {}
-            : { ...NESTED_PATCH_GIT_ENVIRONMENT, GIT_INDEX_FILE: undefined },
-      },
-    );
-    await run(
-      ["update-index", "-z", "--index-info"],
-      entries.replaceAll(/(^|\0)([0-7]+ [a-f\d]+) [123]\t/gu, "$1$2 0\t"),
-    );
-    await run(["--literal-pathspecs", "add", "--all"]);
-    return await run(["write-tree"]);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
+  return withPatchGitIndex(
+    (args, options) =>
+      dependencies.runRepositoryCommand(
+        "git",
+        commandRoot === repository ? args : ["-C", repository, ...args],
+        commandRoot,
+        {
+          trim: false,
+          maxBuffer: options?.indexFile === undefined ? Infinity : undefined,
+          encoding: options?.encoding,
+          input: options?.input,
+          environment: {
+            ...(commandRoot === repository
+              ? {}
+              : { ...NESTED_PATCH_GIT_ENVIRONMENT, GIT_INDEX_FILE: undefined }),
+            ...(options?.indexFile === undefined
+              ? {}
+              : { GIT_INDEX_FILE: options.indexFile }),
+          },
+        },
+      ),
+    async (run) => {
+      await run(["--literal-pathspecs", "add", "--all"]);
+      return (await run(["write-tree"])).trim();
+    },
+  );
 }
 
 async function resolvePatchValidationPrompt(
@@ -9027,27 +9014,33 @@ async function runSkill(
   const gitControls = patch
     ? await capturePatchGitControls(
         directory,
-        (root, checkout, args, encoding, nestedProbe) =>
+        (root, checkout, args, commandOptions) =>
           dependencies.runRepositoryCommand(
             "git",
             root === checkout ? args : ["-C", checkout, ...args],
             root,
             {
               trim: false,
-              encoding,
+              encoding: commandOptions?.encoding,
+              input: commandOptions?.input,
               maxBuffer: Infinity,
               environment: {
                 LC_ALL: "C",
-                ...(root === checkout && !nestedProbe
+                ...(root === checkout && !commandOptions?.nestedProbe
                   ? {}
                   : {
                       ...NESTED_PATCH_GIT_ENVIRONMENT,
                       GIT_INDEX_FILE: undefined,
                     }),
+                ...(commandOptions?.indexFile === undefined
+                  ? {}
+                  : { GIT_INDEX_FILE: commandOptions.indexFile }),
               },
             },
           ),
-        dependencies.environment["GIT_DIR"] === undefined,
+        environmentValue(dependencies.environment, "GIT_DIR") === undefined,
+        environmentValue(dependencies.environment, "GIT_COMMON_DIR") ===
+          undefined,
       )
     : undefined;
   const patchPermissions =

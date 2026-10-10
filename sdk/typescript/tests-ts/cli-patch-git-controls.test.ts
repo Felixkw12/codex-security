@@ -391,8 +391,18 @@ lines.on("line", (line) => {
         {
           currentDirectory: root,
           onRepositoryCommand: (command, args, cwd, options) => {
+            if (args.includes("read-tree") || args.includes("update-index")) {
+              if (args.includes("core.hooksPath=/dev/null")) {
+                expect(args).toContain("core.fsmonitor=false");
+                expect(options?.environment?.["GIT_INDEX_FILE"]).not.toBe(
+                  join(root, ".git", "index"),
+                );
+                expect(options?.environment?.["GIT_INDEX_FILE"]).toBeDefined();
+              }
+            }
             if (
               afterTurn &&
+              !args.includes("core.hooksPath=/dev/null") &&
               args.some((value) =>
                 ["add", "read-tree", "update-index", "write-tree"].includes(
                   value,
@@ -570,8 +580,20 @@ lines.on("line", (line) => {
           {
             currentDirectory: root,
             onRepositoryCommand: (command, args, cwd, options) => {
+              if (args.includes("read-tree") || args.includes("update-index")) {
+                if (args.includes("core.hooksPath=/dev/null")) {
+                  expect(args).toContain("core.fsmonitor=false");
+                  expect(options?.environment?.["GIT_INDEX_FILE"]).not.toBe(
+                    join(root, ".git", "index"),
+                  );
+                  expect(
+                    options?.environment?.["GIT_INDEX_FILE"],
+                  ).toBeDefined();
+                }
+              }
               if (
                 afterTurn &&
+                !args.includes("core.hooksPath=/dev/null") &&
                 args.some((value) =>
                   ["add", "read-tree", "update-index", "write-tree"].includes(
                     value,
@@ -791,7 +813,7 @@ lines.on("line", (line) => {
         import { capturePatchGitControls } from ${JSON.stringify(new URL("../src/patch-git-controls.ts", import.meta.url).href)};
         const root = ${JSON.stringify(root)};
         const child = ${JSON.stringify(child)};
-        const controls = await capturePatchGitControls(root, async (repository, checkout, args, encoding) => execFileSync("git", repository === checkout ? args : ["-C", checkout, ...args], {cwd: repository}).toString(encoding ?? "utf8"), true);
+        const controls = await capturePatchGitControls(root, async (repository, checkout, args, options) => execFileSync("git", repository === checkout ? args : ["-C", checkout, ...args], {cwd: repository, input: options?.input, env: { ...process.env, ...(options?.indexFile === undefined ? {} : {GIT_INDEX_FILE: options.indexFile}) }}).toString(options?.encoding ?? "utf8"), true);
         await writeFile(child + "/app.txt", "after\\n");
         await controls.validate();
         process.stdout.write(JSON.stringify({ paths: controls.readOnlyPaths, expected: await realpath(child + "/.git") }));
