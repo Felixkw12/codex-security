@@ -1,4 +1,6 @@
+import { constants } from "node:fs";
 import {
+  access,
   lstat,
   mkdtemp,
   readFile,
@@ -40,7 +42,9 @@ const GIT_HOOKS = [
   "p4-post-changelist",
   "p4-pre-submit",
   "post-index-change",
-];
+].flatMap((hook) =>
+  process.platform === "win32" ? [hook, `${hook}.exe`] : [hook],
+);
 
 export interface PatchGitCommandOptions {
   readonly encoding?: "base64";
@@ -413,16 +417,46 @@ export async function capturePatchGitControls(
   };
   const controlPaths = new Map<
     string,
-    { canonical: string; identity: { dev: bigint; ino: bigint } | undefined }
+    {
+      canonical: string;
+      identity: { dev: bigint; ino: bigint } | undefined;
+      directory: boolean | undefined;
+      readOnly: boolean;
+    }
   >();
   const inaccessibleIncludes = new Set<string>();
-  const rememberControl = async (path: string): Promise<void> => {
+  const inaccessibleHooks = new Set<string>();
+  const hookIsAvailable = async (path: string): Promise<boolean> =>
+    access(path, constants.X_OK).then(
+      () => true,
+      () => false,
+    );
+  const rememberControl = async (
+    path: string,
+    protectDirectory = true,
+  ): Promise<void> => {
     const canonical = await canonicalPath(path);
     const metadata = await stat(canonical, { bigint: true }).catch(missing);
+    const directory = metadata?.isDirectory();
     controlPaths.set(path, {
       canonical,
       identity: metadata && { dev: metadata.dev, ino: metadata.ino },
+      directory,
+      readOnly:
+        protectDirectory ||
+        !directory ||
+        controlPaths.get(path)?.readOnly === true,
     });
+  };
+  const rememberHook = async (path: string): Promise<void> => {
+    try {
+      // Track directories by identity so ordinary descendants remain writable.
+      await rememberControl(path, false);
+    } catch (error) {
+      // Git skips hooks that fail access(X_OK), including unreadable paths.
+      if (await hookIsAvailable(path)) throw error;
+      inaccessibleHooks.add(path);
+    }
   };
   const captureReferences = async (checkout: string): Promise<void> => {
     // Git can retain an outside caller's cwd or move an inside caller to the
@@ -516,27 +550,23 @@ export async function capturePatchGitControls(
         }
       }
     }
+    // A complete entry preserves Git's empty hooksPath semantics; querying
+    // only the hooks directory would turn that setting into the checkout.
     const hooks = relativeFile(
       checkout,
-      (
-        await runControl(root, checkout, [
-          "rev-parse",
-          "--path-format=absolute",
-          "--git-path",
-          "hooks",
-        ])
-      ).replace(/\n$/u, ""),
+      dirname(
+        (
+          await runControl(root, checkout, [
+            "rev-parse",
+            "--git-path",
+            "hooks/post-index-change",
+          ])
+        ).replace(/\n$/u, ""),
+      ),
     );
-    const hookDirectory = await stat(hooks).catch(missing);
-    if (hookDirectory !== undefined && !hookDirectory.isDirectory()) {
-      // A file such as /dev/null disables hooks; keep that binding intact.
-      await rememberControl(hooks);
-    } else {
-      // Remember absent entrypoints to reject newly installed hooks before Git.
-      // Resolving each entry also protects executable symlink targets.
-      for (const hook of GIT_HOOKS)
-        await rememberControl(relativeFile(hooks, hook));
-    }
+    // A non-directory hooks parent is ordinary data. Bind its absent entries
+    // so validation detects hooks added after it becomes a directory.
+    for (const hook of GIT_HOOKS) await rememberHook(relativeFile(hooks, hook));
   };
   const selectedDirectories: string[] = [];
   for (const argument of ["--absolute-git-dir", "--git-common-dir"]) {
@@ -586,6 +616,12 @@ export async function capturePatchGitControls(
           )
         ).filter((path): path is string => path !== undefined);
     if (!capture) {
+      for (const path of inaccessibleHooks) {
+        if (await hookIsAvailable(path))
+          throw new Error(
+            `Git hook became accessible during the patch: ${path}`,
+          );
+      }
       for (const path of inaccessibleIncludes) {
         try {
           const canonical = await canonicalPath(path);
@@ -612,7 +648,8 @@ export async function capturePatchGitControls(
             inside(root, expected.canonical),
           ) &&
             (metadata?.dev !== expected.identity?.dev ||
-              metadata?.ino !== expected.identity?.ino))
+              metadata?.ino !== expected.identity?.ino ||
+              metadata?.isDirectory() !== expected.directory))
         )
           throw new Error(
             `Git configuration or hooks changed location during the patch: ${path}`,
@@ -814,7 +851,9 @@ export async function capturePatchGitControls(
       ...new Set([
         ...administrationRoots.keys(),
         ...[...controlPaths.values()]
-          .filter(({ identity }) => identity !== undefined)
+          .filter(
+            ({ identity, readOnly }) => identity !== undefined && readOnly,
+          )
           .map(({ canonical }) => canonical)
           .filter(
             (path) =>
