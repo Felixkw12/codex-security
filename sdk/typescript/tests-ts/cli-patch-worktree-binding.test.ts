@@ -95,12 +95,10 @@ test.each([
     expect(launches).toBe(foreign ? 0 : 1);
     if (foreign) expect(nestedInventory).toEqual([]);
     else expect(nestedInventory.length).toBeGreaterThan(0);
-    if (foreign || process.platform !== "win32") {
-      expect(beforeTurnEffect).toBe(foreign ? undefined : "effect");
-      expect(await readFile(effect, "utf8").catch(() => undefined)).toBe(
-        foreign ? undefined : "effect",
-      );
-    }
+    expect(beforeTurnEffect).toBeUndefined();
+    expect(
+      await readFile(effect, "utf8").catch(() => undefined),
+    ).toBeUndefined();
     expect(git("rev-parse", "HEAD")).toBe(head);
     expect(await readFile(join(worktree, ".git", "index"))).toEqual(index);
     expect(await readFile(join(worktree, "app.ts"))).toEqual(source);
@@ -108,5 +106,9 @@ test.each([
     expect(await readFile(join(root, "outer.txt"), "utf8")).toBe(
       foreign ? "before\n" : "after\n",
     );
+    if (!foreign && process.platform !== "win32") {
+      git("ls-files", "--cached");
+      expect(await readFile(effect, "utf8")).toBe("effect");
+    }
   },
 );

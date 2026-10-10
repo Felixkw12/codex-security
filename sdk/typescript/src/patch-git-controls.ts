@@ -106,11 +106,12 @@ async function readGitMarker(
 
 async function markerDirectories(
   directory: string,
-  isGitDirectory: (path: string) => Promise<boolean>,
+  isGitDirectory: (path: string, contents?: Buffer | true) => Promise<boolean>,
 ): Promise<string[] | undefined> {
   const marker = join(directory, ".git");
   const contents = await readGitMarker(marker);
   if (contents === undefined) return undefined;
+  if (!(await isGitDirectory(marker, contents))) return undefined;
   const gitDirectory = await (
     contents === true
       ? realControlPath(marker)
@@ -124,11 +125,7 @@ async function markerDirectories(
         )
   ).catch(missing);
   if (gitDirectory === undefined) return undefined;
-  if (
-    !(await stat(gitDirectory)).isDirectory() ||
-    !(await isGitDirectory(gitDirectory))
-  )
-    return undefined;
+  if (!(await stat(gitDirectory)).isDirectory()) return undefined;
   const commonBytes = await readFile(join(gitDirectory, "commondir")).catch(
     missing,
   );
@@ -246,6 +243,31 @@ export async function capturePatchGitControls(
     path: string,
     markerContents?: Buffer | true,
   ): Promise<boolean> => {
+    let administration: Buffer | undefined = Buffer.from(path);
+    if (Buffer.isBuffer(markerContents)) {
+      let target = markerContents.subarray(8);
+      while (target.at(-1) === 10 || target.at(-1) === 13)
+        target = target.subarray(0, -1);
+      administration =
+        target.length === 0
+          ? undefined
+          : isAbsolute(target.toString("latin1"))
+            ? target
+            : Buffer.concat([Buffer.from(`${dirname(path)}${sep}`), target]);
+    }
+    if (administration !== undefined) {
+      for (const name of ["HEAD", "commondir"]) {
+        const metadataPath = Buffer.concat([
+          administration,
+          Buffer.from(`${sep}${name}`),
+        ]);
+        const metadata = await stat(metadataPath).catch(missing);
+        if (metadata && !metadata.isFile() && !metadata.isDirectory())
+          throw new Error(
+            `Patch cannot safely inspect non-regular Git metadata: ${metadataPath.toString("utf8")}`,
+          );
+      }
+    }
     try {
       // This early rev-parse mode only checks filesystem structure. It does not
       // select the candidate repository or load its configuration and hooks.
@@ -534,6 +556,8 @@ export async function capturePatchGitControls(
       if (capture) await captureReferences(checkout);
       const [tracked, untracked] = await Promise.all([
         runBytes(root, checkout, [
+          "-c",
+          "core.fsmonitor=false",
           "ls-files",
           "--cached",
           "--stage",
@@ -541,6 +565,8 @@ export async function capturePatchGitControls(
           "-z",
         ]),
         runBytes(root, checkout, [
+          "-c",
+          "core.fsmonitor=false",
           "ls-files",
           "--others",
           "--exclude-standard",
