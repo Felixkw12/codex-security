@@ -1,4 +1,13 @@
-import { lstat, readFile, realpath, stat } from "node:fs/promises";
+import {
+  lstat,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  stat,
+  symlink,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 // Git hook entrypoints: https://git-scm.com/docs/githooks
@@ -149,6 +158,10 @@ async function readableGitParent(
   path: Buffer,
   directory: boolean,
   gitlink: boolean,
+  selectsGitDirectory: (
+    directory: Buffer,
+    markerContents: Buffer | true,
+  ) => Promise<boolean>,
 ): Promise<{ path: string; exact: boolean } | undefined> {
   const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
   if (path.at(-1) === 47) path = path.subarray(0, -1);
@@ -182,12 +195,13 @@ async function readableGitParent(
       offset = end + 1;
     }
     if (skippedSymlink) continue;
-    const marker = Buffer.concat([
-      Buffer.from(`${checkout}${sep}`),
-      path,
-      Buffer.from(`${sep}.git`),
-    ]);
-    if ((await readGitMarker(marker)) !== undefined)
+    const rawCheckout = Buffer.concat([Buffer.from(`${checkout}${sep}`), path]);
+    const marker = Buffer.concat([rawCheckout, Buffer.from(`${sep}.git`)]);
+    const markerContents = await readGitMarker(marker);
+    if (
+      markerContents !== undefined &&
+      (await selectsGitDirectory(rawCheckout, markerContents))
+    )
       throw new Error(
         "Patch cannot safely use Git administration whose checkout path is not valid UTF-8.",
       );
@@ -228,11 +242,14 @@ export async function capturePatchGitControls(
       return undefined;
     throw error;
   }
-  const isGitDirectory = async (path: string): Promise<boolean> => {
+  const isGitDirectory = async (
+    path: string,
+    markerContents?: Buffer | true,
+  ): Promise<boolean> => {
     try {
       // This early rev-parse mode only checks filesystem structure. It does not
       // select the candidate repository or load its configuration and hooks.
-      await runControl(root, root, ["rev-parse", "--resolve-git-dir", path]);
+      await runBytes(root, root, ["rev-parse", "--resolve-git-dir", path]);
       return true;
     } catch (error) {
       if (!(error instanceof Error)) throw error;
@@ -244,15 +261,51 @@ export async function capturePatchGitControls(
       const diagnostic = Buffer.isBuffer(failure.stderr)
         ? failure.stderr.toString("utf8")
         : failure.stderr;
-      const negative = `fatal: not a gitdir '${path}'`;
+      const negatives = [
+        `fatal: not a gitdir '${path}'`,
+        `fatal: gitfile does not point to a valid repository: ${path}`,
+        `fatal: no path in gitfile: ${path}`,
+      ];
+      if (Buffer.isBuffer(markerContents)) {
+        // This text is used only to recognize Git's diagnostic, never as a path
+        // for filesystem access. Match the subprocess's UTF-8 error decoding.
+        const target = relativeFile(
+          dirname(path),
+          markerContents
+            .subarray(8)
+            .toString("utf8")
+            .replace(/[\r\n]+$/u, ""),
+        );
+        negatives.push(`fatal: not a git repository: ${target}`);
+      }
       if (
         (failure.code === 128 || failure.status === 128) &&
         typeof diagnostic === "string" &&
-        (diagnostic.endsWith(`${negative}\n`) ||
-          diagnostic.endsWith(`${negative}\r\n`))
+        negatives.some(
+          (negative) =>
+            diagnostic.endsWith(`${negative}\n`) ||
+            diagnostic.endsWith(`${negative}\r\n`),
+        )
       )
         return false;
       throw error;
+    }
+  };
+  const rawCheckoutSelectsGit = async (
+    checkout: Buffer,
+    markerContents: Buffer | true,
+  ): Promise<boolean> => {
+    const temporary = await mkdtemp(
+      join(tmpdir(), "codex-security-git-marker-"),
+    );
+    try {
+      const alias = join(temporary, "checkout");
+      // The symlink preserves byte names and relative gitfile resolution while
+      // giving the native filesystem-only probe a representable argument.
+      await symlink(checkout, alias);
+      return await isGitDirectory(join(alias, ".git"), markerContents);
+    } finally {
+      await rm(temporary, { recursive: true, force: true });
     }
   };
   const administrationRoots = new Map<string, { dev: bigint; ino: bigint }>();
@@ -467,6 +520,15 @@ export async function capturePatchGitControls(
             `Patch selected Git metadata outside the pre-patch administration directories: ${checkout}`,
           );
         }
+        const worktree = await realControlPath(
+          (
+            await runControl(root, checkout, ["rev-parse", "--show-toplevel"])
+          ).replace(/\n$/u, ""),
+        );
+        if (relative(canonical, worktree) !== "")
+          throw new Error(
+            "Git's worktree root does not match the selected checkout's .git marker. Select the intended checkout explicitly or fix its Git configuration.",
+          );
       }
       visited.add(canonical);
       if (capture) await captureReferences(checkout);
@@ -497,6 +559,7 @@ export async function capturePatchGitControls(
           Buffer.from(path, "latin1"),
           directory,
           gitlink,
+          rawCheckoutSelectsGit,
         );
         if (readable === undefined) return;
         let candidate = resolve(checkout, readable.path);
