@@ -218,7 +218,10 @@ export function scanFindingIdentity(source: JsonObject): string {
   ]);
 }
 
-export function validateFindingSemantics(findings: SemanticFinding[]): void {
+export function validateFindingSemantics(
+  findings: SemanticFinding[],
+  enforceLegacyEvidenceBounds = true,
+): void {
   for (const [findingIndex, finding] of findings.entries()) {
     const severity = finding.severity;
     if (
@@ -260,6 +263,7 @@ export function validateFindingSemantics(findings: SemanticFinding[]): void {
         }
         evidenceIds.add(id);
         if (
+          (evidenceName === "codeEvidence" || enforceLegacyEvidenceBounds) &&
           typeof evidence["endLine"] === "number" &&
           evidence["endLine"] < (evidence["startLine"] as number)
         ) {
@@ -378,6 +382,20 @@ export interface PreparedScanDraft {
   coverage: PreparedCoverage;
 }
 
+export function findingsWithinScope<
+  T extends { locations: Array<{ path: string }> },
+>(findings: T[], includePaths: readonly string[]): T[] {
+  if (includePaths.includes(".")) return findings;
+  return findings.filter((finding) =>
+    finding.locations.some((location) => {
+      const path = location.path.replace(/^\.\//u, "");
+      return includePaths.some(
+        (scope) => path === scope || path.startsWith(`${scope}/`),
+      );
+    }),
+  );
+}
+
 /** Build ordinary canonical documents from host-bound target metadata and validated semantics. */
 export function prepareSemanticScanDraft(
   context: SemanticScanContext,
@@ -400,7 +418,12 @@ export function prepareSemanticScanDraft(
   const scope = buildScope(context, trustedScope, input.scope);
   return {
     findings: {
-      findings: prepareScanFindings(input.findings, context.mode),
+      findings: prepareScanFindings(
+        context.mode === "deep"
+          ? findingsWithinScope(input.findings, scope.includePaths)
+          : input.findings,
+        context.mode,
+      ),
     },
     coverage: buildCoverage(context, contract, input.coverage, scope, target),
     manifest: {

@@ -36,13 +36,14 @@ import {
 import {
   collectObserverErrors,
   completedEvents,
+  completedTurn,
   preparedRuntime,
   runEvents,
   type ScanObserverName,
 } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { copyCompletedScan, PLUGIN_ROOT } from "./plugin-root.js";
-import { collectResult } from "../src/scan-publication.js";
+import { collectResult, runScanEvents } from "../src/scan-publication.js";
 import { throwing } from "./support/errors.js";
 
 import {
@@ -485,56 +486,67 @@ describe("one-shot scan events", () => {
     expect(warnings).toEqual([]);
   });
 
-  test("captures warning observers before payload evaluation and isolates failures", async () => {
-    const scanDir = await temporaryDirectory();
-    const observerErrors: Array<[ScanObserverName, string]> = [];
-    const replacement = mock();
-    let warningPending = false;
-    let onWarning: () => void = function (this: void) {
-      expect(this).toBeUndefined();
-      throw new Error("TAC warning observer failed");
-    };
-    let onObserverError = function (
-      this: void,
-      observer: ScanObserverName,
-      error: unknown,
-    ) {
-      expect(this).toBeUndefined();
-      observerErrors.push([observer, (error as Error).message]);
-    };
-    const result = await runScanTurn({
-      thread: { id: null },
-      events: completedEvents(
-        "thread-1",
-        tacEvents([tacToolCall("not_granted")]),
-      ),
-      signal: new AbortController().signal,
-      scanDir,
-      repository: "/repository",
-      get onTrustedAccessStatus() {
-        warningPending = true;
-        return undefined;
-      },
-      get authentication() {
-        if (warningPending) {
-          onWarning = replacement;
-          onObserverError = replacement;
-        }
-        return undefined;
-      },
-      get onWarning() {
-        return onWarning;
-      },
-      get onObserverError() {
-        return onObserverError;
-      },
-    });
-    expect(result.turnResult.status).toBe("completed");
-    expect(observerErrors).toEqual([
-      ["onWarning", "TAC warning observer failed"],
-    ]);
-    expect(replacement).not.toHaveBeenCalled();
-  });
+  test.each([false, true])(
+    "captures warning observers before payload evaluation and isolates failures (admit: %s)",
+    async (admit) => {
+      const scanDir = await copyCompletedScan(await temporaryDirectory());
+      const observerErrors: Array<[ScanObserverName, string]> = [];
+      const replacement = mock();
+      let warningPending = false;
+      let onWarning: () => void = function (this: void) {
+        expect(this).toBeUndefined();
+        throw new Error("TAC warning observer failed");
+      };
+      let onObserverError = function (
+        this: void,
+        observer: ScanObserverName,
+        error: unknown,
+      ) {
+        expect(this).toBeUndefined();
+        observerErrors.push([observer, (error as Error).message]);
+      };
+      const run = admit ? runScanEvents : runScanTurn;
+      const result = await run({
+        pluginRoot: PLUGIN_ROOT,
+        expectation: {
+          repository: "/repository",
+          repositoryRevision: null,
+          target: { kind: "repository", paths: [] },
+          mode: "standard",
+          pluginVersion: "0.1.0",
+        },
+        thread: { id: null },
+        events: completedEvents(
+          "thread-1",
+          tacEvents([tacToolCall("not_granted")]),
+        ),
+        signal: new AbortController().signal,
+        scanDir,
+        get onTrustedAccessStatus() {
+          warningPending = true;
+          return undefined;
+        },
+        get authentication() {
+          if (warningPending) {
+            onWarning = replacement;
+            onObserverError = replacement;
+          }
+          return undefined;
+        },
+        get onWarning() {
+          return onWarning;
+        },
+        get onObserverError() {
+          return onObserverError;
+        },
+      });
+      expect(result.turnResult.status).toBe("completed");
+      expect(observerErrors).toEqual([
+        ["onWarning", "TAC warning observer failed"],
+      ]);
+      expect(replacement).not.toHaveBeenCalled();
+    },
+  );
 
   test("isolates trusted cyber access status observer failures", async () => {
     const scanDir = await temporaryDirectory();
@@ -591,6 +603,34 @@ describe("one-shot scan events", () => {
       }
     },
   );
+
+  test("lets the workbench seal artifacts before validating completed scans", async () => {
+    const root = await temporaryDirectory();
+    const scanDir = await copyCompletedScan(root);
+    await rm(join(scanDir, "report.md"));
+    const events = completedEvents();
+    let finalized = false;
+
+    const result = await runAdmittedEvents(scanDir, events, {
+      model: undefined,
+      onFinalize: async (usage) => {
+        expect(usage).toMatchObject({
+          input_tokens: 10,
+          cached_input_tokens: 2,
+          cache_write_input_tokens: 0,
+          output_tokens: 3,
+        });
+        expect(existsSync(join(scanDir, "scan-manifest.json"))).toBe(true);
+        expect(existsSync(join(scanDir, "report.md"))).toBe(false);
+        await copyCompletedScan(root);
+        finalized = true;
+      },
+    });
+
+    expect(finalized).toBe(true);
+    expect(result.threadId).toBe("thread-1");
+    expect(result.turnResult.status).toBe("completed");
+  });
 
   test("reports a scan as started only after the thread starts", async () => {
     const scanDir = await temporaryDirectory();
@@ -1696,6 +1736,34 @@ test.each([
   },
 );
 
+function runAdmittedEvents(
+  scanDir: string,
+  events: AsyncGenerator<ThreadEvent>,
+  options: {
+    abortController?: AbortController;
+    workbenchValidated?: boolean;
+    model?: string;
+    onFinalize?: (usage: unknown) => Promise<unknown>;
+  } = {},
+) {
+  const { abortController = new AbortController(), ...settings } = options;
+  return runScanEvents({
+    thread: { id: null },
+    events,
+    signal: abortController.signal,
+    scanDir,
+    pluginRoot: PLUGIN_ROOT,
+    expectation: {
+      repository: "/repository",
+      repositoryRevision: null,
+      target: { kind: "repository", paths: [] },
+      mode: "standard",
+      pluginVersion: "0.1.0",
+    },
+    ...settings,
+  });
+}
+
 function collectCompletedResult(scanDir: string) {
   return collectResult(
     {
@@ -1717,14 +1785,58 @@ function collectCompletedResult(scanDir: string) {
   );
 }
 
-test("missing required artifacts remain incomplete scans", async () => {
+test.each([
+  "scan-manifest.json",
+  "findings.json",
+  "coverage.json",
+  "report.md",
+])("missing required artifact %s remains an incomplete scan", async (name) => {
   const scanDir = await copyCompletedScan(await temporaryDirectory());
-  await rm(join(scanDir, "report.md"));
+  await rm(join(scanDir, name));
   await expect(collectCompletedResult(scanDir)).rejects.toMatchObject({
     name: IncompleteScanError.name,
-    message:
-      "Codex Security scan completed without required artifacts: report.md",
+    message: `Codex Security scan completed without required artifacts: ${name}`,
   });
+});
+
+test("an aborted completed turn cannot prepare workbench artifacts", async () => {
+  const abortController = new AbortController();
+  let finalizations = 0;
+  async function* events() {
+    yield { type: "thread.started", thread_id: "synthetic-thread" } as const;
+    yield { type: "turn.started" } as const;
+    abortController.abort("synthetic cancellation");
+    yield completedTurn();
+  }
+  await expect(
+    runAdmittedEvents("/synthetic-scan", events(), {
+      abortController,
+      workbenchValidated: true,
+      onFinalize: async () => {
+        finalizations++;
+      },
+    }),
+  ).rejects.toMatchObject({ name: ScanInterruptedError.name });
+  expect(finalizations).toBe(0);
+});
+
+test("workbench reconciliation precedes admission of canonical artifacts", async () => {
+  const scanDir = await copyCompletedScan(await temporaryDirectory());
+  const file = join(scanDir, "scan-manifest.json");
+  const original = await readFile(file, "utf8");
+  const interrupted = JSON.parse(original);
+  interrupted.scan.complete = false;
+  await writeFile(file, JSON.stringify(interrupted));
+  let reconciliations = 0;
+  const result = await runAdmittedEvents(scanDir, completedEvents(), {
+    workbenchValidated: true,
+    onFinalize: async () => {
+      reconciliations++;
+      await writeFile(file, original);
+    },
+  });
+  expect(reconciliations).toBe(1);
+  expect(result.turnResult.status).toBe("completed");
 });
 
 test.skipIf(process.platform === "win32")(

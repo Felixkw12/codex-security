@@ -75,8 +75,17 @@ export function scanReconnectObserver(
 
 /** @internal */
 export async function runScanTurn(
-  options: ScanEventRunOptions,
+  options:
+    | ScanEventRunOptions
+    | (Omit<ScanEventRunOptions, "repository"> & {
+        expectation: { repository: string };
+      }),
+  finalize = true,
 ): Promise<CompletedScanTurn> {
+  const repository =
+    "repository" in options
+      ? options.repository
+      : options.expectation.repository;
   let scanStarted = false;
   let tacStatusReported = false;
   try {
@@ -101,7 +110,7 @@ export async function runScanTurn(
             }
           }
         }
-        reportScanActivities(event, options.repository, options);
+        reportScanActivities(event, repository, options);
         for (const progress of scanProgressUpdatesFromEvent(event)) {
           notifyObserver(options, "onProgress")(progress);
         }
@@ -136,7 +145,7 @@ export async function runScanTurn(
         "Codex Security did not report a thread ID.",
       );
     }
-    if (options.onFinalize !== undefined) {
+    if (finalize && options.onFinalize !== undefined) {
       const finalizedUsage = await options.onFinalize(usage);
       if (finalizedUsage !== undefined) usage = finalizedUsage;
     }

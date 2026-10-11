@@ -1367,6 +1367,7 @@ def complete_scan_locked(
                 completion_binding=completion_binding,
                 completion_warnings=completion_warnings,
                 draft_documents=documents,
+                finding_scope=requested_scan_paths(scan) if scan["mode"] == "deep" else None,
             )
         add_warning()
         wrote = True

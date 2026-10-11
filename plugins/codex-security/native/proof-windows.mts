@@ -7,14 +7,15 @@ import {
   readFileSync,
   realpathSync,
   renameSync,
-  rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, win32 } from "node:path";
 import { setImmediate } from "node:timers/promises";
 import { privateDirectoryProof } from "./proof-windows-acl.mjs";
+import { processProof } from "./proof-process-windows.mjs";
 import { wideProcessProof } from "./proof-windows-wide.mjs";
 import { windowsFileSystem } from "./windows-files.mjs";
 import {
@@ -402,6 +403,7 @@ function lockProof(root: string) {
 const root = realpathSync.native(
   mkdtempSync(join(tmpdir(), "codex-security-windows-")),
 );
+let proofError: unknown;
 try {
   console.log(
     JSON.stringify(
@@ -414,6 +416,7 @@ try {
         locks: lockProof(root),
         privateDirectories: privateDirectoryProof(root, native),
         wideProcessAndPaths: wideProcessProof(root),
+        childProcesses: await processProof(root),
         garbageCollectionClosesHandle: await ownershipProof(root),
         fixture: basename(root),
       },
@@ -421,6 +424,23 @@ try {
       2,
     ),
   );
+} catch (error) {
+  proofError = error;
+  throw error;
 } finally {
-  rmSync(root, { recursive: true, force: true });
+  try {
+    await rm(root, {
+      recursive: true,
+      force: true,
+      maxRetries: 10,
+      retryDelay: 100,
+    });
+  } catch (error) {
+    if (proofError !== undefined)
+      throw new AggregateError(
+        [proofError, error],
+        "Windows proof and cleanup failed",
+      );
+    throw error;
+  }
 }

@@ -86,9 +86,14 @@ async function publishDraft(
   scanDir: string,
   scanId: string,
   workbench: (args: readonly string[], input?: string) => Promise<unknown>,
+  complete?: boolean,
 ) {
+  const manifest = await json<ScanManifest>(
+    join(scanDir, "scan-manifest.json"),
+  );
+  if (complete !== undefined) manifest.scan["complete"] = complete;
   await writePreparedScanDraft(workbench, scanId, {
-    manifest: await json<ScanManifest>(join(scanDir, "scan-manifest.json")),
+    manifest,
     findings: await json<FindingsDocument>(join(scanDir, "findings.json")),
     coverage: await json<CoverageDocument>(join(scanDir, "coverage.json")),
   });
@@ -611,7 +616,15 @@ describe("custom validation", () => {
     await expect(readFile(join(outside, "candidates.json"))).rejects.toThrow();
   });
 
-  test.each(["standard", "diff", "empty", "incomplete", "dismissed"])(
+  const completionScenarios = [
+    "standard",
+    "diff",
+    "empty",
+    "incomplete",
+    "dismissed",
+    "unfinished-source",
+  ];
+  test.each(completionScenarios)(
     "SDK owns real workbench completion: %s",
     async (scenario) => {
       const diff = scenario === "diff";
@@ -744,8 +757,36 @@ describe("custom validation", () => {
                       );
                       expect(prompt).not.toContain("run `$validation` once");
                       expect(turnOptions.outputSchema).toBeUndefined();
+                      await draft(scanDir, scanId, 0, diff);
+                      const earlyCoverage = await json<CoverageDocument>(
+                        join(scanDir, "coverage.json"),
+                      );
+                      earlyCoverage.completeness = "partial";
+                      await save(join(scanDir, "coverage.json"), earlyCoverage);
+                      await publishDraft(scanDir, scanId, workbench, false);
                       await draft(scanDir, scanId, count, diff);
-                      await publishDraft(scanDir, scanId, workbench);
+                      if (scenario === "unfinished-source") {
+                        const coverage = await json<CoverageDocument>(
+                          join(scanDir, "coverage.json"),
+                        );
+                        coverage.completeness = "partial";
+                        coverage.deferred = [
+                          {
+                            id: "unfinished-source",
+                            reason:
+                              "Requested source review remains unfinished.",
+                          },
+                        ];
+                        await save(join(scanDir, "coverage.json"), coverage);
+                      }
+                      // Follow the adapter's terminal draft instruction at the real workbench boundary.
+                      await publishDraft(
+                        scanDir,
+                        scanId,
+                        workbench,
+                        scenario !== "unfinished-source" &&
+                          /\bcomplete:\s*true\b/u.test(prompt),
+                      );
                       expect(commands).not.toContain("prepare-scan-completion");
                       expect(commands).not.toContain("complete-scan");
                       return { events: completedEvents() };
@@ -870,6 +911,22 @@ describe("custom validation", () => {
           onActivity: (activity) => activities.push(activity),
           ...(diff ? { target: DiffTarget.workingTree({}) } : {}),
         });
+        if (scenario === "unfinished-source") {
+          await expect(pending).rejects.toThrow(
+            "The latest saved scan draft is incomplete",
+          );
+          expect(turns).toBe(2);
+          expect(commands).not.toContain("complete-scan");
+          expect(commands).toContain("fail-scan");
+          expect(await json(join(scanDir, resultName))).toMatchObject({
+            status: "complete",
+          });
+          expect(
+            (await json<CoverageDocument>(join(scanDir, "coverage.json")))
+              .completeness,
+          ).toBe("partial");
+          return;
+        }
         if (scenario === "incomplete") {
           await expect(pending).rejects.toThrow(
             "The validation environment did not start",

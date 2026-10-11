@@ -1,3 +1,5 @@
+import { tokenUsage, type ScanTokenUsage } from "./cost-model.js";
+import { isRecord } from "./record.js";
 import { createHash } from "node:crypto";
 import { join, relative } from "node:path";
 import type { CodexSecurity, ScanOptions } from "./api.js";
@@ -81,11 +83,13 @@ export interface DeepScanComposition {
   ): Promise<ScanMergeInput>;
   publish(draft: SemanticScan): Promise<void>;
   onCost(key: string, cost: Readonly<ScanCost> | null): void;
+  onUsage?(key: string, usage: Readonly<ScanTokenUsage>): void;
   /** Restore parent accounting after every saved child receipt is reported. */
   onCostsRecovered?(): Promise<void>;
   historicalCost?(
     threadId: string,
     scanDirectory?: string,
+    optionalUsageOnly?: boolean,
   ): Promise<ScanCost | null>;
   costUnavailable?: boolean;
 }
@@ -421,6 +425,21 @@ export async function runDeepScans(
       costs.set(pass.directory, missingSession ? null : (record.cost ?? null));
       recoveredCosts.set(pass.directory, costs.get(pass.directory)!);
       input.onCost(pass.directory, null);
+      const savedUsage = record["usage"];
+      if (isRecord(savedUsage)) {
+        const usage = tokenUsage({
+          input_tokens: savedUsage["inputTokens"],
+          cached_input_tokens: savedUsage["cachedInputTokens"],
+          cache_write_input_tokens: savedUsage["cacheWriteInputTokens"],
+          cache_write_input_tokens_reported:
+            record.cost == null
+              ? false
+              : record.cost.cacheWriteInputTokensReported,
+          output_tokens: savedUsage["outputTokens"],
+          reasoning_output_tokens: savedUsage["reasoningOutputTokens"],
+        });
+        if (usage !== null) input.onUsage?.(pass.directory, usage);
+      }
     }
     // Recover every receipt before budget callbacks can abort another recovery.
     for (const { record, pass } of passes) {
@@ -435,6 +454,16 @@ export async function runDeepScans(
           )) ?? null,
         );
         recoveredCosts.set(pass.directory, costs.get(pass.directory)!);
+      } else if (
+        input.onUsage !== undefined &&
+        record.continuationThreadId &&
+        record.progress.status === "complete"
+      ) {
+        // Saved cost remains authoritative; optional token refresh cannot invalidate it.
+        await input
+          .historicalCost?.(record.continuationThreadId, record.scanDir, true)
+          .catch(() => undefined);
+        executionSignal.throwIfAborted();
       }
     }
     if (state.costUnavailable) await save();
@@ -699,6 +728,10 @@ export async function runDeepScans(
             await save();
             if (state.costUnavailable) reportPassCost("previous-work", null);
           },
+          onUsage:
+            input.onUsage === undefined
+              ? input.scanOptions.onUsage
+              : (usage) => input.onUsage!(pass.directory, usage),
           onCost: (cost) => {
             latestCost = cost;
             input.onCost(pass.directory, cost);

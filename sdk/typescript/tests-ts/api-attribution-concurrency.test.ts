@@ -19,16 +19,19 @@ afterEach(fixtures.cleanup);
 
 describe("delegated scan attribution", () => {
   test.each([
-    ["standard", true, "root"],
-    ["deep", true, "profile-override"],
-    ["standard", false, "unset"],
-    ["deep", false, "profile-only"],
-    ["deep", true, "root"],
-    ["deep", true, "profile-fallback"],
-    ["deep", true, "unset"],
+    ["standard", true, false, "root"],
+    ["deep", true, false, "profile-override"],
+    ["standard", false, false, "unset"],
+    ["deep", false, false, "profile-only"],
+    ["deep", true, false, "root"],
+    ["deep", true, false, "profile-fallback"],
+    ["deep", true, false, "unset"],
+    ["standard", true, false, "unset"],
+    ["standard", false, true, "unset"],
+    ["deep", false, true, "unset"],
   ] as const)(
-    "keeps overlapping CLI and SDK %s scans attributed with Cyber selection %p and %s endpoint",
-    async (mode, selectProgram, endpointSource) => {
+    "keeps overlapping CLI and SDK %s scans attributed with Cyber selection %p, explicit models %p and %s endpoint",
+    async (mode, selectProgram, selectModel, endpointSource) => {
       const root = await fixtures.temporaryDirectory();
       const repository = join(root, "repository");
       const ambientHome = join(root, "ambient-home");
@@ -48,6 +51,11 @@ describe("delegated scan attribution", () => {
       const controllers = [new AbortController(), new AbortController()];
       const clients = await Promise.all(
         (["cli", "sdk"] as const).map(async (surface, index) => {
+          const model = selectModel
+            ? surface === "cli"
+              ? "gpt-daybreak-blue-latest"
+              : "gpt-5.6-sol"
+            : undefined;
           const program = surface === "cli" ? programs[0] : programs[1];
           const endpoint =
             endpointSource === "unset"
@@ -114,6 +122,7 @@ describe("delegated scan attribution", () => {
                     }
                   : {}),
                 ...(surface === "sdk" ? { features } : {}),
+                ...(model === undefined ? {} : { model }),
               },
             },
             {
@@ -142,12 +151,18 @@ describe("delegated scan attribution", () => {
               runWorkbench: async (
                 options: WorkbenchCommandOptions,
                 args: readonly string[],
+                input?: string,
               ) => {
                 expect(options.environment["CODEX_HOME"]).toBe(credentialHome);
                 if (args[0] === "list-scans") return { scans: [] };
                 if (args[0] === "get-scan")
                   return { scan: { progress: { status: "running" } } };
                 if (args[0] === "register-cli-scan") {
+                  if (model !== undefined) {
+                    expect(JSON.parse(input!).recipe).toMatchObject({
+                      config: { model },
+                    });
+                  }
                   return {
                     scanId: `scan_${surface}_${++registrations}`,
                     targetId: `target_${surface}`,
@@ -216,6 +231,7 @@ describe("delegated scan attribution", () => {
                           );
                           expect(options.config).toMatchObject({
                             features,
+                            ...(model === undefined ? {} : { model }),
                             analytics: { enabled: surface === "sdk" },
                           });
                           expect(
@@ -327,6 +343,18 @@ describe("delegated scan attribution", () => {
       );
 
       try {
+        if (selectModel) {
+          await Promise.all(
+            clients.map(async (client, index) => {
+              expect(
+                await client.preflight(repository, { mode }),
+              ).toMatchObject({
+                model: index === 0 ? "gpt-daybreak-blue-latest" : "gpt-5.6-sol",
+                authentication: { method: "api_key", verified: false },
+              });
+            }),
+          );
+        }
         const results = await Promise.allSettled(
           clients.map((client, index) =>
             client

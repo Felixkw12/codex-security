@@ -15,6 +15,7 @@ import { afterEach, expect, spyOn, test } from "bun:test";
 import { Codex } from "@openai/codex-sdk";
 import type { ScanOptions } from "../src/api.js";
 import { estimateScanCost } from "../src/cost.js";
+import { tokenUsage, type ScanTokenUsage } from "../src/cost-model.js";
 import { OutputDirectoryError } from "../src/errors.js";
 import {
   DEEP_SCAN_CHECKPOINT,
@@ -196,6 +197,60 @@ async function fixture(
     metrics: () => ({ merges, closes }),
   };
 }
+
+test("discovery usage retains pass keys across saved unpriced receipts", async () => {
+  const h = await fixture({ workers: 1, maxDiscoveryRuns: 2 });
+  const observed: Array<[string, Readonly<ScanTokenUsage>]> = [];
+  h.input.onUsage = (key, usage) => observed.push([key, usage]);
+  h.setExecute(async (options) => {
+    options.onUsage?.(tokenUsage({ input_tokens: 7, output_tokens: 1 })!);
+    options.onUsage?.(tokenUsage({ input_tokens: 11, output_tokens: 2 })!);
+  });
+  await runDeepScans(h.input);
+  const keys = [...new Set(observed.map(([key]) => key))];
+  expect(keys).toHaveLength(2);
+  expect(observed.map(([, usage]) => usage.input_tokens)).toEqual([
+    7, 11, 7, 11,
+  ]);
+  for (const record of h.records.values()) {
+    Object.assign(record, {
+      cost: null,
+      usage: {
+        coverage: "complete",
+        inputTokens: 17,
+        cachedInputTokens: 3,
+        cacheWriteInputTokens: 0,
+        outputTokens: 2,
+        reasoningOutputTokens: 1,
+      },
+    });
+  }
+  observed.length = 0;
+  const refreshed: string[] = [];
+  h.input.historicalCost = async (_thread, directory) => {
+    refreshed.push(directory!);
+    return null;
+  };
+  await runDeepScans(h.input);
+  expect(refreshed.sort()).toEqual(
+    [...h.records.values()].map((record) => record.scanDir).sort(),
+  );
+  expect(h.calls).toHaveLength(2);
+  expect(observed.map(([key]) => key).sort()).toEqual(keys.sort());
+  expect(observed.map(([, usage]) => usage.input_tokens)).toEqual([17, 17]);
+  for (const record of h.records.values())
+    record.cost = estimateScanCost("gpt-6-astra", {
+      input_tokens: 17,
+      output_tokens: 2,
+    });
+  h.input.scanOptions.maxCostUsd = 100;
+  h.input.historicalCost = async (_thread, _directory, optionalUsageOnly) => {
+    expect(optionalUsageOnly).toBe(true);
+    throw new Error("Synthetic saved usage read failure");
+  };
+  await runDeepScans(h.input);
+  expect(h.controller.signal.aborted).toBe(false);
+});
 
 test.each(["Original discovery assumptions.", undefined])(
   "freezes discovery context across interrupted and new passes: %p",

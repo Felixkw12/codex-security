@@ -6,7 +6,9 @@ import {
   prepareSemanticScanDraft,
   type SemanticScan,
 } from "./scan-semantics.js";
-import { relative, sep } from "node:path";
+import { join, relative, sep } from "node:path";
+import { pathToFileURL } from "node:url";
+import { bundledPluginRoot } from "./runtime.js";
 import { createHash } from "node:crypto";
 import { readThreatModelPath } from "./artifact-export.js";
 import type { ScanArtifactRestorer } from "./runtime.js";
@@ -23,7 +25,7 @@ import { tokenUsage } from "./cost-model.js";
 import { ScanCostTrackingError } from "./deep-scan.js";
 import { type DeepScanCheckpointSummary } from "./deep-scan-checkpoint.js";
 import type { SavedScanRecord } from "./workbench-types.js";
-import { throwIfAborted } from "./scan-events.js";
+import { runScanTurn, throwIfAborted } from "./scan-events.js";
 import type { JsonObject } from "./config.js";
 import { findScanSession } from "./scan-logs.js";
 
@@ -33,6 +35,7 @@ export interface CompletedScanTurn {
 }
 
 interface ScanResultContext {
+  scanId?: string;
   scanDir: string;
   pluginRoot: string;
   pythonPath?: string;
@@ -364,27 +367,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-export async function collectResult(
-  context: ScanResultContext,
-  turn: CompletedScanTurn,
-  workbenchValidated = false,
-  cost?: Readonly<ScanCost> | null,
-): Promise<ScanResult> {
-  const {
-    scanDir,
-    pluginRoot,
-    pythonPath,
-    protectedRoot,
-    expectation,
-    signal,
-  } = context;
-  const { threadId, turnResult } = turn;
-  const required = [
-    "scan-manifest.json",
-    "findings.json",
-    "coverage.json",
-    "report.md",
-  ];
+async function requireScanArtifacts(
+  scanDir: string,
+  required: readonly string[],
+  signal: AbortSignal,
+): Promise<void> {
   const missing: string[] = [];
   for (const name of required) {
     try {
@@ -403,6 +390,84 @@ export async function collectResult(
       `Codex Security scan completed without required artifacts: ${missing.join(", ")}`,
     );
   }
+}
+
+export async function admitCanonicalArtifacts(
+  context: ScanResultContext,
+): Promise<void> {
+  const { scanDir, signal } = context;
+  signal.throwIfAborted();
+  await requireScanArtifacts(
+    scanDir,
+    ["scan-manifest.json", "findings.json", "coverage.json"],
+    signal,
+  );
+  const [manifest, findings, coverage] = await Promise.all(
+    ["scan-manifest.json", "findings.json", "coverage.json"].map(async (name) =>
+      JSON.parse(
+        new TextDecoder("utf-8", { fatal: true }).decode(
+          await readScanFile(scanDir, name, name, signal),
+        ),
+      ),
+    ),
+  );
+  const helper = (
+    await import(
+      pathToFileURL(join(await bundledPluginRoot(), "mcp/helpers.mjs")).href
+    )
+  ).default;
+  const draft = helper.parseCanonicalScanDraft({
+    scanId: context.scanId ?? manifest.scan.id,
+    manifest,
+    findings,
+    coverage,
+  });
+  signal.throwIfAborted();
+  if (draft.complete === false)
+    throw new IncompleteScanError(
+      "Codex Security produced only an unfinished audit checkpoint.",
+    );
+}
+
+/** Run and admit an ordinary scan while allowing the workbench to reconcile managed output. */
+export async function runScanEvents(
+  options: Omit<Parameters<typeof runScanTurn>[0], "repository"> &
+    ScanResultContext & { workbenchValidated?: boolean },
+): Promise<ScanResult> {
+  options.signal.throwIfAborted();
+  const completed = await runScanTurn(
+    options,
+    options.workbenchValidated === true,
+  );
+  await admitCanonicalArtifacts(options);
+  if (!options.workbenchValidated && options.onFinalize !== undefined) {
+    const usage = await options.onFinalize(completed.turnResult.usage);
+    if (usage !== undefined) completed.turnResult.usage = usage;
+  }
+  return collectResult(options, completed, options.workbenchValidated);
+}
+
+export async function collectResult(
+  context: ScanResultContext,
+  turn: CompletedScanTurn,
+  workbenchValidated = false,
+  cost?: Readonly<ScanCost> | null,
+): Promise<ScanResult> {
+  const {
+    scanDir,
+    pluginRoot,
+    pythonPath,
+    protectedRoot,
+    expectation,
+    signal,
+  } = context;
+  const { threadId, turnResult } = turn;
+  await requireScanArtifacts(
+    scanDir,
+    ["scan-manifest.json", "findings.json", "coverage.json", "report.md"],
+    signal,
+  );
+  await admitCanonicalArtifacts(context);
   const { manifest, findings, coverage } = await loadContract(scanDir, {
     pluginRoot,
     expectation,

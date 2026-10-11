@@ -96,6 +96,7 @@ import {
   isAbsolute,
   join,
   relative,
+  sep,
   resolve,
 } from "node:path";
 import {
@@ -148,11 +149,13 @@ import {
   addScanCosts,
   scanCostUsage,
   ScanCostTracker,
+  addTokenUsage,
   type ScanCost,
   type ScanSessionEvent,
   type ScanWorkerEvent,
 } from "./cost.js";
 import { tokenUsage } from "./cost-model.js";
+import type { ScanTokenUsage } from "./cost-model.js";
 import {
   DeepScanProgressTracker,
   type DeepScanProgress,
@@ -333,6 +336,8 @@ export interface ScanOptions extends ScanSettings {
   parentScanId?: string;
   expectedPluginVersion?: string;
   onCost?: (cost: Readonly<ScanCost>, maxCostUsd?: number) => void;
+  /** Observed tokens, including models without a price estimate. */
+  onUsage?: (usage: Readonly<ScanTokenUsage>) => void;
   onBudgetApproaching?: (
     budget: ScanBudget,
   ) => number | undefined | Promise<number | undefined>;
@@ -419,6 +424,7 @@ export interface ScanBudget {
 export type ScanObserverName =
   | "onAuthentication"
   | "onCost"
+  | "onUsage"
   | "onOutputArchived"
   | "onOutputDirReady"
   | "onScanRegistered"
@@ -1906,9 +1912,18 @@ export class CodexSecurity {
         throwIfAborted(signal, scanDir);
         return snapshot;
       };
+      const observedUsage = new Map<string, ScanTokenUsage>();
+      const reportUsage = (key: string, usage: Readonly<ScanTokenUsage>) => {
+        observedUsage.set(key, { ...usage });
+        let total: ScanTokenUsage | null = null;
+        for (const snapshot of observedUsage.values())
+          total = addTokenUsage(total, snapshot);
+        notifyObserver(options, "onUsage")(total!);
+      };
       const historicalCost = async (
         threadId: string,
         scanDirectory = scanDir,
+        optionalUsageOnly = false,
       ) => {
         const historical = new ScanCostTracker({
           codexHome: runtime.codexHome,
@@ -1916,8 +1931,33 @@ export class CodexSecurity {
           model,
           repository: repo,
           scanDirectory,
+          onUsage:
+            options.onUsage === undefined
+              ? undefined
+              : (usage) =>
+                  reportUsage(
+                    scanDirectory === scanDir ||
+                      scanDirectory ===
+                        join(scanDir, "artifacts", "deep-scan", "merge")
+                      ? "merge"
+                      : relative(scanDir, scanDirectory).split(sep).join("/"),
+                    usage,
+                  ),
         });
         historical.start(threadId);
+        if (optionalUsageOnly) {
+          return (
+            await historical.stop().catch((error: unknown) => {
+              notifyObserver(
+                options,
+                "onWarning",
+              )(
+                `Could not refresh saved scan token usage: ${errorMessage(error)}`,
+              );
+              return { cost: null };
+            })
+          ).cost;
+        }
         return (await stopTracking(historical)).cost;
       };
       const sealedTurn = sealed
@@ -1938,7 +1978,11 @@ export class CodexSecurity {
             onCost: reportSavedCost,
           })
         : null;
-      if (sealedTurn !== null) completionCost = sealedTurn.cost;
+      if (sealedTurn !== null) {
+        completionCost = sealedTurn.cost;
+        const usage = tokenUsage(sealedTurn.turnResult.usage);
+        if (usage !== null) notifyObserver(options, "onUsage")(usage);
+      }
       if (sealed && !options.postScanPrompt?.trim()) {
         const cost = completionCost;
         await options.onRegisteredScan?.(registration);
@@ -1994,6 +2038,10 @@ export class CodexSecurity {
         includeArchivedSessions: typeof resumeThreadId === "string",
         maxCostUsd: options.maxCostUsd,
         workerNumber,
+        onUsage:
+          options.onUsage === undefined
+            ? undefined
+            : (usage) => reportUsage("merge", usage),
         onActivity:
           options.onActivity === undefined
             ? undefined
@@ -2517,6 +2565,8 @@ export class CodexSecurity {
                   onObserverError: options.onObserverError,
                 },
                 historicalCost,
+                onUsage:
+                  options.onUsage === undefined ? undefined : reportUsage,
                 onCostsRecovered: restoreThreadAccounting,
                 onCost: (key, cost) => {
                   passCosts.set(key, cost);
@@ -4762,3 +4812,5 @@ async function requireStoppedArchiveOutput(
       "Cannot archive output while a scan in that directory is running.",
     );
 }
+
+export { runScanEvents } from "./scan-publication.js";
