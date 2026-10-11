@@ -123,6 +123,127 @@ function progressMessage(
   };
 }
 
+test.each(
+  ["native", "raw-before", "raw-after"].flatMap((projection) =>
+    ["current", "repeated", "pending", "released"].flatMap((scenario) =>
+      [false, true].map((changedDisplay) => ({
+        projection,
+        scenario,
+        changedDisplay,
+      })),
+    ),
+  ),
+)(
+  "retains live command state with $projection receipts, $scenario counterpart, changed display=$changedDisplay",
+  async ({ projection, scenario, changedDisplay }) => {
+    const { home, parent } = await workerSessionFixture();
+    const current: ScanProgress = {
+      phase: "validation",
+      filesCompleted: 1,
+      filesTotal: 8,
+    };
+    const older: ScanProgress = { ...current, phase: "attack_path" };
+    const later: ScanProgress = {
+      ...current,
+      phase: "reporting",
+      filesCompleted: 2,
+    };
+    const sameCount = { ...later, filesCompleted: 1 };
+    const command = ["printf", "sk-" + "a".repeat(32)];
+    const output = (progress: ScanProgress) =>
+      progressMarker(
+        progress.phase,
+        progress.filesCompleted,
+        progress.filesTotal,
+      );
+    const records = (progress: ScanProgress, id: string, args = command) => {
+      const native = nativeCommand(args, output(progress), id);
+      const raw = {
+        type: "response_item",
+        payload: {
+          type: "custom_tool_call_output",
+          call_id: id,
+          output: output(progress),
+        },
+      };
+      return projection === "native"
+        ? [native]
+        : projection === "raw-before"
+          ? [raw, native]
+          : [native, raw];
+    };
+    const append = (rows: unknown[]) =>
+      appendFile(parent, jsonLines(rows) + "\n");
+    const updates: ScanProgress[] = [];
+    const tracker = costTracker(home, {
+      expectedFilesTotal: 8,
+      onProgress: (update) => updates.push(update),
+    });
+    tracker.start("scan-thread");
+    try {
+      await tracker.refresh();
+      tracker.beginParentTurn();
+      await append([
+        ...(scenario === "current"
+          ? []
+          : records(current, "older-identical", ["different-command"])),
+        ...records(older, "older-phase"),
+        ...(scenario === "pending" ? [] : records(current, "current")),
+        ...(scenario === "released" ? records(sameCount, "later") : []),
+      ]);
+      const event = completedCommand(
+        changedDisplay ? "printf [REDACTED_SECRET]" : command.join(" "),
+        output(current),
+        "item_0",
+      );
+      expect(tracker.recordParentProgress(current, event)).toBe(true);
+      tracker.acceptParentProgress(current, event);
+      updates.push(current);
+      await tracker.refresh();
+      const expected = [current];
+      if (scenario === "released" && !changedDisplay) expected.push(sameCount);
+      expect(updates).toEqual(expected);
+      if (scenario === "released") {
+        // A later exact completion releases the latest held state, not its stale prefix.
+        const text = "Finished reviewing the batch.";
+        await append([
+          {
+            type: "event_msg",
+            payload: {
+              type: "item_completed",
+              item: {
+                type: "AgentMessage",
+                content: [{ type: "Text", text }],
+              },
+            },
+          },
+        ]);
+        tracker.recordParentItem({
+          type: "item.completed",
+          item: { type: "agent_message", id: "item_1", text },
+        });
+        await tracker.refresh();
+        if (changedDisplay) expected.push(sameCount);
+        expect(updates).toEqual(expected);
+      }
+      if (scenario === "pending") {
+        // An older identical output does not identify the still-unseen current command.
+        await tracker.refresh();
+        expect(updates).toEqual([current]);
+        await append(records(current, "current"));
+        await tracker.refresh();
+        expect(updates).toEqual([current]);
+      }
+      // Saved-only advancement still works after corroboration or missing live delivery.
+      await appendSessionItem(parent, progressMessage(2, 8, "reporting"));
+      await tracker.stop();
+      expect(updates).toEqual([...expected, later]);
+    } finally {
+      await tracker.stop();
+    }
+  },
+);
+
 test("keeps the parent frontier ahead of duplicate saved inventory", async () => {
   const { home, parent } = await workerSessionFixture();
   const inventory = {

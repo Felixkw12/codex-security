@@ -768,9 +768,18 @@ export class ScanCostTracker {
         candidate.progress.filesCompleted > eligible.progress.filesCompleted ||
         (candidate.progress.filesCompleted ===
           eligible.progress.filesCompleted &&
-          // A saved phase copy cannot establish newer source order while the
-          // admitted live parent's position remains unresolved.
-          eligible.position !== undefined &&
+          // Keep unresolved live authority until an exact later completion
+          // releases its retained rows. Discarded prefix-only facts stay stale.
+          (eligible.position !== undefined ||
+            (this.#acceptedParent?.position === null &&
+              this.#liveParentItems.indexOf(this.#acceptedParent) <
+                this.#matchedParentItems &&
+              this.#parentSession?.progress.some(
+                (saved) =>
+                  saved.order !== undefined &&
+                  saved.position === candidate.position &&
+                  saved.markerIndex === candidate.markerIndex,
+              ))) &&
           compareProgressOrder(candidate, eligible) > 0)
       )
         eligible = candidate;
@@ -1146,6 +1155,55 @@ export class ScanCostTracker {
     if (this.#options.onProgress === undefined || session.threadId === null) {
       return;
     }
+    let corroborated: SessionProgress | undefined;
+    let unresolvedCommandState = false;
+    const live = this.#acceptedParent;
+    const current = this.#parentProgress;
+    if (
+      parent &&
+      this.#parentTurnStartKnown &&
+      live?.position === null &&
+      live.item?.kind === "command" &&
+      current !== null &&
+      current.position === undefined
+    ) {
+      const item = live.item;
+      let completion: SessionCompletion | undefined;
+      for (
+        let index = session.completions.length - 1;
+        index >= this.#parentCompletionCursor;
+        index--
+      ) {
+        const saved = session.completions[index]!;
+        if (
+          saved.item?.kind === "command" &&
+          (saved.item.outputDigest === item.outputDigest ||
+            saved.item.outputDigest === item.persistedOutputDigest)
+        ) {
+          completion = saved;
+          break;
+        }
+      }
+      const saved = session.progress.findLast(
+        (row) => row.position === completion?.position,
+      );
+      const key = progressKey(current.progress);
+      if (saved !== undefined && progressKey(saved.update) === key) {
+        unresolvedCommandState = true;
+        if (
+          session.progress.every(
+            (row) =>
+              row.position <= saved.position || progressKey(row.update) === key,
+          )
+        ) {
+          // The latest saved state agrees with live output even when command
+          // presentation differs. Admit the fact, without guessing live identity.
+          corroborated = saved;
+          session.progress.splice(session.progress.indexOf(saved), 1);
+          session.progress.unshift(saved);
+        }
+      }
+    }
     if (parent) {
       // Legacy message projections lack native completion metadata, but still
       // locate an already-admitted live review in the saved source. Establish
@@ -1202,7 +1260,19 @@ export class ScanCostTracker {
         continue;
       }
       if (
+        unresolvedCommandState &&
+        corroborated === undefined &&
+        !provenInventory &&
+        progress.filesCompleted <= this.#highestFilesCompleted
+      ) {
+        // Conflicting saved tails cannot locate an unresolved live command.
+        // Retain them until a later fact or exact completion establishes order.
+        session.progress.push(saved);
+        continue;
+      }
+      if (
         parent &&
+        saved !== corroborated &&
         !provenInventory &&
         !deferredCoverage &&
         !this.#savedParentProgressIsCurrent(saved)
