@@ -1,4 +1,5 @@
 import { once } from "node:events";
+import { jsonLines } from "./support/json.js";
 import { createServer, type Socket } from "node:net";
 import {
   appendFile,
@@ -4329,6 +4330,110 @@ describe("CodexSecurity orchestration", () => {
         ).toHaveLength(persisted.length);
       } finally {
         clearInterval(keepAlive);
+        await client.close();
+      }
+    },
+  );
+
+  test.each(
+    (["legacy", "paginated"] as const).flatMap((mode) =>
+      [false, true].map((savedFirst) => [mode, savedFirst] as const),
+    ),
+  )(
+    "restores current saved inventory after an unmatched live command (%s, saved first: %p)",
+    async (mode, savedFirst) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const inventoryRead = Promise.withResolvers<void>();
+      const old = progressMarker("discovery", 0, 8);
+      const current = progressMarker("discovery", 0, 9);
+      const complete = progressMarker("discovery", 9, 9);
+      const savedMessage = (text: string) => [
+        {
+          type: "event_msg",
+          payload:
+            mode === "legacy"
+              ? { type: "agent_message", message: text }
+              : {
+                  type: "item_completed",
+                  item: {
+                    type: "AgentMessage",
+                    content: [{ type: "Text", text }],
+                  },
+                },
+        },
+        {
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text }],
+          },
+        },
+      ];
+      const liveMessage = (id: string, text: string): ThreadEvent => ({
+        type: "item.completed",
+        item: { id, type: "agent_message", text },
+      });
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          const rollout = await writeUsageSession(codexHome, "thread-1", {});
+          const persisted = [
+            {
+              type: "response_item",
+              payload: {
+                type: "custom_tool_call_output",
+                call_id: "inventory",
+                output: old,
+              },
+            },
+            ...(mode === "paginated" ? [nativeCommand("inventory", old)] : []),
+            // Legacy saves the agent-message event before its raw response copy,
+            // and does not save the command completion delivered to the SDK.
+            ...savedMessage(current),
+          ];
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            if (savedFirst) {
+              await appendFile(rollout, jsonLines(persisted) + "\n");
+              await inventoryRead.promise;
+            }
+            yield completedCommand("inventory", old);
+            yield liveMessage("current-inventory", current);
+            if (!savedFirst)
+              await appendFile(rollout, jsonLines(persisted) + "\n");
+            await appendFile(rollout, jsonLines(savedMessage(complete)) + "\n");
+            yield liveMessage("review-complete", complete);
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      const keepAlive = setInterval(() => {}, 1_000);
+      try {
+        await client.run(repository, {
+          onProgress: (update) => {
+            updates.push(update);
+            if (update.filesTotal === 9 && update.filesCompleted === 0)
+              inventoryRead.resolve();
+          },
+        });
+        expect(updates.at(-1)).toEqual({
+          phase: "discovery",
+          filesCompleted: 9,
+          filesTotal: 9,
+        });
+      } finally {
+        clearInterval(keepAlive);
+        inventoryRead.resolve();
         await client.close();
       }
     },

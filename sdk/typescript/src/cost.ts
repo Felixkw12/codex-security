@@ -338,10 +338,12 @@ export class ScanCostTracker {
     return (
       live.position === null ||
       this.#afterParentFrontier(live.position, marker.index) ||
-      // Polling can admit this parent completion before stdout delivers it,
-      // then display a worker receipt. Its current live copy still restores the
-      // parent phase; older parent completions and earlier markers stay stale.
-      (this.#displayedProgress?.owner === "worker" &&
+      // Polling can admit this completion before live delivery. Its live copy
+      // restores progress after worker output or an unmatched live completion;
+      // older proved positions and earlier markers remain stale.
+      ((this.#displayedProgress?.owner === "worker" ||
+        (this.#displayedProgress?.owner === "live" &&
+          this.#displayedProgress.position === undefined)) &&
         live.position === this.#parentFrontier.position &&
         marker.index === this.#parentFrontier.markerIndex)
     );
