@@ -1,4 +1,3 @@
-import { finding } from "./scan-draft-fixture.ts";
 import { readJson, writeJsonLine } from "./support/json.ts";
 import { finding } from "./scan-draft-fixture.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
