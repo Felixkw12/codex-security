@@ -3419,7 +3419,9 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
         elif args.command == "start-headless-standard-scan":
             result = _start_prompt_driven_scan(connection, args, headless_standard=True)
         elif args.command == "get-scan":
-            result = scan_context(connection, args.scan_id, args.occurrence_id)
+            scan_id = require_scan(connection, args.scan_id)["id"]
+            with scan_completion_lock(scan_id):
+                result = scan_context(connection, scan_id, args.occurrence_id)
         elif args.command == "rename-scan":
             result = scan_history.rename_scan(
                 connection, require_scan(connection, args.scan_id), args.name
