@@ -4342,6 +4342,334 @@ describe("CodexSecurity orchestration", () => {
   );
 
   test.each(
+    (
+      [
+        "admitted",
+        "selected-live",
+        "active-batch",
+        "fresh-batch",
+        "parent-only",
+        "accepted-eligibility",
+      ] as const
+    ).flatMap((family) =>
+      [false, true].flatMap((early) =>
+        (
+          [
+            ["validation", "discovery"],
+            ["discovery", "attack_path"],
+          ] as const
+        ).map(
+          ([parentPhase, workerPhase]) =>
+            [family, early, parentPhase, workerPhase] as const,
+        ),
+      ),
+    ),
+  )(
+    "retains parent facts across admission and batch boundaries (%s, early: %p, parent: %s, worker: %s)",
+    async (family, early, parentPhase, workerPhase) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const seen = new Map<
+        string,
+        ReturnType<typeof Promise.withResolvers<void>>
+      >();
+      const wait = (id: string) => {
+        if (!seen.has(id)) seen.set(id, Promise.withResolvers<void>());
+        return seen.get(id)!;
+      };
+      let path = "",
+        pause = false;
+      const closeEntered = Promise.withResolvers<void>(),
+        release = Promise.withResolvers<void>();
+      const originalOpen = fsPromises.open;
+      const opening = spyOn(fsPromises, "open").mockImplementation((async (
+        ...args: Parameters<typeof originalOpen>
+      ) => {
+        const file = await originalOpen(...args);
+        if (String(args[0]) !== path || !pause) return file;
+        const close = file.close.bind(file);
+        file.close = async () => {
+          if (pause) {
+            pause = false;
+            closeEntered.resolve();
+            await release.promise;
+          }
+          await close();
+        };
+        return file;
+      }) as typeof originalOpen);
+      const marker = (
+        phase: ScanProgress["phase"],
+        count: number,
+        total: number,
+      ) =>
+        "CODEX_SECURITY_SCAN_PROGRESS " +
+        JSON.stringify({ phase, filesCompleted: count, filesTotal: total });
+      const custom = (id: string, text: string) => ({
+        type: "response_item",
+        payload: { type: "custom_tool_call_output", call_id: id, output: text },
+      });
+      const native = (command: string, output: string) => ({
+        type: "event_msg",
+        payload: {
+          type: "item_completed",
+          item: {
+            type: "CommandExecution",
+            command: [command],
+            aggregated_output: output,
+          },
+        },
+      });
+      const live = (command: string, output: string): ThreadEvent => ({
+        type: "item.completed",
+        item: {
+          type: "command_execution",
+          id: command,
+          command,
+          aggregated_output: output,
+          status: "completed",
+          exit_code: 0,
+        },
+      });
+      const append = async (file: string, rows: readonly unknown[]) => {
+        await appendFile(
+          file,
+          rows.map((x) => JSON.stringify(x)).join("\n") + "\n",
+        );
+      };
+      const worker = async (id: string, count: number, total: number) => {
+        const file = await writeUsageSession(
+          codexHome,
+          id,
+          {},
+          { parent: "thread-1" },
+        );
+        await append(file, [custom(id, marker(workerPhase, count, total))]);
+        await wait(id).promise;
+      };
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? {
+                ...mockScanRegistration(args, input),
+                scopeFileCount:
+                  family === "parent-only"
+                    ? 9
+                    : family === "selected-live"
+                      ? 4
+                      : 8,
+              }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          path = await writeUsageSession(codexHome, "thread-1", {});
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            await wait("metadata").promise;
+            if (family === "accepted-eligibility") {
+              await worker("first", 4, 4);
+              const prefix = [
+                native("inventory", marker("discovery", 0, 5)),
+                native("eligible", marker(parentPhase, 4, 5)),
+              ];
+              if (early) {
+                await append(path, prefix);
+                await wait("eligible").promise;
+              }
+              // Native can deliver events after a persistence error, then retry
+              // buffered writes. Recover a prefix before the next live receipt
+              // gains saved provenance. Later retries must also remain eligible.
+              yield live("eligible", marker(parentPhase, 4, 5));
+              yield live("ineligible", marker(workerPhase, 4, 7));
+              yield live("last-parent", marker(parentPhase, 8, 8));
+              if (!early) {
+                await append(path, prefix);
+                await wait("eligible").promise;
+              }
+              await append(path, [
+                native("ineligible", marker(workerPhase, 4, 7)),
+              ]);
+              await wait("ineligible").promise;
+              await append(path, [
+                native("last-parent", marker(parentPhase, 8, 8)),
+              ]);
+              await wait("last-parent").promise;
+            } else if (family === "parent-only") {
+              // Inventory may be absent from SDK delivery; all native records
+              // are durable before either review is delivered live.
+              pause = !early;
+              if (!early) await closeEntered.promise;
+              await append(path, [
+                native("inventory", marker("discovery", 0, 8)),
+                native("eligible", marker(parentPhase, 4, 8)),
+                native("last-parent", marker(workerPhase, 6, 9)),
+              ]);
+              if (early) await wait("last-parent").promise;
+              yield live("eligible", marker(parentPhase, 4, 8));
+              yield live("last-parent", marker(workerPhase, 6, 9));
+              release.resolve();
+              await wait("last-parent").promise;
+            } else if (family === "fresh-batch") {
+              await worker("first", 3, 3);
+              await worker("second", 1, 8);
+              pause = !early;
+              if (!early) await closeEntered.promise;
+              await append(path, [
+                custom("inventory6", marker("discovery", 0, 6)),
+                custom("eligible", marker(parentPhase, 3, 6)),
+              ]);
+              if (early) await wait("eligible").promise;
+              await append(path, [
+                native("last-parent", marker(workerPhase, 4, 8)),
+              ]);
+              yield live("last-parent", marker(workerPhase, 4, 8));
+              release.resolve();
+              await wait("last-parent").promise;
+            } else if (family === "admitted") {
+              await append(path, [native("inventory", persistedCommandOutput)]);
+              if (early) {
+                yield live(
+                  "inventory",
+                  commandOutput(marker("discovery", 0, 6)),
+                );
+                await wait("scope6").promise;
+              }
+              await worker("first", 3, 3);
+              await append(path, [
+                custom("eligible", marker(parentPhase, 3, 6)),
+              ]);
+              await wait("eligible").promise;
+              await append(path, [
+                custom("oversized", marker(parentPhase, 4, 8)),
+              ]);
+              await wait("oversized").promise;
+              if (!early)
+                yield live(
+                  "inventory",
+                  commandOutput(marker("discovery", 0, 6)),
+                );
+            } else if (family === "selected-live") {
+              const inventories = [
+                custom("inventory8", marker("discovery", 0, 8)),
+                custom("inventory6", marker("discovery", 0, 6)),
+              ];
+              if (early) {
+                await append(path, inventories);
+                await wait("inventory6").promise;
+                await wait("scope6").promise;
+              } else {
+                pause = true;
+                await closeEntered.promise;
+              }
+              await append(path, [
+                ...(early ? [] : inventories),
+                native("first-parent", persistedCommandOutput),
+                native("last-parent", persistedCommandOutput),
+              ]);
+              yield live(
+                "first-parent",
+                commandOutput(marker(workerPhase, 3, 8)),
+              );
+              yield live(
+                "last-parent",
+                commandOutput(marker(parentPhase, 3, 6)),
+              );
+              release.resolve();
+              await wait("last-parent").promise;
+            } else {
+              if (early) {
+                await append(path, [
+                  custom("inventory6", marker("discovery", 0, 6)),
+                ]);
+                await wait("scope6").promise;
+              }
+              await worker("first", 3, 3);
+              await worker("second", 1, 8);
+              await append(path, [
+                ...(early
+                  ? []
+                  : [custom("inventory6", marker("discovery", 0, 6))]),
+                custom("eligible", marker(parentPhase, 3, 6)),
+              ]);
+              if (!early) {
+                pause = true;
+                await closeEntered.promise;
+              } else await wait("eligible").promise;
+              await append(path, [
+                native("last-parent", marker(parentPhase, 4, 8)),
+              ]);
+              yield live("last-parent", marker(parentPhase, 4, 8));
+              release.resolve();
+              await wait("last-parent").promise;
+            }
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      const keepAlive = setInterval(() => {}, 1000);
+      try {
+        await client.run(repository, {
+          onProgress: (p) => {
+            updates.push(p);
+            if (p.filesTotal === 6 && p.filesCompleted === 0)
+              wait("scope6").resolve();
+          },
+          onSessionEvent: ({ event, threadId }) => {
+            if (event["type"] === "session_meta" && threadId === "thread-1")
+              wait("metadata").resolve();
+            const payload = event["payload"] as {
+              call_id?: string;
+              item?: { command?: string[] };
+            };
+            const id = payload?.call_id ?? payload?.item?.command?.[0];
+            if (id) wait(id).resolve();
+          },
+        });
+        if (family === "accepted-eligibility") {
+          const recovered = updates.findIndex(
+            (p) =>
+              p.filesTotal === 5 &&
+              p.filesCompleted === 4 &&
+              p.phase === parentPhase,
+          );
+          expect(recovered).toBeGreaterThanOrEqual(0);
+          // Worker fallback before parent recovery remains valid. Later replay
+          // must not replace the recovered phase with an ineligible receipt.
+          expect(
+            updates
+              .slice(recovered)
+              .filter((p) => p.filesTotal === 5 && p.filesCompleted === 4)
+              .every((p) => p.phase === parentPhase),
+          ).toBe(true);
+        }
+        expect(updates.at(-1)).toEqual({
+          phase: parentPhase,
+          filesCompleted:
+            family === "parent-only" || family === "accepted-eligibility"
+              ? 4
+              : 3,
+          filesTotal:
+            family === "parent-only"
+              ? 8
+              : family === "accepted-eligibility"
+                ? 5
+                : 6,
+        });
+      } finally {
+        clearInterval(keepAlive);
+        release.resolve();
+        for (const p of seen.values()) p.resolve();
+        await client.close();
+        opening.mockRestore();
+      }
+    },
+  );
+
+  test.each(
     (["command", "paginated message", "legacy message"] as const).flatMap(
       (projection) =>
         (
