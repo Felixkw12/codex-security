@@ -888,7 +888,11 @@ async function preserveScanDraft(
   result.coverage.surfaces = normalizeSurfaces(
     result.coverage.surfaces as JsonObject[],
   );
-  result = scanDraftInputSchema.parse(result);
+  result = (
+    context.layout === "scan"
+      ? canonicalScanDraftInputSchema
+      : scanDraftInputSchema
+  ).parse(result);
   if (saveCheckpoint) await saveScanDraftCheckpoint(context, result);
   return { input: result, previousDigest: previousState.digest };
 }

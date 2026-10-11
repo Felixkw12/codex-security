@@ -321,6 +321,65 @@ for (const layout of ["standard", "diff", "worker"] as const) {
   });
 }
 
+for (const layout of ["standard", "diff", "deep"] as const) {
+  for (const variant of ["surface ID", "path spelling", "source annotation"]) {
+    test(`${layout}: checkpoints preserve canonical ${variant}`, async (t) => {
+      const f = await fixture(t, layout);
+      await f.write({
+        ...f.draft({
+          surfaces: [
+            {
+              id: "http-api",
+              label: "HTTP API",
+              disposition: "no_issue_found",
+            },
+          ],
+        }),
+        findings: [findingFor("review")],
+      });
+      const name = variant === "surface ID" ? "coverage.json" : "findings.json";
+      const document = await readJson(f.root, name);
+      if (variant === "surface ID") document.surfaces[0].id = "HTTP API";
+      else if (variant === "path spelling")
+        document.findings[0].locations[0].path = "src//example.py";
+      else
+        document.findings[0].provenance.sourceFindings = [
+          {
+            id: "source",
+            finding: findingFor("source"),
+            annotation: "retained",
+          },
+        ];
+      await writeJson(path.join(f.root, name), document);
+      // An empty tool update retains file-authored canonical history. Repeating
+      // it also reads the checkpoint produced by the first reconciliation.
+      for (let attempt = 0; attempt < 2; attempt++) {
+        await f.write(f.draft());
+        const saved = await readJson(f.root, name);
+        if (variant === "surface ID")
+          assert(
+            saved.surfaces.some(
+              (surface: { id: string }) => surface.id === "HTTP API",
+            ),
+          );
+        else {
+          const retained = saved.findings.find(
+            (finding: FixtureFinding) =>
+              finding.provenance.candidateId === "review",
+          );
+          if (variant === "path spelling")
+            assert.equal(retained.locations[0].path, "src//example.py");
+          else
+            assert.deepEqual(
+              retained.provenance.sourceFindings,
+              document.findings[0].provenance.sourceFindings,
+            );
+        }
+      }
+    });
+  }
+}
+
 test("worker checkpoints retain typed surface IDs", async (t) => {
   const f = await fixture(t, "worker");
   await f.write(
