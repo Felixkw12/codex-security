@@ -3145,6 +3145,116 @@ describe("live scan cost tracking", () => {
     },
   );
 
+  test.each(
+    [
+      ["native"],
+      ["event"],
+      ["native", "event"],
+      ["event", "native"],
+      ["response", "native", "event"],
+    ].map((projections) => [projections] as const),
+  )(
+    "keeps command ordering through marker-free message projections (%j)",
+    async (projections) => {
+      const { home, parent } = await workerSessionFixture();
+      const updates: ScanProgress[] = [];
+      const report = (progress: ScanProgress) => {
+        if (progress.phase === "discovery" && progress.filesCompleted === 0)
+          tracker.setExpectedFilesTotal(progress.filesTotal);
+        updates.push(progress);
+      };
+      const tracker = costTracker(home, {
+        expectedFilesTotal: 8,
+        onProgress: report,
+      });
+      const text = "Continuing the scan.";
+      const native = (item: Record<string, unknown>) => ({
+        type: "event_msg",
+        payload: { type: "item_completed", item },
+      });
+      const message = native({
+        type: "AgentMessage",
+        content: [{ type: "Text", text }],
+      });
+      const copies = {
+        native: message,
+        event: {
+          type: "event_msg",
+          payload: { type: "agent_message", message: text },
+        },
+        response: {
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text }],
+          },
+        },
+      };
+      tracker.start("scan-thread");
+      try {
+        await appendFile(
+          parent,
+          jsonLines(
+            projections.map((kind) => copies[kind as keyof typeof copies]),
+          ) + "\n",
+        );
+        await tracker.refresh();
+        tracker.recordParentItem({
+          type: "item.completed",
+          item: { type: "agent_message", text },
+        });
+        const inventory = {
+          phase: "discovery",
+          filesCompleted: 0,
+          filesTotal: 9,
+        } as const;
+        const marker =
+          "CODEX_SECURITY_SCAN_PROGRESS " + JSON.stringify(inventory);
+        const event = {
+          type: "item.completed",
+          item: {
+            type: "command_execution",
+            command: "inventory",
+            aggregated_output: commandOutput(marker),
+          },
+        };
+        expect(tracker.recordParentProgress(inventory, event)).toBe(true);
+        tracker.acceptParentProgress(inventory, event);
+        report(inventory);
+        tracker.recordParentItem({
+          type: "item.completed",
+          item: { type: "agent_message", text },
+        });
+        await appendSessionItem(parent, {
+          type: "custom_tool_call_output",
+          output:
+            'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":0,"filesTotal":8}',
+        });
+        // The inventory marker is absent from this persisted output. Matching its
+        // completion is the only proof that the live 9-file inventory is newer.
+        await appendFile(
+          parent,
+          jsonLines([
+            native({
+              type: "CommandExecution",
+              command: ["inventory"],
+              aggregated_output: persistedCommandOutput,
+            }),
+            message,
+          ]) + "\n",
+        );
+        await tracker.refresh();
+        await appendSessionItem(parent, progressMessage(2, 9));
+        await tracker.stop();
+        expect(updates.at(-1)).toEqual({ ...inventory, filesCompleted: 2 });
+        expect(updates.every((update) => update.filesTotal === 9)).toBe(true);
+      } finally {
+        await tracker.stop();
+      }
+    },
+  );
+
   test("ignores old live phase copies without blocking new tool-only progress in legacy logs", async () => {
     const { home, parent } = await workerSessionFixture();
     const updates: ScanProgress[] = [];
