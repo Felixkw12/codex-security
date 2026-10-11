@@ -90,7 +90,15 @@ import {
 } from "./scan-publication.js";
 import { tmpdir } from "node:os";
 import { isDeepStrictEqual } from "node:util";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { type CodexOptions, type ThreadOptions } from "@openai/codex-sdk";
 import { z } from "incur";
 import { readThreatModelPath } from "./artifact-export.js";
@@ -137,12 +145,14 @@ import {
 import {
   estimateScanCost,
   addScanCosts,
+  addTokenUsage,
   scanCostUsage,
   ScanCostTracker,
   type ScanCost,
   type ScanSessionEvent,
   type ScanWorkerEvent,
 } from "./cost.js";
+import { tokenUsage, type ScanTokenUsage } from "./cost-model.js";
 import {
   DeepScanProgressTracker,
   type DeepScanProgress,
@@ -324,6 +334,8 @@ export interface ScanOptions extends ScanSettings {
   parentScanId?: string;
   expectedPluginVersion?: string;
   onCost?: (cost: Readonly<ScanCost>, maxCostUsd?: number) => void;
+  /** Observed tokens, including models without a price estimate. */
+  onUsage?: (usage: Readonly<ScanTokenUsage>) => void;
   onBudgetApproaching?: (
     budget: ScanBudget,
   ) => number | undefined | Promise<number | undefined>;
@@ -410,6 +422,7 @@ export interface ScanBudget {
 export type ScanObserverName =
   | "onAuthentication"
   | "onCost"
+  | "onUsage"
   | "onOutputArchived"
   | "onOutputDirReady"
   | "onScanRegistered"
@@ -1779,14 +1792,35 @@ export class CodexSecurity {
       const historicalCost = async (
         threadId: string,
         scanDirectory = scanDir,
+        usageOnly = false,
       ) => {
         const historical = new ScanCostTracker({
           codexHome: runtime.codexHome,
           model,
           repository: repo,
           scanDirectory,
+          onUsage:
+            options.onUsage === undefined
+              ? undefined
+              : (usage) =>
+                  reportUsage(
+                    relative(scanDir, scanDirectory).split(sep).join("/"),
+                    usage,
+                  ),
         });
         historical.start(threadId);
+        if (usageOnly) {
+          await historical.stop().catch((error: unknown) => {
+            notifyObserver(
+              "onWarning",
+              options.onWarning,
+              options.onObserverError,
+              `Could not read prior scan token usage: ${errorMessage(error)}`,
+            );
+          });
+          throwIfAborted(signal, scanDir);
+          return null;
+        }
         return (await stopTracking(historical)).cost;
       };
       const reportCost = createScanCostReporter({
@@ -1797,10 +1831,29 @@ export class CodexSecurity {
         getActiveScan: () => activeScan,
         workbench,
       });
+      const observedUsage = new Map<string, ScanTokenUsage>();
+      const reportUsage = (key: string, usage: Readonly<ScanTokenUsage>) => {
+        observedUsage.set(key, { ...usage });
+        let total: ScanTokenUsage = { ...usage };
+        for (const [other, value] of observedUsage) {
+          if (other === key) continue;
+          total = addTokenUsage(total, value);
+        }
+        notifyObserver(
+          "onUsage",
+          options.onUsage,
+          options.onObserverError,
+          total,
+        );
+      };
       const workerNumber = this.#dependencies.workerNumber;
       const tracker = new ScanCostTracker({
         codexHome: runtime.codexHome,
         model,
+        onUsage:
+          options.onUsage === undefined
+            ? undefined
+            : (usage) => reportUsage("merge", usage),
         repository: repo,
         scanDirectory:
           mode === "deep"
@@ -1875,6 +1928,14 @@ export class CodexSecurity {
         resumeThreadId = sealedTurn.resumeThreadId;
         accounting.completed = sealedTurn.cost;
         scanThreadId = sealedTurn.threadId ?? undefined;
+        const usage = tokenUsage(sealedTurn.turnResult.usage);
+        if (usage !== null)
+          notifyObserver(
+            "onUsage",
+            options.onUsage,
+            options.onObserverError,
+            usage,
+          );
       } else {
         if (mode === "deep" && resumeScanId !== undefined) {
           await restorePriorScanCosts(
@@ -2357,6 +2418,8 @@ export class CodexSecurity {
                   tracker.start(resumeThreadId);
                   await tracker.refresh().catch(reportTrackingError);
                 },
+                onUsage:
+                  options.onUsage === undefined ? undefined : reportUsage,
                 onCost: (key, cost) => {
                   accounting.record(key, cost);
                   if (cost === null) return;

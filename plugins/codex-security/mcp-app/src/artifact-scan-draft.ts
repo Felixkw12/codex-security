@@ -1,3 +1,5 @@
+import { parseCanonicalCheckpoint } from "./artifact-canonical-draft.js";
+export { parseCanonicalScanDraft } from "./artifact-canonical-draft.js";
 import { isDeepStrictEqual } from "node:util";
 import {
   normalizeDeferred,
@@ -8,6 +10,7 @@ import {
   isObject,
   preserveFindingDetails,
   prepareSemanticScanDraft,
+  scopedDeepDraft,
   type PreparedScanDraft,
   requireObject,
   scanFindingIdentity,
@@ -98,7 +101,7 @@ export async function recordCodexSecurityScanDraft(
   publishDraft: PublishScanDraft,
   signal?: AbortSignal,
 ): Promise<ScanDraftResult> {
-  const parsed = parseScanDraft(input);
+  const parsed = scopedDeepDraft(context, parseScanDraft(input));
   requireBoundScan(context, parsed, true);
   if (
     context.mode === "deep" &&
@@ -1011,7 +1014,7 @@ function parsePersistedScanDraft(
       input.findings as JsonObject[],
       requireObject(input.coverage, "saved scan draft coverage"),
     );
-    return parseScanDraftDocument({
+    return parseCanonicalCheckpoint({
       ...input,
       ...(isObject(input.scope) ? { scope: projected.scope } : {}),
       findings: projected.findings,

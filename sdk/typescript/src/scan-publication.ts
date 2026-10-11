@@ -2,7 +2,8 @@ import { readThreatModelPath } from "./artifact-export.js";
 import { relative, sep } from "node:path";
 import { lstat } from "node:fs/promises";
 import { join } from "node:path";
-import type { ScanArtifactRestorer } from "./runtime.js";
+import { bundledPluginRoot, type ScanArtifactRestorer } from "./runtime.js";
+import { pathToFileURL } from "node:url";
 import { ScanAccounting } from "./scan-accounting.js";
 import {
   loadContract,
@@ -31,6 +32,7 @@ export interface CompletedScanTurn {
 }
 
 interface ScanResultContext {
+  scanId?: string;
   scanDir: string;
   pluginRoot: string;
   pythonPath?: string;
@@ -359,19 +361,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-export async function collectResult(
-  context: ScanResultContext,
-  turn: CompletedScanTurn,
-  workbenchValidated = false,
-): Promise<ScanResult> {
-  const { scanDir, pluginRoot, expectation, signal } = context;
-  const { threadId, turnResult } = turn;
-  const required = [
-    "scan-manifest.json",
-    "findings.json",
-    "coverage.json",
-    "report.md",
-  ];
+export async function requireScanArtifacts(
+  scanDir: string,
+  required: readonly string[],
+  signal: AbortSignal,
+): Promise<void> {
   const missing: string[] = [];
   for (const name of required) {
     try {
@@ -390,6 +384,58 @@ export async function collectResult(
       `Codex Security scan completed without required artifacts: ${missing.join(", ")}`,
     );
   }
+}
+
+export async function admitCanonicalArtifacts(
+  context: ScanResultContext,
+): Promise<void> {
+  const { scanDir, signal } = context;
+  signal.throwIfAborted();
+  await requireScanArtifacts(
+    scanDir,
+    ["scan-manifest.json", "findings.json", "coverage.json"],
+    signal,
+  );
+  const [manifest, findings, coverage] = await Promise.all(
+    ["scan-manifest.json", "findings.json", "coverage.json"].map(async (name) =>
+      JSON.parse(
+        new TextDecoder("utf-8", { fatal: true }).decode(
+          await readScanFile(scanDir, name, name, signal),
+        ),
+      ),
+    ),
+  );
+  const helper = (
+    await import(
+      pathToFileURL(join(await bundledPluginRoot(), "mcp/helpers.mjs")).href
+    )
+  ).default;
+  const draft = helper.parseCanonicalScanDraft({
+    scanId: context.scanId ?? manifest.scan.id,
+    manifest,
+    findings,
+    coverage,
+  });
+  signal.throwIfAborted();
+  if (draft.complete === false)
+    throw new IncompleteScanError(
+      "Codex Security produced only an unfinished audit checkpoint.",
+    );
+}
+
+export async function collectResult(
+  context: ScanResultContext,
+  turn: CompletedScanTurn,
+  workbenchValidated = false,
+): Promise<ScanResult> {
+  const { scanDir, pluginRoot, expectation, signal } = context;
+  const { threadId, turnResult } = turn;
+  await requireScanArtifacts(
+    scanDir,
+    ["scan-manifest.json", "findings.json", "coverage.json", "report.md"],
+    signal,
+  );
+  await admitCanonicalArtifacts(context);
   const { manifest, findings, coverage } = await loadContract(scanDir, {
     pluginRoot,
     expectation,

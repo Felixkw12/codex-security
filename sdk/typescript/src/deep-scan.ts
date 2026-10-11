@@ -3,6 +3,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { CodexSecurity, ScanOptions } from "./api.js";
 import type { JsonObject } from "./config.js";
 import type { ScanCost } from "./cost.js";
+import type { ScanTokenUsage } from "./cost-model.js";
 import {
   ScanCostLimitExceededError,
   ScanInterruptedError,
@@ -74,9 +75,11 @@ export interface DeepScanComposition {
   ): Promise<ScanMergeInput>;
   publish(draft: SemanticScan): Promise<void>;
   onCost(key: string, cost: Readonly<ScanCost> | null): void;
+  onUsage?(key: string, usage: Readonly<ScanTokenUsage>): void;
   historicalCost?(
     threadId: string,
     scanDirectory?: string,
+    usageOnly?: boolean,
   ): Promise<ScanCost | null>;
   restoreMergeCost?(): Promise<void>;
   costUnavailable?: boolean;
@@ -242,7 +245,7 @@ export async function runDeepScans(
     }
     // Recover every receipt before budget callbacks can abort another recovery.
     for (const { record, pass } of passes) {
-      if (record.progress.status === "running" && record.continuationThreadId)
+      if (record.progress.status === "running" && record.continuationThreadId) {
         costs.set(
           pass.directory,
           (await input.historicalCost?.(
@@ -250,6 +253,17 @@ export async function runDeepScans(
             record.scanDir,
           )) ?? null,
         );
+      } else if (
+        input.onUsage !== undefined &&
+        record.continuationThreadId &&
+        record.progress.status === "complete"
+      ) {
+        await input.historicalCost?.(
+          record.continuationThreadId,
+          record.scanDir,
+          true,
+        );
+      }
     }
     if (state.costUnavailable) await save();
     // Merge polling may stop the budget; every child receipt must be ready first.
@@ -449,6 +463,10 @@ export async function runDeepScans(
               await save();
               if (state.costUnavailable) reportPassCost("previous-work", null);
             },
+            onUsage:
+              input.onUsage === undefined
+                ? input.scanOptions.onUsage
+                : (usage) => input.onUsage!(pass.directory, usage),
             onCost: (cost) => {
               latestCost = cost;
               input.onCost(pass.directory, cost);

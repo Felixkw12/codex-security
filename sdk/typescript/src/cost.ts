@@ -81,6 +81,7 @@ interface ScanCostTrackerOptions {
   maxCostUsd?: number;
   expectedFilesTotal?: number;
   onCost?: (cost: Readonly<ScanCost>) => void;
+  onUsage?: (usage: Readonly<ScanTokenUsage>) => void;
   onActivity?: (activity: ScanActivity) => void;
   onProgress?: (progress: ScanProgress) => void;
   onSessionEvent?: (event: ScanSessionEvent) => void;
@@ -135,6 +136,7 @@ export class ScanCostTracker {
   #queuedRefresh: Promise<void> | null = null;
   #snapshot: ScanCostSnapshot = { usage: null, cost: null };
   #lastCost: string | null = null;
+  #lastUsage: string | null = null;
   #highestFilesCompleted = 0;
   #expectedFilesTotal: number | undefined;
 
@@ -171,6 +173,7 @@ export class ScanCostTracker {
     if (
       this.#options.maxCostUsd === undefined &&
       this.#options.onCost === undefined &&
+      this.#options.onUsage === undefined &&
       this.#options.onActivity === undefined &&
       this.#options.onProgress === undefined &&
       this.#options.onSessionEvent === undefined &&
@@ -234,6 +237,7 @@ export class ScanCostTracker {
       return this.#snapshot;
     const cost = estimateScanCost(this.#options.model, fallbackUsage);
     this.#snapshot = { usage: fallbackUsage ?? null, cost };
+    this.#reportUsage(tokenUsage(fallbackUsage));
     this.#reportCost(cost);
     return this.#snapshot;
   }
@@ -394,6 +398,7 @@ export class ScanCostTracker {
     if (usage === null) return;
     const cost = estimateScanCost(this.#options.model, usage);
     this.#snapshot = { usage, cost };
+    this.#reportUsage(usage);
     this.#reportCost(cost);
   }
 
@@ -442,6 +447,14 @@ export class ScanCostTracker {
     if (signature === this.#lastCost) return;
     this.#lastCost = signature;
     this.#options.onCost?.(cost);
+  }
+
+  #reportUsage(usage: ScanTokenUsage | null): void {
+    if (usage === null) return;
+    const signature = JSON.stringify(usage);
+    if (signature === this.#lastUsage) return;
+    this.#lastUsage = signature;
+    this.#options.onUsage?.(usage);
   }
 }
 
@@ -879,7 +892,7 @@ function sessionContentText(
     .join("\n");
 }
 
-function addTokenUsage(
+export function addTokenUsage(
   previous: ScanTokenUsage | null,
   next: ScanTokenUsage,
 ): ScanTokenUsage {

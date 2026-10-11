@@ -13,7 +13,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative, sep } from "node:path";
 import * as timers from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeAll, describe, expect, spyOn, test } from "bun:test";
@@ -1173,6 +1173,73 @@ describe("ordinary scan composition", () => {
       expect(costs.get(directory)).toEqual(expectedReceipt);
     },
   );
+
+  test("reports child token usage by pass even when no model price is available", async () => {
+    const h = await harness({ maxDiscoveryRuns: 2 });
+    const reports: Array<{ key: string; usage: unknown }> = [];
+    h.input.onUsage = (key, usage) => reports.push({ key, usage });
+    h.setRun(async (options) => {
+      options.onUsage?.({
+        cache_write_input_tokens: 0,
+        reasoning_output_tokens: 0,
+        total_tokens: 110,
+        input_tokens: 100,
+        cached_input_tokens: 20,
+        output_tokens: 10,
+      });
+      options.onUsage?.({
+        cache_write_input_tokens: 0,
+        reasoning_output_tokens: 0,
+        total_tokens: 165,
+        input_tokens: 150,
+        cached_input_tokens: 30,
+        output_tokens: 15,
+      });
+      const completed = result(options.resumeScanId!, options.outputDir!);
+      h.records.get(options.resumeScanId!)!.continuationThreadId =
+        completed.threadId!;
+      return completed;
+    });
+    await runDeepScans(h.input);
+    expect(reports.map(({ key }) => key)).toEqual([
+      "artifacts/deep-scan/passes/pass-1",
+      "artifacts/deep-scan/passes/pass-1",
+      "artifacts/deep-scan/passes/pass-2",
+      "artifacts/deep-scan/passes/pass-2",
+    ]);
+    expect(reports.at(-1)?.usage).toEqual({
+      cache_write_input_tokens: 0,
+      reasoning_output_tokens: 0,
+      total_tokens: 165,
+      input_tokens: 150,
+      cached_input_tokens: 30,
+      output_tokens: 15,
+    });
+    reports.length = 0;
+    const historicalReads: string[] = [];
+    h.input.historicalCost = async (threadId, scanDirectory, usageOnly) => {
+      expect(usageOnly).toBe(true);
+      historicalReads.push(threadId);
+      h.input.onUsage!(
+        relative(h.input.scanDir, scanDirectory!).split(sep).join("/"),
+        {
+          input_tokens: 150,
+          cached_input_tokens: 30,
+          cache_write_input_tokens: 0,
+          output_tokens: 15,
+          reasoning_output_tokens: 0,
+          total_tokens: 165,
+        },
+      );
+      return null;
+    };
+    await runDeepScans(h.input);
+    expect(historicalReads).toHaveLength(2);
+    expect(reports.map(({ key }) => key)).toEqual([
+      "artifacts/deep-scan/passes/pass-1",
+      "artifacts/deep-scan/passes/pass-2",
+    ]);
+  });
 
   test.each([
     [false, false],

@@ -22,6 +22,7 @@ export interface ArtifactContext {
   repoRoot: string;
   scanId?: string;
   scope?: string;
+  includePaths?: readonly string[];
   pluginRoot?: string;
   pythonCommand?: string;
   targetContract?: Readonly<Record<string, unknown>>;

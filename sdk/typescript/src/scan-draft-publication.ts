@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import {
   prepareSemanticScanDraft,
+  scopedDeepDraft,
   type SemanticScan,
   type PreparedScanDraft,
 } from "./scan-semantics.js";
@@ -24,10 +25,11 @@ export async function writeSemanticScanDraft(
   },
   draft: SemanticScan,
 ): Promise<void> {
+  const scoped = scopedDeepDraft(options.contract, draft);
   await writePreparedScanDraft(
     options,
-    draft,
-    prepareSemanticScanDraft(options.contract, draft),
+    scoped,
+    prepareSemanticScanDraft(options.contract, scoped),
   );
 }
 

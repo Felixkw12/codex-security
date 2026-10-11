@@ -1338,6 +1338,7 @@ def complete_scan_locked(
                 if scan["mode"] != "deep" or documents is not None
                 else None,
                 draft_documents=documents,
+                finding_scope=requested_scan_paths(scan) if scan["mode"] == "deep" else None,
             )
         add_warning()
         wrote = True

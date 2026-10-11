@@ -1,6 +1,7 @@
 use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
-use std::ffi::{CStr, CString};
+use std::ffi::{CStr, CString, OsStr};
+use std::os::unix::ffi::OsStrExt;
 
 #[napi(object)]
 pub struct FileLockResult {
@@ -26,6 +27,17 @@ pub fn file_lock(fd: i32, unlock: bool, nonblocking: bool) -> FileLockResult {
 pub struct UserHomeResult {
     pub errno: i32,
     pub value: Option<Buffer>,
+}
+
+#[napi]
+pub fn unix_environment(name: Buffer) -> napi::Result<Option<Buffer>> {
+    if name.contains(&0) {
+        return Err(napi::Error::from_reason(
+            "Environment variable name contains a NUL byte",
+        ));
+    }
+    Ok(std::env::var_os(OsStr::from_bytes(name.as_ref()))
+        .map(|value| value.as_bytes().to_vec().into()))
 }
 
 #[napi]

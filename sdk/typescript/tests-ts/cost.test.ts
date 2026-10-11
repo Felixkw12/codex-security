@@ -1,3 +1,4 @@
+import { jsonLines } from "./support/json.js";
 import { type ScanWorkerEvent } from "../src/cost.js";
 
 import * as filesystem from "node:fs/promises";
@@ -13,6 +14,7 @@ import {
 
 import { tmpdir } from "node:os";
 
+import * as fs from "node:fs/promises";
 import { join, parse, sep } from "node:path";
 
 import { Codex } from "@openai/codex-sdk";
@@ -86,6 +88,16 @@ async function codexHome(): Promise<string> {
   );
   temporaryDirectories.push(directory);
   return directory;
+}
+
+async function workerSessionFixture() {
+  const home = await codexHome();
+  const usage = { input_tokens: 100, output_tokens: 10 };
+  const parent = await writeSession(home, "scan-thread", usage);
+  const worker = await writeSession(home, "worker-thread", usage, {
+    parent: "scan-thread",
+  });
+  return { home, usage, parent, worker };
 }
 
 async function writeSession(
@@ -202,6 +214,107 @@ test.each([
 });
 
 describe("scan cost", () => {
+  test("ignores token-count events without a usage snapshot in both readers", async () => {
+    const home = await codexHome();
+    const path = await writeSession(
+      home,
+      childUuid7Thread,
+      {},
+      { parent: scanThreadId },
+    );
+    await writeFile(
+      path,
+      jsonLines([
+        ...ownershipRollout([]),
+        {
+          type: "event_msg",
+          timestamp: "2026-07-26T12:03:00Z",
+          payload: {
+            type: "token_count",
+            info: null,
+            rate_limits: { primary: { used_percent: 5 } },
+          },
+        },
+      ]) + "\n",
+    );
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-6-astra",
+    });
+    tracker.start(scanThreadId);
+    expect((await tracker.stop()).usage).toEqual(ownedSdkUsage);
+    expect(readPythonRolloutUsage(BUNDLED_PLUGIN_ROOT, path)).toEqual({
+      usage: ownedPythonUsage,
+      warnings: [],
+    });
+  });
+
+  test("does not reopen unchanged rollouts and reads appended worker usage", async () => {
+    const { home, parent, worker } = await workerSessionFixture();
+    await writeSession(home, "unrelated-thread", {
+      input_tokens: 900,
+      output_tokens: 90,
+    });
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-6-astra",
+    });
+    tracker.start("scan-thread");
+    await tracker.refresh();
+    const opened = spyOn(fs, "open");
+    try {
+      await tracker.refresh();
+      expect(opened).not.toHaveBeenCalled();
+      await appendFile(
+        worker,
+        jsonLines([
+          {
+            type: "event_msg",
+            payload: {
+              type: "token_count",
+              info: {
+                total_token_usage: { input_tokens: 200, output_tokens: 20 },
+              },
+            },
+          },
+        ]) + "\n",
+      );
+      const snapshot = await tracker.refresh();
+      expect(opened.mock.calls.map(([path]) => path)).toEqual([worker]);
+      expect(snapshot.usage).toMatchObject({
+        input_tokens: 300,
+        output_tokens: 30,
+      });
+      expect(opened.mock.calls.map(([path]) => path)).not.toContain(parent);
+    } finally {
+      opened.mockRestore();
+      await tracker.stop();
+    }
+  });
+
+  test("reports known usage even when model pricing is unavailable", async () => {
+    const home = await codexHome();
+    await writeSession(home, "scan-thread", {
+      input_tokens: 100,
+      output_tokens: 10,
+    });
+    const usages: unknown[] = [];
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "synthetic-unpriced-model",
+      onUsage: (usage) => usages.push(usage),
+    });
+    tracker.start("scan-thread");
+    const snapshot = await tracker.stop();
+    expect(snapshot.cost).toBeNull();
+    expect(snapshot.usage).toMatchObject({
+      input_tokens: 100,
+      output_tokens: 10,
+    });
+    expect(usages).toHaveLength(1);
+    expect(usages[0]).toEqual(snapshot.usage);
+  });
+
   test("shows distinct token categories without adding cached input twice", () => {
     expect(
       formatTokenUsage({
@@ -980,6 +1093,78 @@ describe("live scan cost tracking", () => {
       expect(
         events.some((event) => event.threadId === "unrelated-thread"),
       ).toBe(false);
+    },
+  );
+
+  test.each([
+    ["EACCES", true],
+    ["EACCES", false],
+    ["EPERM", true],
+    ["EPERM", false],
+  ] as const)(
+    "retains and retries a %s worker when its parent appears later (already identified: %j)",
+    async (code, identified) => {
+      const home = await codexHome();
+      const usage = (input_tokens: number) => ({
+        input_tokens,
+        output_tokens: 0,
+      });
+      await writeSession(home, "scan-thread", usage(10));
+      const worker = await writeSession(home, "worker", usage(1), {
+        parent: "middle",
+      });
+      let denied = !identified;
+      let attempts = 0;
+      const opened = filesystem.open;
+      const opening = spyOn(filesystem, "open").mockImplementation(
+        async (...args: Parameters<typeof filesystem.open>) => {
+          if (String(args[0]) === worker && denied) {
+            attempts += 1;
+            throw Object.assign(new Error(`Synthetic ${code}`), {
+              code,
+              syscall: "open",
+              path: worker,
+            });
+          }
+          return await opened(...args);
+        },
+      );
+      const reported: number[] = [];
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "gpt-5.6-sol",
+        maxCostUsd: 1,
+        onCost: (cost) => reported.push(cost.inputTokens),
+      });
+      tracker.start("scan-thread");
+      try {
+        if (identified) {
+          expect((await tracker.refresh()).cost?.inputTokens).toBe(10);
+          denied = true;
+          expect((await tracker.refresh()).cost?.inputTokens).toBe(10);
+        } else {
+          await expect(tracker.refresh()).rejects.toMatchObject({ code });
+        }
+        await appendFile(
+          worker,
+          `${JSON.stringify({ type: "event_msg", payload: { type: "token_count", info: { total_token_usage: usage(1_000_000) } } })}\n`,
+        );
+        await writeSession(home, "middle", usage(20), {
+          parent: "scan-thread",
+        });
+        await expect(tracker.refresh()).rejects.toMatchObject({ code });
+        await expect(tracker.refresh()).rejects.toMatchObject({ code });
+        denied = false;
+        const snapshot = await tracker.stop();
+        expect(snapshot.cost?.inputTokens).toBe(1_000_030);
+        expect(snapshot.cost!.estimatedUsd).toBeGreaterThan(1);
+        expect(reported).toContain(1_000_030);
+        expect(attempts).toBeGreaterThanOrEqual(2);
+      } finally {
+        denied = false;
+        await tracker.stop().catch(() => {});
+        opening.mockRestore();
+      }
     },
   );
 

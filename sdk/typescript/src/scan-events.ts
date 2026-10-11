@@ -18,7 +18,11 @@ import {
 import { ScanCostTrackingError } from "./deep-scan.js";
 import type { ScanExpectation } from "./contract.js";
 import type { ScanResult } from "./result.js";
-import { collectResult, type CompletedScanTurn } from "./scan-publication.js";
+import {
+  admitCanonicalArtifacts,
+  collectResult,
+  type CompletedScanTurn,
+} from "./scan-publication.js";
 import { scanActivitiesFromEvent, type ScanActivity } from "./scan-activity.js";
 import {
   scanProgressUpdatesFromEvent,
@@ -31,7 +35,9 @@ const PERSONAL_TRUSTED_ACCESS_URL = "https://chatgpt.com/cyber";
 const ORGANIZATIONAL_TRUSTED_ACCESS_URL =
   "https://openai.com/form/enterprise-trusted-access-for-cyber/";
 interface ScanEventRunOptions {
-  thread: CodexThreadLike;
+  scanId?: string;
+  thread: Pick<CodexThreadLike, "id"> &
+    Partial<Pick<CodexThreadLike, "runStreamed">>;
   events: AsyncGenerator<ScanEvent>;
   signal: AbortSignal;
   scanDir: string;
@@ -111,7 +117,19 @@ export async function runScanEvents(
   options: ScanEventRunOptions,
 ): Promise<ScanResult> {
   try {
-    const completed = await runScanTurn(options);
+    options.signal.throwIfAborted();
+    const completed = await runScanTurn(
+      options,
+      options.workbenchValidated === true,
+    );
+    await admitCanonicalArtifacts(options);
+    if (!options.workbenchValidated && options.onFinalize !== undefined) {
+      const finalizedUsage = await options.onFinalize(
+        completed.turnResult.usage,
+      );
+      if (finalizedUsage !== undefined)
+        completed.turnResult.usage = finalizedUsage;
+    }
     const result = await collectResult(
       options,
       completed,
@@ -126,6 +144,7 @@ export async function runScanEvents(
 /** @internal */
 export async function runScanTurn(
   options: ScanEventRunOptions,
+  finalize = true,
 ): Promise<CompletedScanTurn> {
   let scanStarted = false;
   let tacStatusReported = false;
@@ -218,7 +237,7 @@ export async function runScanTurn(
         "Codex Security did not report a thread ID.",
       );
     }
-    if (options.onFinalize !== undefined) {
+    if (finalize && options.onFinalize !== undefined) {
       const finalizedUsage = await options.onFinalize(usage);
       if (finalizedUsage !== undefined) usage = finalizedUsage;
     }
@@ -239,7 +258,8 @@ export async function runScanTurn(
 
 /** @internal */
 export async function readCodexTurn(options: {
-  thread: CodexThreadLike;
+  thread: Pick<CodexThreadLike, "id"> &
+    Partial<Pick<CodexThreadLike, "runStreamed">>;
   events: AsyncGenerator<ScanEvent>;
   onEvent?: (event: ScanEvent) => Promise<void> | void;
   onReconnect?: (message: string, attempts: [number, number]) => void;

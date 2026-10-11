@@ -218,7 +218,10 @@ export function scanFindingIdentity(source: JsonObject): string {
   ]);
 }
 
-export function validateFindingSemantics(findings: SemanticFinding[]): void {
+export function validateFindingSemantics(
+  findings: SemanticFinding[],
+  enforceLegacyEvidenceBounds = true,
+): void {
   for (const [findingIndex, finding] of findings.entries()) {
     const severity = finding.severity;
     if (
@@ -260,6 +263,7 @@ export function validateFindingSemantics(findings: SemanticFinding[]): void {
         }
         evidenceIds.add(id);
         if (
+          (evidenceName === "codeEvidence" || enforceLegacyEvidenceBounds) &&
           typeof evidence["endLine"] === "number" &&
           evidence["endLine"] < (evidence["startLine"] as number)
         ) {
@@ -399,7 +403,14 @@ export function prepareSemanticScanDraft(
   const target = buildTarget(context, contract, trustedTarget);
   const scope = buildScope(context, trustedScope, input.scope);
   return {
-    findings: { findings: prepareScanFindings(input.findings, context.mode) },
+    findings: {
+      findings: prepareScanFindings(
+        context.mode === "deep"
+          ? findingsWithinScope(input.findings, scope.includePaths)
+          : input.findings,
+        context.mode,
+      ),
+    },
     coverage: buildCoverage(context, contract, input.coverage, scope, target),
     manifest: {
       scan: {
@@ -807,4 +818,39 @@ export function normalizeDeferred(deferred: SemanticCoverage["deferred"]) {
     return { ...item, id };
   });
   return normalizedDeferred;
+}
+
+/** Keep terminal Deep findings inside the host-selected paths. */
+export function findingsWithinScope<
+  T extends { locations: Array<{ path: string }> },
+>(findings: T[], includePaths: readonly string[]): T[] {
+  if (includePaths.includes(".")) return findings;
+  return findings.filter((finding) =>
+    finding.locations.some((location) => {
+      const path = location.path.replace(/^\.\//u, "");
+      return includePaths.some(
+        (scope) => path === scope || path.startsWith(`${scope}/`),
+      );
+    }),
+  );
+}
+
+export function scopedDeepDraft(
+  context: SemanticScanContext,
+  draft: SemanticScan,
+): SemanticScan {
+  if (context.mode !== "deep" || draft.complete === false) return draft;
+  const contract = requireObject(
+    context.targetContract,
+    "scan draft: authoritative target contract",
+  );
+  const trustedScope = requireObject(
+    contract["scope"],
+    "scan draft: authoritative scope",
+  );
+  const scope = buildScope(context, trustedScope, draft.scope);
+  return {
+    ...draft,
+    findings: findingsWithinScope(draft.findings, scope.includePaths),
+  };
 }
