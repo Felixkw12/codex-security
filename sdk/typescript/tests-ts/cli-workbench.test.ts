@@ -28,6 +28,53 @@ import {
 } from "./support/cli-run.js";
 
 describe("CLI workbench", () => {
+  test.each(["json", "text"])(
+    "findings list retains requested aliases after history delegation in %s output",
+    async (format) => {
+      const root = await temporaryDirectory("finding-delegated-alias-");
+      try {
+        const repository = join(root, "repository");
+        const alias = join(root, "requested-alias");
+        await mkdir(repository);
+        await symlink(
+          repository,
+          alias,
+          process.platform === "win32" ? "junction" : "dir",
+        );
+        for (const args of [[], [alias]]) {
+          const cli = createCliTest(main, { stdout: format === "text" });
+          const stdout = cli.stdout;
+          const status = await cli.runCli(
+            [
+              "findings",
+              "list",
+              ...args,
+              ...(format === "json" ? ["--json"] : []),
+            ],
+            dependencies({
+              currentDirectory: alias,
+              onWorkbench: (): JsonObject => ({
+                repository,
+                findings: [
+                  { title: "Saved finding", severity: { level: "high" } },
+                ],
+                nextOffset: null,
+              }),
+            }),
+          );
+          expect(status, cli.stderr.text()).toBe(0);
+          if (format === "json") {
+            expect(JSON.parse(stdout.text()).repository).toBe(alias);
+          } else {
+            expect(stdout.text()).toContain("requested-alias");
+            expect(stdout.text()).toContain("Saved finding");
+          }
+        }
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
   test("findings list delegates repository aliases to the workbench", async () => {
     const root = await temporaryDirectory("finding-repository-alias-");
     try {
