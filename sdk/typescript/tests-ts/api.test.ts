@@ -4337,6 +4337,147 @@ describe("CodexSecurity orchestration", () => {
 
   test.each(
     (["legacy", "paginated"] as const).flatMap((mode) =>
+      [false, true].map(
+        (savedReviewFirst) => [mode, savedReviewFirst] as const,
+      ),
+    ),
+  )(
+    "retains repeated inventory before saved review (%s, saved review first: %p)",
+    async (mode, savedReviewFirst) => {
+      const total = 8;
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const expanded = Promise.withResolvers<void>(),
+        inventory = Promise.withResolvers<void>(),
+        review = Promise.withResolvers<void>(),
+        workerSeen = Promise.withResolvers<void>();
+      const marker = (count: number, filesTotal: number) =>
+        `CODEX_SECURITY_SCAN_PROGRESS ${JSON.stringify({ phase: "discovery", filesCompleted: count, filesTotal })}`;
+      const saved = (id: string, text: string) => [
+        {
+          type: "event_msg",
+          payload:
+            mode === "legacy"
+              ? { type: "agent_message", message: text }
+              : {
+                  type: "item_completed",
+                  item: {
+                    type: "AgentMessage",
+                    id,
+                    content: [{ type: "Text", text }],
+                  },
+                },
+        },
+        {
+          type: "response_item",
+          payload: {
+            type: "message",
+            id,
+            role: "assistant",
+            content: [{ type: "output_text", text }],
+          },
+        },
+      ];
+      const live = (id: string, text: string): ThreadEvent => ({
+        type: "item.completed",
+        item: { type: "agent_message", id, text },
+      });
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          const parent = await writeUsageSession(codexHome, "thread-1", {});
+          const append = async (...rows: unknown[]) =>
+            appendFile(
+              parent,
+              rows
+                .flat()
+                .map((row) => JSON.stringify(row))
+                .join("\n") + "\n",
+            );
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            yield live("first-inventory", marker(0, 8));
+            await append(
+              saved("first-inventory", marker(0, 8)),
+              saved("expanded-inventory", marker(0, 9)),
+            );
+            await expanded.promise;
+            // The SDK can deliver a review while older persisted inventory is still
+            // being flushed. Its saved position becomes known only in the next poll.
+            yield live("parent-review", marker(1, total));
+            await append(
+              saved("final-inventory", marker(0, total)),
+              ...(savedReviewFirst
+                ? [saved("parent-review", marker(1, total))]
+                : []),
+            );
+            await inventory.promise;
+            if (!savedReviewFirst)
+              await append(saved("parent-review", marker(1, total)));
+            await review.promise;
+            const worker = await writeUsageSession(
+              codexHome,
+              "worker-thread",
+              {},
+              { parent: "thread-1" },
+            );
+            await appendFile(
+              worker,
+              JSON.stringify({
+                type: "response_item",
+                payload: {
+                  type: "custom_tool_call_output",
+                  call_id: "oversized-worker",
+                  output: marker(9, 9),
+                },
+              }) + "\n",
+            );
+            await workerSeen.promise;
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      const keepAlive = setInterval(() => {}, 1000);
+      try {
+        await client.run(repository, {
+          onProgress: (update) => updates.push(update),
+          onSessionEvent: ({ event }) => {
+            const p = event["payload"] as { id?: string; call_id?: string };
+            if (p?.id === "expanded-inventory") expanded.resolve();
+            if (p?.id === "final-inventory") inventory.resolve();
+            if (p?.id === "parent-review") review.resolve();
+            if (p?.call_id === "oversized-worker") workerSeen.resolve();
+          },
+        });
+        expect(updates.at(-1)).toEqual({
+          phase: "discovery",
+          filesCompleted: 1,
+          filesTotal: total,
+        });
+        expect(updates.some((update) => update.filesCompleted === 9)).toBe(
+          false,
+        );
+      } finally {
+        clearInterval(keepAlive);
+        expanded.resolve();
+        inventory.resolve();
+        review.resolve();
+        workerSeen.resolve();
+        await client.close();
+      }
+    },
+  );
+
+  test.each(
+    (["legacy", "paginated"] as const).flatMap((mode) =>
       (
         [
           "live-first",

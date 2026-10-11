@@ -1191,13 +1191,6 @@ export class ScanCostTracker {
           markerIndex: saved.markerIndex,
         });
       if (
-        parent &&
-        !provenInventory &&
-        !deferredCoverage &&
-        !this.#savedParentProgressIsCurrent(saved)
-      )
-        continue;
-      if (
         inventoryMarker &&
         newerInventory &&
         (this.#parentProgress?.progress.filesCompleted ?? 0) > 0 &&
@@ -1208,6 +1201,13 @@ export class ScanCostTracker {
         session.progress.push(saved);
         continue;
       }
+      if (
+        parent &&
+        !provenInventory &&
+        !deferredCoverage &&
+        !this.#savedParentProgressIsCurrent(saved)
+      )
+        continue;
       if (saved.duplicate) {
         if (
           parent &&
