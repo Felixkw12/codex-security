@@ -120,6 +120,112 @@ function progressMessage(
   };
 }
 
+test.each([
+  ["complete prefix", true],
+  ["fenced prefix", false],
+  ["partial prefix line", false],
+  ["ambiguous tail", false],
+] as const)(
+  "recovers only complete original lines before a persistence gap (%s)",
+  async (scenario, reported) => {
+    const { home, parent } = await workerSessionFixture();
+    const progress = {
+      phase: "discovery",
+      filesCompleted: 4,
+      filesTotal: 8,
+    } as const;
+    const marker = "CODEX_SECURITY_SCAN_PROGRESS " + JSON.stringify(progress);
+    let prefix = commandHead;
+    let tail = commandTail;
+    if (scenario === "complete prefix" || scenario === "fenced prefix") {
+      const text =
+        "h".repeat(24_999) +
+        "\n" +
+        (scenario === "fenced prefix" ? "```text\n" : "") +
+        marker +
+        "\n";
+      prefix = text + "h".repeat(commandHead.length - text.length);
+    } else if (scenario === "partial prefix line") {
+      prefix =
+        "h".repeat(commandHead.length - marker.length - 1) + "\n" + marker;
+    } else {
+      const text = "\n" + marker + "\n";
+      tail = text + "t".repeat(commandTail.length - text.length);
+    }
+    const saved =
+      prefix + "\n... command output truncated for persistence ...\n" + tail;
+    // The omitted suffix invalidates a marker ending at the prefix boundary;
+    // the gap's inserted newline must not turn it into a complete source line.
+    const full =
+      prefix +
+      " omitted same-line suffix\n```text\n" +
+      "m".repeat(20_000) +
+      tail;
+    expect(Buffer.byteLength(saved)).toBe(64 * 1024);
+    await appendFile(
+      parent,
+      JSON.stringify({
+        type: "event_msg",
+        payload: {
+          type: "item_completed",
+          item: {
+            type: "CommandExecution",
+            command: ["review"],
+            aggregated_output: saved,
+          },
+        },
+      }) + "\n",
+    );
+    const updates: ScanProgress[] = [];
+    const tracker = costTracker(home, {
+      expectedFilesTotal: 8,
+      onProgress: (update) => updates.push(update),
+    });
+    tracker.start("scan-thread");
+    try {
+      await tracker.refresh();
+      expect(updates).toEqual(reported ? [progress] : []);
+      if (reported) {
+        const latest = { ...progress, phase: "validation" } as const;
+        await appendFile(
+          parent,
+          JSON.stringify({
+            type: "event_msg",
+            payload: {
+              type: "item_completed",
+              item: {
+                type: "AgentMessage",
+                content: [
+                  {
+                    type: "Text",
+                    text:
+                      "CODEX_SECURITY_SCAN_PROGRESS " + JSON.stringify(latest),
+                  },
+                ],
+              },
+            },
+          }) + "\n",
+        );
+        await tracker.refresh();
+        expect(updates.at(-1)).toEqual(latest);
+        // Parsing a prefix must preserve the original full-output signature.
+        expect(
+          tracker.recordParentProgress(progress, {
+            type: "item.completed",
+            item: {
+              type: "command_execution",
+              command: "review",
+              aggregated_output: full,
+            },
+          }),
+        ).toBe(false);
+      }
+    } finally {
+      await tracker.stop();
+    }
+  },
+);
+
 test("does not retain completed command payloads when native logs are absent", async () => {
   const root = await codexHome();
   const built = await Bun.build({

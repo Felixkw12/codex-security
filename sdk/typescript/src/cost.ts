@@ -1615,13 +1615,18 @@ function nativeProgressItem(value: unknown): NativeProgressItem | null {
     text = value["aggregated_output"];
     command = value["command"];
   } else return null;
-  const markers = scanProgressUpdatesFromText(text);
+  let progressText = text;
+  const gap = kind === "command" ? text.indexOf(PERSISTED_OUTPUT_GAP) : -1;
+  if (gap !== -1) {
+    // Complete original prefix lines have known fence state. The gap inserts
+    // its own newline, so the last partial prefix line and the tail remain
+    // unproven without the full output.
+    const prefix = text.slice(0, gap);
+    progressText = prefix.slice(0, prefix.lastIndexOf("\n") + 1);
+  }
   return {
     ...progressSignature(kind, text, command),
-    // Missing fence delimiters in the persisted middle can make quoted text
-    // look like a marker. Only full output establishes those progress updates.
-    updates:
-      kind === "command" && text.includes(PERSISTED_OUTPUT_GAP) ? [] : markers,
+    updates: scanProgressUpdatesFromText(progressText),
   };
 }
 

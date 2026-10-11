@@ -4637,7 +4637,11 @@ describe("CodexSecurity orchestration", () => {
   test.each([false, true])(
     "retains saved parent coverage across idle polls (split inventory: %p)",
     async (split) => {
+      const stage = (name: string) =>
+        writeSync(2, `[saved parent progress] split=${split}: ${name}\n`);
+      stage("fixtures begin");
       const { root, repository, codexHome, scanDir } = await scanDirectories();
+      stage("fixtures ready");
       const updates: ScanProgress[] = [];
       const inventoryRead = Promise.withResolvers<void>();
       const completeRead = Promise.withResolvers<void>();
@@ -4658,6 +4662,7 @@ describe("CodexSecurity orchestration", () => {
                 }),
         },
       });
+      stage("construct client");
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: async (
@@ -4669,16 +4674,27 @@ describe("CodexSecurity orchestration", () => {
             ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
             : mockWorkbench(args, input),
         createCodex: codexFactory(async () => {
+          stage("runStreamed entry");
+          stage("copy scan begin");
           await copyCompletedScan(root);
+          stage("copy scan end");
+          stage("write session begin");
           const rollout = await writeUsageSession(codexHome, "thread-1", {});
+          stage("write session end");
           async function* events(): AsyncGenerator<ThreadEvent> {
+            stage("generator entry");
             if (split) {
+              stage("inventory append begin");
               await appendFile(
                 rollout,
                 JSON.stringify(receipt("inventory", 0)) + "\n",
               );
+              stage("inventory append end");
+              stage("inventory wait begin");
               await inventoryRead.promise;
+              stage("inventory wait resolved");
             }
+            stage("complete append begin");
             await appendFile(
               rollout,
               [
@@ -4688,9 +4704,16 @@ describe("CodexSecurity orchestration", () => {
                 .map((row) => JSON.stringify(row))
                 .join("\n") + "\n",
             );
+            stage("complete append end");
+            stage("complete wait begin");
             await completeRead.promise;
+            stage("complete wait resolved");
+            stage("idle append begin");
             await appendFile(rollout, JSON.stringify(receipt("idle")) + "\n");
+            stage("idle append end");
+            stage("idle wait begin");
             await idleRead.promise;
+            stage("idle wait resolved");
           }
           return { events: completedEvents("thread-1", events()) };
         }),
@@ -4698,15 +4721,26 @@ describe("CodexSecurity orchestration", () => {
       // The fake stream has no process handle to keep the unref'ed poll alive.
       const keepAlive = setInterval(() => {}, 1_000);
       try {
+        stage("client.run begin");
         await client.run(repository, {
           onProgress: (update) => updates.push(update),
           onSessionEvent: ({ event }) => {
             const id = (event["payload"] as { call_id?: string })?.call_id;
-            if (id === "inventory") inventoryRead.resolve();
-            if (id === "complete") completeRead.resolve();
-            if (id === "idle") idleRead.resolve();
+            if (id === "inventory") {
+              stage("inventory observed");
+              inventoryRead.resolve();
+            }
+            if (id === "complete") {
+              stage("complete observed");
+              completeRead.resolve();
+            }
+            if (id === "idle") {
+              stage("idle observed");
+              idleRead.resolve();
+            }
           },
         });
+        stage("client.run end");
         expect(updates.at(-1)).toEqual({
           phase: "discovery",
           filesCompleted: 7,
@@ -4726,7 +4760,9 @@ describe("CodexSecurity orchestration", () => {
         ).toBe(true);
       } finally {
         clearInterval(keepAlive);
+        stage("client.close begin");
         await client.close();
+        stage("client.close end");
       }
     },
   );
