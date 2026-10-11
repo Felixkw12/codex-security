@@ -220,10 +220,11 @@ describe("delegated scan attribution", () => {
           ),
         );
         for (const result of results) expect(result.status).toBe("rejected");
-        for (const controller of controllers) {
-          expect(controller.signal.reason?.message).toBe(
-            "delegated attribution observed",
-          );
+        for (const [index, controller] of controllers.entries()) {
+          expect(
+            controller.signal.reason?.message,
+            Bun.inspect(results[index]),
+          ).toBe("delegated attribution observed");
         }
         expect(maximumActive).toBe(2);
       } finally {
