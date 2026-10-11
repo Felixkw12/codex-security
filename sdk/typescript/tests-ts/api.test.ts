@@ -4309,6 +4309,16 @@ describe("CodexSecurity orchestration", () => {
     ["complete native occurrences", true, true, false, 8, 9, 1, 1],
     ["tool-only old inventory", false, true, false, 8, 9, 1, 1],
     ["late upward inventory proof", false, true, true, 8, 9, 1, 1],
+    [
+      "pending validation remains newer than inventory proof",
+      false,
+      true,
+      true,
+      8,
+      9,
+      9,
+      9,
+    ],
     ["live inventory readmits pending worker", false, true, true, 8, 9, 9, 9],
     [
       "late proof admits a previously oversized worker",
@@ -4348,9 +4358,13 @@ describe("CodexSecurity orchestration", () => {
       let proofIndex = 0;
       const parentRead = Promise.withResolvers<void>();
       const workerRead = Promise.withResolvers<void>();
-      const marker = (filesCompleted: number, filesTotal: number) =>
+      const marker = (
+        filesCompleted: number,
+        filesTotal: number,
+        phase: ScanProgress["phase"] = "discovery",
+      ) =>
         "CODEX_SECURITY_SCAN_PROGRESS " +
-        JSON.stringify({ phase: "discovery", filesCompleted, filesTotal });
+        JSON.stringify({ phase, filesCompleted, filesTotal });
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: async (
@@ -4439,7 +4453,14 @@ describe("CodexSecurity orchestration", () => {
                 type: "response_item",
                 payload: {
                   type: "custom_tool_call_output",
-                  output: marker(workerCount, workerTotal),
+                  output: marker(
+                    workerCount,
+                    workerTotal,
+                    _scenario ===
+                      "pending validation remains newer than inventory proof"
+                      ? "validation"
+                      : "discovery",
+                  ),
                 },
               }) + "\n",
             );
@@ -4516,7 +4537,11 @@ describe("CodexSecurity orchestration", () => {
           return;
         }
         expect(updates.at(-1)).toEqual({
-          phase: "discovery",
+          phase:
+            _scenario ===
+            "pending validation remains newer than inventory proof"
+              ? "validation"
+              : "discovery",
           filesCompleted: Math.max(
             2,
             workerTotal <= correctedTotal ? workerCount : 0,
@@ -4544,6 +4569,200 @@ describe("CodexSecurity orchestration", () => {
             filesTotal: correctedTotal,
           });
         }
+      } finally {
+        await client.close();
+      }
+    },
+  );
+
+  test.each([false, true])(
+    "retains saved parent coverage across idle polls (split inventory: %p)",
+    async (split) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const inventoryRead = Promise.withResolvers<void>();
+      const completeRead = Promise.withResolvers<void>();
+      const idleRead = Promise.withResolvers<void>();
+      const receipt = (id: string, count?: number) => ({
+        type: "response_item",
+        payload: {
+          type: "custom_tool_call_output",
+          call_id: id,
+          output:
+            count === undefined
+              ? "Inspection continues."
+              : "CODEX_SECURITY_SCAN_PROGRESS " +
+                JSON.stringify({
+                  phase: "discovery",
+                  filesCompleted: count,
+                  filesTotal: 9,
+                }),
+        },
+      });
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          const rollout = await writeUsageSession(codexHome, "thread-1", {});
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            if (split) {
+              await appendFile(
+                rollout,
+                JSON.stringify(receipt("inventory", 0)) + "\n",
+              );
+              await inventoryRead.promise;
+            }
+            await appendFile(
+              rollout,
+              [
+                ...(split ? [] : [receipt("inventory", 0)]),
+                receipt("complete", 7),
+              ]
+                .map((row) => JSON.stringify(row))
+                .join("\n") + "\n",
+            );
+            await completeRead.promise;
+            await appendFile(rollout, JSON.stringify(receipt("idle")) + "\n");
+            await idleRead.promise;
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      try {
+        await client.run(repository, {
+          onProgress: (update) => updates.push(update),
+          onSessionEvent: ({ event }) => {
+            const id = (event["payload"] as { call_id?: string })?.call_id;
+            if (id === "inventory") inventoryRead.resolve();
+            if (id === "complete") completeRead.resolve();
+            if (id === "idle") idleRead.resolve();
+          },
+        });
+        expect(updates.at(-1)).toEqual({
+          phase: "discovery",
+          filesCompleted: 7,
+          filesTotal: 9,
+        });
+        const reviewed = updates.findIndex(
+          (update) => update.filesCompleted === 7,
+        );
+        expect(reviewed).toBeGreaterThanOrEqual(0);
+        expect(
+          updates
+            .slice(reviewed)
+            .every(
+              (update) =>
+                update.filesCompleted === 7 && update.filesTotal === 9,
+            ),
+        ).toBe(true);
+      } finally {
+        await client.close();
+      }
+    },
+  );
+
+  test.each([false, true])(
+    "applies saved inventory before reconsidering live receipts (split correction: %p)",
+    async (split) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const staleRead = Promise.withResolvers<void>();
+      const correctedRead = Promise.withResolvers<void>();
+      const marker = (count: number, total: number) =>
+        "CODEX_SECURITY_SCAN_PROGRESS " +
+        JSON.stringify({
+          phase: "discovery",
+          filesCompleted: count,
+          filesTotal: total,
+        });
+      const receipt = (id: string, total: number) => ({
+        type: "response_item",
+        payload: {
+          type: "custom_tool_call_output",
+          call_id: id,
+          output: marker(0, total),
+        },
+      });
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 9 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          const rollout = await writeUsageSession(codexHome, "thread-1", {});
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            await appendFile(
+              rollout,
+              JSON.stringify(receipt("stale", 8)) + "\n",
+            );
+            await staleRead.promise;
+            yield {
+              type: "item.completed",
+              item: {
+                type: "command_execution",
+                id: "completed-review",
+                command: "inspect-source",
+                aggregated_output: commandOutput(marker(9, 9)),
+                exit_code: 0,
+                status: "completed",
+              },
+            };
+            if (split) {
+              await appendFile(
+                rollout,
+                JSON.stringify(receipt("corrected", 9)) + "\n",
+              );
+              await correctedRead.promise;
+            }
+            const completion = {
+              type: "event_msg",
+              payload: {
+                type: "item_completed",
+                item: {
+                  type: "CommandExecution",
+                  command: ["inspect-source"],
+                  aggregated_output: persistedCommandOutput,
+                },
+              },
+            };
+            await appendFile(
+              rollout,
+              [...(split ? [] : [receipt("corrected", 9)]), completion]
+                .map((row) => JSON.stringify(row))
+                .join("\n") + "\n",
+            );
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      try {
+        await client.run(repository, {
+          onProgress: (update) => updates.push(update),
+          onSessionEvent: ({ event }) => {
+            const id = (event["payload"] as { call_id?: string })?.call_id;
+            if (id === "stale") staleRead.resolve();
+            if (id === "corrected") correctedRead.resolve();
+          },
+        });
+        expect(updates.at(-1)).toEqual({
+          phase: "discovery",
+          filesCompleted: 9,
+          filesTotal: 9,
+        });
       } finally {
         await client.close();
       }

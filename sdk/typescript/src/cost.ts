@@ -194,6 +194,8 @@ export class ScanCostTracker {
     StreamedProgressItem
   >();
   #acceptedParent: StreamedProgressItem | null = null;
+  // Global coverage admitted from either the live or saved parent projection.
+  #parentProgress: ScanProgress | null = null;
   #acceptedInventory: ParentProgressMarker | null = null;
   readonly #readyParentMarkers: Array<{
     live: StreamedProgressItem;
@@ -313,6 +315,7 @@ export class ScanCostTracker {
     if (progress.phase === "discovery" && progress.filesCompleted === 0)
       this.#acceptedInventory = marker;
     this.#acceptedParent = live;
+    this.#parentProgress = progress;
     live.accepted = progress;
     live.acceptedMarkerIndex = live.observedMarkerIndex;
     const update = {
@@ -415,11 +418,9 @@ export class ScanCostTracker {
           this.#workerProgress.set(session.threadId, session.filesCompleted);
         else this.#workerProgress.delete(session.threadId);
       }
-      const parent = this.#acceptedParent?.accepted;
+      const parent = this.#parentProgress;
       const parentCount =
-        parent !== undefined &&
-        parent !== null &&
-        parent.filesTotal <= this.#expectedFilesTotal!
+        parent !== null && parent.filesTotal <= this.#expectedFilesTotal!
           ? parent.filesCompleted
           : 0;
       this.#highestFilesCompleted = Math.max(
@@ -444,22 +445,28 @@ export class ScanCostTracker {
       const progress = marker.progress;
       if (!marker.accepted) {
         if (
-          (this.#expectedFilesTotal !== undefined &&
-            progress.filesTotal > this.#expectedFilesTotal) ||
-          progress.filesCompleted < this.#highestFilesCompleted
-        )
+          this.#expectedFilesTotal !== undefined &&
+          progress.filesTotal > this.#expectedFilesTotal
+        ) {
+          // Saved inventory in this poll may admit the live receipt. Keep only
+          // its parsed progress available until that inventory is processed.
+          this.#readyParentMarkers.push({ live, marker });
           continue;
+        }
+        if (progress.filesCompleted < this.#highestFilesCompleted) continue;
         marker.accepted = true;
         live.accepted = progress;
         live.acceptedMarkerIndex = marker.index;
         this.#acceptedParent = live;
+        this.#parentProgress = progress;
         this.#liveParentProgress.add(progressKey(progress));
         this.#highestFilesCompleted = progress.filesCompleted;
         if (corrected === null || marker.order > corrected.order)
           corrected = { progress, order: marker.order };
       } else if (
         this.#displayedProgress?.owner === "parent" &&
-        position > (this.#displayedProgress.position ?? 0)
+        position > (this.#displayedProgress.position ?? 0) &&
+        (corrected === null || marker.order > corrected.order)
       ) {
         corrected = { progress, order: marker.order };
       }
@@ -701,6 +708,8 @@ export class ScanCostTracker {
         this.#reconcileParentProgress();
       }
       this.#reportSessionProgress(session, threadId === this.#threadId);
+      if (threadId === this.#threadId && this.#inventoryNeedsReconciliation)
+        this.#reconcileParentProgress();
       const receipt = usages.get(threadId);
       if (
         session.usage !== null &&
@@ -795,6 +804,7 @@ export class ScanCostTracker {
               .reduce((total, reviewed) => total + reviewed, 0),
           );
       if (filesCompleted < this.#highestFilesCompleted) continue;
+      if (parent) this.#parentProgress = progress;
       const update = {
         ...progress,
         filesCompleted,
