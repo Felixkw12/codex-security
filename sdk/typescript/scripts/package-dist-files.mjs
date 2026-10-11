@@ -1,5 +1,9 @@
 const distModules = [
   "api",
+  "reasoning-summary",
+  "preflight-config",
+  "deep-scan-finalization",
+  "codex-session",
   "accepted-audit",
   "artifact-export",
   "auth",
@@ -66,6 +70,7 @@ const distModules = [
   "security-policy-cli",
   "suggest-owners",
   "scan-sessions",
+  "selected-scan-recovery",
   "server/api",
   "deduplication/codex-review",
   "deduplication/checkpointed-review",
