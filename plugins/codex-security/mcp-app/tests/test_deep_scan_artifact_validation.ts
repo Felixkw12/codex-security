@@ -171,7 +171,7 @@ async function testLegacyDeferredPublication(root: string) {
     scanId,
   );
   const coverage = aggregateDiscoveryCoverage(worker.artifacts, [
-    { ...worker, result: accepted },
+    { ...worker, coverage: accepted.coverage },
   ]);
   const parent = parseScanDraft({ ...result, coverage });
   assert.deepEqual(
@@ -251,25 +251,7 @@ async function testMissingReceiptRepair(root: string) {
   );
   const repaired = await recordCodexSecurityWorkerScanDraft(
     context,
-    draft([], {
-      complete: true,
-      coverage: {
-        completeness: "complete",
-        explicitExclusions: [],
-        deferred: [],
-        surfaces: [
-          {
-            id: "api",
-            label: "API",
-            disposition: "no_issue_found",
-            receiptRefs: ["artifacts/replacement.md"],
-          },
-        ],
-        resolvedDeferred: [
-          { id: "review", reason: "Source review completed." },
-        ],
-      },
-    }),
+    replacementDraft,
   );
   assert.match(
     repaired.warnings.join("\n"),
@@ -389,7 +371,7 @@ async function testCoveragePublicationParity(root: string) {
       scanId,
     );
     const coverage = aggregateDiscoveryCoverage(worker.artifacts, [
-      { ...worker, result: accepted },
+      { ...worker, coverage: accepted.coverage },
     ]);
     assert.deepEqual(coverage.deferred[0].receiptRefs, {
       external: "opaque metadata",
