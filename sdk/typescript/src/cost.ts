@@ -654,9 +654,10 @@ export class ScanCostTracker {
     if (saved.receipt) return true;
     const live = this.#acceptedParent;
     if (live === null) return true;
-    if (live.position !== null && saved.position <= live.position) return false;
-    if (!this.#liveParentProgress.has(progressKey(saved.update))) return true;
-    return live.position !== null && saved.completion;
+    // A later saved occurrence may legitimately repeat an earlier live tuple,
+    // including progress recovered only from the original multipart response.
+    if (live.position !== null) return saved.position > live.position;
+    return !this.#liveParentProgress.has(progressKey(saved.update));
   }
 
   public recordUsage(usage: unknown, threadId = this.#threadId): void {
@@ -907,9 +908,15 @@ export class ScanCostTracker {
         inventoryMarker &&
         newerInventory &&
         this.#precedesParentReview(saved.position, saved.markerIndex);
+      // Source order suppresses old phase copies, but a previously parked
+      // receipt can still recover greater coverage after inventory admission.
+      const deferredCoverage =
+        saved.order !== undefined &&
+        progress.filesCompleted > this.#highestFilesCompleted;
       if (
         parent &&
         !provenInventory &&
+        !deferredCoverage &&
         !this.#savedParentProgressIsCurrent(saved)
       )
         continue;
@@ -986,15 +993,13 @@ export class ScanCostTracker {
             position: saved.position,
             markerIndex: saved.markerIndex,
           };
-        if (saved.completion || saved.receipt) {
-          const position = {
-            position: saved.position,
-            markerIndex: saved.markerIndex,
-          };
-          if (this.#afterParentFrontier(saved.position, saved.markerIndex))
-            this.#parentFrontier = position;
-          this.#inventoryFrontier = position;
-        }
+        const position = {
+          position: saved.position,
+          markerIndex: saved.markerIndex,
+        };
+        if (this.#afterParentFrontier(saved.position, saved.markerIndex))
+          this.#parentFrontier = position;
+        this.#inventoryFrontier = position;
         this.setExpectedFilesTotal(progress.filesTotal);
         this.#reconcileParentProgress();
         continue;
@@ -1011,7 +1016,14 @@ export class ScanCostTracker {
               .values()
               .reduce((total, reviewed) => total + reviewed, 0),
           );
-      if (filesCompleted < this.#highestFilesCompleted) continue;
+      if (filesCompleted < this.#highestFilesCompleted) {
+        // A provisional worker can exceed this global parent receipt, then
+        // become ineligible when the parent's earlier inventory is recovered.
+        // Keep the parsed parent fact for that correction, without displaying
+        // a count decrease while the worker coverage remains eligible.
+        if (parent) session.progress.push(saved);
+        continue;
+      }
       if (parent)
         this.#recordParentReview(progress, saved.position, saved.markerIndex);
       // Known parent positions outrank observation order: polling can park a
@@ -1047,16 +1059,21 @@ export class ScanCostTracker {
       )
         this.#parentProgress = { progress, ...provenance };
       const key = `${update.phase}:${update.filesCompleted}:${update.filesTotal}`;
-      if (parent && (saved.completion || saved.receipt)) {
-        this.#parentFrontier = {
-          position: saved.position,
-          markerIndex: saved.markerIndex,
-        };
+      if (parent) {
+        // An original multipart response can expose progress absent from its
+        // concatenated native projection. Its admitted source position still
+        // prevents an older live completion from replaying over that progress.
+        if (this.#afterParentFrontier(saved.position, saved.markerIndex))
+          this.#parentFrontier = {
+            position: saved.position,
+            markerIndex: saved.markerIndex,
+          };
         if (parentInventory)
-          this.#inventoryFrontier = { ...this.#parentFrontier };
+          this.#inventoryFrontier = {
+            position: saved.position,
+            markerIndex: saved.markerIndex,
+          };
       }
-      if (this.#lastProgress === key) continue;
-      this.#lastProgress = key;
       this.#highestFilesCompleted = update.filesCompleted;
       this.#displayedProgress =
         newerProgress !== null
@@ -1069,6 +1086,9 @@ export class ScanCostTracker {
                 ? { position: saved.position, markerIndex: saved.markerIndex }
                 : {}),
             };
+      // Distinct equal-valued receipts still advance source ownership/order.
+      if (this.#lastProgress === key) continue;
+      this.#lastProgress = key;
       this.#options.onProgress(update);
     }
   }

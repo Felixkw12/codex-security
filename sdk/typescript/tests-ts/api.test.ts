@@ -4341,6 +4341,116 @@ describe("CodexSecurity orchestration", () => {
     },
   );
 
+  test.each([false, true])(
+    "recovers parent coverage suppressed by a provisional worker (worker remains eligible: %p)",
+    async (eligibleWorker) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const workerRead = Promise.withResolvers<void>();
+      const parentRead = Promise.withResolvers<void>();
+      const marker = (
+        phase: ScanProgress["phase"],
+        count: number,
+        total: number,
+      ) =>
+        "CODEX_SECURITY_SCAN_PROGRESS " +
+        JSON.stringify({ phase, filesCompleted: count, filesTotal: total });
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          const parent = await writeUsageSession(codexHome, "thread-1", {});
+          // The inventory is already durable; its full SDK projection is delayed
+          // until after the provisional worker and lower parent count are polled.
+          await appendFile(
+            parent,
+            JSON.stringify({
+              type: "event_msg",
+              payload: {
+                type: "item_completed",
+                item: {
+                  type: "CommandExecution",
+                  command: ["inventory"],
+                  aggregated_output: persistedCommandOutput,
+                },
+              },
+            }) + "\n",
+          );
+          const worker = await writeUsageSession(
+            codexHome,
+            "worker-thread",
+            {},
+            { parent: "thread-1" },
+          );
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            const workerCount = eligibleWorker ? 7 : 8;
+            await appendFile(
+              worker,
+              JSON.stringify({
+                type: "response_item",
+                payload: {
+                  type: "custom_tool_call_output",
+                  call_id: "worker-review",
+                  output: marker("discovery", workerCount, workerCount),
+                },
+              }) + "\n",
+            );
+            await workerRead.promise;
+            await appendFile(
+              parent,
+              JSON.stringify({
+                type: "response_item",
+                payload: {
+                  type: "custom_tool_call_output",
+                  call_id: "parent-review",
+                  output: marker("validation", 4, 7),
+                },
+              }) + "\n",
+            );
+            await parentRead.promise;
+            yield {
+              type: "item.completed",
+              item: {
+                type: "command_execution",
+                id: "live-inventory",
+                command: "inventory",
+                aggregated_output: commandOutput(marker("discovery", 0, 7)),
+                exit_code: 0,
+                status: "completed",
+              },
+            };
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      try {
+        await client.run(repository, {
+          onProgress: (progress) => updates.push(progress),
+          onSessionEvent: ({ event }) => {
+            const id = (event["payload"] as { call_id?: string })?.call_id;
+            if (id === "worker-review") workerRead.resolve();
+            if (id === "parent-review") parentRead.resolve();
+          },
+        });
+        expect(updates.at(-1)).toEqual({
+          phase: eligibleWorker ? "discovery" : "validation",
+          filesCompleted: eligibleWorker ? 7 : 4,
+          filesTotal: 7,
+        });
+      } finally {
+        await client.close();
+      }
+    },
+  );
+
   test.each([
     [
       "legacy receipts use completion-order fallback",

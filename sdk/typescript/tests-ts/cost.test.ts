@@ -2207,6 +2207,267 @@ describe("live scan cost tracking", () => {
     },
   );
 
+  test.each([false, true])(
+    "keeps recovered response progress ahead of an older live command (multipart: %p)",
+    async (multipart) => {
+      const { home, parent } = await workerSessionFixture();
+      const updates: ScanProgress[] = [];
+      const tracker = costTracker(home, {
+        expectedFilesTotal: 9,
+        onProgress: (update) => updates.push(update),
+      });
+      const progress = {
+        phase: "attack_path",
+        filesCompleted: 3,
+        filesTotal: 9,
+      } as const;
+      const text = "CODEX_SECURITY_SCAN_PROGRESS " + JSON.stringify(progress);
+      const parts = multipart ? ["Report: ", text] : [text];
+      // Paginated mode persists the concatenated message before the original
+      // parts. Only the original response exposes the multipart marker here.
+      await appendFile(
+        parent,
+        [
+          {
+            type: "event_msg",
+            payload: {
+              type: "item_completed",
+              item: {
+                type: "CommandExecution",
+                command: ["older-review"],
+                aggregated_output: persistedCommandOutput,
+              },
+            },
+          },
+          {
+            type: "event_msg",
+            payload: {
+              type: "item_completed",
+              item: {
+                type: "AgentMessage",
+                content: [{ type: "Text", text: parts.join("") }],
+              },
+            },
+          },
+          {
+            type: "response_item",
+            payload: {
+              type: "message",
+              role: "assistant",
+              content: parts.map((text) => ({ type: "output_text", text })),
+            },
+          },
+        ]
+          .map((row) => JSON.stringify(row))
+          .join("\n") + "\n",
+      );
+      tracker.start("scan-thread");
+      try {
+        await tracker.refresh();
+        expect(updates).toEqual([progress]);
+        const older = { ...progress, phase: "validation" } as const;
+        expect(
+          tracker.recordParentProgress(older, {
+            type: "item.completed",
+            item: {
+              type: "command_execution",
+              command: "older-review",
+              aggregated_output: commandOutput(
+                "CODEX_SECURITY_SCAN_PROGRESS " + JSON.stringify(older),
+              ),
+            },
+          }),
+        ).toBe(false);
+        tracker.recordParentItem({
+          type: "item.completed",
+          item: {
+            type: "agent_message",
+            text: parts.join(""),
+          },
+        });
+        await tracker.refresh();
+        expect(updates).toEqual([progress]);
+      } finally {
+        await tracker.stop();
+      }
+    },
+  );
+
+  test("admits a newer recovered response that repeats an earlier live phase", async () => {
+    const { home, parent } = await workerSessionFixture();
+    const updates: ScanProgress[] = [];
+    const tracker = costTracker(home, {
+      expectedFilesTotal: 9,
+      onProgress: (update) => updates.push(update),
+    });
+    const first = {
+      phase: "discovery",
+      filesCompleted: 3,
+      filesTotal: 9,
+    } as const;
+    const second = { ...first, phase: "validation" } as const;
+    const marker = (progress: ScanProgress) =>
+      "CODEX_SECURITY_SCAN_PROGRESS " + JSON.stringify(progress);
+    // Every native completion and its original multipart response is durable
+    // before SDK delivery. Reusing a tuple is not reusing a message occurrence.
+    await appendFile(
+      parent,
+      [
+        ...[first, second].map((progress, index) => ({
+          type: "event_msg",
+          payload: {
+            type: "item_completed",
+            item: {
+              type: "CommandExecution",
+              command: [`review-${index}`],
+              aggregated_output: marker(progress),
+            },
+          },
+        })),
+        {
+          type: "event_msg",
+          payload: {
+            type: "item_completed",
+            item: {
+              type: "AgentMessage",
+              content: [{ type: "Text", text: "Report: " + marker(first) }],
+            },
+          },
+        },
+        {
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "assistant",
+            content: ["Report: ", marker(first)].map((text) => ({
+              type: "output_text",
+              text,
+            })),
+          },
+        },
+      ]
+        .map((row) => JSON.stringify(row))
+        .join("\n") + "\n",
+    );
+    tracker.start("scan-thread");
+    try {
+      for (const [index, progress] of [first, second].entries()) {
+        const event = {
+          type: "item.completed",
+          item: {
+            type: "command_execution",
+            command: `review-${index}`,
+            aggregated_output: marker(progress),
+          },
+        };
+        expect(tracker.recordParentProgress(progress, event)).toBe(true);
+        tracker.acceptParentProgress(progress, event);
+      }
+      await tracker.refresh();
+      expect(updates).toEqual([first]);
+      tracker.recordParentItem({
+        type: "item.completed",
+        item: {
+          type: "agent_message",
+          text: "Report: " + marker(first),
+        },
+      });
+      await tracker.refresh();
+      expect(updates).toEqual([first]);
+    } finally {
+      await tracker.stop();
+    }
+  });
+
+  test.each([
+    [false, "discovery", "validation"],
+    [true, "discovery", "validation"],
+    [false, "validation", "discovery"],
+    [true, "validation", "discovery"],
+  ] as const)(
+    "retains distinct parent receipt order when notification repeats (%p, %s, %s)",
+    async (repeat, parentPhase, workerPhase) => {
+      const { home, parent, worker } = await workerSessionFixture();
+      const updates: ScanProgress[] = [];
+      const tracker = costTracker(home, {
+        expectedFilesTotal: 9,
+        onProgress: (update) => updates.push(update),
+      });
+      const inventory = {
+        phase: "discovery",
+        filesCompleted: 0,
+        filesTotal: 10,
+      } as const;
+      const parentProgress = {
+        phase: parentPhase,
+        filesCompleted: 9,
+        filesTotal: 9,
+      };
+      const marker = (progress: ScanProgress) =>
+        "CODEX_SECURITY_SCAN_PROGRESS " + JSON.stringify(progress);
+      await appendFile(
+        parent,
+        JSON.stringify({
+          type: "event_msg",
+          payload: {
+            type: "item_completed",
+            item: {
+              type: "CommandExecution",
+              command: ["inventory"],
+              aggregated_output: persistedCommandOutput,
+            },
+          },
+        }) + "\n",
+      );
+      tracker.start("scan-thread");
+      try {
+        await appendSessionItem(parent, {
+          type: "custom_tool_call_output",
+          call_id: "first",
+          output: marker(parentProgress),
+        });
+        await tracker.refresh();
+        await appendSessionItem(worker, {
+          type: "custom_tool_call_output",
+          output: marker({
+            phase: workerPhase,
+            filesCompleted: 9,
+            filesTotal: 10,
+          }),
+        });
+        await tracker.refresh();
+        if (repeat) {
+          await appendSessionItem(parent, {
+            type: "custom_tool_call_output",
+            call_id: "repeat",
+            output: marker(parentProgress),
+          });
+          await tracker.refresh();
+        }
+        // A repeated receipt updates ownership/order without duplicate callbacks.
+        expect(updates).toEqual([parentProgress]);
+        tracker.recordParentProgress(inventory, {
+          type: "item.completed",
+          item: {
+            type: "command_execution",
+            command: "inventory",
+            aggregated_output: commandOutput(marker(inventory)),
+          },
+        });
+        await tracker.refresh();
+        await tracker.refresh();
+        expect(updates.at(-1)).toEqual({
+          phase: repeat ? parentPhase : workerPhase,
+          filesCompleted: 9,
+          filesTotal: 10,
+        });
+        expect(updates).toHaveLength(2);
+      } finally {
+        await tracker.stop();
+      }
+    },
+  );
+
   test.each([
     ["legacy", false],
     ["legacy", true],
