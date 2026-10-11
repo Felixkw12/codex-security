@@ -4813,4 +4813,5 @@ async function requireStoppedArchiveOutput(
     );
 }
 
+/** @internal */
 export { runScanEvents } from "./scan-publication.js";

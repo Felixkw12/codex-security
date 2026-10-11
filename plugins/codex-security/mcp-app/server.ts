@@ -12,6 +12,7 @@ import { resolvePythonCommand } from "./src/python_command.js";
 import { version as MCP_APP_VERSION } from "./package.json";
 import {
   handoffClaimTokenSchema,
+  recoveryHandoffClaimTokenSchema,
   registerScanHandoffTools,
   type HandoffWorkspaceState as WorkspaceState,
 } from "./src/server/handoff-tools.js";
@@ -1303,7 +1304,9 @@ export function createCodexSecurityServer(): McpServer {
         handoffClaimToken &&
         threadId &&
         scan?.handoffStatus === "delivered" &&
-        scan.handoffClaimToken === handoffClaimToken
+        scan.handoffClaimToken === handoffClaimToken &&
+        (scan.continuationThreadId === threadId ||
+          recoveryHandoffClaimTokenSchema.safeParse(handoffClaimToken).success)
       ) {
         authenticatedArtifactClaims.set(scanId, {
           claimToken: handoffClaimToken,

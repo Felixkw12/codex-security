@@ -429,7 +429,10 @@ export async function admitCanonicalArtifacts(
     );
 }
 
-/** Run and admit an ordinary scan while allowing the workbench to reconcile managed output. */
+/**
+ * Run and admit an ordinary scan while allowing the workbench to reconcile managed output.
+ * @internal
+ */
 export async function runScanEvents(
   options: Omit<Parameters<typeof runScanTurn>[0], "repository"> &
     ScanResultContext & { workbenchValidated?: boolean },

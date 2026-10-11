@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { loadSourceModule } from "./helpers/source.mjs";
 
 const { executeWorkbench } = await loadSourceModule(
-  new URL("../server.ts", import.meta.url),
+  new URL("../src/workbench-client.ts", import.meta.url),
   {
     loader: { ".md": "text" },
     plugins: [
