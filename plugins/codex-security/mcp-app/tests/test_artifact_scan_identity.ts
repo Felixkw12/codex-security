@@ -88,6 +88,161 @@ const variants = {
   ),
 };
 
+for (const kind of ["object", "array", "string"] as const) {
+  test(`unchanged worker drafts preserve ${kind} owner metadata`, async (t) => {
+    const worker = await fixture(t, "worker");
+    const findings = ["first", "second"].map((id) =>
+      finding("Synthetic review", {
+        provenance: {
+          source: "local_plugin",
+          candidateId: "shared-candidate",
+          workerId: kind === "object" ? { id } : kind === "array" ? [id] : id,
+        },
+      }),
+    );
+    for (let replay = 0; replay < 3; replay++) {
+      await worker.write({ ...worker.draft(), findings });
+      const saved = JSON.parse(
+        await readFile(path.join(worker.root, "result.json"), "utf8"),
+      );
+      assert.deepEqual(saved.findings, findings);
+    }
+  });
+}
+
+for (const observations of [
+  [1, true],
+  [true, 1],
+  [0, false],
+  [false, 0],
+  [1, 2],
+  [0, 2],
+]) {
+  test(`worker checkpoints preserve reordered JSON identities ${observations.join("/")}`, async (t) => {
+    const normal = await fixture(t, "deep");
+    const recovered = await fixture(t, "deep");
+    const workerRoot = path.join(normal.root, "worker");
+    const interruptedRoot = path.join(recovered.root, "worker");
+    await Promise.all([mkdir(workerRoot), mkdir(interruptedRoot)]);
+    const worker = draftFixture(workerRoot, "worker");
+    const interrupted = draftFixture(interruptedRoot, "worker");
+    const findings = observations.map((value) =>
+      finding("Synthetic review", {
+        extensions: { observations: [{ value }] },
+      }),
+    );
+    for (const [index, rows] of [findings, [...findings].reverse()].entries()) {
+      const snapshot = { ...worker.draft(), findings: rows };
+      await worker.write(snapshot);
+      if (
+        index === 1 &&
+        observations.every((value) => typeof value === "number")
+      ) {
+        const contents = (JSON.stringify(snapshot, null, 2) + "\n").replace(
+          /"value": (\d+)/g,
+          (_, value: string) =>
+            `"value": ${value === "0" ? "-0.0" : `${value}.0`}`,
+        );
+        const name =
+          createHash("sha256").update(contents).digest("hex") + ".json";
+        await writeFile(
+          path.join(interruptedRoot, "checkpoints", name),
+          contents,
+        );
+      } else {
+        await draftApi.saveScanDraftCheckpoint(
+          interrupted.context,
+          snapshot,
+          false,
+        );
+      }
+      if (index === 0) {
+        await dateDraftFiles(workerRoot, 100);
+        await dateDraftFiles(interruptedRoot, 100);
+      }
+    }
+    const saved = JSON.parse(
+      await readFile(path.join(workerRoot, "result.json"), "utf8"),
+    );
+    await normal.write({
+      ...normal.draft(),
+      findings: saved.findings.map((row: FixtureFinding) => ({
+        ...row,
+        provenance: { ...row.provenance, workerId: "worker" },
+      })),
+    });
+    const result = await recoverAndFinalize(
+      normal,
+      recovered,
+      [
+        {
+          id: "worker",
+          kind: "discovery",
+          artifact_dir: interruptedRoot,
+          result_manifest_path: null,
+          attempt: 1,
+        },
+      ],
+      true,
+      true,
+    );
+    const identitiesByEvidence = (rows: RecoveredFinding[]) =>
+      new Map(
+        rows.map((row) => [
+          JSON.stringify(
+            (row.candidateMetadata as { extensions: unknown }).extensions,
+          ),
+          {
+            identity: row.identity,
+            findingId: row.findingId,
+            occurrenceId: row.occurrenceId,
+          },
+        ]),
+      );
+    assert.equal(result.normal.length, 2);
+    assert.equal(result.recovered.length, 2);
+    assert.deepEqual(
+      identitiesByEvidence(result.recovered),
+      identitiesByEvidence(result.normal),
+    );
+    assert.deepEqual(result.warnings, []);
+  });
+}
+
+for (const layout of ["standard", "diff", "deep"] as const) {
+  for (const [label, candidateId] of Object.entries({
+    bom: "\ufeff",
+    nextLine: "\u0085",
+    controlSeparators: "\u001c\u001f",
+    spaces: " \u00a0\u2003\u3000",
+  })) {
+    test(`${layout}: ${label} candidate metadata matches recovered identity`, async (t) => {
+      const normal = await fixture(t, layout);
+      const recovered = await fixture(t, layout);
+      const findings = [
+        finding("Synthetic review", {
+          provenance: { source: "local_plugin", candidateId },
+        }),
+      ];
+      await normal.write({ ...normal.draft(), findings });
+      await draftApi.saveScanDraftCheckpoint(
+        recovered.context,
+        { ...recovered.draft(), findings },
+        false,
+      );
+      const result = await recoverAndFinalize(
+        normal,
+        recovered,
+        [],
+        true,
+        true,
+      );
+      assert.deepEqual(result.recovered, result.normal);
+      assert.deepEqual(result.warnings, []);
+    });
+  }
+}
+
 for (const layout of ["standard", "diff", "deep"] as const) {
   for (const observations of [
     [true, 1],

@@ -624,14 +624,23 @@ def _finding_content(finding: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _has_identity_text(value: Any) -> bool:
+    # Match JavaScript String.trim when selecting optional identity metadata.
+    return isinstance(value, str) and bool(
+        value.strip(
+            "\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680"
+            "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+            "\u2028\u2029\u202f\u205f\u3000\ufeff"
+        )
+    )
+
+
 def _identity_candidate(finding: dict[str, Any]) -> str | None:
     return next(
         (
             value
             for section in (finding.get("extensions"), finding.get("provenance"))
-            if isinstance(section, dict)
-            and isinstance(value := section.get("candidateId"), str)
-            and value.strip()
+            if isinstance(section, dict) and _has_identity_text(value := section.get("candidateId"))
         ),
         None,
     )
@@ -689,8 +698,7 @@ def _ensure_finding_identities(findings: list[Any]) -> None:
                 value
                 for field in ("reportId", "ledgerRowId")
                 if isinstance(extensions, dict)
-                and isinstance(value := extensions.get(field), str)
-                and value.strip()
+                and _has_identity_text(value := extensions.get(field))
             ),
             None,
         )
@@ -1826,7 +1834,7 @@ def merge_saved_results(
     def identifiers(value: dict[str, Any]) -> tuple[Any, Any]:
         extensions = value.get("extensions")
         return tuple(
-            identifier if isinstance(identifier, str) and identifier.strip() else None
+            identifier if _has_identity_text(identifier) else None
             for identifier in (
                 extensions.get(field) if isinstance(extensions, dict) else None
                 for field in ("reportId", "ledgerRowId")
@@ -2536,7 +2544,8 @@ def merge_saved_results(
     def publication_order(item):
         _, group = item
         source, value = group["observations"][group["owner"]]
-        return finding_source_order(source, True), -source[1]["findings"].index(value)
+        index = next(index for index, row in enumerate(source[1]["findings"]) if row is value)
+        return finding_source_order(source, True), -index
 
     identity_order = list(findings)
     for owner in {group["owner"] for _, group in finding_positions.values() if group is not None}:

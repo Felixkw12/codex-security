@@ -1787,7 +1787,7 @@ function containsSavedFinding(
   const currentOwner = (current.provenance as JsonObject | undefined)?.workerId;
   const previousOwner = (previous.provenance as JsonObject | undefined)
     ?.workerId;
-  if (currentOwner !== previousOwner) return false;
+  if (!isDeepStrictEqual(currentOwner, previousOwner)) return false;
   const original = withoutPreviousFindings(previous);
   if (current.identity === undefined) delete original.identity;
   return containsSavedValue(current, original);
