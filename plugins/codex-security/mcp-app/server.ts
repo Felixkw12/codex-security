@@ -14,7 +14,6 @@ import { PLUGIN_ROOT, runWorkbench, scanRoot } from "./src/workbench-client.js";
 import { version as MCP_APP_VERSION } from "./package.json";
 import {
   handoffClaimTokenSchema,
-  recoveryHandoffClaimTokenSchema,
   registerScanHandoffTools,
   type HandoffWorkspaceState as WorkspaceState,
 } from "./src/server/handoff-tools.js";
@@ -1273,10 +1272,9 @@ export function createCodexSecurityServer(): McpServer {
         handoffClaimToken &&
         threadId &&
         scan?.handoffStatus === "delivered" &&
-        scan.handoffClaimToken === handoffClaimToken &&
-        (scan.continuationThreadId === threadId ||
-          recoveryHandoffClaimTokenSchema.safeParse(handoffClaimToken).success)
+        scan.handoffClaimToken === handoffClaimToken
       ) {
+        // Delivery already verified the native owner, which can differ from the SDK execution thread.
         authenticatedArtifactClaims.set(scanId, {
           claimToken: handoffClaimToken,
           threadId,

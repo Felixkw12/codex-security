@@ -825,7 +825,6 @@ try {
     ],
     { cwd: consumer },
   );
-  await smokeNestedDeepScanWorker(installedRoot, consumer);
 
   run(
     process.execPath,

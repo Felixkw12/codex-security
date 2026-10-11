@@ -222,32 +222,31 @@ print(json.dumps(_read_saved_parent_result(Path(sys.argv[2]), sys.argv[3])[1]))
     );
   }
 
-  const unsupportedCheckpointContext = {
+  const legacyCheckpointContext = {
     ...context,
-    root: path.join(root, "unsupported-checkpoint"),
+    root: path.join(root, "legacy-checkpoint"),
   };
   const { handoffClaimToken: _oldClaim, ...oldCheckpoint } = {
     ...input,
     findings: [
-      { ...finding, validation: { assertions: "obsolete string list" } },
+      { ...finding, validation: { assertions: "Legacy persisted assertion." } },
     ],
   };
-  await saveScanDraftCheckpoint(unsupportedCheckpointContext, oldCheckpoint);
-  await assert.rejects(
-    recordCodexSecurityScanDraft(unsupportedCheckpointContext, input),
-    /Saved scan draft does not match the current schema/,
-  );
-  const retained = (
-    await readdir(path.join(unsupportedCheckpointContext.root, "checkpoints"))
-  ).filter((name) => name.endsWith(".json"));
-  assert.equal(retained.length, 1);
-  assert.deepEqual(
-    await readJson(
-      unsupportedCheckpointContext.root,
-      "checkpoints/" + retained[0],
-    ),
+  const legacyCheckpointPath = await saveScanDraftCheckpoint(
+    legacyCheckpointContext,
     oldCheckpoint,
   );
+  const legacyCheckpointBytes = await readFile(legacyCheckpointPath);
+  await recordCodexSecurityScanDraft(legacyCheckpointContext, {
+    ...input,
+    findings: [],
+  });
+  assert.deepEqual(
+    (await readJson(legacyCheckpointContext.root, "findings.json")).findings[0]
+      .validation.assertions,
+    ["Legacy persisted assertion."],
+  );
+  assert.deepEqual(await readFile(legacyCheckpointPath), legacyCheckpointBytes);
 
   const interruptedParentRoot = path.join(
     root,
