@@ -173,7 +173,8 @@ fn windows_application_path(executable: &OsStr) -> io::Result<Vec<u16>> {
         bytes.starts_with(br"\\?\") || bytes.starts_with(br"\\.\") || bytes.starts_with(br"\??\")
     };
     let terminated = |path: &OsStr| path.encode_wide().chain([0]).collect::<Vec<_>>();
-    if namespaced(executable) {
+    // DOS-device paths still need Win32 normalization; only verbatim paths skip it.
+    if namespaced(executable) && !executable.as_encoded_bytes().starts_with(br"\\.\") {
         return Ok(terminated(executable));
     }
     // Resolve lexically, without canonicalizing the selected file or changing argv.
