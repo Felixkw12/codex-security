@@ -89,6 +89,30 @@ interface ParentProgressMarker {
   accepted: boolean;
 }
 
+interface ProgressOrder {
+  order: number;
+  position?: number;
+  markerIndex?: number;
+}
+
+interface OrderedProgress extends ProgressOrder {
+  progress: ScanProgress;
+}
+
+// Positions compare phases from the same parent source. Observation order is
+// the fallback for missing provenance and independent worker receipts.
+function compareProgressOrder(
+  left: ProgressOrder,
+  right: ProgressOrder,
+): number {
+  if (left.position !== undefined && right.position !== undefined)
+    return (
+      left.position - right.position ||
+      (left.markerIndex ?? 0) - (right.markerIndex ?? 0)
+    );
+  return left.order - right.order;
+}
+
 interface StreamedProgressItem {
   markers: ParentProgressMarker[];
   accepted: ScanProgress | null;
@@ -196,7 +220,7 @@ export class ScanCostTracker {
   >();
   #acceptedParent: StreamedProgressItem | null = null;
   // Global coverage admitted from either the live or saved parent projection.
-  #parentProgress: ScanProgress | null = null;
+  #parentProgress: OrderedProgress | null = null;
   #parentInventory: ParentProgressMarker | null = null;
   #parentReviewStart: { position: number; markerIndex: number } | null = null;
   readonly #readyParentMarkers: Array<{
@@ -205,12 +229,12 @@ export class ScanCostTracker {
   }> = [];
   #inventoryFrontier = { position: 0, markerIndex: -1 };
   #progressOrder = 0;
-  #displayedProgress: {
-    update: ScanProgress;
-    owner: "live" | "parent" | "worker";
-    order: number;
-    position?: number;
-  } | null = null;
+  #displayedProgress:
+    | (ProgressOrder & {
+        update: ScanProgress;
+        owner: "live" | "parent" | "worker";
+      })
+    | null = null;
   #matchedParentItems = 0;
   #parentCompletionStart = 0;
   #parentSession: SessionUsage | null = null;
@@ -323,7 +347,13 @@ export class ScanCostTracker {
     if (marker === undefined) return;
     marker.accepted = true;
     this.#acceptedParent = live;
-    this.#parentProgress = progress;
+    const provenance = {
+      order: marker.order,
+      ...(live.position === null
+        ? {}
+        : { position: live.position, markerIndex: marker.index }),
+    };
+    this.#parentProgress = { progress, ...provenance };
     live.accepted = progress;
     live.acceptedMarkerIndex = live.observedMarkerIndex;
     const update = {
@@ -331,7 +361,7 @@ export class ScanCostTracker {
       filesTotal: this.#expectedFilesTotal ?? progress.filesTotal,
     };
     this.#lastProgress = progressKey(update);
-    this.#displayedProgress = { update, owner: "live", order: marker.order };
+    this.#displayedProgress = { update, owner: "live", ...provenance };
     this.#highestFilesCompleted = Math.max(
       this.#highestFilesCompleted,
       progress.filesCompleted,
@@ -409,14 +439,20 @@ export class ScanCostTracker {
   #reconcileParentProgress(): void {
     const ready = this.#readyParentMarkers.splice(0);
     for (const { live, marker } of ready) {
-      if (marker.accepted && live.position !== null)
+      if (marker.accepted && live.position !== null) {
         this.#recordParentReview(marker.progress, live.position, marker.index);
+        const source = { position: live.position, markerIndex: marker.index };
+        if (this.#parentProgress?.order === marker.order)
+          Object.assign(this.#parentProgress, source);
+        if (
+          this.#displayedProgress?.owner !== "worker" &&
+          this.#displayedProgress?.order === marker.order
+        )
+          Object.assign(this.#displayedProgress, source);
+      }
     }
-    let corrected: {
-      progress: ScanProgress;
-      order: number;
-      owner: "worker" | "live";
-    } | null = null;
+    let corrected: (OrderedProgress & { owner: "worker" | "live" }) | null =
+      null;
     for (const { live, marker } of ready) {
       const position = live.position;
       if (position === null) continue;
@@ -424,7 +460,7 @@ export class ScanCostTracker {
       if (
         marker === this.#parentInventory &&
         !marker.accepted &&
-        (this.#parentProgress?.filesCompleted ?? 0) > 0 &&
+        (this.#parentProgress?.progress.filesCompleted ?? 0) > 0 &&
         this.#parentReviewStart === null
       ) {
         // A read can reach EOF before the next completion is appended, then
@@ -436,7 +472,7 @@ export class ScanCostTracker {
       if (
         marker === this.#parentInventory &&
         (marker.accepted ||
-          (this.#parentProgress?.filesCompleted ?? 0) === 0 ||
+          (this.#parentProgress?.progress.filesCompleted ?? 0) === 0 ||
           this.#precedesParentReview(position, marker.index)) &&
         progress.phase === "discovery" &&
         progress.filesCompleted === 0 &&
@@ -480,7 +516,7 @@ export class ScanCostTracker {
           this.#workerProgress.set(session.threadId, session.filesCompleted);
         else this.#workerProgress.delete(session.threadId);
       }
-      const parent = this.#parentProgress;
+      const parent = this.#parentProgress?.progress ?? null;
       const parentCount =
         parent !== null && parent.filesTotal <= this.#expectedFilesTotal!
           ? parent.filesCompleted
@@ -497,6 +533,10 @@ export class ScanCostTracker {
         this.#parentSession.filesTotal = this.#expectedFilesTotal!;
       }
     }
+    const workerCoverage = Math.min(
+      this.#expectedFilesTotal ?? Number.MAX_SAFE_INTEGER,
+      this.#workerProgress.values().reduce((sum, count) => sum + count, 0),
+    );
     for (const { live, marker } of ready) {
       const position = live.position;
       if (
@@ -505,6 +545,24 @@ export class ScanCostTracker {
       )
         continue;
       const progress = marker.progress;
+      const candidate: OrderedProgress & { owner: "live" } = {
+        progress,
+        order: marker.order,
+        position,
+        markerIndex: marker.index,
+        owner: "live",
+      };
+      const selectedCoverage =
+        corrected?.owner === "worker"
+          ? workerCoverage
+          : (corrected?.progress.filesCompleted ?? -1);
+      // Do not let a newer, lower-coverage worker candidate mask a valid parent
+      // correction before the final display guards can consider it.
+      const preferCandidate =
+        corrected === null ||
+        progress.filesCompleted > selectedCoverage ||
+        (progress.filesCompleted === selectedCoverage &&
+          compareProgressOrder(candidate, corrected) > 0);
       if (!marker.accepted) {
         if (
           this.#expectedFilesTotal !== undefined &&
@@ -520,28 +578,37 @@ export class ScanCostTracker {
         live.accepted = progress;
         live.acceptedMarkerIndex = marker.index;
         this.#acceptedParent = live;
-        this.#parentProgress = progress;
+        this.#parentProgress = {
+          progress,
+          order: marker.order,
+          position,
+          markerIndex: marker.index,
+        };
         this.#recordParentReview(progress, position, marker.index);
         this.#liveParentProgress.add(progressKey(progress));
         this.#highestFilesCompleted = progress.filesCompleted;
-        if (corrected === null || marker.order > corrected.order)
-          corrected = { progress, order: marker.order, owner: "live" };
+        if (preferCandidate) corrected = candidate;
       } else if (
         this.#displayedProgress?.owner === "parent" &&
-        position > (this.#displayedProgress.position ?? 0) &&
-        (corrected === null || marker.order > corrected.order)
+        compareProgressOrder(candidate, this.#displayedProgress) > 0 &&
+        preferCandidate
       ) {
-        corrected = { progress, order: marker.order, owner: "live" };
+        corrected = candidate;
       }
       this.#parentFrontier = { position, markerIndex: marker.index };
     }
     const displayed = this.#displayedProgress;
     if (!inventoryChanged && corrected === null) return;
+    const correctedCoverage =
+      corrected?.owner === "worker"
+        ? workerCoverage
+        : (corrected?.progress.filesCompleted ?? 0);
     const replacePhase =
       corrected !== null &&
+      correctedCoverage >= this.#highestFilesCompleted &&
       (displayed === null ||
-        displayed.owner === "parent" ||
-        corrected.order >= displayed.order);
+        correctedCoverage > displayed.update.filesCompleted ||
+        compareProgressOrder(corrected, displayed) >= 0);
     const phase = replacePhase
       ? corrected!.progress.phase
       : (displayed?.update.phase ?? "discovery");
@@ -561,10 +628,14 @@ export class ScanCostTracker {
     if (this.#lastProgress === key && (!inventoryChanged || inventoryReported))
       return;
     this.#lastProgress = key;
+    const selected = replacePhase ? corrected : displayed;
     this.#displayedProgress = {
       update: progress,
-      owner: replacePhase ? corrected!.owner : (displayed?.owner ?? "live"),
-      order: replacePhase ? corrected!.order : (displayed?.order ?? 0),
+      owner: selected?.owner ?? "live",
+      order: selected?.order ?? 0,
+      ...(selected?.position === undefined
+        ? {}
+        : { position: selected.position, markerIndex: selected.markerIndex }),
     };
     this.#options.onProgress?.(progress, {
       reconciled: true,
@@ -845,7 +916,7 @@ export class ScanCostTracker {
       if (
         inventoryMarker &&
         newerInventory &&
-        (this.#parentProgress?.filesCompleted ?? 0) > 0 &&
+        (this.#parentProgress?.progress.filesCompleted ?? 0) > 0 &&
         this.#parentReviewStart === null
       ) {
         // Legacy logs can expose the same EOF/close race through a tool receipt
@@ -864,7 +935,8 @@ export class ScanCostTracker {
       const expectedFilesTotal = this.#expectedFilesTotal;
       const parentInventory =
         inventoryMarker &&
-        ((this.#parentProgress?.filesCompleted ?? 0) === 0 || provenInventory);
+        ((this.#parentProgress?.progress.filesCompleted ?? 0) === 0 ||
+          provenInventory);
       const order = (saved.order ??= ++this.#progressOrder);
       if (
         (!parent &&
@@ -907,8 +979,13 @@ export class ScanCostTracker {
       if (parentInventory && this.#highestFilesCompleted > 0) {
         // Resumed workers may be enumerated before the parent's inventory.
         // Admit the scope independently while preserving eligible worker counts.
-        if ((this.#parentProgress?.filesCompleted ?? 0) === 0)
-          this.#parentProgress = progress;
+        if ((this.#parentProgress?.progress.filesCompleted ?? 0) === 0)
+          this.#parentProgress = {
+            progress,
+            order,
+            position: saved.position,
+            markerIndex: saved.markerIndex,
+          };
         if (saved.completion || saved.receipt) {
           const position = {
             position: saved.position,
@@ -937,14 +1014,19 @@ export class ScanCostTracker {
       if (filesCompleted < this.#highestFilesCompleted) continue;
       if (parent)
         this.#recordParentReview(progress, saved.position, saved.markerIndex);
-      // A parked receipt keeps its original observation order. Admitting its
-      // equal coverage must not replay its older phase over a newer update.
+      // Known parent positions outrank observation order: polling can park a
+      // newer completion before an earlier live completion is displayed.
       const displayed = this.#displayedProgress;
+      const provenance = {
+        order,
+        position: saved.position,
+        markerIndex: saved.markerIndex,
+      };
       const newerProgress =
         parent &&
         displayed !== null &&
         filesCompleted === displayed.update.filesCompleted &&
-        order < displayed.order
+        compareProgressOrder(provenance, displayed) < 0
           ? displayed
           : null;
       const update = {
@@ -956,11 +1038,14 @@ export class ScanCostTracker {
           : (expectedFilesTotal ??
             Math.max(progress.filesTotal, filesCompleted)),
       };
-      if (parent)
-        this.#parentProgress =
-          newerProgress !== null && newerProgress.owner !== "worker"
-            ? { ...progress, phase: update.phase }
-            : progress;
+      // Retaining a newer parent phase retains that whole receipt, including
+      // its actual inventory. Mixing an older total with its phase would discard
+      // valid parent coverage when a later inventory correction arrives.
+      if (
+        parent &&
+        (newerProgress === null || newerProgress.owner === "worker")
+      )
+        this.#parentProgress = { progress, ...provenance };
       const key = `${update.phase}:${update.filesCompleted}:${update.filesTotal}`;
       if (parent && (saved.completion || saved.receipt)) {
         this.#parentFrontier = {
@@ -980,7 +1065,9 @@ export class ScanCostTracker {
               update,
               owner: parent ? "parent" : "worker",
               order,
-              ...(parent ? { position: saved.position } : {}),
+              ...(parent
+                ? { position: saved.position, markerIndex: saved.markerIndex }
+                : {}),
             };
       this.#options.onProgress(update);
     }
