@@ -1,0 +1,173 @@
+import { afterEach, expect, test } from "bun:test";
+import {
+  mkdir,
+  readFile,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
+import { join, sep } from "node:path";
+import { createTemporaryDirectories } from "./support/temporary-directories.js";
+import {
+  patchRiskAssessment,
+  repositoryGit,
+  runGitRepositoryCommand,
+  runWorkflow,
+} from "./cli-patch-fixtures.js";
+
+const fixtures = createTemporaryDirectories(true);
+afterEach(fixtures.cleanup);
+
+async function initialize(directory: string) {
+  await mkdir(directory, { recursive: true });
+  const git = repositoryGit(directory);
+  git("init", "--initial-branch=main");
+  git("config", "user.name", "Synthetic User");
+  git("config", "user.email", "synthetic@example.test");
+  await writeFile(join(directory, "app.ts"), "original\n");
+  git("add", ".");
+  git("commit", "-m", "Synthetic baseline");
+  return git;
+}
+
+test.each(["GIT_DIR", "GIT_WORK_TREE"])(
+  "patch assessment preserves symlink traversal in relative %s",
+  async (selector) => {
+    const root = await fixtures.create("patch-relative-selector-");
+    const checkout = join(root, "storage", "checkout");
+    const caller = join(root, "caller");
+    await initialize(checkout);
+    await mkdir(caller);
+    await mkdir(join(root, "storage", "child"));
+    await symlink(
+      join(root, "storage", "child"),
+      join(caller, "alias"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    const metadata = join(root, "storage", "metadata");
+    await rename(join(checkout, ".git"), metadata);
+    const environment = {
+      GIT_DIR: metadata,
+      GIT_WORK_TREE: checkout,
+      [selector]: `alias${sep}..${sep}${selector === "GIT_DIR" ? "metadata" : "checkout"}`,
+    };
+    const git = (args: string[]) =>
+      runGitRepositoryCommand("git", args, caller, { environment });
+    const before = await git(["rev-parse", "HEAD"]);
+    let assessments = 0;
+    const outcome = await runWorkflow(
+      ["patch", "Synthetic issue", "--assess-patch-risk", "--json"],
+      {
+        currentDirectory: caller,
+        environment,
+        onRepositoryCommand: (command, args, cwd, options) =>
+          runGitRepositoryCommand(command, args, cwd, {
+            ...options,
+            environment: { ...environment, ...options?.environment },
+          }),
+        onCodex: async (_args, output) => {
+          if (output?.appServer?.prompt.includes("immutable patch artifact")) {
+            assessments++;
+            const artifact = JSON.parse(
+              output.appServer.prompt
+                .split("\n")
+                .find((line) => line.startsWith('{"path":'))!,
+            );
+            expect((await readFile(artifact.path, "utf8")).trim()).toBe(
+              await git([
+                "diff",
+                "--binary",
+                "--full-index",
+                "--no-renames",
+                "HEAD",
+              ]),
+            );
+            output.stdout.write(patchRiskAssessment().report);
+            return 0;
+          }
+          await writeFile(join(checkout, "app.ts"), "fixed\n");
+          output?.stdout.write("Synthetic patch complete.\n");
+          return 0;
+        },
+      },
+    );
+    expect(outcome.exitCode, outcome.stderr).toBe(0);
+    expect(assessments).toBe(1);
+    expect(await git(["rev-parse", "HEAD"])).toBe(before);
+  },
+);
+
+for (const nested of [false, true]) {
+  test
+    .skipIf(process.platform === "win32")
+    .each(["unicode", "raw", "both", "delete raw"])(
+    `patch assessment retains distinct filename bytes (${nested ? "nested" : "root"}): %s`,
+    async (change) => {
+      const root = await fixtures.create("patch-filename-bytes-");
+      const outerGit = await initialize(root);
+      const checkout = nested ? join(root, "nested-λ") : root;
+      const git = nested ? await initialize(checkout) : outerGit;
+      const raw = Buffer.concat([
+        Buffer.from(`${checkout}/file-`),
+        Buffer.from([255]),
+        Buffer.from(".txt"),
+      ]);
+      const unicode = join(checkout, "file-\ufffd.txt");
+      await writeFile(raw, "raw original\n");
+      await writeFile(unicode, "unicode original\n");
+      git("add", ".");
+      git("commit", "-m", "Synthetic byte names");
+      if (nested) {
+        outerGit("add", ".");
+        outerGit("commit", "-m", "Synthetic nested checkout");
+      }
+      const index = await readFile(join(checkout, ".git", "index"));
+      let assessments = 0;
+      const outcome = await runWorkflow(
+        ["patch", "Synthetic issue", "--assess-patch-risk", "--json"],
+        {
+          currentDirectory: root,
+          onRepositoryCommand: runGitRepositoryCommand,
+          onCodex: async (_args, output) => {
+            if (
+              output?.appServer?.prompt.includes("immutable patch artifact")
+            ) {
+              assessments++;
+              const artifact = JSON.parse(
+                output.appServer.prompt
+                  .split("\n")
+                  .find((line) => line.startsWith('{"path":'))!,
+              );
+              const patch = await readFile(artifact.path, "utf8");
+              expect(patch.trim()).toBe(
+                git(
+                  "diff",
+                  "--binary",
+                  "--full-index",
+                  "--no-renames",
+                  ...(nested
+                    ? ["--src-prefix=a/nested-λ/", "--dst-prefix=b/nested-λ/"]
+                    : []),
+                  "HEAD",
+                ),
+              );
+              output.stdout.write(patchRiskAssessment().report);
+              return 0;
+            }
+            if (change === "raw" || change === "both")
+              await writeFile(raw, "raw fixed\n");
+            if (change === "unicode" || change === "both")
+              await writeFile(unicode, "unicode fixed\n");
+            if (change === "delete raw") await rm(raw);
+            output?.stdout.write("Synthetic patch complete.\n");
+            return 0;
+          },
+        },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(assessments).toBe(1);
+      expect(await readFile(join(checkout, ".git", "index"))).toEqual(index);
+    },
+  );
+}

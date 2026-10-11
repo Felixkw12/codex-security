@@ -50,7 +50,7 @@ export interface PatchGitCommandOptions {
   readonly encoding?: "base64";
   readonly nestedProbe?: boolean;
   readonly indexFile?: string;
-  readonly input?: string;
+  readonly input?: string | Uint8Array;
   readonly environment?: NodeJS.ProcessEnv;
 }
 
@@ -77,11 +77,16 @@ export async function withPatchGitIndex<T>(
   try {
     const heads = await indexed(["rev-parse", "--revs-only", "HEAD"]);
     await indexed(["read-tree", ...(heads.trim() ? ["HEAD"] : ["--empty"])]);
-    const entries = await run(["ls-files", "--stage", "--full-name", "-z"]);
+    const entries = Buffer.from(
+      await run(["ls-files", "--stage", "--full-name", "-z"], {
+        encoding: "base64",
+      }),
+      "base64",
+    ).toString("latin1");
     await indexed(["update-index", "-z", "--index-info"], {
-      input: entries.replaceAll(
-        /(^|\0)([0-7]+ [a-f\d]+) [123]\t/gu,
-        "$1$2 0\t",
+      input: Buffer.from(
+        entries.replaceAll(/(^|\0)([0-7]+ [a-f\d]+) [123]\t/gu, "$1$2 0\t"),
+        "latin1",
       ),
     });
     return await inspect(indexed);

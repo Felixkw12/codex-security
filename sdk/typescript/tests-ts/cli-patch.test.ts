@@ -2437,7 +2437,7 @@ describe("patch publication integrity", () => {
             current.assessPatchRisk = async (request) => {
               assessments++;
               expect(request.repository).toBe(tree);
-              expect(request.files).toEqual(["app.ts"]);
+              expect(request.files).toBeUndefined();
               expect(
                 await runGitRepositoryCommand(
                   "git",
@@ -2582,7 +2582,7 @@ describe("patch publication integrity", () => {
             inputRunner = current.runRepositoryCommand;
             current.assessPatchRisk = async (request) => {
               expect(request.repository).toBe(root);
-              expect(request.files).toEqual(["package/app.ts"]);
+              expect(request.files).toBeUndefined();
               expect(
                 resolve(
                   await runGitRepositoryCommand(

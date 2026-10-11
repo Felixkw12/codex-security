@@ -41,6 +41,7 @@ import {
   parse,
   relative,
   resolve,
+  sep,
   win32,
 } from "node:path";
 import { cwd } from "node:process";
@@ -1183,7 +1184,7 @@ interface CliDependencies {
       encoding?: "base64";
       environment?: NodeJS.ProcessEnv;
       maxBuffer?: number;
-      input?: string;
+      input?: string | Uint8Array;
     },
   ): Promise<string>;
   assessPatchRisk?: (request: PatchRiskRequest) => Promise<PatchRiskReport>;
@@ -1768,9 +1769,15 @@ export async function main(
         gitEnvironment ??= Object.fromEntries(
           ["GIT_DIR", "GIT_WORK_TREE"].flatMap((name) => {
             const value = parentDependencies.environment[name];
-            return value && !isAbsolute(value)
-              ? [[name, resolve(repository, value)]]
-              : [];
+            if (!value || isAbsolute(value)) return [];
+            const { root } = parse(value);
+            // Anchor the drive separately so a link/.. suffix still traverses the link.
+            return [
+              [
+                name,
+                `${resolve(repository, root)}${sep}${value.slice(root.length)}`,
+              ],
+            ];
           }),
         );
         if (
@@ -5600,7 +5607,6 @@ export async function main(
                   },
                   base: patchGitBase!,
                   state: patchRiskState,
-                  files,
                   configuration: options,
                   auth: options.auth,
                 },
@@ -7329,10 +7335,11 @@ async function checkDeinitializedPatchSubmodules(
       { trim: false },
     )
   ).replace(/\n$/u, "");
-  submodules: for (const [path, entry] of after) {
+  submodules: for (const [key, entry] of after) {
+    const path = patchPathText(key);
     if (
       !entry.startsWith("160000 ") ||
-      before.get(path) === entry ||
+      before.get(key) === entry ||
       existsSync(join(root, path, ".git"))
     )
       continue;
@@ -7340,7 +7347,7 @@ async function checkDeinitializedPatchSubmodules(
     const registrations =
       parent &&
       before.has(".gitmodules") &&
-      before.get(path)?.startsWith("160000 ")
+      before.get(key)?.startsWith("160000 ")
         ? [parent, ref]
         : [ref];
     for (const registration of registrations) {
@@ -7939,6 +7946,7 @@ const NESTED_PATCH_GIT_ENVIRONMENT = {
 interface GitPatchState {
   root: string;
   tree: string;
+  // Git path keys use Latin-1 to retain every byte, including non-UTF-8 names.
   trees: Map<string, string>;
   files: Map<string, string>;
   gitlinks: Map<
@@ -8031,7 +8039,7 @@ async function changedPatchFiles(
         await hydrate(head, base, directory, current.commit, after);
     }
     for (const path of new Set([...before.keys(), ...after.keys()])) {
-      if (before.get(path) !== after.get(path)) files.add(path);
+      if (before.get(path) !== after.get(path)) files.add(patchPathText(path));
     }
   }
   return [...files].sort();
@@ -8082,13 +8090,15 @@ async function patchTreeEntries(
     repository,
     {
       trim: false,
+      encoding: "base64",
       maxBuffer: Infinity,
       environment:
         checkout !== repository ? NESTED_PATCH_GIT_ENVIRONMENT : undefined,
     },
   );
   return new Map(
-    entries
+    Buffer.from(entries, "base64")
+      .toString("latin1")
       .split("\0")
       .filter(Boolean)
       .map((entry) => {
@@ -8096,6 +8106,10 @@ async function patchTreeEntries(
         return [entry.slice(separator + 1), entry.slice(0, separator)];
       }),
   );
+}
+
+function patchPathText(path: string): string {
+  return Buffer.from(path, "latin1").toString("utf8");
 }
 
 async function retainPatchTrees(
@@ -8166,7 +8180,7 @@ async function snapshotGitPatchState(
     snapshot: string,
     ancestors: string[],
   ): Promise<void> => {
-    const checkout = join(repository, directory);
+    const checkout = join(repository, patchPathText(directory));
     trees.set(directory, snapshot);
     if (retainTrees && directory)
       await retainPatchTrees(
@@ -8185,7 +8199,7 @@ async function snapshotGitPatchState(
       const nestedPath = directory ? `${directory}/${path}` : path;
       if (directory) files.set(nestedPath, entry);
       if (entry.startsWith("160000 ")) {
-        const nested = join(checkout, path);
+        const nested = join(checkout, patchPathText(path));
         const gitlink = {
           commit: entry.split(" ")[2]!,
           gitDirectory: undefined as string | undefined,
@@ -8386,9 +8400,10 @@ async function assessPatchRisk(
         repositoryRoot,
         {
           environment: indexEnvironment,
-          input: [...entries]
-            .map(([path, entry]) => `${entry}\t${path}\0`)
-            .join(""),
+          input: Buffer.from(
+            [...entries].map(([path, entry]) => `${entry}\t${path}\0`).join(""),
+            "latin1",
+          ),
         },
       );
       return dependencies.runRepositoryCommand(
@@ -8467,8 +8482,9 @@ async function assessPatchRisk(
           await writeTree(after),
         ]);
     }
-    for (const [directory, baseTree, headTree] of fragments) {
+    for (const [directoryKey, baseTree, headTree] of fragments) {
       if (baseTree === headTree) continue;
+      const directory = patchPathText(directoryKey);
       const checkout = join(repositoryRoot, directory);
       const fragment = join(root, "fragment.diff");
       const args = [
@@ -8525,17 +8541,23 @@ async function assessPatchRisk(
           ),
         );
         const entries = new Map(before!);
+        const pathKey = (path: string) => Buffer.from(path).toString("latin1");
+        const selectedFiles = request.files!.map(pathKey);
+        const deletedFiles = new Set([...sources.deleted].map(pathKey));
         for (const path of new Set([...before!.keys(), ...after!.keys()])) {
-          const file = relative(request.repository, resolve(checkout, path));
+          const file = relative(
+            pathKey(request.repository),
+            resolve(pathKey(checkout), path),
+          );
           if (
-            request.files!.some(
+            selectedFiles.some(
               (selected) => !isOutsidePath(relative(selected, file)),
             )
           ) {
             const entry = after!.get(path);
             if (entry === undefined) entries.delete(path);
             else entries.set(path, entry);
-          } else if (sources.deleted.has(file)) {
+          } else if (deletedFiles.has(file)) {
             // An inferred rename source is an exact deletion, not a directory selection.
             entries.delete(path);
           }
