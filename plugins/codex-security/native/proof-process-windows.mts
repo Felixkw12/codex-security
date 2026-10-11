@@ -254,10 +254,13 @@ export async function processProof(
           ),
           [0, null],
         );
-        assert.deepEqual(JSON.parse(Buffer.concat(output).toString()), {
-          executable: expected,
-          argv0: executable,
-        });
+        const actual = JSON.parse(Buffer.concat(output).toString());
+        // Node can retain dot components in its reported module filename.
+        assert.deepEqual(
+          { ...actual, executable: win32.normalize(actual.executable) },
+          { executable: expected, argv0: executable },
+          `${mode} selection ${JSON.stringify(executable)}`,
+        );
         assert.equal(Buffer.concat(diagnostics).toString(), "");
       }
     }
