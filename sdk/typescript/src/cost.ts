@@ -196,7 +196,8 @@ export class ScanCostTracker {
   #acceptedParent: StreamedProgressItem | null = null;
   // Global coverage admitted from either the live or saved parent projection.
   #parentProgress: ScanProgress | null = null;
-  #acceptedInventory: ParentProgressMarker | null = null;
+  #parentInventory: ParentProgressMarker | null = null;
+  #parentReviewStart: { position: number; markerIndex: number } | null = null;
   readonly #readyParentMarkers: Array<{
     live: StreamedProgressItem;
     marker: ParentProgressMarker;
@@ -246,7 +247,7 @@ export class ScanCostTracker {
     this.#liveParentItems.length = 0;
     this.#liveParentEvents = new WeakMap();
     this.#acceptedParent = null;
-    this.#acceptedInventory = null;
+    this.#parentInventory = null;
     // Historical logs may omit projection kinds emitted by the new turn.
     this.#parentSession?.messageProjections.clear();
     this.#readyParentMarkers.length = 0;
@@ -295,6 +296,8 @@ export class ScanCostTracker {
       accepted: false,
     };
     live.markers.push(marker);
+    if (progress.phase === "discovery" && progress.filesCompleted === 0)
+      this.#parentInventory = marker;
     if (live.position !== null) this.#readyParentMarkers.push({ live, marker });
     return (
       live.position === null ||
@@ -312,8 +315,6 @@ export class ScanCostTracker {
     const marker = live.markers[live.observedMarkerIndex];
     if (marker === undefined) return;
     marker.accepted = true;
-    if (progress.phase === "discovery" && progress.filesCompleted === 0)
-      this.#acceptedInventory = marker;
     this.#acceptedParent = live;
     this.#parentProgress = progress;
     live.accepted = progress;
@@ -329,11 +330,32 @@ export class ScanCostTracker {
       progress.filesCompleted,
     );
     this.#liveParentProgress.add(progressKey(progress));
-    if (live.position !== null)
+    if (live.position !== null) {
+      this.#recordParentReview(
+        progress,
+        live.position,
+        live.acceptedMarkerIndex,
+      );
       this.#parentFrontier = {
         position: live.position,
         markerIndex: live.acceptedMarkerIndex,
       };
+    }
+  }
+
+  #recordParentReview(
+    progress: ScanProgress,
+    position: number,
+    markerIndex: number,
+  ): void {
+    if (progress.filesCompleted === 0) return;
+    const first = this.#parentReviewStart;
+    if (
+      first === null ||
+      position < first.position ||
+      (position === first.position && markerIndex < first.markerIndex)
+    )
+      this.#parentReviewStart = { position, markerIndex };
   }
 
   #afterParentFrontier(position: number, index: number): boolean {
@@ -370,20 +392,31 @@ export class ScanCostTracker {
 
   #reconcileParentProgress(): void {
     const ready = this.#readyParentMarkers.splice(0);
+    for (const { live, marker } of ready) {
+      if (marker.accepted && live.position !== null)
+        this.#recordParentReview(marker.progress, live.position, marker.index);
+    }
     let corrected: { progress: ScanProgress; order: number } | null = null;
     for (const { live, marker } of ready) {
       const position = live.position;
       if (position === null) continue;
       const progress = marker.progress;
       if (
-        marker === this.#acceptedInventory &&
-        marker.accepted &&
+        marker === this.#parentInventory &&
+        (marker.accepted ||
+          (this.#parentProgress?.filesCompleted ?? 0) === 0 ||
+          (this.#parentReviewStart !== null &&
+            (position < this.#parentReviewStart.position ||
+              (position === this.#parentReviewStart.position &&
+                marker.index < this.#parentReviewStart.markerIndex)))) &&
         progress.phase === "discovery" &&
         progress.filesCompleted === 0 &&
         (position > this.#inventoryFrontier.position ||
           (position === this.#inventoryFrontier.position &&
             marker.index > this.#inventoryFrontier.markerIndex))
       ) {
+        // Inventory may precede already-admitted review even when its full live
+        // marker arrives later. Restore scope without replaying that older phase.
         this.#inventoryFrontier = { position, markerIndex: marker.index };
         this.setExpectedFilesTotal(progress.filesTotal);
       }
@@ -459,6 +492,7 @@ export class ScanCostTracker {
         live.acceptedMarkerIndex = marker.index;
         this.#acceptedParent = live;
         this.#parentProgress = progress;
+        this.#recordParentReview(progress, position, marker.index);
         this.#liveParentProgress.add(progressKey(progress));
         this.#highestFilesCompleted = progress.filesCompleted;
         if (corrected === null || marker.order > corrected.order)
@@ -491,7 +525,12 @@ export class ScanCostTracker {
         displayed!.update.filesTotal,
     };
     const key = progressKey(progress);
-    if (this.#lastProgress === key) return;
+    // An initial zero-count discovery already reported this inventory. Other
+    // equal raw keys can still require synchronization of the API's file total.
+    const inventoryReported =
+      progress.phase === "discovery" && progress.filesCompleted === 0;
+    if (this.#lastProgress === key && (!inventoryChanged || inventoryReported))
+      return;
     this.#lastProgress = key;
     this.#displayedProgress = {
       update: progress,
@@ -769,7 +808,11 @@ export class ScanCostTracker {
         expectedFilesTotal !== undefined &&
         progress.filesTotal > expectedFilesTotal
       ) {
-        if (!parent) {
+        if (parent) {
+          // The full inventory may still be waiting in the live stream. Retain
+          // parsed receipts so its admission can recover saved parent coverage.
+          session.progress.push(saved);
+        } else {
           const pending = session.pendingWorkerProgress.get(
             progress.filesTotal,
           );
@@ -819,7 +862,10 @@ export class ScanCostTracker {
               .reduce((total, reviewed) => total + reviewed, 0),
           );
       if (filesCompleted < this.#highestFilesCompleted) continue;
-      if (parent) this.#parentProgress = progress;
+      if (parent) {
+        this.#parentProgress = progress;
+        this.#recordParentReview(progress, saved.position, saved.markerIndex);
+      }
       const update = {
         ...progress,
         filesCompleted,

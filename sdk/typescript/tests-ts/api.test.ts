@@ -5249,6 +5249,149 @@ describe("CodexSecurity orchestration", () => {
   });
 
   test.each([
+    [false, 7, 3, false, false],
+    [true, 7, 3, false, false],
+    [false, 9, 4, false, false],
+    [true, 9, 4, false, false],
+    [false, 9, 3, true, false],
+    [false, 9, 4, true, true],
+  ] as const)(
+    "recovers inventory and saved counts when polling leads live delivery (live first: %p, total: %p, reviewed: %p, later inventory: %p, later count: %p)",
+    async (liveFirst, total, reviewed, laterInventory, laterCount) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const pollAllowed = Promise.withResolvers<void>();
+      const receiptRead = Promise.withResolvers<void>();
+      if (!liveFirst) pollAllowed.resolve();
+      const originalReaddir = fsPromises.readdir;
+      const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
+        ...args: Parameters<typeof originalReaddir>
+      ) => {
+        if (String(args[0]) === join(codexHome, "sessions"))
+          await pollAllowed.promise;
+        return originalReaddir(...args);
+      }) as typeof originalReaddir);
+      const marker = (phase: ScanProgress["phase"], count: number) =>
+        "CODEX_SECURITY_SCAN_PROGRESS " +
+        JSON.stringify({
+          phase,
+          filesCompleted: count,
+          filesTotal: laterInventory && count > 0 ? 8 : total,
+        });
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          const rollout = await writeUsageSession(codexHome, "thread-1", {});
+          // Both records are durable before live delivery. Slow polling is the
+          // only difference between the two schedules, as in the native writer.
+          const records = [
+            {
+              type: "event_msg",
+              payload: {
+                type: "item_completed",
+                item: {
+                  type: "CommandExecution",
+                  command: ["inventory"],
+                  aggregated_output: persistedCommandOutput,
+                },
+              },
+            },
+            {
+              type: "response_item",
+              payload: {
+                type: "custom_tool_call_output",
+                call_id: "review-count",
+                output: marker(
+                  "validation",
+                  laterCount ? reviewed - 1 : reviewed,
+                ),
+              },
+            },
+          ];
+          if (laterInventory) records.reverse();
+          if (laterCount)
+            records.push({
+              type: "response_item",
+              payload: {
+                type: "custom_tool_call_output",
+                call_id: "later-count",
+                output: marker("validation", reviewed),
+              },
+            });
+          await appendFile(
+            rollout,
+            records.map((row) => JSON.stringify(row)).join("\n") + "\n",
+          );
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            if (!liveFirst) await receiptRead.promise;
+            yield {
+              type: "item.completed",
+              item: {
+                id: "inventory",
+                type: "command_execution",
+                command: "inventory",
+                aggregated_output: commandOutput(marker("discovery", 0)),
+                status: "completed",
+                exit_code: 0,
+              },
+            };
+            if (liveFirst) await receiptRead.promise;
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      try {
+        await client.run(repository, {
+          onProgress: (update) => {
+            updates.push(update);
+            if (update.filesTotal === total && update.filesCompleted === 0)
+              pollAllowed.resolve();
+          },
+          onSessionEvent: ({ event }) => {
+            if (
+              (event["payload"] as { call_id?: string })?.call_id ===
+              "review-count"
+            )
+              receiptRead.resolve();
+          },
+        });
+        expect(updates.at(-1)).toEqual({
+          phase: "validation",
+          filesCompleted: reviewed,
+          filesTotal: laterInventory ? 8 : total,
+        });
+        const counted = updates.findIndex(
+          (update) => update.filesCompleted === reviewed,
+        );
+        expect(counted).toBeGreaterThanOrEqual(0);
+        expect(
+          updates
+            .slice(counted)
+            .every(
+              (update) =>
+                update.filesCompleted === reviewed &&
+                update.phase === "validation",
+            ),
+        ).toBe(true);
+      } finally {
+        pollAllowed.resolve();
+        receiptRead.resolve();
+        await client.close();
+        listing.mockRestore();
+      }
+    },
+  );
+
+  test.each([
     [true, 9],
     [false, 9],
     [true, 7],
