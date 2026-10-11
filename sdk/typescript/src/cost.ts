@@ -124,6 +124,7 @@ export class ScanCostTracker {
   readonly #workers = new Map<string, number>();
   readonly #workerProgress = new Map<string, number>();
   readonly #reportedProgress = new Set<string>();
+  #streamedParentProgress: string | null = null;
   #threadId: string | null = null;
   #observingWorkers = true;
   #timer: NodeJS.Timeout | null = null;
@@ -140,6 +141,11 @@ export class ScanCostTracker {
 
   public setExpectedFilesTotal(filesTotal: number): void {
     this.#expectedFilesTotal = filesTotal;
+  }
+
+  /** The live stream can deliver a parent marker before its rollout is polled. */
+  public recordParentProgress(progress: ScanProgress): void {
+    this.#streamedParentProgress = `${progress.phase}:${progress.filesCompleted}:${progress.filesTotal}`;
   }
 
   public recordUsage(usage: unknown, threadId = this.#threadId): void {
@@ -353,6 +359,13 @@ export class ScanCostTracker {
       return;
     }
     for (const progress of session.progress.splice(0)) {
+      if (parent && this.#streamedParentProgress !== null) {
+        const key = `${progress.phase}:${progress.filesCompleted}:${progress.filesTotal}`;
+        // Earlier parent output must not overwrite a newer live phase or inventory.
+        // Resume normal forwarding at the marker already delivered by the stream.
+        if (key !== this.#streamedParentProgress) continue;
+        this.#streamedParentProgress = null;
+      }
       const expectedFilesTotal = this.#expectedFilesTotal;
       const parentInventory =
         parent &&

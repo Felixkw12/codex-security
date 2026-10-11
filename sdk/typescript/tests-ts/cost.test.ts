@@ -1862,6 +1862,33 @@ describe("live scan cost tracking", () => {
     ]);
   });
 
+  test("waits for a streamed parent marker across rollout polls", async () => {
+    const { home, parent } = await workerSessionFixture();
+    const updates: ScanProgress[] = [];
+    const tracker = costTracker(home, {
+      expectedFilesTotal: 8,
+      onProgress: (update) => updates.push(update),
+    });
+    tracker.start("scan-thread");
+    await tracker.refresh();
+    tracker.recordParentProgress({
+      phase: "validation",
+      filesCompleted: 8,
+      filesTotal: 8,
+    });
+    await appendSessionItem(parent, progressMessage(8, 8));
+    await tracker.refresh();
+    expect(updates).toEqual([]);
+    await appendSessionItem(parent, progressMessage(8, 8, "validation"));
+    await tracker.refresh();
+    await appendSessionItem(parent, progressMessage(8, 8, "reporting"));
+    await tracker.stop();
+    expect(updates).toEqual([
+      { phase: "validation", filesCompleted: 8, filesTotal: 8 },
+      { phase: "reporting", filesCompleted: 8, filesTotal: 8 },
+    ]);
+  });
+
   test.each([940, 944])(
     "preserves the parent's exact inventory of %p in custom-tool progress",
     async (filesTotal) => {

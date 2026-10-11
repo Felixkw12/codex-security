@@ -1542,7 +1542,10 @@ export class CodexSecurity {
       const reportedProgress = new Set<string>();
       const progressKey = (progress: ScanProgress): string =>
         `${progress.phase}:${progress.filesCompleted}:${progress.filesTotal}`;
-      const reportProgress = (progress: ScanProgress): void => {
+      const reportProgress = (
+        progress: ScanProgress,
+        streamed = false,
+      ): void => {
         if (reportedProgress.has(progressKey(progress))) return;
         if (
           progress.phase === "discovery" &&
@@ -1565,6 +1568,7 @@ export class CodexSecurity {
         const key = progressKey(update);
         if (reportedProgress.has(key)) return;
         reportedProgress.add(key);
+        if (streamed) tracker.recordParentProgress(progress);
         notifyObserver(options, "onProgress")(update);
       };
       const reportedInaccessibleSessionLogs = new Set<string>();
@@ -2262,7 +2266,7 @@ export class CodexSecurity {
         onTrustedAccessStatus: options.onTrustedAccessStatus,
         onReconnect: options.onReconnect,
         onActivity: options.onActivity,
-        onProgress: reportProgress,
+        onProgress: (progress) => reportProgress(progress, true),
         onWorkerStatus: options.onWorkerStatus,
         onWarning: options.onWarning,
         onObserverError: options.onObserverError,

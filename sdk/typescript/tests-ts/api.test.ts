@@ -4047,86 +4047,116 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
-  test("delivers each parent progress phase once when rollout replay follows the stream", async () => {
-    const { root, repository, codexHome, scanDir } = await scanDirectories();
-    const updates: ScanProgress[] = [];
-    const sessionEvents: ScanSessionEvent[] = [];
-    const progress = [
-      { phase: "discovery", filesCompleted: 8, filesTotal: 8 },
-      { phase: "validation", filesCompleted: 8, filesTotal: 8 },
-    ] as const;
-    const markerTexts = progress.map(
-      (update) => "CODEX_SECURITY_SCAN_PROGRESS " + JSON.stringify(update),
-    );
-    const client = TestClient.withDependencies({
-      ...scanRuntimeDependencies(codexHome, scanDir),
-      runWorkbench: async (
-        _options: unknown,
-        args: readonly string[],
-        input?: string,
-      ): Promise<JsonObject> =>
-        args[0] === "register-cli-scan"
-          ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-          : mockWorkbench(args, input),
-      createCodex: codexFactory(async () => {
-        await copyCompletedScan(root);
-        const rollout = await writeUsageSession(codexHome, "thread-1", {
-          input_tokens: 100,
-          output_tokens: 10,
-        });
-        async function* markers(): AsyncGenerator<ThreadEvent> {
-          for (const [index, text] of markerTexts.entries()) {
-            yield {
-              type: "item.completed",
-              item: {
-                id: `parent-progress-${index}`,
-                type: "agent_message",
-                text,
-              },
-            };
+  test.each([
+    [
+      "both phases streamed",
+      [0, 1],
+      [
+        { phase: "discovery", filesCompleted: 8, filesTotal: 8 },
+        { phase: "validation", filesCompleted: 8, filesTotal: 8 },
+      ],
+      [0, 1],
+    ],
+    [
+      "older tool phase",
+      [1],
+      [
+        { phase: "discovery", filesCompleted: 8, filesTotal: 8 },
+        { phase: "validation", filesCompleted: 8, filesTotal: 8 },
+        { phase: "attack_path", filesCompleted: 8, filesTotal: 8 },
+      ],
+      [1, 2],
+    ],
+    [
+      "older inventory",
+      [1],
+      [
+        { phase: "discovery", filesCompleted: 0, filesTotal: 8 },
+        { phase: "discovery", filesCompleted: 0, filesTotal: 9 },
+        { phase: "discovery", filesCompleted: 1, filesTotal: 9 },
+      ],
+      [1, 2],
+    ],
+  ] as const)(
+    "orders parent stream and rollout progress: %s",
+    async (_scenario, streamed, progress, expected) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const sessionEvents: ScanSessionEvent[] = [];
+      const markerTexts = progress.map(
+        (update) => "CODEX_SECURITY_SCAN_PROGRESS " + JSON.stringify(update),
+      );
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          const rollout = await writeUsageSession(codexHome, "thread-1", {
+            input_tokens: 100,
+            output_tokens: 10,
+          });
+          async function* markers(): AsyncGenerator<ThreadEvent> {
+            for (const [index, text] of markerTexts.entries()) {
+              if (!new Set<number>(streamed).has(index)) continue;
+              yield {
+                type: "item.completed",
+                item: {
+                  id: `parent-progress-${index}`,
+                  type: "agent_message",
+                  text,
+                },
+              };
+            }
+            // Streamed markers arrive before the delayed parent rollout is polled.
+            await appendFile(
+              rollout,
+              markerTexts
+                .map((text) =>
+                  JSON.stringify({
+                    type: "response_item",
+                    payload: {
+                      type: "custom_tool_call_output",
+                      status: "completed",
+                      output: [{ type: "input_text", text }],
+                    },
+                  }),
+                )
+                .join("\n") + "\n",
+            );
           }
-          // Both stream phases reach the observer before their rollout replay.
-          await appendFile(
-            rollout,
-            markerTexts
-              .map((text) =>
-                JSON.stringify({
-                  type: "response_item",
-                  payload: {
-                    type: "custom_tool_call_output",
-                    status: "completed",
-                    output: [{ type: "input_text", text }],
-                  },
-                }),
-              )
-              .join("\n") + "\n",
-          );
-        }
-        return { events: completedEvents("thread-1", markers()) };
-      }),
-    });
-    try {
-      await client.run(repository, {
-        onProgress: (update) => updates.push(update),
-        onSessionEvent: (event) => sessionEvents.push(event),
+          return { events: completedEvents("thread-1", markers()) };
+        }),
       });
-      expect(updates).toEqual([
-        { phase: "preflight", filesCompleted: 0, filesTotal: 8 },
-        ...progress,
-      ]);
-      expect(
-        sessionEvents.filter(
-          ({ threadId, event }) =>
-            threadId === "thread-1" &&
-            (event["payload"] as Record<string, unknown> | undefined)?.[
-              "type"
-            ] === "custom_tool_call_output",
-        ),
-      ).toHaveLength(2);
-    } finally {
-      await client.close();
-    }
-  });
+      try {
+        await client.run(repository, {
+          onProgress: (update) => updates.push(update),
+          onSessionEvent: (event) => sessionEvents.push(event),
+        });
+        expect(updates).toEqual([
+          { phase: "preflight", filesCompleted: 0, filesTotal: 8 },
+          ...expected.map((index) => progress[index]!),
+        ]);
+        expect(
+          sessionEvents.filter(
+            ({ threadId, event }) =>
+              threadId === "thread-1" &&
+              (event["payload"] as Record<string, unknown> | undefined)?.[
+                "type"
+              ] === "custom_tool_call_output",
+          ),
+        ).toHaveLength(progress.length);
+      } finally {
+        await client.close();
+      }
+    },
+  );
 
   test.each(["none", "sync", "async"] as const)(
     "observes workers before scan completion with %s observer errors",
