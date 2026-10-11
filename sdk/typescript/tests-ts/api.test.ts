@@ -4286,10 +4286,39 @@ describe("CodexSecurity orchestration", () => {
   );
 
   test.each([
-    ["legacy previews", true, false, false, 8, 9, 1, 1],
-    ["truncated native completion", true, true, false, 8, 9, 1, 1],
+    [
+      "legacy receipts use completion-order fallback",
+      true,
+      false,
+      false,
+      8,
+      9,
+      1,
+      1,
+    ],
+    [
+      "missing native occurrence uses completion-order fallback",
+      true,
+      true,
+      false,
+      8,
+      9,
+      1,
+      1,
+    ],
+    ["complete native occurrences", true, true, false, 8, 9, 1, 1],
     ["tool-only old inventory", false, true, false, 8, 9, 1, 1],
     ["late upward inventory proof", false, true, true, 8, 9, 1, 1],
+    [
+      "late proof admits a previously oversized worker",
+      false,
+      true,
+      true,
+      8,
+      9,
+      9,
+      9,
+    ],
     ["late downward inventory proof", false, true, true, 9, 8, 1, 1],
     [
       "late proof excludes an oversized worker shard",
@@ -4302,7 +4331,7 @@ describe("CodexSecurity orchestration", () => {
       9,
     ],
   ] as const)(
-    "preserves live inventory when a worker follows an older preview: %s",
+    "reconciles inventory receipts and worker progress: %s",
     async (
       _scenario,
       streamOld,
@@ -4376,6 +4405,19 @@ describe("CodexSecurity orchestration", () => {
                   },
                 },
               });
+            if (_scenario === "complete native occurrences")
+              saved.unshift({
+                type: "event_msg",
+                payload: {
+                  type: "item_completed",
+                  item: {
+                    type: "CommandExecution",
+                    id: "native-original-inventory",
+                    command: ["scan-inventory", String(originalTotal)],
+                    aggregated_output: persistedCommandOutput,
+                  },
+                },
+              });
             await appendFile(
               rollout,
               saved
@@ -4430,6 +4472,7 @@ describe("CodexSecurity orchestration", () => {
             if (progress.filesCompleted === workerCount) workerRead.resolve();
           },
           onSessionEvent: ({ threadId, event }) => {
+            if (threadId === "worker-thread") workerRead.resolve();
             if (
               (event["payload"] as { item?: { id?: string } } | undefined)?.item
                 ?.id === "native-inventory"
@@ -4444,9 +4487,27 @@ describe("CodexSecurity orchestration", () => {
               parentRead.resolve();
           },
         });
+        const uncorrelated =
+          streamOld && _scenario !== "complete native occurrences";
+        if (uncorrelated) {
+          // The outer tool output may be a fresh inventory or a copied preview.
+          // Missing completion identity cannot distinguish these histories.
+          expect(
+            updates.some((update) => update.filesTotal === correctedTotal),
+          ).toBe(true);
+          expect(updates.at(-1)).toEqual({
+            phase: "discovery",
+            filesCompleted: workerCount,
+            filesTotal: originalTotal,
+          });
+          return;
+        }
         expect(updates.at(-1)).toEqual({
           phase: "discovery",
-          filesCompleted: 2,
+          filesCompleted: Math.max(
+            2,
+            workerTotal <= correctedTotal ? workerCount : 0,
+          ),
           filesTotal: correctedTotal,
         });
         const corrected = updates.findIndex(
@@ -4477,23 +4538,120 @@ describe("CodexSecurity orchestration", () => {
   );
 
   test.each([
+    ["rejected completion", 8, 9, 9],
+    ["inventory followed by an accepted count", 9, 8, 1],
+  ] as const)(
+    "reconsiders parent receipts after inventory proof: %s",
+    async (_scenario, oldTotal, total, count) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const previewRead = Promise.withResolvers<void>();
+      const marker = (completed: number, inventory: number) =>
+        "CODEX_SECURITY_SCAN_PROGRESS " +
+        JSON.stringify({
+          phase: "discovery",
+          filesCompleted: completed,
+          filesTotal: inventory,
+        });
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: oldTotal }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          const rollout = await writeUsageSession(codexHome, "thread-1", {});
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            const live = (completed: number): ThreadEvent => ({
+              type: "item.completed",
+              item: {
+                type: "command_execution",
+                id: `live-${completed}`,
+                command: `report-progress ${completed}`,
+                aggregated_output: commandOutput(marker(completed, total)),
+                status: "completed",
+                exit_code: 0,
+              },
+            });
+            yield live(0);
+            await appendFile(
+              rollout,
+              JSON.stringify({
+                type: "response_item",
+                payload: {
+                  type: "custom_tool_call_output",
+                  call_id: "old-preview",
+                  output: marker(0, oldTotal),
+                },
+              }) + "\n",
+            );
+            await previewRead.promise;
+            yield live(count);
+            for (const completed of [0, count])
+              await appendFile(
+                rollout,
+                JSON.stringify({
+                  type: "event_msg",
+                  payload: {
+                    type: "item_completed",
+                    item: {
+                      type: "CommandExecution",
+                      id: `native-${completed}`,
+                      command: ["report-progress", String(completed)],
+                      aggregated_output: persistedCommandOutput,
+                    },
+                  },
+                }) + "\n",
+              );
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      try {
+        await client.run(repository, {
+          onProgress: (update) => updates.push(update),
+          onSessionEvent: ({ event }) => {
+            if (
+              (event["payload"] as { call_id?: string })?.call_id ===
+              "old-preview"
+            )
+              previewRead.resolve();
+          },
+        });
+        expect(updates.at(-1)).toEqual({
+          phase: "discovery",
+          filesCompleted: count,
+          filesTotal: total,
+        });
+      } finally {
+        await client.close();
+      }
+    },
+  );
+
+  test.each([
     ["saved first", false, false, false, ["discovery", "validation"]],
     [
-      "saved first with an older preview",
+      "saved first with a later tool receipt",
       false,
       true,
       false,
       ["discovery", "validation"],
     ],
     [
-      "saved first with truncated native output",
+      "ambiguous truncated preview uses the later receipt",
       false,
       true,
       true,
       ["discovery", "validation"],
     ],
     [
-      "live first with an older preview",
+      "live first with a later tool receipt",
       true,
       true,
       false,
@@ -4591,7 +4749,15 @@ describe("CodexSecurity orchestration", () => {
           updates
             .filter((progress) => progress.filesCompleted === 8)
             .map((progress) => progress.phase),
-        ).toEqual([...phases]);
+        ).toEqual(
+          // A separate tool completion has no nested-origin identity. Its
+          // completion order wins even when it could be a copied preview.
+          preview
+            ? liveFirst || !truncated
+              ? [...phases, "discovery"]
+              : ["discovery"]
+            : [...phases],
+        );
       } finally {
         await client.close();
       }

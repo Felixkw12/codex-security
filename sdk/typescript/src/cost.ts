@@ -51,10 +51,10 @@ interface SessionReasoning {
 interface SessionProgress {
   update: ScanProgress;
   position: number;
-  sourcePosition: number | null;
   completion: boolean;
   markerIndex: number;
-  nativeMarkerPosition: number | null;
+  receipt: boolean;
+  duplicate: boolean;
 }
 
 interface ProgressItem {
@@ -66,7 +66,6 @@ interface ProgressItem {
 
 interface NativeProgressItem extends ProgressItem {
   updates: ScanProgress[];
-  previewKeys: string[];
 }
 
 interface SessionCompletion {
@@ -82,7 +81,15 @@ export type ParentProgressSource =
     }
   | { reconciled: true; inventory?: true };
 
+interface ParentProgressMarker {
+  progress: ScanProgress;
+  index: number;
+  order: number;
+  accepted: boolean;
+}
+
 interface StreamedProgressItem {
+  markers: ParentProgressMarker[];
   accepted: ScanProgress | null;
   observedMarkerIndex: number;
   acceptedMarkerIndex: number;
@@ -106,10 +113,14 @@ interface SessionUsage {
   activities: ScanActivity[];
   progress: SessionProgress[];
   position: number;
-  callPositions: Map<string, number>;
   completions: SessionCompletion[];
-  nativeMarkerPositions: Map<string, number>;
+  toolReceipts: Set<string>;
   workerProgress: Set<string>;
+  pendingWorkerProgress: Map<number, { progress: ScanProgress; order: number }>;
+  messageProjections: Map<
+    string,
+    { native: number; event: number; response: number }
+  >;
   filesCompleted: number;
   filesTotal: number | null;
   prose: Set<string>;
@@ -158,10 +169,11 @@ function createSessionUsage(): SessionUsage {
     activities: [],
     progress: [],
     position: 0,
-    callPositions: new Map(),
     completions: [],
-    nativeMarkerPositions: new Map(),
+    toolReceipts: new Set(),
     workerProgress: new Set(),
+    pendingWorkerProgress: new Map(),
+    messageProjections: new Map(),
     filesCompleted: 0,
     filesTotal: null,
     prose: new Set(),
@@ -184,6 +196,18 @@ export class ScanCostTracker {
     StreamedProgressItem
   >();
   #acceptedParent: StreamedProgressItem | null = null;
+  readonly #readyParentMarkers: Array<{
+    live: StreamedProgressItem;
+    marker: ParentProgressMarker;
+  }> = [];
+  #inventoryFrontier = { position: 0, markerIndex: -1 };
+  #progressOrder = 0;
+  #displayedProgress: {
+    update: ScanProgress;
+    owner: "live" | "parent" | "worker";
+    order: number;
+    position?: number;
+  } | null = null;
   #matchedParentItems = 0;
   #parentCompletionStart = 0;
   #parentSession: SessionUsage | null = null;
@@ -215,6 +239,7 @@ export class ScanCostTracker {
     this.#liveParentItems.length = 0;
     this.#liveParentEvents = new WeakMap();
     this.#acceptedParent = null;
+    this.#readyParentMarkers.length = 0;
     this.#matchedParentItems = 0;
     this.#parentCompletionStart = this.#parentSession?.completions.length ?? 0;
     this.#liveParentProgress.clear();
@@ -232,6 +257,7 @@ export class ScanCostTracker {
     )
       return;
     const live: StreamedProgressItem = {
+      markers: [],
       item: streamedProgressItem(event),
       position: null,
       accepted: null,
@@ -245,13 +271,21 @@ export class ScanCostTracker {
 
   /** Observe source identity before applying display/count guards. */
   public recordParentProgress(
-    _progress: ScanProgress,
+    progress: ScanProgress,
     event: Readonly<Record<string, unknown>>,
   ): boolean {
     this.recordParentItem(event);
     const live = this.#liveParentEvents.get(event);
     if (live === undefined) return true;
     live.observedMarkerIndex++;
+    const marker = {
+      progress,
+      index: live.observedMarkerIndex,
+      order: ++this.#progressOrder,
+      accepted: false,
+    };
+    live.markers.push(marker);
+    if (live.position !== null) this.#readyParentMarkers.push({ live, marker });
     return (
       live.position === null ||
       this.#afterParentFrontier(live.position, live.observedMarkerIndex)
@@ -265,10 +299,18 @@ export class ScanCostTracker {
   ): void {
     const live = this.#liveParentEvents.get(event);
     if (live === undefined) return;
+    const marker = live.markers[live.observedMarkerIndex];
+    if (marker === undefined) return;
+    marker.accepted = true;
     this.#acceptedParent = live;
     live.accepted = progress;
     live.acceptedMarkerIndex = live.observedMarkerIndex;
-    this.#lastProgress = progressKey(progress);
+    const update = {
+      ...progress,
+      filesTotal: this.#expectedFilesTotal ?? progress.filesTotal,
+    };
+    this.#lastProgress = progressKey(update);
+    this.#displayedProgress = { update, owner: "live", order: marker.order };
     this.#highestFilesCompleted = Math.max(
       this.#highestFilesCompleted,
       progress.filesCompleted,
@@ -303,84 +345,163 @@ export class ScanCostTracker {
         live.item !== null &&
         saved.item !== null &&
         matchingProgressItem(live.item, saved.item)
-      )
+      ) {
         live.position = saved.position;
+        for (const marker of live.markers)
+          this.#readyParentMarkers.push({ live, marker });
+      }
       live.item = null;
       saved.item = null;
     }
   }
 
   #reconcileParentProgress(): void {
-    const live = this.#acceptedParent;
-    if (
-      live?.accepted === null ||
-      live?.accepted === undefined ||
-      live.position === null
-    )
-      return;
-    const index = live.acceptedMarkerIndex;
-    if (!this.#afterParentFrontier(live.position, index)) return;
-    this.#parentFrontier = { position: live.position, markerIndex: index };
-    let progress = live.accepted;
-    const inventory =
-      progress.phase === "discovery" && progress.filesCompleted === 0;
-    if (inventory) {
-      // A provisional older preview may have normalized worker counts against
-      // the wrong inventory. Reapply the same shard bounds to their receipts;
-      // do not turn an invalid overcount into claimed reviewed coverage.
-      this.#expectedFilesTotal = progress.filesTotal;
-      for (const session of this.#sessions.values()) {
-        if (
-          session.threadId !== null &&
-          session.filesTotal !== null &&
-          session.filesTotal > progress.filesTotal
-        )
-          this.#workerProgress.delete(session.threadId);
+    const ready = this.#readyParentMarkers.splice(0);
+    let inventoryChanged = false;
+    let corrected: { progress: ScanProgress; order: number } | null = null;
+    for (const { live, marker } of ready) {
+      const position = live.position;
+      if (position === null) continue;
+      const progress = marker.progress;
+      if (
+        marker.accepted &&
+        progress.phase === "discovery" &&
+        progress.filesCompleted === 0 &&
+        (position > this.#inventoryFrontier.position ||
+          (position === this.#inventoryFrontier.position &&
+            marker.index > this.#inventoryFrontier.markerIndex))
+      ) {
+        this.#inventoryFrontier = { position, markerIndex: marker.index };
+        if (this.#expectedFilesTotal !== progress.filesTotal) {
+          this.#expectedFilesTotal = progress.filesTotal;
+          inventoryChanged = true;
+        }
       }
-      const workers = this.#workerProgress
-        .values()
-        .reduce((sum, count) => sum + count, 0);
-      progress = {
-        ...progress,
-        filesCompleted: Math.min(progress.filesTotal, workers),
-      };
-      if (this.#parentSession !== null) {
-        this.#parentSession.filesCompleted = 0;
-        this.#parentSession.filesTotal = progress.filesTotal;
-      }
-      this.#highestFilesCompleted = progress.filesCompleted;
     }
+    if (inventoryChanged) {
+      // Reconsider compact worker receipts under the proven inventory. Keep an
+      // oversized receipt available without counting it as reviewed coverage.
+      for (const session of this.#sessions.values()) {
+        if (session.threadId === null || session.threadId === this.#threadId)
+          continue;
+        for (const [total, pending] of session.pendingWorkerProgress) {
+          const progress = pending.progress;
+          if (
+            total > this.#expectedFilesTotal! ||
+            (session.filesTotal !== null && total !== session.filesTotal) ||
+            progress.filesCompleted < session.filesCompleted
+          )
+            continue;
+          session.filesTotal = total;
+          session.filesCompleted = progress.filesCompleted;
+          session.workerProgress.add(progressKey(progress));
+          session.pendingWorkerProgress.delete(total);
+          if (corrected === null || pending.order > corrected.order)
+            corrected = pending;
+        }
+        if (
+          session.filesTotal !== null &&
+          session.filesTotal <= this.#expectedFilesTotal!
+        )
+          this.#workerProgress.set(session.threadId, session.filesCompleted);
+        else this.#workerProgress.delete(session.threadId);
+      }
+      const parent = this.#acceptedParent?.accepted;
+      const parentCount =
+        parent !== undefined &&
+        parent !== null &&
+        parent.filesTotal <= this.#expectedFilesTotal!
+          ? parent.filesCompleted
+          : 0;
+      this.#highestFilesCompleted = Math.max(
+        parentCount,
+        Math.min(
+          this.#expectedFilesTotal!,
+          this.#workerProgress.values().reduce((sum, count) => sum + count, 0),
+        ),
+      );
+      if (this.#parentSession !== null) {
+        this.#parentSession.filesCompleted = parentCount;
+        this.#parentSession.filesTotal = this.#expectedFilesTotal!;
+      }
+    }
+    for (const { live, marker } of ready) {
+      const position = live.position;
+      if (
+        position === null ||
+        !this.#afterParentFrontier(position, marker.index)
+      )
+        continue;
+      const progress = marker.progress;
+      if (!marker.accepted) {
+        if (
+          (this.#expectedFilesTotal !== undefined &&
+            progress.filesTotal > this.#expectedFilesTotal) ||
+          progress.filesCompleted < this.#highestFilesCompleted
+        )
+          continue;
+        marker.accepted = true;
+        live.accepted = progress;
+        live.acceptedMarkerIndex = marker.index;
+        this.#acceptedParent = live;
+        this.#liveParentProgress.add(progressKey(progress));
+        this.#highestFilesCompleted = progress.filesCompleted;
+        if (corrected === null || marker.order > corrected.order)
+          corrected = { progress, order: marker.order };
+      } else if (
+        this.#displayedProgress?.owner === "parent" &&
+        position > (this.#displayedProgress.position ?? 0)
+      ) {
+        corrected = { progress, order: marker.order };
+      }
+      this.#parentFrontier = { position, markerIndex: marker.index };
+    }
+    const displayed = this.#displayedProgress;
+    if (!inventoryChanged && corrected === null) return;
+    const replacePhase =
+      corrected !== null &&
+      (displayed === null ||
+        displayed.owner === "parent" ||
+        corrected.order >= displayed.order);
+    const phase = replacePhase
+      ? corrected!.progress.phase
+      : (displayed?.update.phase ?? "discovery");
+    const progress = {
+      phase,
+      filesCompleted: this.#highestFilesCompleted,
+      filesTotal:
+        this.#expectedFilesTotal ??
+        corrected?.progress.filesTotal ??
+        displayed!.update.filesTotal,
+    };
     const key = progressKey(progress);
     if (this.#lastProgress === key) return;
     this.#lastProgress = key;
+    this.#displayedProgress = {
+      update: progress,
+      owner: replacePhase ? "live" : (displayed?.owner ?? "live"),
+      order: replacePhase ? corrected!.order : (displayed?.order ?? 0),
+    };
     this.#options.onProgress?.(progress, {
       reconciled: true,
-      ...(inventory ? { inventory: true } : {}),
+      ...(inventoryChanged ? { inventory: true } : {}),
     });
   }
 
   #savedParentProgressIsCurrent(saved: SessionProgress): boolean {
     if (!this.#afterParentFrontier(saved.position, saved.markerIndex))
       return false;
-    if (!saved.completion) {
-      // Response-item previews can follow a full native completion. A later
-      // tool call establishes a new receipt; a copied marker does not.
-      if (
-        saved.nativeMarkerPosition !== null &&
-        (saved.sourcePosition === null ||
-          saved.sourcePosition <= saved.nativeMarkerPosition)
-      )
-        return false;
-    }
+    // An outer tool result has its own completion order. Native output does not
+    // identify whether its text was copied from a nested command or emitted
+    // directly, so text equality and call-start time cannot establish a copy.
+    // Treat it as a receipt; a copied truncated preview can consequently hide
+    // omitted same-count phases from its earlier command. This is best effort.
+    if (saved.receipt) return true;
     const live = this.#acceptedParent;
     if (live === null) return true;
     if (live.position !== null && saved.position <= live.position) return false;
     if (!this.#liveParentProgress.has(progressKey(saved.update))) return true;
-    return (
-      live.position !== null &&
-      (saved.completion ||
-        (saved.sourcePosition !== null && saved.sourcePosition > live.position))
-    );
+    return live.position !== null && saved.completion;
   }
 
   public recordUsage(usage: unknown, threadId = this.#threadId): void {
@@ -602,6 +723,14 @@ export class ScanCostTracker {
     }
     for (const saved of session.progress.splice(0)) {
       if (parent && !this.#savedParentProgressIsCurrent(saved)) continue;
+      if (saved.duplicate) {
+        if (parent && saved.completion)
+          this.#parentFrontier = {
+            position: saved.position,
+            markerIndex: saved.markerIndex,
+          };
+        continue;
+      }
       const progress = saved.update;
       const expectedFilesTotal = this.#expectedFilesTotal;
       const parentInventory =
@@ -609,15 +738,32 @@ export class ScanCostTracker {
         progress.phase === "discovery" &&
         this.#highestFilesCompleted === 0 &&
         progress.filesCompleted === 0;
+      const order = ++this.#progressOrder;
       if (
-        (!parentInventory &&
-          expectedFilesTotal !== undefined &&
-          progress.filesTotal > expectedFilesTotal) ||
         (!parent &&
           session.filesTotal !== null &&
           progress.filesTotal !== session.filesTotal) ||
         progress.filesCompleted < session.filesCompleted
+      )
+        continue;
+      if (
+        !parentInventory &&
+        expectedFilesTotal !== undefined &&
+        progress.filesTotal > expectedFilesTotal
       ) {
+        if (!parent) {
+          const pending = session.pendingWorkerProgress.get(
+            progress.filesTotal,
+          );
+          if (
+            pending === undefined ||
+            progress.filesCompleted >= pending.progress.filesCompleted
+          )
+            session.pendingWorkerProgress.set(progress.filesTotal, {
+              progress,
+              order,
+            });
+        }
         continue;
       }
       if (!parent) {
@@ -649,14 +795,23 @@ export class ScanCostTracker {
             Math.max(progress.filesTotal, filesCompleted)),
       };
       const key = `${update.phase}:${update.filesCompleted}:${update.filesTotal}`;
-      if (parent && saved.completion)
+      if (parent && (saved.completion || saved.receipt)) {
         this.#parentFrontier = {
           position: saved.position,
           markerIndex: saved.markerIndex,
         };
+        if (parentInventory)
+          this.#inventoryFrontier = { ...this.#parentFrontier };
+      }
       if (this.#lastProgress === key) continue;
       this.#lastProgress = key;
       this.#highestFilesCompleted = update.filesCompleted;
+      this.#displayedProgress = {
+        update,
+        owner: parent ? "parent" : "worker",
+        order,
+        ...(parent ? { position: saved.position } : {}),
+      };
       this.#options.onProgress(update);
     }
   }
@@ -791,29 +946,39 @@ function readSessionEvent(
   const position = ++session.position;
   if (event["type"] === "response_item") {
     const callId = payload["call_id"];
-    if (
-      session.threadId === progressThread &&
-      typeof callId === "string" &&
-      (payload["type"] === "function_call" ||
-        payload["type"] === "custom_tool_call" ||
-        payload["type"] === "local_shell_call")
-    ) {
-      session.callPositions.set(callId, position);
-    }
-    for (const [markerIndex, update] of sessionProgressUpdates(
-      payload,
-    ).entries()) {
+    const receipt =
+      payload["type"] === "function_call_output" ||
+      payload["type"] === "custom_tool_call_output";
+    const message =
+      payload["type"] === "message" &&
+      payload["role"] === "assistant" &&
+      Array.isArray(payload["content"])
+        ? payload["content"]
+            .filter(isRecord)
+            .map((part) =>
+              typeof part["text"] === "string" ? part["text"] : "",
+            )
+            .join("")
+        : null;
+    const duplicateMessage =
+      message !== null &&
+      repeatedMessageProjection(session, digest(message), "response");
+    const duplicateReceipt =
+      receipt && typeof callId === "string" && session.toolReceipts.has(callId);
+    const updates =
+      duplicateMessage || duplicateReceipt
+        ? []
+        : sessionProgressUpdates(payload);
+    if (receipt && updates.length > 0 && typeof callId === "string")
+      session.toolReceipts.add(callId);
+    for (const [markerIndex, update] of updates.entries()) {
       session.progress.push({
         update,
         position,
-        sourcePosition:
-          typeof callId === "string"
-            ? (session.callPositions.get(callId) ?? null)
-            : null,
         completion: false,
         markerIndex,
-        nativeMarkerPosition:
-          session.nativeMarkerPositions.get(progressKey(update)) ?? null,
+        receipt,
+        duplicate: false,
       });
     }
     if (repository === undefined) return;
@@ -928,16 +1093,17 @@ function readSessionEvent(
       session.completions.push({ position, item: signature });
     }
     if (item !== null) {
-      for (const key of item.previewKeys)
-        session.nativeMarkerPositions.set(key, position);
+      const duplicate =
+        item.kind === "message" &&
+        repeatedMessageProjection(session, item.outputDigest, "native");
       for (const [markerIndex, update] of item.updates.entries()) {
         session.progress.push({
           update,
           position,
-          sourcePosition: position,
           completion: true,
           markerIndex,
-          nativeMarkerPosition: position,
+          receipt: false,
+          duplicate,
         });
       }
     }
@@ -952,7 +1118,8 @@ function readSessionEvent(
   ) {
     if (
       payload["type"] === "agent_message" &&
-      typeof payload["message"] === "string"
+      typeof payload["message"] === "string" &&
+      !repeatedMessageProjection(session, digest(payload["message"]), "event")
     ) {
       for (const [markerIndex, update] of scanProgressUpdatesFromText(
         payload["message"],
@@ -960,11 +1127,10 @@ function readSessionEvent(
         session.progress.push({
           update,
           position,
-          sourcePosition: null,
           completion: false,
           markerIndex,
-          nativeMarkerPosition:
-            session.nativeMarkerPositions.get(progressKey(update)) ?? null,
+          receipt: false,
+          duplicate: false,
         });
       }
     }
@@ -1115,6 +1281,21 @@ function progressSignature(
   };
 }
 
+function repeatedMessageProjection(
+  session: SessionUsage,
+  key: string,
+  projection: "native" | "event" | "response",
+): boolean {
+  let counts = session.messageProjections.get(key);
+  if (counts === undefined) {
+    counts = { native: 0, event: 0, response: 0 };
+    session.messageProjections.set(key, counts);
+  }
+  const previous = Math.max(counts.native, counts.event, counts.response);
+  counts[projection]++;
+  return counts[projection] <= previous;
+}
+
 function progressKey(progress: ScanProgress): string {
   return `${progress.phase}:${progress.filesCompleted}:${progress.filesTotal}`;
 }
@@ -1167,7 +1348,6 @@ function nativeProgressItem(value: unknown): NativeProgressItem | null {
   const markers = scanProgressUpdatesFromText(text);
   return {
     ...progressSignature(kind, text, command),
-    previewKeys: markers.map(progressKey),
     // Missing fence delimiters in the persisted middle can make quoted text
     // look like a marker. Only full output establishes those progress updates.
     updates:

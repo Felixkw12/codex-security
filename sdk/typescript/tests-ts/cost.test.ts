@@ -1974,6 +1974,180 @@ describe("live scan cost tracking", () => {
     ]);
   });
 
+  test("does not replay a parent phase when delayed provenance follows a newer worker", async () => {
+    const { home, parent, worker } = await workerSessionFixture();
+    const updates: ScanProgress[] = [];
+    const tracker = costTracker(home, {
+      expectedFilesTotal: 8,
+      onProgress: (update) => updates.push(update),
+    });
+    tracker.start("scan-thread");
+    await tracker.refresh();
+    const progress = {
+      phase: "discovery",
+      filesCompleted: 8,
+      filesTotal: 8,
+    } as const;
+    const text = "CODEX_SECURITY_SCAN_PROGRESS " + JSON.stringify(progress);
+    const event = {
+      type: "item.completed",
+      item: { type: "agent_message", text },
+    };
+    expect(tracker.recordParentProgress(progress, event)).toBe(true);
+    tracker.acceptParentProgress(progress, event);
+    updates.push(progress);
+    await appendSessionItem(worker, progressMessage(8, 8, "validation"));
+    await tracker.refresh();
+    await appendFile(
+      parent,
+      JSON.stringify({
+        type: "event_msg",
+        payload: {
+          type: "item_completed",
+          item: { type: "AgentMessage", content: [{ type: "Text", text }] },
+        },
+      }) + "\n",
+    );
+    await tracker.stop();
+    expect(updates.map((update) => update.phase)).toEqual([
+      "discovery",
+      "validation",
+    ]);
+  });
+
+  test.each([false, true])(
+    "orders independent tool receipts by completion, not call start (%p)",
+    async (overlap) => {
+      const { home, parent } = await workerSessionFixture();
+      const updates: ScanProgress[] = [];
+      const tracker = costTracker(home, {
+        expectedFilesTotal: 8,
+        onProgress: (update) => updates.push(update),
+      });
+      tracker.start("scan-thread");
+      await tracker.refresh();
+      const marker = (phase: string) =>
+        "CODEX_SECURITY_SCAN_PROGRESS " +
+        JSON.stringify({ phase, filesCompleted: 8, filesTotal: 8 });
+      const call = {
+        type: "response_item",
+        payload: {
+          type: "custom_tool_call",
+          call_id: "outer-call",
+          name: "exec",
+          input: "synthetic tool invocation",
+        },
+      };
+      const native = {
+        type: "event_msg",
+        payload: {
+          type: "item_completed",
+          item: {
+            type: "CommandExecution",
+            command: ["inspect-source"],
+            aggregated_output: overlap
+              ? commandOutput(marker("discovery"))
+              : persistedCommandOutput,
+          },
+        },
+      };
+      const records: unknown[] = overlap
+        ? [
+            call,
+            native,
+            {
+              type: "event_msg",
+              payload: {
+                type: "item_completed",
+                item: {
+                  type: "AgentMessage",
+                  content: [{ type: "Text", text: marker("validation") }],
+                },
+              },
+            },
+          ]
+        : [native, call];
+      records.push({
+        type: "response_item",
+        payload: {
+          type: "custom_tool_call_output",
+          call_id: "outer-call",
+          output: marker(overlap ? "discovery" : "validation"),
+        },
+      });
+      await appendFile(
+        parent,
+        records.map((record) => JSON.stringify(record)).join("\n") + "\n",
+      );
+      await tracker.refresh();
+      const event = {
+        type: "item.completed",
+        item: {
+          type: "command_execution",
+          command: "inspect-source",
+          aggregated_output: commandOutput(marker("discovery")),
+        },
+      };
+      expect(
+        tracker.recordParentProgress(
+          { phase: "discovery", filesCompleted: 8, filesTotal: 8 },
+          event,
+        ),
+      ).toBe(false);
+      await tracker.stop();
+      expect(updates.map((update) => update.phase)).toEqual(
+        overlap ? ["discovery", "validation", "discovery"] : ["validation"],
+      );
+    },
+  );
+
+  test("deduplicates legacy parent message projections by occurrence", async () => {
+    const { home, parent } = await workerSessionFixture();
+    const updates: ScanProgress[] = [];
+    const tracker = costTracker(home, {
+      expectedFilesTotal: 8,
+      onProgress: (update) => updates.push(update),
+    });
+    tracker.start("scan-thread");
+    await tracker.refresh();
+    const text = ["discovery", "validation"]
+      .map(
+        (phase) =>
+          "CODEX_SECURITY_SCAN_PROGRESS " +
+          JSON.stringify({ phase, filesCompleted: 8, filesTotal: 8 }),
+      )
+      .join("\n");
+    for (let occurrence = 0; occurrence < 2; occurrence++) {
+      await appendFile(
+        parent,
+        JSON.stringify({
+          type: "event_msg",
+          payload: { type: "agent_message", message: text },
+        }) + "\n",
+      );
+      await tracker.refresh();
+      await appendFile(
+        parent,
+        JSON.stringify({
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text }],
+          },
+        }) + "\n",
+      );
+      await tracker.refresh();
+    }
+    await tracker.stop();
+    expect(updates.map((update) => update.phase)).toEqual([
+      "discovery",
+      "validation",
+      "discovery",
+      "validation",
+    ]);
+  });
+
   test("restores a parent phase after a different worker update", async () => {
     const { home, parent, worker } = await workerSessionFixture();
     const updates: ScanProgress[] = [];
