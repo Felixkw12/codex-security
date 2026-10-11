@@ -1058,7 +1058,7 @@ export class CodexSecurity {
       ].filter((path, index, roots) => roots.indexOf(path) === index);
       const policyFilesystem = policyFilesystemPermissions(
         inputs.gitMetadataPaths,
-        await codexExecutableReadPaths(this.#codexCommand().command),
+        await codexExecutableReadPaths(session.source.command.command),
       );
       const { codex } = this.#createSessionCodex(
         session,

@@ -102,13 +102,14 @@ async function setup(
     "threat_model",
     "policy",
   ];
+  const environment: NodeJS.ProcessEnv = {
+    CODEX_SECURITY_STATE_DIR: join(f.root, "state"),
+    ...options.environment,
+  };
   const security = new InternalSecurity(
     options.config ?? {},
     {
-      environment: {
-        CODEX_SECURITY_STATE_DIR: join(f.root, "state"),
-        ...options.environment,
-      },
+      environment,
       prepareRuntime: async () => {
         options.onPrepare?.();
         return runtime;
@@ -133,6 +134,7 @@ async function setup(
     ...f,
     security,
     runtime,
+    environment,
     threads,
     prompts,
     turns,
@@ -168,6 +170,42 @@ async function* events(
 }
 
 describe("CodexSecurity policy API", () => {
+  test("keeps executable read permissions bound to the prepared policy command", async () => {
+    const runtimeFixture = await fixture();
+    const suffix = process.platform === "win32" ? ".exe" : "";
+    const first = join(runtimeFixture.root, `codex-first${suffix}`);
+    const second = join(runtimeFixture.root, `codex-second${suffix}`);
+    await writeFile(first, "synthetic first executable\n");
+    await writeFile(second, "synthetic second executable\n");
+    const f = await setup({ environment: { CODEX_CLI_PATH: first } });
+    await using security = f.security;
+
+    await security.generatePolicy(f.repository, {
+      outputDir: f.outputDir,
+      onOutputDirReady() {
+        f.environment["CODEX_CLI_PATH"] = second;
+      },
+    });
+
+    const configuration = f.configuration()!;
+    expect(configuration.codexPathOverride).toBe(
+      runtime.executablePathForSpawn(first),
+    );
+    const effective = configuration.configOverrides!.reduce(
+      (config, override) =>
+        deepMerge(config, parseToml(override) as JsonObject),
+      configuration.config as JsonObject,
+    );
+    const filesystem = (
+      (effective["permissions"] as JsonObject)[
+        "codex_security_policy"
+      ] as JsonObject
+    )["filesystem"] as JsonObject;
+    expect(filesystem[await realpath(first)]).toEqual({ ".": "read" });
+    expect(filesystem).not.toHaveProperty(await realpath(second));
+    expect(f.threads).toHaveLength(3);
+  });
+
   test.each([
     "bundled",
     "symlink",
