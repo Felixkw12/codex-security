@@ -1756,6 +1756,8 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
 
   test("preserves patch-risk details in display and publication summaries", async () => {
     const directory = await repositories.create("patch-risk-publication-");
+    const git = repositoryGit(directory);
+    git("init", "--initial-branch=main");
     const result = resultWithFindings(["high"]);
     const detail = "Diagnostic detail: token=SYNTHETIC_RISK_VALUE";
     const report = patchRiskAssessment().report.replace(
@@ -1777,18 +1779,26 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
       ],
       {
         onWorkbench: () => savedScan(result, "scan-1", directory),
-        onRepositoryCommand: (command, args, _cwd, options) => {
+        onRepositoryCommand: (command, args, cwd, options) => {
           repositoryCommands.push({ command, args });
           if (command === "git") {
             const encoded = (value: string) =>
               options?.encoding === "base64"
                 ? Buffer.from(value).toString("base64")
                 : value;
+            if (args.includes("--show-toplevel")) return encoded(directory);
             if (
-              args.includes("--show-toplevel") ||
-              args.includes("--absolute-git-dir")
+              args[0] === "rev-parse" &&
+              args.some((argument) =>
+                [
+                  "--git-dir",
+                  "--absolute-git-dir",
+                  "--git-common-dir",
+                  "--git-path",
+                ].includes(argument),
+              )
             )
-              return encoded(directory);
+              return runGitRepositoryCommand(command, args, cwd, options);
             if (args[0] === "diff" && args.includes("--cached")) return "";
             if (args[0] === "remote") {
               return "https://github.example.test/example/repository.git";
@@ -3218,6 +3228,8 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
       "patch-interactive-publication-",
     );
     try {
+      const git = repositoryGit(directory);
+      git("init", "--initial-branch=main");
       let published = false;
       const url = "https://github.example.test/example/repository/pull/13";
       const outcome = await runWorkflow(
@@ -3225,17 +3237,26 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
         {
           currentDirectory: directory,
           result: resultWithFindings(["high"]),
-          onRepositoryCommand: (command, args, _cwd, options) => {
+          onRepositoryCommand: (command, args, cwd, options) => {
             const encoded = (value: string) =>
               options?.encoding === "base64"
                 ? Buffer.from(value).toString("base64")
                 : value;
             published ||= command === "gh" && args[1] === "create";
+            if (args.includes("--show-toplevel")) return encoded(directory);
             if (
-              args.includes("--show-toplevel") ||
-              args.includes("--absolute-git-dir")
+              command === "git" &&
+              args[0] === "rev-parse" &&
+              args.some((argument) =>
+                [
+                  "--git-dir",
+                  "--absolute-git-dir",
+                  "--git-common-dir",
+                  "--git-path",
+                ].includes(argument),
+              )
             )
-              return encoded(directory);
+              return runGitRepositoryCommand(command, args, cwd, options);
             if (args.includes("--cached")) return "";
             return encoded(
               command === "gh" && args[1] === "create"
