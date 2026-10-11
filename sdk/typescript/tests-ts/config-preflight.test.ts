@@ -2101,3 +2101,56 @@ test("effective JSON tables and arrays compare by value with TOML requirements",
     }
   }
 });
+
+test.each([123, true])(
+  "config absence rejects non-string paths (%j)",
+  async (path) => {
+    const result = await customCapability({ kind: "config_absent", path });
+    expect(result.status).toBe(2);
+    expect(result.payload!.status).toBe("error");
+  },
+);
+
+test.each([true, 1])(
+  "non-iterable requirement modes are errors (%j)",
+  async (modes) => {
+    const result = await customCapability(
+      { kind: "runtime", check: "synthetic" },
+      "",
+      ["--runtime-check", "synthetic=true"],
+      modes as unknown as string[],
+    );
+    expect(result.status).toBe(2);
+    expect(result.payload!.status).toBe("error");
+  },
+);
+
+test.each([false, true])(
+  "remediation ownership is retained for pair form (%j)",
+  async (pairs) => {
+    const root = await temporaryDirectory();
+    const registry = join(root, "registry.toml");
+    const patch = { path: "multiagent_config.max_concurrency", value: 8 };
+    await writeFile(
+      registry,
+      stringifyToml({
+        version: 1,
+        capabilities: {},
+        profiles: {
+          custom: {
+            description: "Synthetic",
+            requirements: [],
+            remediation: pairs ? [["patches", [patch]]] : { patches: [patch] },
+          },
+        },
+      }),
+    );
+    const result = await configured(
+      "[multiagent_config]\nmax_concurrency = 8\n",
+      ["--registry", registry],
+      "custom",
+    );
+    expect(result.status).toBe(2);
+    expect(result.payload!.error).toContain("does not prove bridge ownership");
+  },
+);
