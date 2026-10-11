@@ -491,6 +491,11 @@ test("default factory checks fresh and resumed discovery and merge permissions",
             expect(executions[0].context).toBe("selected-scan");
             expect(executions[0].apiKey).toBe("synthetic-fixture-key");
             expect(executions[0].args.includes("resume")).toBe(resumed);
+            expect(
+              executions[0].args.some((arg: string) =>
+                arg.startsWith("permissions.codex_security_policy"),
+              ),
+            ).toBe(false);
             expect(executions[0].mcpServers).toEqual({
               "codex-security": { command: "node", enabled: false },
               synthetic: {

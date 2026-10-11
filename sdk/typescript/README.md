@@ -777,17 +777,16 @@ After [installing the CLI](#install-the-cli), sign in if needed:
 cs login
 ```
 
-From your repository directory, optionally draft security guidance before scanning:
+From your repository, optionally [draft a `SECURITY.md`](#generate-a-security-policy)
+that explains what counts as a security issue in your project:
 
 ```bash
 cs policy .
 ```
 
-The command saves a draft outside the checkout. Review the proposed diff and
-notes, edit the draft as needed, then copy it to the displayed `Policy target`
-so future scans use it. Generating the draft alone does not install it.
-Skip this step to keep an existing policy or scan without one. See
-[Generate a security policy](#generate-a-security-policy) for details.
+The draft is saved outside your repository. Review the diff and notes, edit the
+draft, then copy only `SECURITY.md` to the **Policy target** shown. Skip this step
+to keep your current policy or scan without one.
 
 Then scan the repository:
 
@@ -812,204 +811,20 @@ scans, custom validation, imports, patching, and integrations.
 
 ### Generate a security policy
 
-The command uses existing Codex credentials and the Codex Security default model and effort.
-Use `--model` and `--effort` to override them. Model selection runs with tools and
-network access disabled. Exit code `0` includes successful recommendations and
-abstentions; `2` means invalid input or at least one failed recommendation. A
-per-finding failure retains the other results in the report. Cancellation uses
-exit code `130` for SIGINT or `143` for SIGTERM.
-
-The SDK accepts finding IDs, titles, summaries, and source locations directly:
-
-```ts
-import { suggestOwners } from "@openai/codex-security";
-
-const owners = await suggestOwners("/path/to/repo", result.findings, {
-  reasoningEffort: "high",
-});
-```
-
-SDK inputs may include `sourceRevision`. If it differs from `HEAD`, the collector
-ignores the old line ranges and reports the mismatch. Reports record the analyzed
-revision, model, effort, and limitations; they remain separate from scan artifacts.
-
-### Feedback
-
-Send a problem report to OpenAI and share the returned feedback ID with support:
-
-```sh
-codex-security feedback --reason "The scan stopped before it finished"
-codex-security feedback SCAN_ID --reason "The scan stopped before it finished" --include-logs
-```
-
-Without an ID, `feedback` selects the most recently started scan in the current
-repository, including active or failed scans. If there are no saved scans, it sends
-a general report. The report includes your description, version details, and the selected
-scan and session IDs. Add `--json` for structured output.
-
-Logs are off by default. `--include-logs` uploads Codex diagnostics and saved scan
-and worker activity. These can contain source code, prompts, findings, tool
-output, and other sensitive data. Only include logs you can share with OpenAI.
-The command uses Codex's feedback service and respects `feedback.enabled = false`.
-
-For scans started through the Desktop plugin, run the command on the machine
-where the scan ran, using the same Codex home and Codex Security state directory.
-It searches active and archived sessions in both that Codex home and the CLI's
-managed home, and attaches available worker logs even if the parent log is missing.
-Earlier retries that started separate sessions may be missing when their session
-IDs are no longer recorded.
-
-Standard scans run inside an existing Codex conversation attach only the owner's
-saved session; they do not record which subagents belong to the scan. Deep Scans
-and scans launched by `codex-security` also attach their recorded execution
-threads and descendants, without following unrelated children of the owner.
-
-### Scan history and reruns
-
-Commands default to the current repository. Select scans by full ID or a
-unique prefix of at least eight characters.
-
-New recipes retain resolved settings and the authentication choice, not
-credentials. Reruns do not reload project files; complete saved deep settings do
-not use current legacy defaults. Older partial recipes retain their previous
-fallback behavior. Context paths and the current checkout are not immutable input
-snapshots.
-
-Reruns require replacement scan instructions when the original scan used them.
-New recipes mark this requirement, and `scans rerun` refuses to omit them silently; use
-`scans rerun [SCAN_ID] --scan-prompt-file FILE` to supply a nonempty replacement.
-Replacement files resolve from the invocation directory. Custom validation keeps its existing
-`scans rerun --validation-prompt-file` requirement.
-
-| Command                                               | Purpose                                                                                                     |
-| ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `scans list [REPOSITORY]`                             | List scans. Filter by artifact root with `--scan-root DIR`.                                                 |
-| `scans show [SCAN_ID]`                                | Show a scan; defaults to the latest completed one. `--show-linked-findings` includes earlier finding links. |
-| `scans logs [SCAN_ID]`                                | Show session events; defaults to the latest scan, including active scans.                                   |
-| `scans resume SCAN_ID`                                | Resume saved Deep Scan work in its original output directory.                                               |
-| `scans rerun [SCAN_ID]`                               | Repeat a scan on the current checkout; defaults to the latest completed scan.                               |
-| `scans match BEFORE AFTER`                            | Link findings with the same root cause.                                                                     |
-| `scans match --all`                                   | Match completed scans across the repository's worktrees and clones.                                         |
-| `scans compare [BEFORE] [AFTER]`                      | Compare scans; defaults to the latest two completed scans.                                                  |
-| `findings list [REPOSITORY]`                          | List open findings. `findings` is an alias.                                                                 |
-| `findings false-positive OCCURRENCE_ID --reason TEXT` | Mark a false positive. Later scans dismiss matches only while the reason applies.                           |
-
-#### Resuming an interrupted Deep Scan
-
-After the CLI process or host stops unexpectedly, find the scan and rejoin it:
+Use `policy` to draft a new `SECURITY.md` or update an existing one. To select a
+component:
 
 ```bash
 cs policy . --path services/api
 ```
 
-The scan must still be `running`, with its original checkout, output directory,
-and Codex Security state directory available.
-The checkout's identity, revision, and contents must match the saved target.
-Completed, failed, and canceled scans cannot resume; `scans rerun` starts a new scan.
+Existing files stay unchanged until you review and copy the draft to the
+**Policy target** shown. Scans already use root and component policies; you can
+keep them without generating new ones.
 
-Resume uses the saved configuration and instructions with the installed plugin.
-New scans save the selected authentication mode, explicit safety identifier, and
-post-scan prompt contents. Resume restores the authentication choice without
-saving credentials. Single-scan resume restores the prompt even if its original
-file changes or disappears.
-Older records that did not save these values cannot reconstruct them. Bulk
-recovery still requires matching campaign inputs and options; it uses the supplied
-post-scan prompt when the scan has no saved prompt.
-It keeps the scan ID, completed workers, artifacts, and accumulated session cost.
-If discovery finished before the interruption, resume completes and seals the
-same scan. No archiving or new attempt directory is needed. A failed connection
-leaves the existing scan available for another resume attempt.
-
-Compatible saved scans can resume after a plugin update. Unsealed scans from the
-retired Deep Scan runtime cannot resume; start a fresh scan instead. Saved drafts
-must match the current schema. Recover unfinished worker or reducer fragments
-from that runtime with the prior release; the current runtime reads parent drafts
-and ordinary scan checkpoints. Existing report files remain available, and
-rejecting a failed or canceled checkpoint leaves its saved accounting unchanged.
-Historical checkpoints without a pending checkpoint index are no longer imported
-automatically into unfinished scans. Use the prior release to finish those scans,
-or start a fresh scan; completed reports remain readable.
-Older unreleased builds identified child scans by their artifact paths. That
-state is no longer migrated; start fresh scans for those database snapshots.
-Existing report files remain available.
-Already-sealed results
-keep their original producer version and contents when completion is recorded.
-Unsupported or invalid sealed artifacts are rejected before resuming, preserving
-the saved scan state and files.
-
-For bulk campaigns, use [`bulk-scan --recover`](#recovering-failed-or-interrupted-bulk-scans)
-to recover eligible attempts and update `results.jsonl`. Individual `scans resume`
-does not update campaign receipts.
-
-#### Matching saved scans
-
-Matching requires sealed artifacts and reuses saved matches unless you pass
-`--force`. Comparisons classify findings as new, persisting, reopened, resolved,
-or unknown. Missing findings aren't resolved if the later scan is incomplete
-or excludes their original scope. With one ID, `scans compare` compares it
-to the latest completed scan.
-
-Use `scans match --all --force` to rebuild comparisons chronologically while
-retaining stable finding identities. Ctrl-C keeps comparisons already saved.
-Only high-confidence duplicates are grouped; uncertain and independently
-related findings stay separate. Matching preserves triage and sealed artifacts.
-
-Codex runs only for new matching decisions, using existing authentication.
-`scans match` and `scans compare` accept `--model` and `--effort`; the defaults
-are Codex's configured model and `medium` effort. Cached matches are reused
-even when these flags change. To recompute all matches:
-
-```bash
-npx @openai/codex-security scans match --all --force \
-  --model gpt-6.1-sol --effort high
-```
-
-Scans without sealed artifacts are skipped, but their confirmed links can still
-be reused. Older custom plugins save confirmed and uncertain matches; use the
-bundled plugin for related links and large comparisons.
-
-SDK callers can compare findings without saving a workbench comparison:
-
-```ts
-import { readFile } from "node:fs/promises";
-import {
-  matchScanFindings,
-  type FindingsDocument,
-} from "@openai/codex-security";
-
-const before = JSON.parse(
-  await readFile("/path/to/earlier-scan/findings.json", "utf8"),
-) as FindingsDocument;
-const after = JSON.parse(
-  await readFile("/path/to/later-scan/findings.json", "utf8"),
-) as FindingsDocument;
-
-const comparison = await matchScanFindings(
-  { before: before.findings, after: after.findings },
-  { workingDirectory: "/path/to/repository" },
-);
-console.log(comparison.matches, comparison.uncertain, comparison.related ?? []);
-```
-
-Pass `knownFindingGroups` to reuse confirmed groups of stable `findingId` values
-from your store. Results identify the original `occurrenceId` values. Options
-include model, reasoning effort, `AbortSignal`, and an optional `onProgress`
-callback whose errors do not interrupt matching.
-
-History lives in `$CODEX_SECURITY_STATE_DIR/workbench.sqlite3`, or
-`$CODEX_HOME/state/plugins/codex-security/workbench.sqlite3`. The CLI and
-workbench maintain the database and its journal files as the current user.
-Keep state private, writable, and outside the scanned repository.
-
-On Windows, an older sandboxed run can leave an invalid credential-home ancestor
-ACL. Preserve that state and its reports, and select a **new**, private
-`CODEX_SECURITY_STATE_DIR` outside both the old state and the repository.
-Sign in again if needed and keep using the new setting; it starts separate scan
-history. Existing ancestor ACLs are not rewritten.
-
-Scan configurations don't store credentials; session logs and live details can
-contain them. Press `d` during a scan for details, then `a` for all sources,
-`m` for the main scan, or `1` through `9` for a worker.
+The SDK provides `generatePolicy()`, `preflightPolicy()`, and `previewPolicy()`. See
+[policy generation](docs/cli.md#generate-a-security-policy) for SDK examples,
+policy locations and reporting instructions, headless use, and saved artifacts.
 
 ### Exports and CI
 
