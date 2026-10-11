@@ -23,6 +23,7 @@ test("policy generation retains prepared command authentication after shared con
   await mkdir(repository);
   await mkdir(home, { mode: 0o700 });
   const executable = join(root, "synthetic-policy.exe");
+  await writeFile(executable, "", { mode: 0o755 });
   const script = join(root, "synthetic-policy.cjs");
   const capture = join(root, "capture.jsonl");
   await writeFile(capture, "");
