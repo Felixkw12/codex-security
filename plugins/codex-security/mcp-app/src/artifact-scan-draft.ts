@@ -743,14 +743,14 @@ async function preserveScanDraft(
         .join("/");
       const key = normalized.toLowerCase();
       const origin = archivedReceipts.get(ref);
-      if (!origin) {
+      if (!origin && selectedReceiptRefs.has(ref)) {
         if (!receiptPaths.has(key)) receiptPaths.set(key, normalized);
         continue;
       }
       let source: string;
       try {
         const components = coverageReceiptComponents(
-          origin.components.join("/"),
+          origin ? origin.components.join("/") : ref,
         );
         coverageReceiptComponents(ref);
         const previous = receiptPaths.get(key);
@@ -762,9 +762,9 @@ async function preserveScanDraft(
             { code: "invalid_coverage_receipt_path" },
           );
         source = await artifactSourcePath(
-          origin.context,
+          origin?.context ?? context,
           components,
-          "archived coverage receipt",
+          origin ? "archived coverage receipt" : "saved coverage receipt",
         );
       } catch (error) {
         const closesSavedSurface = [...resolvedSurfaces].some((surface) =>
@@ -786,8 +786,10 @@ async function preserveScanDraft(
             error.message.includes("the requested artifact is unavailable") ||
             ("code" in error && error.code === "invalid_coverage_receipt_path")
           )
-        )
+        ) {
+          if (!origin) continue;
           throw error;
+        }
         // Saved, validated closeouts remain authoritative on later writes and
         // fresh retries; the caller need not repeat their completed surfaces.
         let repaired = false;
@@ -838,21 +840,28 @@ async function preserveScanDraft(
             replacementError = failure;
           }
         }
-        if (!repaired) throw replacementError;
+        if (!repaired) {
+          // Current drafts may still be incomplete; ordinary discovery admission
+          // diagnoses unrepaired refs as before. Archived repair keeps its errors.
+          if (!origin) continue;
+          throw replacementError;
+        }
         row.receiptRefs = (row.receiptRefs as string[]).filter(
           (value) => value !== ref,
         );
         warnings.push(
-          `Replaced ${error.message.includes("unavailable") ? "missing" : "invalid"} archived coverage receipt ${ref}: ${error.message}`,
+          `Replaced ${error.message.includes("unavailable") ? "missing" : "invalid"} ${origin ? "archived" : "saved"} coverage receipt ${ref}: ${error.message}`,
         );
         continue;
       }
-      const destination = await artifactDestination(
-        context,
-        coverageReceiptComponents(ref),
-        "retained coverage receipt",
-      );
-      await fs.copyFile(source, destination);
+      if (origin) {
+        const destination = await artifactDestination(
+          context,
+          coverageReceiptComponents(ref),
+          "retained coverage receipt",
+        );
+        await fs.copyFile(source, destination);
+      }
       receiptPaths.set(key, normalized);
     }
   }
