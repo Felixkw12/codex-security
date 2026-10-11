@@ -43,6 +43,8 @@ Target `NODE_OPTIONS`, `NODE_DEBUG`, `NODE_DEBUG_NATIVE`, `NODE_EXTRA_CA_CERTS`,
 
 Every selected image uses `CreateProcessW` with that exact application name, because Rust's `Command` otherwise searches different extensions and can prefer a sibling such as `.bin.exe` over the selected `.bin`. The originally requested executable spelling remains `argv[0]`. The launcher preserves UTF-16 arguments with CRT quoting, duplicates the shim's standard handles for inheritance, and uses the same restored environment, job lifetime, and error reporting.
 
+Selected `.cmd` and `.bat` files are rejected with Windows error 87 before launch, including Node's case-insensitive extension handling with trailing dots and whitespace. Win32 can otherwise dispatch batch files through a command interpreter whose argument rules differ from CRT quoting. The check follows image selection, preserving missing-file errors and `.com`/`.exe` sibling selection. The proof uses harmless echo metacharacters to check that batch contents and argument commands never execute.
+
 Explicit paths and names searched through `PATH` try the given name first when it has an extension, followed by `.com` and `.exe`, matching Node's lookup. Candidate checks inspect Windows entry attributes without following file symlinks and skip directories, including directory symlinks. A dangling first file candidate therefore reports its launch failure instead of selecting a later image. The Windows proof compares image selection and `argv[0]` with ordinary Node spawning, including PATH-only `.com` files, extension collisions, quoted PATH entries, symlink candidates, and names with a trailing dot, while preserving the caller's working directory.
 
 Build on Windows after compiling the TypeScript tools, then run:

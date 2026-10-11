@@ -14,6 +14,7 @@ import { rootCertificates } from "node:tls";
 import { binaryPath } from "./binding.mjs";
 import { loadWindowsBinding } from "./windows-binding.mjs";
 import { widePath, windowsFileSystem } from "./windows-files.mjs";
+import { windowsFlags as flags } from "./windows-flags.mjs";
 import { spawnWindowsProcess } from "./windows-process.mjs";
 
 async function processExit(
@@ -320,6 +321,109 @@ export async function processProof(
         }
         assert.equal(Buffer.concat(diagnostics).length, 0);
       }
+    }
+
+    const batchTools = join(root, "batch-tools");
+    mkdirSync(batchTools);
+    const batchArguments = [
+      "value&echo.BATCH_METACHAR",
+      'value"&echo.BATCH_QUOTE',
+    ];
+    const batchOptions = {
+      cwd: root,
+      env: { ...relativeEnvironment, PATH: batchTools },
+      stdio: ["ignore", "pipe", "pipe"] as ["ignore", "pipe", "pipe"],
+    };
+    async function startupFailure(
+      executable: string,
+      expectedErrors: number[],
+      args = batchArguments,
+    ) {
+      const child = spawnWindowsProcess(
+        binaryPath,
+        executable,
+        args,
+        batchOptions,
+      );
+      const errors: NodeJS.ErrnoException[] = [];
+      const stdout: Buffer[] = [],
+        stderr: Buffer[] = [];
+      child.on("error", (error) => errors.push(error));
+      child.stdout!.on("data", (chunk: Buffer) => stdout.push(chunk));
+      child.stderr!.on("data", (chunk: Buffer) => stderr.push(chunk));
+      const status = await new Promise<number | null>((resolve) =>
+        child.once("close", (code) => resolve(code)),
+      );
+      assert.equal(status, 127);
+      assert.equal(errors.length, 1);
+      assert.equal(errors[0]!.code, "WINDOWS_PROCESS_ERROR");
+      assert(
+        expectedErrors.includes(errors[0]!.errno!),
+        `${executable}: ${errors[0]!.message}`,
+      );
+      assert(errors[0]!.message.length > 0);
+      assert.equal(
+        Buffer.concat(stdout).length,
+        0,
+        "neither the batch nor a metacharacter command may run",
+      );
+      assert.equal(Buffer.concat(stderr).length, 0);
+    }
+    for (const extension of ["cmd", "bat"] as const) {
+      const batch = join(batchTools, `blocked.${extension}`);
+      const selected = `${batch}.${extension === "cmd" ? "com" : "exe"}`;
+      copyFileSync(process.execPath, selected);
+      files.writeFile(
+        widePath(batch),
+        Buffer.from("@echo off\r\necho BATCH_BODY\r\n"),
+      );
+      for (const executable of [
+        batch,
+        `.\\batch-tools\\blocked.${extension}`,
+        `blocked.${extension}`,
+        join(batchTools, `blocked.${extension.toUpperCase()}`),
+        `${batch}. `,
+        win32.toNamespacedPath(batch),
+      ])
+        await startupFailure(executable, [87]);
+      files.unlink(widePath(batch));
+      // Classify the selected image, allowing the existing .com/.exe fallback.
+      const image = spawnWindowsProcess(
+        binaryPath,
+        `blocked.${extension}`,
+        selectionArgs,
+        batchOptions,
+      );
+      const output: Buffer[] = [],
+        diagnostics: Buffer[] = [];
+      image.stdout!.on("data", (chunk: Buffer) => output.push(chunk));
+      image.stderr!.on("data", (chunk: Buffer) => diagnostics.push(chunk));
+      assert.deepEqual(
+        await processExit(image, `batch-name ${extension} image fallback`),
+        [0, null],
+      );
+      assert.deepEqual(JSON.parse(Buffer.concat(output).toString()), {
+        executable: selected,
+        argv0: `blocked.${extension}`,
+      });
+      assert.equal(Buffer.concat(diagnostics).length, 0);
+    }
+    await startupFailure(join(batchTools, "missing.cmd"), [2]);
+    const lockedExecutable = join(batchTools, "locked.exe");
+    copyFileSync(process.execPath, lockedExecutable);
+    const locked = native.openWindowsFile(
+      widePath(win32.toNamespacedPath(lockedExecutable)),
+      flags.GENERIC_READ,
+      0,
+      flags.OPEN_EXISTING,
+      flags.FILE_ATTRIBUTE_NORMAL,
+    );
+    assert.equal(locked.error, 0);
+    assert(locked.handle);
+    try {
+      await startupFailure(lockedExecutable, [5, 32], selectionArgs);
+    } finally {
+      assert.equal(locked.handle.close(), 0);
     }
 
     const inheritedPath = process.env["PATH"];
@@ -875,6 +979,9 @@ child.once('close', code => { process.exitCode = code ?? 1; });`,
       originalArgv0Preserved: true,
       executableSymlinkSelectionMatchesNode: symlinks,
       executableDirectoryCandidatesSkipped: true,
+      batchImagesRejectedWithoutInterpretingArguments: true,
+      batchNamedExecutableFallbackPreserved: true,
+      missingAndLockedImageDiagnosticsPreserved: true,
       omittedPathInheritsCallerValue: true,
       longAndNamespacedRawComPaths: true,
       inheritedAndOverriddenPathPrecedeShimDirectory: true,

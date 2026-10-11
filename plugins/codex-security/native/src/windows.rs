@@ -14,8 +14,8 @@ use std::{
 };
 use windows_sys::Win32::{
     Foundation::{
-        GetLastError, LocalFree, SetLastError, ERROR_FILE_NOT_FOUND, ERROR_INVALID_HANDLE, HANDLE,
-        INVALID_HANDLE_VALUE,
+        GetLastError, LocalFree, SetLastError, ERROR_FILE_NOT_FOUND, ERROR_INVALID_HANDLE,
+        ERROR_INVALID_PARAMETER, HANDLE, INVALID_HANDLE_VALUE,
     },
     Security::{
         Authorization::{
@@ -374,6 +374,17 @@ fn run_exact_process(executable: &OsStr, argv0: &OsStr, arguments: &[OsString]) 
     Ok(exit_code as i32)
 }
 
+fn windows_batch_file(executable: &OsStr) -> bool {
+    let bytes = executable.as_encoded_bytes();
+    // Node recognizes batch extensions after trailing dots and ASCII whitespace.
+    let end = bytes
+        .iter()
+        .rposition(|byte| !matches!(byte, b'.' | b' ' | b'\t' | b'\n' | b'\r' | 11 | 12))
+        .map_or(0, |index| index + 1);
+    let extension = &bytes[end.saturating_sub(4)..end];
+    extension.eq_ignore_ascii_case(b".cmd") || extension.eq_ignore_ascii_case(b".bat")
+}
+
 /// Run only inside the Node subprocess shim: blocking here keeps pipe ownership in that process.
 #[napi]
 pub fn run_windows_process(
@@ -420,6 +431,10 @@ pub fn run_windows_process(
             std::env::set_current_dir(directory)?;
         }
         let application = resolve_windows_executable(&executable)?;
+        // CreateProcessW can dispatch batch files through a shell without CRT escaping.
+        if windows_batch_file(&application) {
+            return Err(io::Error::from_raw_os_error(ERROR_INVALID_PARAMETER as i32));
+        }
         let raw_job = unsafe { CreateJobObjectW(null(), null()) };
         if raw_job.is_null() {
             return Err(io::Error::last_os_error());
