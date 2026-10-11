@@ -62,7 +62,14 @@ export function spawnWindowsProcess(
     cwd: undefined,
     stdio: [...options.stdio, "ipc"],
   });
-  const cancelled = () => child.killed || options.signal?.aborted === true;
+  let killed = false;
+  const kill = child.kill;
+  child.kill = function (signal) {
+    const success = kill.call(this, signal);
+    if (success && signal !== 0) killed = true;
+    return success;
+  };
+  const cancelled = () => killed || options.signal?.aborted === true;
   child.once("spawn", () => {
     if (cancelled()) return;
     child.send(payload, (error) => {
