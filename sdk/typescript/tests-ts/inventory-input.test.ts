@@ -1530,6 +1530,7 @@ for (const setting of [
   "GIT_CONFIG_SYSTEM",
   "XDG_CONFIG_HOME",
   "GIT_CONFIG_PARAMETERS",
+  "GIT_CONFIG_KEY_0",
   "GIT_CONFIG_VALUE_0",
   "RIPGREP_CONFIG_PATH",
 ])
@@ -1546,7 +1547,25 @@ for (const setting of [
       const ignore = join(f.root, "ignore");
       writeFileSync(ignore, "hidden.py\n");
       let value = rawPath;
-      if (
+      if (setting === "GIT_CONFIG_KEY_0") {
+        writeFileSync(
+          join(f.repo, ".git", "HEAD"),
+          Buffer.concat([
+            Buffer.from("ref: refs/heads/branch-"),
+            pathNameBytes,
+            Buffer.from("\n"),
+          ]),
+        );
+        writeFileSync(
+          join(f.root, "config"),
+          `[core]\nexcludesFile = ${JSON.stringify(ignore)}\n`,
+        );
+        value = Buffer.concat([
+          Buffer.from("includeIf.onbranch:branch-"),
+          pathNameBytes,
+          Buffer.from(".path"),
+        ]);
+      } else if (
         setting === "GIT_CONFIG_PARAMETERS" ||
         setting === "GIT_CONFIG_VALUE_0"
       ) {
@@ -1602,9 +1621,14 @@ for (const setting of [
             GIT_CONFIG_SYSTEM: "/dev/null",
             GIT_CONFIG_PARAMETERS: undefined,
             GIT_CONFIG_COUNT:
-              setting === "GIT_CONFIG_VALUE_0" ? "1" : undefined,
+              setting === "GIT_CONFIG_KEY_0" || setting === "GIT_CONFIG_VALUE_0"
+                ? "1"
+                : undefined,
             GIT_CONFIG_KEY_0: "core.excludesFile",
-            GIT_CONFIG_VALUE_0: undefined,
+            GIT_CONFIG_VALUE_0:
+              setting === "GIT_CONFIG_KEY_0"
+                ? join(f.root, "config")
+                : undefined,
             GIT_CONFIG_NOSYSTEM: undefined,
             XDG_CONFIG_HOME: undefined,
             RIPGREP_CONFIG_PATH: undefined,

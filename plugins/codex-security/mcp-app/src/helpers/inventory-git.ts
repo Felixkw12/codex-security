@@ -260,7 +260,7 @@ function inheritedToolPaths(additional: string[] = []): Record<string, string> {
         "GIT_CONFIG_SYSTEM",
         "GIT_CONFIG_PARAMETERS",
       ].includes(key) ||
-      /^GIT_CONFIG_VALUE_\d+$/u.test(key) ||
+      /^GIT_CONFIG_(?:KEY|VALUE)_\d+$/u.test(key) ||
       // Restore loader settings before exec: the tool cannot repair them after
       // its dynamic loader has already tried to open libraries and preload files.
       (!windows && posixLoaderSetting.test(key))
