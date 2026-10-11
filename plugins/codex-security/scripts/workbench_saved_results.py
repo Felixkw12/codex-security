@@ -44,6 +44,8 @@ from finalize_scan_contract import (
 )
 from workbench_constants import PHASES
 from workbench_saved_sources import (
+    _admit_parent_checkpoint,
+    _capture_parent_observation,
     _capture_saved_source,
     _checkpoint_head_directory,
     _checkpoint_paths,
@@ -53,6 +55,7 @@ from workbench_saved_sources import (
     _freeze_source_times,
     _frozen_source_times,
     _is_source_order_snapshot,
+    _parent_publication_ancestors,
     _read_saved_result,
 )
 from workbench_target import committed_diff_snapshot_digest
@@ -526,7 +529,7 @@ def _semantic_identity_key(finding: dict[str, Any], identity: Any = None) -> byt
     return _encoded([finding.get("ruleId"), identity])
 
 
-def _ensure_finding_identities(findings: list[Any]) -> None:
+def _ensure_finding_identities(findings: list[Any], *, deep: bool = False) -> None:
     """Use the same candidate, anchor and sibling rules as draft publication."""
     anchors: dict[int, Any] = {}
     for index, finding in enumerate(findings):
@@ -544,7 +547,7 @@ def _ensure_finding_identities(findings: list[Any]) -> None:
         _digest([findings[index].get("ruleId"), anchor]) for index, anchor in anchors.items()
     )
 
-    used = {
+    authored = {
         _semantic_identity_key(finding)
         for finding in findings
         if isinstance(finding, dict) and "identity" in finding
@@ -575,9 +578,11 @@ def _ensure_finding_identities(findings: list[Any]) -> None:
     reserved = {
         _semantic_identity_key(finding) for finding in findings if isinstance(finding, dict)
     }
-    for finding in generated:
+    used = set() if deep else authored.copy()
+    generated_ids = {id(finding) for finding in generated}
+    for finding in findings if deep else generated:
         key = _semantic_identity_key(finding)
-        if key in used:
+        if key in used or (id(finding) in generated_ids and key in authored):
             identity = finding["identity"]
             base_instance = identity.get("instance", "saved")
             suffix = 2
@@ -912,9 +917,7 @@ def merge_saved_results(
         if parent_manifest is not None and parent is not None:
             parent_scan = parent_manifest["scan"]
             try:
-                previous_head, _, head_modified = _read_saved_result(
-                    scan_dir, "checkpoint-head.json", scan_id
-                )
+                _, _, head_modified = _read_saved_result(scan_dir, "checkpoint-head.json", scan_id)
             except (ContractError, OSError, ValueError):
                 head_modified = None
             if head_modified is not None:
@@ -928,24 +931,22 @@ def merge_saved_results(
                 parent_digest = hashlib.sha256(payload).hexdigest()
                 parent_checkpoint = f"checkpoints/{parent_digest}.json"
                 parent_context["canonical"] = parent_checkpoint
-                # Identical checkpoint content can predate this canonical publication.
                 parent_context["canonicalObservedAtNs"] = str(parent_modified)
                 checkpoint_path = scan_dir / parent_checkpoint
                 if not checkpoint_path.exists():
                     write_scan_local_bytes(scan_dir, parent_checkpoint, payload)
                     # A recovery copy must not appear newer than the review it copies.
                     os.utime(checkpoint_path, ns=(parent_modified, parent_modified))
-                if head_modified is None:
-                    head_path = scan_dir / "checkpoint-head.json"
-                    write_scan_local_bytes(
-                        scan_dir,
-                        "checkpoint-head.json",
-                        _encoded({"checkpoint": checkpoint_path.name}),
+                captured = (
+                    _capture_saved_source(scan_dir, "checkpoint-head.json", scan_id)
+                    if head_modified is not None
+                    else _capture_parent_observation(
+                        scan_dir, checkpoint_path.name, parent_modified, allow_frozen_legacy_parent
                     )
-                    os.utime(head_path, ns=(parent_modified, parent_modified))
-                if frozen_source_digests is not None:
-                    captured = _capture_saved_source(scan_dir, "checkpoint-head.json", scan_id)
+                )
+                if head_modified is not None or allow_frozen_legacy_parent:
                     parent_context["head"] = next(iter(captured))
+                if frozen_source_digests is not None:
                     frozen_source_digests = {
                         **frozen_source_digests,
                         parent_checkpoint: parent_digest,
@@ -958,6 +959,7 @@ def merge_saved_results(
     source_order: dict[str, tuple[int, int]] = {}
     worker_attempts: dict[str, tuple[str, int]] = {}
     saved_heads: dict[str, str] = {}
+    saved_inputs: dict[str, str] = {}
     if parent_manifest:
         recorded = parent_manifest["scan"].get("preservedSources", {})
         if isinstance(recorded, dict):
@@ -1035,7 +1037,9 @@ def merge_saved_results(
                     parent_context["head"] = next(iter(captured))
                 paths.update({path: worker_id for path in captured})
             except (ContractError, OSError, ValueError) as exc:
-                if (scan_dir / relative).exists():
+                if (scan_dir / relative).exists() and not (
+                    relative == "checkpoint-head.json" and parent is not None
+                ):
                     warnings.append(f"Preserved unreadable checkpoint {relative}: {exc}")
 
     if frozen_source_digests is not None:
@@ -1067,6 +1071,8 @@ def merge_saved_results(
             source_order[relative] = (0, source_times[relative])
             if _checkpoint_head_directory(relative) is not None:
                 saved_heads[relative] = draft["checkpoint"]
+                if isinstance(draft.get("inputCheckpoint"), str):
+                    saved_inputs[relative] = draft["inputCheckpoint"]
                 continue
             # Recovery expects coverage, but reducer results only contain findings
             # and context. Add an empty value after hashing the original result.
@@ -1894,18 +1900,43 @@ def merge_saved_results(
     # Legacy projections alone do not record the submitted replacement batch.
     if not terminal_findings:
         terminal_sources.clear()
-    pending_terminals = {
-        relative
-        for relative, values in terminal_findings.items()
-        if not any(represented_by_parent(values, draft) for draft in projected_parents)
-    }
+    head_path = (
+        f"checkpoints/{saved_heads[parent_context['head']]}"
+        if "head" in parent_context and not allow_frozen_legacy_parent
+        else None
+    )
+    head_input = saved_inputs.get(parent_context.get("head"))
+    ancestors = _parent_publication_ancestors(head_input, drafts_by_path)
     committed_parent = parent
-    committed_path = None
-    if "head" in parent_context and not allow_frozen_legacy_parent:
-        head = parent_context["head"]
-        committed_path = f"checkpoints/{saved_heads[head]}"
-        committed_parent = drafts_by_path[committed_path]
-    # The selected terminal head supersedes older publications even if their clocks differ.
+    committed_path = "parent" if parent_is_root else None
+    if head_path and (
+        not parent_is_canonical or any(parent == drafts_by_path.get(path) for path in ancestors)
+    ):
+        committed_path = head_path
+        committed_parent = drafts_by_path[head_path]
+    committed_time = source_order.get(committed_path, (0, 0))[1]
+    pending_terminals = set()
+    superseded_terminals = set()
+    unordered_terminals = set()
+    for relative, values in terminal_findings.items():
+        publication = drafts_by_path[relative].get("publication")
+        if isinstance(publication, dict):
+            previous = publication.get("previousCheckpoint")
+            if Path(relative).name == head_input:
+                continue
+            if (
+                f"checkpoints/{previous}" if previous is not None else None
+            ) != head_path or publication.get("previousInputCheckpoint") != head_input:
+                superseded_terminals.add(relative)
+                continue
+            pending_terminals.add(relative)
+        elif not any(represented_by_parent(values, draft) for draft in projected_parents):
+            # Legacy inputs have no causal link to an accepted publication. A
+            # backdated observation cannot prove that accepted findings were removed.
+            if source_order[relative][1] >= committed_time:
+                pending_terminals.add(relative)
+            else:
+                unordered_terminals.add(relative)
     terminal_cutoffs = {committed_path} if committed_path in terminal_sources else terminal_sources
     terminal_parent_time = max(
         (source_order[relative][1] for relative in pending_terminals or terminal_cutoffs),
@@ -1916,6 +1947,10 @@ def merge_saved_results(
         for relative in pending_terminals
         if source_order[relative][1] == terminal_parent_time
     }
+    for relative in pending_terminals | unordered_terminals:
+        identified = copy.deepcopy(drafts_by_path[relative]["findings"])
+        _ensure_finding_identities(identified, deep=True)
+        terminal_findings[relative] = identified
     current_findings = [
         previous
         for value in (committed_parent["findings"] if committed_parent else [])
@@ -1939,7 +1974,11 @@ def merge_saved_results(
     ]
 
     def replaced_parent_finding(relative: str, owner: str | None, value: Any) -> bool:
-        if owner is not None or relative in pending_terminals or not isinstance(value, dict):
+        if (
+            owner is not None
+            or relative in pending_terminals | unordered_terminals
+            or not isinstance(value, dict)
+        ):
             return False
         return any(same_published_finding(value, previous) for previous in replaced_findings)
 
@@ -1954,9 +1993,13 @@ def merge_saved_results(
 
     def precedes_terminal_parent(relative: str, owner: str | None) -> bool:
         attempt, modified = source_order[relative]
-        return terminal_parent_time is not None and (
-            modified < terminal_parent_time
-            or attempt < terminal_worker_attempts.get(owner, attempt)
+        return relative in superseded_terminals or (
+            relative not in unordered_terminals
+            and terminal_parent_time is not None
+            and (
+                modified < terminal_parent_time
+                or attempt < terminal_worker_attempts.get(owner, attempt)
+            )
         )
 
     finding_sources = [
@@ -2376,7 +2419,9 @@ def merge_saved_results(
             if worker_id:
                 provenance.setdefault("workerId", worker_id)
             group = row_groups.get((relative, index))
-            if group is not None and group["identity"] is not None:
+            if relative in terminal_findings:
+                finding["identity"] = copy.deepcopy(terminal_findings[relative][index]["identity"])
+            elif group is not None and group["identity"] is not None:
                 finding.setdefault("identity", copy.deepcopy(group["identity"]))
             if worker_id is not None and "identity" not in finding:
                 generated_worker_findings.append(finding)
@@ -3054,6 +3099,7 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         _populate_unsealed_manifest_envelope(manifest, manifest["scan"], binding)
         _populate_unsealed_artifact_envelope(manifest, findings, coverage, binding)
         _validate_completion_binding(manifest, findings, coverage, binding)
+        admitted_input = None
         if args.checkpoint_path is not None:
             try:
                 checkpoint_relative = Path(args.checkpoint_path).relative_to(scan_dir).as_posix()
@@ -3070,21 +3116,26 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             )
             if checkpoint.get("scanId") != scan_id:
                 raise SystemExit("Staged scan checkpoint belongs to another scan.")
+            if scan["mode"] == "deep":
+                checkpoint_contents = _admit_parent_checkpoint(scan_dir, scan_id, checkpoint)
             checkpoint_digest = hashlib.sha256(checkpoint_contents).hexdigest()
+            if scan["mode"] == "deep":
+                admitted_input = f"{checkpoint_digest}.json"
             write_scan_local_bytes(
                 scan_dir,
                 f"checkpoints/{checkpoint_digest}.json",
                 checkpoint_contents,
             )
-        checkpoint = _parent_scan_draft(scan_id, manifest["scan"], findings, coverage)
-        checkpoint_contents = _encoded(checkpoint)
-        checkpoint_name = f"{hashlib.sha256(checkpoint_contents).hexdigest()}.json"
+        projected = _parent_scan_draft(scan_id, manifest["scan"], findings, coverage)
+        projected_contents = _encoded(projected)
+        checkpoint_name = f"{hashlib.sha256(projected_contents).hexdigest()}.json"
         checkpoint_relative = f"checkpoints/{checkpoint_name}"
         if not (scan_dir / checkpoint_relative).exists():
-            write_scan_local_bytes(scan_dir, checkpoint_relative, checkpoint_contents)
-        write_scan_local_bytes(
-            scan_dir, "checkpoint-head.json", _encoded({"checkpoint": checkpoint_name})
-        )
+            write_scan_local_bytes(scan_dir, checkpoint_relative, projected_contents)
+        head = {"checkpoint": checkpoint_name}
+        if admitted_input is not None:
+            head["inputCheckpoint"] = admitted_input
+        write_scan_local_bytes(scan_dir, "checkpoint-head.json", _encoded(head))
         for filename, document in (
             ("findings.json", findings),
             ("coverage.json", coverage),

@@ -361,9 +361,27 @@ export async function saveScanDraftCheckpoint(
   input: Omit<ScanDraftInput, "coverage">,
   updateHead = true,
 ): Promise<void> {
-  const { handoffClaimToken: _claim, ...snapshot } = input;
+  const { handoffClaimToken: _claim, ...raw } = input;
+  const head =
+    context.layout === "scan" &&
+    context.mode === "deep" &&
+    input.complete !== false
+      ? await readCheckpointHead(context, "current")
+      : undefined;
+  const snapshot =
+    context.layout === "scan" &&
+    context.mode === "deep" &&
+    input.complete !== false
+      ? {
+          ...raw,
+          publication: {
+            previousCheckpoint: head?.checkpoint ?? null,
+            previousInputCheckpoint: head?.inputCheckpoint ?? null,
+          },
+        }
+      : raw;
   const contents = JSON.stringify(snapshot, null, 2) + "\n";
-  const name = scanDraftCheckpointName(input);
+  const name = scanDraftCheckpointName(snapshot);
   const destination = await artifactDestination(
     context,
     ["checkpoints", name],
@@ -1273,7 +1291,10 @@ function reconcileDeferredSurfaces(
 async function readCheckpointHead(
   context: ArtifactContext,
   kind: "current" | "archived",
-): Promise<{ checkpoint: string; modifiedMs: number } | undefined> {
+): Promise<
+  | { checkpoint: string; inputCheckpoint?: string; modifiedMs: number }
+  | undefined
+> {
   const metadata = await lstatIfExists(
     join(context.root, "checkpoint-head.json"),
   );
@@ -1295,7 +1316,13 @@ async function readCheckpointHead(
   )
     throw new Error(`scan checkpoint: ${kind} checkpoint head is invalid.`);
   // Reselecting an immutable checkpoint updates only the head file.
-  return { checkpoint: head.checkpoint, modifiedMs: saved.modifiedMs };
+  return {
+    checkpoint: head.checkpoint,
+    ...(typeof head.inputCheckpoint === "string"
+      ? { inputCheckpoint: head.inputCheckpoint }
+      : {}),
+    modifiedMs: saved.modifiedMs,
+  };
 }
 
 async function readSavedCheckpoints(
@@ -2169,6 +2196,7 @@ function parsePersistedCheckpoint(
   schema = scanDraftInputSchema,
 ): ScanDraftInput {
   const compatible = structuredClone(input);
+  delete compatible.publication;
   if (isObject(compatible.scope)) {
     delete compatible.scope.includePaths;
     delete compatible.scope.excludePaths;

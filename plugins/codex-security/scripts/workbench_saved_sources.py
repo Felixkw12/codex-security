@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
+import os
 import re
 import stat
+import sys
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from finalize_scan_contract import (
     ContractError,
     _read_scan_local_json_with_metadata,
@@ -70,10 +74,17 @@ def _capture_saved_source(
         _, digest, observed = _read_saved_result(scan_dir, relative, scan_id, kind=kind)
         return {relative: (digest, observed)}
     head, _, observed = _read_saved_result(scan_dir, relative, scan_id)
-    observation = {"checkpoint": head["checkpoint"], "observedAtNs": str(observed)}
+    observation = {
+        **{key: head[key] for key in ("checkpoint", "inputCheckpoint") if key in head},
+        "observedAtNs": str(observed),
+    }
     directory = Path(relative).parent
-    selected = (directory / "checkpoints" / observation["checkpoint"]).as_posix()
-    _, selected_digest, selected_time = _read_saved_result(scan_dir, selected, scan_id)
+    selected_sources = {}
+    for key in ("checkpoint", "inputCheckpoint"):
+        if key in head:
+            selected = (directory / "checkpoints" / head[key]).as_posix()
+            _, selected_digest, selected_time = _read_saved_result(scan_dir, selected, scan_id)
+            selected_sources[selected] = (selected_digest, selected_time)
     digest = _digest(observation)
     snapshot = (directory / "checkpoint-heads" / f"{digest}.json").as_posix()
     # Capture the selected file even if the worker created it after directory enumeration.
@@ -81,7 +92,7 @@ def _capture_saved_source(
         write_scan_local_bytes(scan_dir, snapshot, _encoded(observation))
     return {
         snapshot: (digest, int(observation["observedAtNs"])),
-        selected: (selected_digest, selected_time),
+        **selected_sources,
     }
 
 
@@ -97,6 +108,11 @@ def _read_saved_result(
         if not isinstance(checkpoint, str) or not re.fullmatch(r"[0-9a-f]{64}\.json", checkpoint):
             raise ContractError("checkpoint head does not name a saved checkpoint")
         _read_saved_result(scan_dir, (directory / "checkpoints" / checkpoint).as_posix(), scan_id)
+        if "inputCheckpoint" in draft:
+            raw = draft["inputCheckpoint"]
+            if not isinstance(raw, str) or not re.fullmatch(r"[0-9a-f]{64}\.json", raw):
+                raise ContractError("checkpoint head does not name a saved input checkpoint")
+            _read_saved_result(scan_dir, (directory / "checkpoints" / raw).as_posix(), scan_id)
         if Path(relative).name == "checkpoint-head.json":
             return draft, _digest([draft, metadata.st_mtime_ns]), metadata.st_mtime_ns
         observed = draft.get("observedAtNs")
@@ -205,3 +221,61 @@ def _freeze_source_times(
             if previous_record.get("parentContext"):
                 del sources[previous]
     sources[path] = digest
+
+
+def _parent_publication_ancestors(
+    input_checkpoint: str | None, drafts: dict[str, dict[str, Any]]
+) -> set[str]:
+    """Find stale canonical projections without relying on publication clocks."""
+    ancestors = set()
+    inputs = set()
+    # Input hashes distinguish repeated publication of the same projected result.
+    while isinstance(input_checkpoint, str) and input_checkpoint not in inputs:
+        inputs.add(input_checkpoint)
+        publication = drafts.get(f"checkpoints/{input_checkpoint}", {}).get("publication")
+        if not isinstance(publication, dict):
+            break
+        previous = publication.get("previousCheckpoint")
+        if isinstance(previous, str):
+            ancestors.add(f"checkpoints/{previous}")
+        input_checkpoint = publication.get("previousInputCheckpoint")
+    return ancestors
+
+
+def _admit_parent_checkpoint(scan_dir: Path, scan_id: str, checkpoint: dict[str, Any]) -> bytes:
+    """Bind a Deep input to the accepted head under the host's publication lock."""
+    previous = {}
+    try:
+        previous, _, _ = _read_saved_result(scan_dir, "checkpoint-head.json", scan_id)
+    except (ContractError, OSError, ValueError):
+        pass
+    return _encoded(
+        {
+            **checkpoint,
+            "publication": {
+                "previousCheckpoint": previous.get("checkpoint"),
+                "previousInputCheckpoint": previous.get("inputCheckpoint"),
+            },
+        }
+    )
+
+
+def _capture_parent_observation(
+    scan_dir: Path, checkpoint: str, observed: int, legacy_head: bool = False
+) -> dict[str, tuple[str, int]]:
+    """Freeze canonical input, preserving the legacy sealed-parent migration."""
+    if legacy_head:
+        write_scan_local_bytes(
+            scan_dir, "checkpoint-head.json", _encoded({"checkpoint": checkpoint})
+        )
+        os.utime(scan_dir / "checkpoint-head.json", ns=(observed, observed))
+    observation = {"checkpoint": checkpoint, "observedAtNs": str(observed)}
+    digest = _digest(observation)
+    snapshot = f"checkpoint-heads/{digest}.json"
+    if not (scan_dir / snapshot).exists():
+        write_scan_local_bytes(scan_dir, snapshot, _encoded(observation))
+    return {snapshot: (digest, observed)}
+
+
+if __name__ == "__main__":
+    argparse.ArgumentParser(description=__doc__).parse_args()

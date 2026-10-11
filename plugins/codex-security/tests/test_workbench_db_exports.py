@@ -1198,8 +1198,9 @@ def test_remediation_apply_rejects_replaced_scan_directory_ancestor(tmp_path: Pa
 
 
 @pytest.mark.parametrize("interrupted", [False, True])
+@pytest.mark.parametrize("mode", ["standard", "deep"])
 def test_parent_draft_preserves_reconciled_candidate_identity_before_publication(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interrupted: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interrupted: bool, mode: str
 ) -> None:
     monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "scripts"))
     import workbench_db as db
@@ -1209,8 +1210,14 @@ def test_parent_draft_preserves_reconciled_candidate_identity_before_publication
     monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state_dir))
     target = tmp_path / "target"
     target.mkdir()
-    scan_id, scan_dir = start_saved_scan(state_dir, target, tmp_path / "scans")
-    write_completed_contract(scan_dir, scan_id, target)
+    workspace = create_saved_workspace(state_dir, target, mode=mode)
+    scan_id, scan_dir = start_workspace_scan(state_dir, str(workspace["id"]), tmp_path / "scans")
+    write_completed_contract(
+        scan_dir,
+        scan_id,
+        target,
+        coverage_mode="deep_repository" if mode == "deep" else "repository",
+    )
     documents = {
         key: json.loads((scan_dir / filename).read_text())
         for key, filename in (
@@ -1275,8 +1282,21 @@ def test_parent_draft_preserves_reconciled_candidate_identity_before_publication
         normalized = json.loads(normalized_bytes)
         assert normalized["coverage"]["deferred"] == documents["coverage"]["deferred"]
         assert normalized["scanId"] == scan_id
+        retained = raw
+        if mode == "deep":
+            retained = {
+                **raw,
+                "publication": {
+                    "previousCheckpoint": None,
+                    "previousInputCheckpoint": None,
+                },
+            }
+            raw_bytes = results._encoded(retained)
         retained_raw = scan_dir / "checkpoints" / f"{hashlib.sha256(raw_bytes).hexdigest()}.json"
         assert retained_raw.read_bytes() == raw_bytes
+        assert json.loads(raw_bytes) == retained
+        if mode == "deep":
+            assert head["inputCheckpoint"] == retained_raw.name
 
         rejected = copy.deepcopy(documents["coverage"]["deferred"][0])
         documents["coverage"]["deferred"] = documents["coverage"]["deferred"][1:]
@@ -1333,3 +1353,96 @@ def test_parent_draft_preserves_reconciled_candidate_identity_before_publication
         canonical = json.loads((scan_dir / "coverage.json").read_text())
         assert [row["id"] for row in canonical["deferred"]] == ["review-b"]
         assert canonical["resolvedDeferred"] == raw["coverage"]["resolvedDeferred"]
+
+
+def test_deep_draft_admission_survives_interrupted_projection(tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "scripts"))
+    import workbench_db as db
+    import workbench_saved_results as results
+
+    state_dir = tmp_path / "state"
+    monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state_dir))
+    target = tmp_path / "target"
+    target.mkdir()
+    workspace = create_saved_workspace(state_dir, target, mode="deep")
+    scan_id, scan_dir = start_workspace_scan(state_dir, str(workspace["id"]), tmp_path / "scans")
+    write_completed_contract(scan_dir, scan_id, target, coverage_mode="deep_repository")
+    documents = {
+        key: json.loads((scan_dir / filename).read_text())
+        for key, filename in (
+            ("manifest", "scan-manifest.json"),
+            ("findings", "findings.json"),
+            ("coverage", "coverage.json"),
+        )
+    }
+    raw = {
+        "scanId": scan_id,
+        "findings": documents["findings"]["findings"],
+        "coverage": saved_coverage(),
+    }
+    drafts = scan_dir / "drafts"
+    drafts.mkdir()
+    staged = drafts / f"{uuid.uuid4()}.json"
+    raw_path = drafts / f"{uuid.uuid4()}.checkpoint.json"
+    args = SimpleNamespace(
+        scan_id=scan_id,
+        claim_token=None,
+        draft_path=str(staged),
+        checkpoint_path=str(raw_path),
+        expected_draft_digest=None,
+    )
+    with closing(db.connect()) as connection:
+        staged.write_text(json.dumps(documents))
+        raw_path.write_text(json.dumps(raw))
+        results.write_scan_draft(db._WORKBENCH_DB_CONTEXT, connection, args)
+        previous_head = json.loads((scan_dir / "checkpoint-head.json").read_text())
+        original = results.write_scan_local_bytes
+        writes = 0
+
+        def interrupt_projection(root, relative, contents):
+            nonlocal writes
+            if relative.startswith("checkpoints/"):
+                writes += 1
+                if writes == 2:
+                    raise OSError("Interrupted projected checkpoint")
+            original(root, relative, contents)
+
+        raw["findings"][0]["summary"] = "Updated synthetic evidence."
+        staged.write_text(json.dumps(documents))
+        raw_path.write_text(json.dumps(raw))
+        with monkeypatch.context() as context:
+            context.setattr(results, "write_scan_local_bytes", interrupt_projection)
+            with pytest.raises(OSError, match="Interrupted projected checkpoint"):
+                results.write_scan_draft(db._WORKBENCH_DB_CONTEXT, connection, args)
+        assert writes == 2
+        assert json.loads((scan_dir / "checkpoint-head.json").read_text()) == previous_head
+        binding = db.workbench_completion_binding(db.require_scan(connection, scan_id), db.now())
+        warnings = []
+        recovered = results.merge_saved_results(
+            scan_dir,
+            scan_id,
+            binding,
+            [],
+            warnings,
+            stopped=True,
+            reason="interrupted",
+            scan_mode="deep",
+        )
+        assert [row["summary"] for row in recovered[1]["findings"]] == [
+            "Updated synthetic evidence."
+        ]
+        assert warnings == []
+        replayed = results.merge_saved_results(
+            scan_dir,
+            scan_id,
+            binding,
+            [],
+            [],
+            stopped=True,
+            reason="interrupted",
+            scan_mode="deep",
+            frozen_source_digests=recovered[0]["scan"]["preservedSources"],
+        )
+        assert replayed[1:] == recovered[1:]
+        for field in ("target", "scope", "preservedSources"):
+            assert replayed[0]["scan"][field] == recovered[0]["scan"][field]
