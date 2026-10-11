@@ -178,6 +178,8 @@ async function testInventoryChildPreservesSettingsAndCwd() {
     "GIT_CONFIG_GLOBAL",
     "NODE_OPTIONS",
     "CODEX_MCP_NODE_PATH",
+    "LD_LIBRARY_PATH",
+    "DYLD_LIBRARY_PATH",
   ];
   await writeFile(
     preload,
@@ -190,6 +192,8 @@ async function testInventoryChildPreservesSettingsAndCwd() {
     GIT_CONFIG_GLOBAL: config,
     NODE_OPTIONS: `--require ${JSON.stringify(path.relative(process.cwd(), preload).split(path.sep).join("/"))}`,
     CODEX_MCP_NODE_PATH: path.join(fixture.root, "unused-node"),
+    LD_LIBRARY_PATH: path.join(fixture.root, "selected libraries"),
+    DYLD_LIBRARY_PATH: path.join(fixture.root, "selected dylibs"),
   };
   Object.assign(process.env, selected);
   try {
@@ -263,10 +267,20 @@ async function testInventoryChildPreservesRawPaths() {
       diffTarget: { kind: "working_tree", baseRevision, headRevision: "HEAD" },
     },
   };
+  const marker = path.join(fixture.root, "child.json");
+  const preload = path.join(fixture.root, "preload.cjs");
+  const loaderSettings = {
+    LD_LIBRARY_PATH: path.join(fixture.root, "selected libraries"),
+    DYLD_LIBRARY_PATH: path.join(fixture.root, "selected dylibs"),
+  };
+  await writeFile(
+    preload,
+    `const fs = require('node:fs'); fs.writeFileSync(${JSON.stringify(marker)}, JSON.stringify({stdin:fs.readFileSync(0).length,env:Object.fromEntries(${JSON.stringify(Object.keys(loaderSettings))}.map(name=>[name,process.env[name]]))}));`,
+  );
   const driver = path.join(fixture.root, "prepare.mjs");
   await build({
     stdin: {
-      contents: `import { prepareCodexSecurityReviewItems } from ${JSON.stringify(path.resolve(import.meta.dirname, "../src/artifact-inventory.ts"))}; console.log(JSON.stringify(await prepareCodexSecurityReviewItems(${JSON.stringify(context)})));`,
+      contents: `import { prepareCodexSecurityReviewItems } from ${JSON.stringify(path.resolve(import.meta.dirname, "../src/artifact-inventory.ts"))}; Object.assign(process.env, ${JSON.stringify({ ...loaderSettings, NODE_OPTIONS: `--require ${JSON.stringify(preload)}` })}); console.log(JSON.stringify(await prepareCodexSecurityReviewItems(${JSON.stringify(context)})));`,
       loader: "ts",
       resolveDir: import.meta.dirname,
     },
@@ -292,6 +306,8 @@ async function testInventoryChildPreservesRawPaths() {
     [
       "-c",
       [
+        // Raw environment bytes are valid on macOS even though APFS names are UTF-8.
+        'HOME=$(printf "/fixture/home-\\377"); export HOME',
         `GIT_CONFIG_GLOBAL=$(printf '%b' '${octal(config)}'); export GIT_CONFIG_GLOBAL`,
         `CODEX_SECURITY_GIT=$(printf '%b' '${octal(git)}'); export CODEX_SECURITY_GIT`,
         'exec "$1" "$2"',
@@ -304,6 +320,10 @@ async function testInventoryChildPreservesRawPaths() {
   );
   assert.deepEqual(JSON.parse(stdout), { reviewItemsTotal: 1 });
   assert.equal(await readFile(fixture.scanInventory, "utf8"), "visible.py\n");
+  assert.deepEqual(JSON.parse(await readFile(marker, "utf8")), {
+    stdin: 0,
+    env: loaderSettings,
+  });
 }
 
 async function testInventoryChildFailuresPreserveOutput() {

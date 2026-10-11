@@ -113,19 +113,12 @@ export async function prepareCodexSecurityReviewItems(
           ).toString("hex"),
         );
     const result = await runTool(
-      windows ? process.execPath : "/bin/sh",
-      windows
-        ? [helper, ...arguments_]
-        : [
-            "-c",
-            'exec "$1" "$2" --helper 3<&0 0</dev/null',
-            "inventory-helper",
-            process.execPath,
-            helper,
-          ],
+      process.execPath,
+      windows ? [helper, ...arguments_] : [helper, "--helper"],
       // Relative NODE_OPTIONS preloads use the MCP process's current directory.
       undefined,
       input,
+      windows ? 0 : 3,
     );
     if (result.status !== 0)
       throw new Error(

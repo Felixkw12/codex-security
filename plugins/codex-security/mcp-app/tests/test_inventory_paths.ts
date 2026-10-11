@@ -8,6 +8,83 @@ import { importSource } from "./import-module.ts";
 import type { WindowsBinding } from "../../native/windows-binding.mjs";
 
 test(
+  "POSIX tools keep helper input separate from stdin and startup status",
+  { skip: process.platform === "win32" },
+  async () => {
+    const { runTool } = await importSource("src/helpers/inventory-git.ts", {
+      define: {
+        "import.meta.url": JSON.stringify(
+          new URL(
+            "../../../../sdk/typescript/_bundled_plugin/mcp/helpers.mjs",
+            import.meta.url,
+          ).href,
+        ),
+      },
+    });
+    const root = fs.mkdtempSync(join(tmpdir(), "inventory-input-fds-"));
+    const denied = join(root, "not-executable");
+    fs.writeFileSync(denied, "#!/bin/sh\n", { mode: 0o600 });
+    try {
+      for (const argument of ["ordinary", "raw-\udcff"])
+        for (const inputFd of [0, 3]) {
+          const input = Buffer.from([0, 128, 255, 10]);
+          const result = await runTool(
+            process.execPath,
+            [
+              "-e",
+              `const fs = require('node:fs');
+fs.writeFileSync(1, fs.readFileSync(${inputFd}));
+${inputFd === 3 ? "fs.writeFileSync(2, String(fs.readFileSync(0).length));" : ""}`,
+              argument,
+            ],
+            undefined,
+            input,
+            inputFd,
+          );
+          assert.equal(result.status, 0, result.stderr);
+          assert.deepEqual(result.stdout, input);
+          assert.equal(result.stderr, inputFd === 3 ? "0" : "");
+          for (const [command, code] of [
+            [join(root, "missing"), "ENOENT"],
+            [denied, "EACCES"],
+          ])
+            await assert.rejects(
+              runTool(command, [argument], undefined, input, inputFd),
+              { code },
+            );
+          for (const status of [126, 127]) {
+            const launched = await runTool(
+              process.execPath,
+              ["-e", `process.exit(${status})`, argument],
+              undefined,
+              input,
+              inputFd,
+            );
+            assert.equal(launched.status, status);
+          }
+          const statusFd = inputFd === 3 ? 4 : 3;
+          const descendant = await runTool(
+            "/bin/sh",
+            [
+              "-c",
+              `/bin/sh -c 'if ( : >&${statusFd} ) 2>/dev/null; then printf inherited; else printf closed; fi'`,
+              "inventory-fixture",
+              argument,
+            ],
+            undefined,
+            input,
+            inputFd,
+          );
+          assert.equal(descendant.status, 0, descendant.stderr);
+          assert.equal(descendant.stdout.toString(), "closed");
+        }
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
   "POSIX tools retain loader settings across the raw argument shell bridge",
   { skip: process.platform === "win32" },
   async () => {

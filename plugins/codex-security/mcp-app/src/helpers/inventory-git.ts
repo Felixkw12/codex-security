@@ -7,6 +7,7 @@ import {
   type SpawnOptions,
   type ChildProcessWithoutNullStreams,
 } from "node:child_process";
+import type { Writable } from "node:stream";
 import {
   basename,
   dirname,
@@ -173,7 +174,10 @@ function spawnTool(
     stdio: ["ignore" | "pipe", "pipe", "pipe"];
   },
   inheritedEnvironment: Record<string, string>,
+  inputFd: 0 | 3 = 0,
 ) {
+  const stdio = [...options.stdio];
+  if (inputFd === 3) stdio.push("pipe");
   const environment = Object.fromEntries(
     Object.entries(inheritedEnvironment).filter(
       ([name, value]) =>
@@ -186,12 +190,19 @@ function spawnTool(
     ...(typeof options.cwd === "string" ? [options.cwd] : []),
     ...Object.values(environment),
   ];
-  if (!values.some(rawToolValue)) return spawn(command, args, options);
+  if (!values.some(rawToolValue))
+    return {
+      child: spawn(command, args, { ...options, stdio }),
+      execFailure: undefined,
+    };
   if (windows) {
     const binary = createRequire(import.meta.url).resolve(
       `./native/${nativeTarget}/windows.node`,
     );
-    return spawnWindowsProcess(binary, command, args, options, environment);
+    return {
+      child: spawnWindowsProcess(binary, command, args, options, environment),
+      execFailure: undefined,
+    };
   }
   // Node encodes argv/cwd as UTF-8. POSIX sh can reconstruct raw filename bytes
   // with its builtin printf; a sentinel preserves trailing newlines in each value.
@@ -203,6 +214,7 @@ function spawnTool(
       .join("");
     return `value=$(printf '%b.' '${octal}'); value=\${value%.}`;
   };
+  const statusFd = stdio.length;
   const script = [
     "set --",
     ...Object.entries(environment).flatMap(([name, value]) => [
@@ -220,21 +232,22 @@ function spawnTool(
     // the launched program's exit status, which may also be 126 or 127.
     // Bash (macOS /bin/sh) otherwise skips EXIT traps when exec fails.
     'if [ -n "${BASH_VERSION:-}" ]; then shopt -s execfail; fi',
-    'trap \'printf "%s" "$?" >&3\' 0',
+    `trap 'printf "%s" "$?" >&${statusFd}' 0`,
     // Restore the status pipe for a failed exec, but do not pass it to the tool
     // or its descendants, which could otherwise keep child.close pending.
-    '{ exec "$@"; } 3>&-',
+    `{ exec "$@"; } ${statusFd}>&-`,
   ].join("\n");
   // Loader settings belong to the tool: decoded raw values can fail at shell
   // startup, and macOS system shells also strip ordinary DYLD_* values.
   const env = { ...(options.env ?? process.env) };
   for (const name of Object.keys(environment)) delete env[name];
-  return spawn("/bin/sh", ["-c", script], {
+  const child = spawn("/bin/sh", ["-c", script], {
     ...options,
     env,
     cwd: undefined,
-    stdio: [...options.stdio, "pipe"],
+    stdio: [...stdio, "pipe"],
   });
+  return { child, execFailure: child.stdio[statusFd] };
 }
 
 function inheritedToolPaths(additional: string[] = []): Record<string, string> {
@@ -294,7 +307,7 @@ function gitProcess(repo: string, args: string[]) {
     ],
     { env, stdio: ["pipe", "pipe", "pipe"] },
     inherited,
-  ) as ChildProcessWithoutNullStreams;
+  );
 }
 
 export async function runRipgrep(
@@ -320,26 +333,36 @@ export async function runTool(
   args: string[],
   cwd?: string,
   input?: Buffer,
+  inputFd: 0 | 3 = 0,
 ): Promise<ToolResult> {
-  const child = spawnTool(
+  const execution = spawnTool(
     command,
     args,
     {
       cwd,
-      stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
+      stdio: [
+        input === undefined || inputFd !== 0 ? "ignore" : "pipe",
+        "pipe",
+        "pipe",
+      ],
     },
     inheritedToolPaths(["RIPGREP_CONFIG_PATH", "CODEX_SECURITY_GIT"]),
+    inputFd,
   );
-  child.stdin?.on("error", () => {});
-  child.stdin?.end(input);
-  return collect(child);
+  const pipe = execution.child.stdio[inputFd] as Writable | null;
+  pipe?.on("error", () => {});
+  pipe?.end(input);
+  return collect(execution);
 }
 
-async function collect(child: ReturnType<typeof spawn>): Promise<ToolResult> {
+async function collect({
+  child,
+  execFailure: statusPipe,
+}: ReturnType<typeof spawnTool>): Promise<ToolResult> {
   const stdout: Buffer[] = [],
     stderr: Buffer[] = [];
   let execFailure = "";
-  child.stdio[3]?.on("data", (chunk: Buffer) => (execFailure += chunk));
+  statusPipe?.on("data", (chunk: Buffer) => (execFailure += chunk));
   child.stdout!.on("data", (chunk: Buffer) => stdout.push(chunk));
   child.stderr!.on("data", (chunk: Buffer) => stderr.push(chunk));
   await new Promise<void>((resolve, reject) => {
@@ -360,10 +383,10 @@ async function collect(child: ReturnType<typeof spawn>): Promise<ToolResult> {
 
 export async function git(repo: string, args: string[]) {
   try {
-    const child = gitProcess(repo, args);
-    if (child) {
-      child.stdin.end();
-      return await collect(child);
+    const execution = gitProcess(repo, args);
+    if (execution) {
+      execution.child.stdin!.end();
+      return await collect(execution);
     }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
@@ -553,7 +576,8 @@ export async function blobSamples(
   names: string[],
 ): Promise<([Buffer, boolean] | undefined)[]> {
   if (!names.length) return [];
-  const child = gitProcess(repo, ["cat-file", "--batch", "-z"]);
+  const child = gitProcess(repo, ["cat-file", "--batch", "-z"])?.child as
+    ChildProcessWithoutNullStreams | undefined;
   if (!child) return names.map(() => undefined);
   const completion = new Promise<number>((resolve, reject) => {
     child.once("error", reject);
