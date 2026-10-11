@@ -176,7 +176,7 @@ describe("CLI findings history", () => {
         "20",
       ],
     ]);
-    expect(JSON.parse(stdout.text())).toEqual(page);
+    expect(JSON.parse(stdout.text())).toEqual({ ...page, repository });
   });
 
   test.each([
@@ -265,7 +265,12 @@ describe("CLI findings history", () => {
           }),
         ),
       ).toBe(0);
-      expect(JSON.parse(stdout.text())).toEqual({ findings: [finding] });
+      expect(JSON.parse(stdout.text())).toEqual({
+        ...(scope.length === 0
+          ? { repository: resolve("/current/repository") }
+          : {}),
+        findings: [finding],
+      });
       expect(calls).toHaveLength(1);
       expect(calls[0]?.includes("--include-resolved")).toBe(includeResolved);
     },
