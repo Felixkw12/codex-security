@@ -758,9 +758,9 @@ def _generic_surface_updates(
     deferred_rows: dict[str, list[Any]],
     ambiguous_deferred: set[tuple[str | None, str]],
     *,
+    surface_is_retained: Callable[[str, str | None, dict[str, Any]], bool],
     receipt_root: Path | None = None,
     receipt_warnings: list[str] | None = None,
-    surface_is_retained: Callable[[str, str | None, dict[str, Any]], bool] | None = None,
 ) -> tuple[set[int], list[tuple[str | None, dict[str, Any]]]]:
     if not closed_deferred and not reopened_generic and receipt_root is None:
         return set(), []
@@ -796,9 +796,7 @@ def _generic_surface_updates(
     if receipt_root is not None:
         for (owner, _), matches in saved_surfaces.items():
             retained = [
-                match
-                for match in matches
-                if surface_is_retained is None or surface_is_retained(match[0], owner, match[1])
+                match for match in matches if surface_is_retained(match[0], owner, match[1])
             ]
             if not retained:
                 continue
@@ -1118,6 +1116,8 @@ def _prepare_worker_coverage_recovery(
     # the existing per-worker chronology reconcile those originals exactly once.
     # Keep parent-only evidence when its bound worker source is unavailable.
     for draft in parents:
+        if not draft["coverage"]:
+            continue
         for field in fields:
             rows = draft["coverage"].get(field, [])
             if isinstance(rows, list):
@@ -2501,6 +2501,7 @@ def preserve_scan_results_locked(
         frozen_source_digests=frozen_source_digests,
         frozen_model_source=model_source[0] if model_source else None,
         selected_model_source=model_source,
+        project_worker_coverage=scan["mode"] == "deep",
         allow_frozen_legacy_parent=(
             include_parent_with_recovery
             or (
