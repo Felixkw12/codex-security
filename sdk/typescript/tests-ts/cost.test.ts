@@ -2459,6 +2459,7 @@ describe("live scan cost tracking", () => {
     await tracker.refresh();
 
     await appendSessionItem(otherWorker, progressMessage(2, 2));
+    await tracker.refresh();
     await appendSessionItem(otherWorker, progressMessage(3, 3));
     await appendSessionItem(otherWorker, progressMessage(1, 1_259));
     await appendSessionItem(parent, progressMessage(1_200, 1_258));
