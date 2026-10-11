@@ -88,6 +88,120 @@ const variants = {
   ),
 };
 
+for (const variant of [
+  "primary location",
+  "primary range",
+  "additional locations",
+] as const) {
+  for (const reversed of [false, true]) {
+    test(`worker ${variant} identity survives recovery (reversed=${reversed})`, async (t) => {
+      const normal = await fixture(t, "deep");
+      const recovered = await fixture(t, "deep");
+      const workerRoot = path.join(normal.root, "worker");
+      const interruptedRoot = path.join(recovered.root, "worker");
+      await Promise.all([mkdir(workerRoot), mkdir(interruptedRoot)]);
+      const worker = draftFixture(workerRoot, "worker");
+      const interrupted = draftFixture(interruptedRoot, "worker");
+      const locations = [
+        { path: "src/first.py", startLine: 1 },
+        { path: "src/second.py", startLine: 2 },
+        { path: "src/third.py", startLine: 3 },
+      ];
+      const rows = [
+        finding("First synthetic review", {
+          summary: "First synthetic evidence.",
+          locations,
+        }),
+        finding("Second synthetic review", {
+          summary: "Second synthetic evidence.",
+          locations:
+            variant === "primary location"
+              ? [locations[1], locations[0], locations[2]]
+              : variant === "primary range"
+                ? [{ ...locations[0], endLine: 1 }, ...locations.slice(1)]
+                : [locations[0], locations[2], locations[1]],
+        }),
+      ];
+      if (reversed) rows.reverse();
+      for (const target of [worker, interrupted]) {
+        await target.write({ ...target.draft(), findings: [rows[0]] });
+        await dateDraftFiles(target.root, 100);
+      }
+      await worker.write({ ...worker.draft(), findings: [rows[1]] });
+      await draftApi.saveScanDraftCheckpoint(
+        interrupted.context,
+        { ...interrupted.draft(), findings: [rows[1]] },
+        false,
+      );
+      const saved = JSON.parse(
+        await readFile(path.join(workerRoot, "result.json"), "utf8"),
+      );
+      await normal.write({
+        ...normal.draft(),
+        findings: saved.findings.map((row: FixtureFinding) => ({
+          ...row,
+          provenance: { ...row.provenance, workerId: "worker" },
+        })),
+      });
+      const result = await recoverAndFinalize(
+        normal,
+        recovered,
+        [
+          {
+            id: "worker",
+            kind: "discovery",
+            artifact_dir: interruptedRoot,
+            result_manifest_path: path.join(interruptedRoot, "result.json"),
+            attempt: 1,
+          },
+        ],
+        true,
+        true,
+        true,
+      );
+      const expectedCount = variant === "additional locations" ? 1 : 2;
+      assert.equal(result.normal.length, expectedCount);
+      assert.equal(result.recovered.length, expectedCount);
+      const reports = (findings: RecoveredFinding[]) =>
+        new Map(
+          findings.map((row) => [
+            row.summary,
+            {
+              identity: row.identity,
+              findingId: row.findingId,
+              occurrenceId: row.occurrenceId,
+              locations: row.locations,
+              history: (
+                row.evidenceProvenance as { previousFindings: FixtureFinding[] }
+              ).previousFindings.map((previous) => ({
+                title: previous.title,
+                summary: previous.summary,
+                locations: previous.locations,
+              })),
+            },
+          ]),
+        );
+      const published = reports(result.normal);
+      for (const report of published.values()) {
+        assert.deepEqual(
+          report.history,
+          variant === "additional locations"
+            ? [
+                {
+                  title: rows[0]!.title,
+                  summary: rows[0]!.summary,
+                  locations: rows[0]!.locations,
+                },
+              ]
+            : [],
+        );
+      }
+      assert.deepEqual(reports(result.recovered), published);
+      assert.deepEqual(result.warnings, []);
+    });
+  }
+}
+
 for (const kind of ["object", "array", "string"] as const) {
   test(`unchanged worker drafts preserve ${kind} owner metadata`, async (t) => {
     const worker = await fixture(t, "worker");

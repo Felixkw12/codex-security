@@ -1861,7 +1861,14 @@ def merge_saved_results(
         return owner if isinstance(owner, str) else source_owner
 
     def raw_scope(value: dict[str, Any]) -> tuple[Any, ...]:
-        return value.get("ruleId"), tuple(_finding_locations(value))
+        # Match scanFindingIdentity's primary location for anonymous reports.
+        location = value["locations"][0]
+        return (
+            value.get("ruleId"),
+            location["path"],
+            location["startLine"],
+            location.get("endLine"),
+        )
 
     def same_owner(left: str | None, right: str | None) -> bool:
         return left is None or right is None or left == right
