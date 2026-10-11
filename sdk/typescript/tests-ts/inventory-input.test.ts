@@ -1606,6 +1606,30 @@ for (const command of ["make-repo-rank-input", "make-repo-scope-input"])
     },
   );
 
+for (const command of ["make-repo-scope-input", "make-repo-rank-input"])
+  test.skipIf(process.platform === "win32")(
+    `${command} prunes Git metadata in a tracked file replaced by a directory`,
+    () => {
+      const f = fixture();
+      f.write("replacement");
+      f.commit();
+      rmSync(join(f.repo, "replacement"));
+      f.write("replacement/source.py");
+      f.write("replacement/.git/private");
+      const metadata = join(f.repo, "replacement", ".git");
+      const scopes = join(f.root, "scopes.json");
+      writeFileSync(scopes, '["."]');
+      chmodSync(metadata, 0);
+      try {
+        expect(
+          f.rows(command, ["--scopes-file", scopes]).map((row) => row.path),
+        ).toEqual(["replacement/source.py"]);
+      } finally {
+        chmodSync(metadata, 0o700);
+      }
+    },
+  );
+
 test("inventory skips stale tracked entries after deletion and directory replacement", () => {
   const f = fixture();
   f.write("deleted.py");
@@ -1762,14 +1786,24 @@ test.skipIf(process.platform !== "win32")(
       expect(updated.status, updated.stderr.toString()).toBe(0);
       git(f.repo, "checkout-index", "--all", "--force");
       git(f.repo, "commit", "-qm", "Indexed path fixture");
-      const inventory = f.run("generate-in-scope-files", ["--scope", "."]);
-      expect(inventory.status, inventory.stderr).toBe(0);
-      for (const name of rawNames)
-        expect(
-          readFileSync(f.out).includes(
-            Buffer.concat([Buffer.from("./"), name, Buffer.from("\n")]),
-          ),
-        ).toBe(true);
+      for (const diff of [false, true]) {
+        const inventory = f.run("generate-in-scope-files", [
+          "--scope",
+          ".",
+          ...(diff ? ["--diff-base", base] : []),
+        ]);
+        expect(inventory.status, inventory.stderr).toBe(0);
+        for (const name of rawNames)
+          expect(
+            readFileSync(f.out).includes(
+              Buffer.concat([
+                Buffer.from(diff ? "" : "./"),
+                name,
+                Buffer.from("\n"),
+              ]),
+            ),
+          ).toBe(true);
+      }
       const scopes = join(f.root, "scopes.json");
       writeFileSync(scopes, '["."]');
       for (const command of [

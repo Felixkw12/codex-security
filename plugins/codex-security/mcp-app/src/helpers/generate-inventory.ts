@@ -390,7 +390,7 @@ export async function generateInventory(
         }
       }
       if (inventory) {
-        const encoded = encodePosixPath(path);
+        const encoded = encodeGitPath(path);
         if (/[\r\n]/u.test(path))
           throw new Error(
             "Git changes contain a path that cannot fit in the file inventory",

@@ -105,15 +105,18 @@ export function linkedParent(scope: string, path: string): boolean {
   }
   return false;
 }
-export function* walk(path: string): Iterable<string> {
+export function* walk(path: string, skipGit = false): Iterable<string> {
   const names = windows
     ? windowsFiles()
         .entriesWithTypes(Buffer.from(path, "utf16le"))
         .map((entry) => entry.name)
     : readdirSync(fsPath(path), { encoding: "buffer" });
-  const children = names.map((name) =>
-    append(path, windows ? name.toString("utf16le") : decodePosixBytes(name)),
-  );
+  const children = names
+    .map((name) =>
+      windows ? name.toString("utf16le") : decodePosixBytes(name),
+    )
+    .filter((name) => !skipGit || name !== ".git")
+    .map((name) => append(path, name));
   yield* children;
   for (const child of children) {
     const info = lstat(child);
@@ -121,7 +124,7 @@ export function* walk(path: string): Iterable<string> {
       info.isDirectory() &&
       !("isNameSurrogate" in info && info.isNameSurrogate())
     )
-      yield* walk(child);
+      yield* walk(child, skipGit);
   }
 }
 export function executable(path: string): boolean {
