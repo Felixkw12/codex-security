@@ -10,7 +10,6 @@ import json
 import os
 import re
 import sqlite3
-import stat
 import sys
 import unicodedata
 from collections import Counter
@@ -30,7 +29,6 @@ from finalize_scan_contract import (
     _read_saved_threat_model,
     _read_scan_local_json,
     _read_scan_local_json_bytes,
-    _read_scan_local_json_with_metadata,
     _recover_unsealed_findings,
     _remove_scan_local_file_if_exists,
     _validate_completion_binding,
@@ -45,6 +43,18 @@ from finalize_scan_contract import (
     write_threat_model_projection_if_possible,
 )
 from workbench_constants import PHASES
+from workbench_saved_sources import (
+    _capture_saved_source,
+    _checkpoint_head_directory,
+    _checkpoint_paths,
+    _children,
+    _digest,
+    _encoded,
+    _freeze_source_times,
+    _frozen_source_times,
+    _is_source_order_snapshot,
+    _read_saved_result,
+)
 from workbench_target import committed_diff_snapshot_digest
 from workbench_validation import path_within_scope
 
@@ -123,30 +133,6 @@ def refresh_completed_scan(
     return db.scan_context(connection, scan["id"])
 
 
-def _encoded(value: Any) -> bytes:
-    return json.dumps(
-        value, ensure_ascii=True, allow_nan=False, sort_keys=True, separators=(",", ":")
-    ).encode()
-
-
-def _digest(value: Any) -> str:
-    return hashlib.sha256(_encoded(value)).hexdigest()
-
-
-def _children(scan_dir: Path, relative: str) -> list[str]:
-    cursor = scan_dir
-    for part in Path(relative).parts:
-        if part in {"..", "."}:
-            return []
-        cursor = cursor / part
-        try:
-            if not stat.S_ISDIR(cursor.lstat().st_mode):
-                return []
-        except FileNotFoundError:
-            return []
-    return sorted(child.name for child in cursor.iterdir())
-
-
 def _latest_successful_reducer(workers: list[Any]) -> Any | None:
     return max(
         (
@@ -159,14 +145,6 @@ def _latest_successful_reducer(workers: list[Any]) -> Any | None:
         key=lambda worker: (worker["completed_at"] or "", worker["id"]),
         default=None,
     )
-
-
-def _checkpoint_paths(scan_dir: Path, directory: str) -> list[str]:
-    return [
-        f"{directory}/{name}"
-        for name in _children(scan_dir, directory)
-        if re.fullmatch(r"[0-9a-f]{64}\.json", name)
-    ]
 
 
 def _worker_outputs(scan_dir: Path, worker: Any) -> list[tuple[str, int]]:
@@ -217,124 +195,6 @@ def _saved_result_paths(scan_dir: Path, workers: list[Any]) -> Iterator[tuple[st
                 )
             except ValueError:
                 continue
-
-
-def _checkpoint_head_directory(relative: str) -> Path | None:
-    path = Path(relative)
-    if path.name == "checkpoint-head.json":
-        return path.parent
-    if path.parent.name == "checkpoint-heads":
-        return path.parent.parent
-    return None
-
-
-def _capture_saved_source(
-    scan_dir: Path,
-    relative: str,
-    scan_id: str,
-    *,
-    kind: str | None = None,
-    snapshot_head: bool = True,
-    write: bool = True,
-) -> dict[str, tuple[str, int]]:
-    if not snapshot_head or Path(relative).name != "checkpoint-head.json":
-        _, digest, observed = _read_saved_result(scan_dir, relative, scan_id, kind=kind)
-        return {relative: (digest, observed)}
-    head, _, observed = _read_saved_result(scan_dir, relative, scan_id)
-    observation = {"checkpoint": head["checkpoint"], "observedAtNs": str(observed)}
-    directory = Path(relative).parent
-    selected = (directory / "checkpoints" / observation["checkpoint"]).as_posix()
-    _, selected_digest, selected_time = _read_saved_result(scan_dir, selected, scan_id)
-    digest = _digest(observation)
-    snapshot = (directory / "checkpoint-heads" / f"{digest}.json").as_posix()
-    # Capture the selected file even if the worker created it after directory enumeration.
-    if write and not (scan_dir / snapshot).exists():
-        write_scan_local_bytes(scan_dir, snapshot, _encoded(observation))
-    return {
-        snapshot: (digest, int(observation["observedAtNs"])),
-        selected: (selected_digest, selected_time),
-    }
-
-
-def _is_source_order_snapshot(relative: str) -> bool:
-    path = Path(relative)
-    return path.parent == Path("source-order") and bool(
-        re.fullmatch(r"[0-9a-f]{64}\.json", path.name)
-    )
-
-
-def _read_saved_result(
-    scan_dir: Path, relative: str, scan_id: str, *, kind: str | None = None
-) -> tuple[dict[str, Any], str, int]:
-    draft, _, metadata = _read_scan_local_json_with_metadata(
-        scan_dir, relative, "Saved scan checkpoint"
-    )
-    directory = _checkpoint_head_directory(relative)
-    if directory is not None:
-        checkpoint = draft.get("checkpoint")
-        if not isinstance(checkpoint, str) or not re.fullmatch(r"[0-9a-f]{64}\.json", checkpoint):
-            raise ContractError("checkpoint head does not name a saved checkpoint")
-        _read_saved_result(scan_dir, (directory / "checkpoints" / checkpoint).as_posix(), scan_id)
-        if Path(relative).name == "checkpoint-head.json":
-            return draft, _digest([draft, metadata.st_mtime_ns]), metadata.st_mtime_ns
-        observed = draft.get("observedAtNs")
-        if not isinstance(observed, str) or not re.fullmatch(r"-?[0-9]+", observed):
-            raise ContractError("checkpoint head has no observation time")
-        return draft, _digest(draft), int(observed)
-    if draft.get("scanId") != scan_id:
-        raise ContractError("checkpoint belongs to a different scan")
-    if not _is_source_order_snapshot(relative) and (
-        not isinstance(draft.get("findings"), list)
-        or not isinstance(draft.get("coverage", {} if kind == "dedup" else None), dict)
-    ):
-        raise ContractError("checkpoint has no semantic findings or coverage")
-    return draft, _digest(draft), metadata.st_mtime_ns
-
-
-def _frozen_source_times(scan_dir: Path, scan_id: str, sources: dict[str, str]) -> dict[str, int]:
-    times: dict[str, int] = {}
-    snapshots = [path for path in sources if _is_source_order_snapshot(path)]
-    for path in snapshots:
-        record, digest, _ = _read_saved_result(scan_dir, path, scan_id)
-        if digest != sources[path] or not isinstance(record.get("sources"), dict):
-            raise ContractError("saved source ordering changed after the scan stopped")
-        for relative, observation in record["sources"].items():
-            if (
-                not isinstance(observation, dict)
-                or relative not in sources
-                or observation.get("digest") != sources[relative]
-                or not isinstance(observation.get("observedAtNs"), str)
-                or not re.fullmatch(r"-?[0-9]+", observation["observedAtNs"])
-            ):
-                raise ContractError("saved source ordering does not match its frozen sources")
-            observed = int(observation["observedAtNs"])
-            if relative in times and times[relative] != observed:
-                raise ContractError("saved source ordering has conflicting observations")
-            times[relative] = observed
-    if snapshots and sources.keys() - set(snapshots) - times.keys():
-        raise ContractError("saved source ordering is incomplete")
-    return times
-
-
-def _freeze_source_times(
-    scan_dir: Path, scan_id: str, sources: dict[str, str], times: dict[str, int]
-) -> None:
-    # Identical result rewrites must not change the order of frozen review evidence.
-    observations = {
-        path: {"digest": digest, "observedAtNs": str(times[path])}
-        for path, digest in sources.items()
-        if not _is_source_order_snapshot(path)
-    }
-    if not observations:
-        return
-    record = {"scanId": scan_id, "sources": observations}
-    digest = _digest(record)
-    path = f"source-order/{digest}.json"
-    if not (scan_dir / path).exists():
-        write_scan_local_bytes(scan_dir, path, _encoded(record))
-    if _read_saved_result(scan_dir, path, scan_id)[1] != digest:
-        raise ContractError("saved source ordering does not match its digest")
-    sources[path] = digest
 
 
 def _parent_scan_draft(
@@ -509,7 +369,8 @@ def _recovery_source_digests(db: Any, connection: Any, scan: Any) -> tuple[dict[
     ).fetchall()
     paths = dict(_saved_result_paths(scan_dir, workers))
     recovery_sources = dict(frozen_sources or {})
-    source_times = _frozen_source_times(scan_dir, scan["id"], recovery_sources)
+    parent_context: dict[str, str] = {}
+    source_times = _frozen_source_times(scan_dir, scan["id"], recovery_sources, parent_context)
     for relative, expected_digest in recovery_sources.items():
         try:
             _, digest, observed = _read_saved_result(
@@ -527,12 +388,14 @@ def _recovery_source_digests(db: Any, connection: Any, scan: Any) -> tuple[dict[
             captured = _capture_saved_source(scan_dir, relative, scan["id"], kind=paths[relative])
         except (ContractError, OSError, ValueError):
             continue
+        if relative == "checkpoint-head.json":
+            parent_context["head"] = next(iter(captured))
         for path, (digest, observed) in captured.items():
             if path in recovery_sources and recovery_sources[path] != digest:
                 raise ContractError("checkpoint changed after the scan stopped")
             recovery_sources[path] = digest
             source_times.setdefault(path, observed)
-    _freeze_source_times(scan_dir, scan["id"], recovery_sources, source_times)
+    _freeze_source_times(scan_dir, scan["id"], recovery_sources, source_times, parent_context)
     return recovery_sources, include_parent
 
 
@@ -1014,6 +877,7 @@ def merge_saved_results(
     *,
     stopped: bool,
     reason: str,
+    scan_mode: str | None = None,
     frozen_source_digests: dict[str, str] | None = None,
     allow_frozen_legacy_parent: bool = False,
     frozen_model_source: str | None = None,
@@ -1021,8 +885,11 @@ def merge_saved_results(
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None:
     """Read only bound parent/worker files; return an unsealed loss-preserving union."""
     initial_warnings = set(warnings)
+    parent_context: dict[str, str] = {}
     try:
-        source_times = _frozen_source_times(scan_dir, scan_id, frozen_source_digests or {})
+        source_times = _frozen_source_times(
+            scan_dir, scan_id, frozen_source_digests or {}, parent_context
+        )
     except (ContractError, OSError, ValueError) as exc:
         raise ContractError("Frozen stopped-scan checkpoint set is incomplete.") from exc
     parent: dict[str, Any] | None = None
@@ -1057,26 +924,17 @@ def merge_saved_results(
                     for name in ("findings.json", "coverage.json", "scan-manifest.json")
                 )
             if not parent_scan.get("sealedAt") or allow_frozen_legacy_parent:
-                head_path = scan_dir / "checkpoint-head.json"
-                tied_observations = False
-                if head_modified == parent_modified:
-                    previous_parent, _, _ = _read_saved_result(
-                        scan_dir, f"checkpoints/{previous_head['checkpoint']}", scan_id
-                    )
-                    if previous_parent != parent:
-                        # Tied observations cannot decide which pending work came last.
-                        parent = _merge_tied_parent_observations(parent, previous_parent)
-                        parent_is_canonical = False
-                        tied_observations = True
                 payload = _encoded(parent)
                 parent_digest = hashlib.sha256(payload).hexdigest()
                 parent_checkpoint = f"checkpoints/{parent_digest}.json"
+                parent_context["canonical"] = parent_checkpoint
                 checkpoint_path = scan_dir / parent_checkpoint
                 if not checkpoint_path.exists():
                     write_scan_local_bytes(scan_dir, parent_checkpoint, payload)
                     # A recovery copy must not appear newer than the review it copies.
                     os.utime(checkpoint_path, ns=(parent_modified, parent_modified))
-                if head_modified is None or head_modified < parent_modified or tied_observations:
+                if head_modified is None:
+                    head_path = scan_dir / "checkpoint-head.json"
                     write_scan_local_bytes(
                         scan_dir,
                         "checkpoint-head.json",
@@ -1170,6 +1028,8 @@ def merge_saved_results(
             del paths[relative]
             try:
                 captured = _capture_saved_source(scan_dir, relative, scan_id)
+                if relative == "checkpoint-head.json" and frozen_source_digests is None:
+                    parent_context["head"] = next(iter(captured))
                 paths.update({path: worker_id for path in captured})
             except (ContractError, OSError, ValueError) as exc:
                 if (scan_dir / relative).exists():
@@ -1247,6 +1107,14 @@ def merge_saved_results(
     source_order.update(selected_observations)
 
     drafts_by_path = {relative: draft for relative, draft, _ in sources}
+    if frozen_source_digests is not None and "canonical" in parent_context:
+        canonical = parent_context["canonical"]
+        parent = drafts_by_path[canonical]
+        parent_modified = source_order[canonical][1]
+        parent_is_canonical = True
+    if "head" in parent_context:
+        head = parent_context["head"]
+        parent_heads = [(source_order[head][1], f"checkpoints/{saved_heads[head]}")]
     latest_reducer_key = (
         (reducer["completed_at"] or "", reducer["id"], int(reducer["attempt"] or 0))
         if reducer is not None and latest_reducer in drafts_by_path
@@ -1344,7 +1212,7 @@ def merge_saved_results(
         or any(_is_source_order_snapshot(path) for path in source_digests)
         or allow_frozen_legacy_parent
     ):
-        _freeze_source_times(scan_dir, scan_id, source_digests, source_times)
+        _freeze_source_times(scan_dir, scan_id, source_digests, source_times, parent_context)
 
     target_kind = binding["allowedTargetKinds"][0]
     if (
@@ -1944,8 +1812,138 @@ def merge_saved_results(
             relative == "parent",
         )
 
+    terminal_findings: dict[str, list[dict[str, Any]]] = {}
+    projected_paths = {
+        relative
+        for relative, draft, owner in all_sources
+        if owner is None
+        and (
+            relative == "parent"
+            or relative == parent_context.get("canonical")
+            # The semantic tool schema forbids this host-owned projection field.
+            or draft["coverage"].get("mode") == binding["coverageMode"]
+        )
+    }
+    projected_parents = [draft for relative, draft, _ in all_sources if relative in projected_paths]
+
+    def same_published_finding(left: dict[str, Any], right: dict[str, Any]) -> bool:
+        if not valid_finding(left) or not valid_finding(right):
+            return False
+        return (
+            same_raw_value(_finding_content(left), _finding_content(right))
+            and (
+                "identity" not in left
+                or same_raw_value(_finding_identity(left), _finding_identity(right))
+            )
+            and same_raw_value(
+                {
+                    key: value
+                    for key, value in left.get("provenance", {}).items()
+                    if key not in ("previousFindings", "preservedIdentity")
+                },
+                {
+                    key: value
+                    for key, value in right.get("provenance", {}).items()
+                    if key not in ("previousFindings", "preservedIdentity")
+                },
+            )
+        )
+
+    def represented_by_parent(values: list[dict[str, Any]], draft: dict[str, Any]) -> bool:
+        remaining = [row for row in draft["findings"] if isinstance(row, dict)]
+        for value in values:
+            match = next(
+                (
+                    index
+                    for index, row in enumerate(remaining)
+                    if same_published_finding(value, row)
+                ),
+                None,
+            )
+            if match is None:
+                return False
+            remaining.pop(match)
+        return True
+
+    terminal_sources: set[str] = set()
+    for relative, draft, owner in all_sources:
+        if (
+            scan_mode == "deep"
+            and owner is None
+            and draft.get("complete") is not False
+            and all(valid_finding(value) for value in draft["findings"])
+        ):
+            terminal_sources.add(relative)
+            if relative not in projected_paths:
+                identified = copy.deepcopy(draft["findings"])
+                _ensure_finding_identities(identified)
+                terminal_findings[relative] = identified
+    pending_terminals = {
+        relative
+        for relative, values in terminal_findings.items()
+        if not any(represented_by_parent(values, draft) for draft in projected_parents)
+    }
+    terminal_parent_time = max(
+        (source_order[relative][1] for relative in pending_terminals or terminal_sources),
+        default=None,
+    )
+    pending_terminals = {
+        relative
+        for relative in pending_terminals
+        if source_order[relative][1] == terminal_parent_time
+    }
+    committed_parent = parent
+    if "head" in parent_context and not allow_frozen_legacy_parent:
+        head = parent_context["head"]
+        committed_parent = drafts_by_path[f"checkpoints/{saved_heads[head]}"]
+    current_findings = [
+        previous
+        for value in (committed_parent["findings"] if committed_parent else [])
+        if isinstance(value, dict)
+        for previous in _retained_findings(value)
+    ]
+    replaced_findings = [
+        value
+        for draft in projected_parents
+        for value in draft["findings"]
+        if isinstance(value, dict)
+        and (
+            pending_terminals
+            or (
+                terminal_sources
+                and not any(
+                    same_published_finding(value, previous) for previous in current_findings
+                )
+            )
+        )
+    ]
+
+    def replaced_parent_finding(relative: str, owner: str | None, value: Any) -> bool:
+        if owner is not None or relative in pending_terminals or not isinstance(value, dict):
+            return False
+        return any(same_published_finding(value, previous) for previous in replaced_findings)
+
+    terminal_worker_attempts: dict[str, int] = {}
+    if terminal_parent_time is not None:
+        for relative, _, owner in all_sources:
+            attempt, modified = source_order[relative]
+            if owner is not None and modified <= terminal_parent_time:
+                terminal_worker_attempts[owner] = max(
+                    terminal_worker_attempts.get(owner, attempt), attempt
+                )
+
+    def precedes_terminal_parent(relative: str, owner: str | None) -> bool:
+        attempt, modified = source_order[relative]
+        return terminal_parent_time is not None and (
+            modified < terminal_parent_time
+            or attempt < terminal_worker_attempts.get(owner, attempt)
+        )
+
+    finding_sources = [
+        source for source in all_sources if not precedes_terminal_parent(source[0], source[2])
+    ]
     # Publication chronology spans workers; attempt numbers only order one worker's revisions.
-    for source in sorted(all_sources, key=lambda item: finding_source_order(item)[2:]):
+    for source in sorted(finding_sources, key=lambda item: finding_source_order(item)[2:]):
         relative, draft, source_owner = source
         explicit_identity_counts = Counter(
             _semantic_identity_key(sibling, _finding_identity(sibling))
@@ -1958,6 +1956,7 @@ def merge_saved_results(
         for index, value in enumerate(draft["findings"]):
             if (
                 not isinstance(value, dict)
+                or replaced_parent_finding(relative, source_owner, value)
                 or not valid_finding(value)
                 or (
                     not (relative == "parent" and parent_is_canonical)
@@ -1969,6 +1968,11 @@ def merge_saved_results(
             scope = raw_scope(value)
             candidate = finding_candidate_id(value)
             scopes = [scope, (scope[0], candidate)] if candidate else [scope]
+            publication_identity = (
+                terminal_findings[relative][index]["identity"]
+                if relative in terminal_findings
+                else None
+            )
             matches = [
                 group
                 for group in {
@@ -1977,6 +1981,12 @@ def merge_saved_results(
                     for key, group in logical_rows.get(saved_scope, {}).items()
                 }.values()
                 if same_owner(owner, group["owner"])
+                and (
+                    publication_identity is None
+                    or group["identity"] is None
+                    or _semantic_identity_key(value, group["identity"])
+                    == _semantic_identity_key(value, publication_identity)
+                )
                 and (
                     (relative == "parent" and parent_is_canonical)
                     or group["identity"] is None
@@ -2102,7 +2112,9 @@ def merge_saved_results(
                         _finding_strength(observation[1]),
                     ),
                 )[1]
-            if "identity" in value and (match["identity"] is None or relative == "parent"):
+            if relative in terminal_findings:
+                match["identity"] = copy.deepcopy(terminal_findings[relative][index]["identity"])
+            elif "identity" in value and (match["identity"] is None or relative == "parent"):
                 match["identity"] = copy.deepcopy(_finding_identity(value))
             row_groups[(relative, index)] = match
             current_groups.append((index, match))
@@ -2264,6 +2276,10 @@ def merge_saved_results(
         for index, (value, normalized) in enumerate(
             zip(draft["findings"], normalized_findings, strict=True)
         ):
+            if precedes_terminal_parent(relative, worker_id) or replaced_parent_finding(
+                relative, worker_id, value
+            ):
+                continue
             _ensure_finding_identity(normalized)
             group = row_groups.get((relative, index))
             if group is not None and group["key"] in contained_groups:
@@ -2334,8 +2350,6 @@ def merge_saved_results(
             if worker_id:
                 provenance.setdefault("workerId", worker_id)
             group = row_groups.get((relative, index))
-            if group is not None and group["owner"] is not None and "parent_key" not in group:
-                provenance.setdefault("workerId", group["owner"])
             if group is not None and group["identity"] is not None:
                 finding.setdefault("identity", copy.deepcopy(group["identity"]))
             if worker_id is not None and "identity" not in finding:
@@ -2570,7 +2584,6 @@ def merge_saved_results(
     _ensure_finding_identities(identity_order)
 
     identities: dict[bytes, tuple[str, dict[str, Any] | None]] = {}
-    identity_owners: dict[bytes, Any] = {}
     retained_groups = {
         position: group for position, group in finding_positions.values() if group is not None
     }
@@ -2589,23 +2602,16 @@ def merge_saved_results(
             previous_variant != variant or distinct_reports(group, previous_group)
         ):
             finding.setdefault("provenance", {})["preservedIdentity"] = copy.deepcopy(identity)
-            if previous_variant == variant or (
-                _identity_candidate(finding)
-                and finding["provenance"].get("workerId") != identity_owners.get(key)
-            ):
-                base_instance = identity.get("instance", "saved")
-                suffix = 2
-                while True:
-                    identity["instance"] = f"{base_instance}-{suffix}"
-                    distinct = _semantic_identity_key(finding)
-                    if distinct not in reserved_identities:
-                        reserved_identities.add(distinct)
-                        break
-                    suffix += 1
-            else:
-                identity["instance"] = f"{identity.get('instance', 'saved')}-{variant[:16]}"
+            base_instance = identity.get("instance", "saved")
+            suffix = 2
+            while True:
+                identity["instance"] = f"{base_instance}-{suffix}"
+                distinct = _semantic_identity_key(finding)
+                if distinct not in reserved_identities:
+                    reserved_identities.add(distinct)
+                    break
+                suffix += 1
         identities[key] = (variant, group)
-        identity_owners[key] = finding["provenance"].get("workerId")
     for field in ("surfaces", "explicitExclusions", "deferred"):
         used: set[str] = set()
         items = coverage.setdefault(field, [])
@@ -2823,6 +2829,7 @@ def preserve_scan_results_locked(
         ).fetchall(),
         warnings,
         stopped=True,
+        scan_mode=scan["mode"],
         reason=(
             f"Scan {outcome}; saved findings and pending review were preserved. "
             f"{scan['failure_message'] or ''}"

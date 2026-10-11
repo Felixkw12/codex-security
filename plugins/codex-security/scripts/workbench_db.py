@@ -1520,6 +1520,7 @@ def complete_scan_locked(
                     ).fetchall(),
                     warnings,
                     stopped=False,
+                    scan_mode=scan["mode"],
                     reason="",
                 )
                 if merge_parent_draft

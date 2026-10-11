@@ -73,6 +73,38 @@ def recover(root: Path, module, workers, frozen=None):
     return result
 
 
+def test_legacy_frozen_source_order_without_parent_context_remains_readable(
+    tmp_path, saved_results
+):
+    finding = {
+        "ruleId": "fixture.review",
+        "identity": {"anchor": "review"},
+        "title": "Review",
+        "summary": "Synthetic evidence.",
+        "severity": {"level": "low"},
+        "confidence": {"level": "high", "rationale": "Synthetic evidence."},
+        "taxonomy": {"category": "other", "cwe": []},
+        "locations": [{"path": "src/example.py", "startLine": 1}],
+        "remediation": "Complete the review.",
+        "provenance": {"source": "local_plugin"},
+    }
+    write_saved_parent(tmp_path, saved_draft("identity-scan", findings=[finding]), 100)
+    first = recover(tmp_path, saved_results, [])
+    legacy_sources = dict(first[0]["scan"]["preservedSources"])
+    for relative in list(legacy_sources):
+        if not saved_results._is_source_order_snapshot(relative):
+            continue
+        record = json.loads((tmp_path / relative).read_text())
+        assert record.pop("parentContext")
+        digest = saved_results._digest(record)
+        legacy_path = f"source-order/{digest}.json"
+        (tmp_path / legacy_path).write_bytes(saved_results._encoded(record))
+        del legacy_sources[relative]
+        legacy_sources[legacy_path] = digest
+    replay = recover(tmp_path, saved_results, [], legacy_sources)
+    assert replay[1:] == first[1:]
+
+
 @pytest.mark.parametrize("field", ["disposition", "completeness"])
 def test_malformed_coverage_does_not_interrupt_saved_evidence(
     tmp_path: Path, saved_results, field: str
@@ -231,6 +263,45 @@ def test_empty_artifact_envelope_remains_a_recoverable_draft(tmp_path: Path, art
             environment={"CODEX_HOME": str(codex_home)},
         )
     assert manifest_path.read_bytes() == original
+
+
+def test_stopped_deep_recovery_uses_host_mode_for_terminal_replacement(tmp_path: Path):
+    state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    first = {
+        "ruleId": "fixture.review",
+        "identity": {"anchor": "first-review"},
+        "title": "First review",
+        "summary": "Earlier synthetic evidence.",
+        "severity": {"level": "low"},
+        "confidence": {"level": "high", "rationale": "Synthetic evidence."},
+        "taxonomy": {"category": "other", "cwe": []},
+        "locations": [{"path": "app.py", "startLine": 1}],
+        "remediation": "Complete the review.",
+        "provenance": {"source": "local_plugin"},
+    }
+    write_saved_parent(scan_dir, saved_draft(scan_id, findings=[first], complete=True), 100)
+    revised = {**first, "title": "Revised review", "summary": "Revised synthetic evidence."}
+    del revised["identity"]
+    checkpoint = write_checkpoint(
+        scan_dir / "checkpoints", saved_draft(scan_id, findings=[revised], complete=True)
+    )
+    os.utime(checkpoint, ns=(200, 200))
+    fail_deep_scan(state, codex_home, scan_id)
+    findings_path = scan_dir / "findings.json"
+    findings = json.loads(findings_path.read_text())["findings"]
+    assert [(row["title"], row["identity"]) for row in findings] == [
+        ("Revised review", {"anchor": "revised-review"})
+    ]
+    original = findings_path.read_bytes()
+    run_workbench(
+        state,
+        "recover-scan-results",
+        "--scan-id",
+        scan_id,
+        environment={"CODEX_HOME": str(codex_home)},
+    )
+    assert findings_path.read_bytes() == original
 
 
 @pytest.mark.parametrize("reason", ["Review remains.", "Unicode review: é \ud800"])

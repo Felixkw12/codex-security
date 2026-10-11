@@ -1,0 +1,405 @@
+import assert from "node:assert/strict";
+import { mkdir, writeFile, readdir, utimes } from "node:fs/promises";
+import path from "node:path";
+import test from "node:test";
+import {
+  draftApi,
+  draftFixture,
+  fixture,
+  interruptDraftWrite,
+} from "./scan-draft-recovery-fixture.ts";
+import {
+  type RecoveredFinding,
+  finding,
+  recoverAndFinalize,
+  dateDraftFiles,
+} from "./scan-identity-recovery-fixture.ts";
+
+for (const authored of [false, true]) {
+  for (const owner of [undefined, "reviewer"]) {
+    for (const changedCandidate of [false, true]) {
+      test(`parent and moved worker keep publication identities on frozen retry (authored=${authored}, owner=${owner ?? "omitted"}, changedCandidate=${changedCandidate})`, async (t) => {
+        const normal = await fixture(t, "deep");
+        const recovered = await fixture(t, "deep");
+        const first = finding("Review", {
+          ...(authored ? { identity: { anchor: "review" } } : {}),
+          provenance: {
+            source: "local_plugin",
+            ...(owner ? { workerId: owner } : {}),
+            ...(changedCandidate ? { candidateId: "candidate-a" } : {}),
+          },
+        });
+        const revised = {
+          ...first,
+          summary: "Second synthetic location.",
+          locations: [{ path: "src/example.py", startLine: 2 }],
+          provenance: { source: "local_plugin", candidateId: "candidate-b" },
+        };
+        for (const target of [normal, recovered]) {
+          await target.write({ ...target.draft(), findings: [first] });
+          await dateDraftFiles(target.root, 100);
+        }
+        const workerRoot = path.join(recovered.root, "reviewer");
+        await mkdir(workerRoot);
+        const worker = draftFixture(workerRoot, "worker");
+        await draftApi.saveScanDraftCheckpoint(
+          worker.context,
+          { ...worker.draft(), findings: [first] },
+          false,
+        );
+        await dateDraftFiles(workerRoot, 50);
+        await writeFile(
+          path.join(workerRoot, "result.json"),
+          JSON.stringify({ ...worker.draft(), findings: [revised] }),
+        );
+        await normal.write({
+          ...normal.draft({}, true),
+          findings: [
+            first,
+            {
+              ...revised,
+              provenance: { ...revised.provenance, workerId: "reviewer" },
+            },
+          ],
+        });
+        const result = await recoverAndFinalize(
+          normal,
+          recovered,
+          [
+            {
+              id: "reviewer",
+              kind: "discovery",
+              artifact_dir: workerRoot,
+              result_manifest_path: path.join(workerRoot, "result.json"),
+              attempt: 1,
+            },
+          ],
+          true,
+          true,
+        );
+        const byEvidence = (rows: RecoveredFinding[]) =>
+          new Map(rows.map((row) => [row.summary, row]));
+        assert.equal(result.normal.length, 2);
+        assert.equal(result.recovered.length, 2);
+        assert.deepEqual(
+          byEvidence(result.recovered),
+          byEvidence(result.normal),
+        );
+        assert.deepEqual(result.warnings, []);
+      });
+    }
+  }
+}
+
+for (const layout of ["standard", "deep"] as const) {
+  for (const scoped of [false, true]) {
+    for (const variant of [
+      "anonymous",
+      "authored",
+      "changed candidate",
+      "authored changed candidate",
+      "owned",
+      "authored owned",
+    ]) {
+      test(`${layout}: terminal replacement ${variant} matches frozen recovery (scoped=${scoped})`, async (t) => {
+        const normal = await fixture(t, layout);
+        const recovered = await fixture(t, layout);
+        if (scoped)
+          for (const target of [normal, recovered]) {
+            target.context.scope = "src";
+            (
+              target.context.targetContract!.scope as Record<string, unknown>
+            ).requiredIncludePaths = ["src"];
+          }
+        const initial = finding("First review", {
+          ...(variant.includes("authored")
+            ? { identity: { anchor: "authored-review" } }
+            : {}),
+          provenance: {
+            source: "local_plugin",
+            ...(variant.includes("candidate")
+              ? { candidateId: "candidate-a" }
+              : {}),
+            ...(variant.includes("owned") ? { workerId: "reviewer" } : {}),
+          },
+        });
+        const revised = {
+          ...initial,
+          title: "Revised review",
+          summary: "Revised synthetic evidence.",
+          provenance: {
+            ...initial.provenance,
+            ...(variant.includes("candidate")
+              ? { candidateId: "candidate-b" }
+              : {}),
+          },
+        };
+        for (const target of [normal, recovered]) {
+          await target.write({
+            ...target.draft({}, true),
+            findings: [initial],
+          });
+          await dateDraftFiles(target.root, 100);
+        }
+        await normal.write({ ...normal.draft({}, true), findings: [revised] });
+        await draftApi.saveScanDraftCheckpoint(
+          recovered.context,
+          { ...recovered.draft({}, true), findings: [revised] },
+          false,
+        );
+        const result = await recoverAndFinalize(
+          normal,
+          recovered,
+          [],
+          true,
+          true,
+          true,
+        );
+        const byEvidence = (rows: RecoveredFinding[]) =>
+          new Map(
+            rows.map(({ evidenceProvenance, ...row }) => [row.summary, row]),
+          );
+        assert.equal(result.recovered.length, result.normal.length);
+        assert.deepEqual(
+          byEvidence(result.recovered),
+          byEvidence(result.normal),
+        );
+        if (layout === "deep")
+          for (const row of [...result.normal, ...result.recovered]) {
+            assert.deepEqual(
+              (row.evidenceProvenance as { previousFindings: unknown[] })
+                .previousFindings,
+              [],
+            );
+          }
+        assert.deepEqual(result.warnings, []);
+      });
+    }
+  }
+}
+
+for (const scoped of [false, true]) {
+  for (const time of [99, 100, 101]) {
+    for (const cut of ["raw input", "committed head"] as const) {
+      test(`terminal Deep identity follows producer context at time ${time} (scoped=${scoped}, cut=${cut})`, async (t) => {
+        const normal = await fixture(t, "deep");
+        const recovered = await fixture(t, "deep");
+        if (scoped)
+          for (const f of [normal, recovered]) {
+            f.context.scope = "src";
+            (
+              f.context.targetContract!.scope as Record<string, unknown>
+            ).requiredIncludePaths = ["src"];
+          }
+        const first = finding("First review");
+        const revised = {
+          ...first,
+          title: "Revised review",
+          summary: "Revised synthetic evidence.",
+        };
+        for (const f of [normal, recovered]) {
+          await f.write({ ...f.draft(), findings: [first] });
+          await dateDraftFiles(f.root, 100);
+        }
+        const checkpoints = path.join(recovered.root, "checkpoints");
+        const original = new Set(await readdir(checkpoints));
+        await normal.write({ ...normal.draft({}, true), findings: [revised] });
+        const input = { ...recovered.draft({}, true), findings: [revised] };
+        if (cut === "raw input")
+          await draftApi.saveScanDraftCheckpoint(
+            recovered.context,
+            input,
+            false,
+          );
+        else
+          await interruptDraftWrite(
+            path.join(recovered.root, "findings.json"),
+            () => recovered.write(input),
+          );
+        for (const name of await readdir(checkpoints))
+          if (!original.has(name))
+            await utimes(path.join(checkpoints, name), time, time);
+        if (cut === "committed head")
+          await utimes(
+            path.join(recovered.root, "checkpoint-head.json"),
+            time,
+            time,
+          );
+        const result = await recoverAndFinalize(
+          normal,
+          recovered,
+          [],
+          true,
+          true,
+          true,
+        );
+        assert.equal(result.normal.length, 1);
+        assert.deepEqual(result.recovered, result.normal);
+        assert.deepEqual(result.warnings, []);
+      });
+    }
+  }
+}
+
+for (const cut of ["raw input", "committed head"] as const) {
+  test(`later partial Deep evidence survives the terminal clock tie (${cut})`, async (t) => {
+    const normal = await fixture(t, "deep");
+    const recovered = await fixture(t, "deep");
+    const terminal = finding("Terminal review");
+    const later = finding("Later independent review", {
+      locations: [{ path: "src/later.py", startLine: 2 }],
+    });
+    for (const f of [normal, recovered])
+      await f.write({ ...f.draft({}, true), findings: [terminal] });
+    const pending = {
+      deferred: [{ id: "later-work", reason: "More review remains." }],
+    };
+    await normal.write({ ...normal.draft(pending), findings: [later] });
+    if (cut === "raw input")
+      await draftApi.saveScanDraftCheckpoint(
+        recovered.context,
+        { ...recovered.draft(pending), findings: [later] },
+        false,
+      );
+    else
+      await recovered.write({ ...recovered.draft(pending), findings: [later] });
+    for (const f of [normal, recovered]) await dateDraftFiles(f.root, 100);
+    const result = await recoverAndFinalize(
+      normal,
+      recovered,
+      [],
+      true,
+      true,
+      true,
+    );
+    const byId = (rows: RecoveredFinding[]) =>
+      new Map(rows.map((row) => [row.findingId, row]));
+    assert.equal(result.normal.length, 2);
+    assert.deepEqual(byId(result.recovered), byId(result.normal));
+    assert.deepEqual(result.warnings, []);
+  });
+}
+
+test("a later worker attempt survives the terminal parent's clock tie", async (t) => {
+  const normal = await fixture(t, "deep");
+  const recovered = await fixture(t, "deep");
+  const workerRoot = path.join(recovered.root, "reviewer");
+  const archiveRoot = path.join(workerRoot, "attempts", "attempt-1");
+  await mkdir(archiveRoot, { recursive: true });
+  const archived = draftFixture(archiveRoot, "worker");
+  await archived.write({
+    ...archived.draft({}, true),
+    findings: [finding("Archived worker review")],
+  });
+  await dateDraftFiles(archiveRoot, 99);
+  const terminal = finding("Terminal review");
+  for (const f of [normal, recovered]) {
+    await f.write({ ...f.draft({}, true), findings: [terminal] });
+    for (const name of [
+      "findings.json",
+      "coverage.json",
+      "scan-manifest.json",
+      "checkpoint-head.json",
+    ])
+      await utimes(path.join(f.root, name), 100, 100);
+    await dateDraftFiles(path.join(f.root, "checkpoints"), 100);
+  }
+  const worker = draftFixture(workerRoot, "worker");
+  const later = finding("Later worker review", {
+    locations: [{ path: "src/later.py", startLine: 2 }],
+  });
+  await worker.write({ ...worker.draft(), findings: [later] });
+  await dateDraftFiles(path.join(workerRoot, "checkpoints"), 100);
+  for (const name of ["result.json", "checkpoint-head.json"])
+    await utimes(path.join(workerRoot, name), 100, 100);
+  await normal.write({
+    ...normal.draft({}, true),
+    findings: [
+      terminal,
+      { ...later, provenance: { ...later.provenance, workerId: "reviewer" } },
+    ],
+  });
+  const result = await recoverAndFinalize(
+    normal,
+    recovered,
+    [
+      {
+        id: "reviewer",
+        kind: "discovery",
+        artifact_dir: workerRoot,
+        result_manifest_path: path.join(workerRoot, "result.json"),
+        attempt: 2,
+      },
+    ],
+    true,
+    true,
+  );
+  assert.equal(result.normal.length, 2);
+  const byId = (rows: RecoveredFinding[]) =>
+    new Map(rows.map((row) => [row.findingId, row]));
+  assert.deepEqual(byId(result.recovered), byId(result.normal));
+  assert.deepEqual(result.warnings, []);
+});
+
+for (const reversed of [false, true]) {
+  test(`tied legacy surface observations retain distinct rows and frozen IDs (reversed=${reversed})`, async (t) => {
+    const normal = await fixture(t, "deep");
+    const recovered = await fixture(t, "deep");
+    const surfaces = ["First legacy surface", "Second legacy surface"].map(
+      (label) => ({
+        id: "legacy-shared",
+        label,
+        disposition: "needs_follow_up",
+        receiptRefs: [],
+      }),
+    );
+    if (reversed) surfaces.reverse();
+    const deferred = [
+      {
+        id: "review",
+        reason: "Review remains.",
+        surfaceIds: ["legacy-shared"],
+      },
+    ];
+    await normal.write(
+      normal.draft({
+        surfaces: surfaces.map((row, index) => ({
+          ...row,
+          id: index === 0 ? row.id : "legacy-second",
+        })),
+        deferred,
+      }),
+    );
+    await recovered.write(recovered.draft());
+    await draftApi.saveScanDraftCheckpoint(
+      recovered.context,
+      recovered.draft({ surfaces, deferred }),
+      false,
+    );
+    await draftApi.saveScanDraftCheckpoint(
+      recovered.context,
+      recovered.draft({}, true),
+      false,
+    );
+    await dateDraftFiles(recovered.root, 100);
+    const result = await recoverAndFinalize(normal, recovered, [], true, true);
+    const rows = result.recoveredCoverage.surfaces as Array<{
+      id: string;
+      label: string;
+    }>;
+    assert.deepEqual(
+      rows.map((row) => row.label).sort(),
+      surfaces.map((row) => row.label).sort(),
+    );
+    assert.equal(new Set(rows.map((row) => row.id)).size, 2);
+    assert.deepEqual(result.warnings, []);
+    await draftApi.saveScanDraftCheckpoint(
+      recovered.context,
+      recovered.draft(),
+      false,
+    );
+    await dateDraftFiles(recovered.root, 100);
+    const replay = await recoverAndFinalize(normal, recovered, [], true, true);
+    assert.deepEqual(replay.recoveredCoverage.surfaces, rows);
+  });
+}
