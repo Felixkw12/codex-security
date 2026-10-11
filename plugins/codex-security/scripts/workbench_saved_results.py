@@ -232,6 +232,7 @@ def _capture_saved_source(
     kind: str | None = None,
     snapshot_head: bool = True,
     write: bool = True,
+    created_paths: set[str] | None = None,
 ) -> dict[str, tuple[str, int]]:
     if not snapshot_head or Path(relative).name != "checkpoint-head.json":
         _, digest, observed = _read_saved_result(scan_dir, relative, scan_id, kind=kind)
@@ -245,6 +246,8 @@ def _capture_saved_source(
     snapshot = (directory / "checkpoint-heads" / f"{digest}.json").as_posix()
     # Capture the selected file even if the worker created it after directory enumeration.
     if write and not (scan_dir / snapshot).exists():
+        if created_paths is not None:
+            created_paths.add(snapshot)
         write_scan_local_bytes(scan_dir, snapshot, _encoded(observation))
     return {
         snapshot: (digest, int(observation["observedAtNs"])),
@@ -313,7 +316,12 @@ def _frozen_source_times(scan_dir: Path, scan_id: str, sources: dict[str, str]) 
 
 
 def _freeze_source_times(
-    scan_dir: Path, scan_id: str, sources: dict[str, str], times: dict[str, int]
+    scan_dir: Path,
+    scan_id: str,
+    sources: dict[str, str],
+    times: dict[str, int],
+    *,
+    created_paths: set[str] | None = None,
 ) -> None:
     # Identical result rewrites must not change the order of frozen review evidence.
     observations = {
@@ -327,6 +335,8 @@ def _freeze_source_times(
     digest = _digest(record)
     path = f"source-order/{digest}.json"
     if not (scan_dir / path).exists():
+        if created_paths is not None:
+            created_paths.add(path)
         write_scan_local_bytes(scan_dir, path, _encoded(record))
     if _read_saved_result(scan_dir, path, scan_id)[1] != digest:
         raise ContractError("saved source ordering does not match its digest")
@@ -1135,6 +1145,7 @@ def merge_saved_results(
     frozen_model_source: str | None = None,
     selected_model_source: list[str] | None = None,
     project_worker_coverage: bool = False,
+    created_paths: set[str] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None:
     """Read only bound parent/worker files; return an unsealed loss-preserving union."""
     initial_warnings = set(warnings)
@@ -1190,6 +1201,8 @@ def merge_saved_results(
                 parent_checkpoint = f"checkpoints/{parent_digest}.json"
                 checkpoint_path = scan_dir / parent_checkpoint
                 if not checkpoint_path.exists():
+                    if created_paths is not None:
+                        created_paths.add(parent_checkpoint)
                     write_scan_local_bytes(scan_dir, parent_checkpoint, payload)
                     # A recovery copy must not appear newer than the review it copies.
                     os.utime(checkpoint_path, ns=(parent_modified, parent_modified))
@@ -1201,7 +1214,9 @@ def merge_saved_results(
                     )
                     os.utime(head_path, ns=(parent_modified, parent_modified))
                 if frozen_source_digests is not None:
-                    captured = _capture_saved_source(scan_dir, "checkpoint-head.json", scan_id)
+                    captured = _capture_saved_source(
+                        scan_dir, "checkpoint-head.json", scan_id, created_paths=created_paths
+                    )
                     frozen_source_digests = {
                         **frozen_source_digests,
                         parent_checkpoint: parent_digest,
@@ -1286,7 +1301,9 @@ def merge_saved_results(
                 continue
             del paths[relative]
             try:
-                captured = _capture_saved_source(scan_dir, relative, scan_id)
+                captured = _capture_saved_source(
+                    scan_dir, relative, scan_id, created_paths=created_paths
+                )
                 paths.update({path: worker_id for path in captured})
             except (ContractError, OSError, ValueError) as exc:
                 if (scan_dir / relative).exists():
@@ -1468,7 +1485,9 @@ def merge_saved_results(
         or any(_is_source_order_snapshot(path) for path in source_digests)
         or allow_frozen_legacy_parent
     ):
-        _freeze_source_times(scan_dir, scan_id, source_digests, source_times)
+        _freeze_source_times(
+            scan_dir, scan_id, source_digests, source_times, created_paths=created_paths
+        )
 
     target_kind = binding["allowedTargetKinds"][0]
     if (
@@ -1526,6 +1545,13 @@ def merge_saved_results(
                 model = None
             model_checks[relative] = model
         return model_checks[relative]
+
+    if "threatModel" in manifest["scan"]:
+        model = recovered_model("parent", manifest["scan"], None)
+        if model is None:
+            manifest["scan"].pop("threatModel")
+        else:
+            manifest["scan"]["threatModel"] = model
 
     if frozen_model_source is not None:
         # Publication retries retain a valid choice from the frozen source set.
@@ -2344,7 +2370,9 @@ def _snapshot_published_outputs(
 
 
 def _restore_published_outputs(
-    scan_dir: Path, snapshots: dict[str, tuple[bytes, os.stat_result] | None]
+    scan_dir: Path,
+    snapshots: dict[str, tuple[bytes, os.stat_result] | None],
+    created_paths: set[str] | None = None,
 ) -> None:
     for relative, snapshot in snapshots.items():
         if snapshot is None:
@@ -2355,16 +2383,19 @@ def _restore_published_outputs(
             contents, metadata = snapshot
             write_scan_local_bytes(scan_dir, relative, contents)
             os.utime(scan_dir / relative, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+    for relative in sorted(created_paths or ()):
+        _remove_scan_local_file_if_exists(scan_dir, relative)
 
 
 def preserve_deep_deadline_draft(
-    db: Any, connection: Any, scan: Any
-) -> tuple[Path, dict[str, tuple[bytes, os.stat_result] | None]]:
+    db: Any, connection: Any, scan: Any, *, allow_empty: bool = False
+) -> tuple[Path, dict[str, tuple[bytes, os.stat_result] | None], set[str]] | None:
     """Recover a settled, zero-accepted Deep deadline without sealing the parent."""
     scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
     snapshots = _snapshot_published_outputs(scan_dir, (*_PUBLISHED_OUTPUTS, "checkpoint-head.json"))
     warnings = json.loads(scan["completion_warnings_json"])
     binding = db.workbench_completion_binding(scan, db.now())
+    created_paths: set[str] = set()
     try:
         documents = merge_saved_results(
             scan_dir,
@@ -2377,13 +2408,21 @@ def preserve_deep_deadline_draft(
             warnings,
             stopped=True,
             project_worker_coverage=True,
+            created_paths=created_paths,
             reason=(
                 "The configured discovery time limit elapsed before any source review completed. "
                 "Saved findings and pending review were preserved without a completed reduction."
             ),
         )
         if documents is None:
-            raise ContractError("Deep Scan deadline has no saved parent draft.")
+            if not allow_empty:
+                raise ContractError("Deep Scan deadline has no saved parent draft.")
+            _restore_published_outputs(scan_dir, snapshots, created_paths)
+            connection.execute(
+                "UPDATE scans SET completion_warnings_json = ? WHERE id = ?",
+                (json.dumps(list(dict.fromkeys(warnings))), scan["id"]),
+            )
+            return None
         documents[0]["scan"].pop("complete", None)
         # Reuse stopped-result recovery's per-record validation, scope checks,
         # source lineage, and receipt validation before admitting this draft.
@@ -2417,9 +2456,9 @@ def preserve_deep_deadline_draft(
             (json.dumps(list(dict.fromkeys(warnings))), scan["id"]),
         )
     except BaseException:
-        _restore_published_outputs(scan_dir, snapshots)
+        _restore_published_outputs(scan_dir, snapshots, created_paths)
         raise
-    return scan_dir, snapshots
+    return scan_dir, snapshots, created_paths
 
 
 def preserve_scan_results_locked(

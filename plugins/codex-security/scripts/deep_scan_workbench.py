@@ -1589,7 +1589,9 @@ def finish_deep_scan_locked(
     if len(set(omitted_worker_ids)) != len(omitted_worker_ids):
         raise SystemExit("Omitted Deep Scan worker IDs must be unique.")
     promotion: tuple[Path, Path, Path | None] | None = None
-    deadline_publication: tuple[Path, dict[str, tuple[bytes, os.stat_result] | None]] | None = None
+    deadline_publication: (
+        tuple[Path, dict[str, tuple[bytes, os.stat_result] | None], set[str]] | None
+    ) = None
     connection.execute("BEGIN IMMEDIATE")
     try:
         run = require_deep_scan_run(connection, scan_id)
@@ -1825,9 +1827,9 @@ def finish_deep_scan_locked(
                 kind="file",
             )
             promotion = promote_staged_file(staged_manifest_path, manifest_path)
-        if zero_discovery_deadline and standard_scan_manifest:
+        if zero_discovery_deadline:
             deadline_publication = saved_results.preserve_deep_deadline_draft(
-                dependencies(), connection, scan
+                dependencies(), connection, scan, allow_empty=not standard_scan_manifest
             )
         timestamp = dependencies().now()
         connection.execute(
