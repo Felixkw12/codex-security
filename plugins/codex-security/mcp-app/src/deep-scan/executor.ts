@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   accessSync,
   constants as fsConstants,
@@ -29,6 +30,7 @@ import {
   profileConfigOverrides,
 } from "../../../scripts/codex_profile.mjs";
 import { executablePathForSpawn } from "./executable-path.js";
+import { writePrivateFile } from "./artifacts.js";
 import {
   classifyCodexWorkerError,
   DeepScanNonRetryableError,
@@ -70,6 +72,7 @@ export interface CodexSdkWorkerArtifactContext {
   scanId: string;
   scope?: string;
   scanRoot?: string;
+  includePaths?: readonly string[];
   pythonCommand?: string;
 }
 
@@ -162,8 +165,9 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
             ...(isRecord(workerConfig.mcp_servers)
               ? workerConfig.mcp_servers
               : {}),
+            // A disabled server still needs a valid transport during native resolution.
             "codex-security": { command: "node", enabled: false },
-            ...this.compactArtifactServer(request),
+            ...(await this.compactArtifactServer(request)),
           },
           ...workerSubagentConfig(
             request.subagents,
@@ -351,16 +355,18 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
     }
   }
 
-  private compactArtifactServer(request: CodexWorkerRequest): Record<
-    string,
-    {
-      command: string;
-      args: string[];
-      env: Record<string, string>;
-      required: true;
-      startup_timeout_sec: number;
-      tool_timeout_sec: number;
-    }
+  private async compactArtifactServer(request: CodexWorkerRequest): Promise<
+    Record<
+      string,
+      {
+        command: string;
+        args: string[];
+        env: Record<string, string>;
+        required: true;
+        startup_timeout_sec: number;
+        tool_timeout_sec: number;
+      }
+    >
   > {
     const scan = this.modelSettings.artifactContext;
     if (!scan) return {};
@@ -386,6 +392,17 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       );
     }
 
+    const includePathsFile =
+      scan.includePaths === undefined
+        ? undefined
+        : resolve(dirname(request.promptPath), `scope-${randomUUID()}.json`);
+    if (includePathsFile !== undefined) {
+      // Keep host-bound inputs beside the prompt, outside the worker's output root.
+      await writePrivateFile(
+        includePathsFile,
+        JSON.stringify(scan.includePaths),
+      );
+    }
     return {
       // Keep every qualified worker tool within Codex's existing name limit.
       cs_artifacts: {
@@ -404,6 +421,9 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           ...(scan.scope !== undefined
             ? { CODEX_SECURITY_SCOPE: scan.scope }
             : {}),
+          ...(includePathsFile === undefined
+            ? {}
+            : { CODEX_SECURITY_INCLUDE_PATHS_FILE: includePathsFile }),
           ...(scan.pythonCommand !== undefined
             ? { CODEX_SECURITY_PYTHON_COMMAND: scan.pythonCommand }
             : {}),

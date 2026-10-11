@@ -1,4 +1,6 @@
 import { closeSync, readFileSync, existsSync, realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+export { parseCanonicalScanDraft } from "./src/artifact-scan-draft.js";
 import { parseArgs } from "node:util";
 import { isMainThread, parentPort, workerData } from "node:worker_threads";
 import { resolveSecurityMdCommand } from "./src/helpers/resolve-security-md";
@@ -16,8 +18,6 @@ import { bindRepoScopesCommand } from "./src/helpers/bind-repo-scopes";
 import { escapeControls, stringifyJson } from "./src/helpers/json";
 import { decodeUtf8 } from "./src/helpers/utf8";
 
-import { fileURLToPath } from "node:url";
-export { parseCanonicalScanDraft } from "./src/artifact-scan-draft.js";
 export { resumeSelectedDeepScan } from "./src/deep-scan/finalization.js";
 
 // Importing the bundled helper from the SDK does not invoke its CLI adapter.
@@ -29,12 +29,14 @@ if (
   invokedPath &&
   existsSync(invokedPath) &&
   realpathSync(invokedPath) === realpathSync(entryPath)
-)
-  runHelper();
+) {
+  if (isMainThread) runHelper();
+  else parentPort!.postMessage(normalizeCandidateBatch(workerData));
+}
 
 function runHelper(): void {
-  let commandLine = isMainThread ? process.argv.slice(2) : [];
-  if (isMainThread && process.platform === "win32") {
+  let commandLine = process.argv.slice(2);
+  if (process.platform === "win32") {
     const original = windowsBinding().windowsArguments();
     commandLine = original
       .slice(original.length - commandLine.length)
@@ -75,9 +77,7 @@ function runHelper(): void {
     "read-severity-classification":
       "Usage: read-severity-classification --scan-id <id>\nReads a JSON object from stdin with an absolute stateDirectory. Reads saved assessments without updating the database.",
   };
-  if (!isMainThread) {
-    parentPort!.postMessage(normalizeCandidateBatch(workerData));
-  } else if (command === "resolve-security-md") {
+  if (command === "resolve-security-md") {
     process.exitCode = resolveSecurityMdCommand(args, posixHome);
   } else if (command === "normalize-candidates") {
     process.exitCode = normalizeCandidatesCommand(args, posixHome);

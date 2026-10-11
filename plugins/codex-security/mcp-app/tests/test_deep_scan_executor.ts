@@ -1,6 +1,8 @@
+import { testRestoredPrivateProfileHomes } from "./deep_scan_private_profile_cases.ts";
 import { testWorkerCancellation } from "./deep_scan_cancellation_cases.ts";
 import { testHome } from "./deep_scan_home_case.ts";
 import { testReconstructedWorkers } from "./deep_scan_reconstructed_cases.ts";
+import { jsonLineInputSource } from "./support/json-line-input-source.ts";
 import { readJson, writeJson } from "./support/json.ts";
 import { randomUUID } from "node:crypto";
 import { loadWorkbenchProcess } from "./support/workbench-process.ts";
@@ -127,6 +129,7 @@ const deniedWorkerPermissionProfile = {
 
 try {
   testCodeModeFrameDiagnosticBoundaries();
+  await testLargeScopeTransport();
   await testOpenAiCredentialsReachWorker();
   await testWorkerCancellation({
     CodexSdkWorkerExecutor,
@@ -149,7 +152,14 @@ try {
     deniedWorkerPermissionProfile,
     restoreEnv,
   });
-  await testRestoredPrivateProfileHomes();
+  await testRestoredPrivateProfileHomes({
+    CodexSdkWorkerExecutor,
+    captureDeepScanExecutionSettings,
+    restoredDeepScanWorkerSettings,
+    fakeCodexFixture,
+    workerRequest,
+    emptyWorkerPermissionProfile,
+  });
   await testCompletedWorkerSettlesWithoutWaitingForProcessExit();
   if (process.platform !== "win32") {
     await testDeepScanContextSnapshots({
@@ -1261,6 +1271,7 @@ env_key = "CODEX_API_KEY"
         `CAPTURE_SYNTHETIC_OPENAI_AUTH\n${virtualenv === undefined ? "" : "CAPTURE_SYNTHETIC_PYTHON\n"}`,
       );
       const executor = new CodexSdkWorkerExecutor({
+        model: "gpt-daybreak-blue-latest",
         parentSandbox: trustedParentSandbox,
       });
       for (const kind of ["discovery", "dedup"] as const) {
@@ -1283,6 +1294,11 @@ env_key = "CODEX_API_KEY"
             runtimeEnvironment.LD_LIBRARY_PATH,
           );
           assert.equal(invocation.codexHome, fixture.root);
+          assertFlagPair(
+            invocation.argv,
+            "--model",
+            "gpt-daybreak-blue-latest",
+          );
           assert.deepEqual(invocation.runtimeEnvironment, runtimeEnvironment);
           if (virtualenv !== undefined) {
             assert.equal(invocation.pythonPrefix, virtualenv);
@@ -1294,6 +1310,7 @@ env_key = "CODEX_API_KEY"
           for (const [name, value] of Object.entries(runtimeEnvironment)) {
             assert.equal(process.env[name], value);
           }
+
           assert.equal(
             invocation.openaiAuthentication.CODEX_API_KEY,
             entry.expected,
@@ -1821,6 +1838,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               pluginRoot: path.join(fixture.root, `plugin-${index}`),
               repoRoot: fixture.root,
               scanId: `fixture-scan-${modelSettings.model ?? "inherited"}`,
+              includePaths:
+                index % 2 === 0
+                  ? ["api", `background jobs ${index}`]
+                  : undefined,
               pythonCommand: `${helperPython}-${index} `,
             },
           }),
@@ -1925,6 +1946,12 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 codex_security_deep_scan_worker:
                   workerConfigurations[index].permissionProfile,
               },
+            );
+            assert.equal(
+              workerLaunch.args.some((arg) =>
+                arg.startsWith("permissions.codex_security_policy"),
+              ),
+              false,
             );
             assert.equal(
               workerLaunch.environment!.CODEX_SECURITY_KNOWLEDGE_BASE,
@@ -2077,6 +2104,8 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             assert.equal(invocation.python, python);
             assertConfigOverrides(invocation.argv, {
               "mcp_servers.cs_artifacts.command": process.execPath,
+              "mcp_servers.cs_artifacts.env.CODEX_SECURITY_INCLUDE_PATHS_JSON":
+                undefined,
               "mcp_servers.cs_artifacts.env.CODEX_SECURITY_PYTHON_COMMAND": `${helperPython}-${index} `,
               "mcp_servers.cs_artifacts.args.0": path.join(
                 fixture.root,
@@ -2089,6 +2118,21 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               "mcp_servers.cs_artifacts.env.CODEX_SECURITY_ARTIFACT_LAYOUT":
                 kind === "dedup" ? "reducer" : "worker",
             });
+            const servers = nativeConfigOverrides(invocation.argv)
+              .map((value) => parseToml(value))
+              .find((value) => value["mcp_servers"])!["mcp_servers"] as Record<
+              string,
+              { env: Record<string, string> }
+            >;
+            const scopeFile =
+              servers["cs_artifacts"]!.env["CODEX_SECURITY_INCLUDE_PATHS_FILE"];
+            if (index % 2 === 0) {
+              assert.ok(scopeFile && path.isAbsolute(scopeFile));
+              assert.deepEqual(JSON.parse(await readFile(scopeFile, "utf8")), [
+                "api",
+                `background jobs ${index}`,
+              ]);
+            } else assert.equal(scopeFile, undefined);
             assert.equal(process.env.PYTHON, python);
             assert.equal(
               invocation.deepConfigPath,
@@ -2484,6 +2528,129 @@ async function testZeroSubagentsPreservesHostRestrictions() {
       assertWorkerSubagentPolicy(invocation.argv, 0);
       assertReadOnlyWorkerPolicy(invocation.argv);
     });
+  }
+}
+
+async function testLargeScopeTransport() {
+  const names = [
+    "CODEX_CLI_PATH",
+    "CODEX_HOME",
+    "CODEX_SECURITY_CONFIG_PATH",
+    "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+    "FAKE_CODEX_MARKER",
+  ];
+  const saved = names.map((name) => [name, process.env[name]] as const);
+  const originalSpawn = childProcess.spawn;
+  const fixture = await fakeCodexFixture();
+  const scanIds = [randomUUID(), randomUUID()];
+  try {
+    process.env.CODEX_CLI_PATH = process.execPath;
+    process.env.CODEX_HOME = fixture.root;
+    delete process.env.CODEX_SECURITY_CONFIG_PATH;
+    delete process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
+    childProcess.spawn = ((
+      command: string,
+      args: readonly string[],
+      options: SpawnOptions,
+    ) =>
+      originalSpawn(command, [fixture.executablePath, ...args], {
+        ...options,
+        env: {
+          ...options.env,
+          FAKE_CODEX_MARKER: path.join(
+            String(options.cwd ?? args[args.indexOf("--cd") + 1]),
+            "invocation.json",
+          ),
+          FAKE_CODEX_PREFLIGHT_MARKER: path.join(
+            String(options.cwd),
+            "preflight.json",
+          ),
+        },
+      })) as typeof childProcess.spawn;
+    syncBuiltinESMExports();
+    for (const kind of ["discovery", "dedup"] as const) {
+      for (const resumed of [false, true]) {
+        let control: number[] = [];
+        for (const count of [2, 16384]) {
+          const sizes = await Promise.all(
+            scanIds.map(async (scanId, index) => {
+              const workerRoot = path.join(
+                fixture.root,
+                `scan-${index} café`,
+                `${kind}-${resumed}`,
+              );
+              const output = path.join(workerRoot, "output");
+              const prompt = path.join(workerRoot, "prompt.md");
+              await mkdir(output, { recursive: true });
+              await writeFile(prompt, "CAPTURE_SCOPE_INPUT");
+              const includePaths = Array.from(
+                { length: count },
+                (_, row) =>
+                  `scan-${index}/background jobs/café-${row}-${"a".repeat(110)}`,
+              );
+              const executor = new CodexSdkWorkerExecutor({
+                parentSandbox: trustedParentSandbox,
+                artifactContext: {
+                  pluginRoot: fixture.root,
+                  repoRoot: fixture.root,
+                  scanId,
+                  scope: ".",
+                  includePaths,
+                },
+              });
+              await executor.run(
+                workerRequest(prompt, output, {
+                  kind,
+                  ...(resumed
+                    ? { resumeThreadId: `scope-thread-${index}` }
+                    : {}),
+                  artifactContext: {
+                    root: output,
+                    layout: kind === "dedup" ? "reducer" : "worker",
+                    ...(kind === "dedup"
+                      ? {
+                          deepReducer: {
+                            scanRoot: workerRoot,
+                            claimedWorkers: [
+                              {
+                                id: "source-worker",
+                                resultPath: path.join(
+                                  workerRoot,
+                                  "accepted.json",
+                                ),
+                              },
+                            ],
+                          },
+                        }
+                      : {}),
+                  },
+                }),
+              );
+              const invocation = await readJson(output, "invocation.json");
+              assert.deepEqual(invocation.scopeInput.paths, includePaths);
+              assert.equal(path.isAbsolute(invocation.scopeInput.file), true);
+              assert.equal(invocation.argv.includes("resume"), resumed);
+              const argument = nativeConfigOverrides(invocation.argv).find(
+                (value) => value.startsWith("mcp_servers="),
+              )!;
+              assert.ok(argument);
+              return Buffer.byteLength(argument);
+            }),
+          );
+          if (count === 2) control = sizes;
+          else
+            assert.deepEqual(
+              sizes,
+              control,
+              "scope size must not increase the native command arguments",
+            );
+        }
+      }
+    }
+  } finally {
+    childProcess.spawn = originalSpawn;
+    syncBuiltinESMExports();
+    for (const [name, value] of saved) restoreEnv(name, value);
   }
 }
 
@@ -3349,18 +3516,7 @@ const preflightMarkerPath = process.env.FAKE_CODEX_PREFLIGHT_MARKER ?? ${JSON.st
 if (process.argv.includes('app-server')) {
   const preflight = { argv: process.argv.slice(2), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, runnerTrackingId: process.env.RUNNER_TRACKING_ID, libraryPath: process.env.LD_LIBRARY_PATH, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), requests: [] };
   writeFileSync(preflightMarkerPath, JSON.stringify(preflight));
-  let buffer = '';
-  process.stdin.setEncoding('utf8');
-  process.stdin.on('data', (chunk) => {
-    buffer += chunk;
-    while (true) {
-      const newline = buffer.indexOf('\\n');
-      if (newline < 0) return;
-      const line = buffer.slice(0, newline).trim();
-      buffer = buffer.slice(newline + 1);
-      if (!line) continue;
-      const message = JSON.parse(line);
-      if (message.method === 'initialized') continue;
+${jsonLineInputSource(`      if (message.method === 'initialized') continue;
       if (message.method === 'config/read' || message.method === 'permissionProfile/list') {
         preflight.requests.push({ method: message.method, cwd: message.params?.cwd });
         writeFileSync(preflightMarkerPath, JSON.stringify(preflight));
@@ -3380,12 +3536,19 @@ if (process.argv.includes('app-server')) {
         process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, error: { code: -32601, message: 'Method not found' } }) + '\\n');
         continue;
       }
-      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, result }) + '\\n');
-    }
-  });
+      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, result }) + '\\n');`)}
   process.stdin.on('end', () => process.exit(0));
 } else {
 const stdin = (await process.stdin.toArray()).join('');
+let scopeInput;
+if (stdin.includes('CAPTURE_SCOPE_INPUT')) {
+  const { parse } = await import(${JSON.stringify(import.meta.resolve("smol-toml"))});
+  const configuration = process.argv.flatMap((arg, index) => arg === '--config' || arg === '-c' ? [parse(process.argv[index + 1])] : []).findLast(value => value.mcp_servers?.cs_artifacts);
+  const environment = configuration.mcp_servers.cs_artifacts.env;
+  const file = environment.CODEX_SECURITY_INCLUDE_PATHS_FILE;
+  scopeInput = { file, paths: JSON.parse(file ? readFileSync(file, 'utf8') : environment.CODEX_SECURITY_INCLUDE_PATHS_JSON) };
+}
+
 const profileIndex = process.argv.indexOf('--profile');
 const profileContents = profileIndex === -1 ? undefined : readFileSync(join(process.env.CODEX_HOME, process.argv[profileIndex + 1] + '.config.toml'), 'utf8');
 const openaiAuthentication = stdin.includes('CAPTURE_SYNTHETIC_OPENAI_AUTH') ? { OPENAI_API_KEY: process.env.OPENAI_API_KEY, CODEX_API_KEY: process.env.CODEX_API_KEY } : undefined;
@@ -3399,7 +3562,7 @@ if (pythonProbe && pythonProbe.status !== 0) throw new Error(pythonProbe.stderr 
 const pythonRuntime = pythonProbe ? JSON.parse(pythonProbe.stdout) : undefined;
 const knowledgePath = stdin.includes('synthetic worker configuration fixture') ? process.env.CODEX_SECURITY_KNOWLEDGE_BASE : undefined;
 const knowledgeDocuments = knowledgePath === undefined ? undefined : Object.fromEntries(readdirSync(knowledgePath).map(name => [name, readFileSync(join(knowledgePath, name), 'utf8')]));
-writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ executable: process.execPath, codexCliPath: process.env.CODEX_CLI_PATH, scanValue: process.env.FAKE_CODEX_SCAN_VALUE, argv: process.argv.slice(2), stdin, cwd: process.cwd(), knowledgePath, knowledgeDocuments, codexHome: process.env.CODEX_HOME, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, mcpNodePath: process.env.CODEX_MCP_NODE_PATH, bundledTool: toolProbe?.stdout.trim(), pythonPrefix: pythonRuntime?.[0], pythonLibraryPath: pythonRuntime?.[1], runtimeEnvironment, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(profileContents === undefined ? {} : { profileContents }), ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}), ...(providerAuthentication ? { providerAuthentication } : {}) }));
+writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ ...(scopeInput === undefined ? {} : { scopeInput }), executable: process.execPath, codexCliPath: process.env.CODEX_CLI_PATH, scanValue: process.env.FAKE_CODEX_SCAN_VALUE, argv: process.argv.slice(2), stdin, cwd: process.cwd(), knowledgePath, knowledgeDocuments, codexHome: process.env.CODEX_HOME, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, mcpNodePath: process.env.CODEX_MCP_NODE_PATH, bundledTool: toolProbe?.stdout.trim(), pythonPrefix: pythonRuntime?.[0], pythonLibraryPath: pythonRuntime?.[1], runtimeEnvironment, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(profileContents === undefined ? {} : { profileContents }), ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}), ...(providerAuthentication ? { providerAuthentication } : {}) }));
 if (stdin.includes('COMPLETE_THEN_HANG')) process.on('SIGTERM', () => { if (!stdin.includes('IGNORE_TERMINATION')) setTimeout(() => process.exit(0), 100); });
 
 if (stdin.includes('THREAD_START_CONFIG_ERROR')) { console.error('Error: thread/start: thread/start failed: agents.max_threads cannot be set when features.multi_agent_v2 is enabled (code -32600)'); process.exit(1); }
@@ -3690,233 +3853,5 @@ async function testReducerCoveragePersistenceBinding() {
   } finally {
     restoreEnv("CODEX_CLI_PATH", previousPath);
     restoreEnv("FAKE_CODEX_MARKER", previousMarker);
-  }
-}
-
-async function testRestoredPrivateProfileHomes() {
-  const providerSource = new URL(
-    "../../../../sdk/typescript/src/provider-profile.ts",
-    import.meta.url,
-  );
-  const { createProviderProfile } = await importModule({
-    entryPoints: [fileURLToPath(providerSource)],
-    define: { "import.meta.url": JSON.stringify(providerSource.href) },
-    banner: {
-      js: `import { createRequire as profileRequire } from "node:module"; const require = profileRequire(${JSON.stringify(providerSource.href)});`,
-    },
-  });
-  const fixture = await fakeCodexFixture();
-  const owners = [];
-  for (const name of ["same", "first", "second"]) {
-    const originalHome = path.join(fixture.root, name, "original");
-    const currentHome =
-      name === "same" ? originalHome : path.join(fixture.root, name, "current");
-    await mkdir(originalHome, { recursive: true });
-    await mkdir(currentHome, { recursive: true });
-    const provider =
-      name === "first"
-        ? "openrouter"
-        : name === "second"
-          ? "fireworks"
-          : "fixture-provider";
-    const config = {
-      model: "fixture-model",
-      model_provider: provider,
-      model_providers: {
-        [provider]: {
-          name: "Fixture",
-          base_url: `https://${name}.example.invalid/v1`,
-          env_key: `SYNTHETIC_${name.toUpperCase()}_KEY`,
-          wire_api: "responses",
-          requires_openai_auth: true,
-          http_headers: { Authorization: `synthetic-${name}-profile-header` },
-        },
-      },
-    };
-    const configPath = path.join(originalHome, "config.toml");
-    await writeFile(configPath, stringifyToml(config));
-    const sandbox = {
-      filesystemDenies: [...new Set([originalHome, currentHome])],
-    };
-    const saved = await captureDeepScanExecutionSettings(
-      { model: config.model },
-      sandbox,
-      {
-        CODEX_HOME: originalHome,
-        CODEX_CLI_PATH: process.execPath,
-      },
-    );
-    const current = await createProviderProfile(currentHome, config);
-    const workerConfigPath = path.join(currentHome, "workers.toml");
-    await writeFile(
-      workerConfigPath,
-      stringifyToml({ worker_runtime: { native_profile: current.name } }),
-    );
-    const promptPath = path.join(fixture.root, name, "prompt.md");
-    await writeFile(
-      promptPath,
-      "NULL_USAGE CAPTURE_SYNTHETIC_OPENAI_AUTH fixture worker\n",
-    );
-    const markerPath = path.join(fixture.root, name, "invocation.json");
-    const environment = {
-      ...process.env,
-      CODEX_HOME: currentHome,
-      CODEX_SECURITY_CONFIG_PATH: configPath,
-      CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH: workerConfigPath,
-      CODEX_CLI_PATH: process.execPath,
-      CODEX_API_KEY: `synthetic-${name}-worker-key`,
-      FAKE_CODEX_MARKER: markerPath,
-      FAKE_CODEX_PREFLIGHT_MARKER: path.join(
-        fixture.root,
-        name,
-        "preflight.json",
-      ),
-      FAKE_CODEX_PREFLIGHT_PROFILE: JSON.stringify({
-        extends: ":read-only",
-        filesystem: Object.fromEntries([
-          [":root", "read"],
-          ...sandbox.filesystemDenies.map((value) => [value, "deny"]),
-        ]),
-        network: { enabled: false },
-      }),
-    };
-    const recreated: {
-      name: string;
-      path: string;
-      cleanup(): Promise<void>;
-    }[] = [];
-    const executor = new CodexSdkWorkerExecutor({
-      ...restoredDeepScanWorkerSettings(saved, sandbox, () => environment),
-      createProviderProfile: async (
-        home: string,
-        profileConfig: Record<string, unknown>,
-      ) => {
-        const profile = await createProviderProfile(home, profileConfig);
-        recreated.push(profile);
-        return profile;
-      },
-    });
-    owners.push({
-      name,
-      provider,
-      config,
-      originalHome,
-      currentHome,
-      current,
-      promptPath,
-      markerPath,
-      environment,
-      recreated,
-      executor,
-    });
-  }
-  const originalSpawn = childProcess.spawn;
-  childProcess.spawn = ((
-    command: string,
-    args: readonly string[] = [],
-    options: SpawnOptions = {},
-  ) =>
-    originalSpawn(
-      command,
-      command === process.execPath ||
-        command === path.win32.toNamespacedPath(process.execPath)
-        ? [fixture.executablePath, ...args]
-        : args,
-      options,
-    )) as typeof childProcess.spawn;
-  syncBuiltinESMExports();
-  try {
-    for (const kind of ["discovery", "dedup"] as const) {
-      const launches: PromiseSettledResult<void>[] = await Promise.allSettled(
-        owners.map(async (owner) => {
-          const request = workerRequest(owner.promptPath, fixture.root, {
-            kind,
-            ...(kind === "dedup"
-              ? { resumeThreadId: `fixture-resumed-${owner.name}` }
-              : {}),
-          });
-          const result = await owner.executor.run(request);
-          assert.equal(
-            result.threadId,
-            kind === "dedup"
-              ? `fixture-resumed-${owner.name}`
-              : "fixture-thread-id",
-          );
-          const child = await readJson(owner.markerPath);
-          assert.equal(child.codexHome, owner.originalHome);
-          const profile = parseToml(child.profileContents);
-          assert.deepEqual(
-            JSON.parse(JSON.stringify(profile.model_providers)),
-            owner.config.model_providers,
-          );
-          const preflight = await readJson(
-            owner.environment.FAKE_CODEX_PREFLIGHT_MARKER,
-          );
-          assertConfigOverrides(child.argv, {
-            [`model_providers.${owner.provider}.base_url`]: undefined,
-            [`model_providers.${owner.provider}.env_key`]: undefined,
-          });
-          assertConfigOverrides(preflight.argv, {
-            [`model_providers.${owner.provider}.base_url`]: undefined,
-            [`model_providers.${owner.provider}.env_key`]: undefined,
-          });
-          assert.match(
-            child.profileContents,
-            new RegExp(`synthetic-${owner.name}-profile-header`),
-          );
-          assert.equal(
-            child.argv
-              .join(" ")
-              .includes(`synthetic-${owner.name}-profile-header`),
-            false,
-          );
-          assert.equal(
-            child.openaiAuthentication.CODEX_API_KEY,
-            `synthetic-${owner.name}-worker-key`,
-          );
-          for (const profile of owner.recreated)
-            await assert.rejects(readFile(profile.path), { code: "ENOENT" });
-          await readFile(owner.current.path);
-        }),
-      );
-      assert.deepEqual(
-        launches.flatMap((launch) =>
-          launch.status === "rejected" ? [String(launch.reason)] : [],
-        ),
-        [],
-        `native provider selections survive ${kind} child launches`,
-      );
-    }
-    assert.equal(owners[0].recreated.length, 0);
-    assert.equal(
-      new Set(
-        owners.flatMap((owner) =>
-          owner.recreated.map((profile) => profile.name),
-        ),
-      ).size,
-      4,
-    );
-    const owner = owners[1];
-    const acceptedProfile = owner.environment.FAKE_CODEX_PREFLIGHT_PROFILE;
-    owner.environment.FAKE_CODEX_PREFLIGHT_PROFILE = JSON.stringify({
-      ...emptyWorkerPermissionProfile,
-      network: { enabled: true },
-    });
-    await assert.rejects(
-      owner.executor.run(workerRequest(owner.promptPath, fixture.root)),
-    );
-    for (const profile of owner.recreated)
-      await assert.rejects(readFile(profile.path), { code: "ENOENT" });
-    owner.environment.FAKE_CODEX_PREFLIGHT_PROFILE = acceptedProfile;
-    await writeFile(owner.promptPath, "CONFIG_ERROR\n");
-    await assert.rejects(
-      owner.executor.run(workerRequest(owner.promptPath, fixture.root)),
-    );
-    for (const profile of owner.recreated)
-      await assert.rejects(readFile(profile.path), { code: "ENOENT" });
-  } finally {
-    childProcess.spawn = originalSpawn;
-    syncBuiltinESMExports();
-    await Promise.all(owners.map((owner) => owner.current.cleanup()));
   }
 }
