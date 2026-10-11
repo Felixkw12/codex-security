@@ -1416,6 +1416,89 @@ test.skipIf(process.platform === "win32")(
   },
 );
 
+for (const tool of ["git", "rg"])
+  for (const rawLoader of [false, true])
+    test.skipIf(process.platform === "win32")(
+      `${tool} children retain loader configuration with ${rawLoader ? "raw loader values" : "raw HOME"}`,
+      () => {
+        const f = fixture();
+        f.write("visible.py");
+        const tools = join(f.root, "tools");
+        mkdirSync(tools);
+        const value = Buffer.concat([
+          Buffer.from(f.root + "/libraries-"),
+          rawLoader ? Buffer.from([0xff, 0xfe]) : Buffer.from("ascii"),
+          Buffer.from("' $value\n"),
+        ]);
+        const octal = [...value]
+          .map((byte) => `\\0${byte.toString(8).padStart(3, "0")}`)
+          .join("");
+        const quote = (text: string) =>
+          "'" + text.replaceAll("'", "'\\''") + "'";
+        const marker = join(f.root, "child-ran");
+        writeFileSync(
+          join(tools, tool),
+          [
+            "#!/bin/sh",
+            "set -e",
+            `expected=$(printf '%b.' '${octal}'); expected=\${expected%.}`,
+            'test "$LD_LIBRARY_PATH" = "$expected"',
+            'test "$LD_PROFILE_OUTPUT" = "$expected"',
+            'test "${LD_PROFILE+x}" = x && test -z "$LD_PROFILE"',
+            'test -z "${LD_PRELOAD+x}"',
+            'test "$INVENTORY_CALLER_VALUE" = preserved',
+            ...(tool === "git"
+              ? ['test -z "${GIT_DIR+x}"', 'test "$GIT_LITERAL_PATHSPECS" = 1']
+              : []),
+            `printf executed > ${quote(marker)}`,
+            tool === "git"
+              ? `exec ${quote(Bun.which("git")!)} "$@"`
+              : "printf './visible.py\\0'",
+          ].join("\n") + "\n",
+          { mode: 0o700 },
+        );
+        const result = spawnSync(
+          "/bin/sh",
+          [
+            "-c",
+            [
+              `value=$(printf '%b.' '${octal}'); value=\${value%.}`,
+              'LD_LIBRARY_PATH="$value"; export LD_LIBRARY_PATH',
+              'LD_PROFILE_OUTPUT="$value"; export LD_PROFILE_OUTPUT',
+              ...(rawLoader ? [] : ["HOME=$(printf '\\377'); export HOME"]),
+              'exec "$@"',
+            ].join("\n"),
+            "inventory-loader-environment",
+            node,
+            join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+            "generate-in-scope-files",
+            "--repo",
+            f.repo,
+            "--scope",
+            ".",
+            "--out",
+            f.out,
+          ],
+          {
+            encoding: "utf8",
+            env: {
+              ...f.toolEnvironment,
+              PATH: `${tools}${delimiter}${f.toolEnvironment["PATH"] ?? ""}`,
+              CODEX_SECURITY_GIT: tool === "git" ? join(tools, tool) : "",
+              GIT_DIR: join(f.root, "wrong-git"),
+              GIT_LITERAL_PATHSPECS: "0",
+              LD_PROFILE: "",
+              LD_PRELOAD: undefined,
+              INVENTORY_CALLER_VALUE: "preserved",
+            },
+          },
+        );
+        expect(result.status, result.stderr).toBe(0);
+        expect(readFileSync(marker, "utf8")).toBe("executed");
+        expect(readFileSync(f.out, "utf8")).toBe("./visible.py\n");
+      },
+    );
+
 test.skipIf(process.platform === "win32")(
   "Git discovery distinguishes absent and empty PATH",
   () => {

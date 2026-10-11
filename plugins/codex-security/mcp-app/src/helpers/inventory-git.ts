@@ -54,6 +54,7 @@ const repositoryEnvironment = [
   "GIT_OBJECT_DIRECTORY",
   "GIT_WORK_TREE",
 ];
+const posixLoaderSetting = /^(?:LD|DYLD)_[A-Z0-9_]+$/u;
 
 function rawToolValue(value: string): boolean {
   return (windows ? /[\ud800-\udfff]/u : /[\udc80-\udcff]/u).test(value);
@@ -174,8 +175,9 @@ function spawnTool(
   inheritedEnvironment: Record<string, string>,
 ) {
   const environment = Object.fromEntries(
-    Object.entries(inheritedEnvironment).filter(([, value]) =>
-      rawToolValue(value),
+    Object.entries(inheritedEnvironment).filter(
+      ([name, value]) =>
+        rawToolValue(value) || (!windows && posixLoaderSetting.test(name)),
     ),
   );
   const values = [
@@ -223,8 +225,13 @@ function spawnTool(
     // or its descendants, which could otherwise keep child.close pending.
     '{ exec "$@"; } 3>&-',
   ].join("\n");
+  // Loader settings belong to the tool: decoded raw values can fail at shell
+  // startup, and macOS system shells also strip ordinary DYLD_* values.
+  const env = { ...(options.env ?? process.env) };
+  for (const name of Object.keys(environment)) delete env[name];
   return spawn("/bin/sh", ["-c", script], {
     ...options,
+    env,
     cwd: undefined,
     stdio: [...options.stdio, "pipe"],
   });
@@ -232,14 +239,18 @@ function spawnTool(
 
 function inheritedToolPaths(additional: string[] = []): Record<string, string> {
   const keys = Object.keys(process.env).sort();
-  const gitConfiguration = keys.filter((name) => {
+  const toolConfiguration = keys.filter((name) => {
     const key = windows ? name.toUpperCase() : name;
     return (
       [
         "GIT_CONFIG_GLOBAL",
         "GIT_CONFIG_SYSTEM",
         "GIT_CONFIG_PARAMETERS",
-      ].includes(key) || /^GIT_CONFIG_VALUE_\d+$/u.test(key)
+      ].includes(key) ||
+      /^GIT_CONFIG_VALUE_\d+$/u.test(key) ||
+      // Restore loader settings before exec: the tool cannot repair them after
+      // its dynamic loader has already tried to open libraries and preload files.
+      (!windows && posixLoaderSetting.test(key))
     );
   });
   return Object.fromEntries(
@@ -248,7 +259,7 @@ function inheritedToolPaths(additional: string[] = []): Record<string, string> {
       "PATH",
       "XDG_CONFIG_HOME",
       ...additional,
-      ...gitConfiguration,
+      ...toolConfiguration,
     ].flatMap((name) => {
       const key = windows
         ? (keys.find((key) => key.toUpperCase() === name.toUpperCase()) ?? name)

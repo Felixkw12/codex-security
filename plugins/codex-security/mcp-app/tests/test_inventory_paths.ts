@@ -7,6 +7,48 @@ import { join } from "node:path";
 import { importSource } from "./import-module.ts";
 import type { WindowsBinding } from "../../native/windows-binding.mjs";
 
+test(
+  "POSIX tools retain loader settings across the raw argument shell bridge",
+  { skip: process.platform === "win32" },
+  async () => {
+    const { runTool } = await importSource("src/helpers/inventory-git.ts", {
+      define: {
+        "import.meta.url": JSON.stringify(
+          new URL(
+            "../../../../sdk/typescript/_bundled_plugin/mcp/helpers.mjs",
+            import.meta.url,
+          ).href,
+        ),
+      },
+    });
+    const names = ["LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"];
+    const saved = names.map((name) => [name, process.env[name]] as const);
+    try {
+      for (const name of names) process.env[name] = "/fixture/libraries";
+      for (const argument of ["ordinary", "raw-\udcff"]) {
+        const result = await runTool(process.execPath, [
+          "-e",
+          `process.stdout.write(JSON.stringify(${JSON.stringify(names)}.map(name => process.env[name])));`,
+          argument,
+        ]);
+        assert.equal(result.status, 0, result.stderr);
+        assert.equal(result.stderr, "");
+        assert.deepEqual(JSON.parse(result.stdout.toString()), [
+          "/fixture/libraries",
+          "/fixture/libraries",
+        ]);
+        for (const name of names)
+          assert.equal(process.env[name], "/fixture/libraries");
+      }
+    } finally {
+      for (const [name, value] of saved) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  },
+);
+
 const { windowsFileSystem } = (await importSource(
   "../native/windows-files.mts",
 )) as typeof import("../../native/windows-files.mjs");
