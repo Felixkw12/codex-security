@@ -24,8 +24,12 @@ from workbench_test_support import (
 )
 
 
-def deadline_fixture(tmp_path: Path, checkpoint_kind: str = "empty") -> SimpleNamespace:
-    state, home, target, directory, scan_id = deep_scan_fixture(tmp_path)
+def deadline_fixture(
+    tmp_path: Path, checkpoint_kind: str = "empty", *, include_paths: list[str] | None = None
+) -> SimpleNamespace:
+    state, home, target, directory, scan_id = deep_scan_fixture(
+        tmp_path, include_paths=include_paths
+    )
     environment = {"CODEX_HOME": str(home)}
     claimed = run_workbench(
         state,
@@ -192,6 +196,34 @@ def test_deadline_recovery_does_not_snapshot_untouched_optional_sarif(tmp_path):
     assert external.read_text() == "Unchanged optional export.\n"
 
 
+@pytest.mark.parametrize("include_paths", [None, ["app.py"], ["unrelated.py"]])
+@pytest.mark.parametrize("source", ["parent", "worker", "both"])
+def test_deadline_recovery_applies_requested_scope_to_parent_and_worker_findings(
+    tmp_path, include_paths, source
+):
+    scan = deadline_fixture(
+        tmp_path, "empty" if source == "parent" else "valid", include_paths=include_paths
+    )
+    if source != "worker":
+        draft = saved_draft(scan.scan_id, findings=[scan.finding])
+        draft["coverage"].update(
+            mode="scoped_path" if include_paths is not None else "deep_repository",
+            inventoryStrategy="scoped_path" if include_paths is not None else "repository",
+            includePaths=include_paths or ["."],
+            excludePaths=[],
+        )
+        canonical_parent(scan, draft)
+    workers = scan.directory / "artifacts/deep_discovery"
+    original = {p: p.read_bytes() for p in workers.rglob("*.json") if p != scan.manifest}
+    assert finish(scan)["deepScan"]["status"] == "succeeded"
+    findings = json.loads((scan.directory / "findings.json").read_text())["findings"]
+    head = json.loads((scan.directory / "checkpoint-head.json").read_text())["checkpoint"]
+    checkpoint = json.loads((scan.directory / "checkpoints" / head).read_text())
+    expected = 0 if include_paths == ["unrelated.py"] else 1
+    assert len(findings) == len(checkpoint["findings"]) == expected
+    assert all(path.read_bytes() == contents for path, contents in original.items())
+
+
 @pytest.mark.parametrize("failure", ["publication", "commit"])
 def test_failed_deadline_without_parent_head_restores_all_recovery_evidence(
     tmp_path: Path, failure: str
@@ -233,16 +265,21 @@ def test_failed_deadline_without_parent_head_restores_all_recovery_evidence(
 
 
 @pytest.mark.parametrize("committed", [False, True])
-@pytest.mark.parametrize("staged", [False, True])
+@pytest.mark.parametrize(
+    "checkpoint_kind,staged,existing_target",
+    [("valid", False, True), ("valid", True, True), ("empty", True, False), ("empty", True, True)],
+)
 def test_deadline_interrupt_preserves_only_committed_publication(
-    tmp_path, monkeypatch, workbench_api, committed, staged
+    tmp_path, monkeypatch, workbench_api, committed, checkpoint_kind, staged, existing_target
 ):
-    scan = deadline_fixture(tmp_path, "valid")
+    scan = deadline_fixture(tmp_path, checkpoint_kind)
     monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(scan.state))
     monkeypatch.setenv("CODEX_HOME", scan.environment["CODEX_HOME"])
     deep_scan = workbench_api["deep_scan"]
     deep_scan.configure(SimpleNamespace(**workbench_api))
     original_manifest = scan.manifest.read_bytes()
+    if not existing_target:
+        scan.manifest.unlink()
     staged_path = scan.manifest.with_name("staged-manifest.json") if staged else None
     if staged_path:
         staged_path.write_bytes(original_manifest + b"\n")
@@ -272,13 +309,25 @@ def test_deadline_interrupt_preserves_only_committed_publication(
             "SELECT status FROM deep_scan_runs WHERE scan_id = ?", (scan.scan_id,)
         ).fetchone()[0]
     assert status == ("succeeded" if committed else "running")
-    assert (scan.directory / "findings.json").exists() is committed
-    assert (scan.directory / "checkpoint-head.json").exists() is committed
-    assert scan.manifest.read_bytes() == original_manifest + (
-        b"\n" if staged and committed else b""
-    )
-    assert finish(scan)["deepScan"]["status"] == "succeeded"
-    assert_retained_finding(scan)
+    published = committed and checkpoint_kind == "valid"
+    assert (scan.directory / "findings.json").exists() is published
+    assert (scan.directory / "checkpoint-head.json").exists() is published
+    if committed or existing_target:
+        assert scan.manifest.read_bytes() == original_manifest + (
+            b"\n" if staged and committed else b""
+        )
+    else:
+        assert not scan.manifest.exists()
+    if staged_path:
+        assert staged_path.exists() is not committed
+    with sqlite3.connect(scan.database) as connection:
+        connection.row_factory = sqlite3.Row
+        assert (
+            deep_scan.finish_deep_scan(connection, arguments)["deepScan"]["status"] == "succeeded"
+        )
+    assert scan.manifest.read_bytes() == original_manifest + (b"\n" if staged else b"")
+    if checkpoint_kind == "valid":
+        assert_retained_finding(scan)
 
 
 @pytest.mark.parametrize("write_kind", ["parent-checkpoint", "head-observation", "source-order"])

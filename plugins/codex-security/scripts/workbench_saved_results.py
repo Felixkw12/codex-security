@@ -2476,6 +2476,7 @@ def preserve_deep_deadline_draft(
             completion_binding=binding,
             completion_warnings=warnings,
             draft_documents=documents,
+            finding_scope=db.requested_scan_paths(scan),
         )
         manifest, findings, coverage = prepared[2:5]
         manifest["scan"].pop("sealedAt", None)

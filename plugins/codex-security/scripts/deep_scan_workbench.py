@@ -1846,13 +1846,14 @@ def finish_deep_scan_locked(
         connection.commit()
     except BaseException:
         connection.rollback()
-        if deadline_publication is not None:
+        if deadline_publication is not None or promotion is not None:
             # A signal can arrive after SQLite commits but before commit returns.
             # The completion lock makes persisted success authoritative here.
             if require_deep_scan_run(connection, scan_id)["status"] == "succeeded":
                 if promotion is not None:
                     finish_staged_file(promotion)
                 raise
+        if deadline_publication is not None:
             saved_results._restore_published_outputs(*deadline_publication)
         if promotion is not None:
             rollback_staged_file(promotion)
