@@ -1094,9 +1094,8 @@ def merge_saved_results(
         if frozen_source_digests.keys() - source_digests.keys():
             raise ContractError("Frozen stopped-scan checkpoint set is incomplete.")
 
-    # A failed result replacement leaves model input beside its accepted host snapshot.
-    # Compare the original documents before promoting host coverage. Legacy results
-    # without a saved host projection retain their existing recovery format.
+    # Compare failed replacements with their accepted host snapshot before promotion.
+    # Preserve legacy recovery when no host projection exists.
     saved_documents = {relative: draft for relative, draft, _ in sources}
     unaccepted_reducer_results = set()
     for _, result_path, checkpoint_paths, _ in reducer_outputs:
@@ -2905,6 +2904,7 @@ def preserve_scan_results_locked(
         completion_binding=binding,
         completion_warnings=warnings,
         draft_documents=documents,
+        finding_scope=db.requested_scan_paths(scan) if scan["mode"] == "deep" else None,
     )
     snapshots = _snapshot_published_outputs(scan_dir)
     try:

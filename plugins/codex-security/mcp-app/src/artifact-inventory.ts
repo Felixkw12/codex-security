@@ -20,6 +20,7 @@ import {
   resolvePythonCommand,
 } from "./python_command.js";
 import { decodeUtf8 } from "./helpers/utf8.js";
+import { decodePosixBytes } from "./helpers/posix-path.js";
 
 const execFile = promisify(nodeExecFile);
 const documents = [commonSchema, reviewItemsSchema] as SchemaDocument[];
@@ -151,9 +152,11 @@ export async function listCodexSecurityReviewItems(
 async function readReviewItems(
   context: ArtifactContext,
 ): Promise<ReviewItem[]> {
-  const source = decodeUtf8(
-    await readArtifactBytes(context, inventoryComponents, label),
-  );
+  const contents = await readArtifactBytes(context, inventoryComponents, label);
+  const source =
+    process.platform === "win32"
+      ? decodeUtf8(contents)
+      : decodePosixBytes(contents);
   const rows: ReviewItem[] = [];
 
   for (const [index, line] of source.split(/\r?\n/u).entries()) {
