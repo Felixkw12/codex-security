@@ -4719,6 +4719,24 @@ describe("CodexSecurity orchestration", () => {
       const newRead = Promise.withResolvers<void>();
       const pollAllowed = Promise.withResolvers<void>();
       let pausePoll = false;
+      let parentPath = "";
+      const originalOpen = fsPromises.open;
+      const opening = spyOn(fsPromises, "open").mockImplementation((async (
+        ...args: Parameters<typeof originalOpen>
+      ) => {
+        const handle = await originalOpen(...args);
+        if (String(args[0]) !== parentPath) return handle;
+        const read = handle.read.bind(handle);
+        handle.read = (async (...readArgs: Parameters<typeof read>) => {
+          if (pausePoll) await pollAllowed.promise;
+          const result = await read(...readArgs);
+          // A parent read may already be past directory enumeration when the
+          // fixture pauses. Hold its bytes until both inventories are queued.
+          if (pausePoll) await pollAllowed.promise;
+          return result;
+        }) as typeof handle.read;
+        return handle;
+      }) as typeof originalOpen);
       const originalReaddir = fsPromises.readdir;
       const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
         ...args: Parameters<typeof originalReaddir>
@@ -4747,6 +4765,7 @@ describe("CodexSecurity orchestration", () => {
         createCodex: codexFactory(async () => {
           await copyCompletedScan(root);
           const parent = await writeUsageSession(codexHome, "thread-1", {});
+          parentPath = parent;
           const worker = await writeUsageSession(
             codexHome,
             "worker-thread",
@@ -4849,6 +4868,7 @@ describe("CodexSecurity orchestration", () => {
         oldRead.resolve();
         newRead.resolve();
         await client.close();
+        opening.mockRestore();
         listing.mockRestore();
       }
     },
@@ -7683,13 +7703,17 @@ describe("CodexSecurity orchestration", () => {
                 for await (const event of completedEvents()) {
                   yield event;
                   if (event.type === "turn.started") {
+                    console.error("[worker observer] metadata begin");
                     await writeUsageSession(
                       codexHome,
                       "worker-thread",
                       {},
                       { parent: "thread-1" },
                     );
+                    console.error("[worker observer] metadata end");
+                    console.error("[worker observer] observed wait begin");
                     await observed.promise;
+                    console.error("[worker observer] observed wait resolved");
                   }
                 }
               }
@@ -7698,7 +7722,10 @@ describe("CodexSecurity orchestration", () => {
           }),
         }),
       });
+      // The fake stream has no process handle to keep the unref'ed poll alive.
+      const keepAlive = setInterval(() => {}, 1_000);
       try {
+        console.error("[worker observer] run begin");
         const result = await client.run(repository, {
           onWorkerEvent: (event) => {
             workers.push(event);
@@ -7709,11 +7736,15 @@ describe("CodexSecurity orchestration", () => {
           },
           onObserverError: (observer) => errors.push(observer),
         });
+        console.error("[worker observer] run end");
         expect(result.threadId).toBe("thread-1");
         expect(workers).toEqual([{ kind: "observed", worker: 1 }]);
         expect(errors).toEqual(failure === "none" ? [] : ["onWorkerEvent"]);
       } finally {
+        clearInterval(keepAlive);
+        console.error("[worker observer] close begin");
         await client.close();
+        console.error("[worker observer] close end");
       }
     },
   );
