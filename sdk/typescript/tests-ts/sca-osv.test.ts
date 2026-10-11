@@ -772,6 +772,40 @@ describe("SCA OSV normalization", () => {
       ["D"],
     ]);
   });
+  test.each([
+    ["A", "B", "C"],
+    ["B", "A", "C"],
+    ["C", "A", "B"],
+  ])(
+    "keeps the maximum severity when aliases bridge groups: %p",
+    (...order) => {
+      const advisories = {
+        A: advisory("A", ["X"]),
+        B: advisory("B", ["Y"]),
+        C: advisory("C", ["X", "Y"]),
+      };
+      const raw = rawOutput(
+        "package-lock.json",
+        order.map((id) => advisories[id as keyof typeof advisories]),
+      );
+      Object.assign(raw.results[0]!.packages[0]!, {
+        groups: [
+          { ids: ["A"], max_severity: "2.0" },
+          { ids: ["B"], max_severity: "9.8" },
+          { ids: ["C"], max_severity: "5.0" },
+        ],
+      });
+      const normalized = normalizeOsvOutput(raw, {
+        repositoryPath: "/repo",
+        inputs: [input()],
+      });
+      expect(normalized.matches).toHaveLength(1);
+      expect(normalized.matches[0]).toMatchObject({
+        advisoryIds: ["A", "B", "C"],
+        severity: "9.8",
+      });
+    },
+  );
   test("uses scanner group aliases and severity and keeps unavailable fixes empty", () => {
     const raw = rawOutput("package-lock.json", [
       { id: "A" },

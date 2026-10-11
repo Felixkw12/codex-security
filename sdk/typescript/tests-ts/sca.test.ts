@@ -178,7 +178,7 @@ async function fixture(
     malformed?: boolean;
     runtimeError?: boolean;
     controller?: AbortController;
-    abortAt?: "scanner" | "model";
+    abortAt?: "source" | "revision" | "scanner" | "model";
     model?: string;
     dirtyRepository?: boolean;
     changeSourceAt?: "scanner" | "model";
@@ -308,6 +308,8 @@ process.exit(child.status ?? 1);
   };
   const sourceSnapshot = async (path: string) => {
     expect(path).toBe(repository);
+    if (options.abortAt === "source")
+      options.controller!.abort("cancel during source snapshot");
     if (++snapshotCalls === options.snapshotErrorAt)
       throw new Error("synthetic source snapshot unavailable");
     return {
@@ -332,7 +334,11 @@ process.exit(child.status ?? 1);
     },
     {
       environment,
-      repositoryRevision: async () => revision,
+      repositoryRevision: async () => {
+        if (options.abortAt === "revision")
+          options.controller!.abort("cancel during revision lookup");
+        return revision;
+      },
       ...(options.workbenchSnapshot
         ? {
             runWorkbench: async (
@@ -1509,6 +1515,38 @@ test.each(["runtime", "model", "malformed", "missing"])(
     expect(
       JSON.parse(await readFile(join(outputDir, "sca-result.json"), "utf8")),
     ).toEqual(result);
+  },
+);
+
+test.each(["source", "revision"] as const)(
+  "cancellation during %s provenance saves an incomplete result before inventory",
+  async (abortAt) => {
+    const controller = new AbortController();
+    const { client, repository, outputDir, calls } = await fixture({
+      controller,
+      abortAt,
+    });
+    await using security = client;
+    await expect(
+      security.scanDependencies({
+        repositoryPath: repository,
+        outputDir,
+        signal: controller.signal,
+      }),
+    ).rejects.toMatchObject({ scanDir: outputDir });
+    const saved = JSON.parse(
+      await readFile(join(outputDir, "sca-result.json"), "utf8"),
+    ) as ScaResult;
+    expect(saved.status).toBe("partial");
+    expect(saved.coverage.status).toBe("failed");
+    expect(saved.repository.path).toBe(repository);
+    expect(saved.matches).toEqual([]);
+    expect(saved.scanner.invocations).toEqual([]);
+    expect(await readFile(join(outputDir, "report.md"), "utf8")).toContain(
+      "partial",
+    );
+    expect(calls.scanner).toBe(0);
+    expect(calls.runtime).toBe(0);
   },
 );
 

@@ -1638,9 +1638,11 @@ unresolved.
 
 Advisory matching uses observed package names and versions; it does not establish
 registry origin. Gradle and NuGet locks do not record the selected repository or
-feed, and npm locks can omit resolved URLs. Complete matching coverage means the
-supported inputs were inventoried and matched, not that every package's public
-registry origin was verified.
+feed, and npm locks can omit resolved URLs. Composer archive URLs identify package
+downloads, not the registry that supplied them; remote archives retain name/version
+matching, while source-only VCS packages remain unresolved. Complete matching
+coverage means the supported inputs were inventoried and matched, not that every
+package's public registry origin was verified.
 
 ```ts
 import { createSecurity } from "@openai/codex-security";

@@ -919,15 +919,21 @@ export function normalizeOsvOutput(
         );
         for (const bucket of joined)
           for (const value of bucket.ids) ids.add(value);
-        const severity =
-          matchingGroups
-            .map((group) => group["max_severity"])
-            .find(
-              (value): value is string =>
-                typeof value === "string" && value !== "",
-            ) ??
-          joined.find((bucket) => bucket.severity !== null)?.severity ??
-          null;
+        const severity = [
+          ...matchingGroups.map((group) => group["max_severity"]),
+          ...joined.map((bucket) => bucket.severity),
+        ]
+          .filter(
+            (value): value is string =>
+              typeof value === "string" && value !== "",
+          )
+          .reduce<string | null>(
+            (maximum, value) =>
+              maximum === null || Number(value) > Number(maximum)
+                ? value
+                : maximum,
+            null,
+          );
         for (const bucket of joined) buckets.splice(buckets.indexOf(bucket), 1);
         buckets.push({
           advisories: [
@@ -1043,30 +1049,24 @@ export const runOsvProcess: OsvProcessRunner = async (
   return { stdout, stderr, exitCode };
 };
 
-export async function runOsvScan(
-  options: {
-    repositoryPath: string;
-    outputDir: string;
-    environment?: Record<string, string | undefined>;
-    signal?: AbortSignal;
-  },
-  dependencies: OsvDependencies = {},
-): Promise<OsvScanResult> {
-  const now = dependencies.now ?? (() => new Date().toISOString());
+export function initialOsvScanResult(
+  outputDir: string,
+  startedAt = new Date().toISOString(),
+): OsvScanResult {
   const scanner: ScaScanner = {
     name: "osv-scanner",
     version: null,
     argv: [],
     invocations: [],
-    startedAt: now(),
+    startedAt,
     completedAt: "",
     exitCode: null,
-    rawOutputPath: join(options.outputDir, "osv-output.json"),
-    stderrPath: join(options.outputDir, "osv-stderr.log"),
+    rawOutputPath: join(outputDir, "osv-output.json"),
+    stderrPath: join(outputDir, "osv-stderr.log"),
     advisoryMode: "online",
     advisorySnapshotId: null,
   };
-  const result: OsvScanResult = {
+  return {
     scanner,
     coverage: {
       status: "failed",
@@ -1080,6 +1080,20 @@ export async function runOsvScan(
     diagnostics: [],
     status: "failed",
   };
+}
+
+export async function runOsvScan(
+  options: {
+    repositoryPath: string;
+    outputDir: string;
+    environment?: Record<string, string | undefined>;
+    signal?: AbortSignal;
+  },
+  dependencies: OsvDependencies = {},
+): Promise<OsvScanResult> {
+  const now = dependencies.now ?? (() => new Date().toISOString());
+  const result = initialOsvScanResult(options.outputDir, now());
+  const { scanner } = result;
   await mkdir(options.outputDir, { recursive: true });
   await Promise.all([
     writeFile(scanner.rawOutputPath, ""),

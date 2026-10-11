@@ -1,6 +1,10 @@
 /// <reference lib="esnext.disposable" preserve="true" />
 
-import { runOsvScan, type OsvScanResult } from "./sca-osv.js";
+import {
+  initialOsvScanResult,
+  runOsvScan,
+  type OsvScanResult,
+} from "./sca-osv.js";
 import {
   dependencyScanResult,
   dependencyRepositoryDirty,
@@ -749,6 +753,13 @@ export class CodexSecurity {
         outputRoot,
         (path) => requireOutputOutsideRepository(inputs.protectedRoot, path),
       );
+      result = dependencyScanResult(
+        initialOsvScanResult(outputDir),
+        { path: inputs.repository, revision: null, dirty: null },
+        outputDir,
+      );
+      result.diagnostics.push("Dependency inventory has not started.");
+      await saveDependencyScan(result);
       let sourceWorkflow: FindingWorkflow | undefined;
       const snapshotSource = async (): Promise<JsonObject> => {
         if (this.#dependencies.sourceSnapshot !== undefined)
@@ -786,17 +797,16 @@ export class CodexSecurity {
         (digest) => ({ digest }),
         (error: unknown) => ({ error }),
       );
-      const repository = {
-        path: inputs.repository,
-        revision: await (
-          this.#dependencies.repositoryRevision ?? repositoryRevision
-        )(inputs.repository, signal),
-        dirty: await dependencyRepositoryDirty(
-          inputs.repository,
-          this.#dependencies.environment,
-          signal,
-        ),
-      };
+      throwIfAborted(signal, outputDir);
+      const repository = result.repository;
+      repository.revision = await (
+        this.#dependencies.repositoryRevision ?? repositoryRevision
+      )(inputs.repository, signal);
+      repository.dirty = await dependencyRepositoryDirty(
+        inputs.repository,
+        this.#dependencies.environment,
+        signal,
+      );
       try {
         const scan = await (this.#dependencies.runOsvScan ?? runOsvScan)({
           repositoryPath: inputs.repository,
@@ -812,7 +822,6 @@ export class CodexSecurity {
             repository,
             outputDir,
           );
-          await saveDependencyScan(result);
         }
         throw error;
       }
@@ -1029,16 +1038,18 @@ export class CodexSecurity {
       await saveDependencyScan(result);
       return result;
     } catch (error) {
-      if (result !== undefined && signal.aborted) {
-        result.status = "partial";
-        for (const assessment of result.assessments) {
-          if (assessment.status !== "not_started") continue;
-          assessment.status = "cancelled";
-          assessment.error = errorMessage(signal.reason);
-        }
-        result.diagnostics.push(
-          "Dependency scan interrupted; completed scanner facts are retained.",
-        );
+      if (result !== undefined) {
+        if (signal.aborted) {
+          result.status = "partial";
+          for (const assessment of result.assessments) {
+            if (assessment.status !== "not_started") continue;
+            assessment.status = "cancelled";
+            assessment.error = errorMessage(signal.reason);
+          }
+          result.diagnostics.push(
+            "Dependency scan interrupted; completed scanner facts are retained.",
+          );
+        } else result.diagnostics.push(errorMessage(error));
         await saveDependencyScan(result);
       }
       throwIfAborted(signal, outputDir);

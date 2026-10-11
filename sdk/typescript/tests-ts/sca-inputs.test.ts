@@ -414,66 +414,75 @@ describe("additional SCA input contracts", () => {
     },
   );
 
-  test("distinguishes Composer archives from local and source-only Git origins", () => {
-    const result = inspect(
-      JSON.stringify({
-        packages: [
-          {
-            name: "synthetic/registry",
-            version: "v1.2.3",
-            dist: { type: "zip", url: "https://example.invalid/registry.zip" },
-            source: { type: "git", url: "https://example.invalid/source.git" },
-          },
-          {
-            name: "synthetic/local",
-            version: "v1.2.3",
-            dist: { type: "path", url: "./local" },
-            source: { type: "path", url: "./local" },
-          },
-          {
-            name: "synthetic/archive",
-            version: "v1.2.3",
-            dist: { type: "zip", url: "archives/library.zip" },
-            source: {
-              type: "git",
-              url: "git@example.invalid:synthetic/library.git",
+  test.each(["git", "hg", "svn", "fossil"])(
+    "distinguishes Composer archives from local and source-only %s origins",
+    (sourceType) => {
+      const result = inspect(
+        JSON.stringify({
+          packages: [
+            {
+              name: "synthetic/registry",
+              version: "v1.2.3",
+              dist: {
+                type: "zip",
+                url: "https://example.invalid/registry.zip",
+              },
+              source: {
+                type: "git",
+                url: "https://example.invalid/source.git",
+              },
             },
-          },
-          {
-            name: "synthetic/source-only",
-            version: "v1.2.3",
-            source: {
-              type: "git",
-              url: "https://example.invalid/synthetic-fork.git",
-              reference: "0123456789012345678901234567890123456789",
+            {
+              name: "synthetic/local",
+              version: "v1.2.3",
+              dist: { type: "path", url: "./local" },
+              source: { type: "path", url: "./local" },
             },
-          },
-        ],
-        "packages-dev": [],
-      }),
-      "composer",
-    );
-    expect(result.status).toBe("scanned");
-    expect(result.references).toEqual([
-      expect.objectContaining({
-        ecosystem: "Packagist",
-        name: "synthetic/local",
-        version: "v1.2.3",
-      }),
-      expect.objectContaining({
-        ecosystem: "Packagist",
-        name: "synthetic/archive",
-        version: "v1.2.3",
-        resolution: "archives/library.zip",
-      }),
-      expect.objectContaining({
-        ecosystem: "Packagist",
-        name: "synthetic/source-only",
-        version: "v1.2.3",
-        resolution: "https://example.invalid/synthetic-fork.git",
-      }),
-    ]);
-  });
+            {
+              name: "synthetic/archive",
+              version: "v1.2.3",
+              dist: { type: "zip", url: "archives/library.zip" },
+              source: {
+                type: "git",
+                url: "git@example.invalid:synthetic/library.git",
+              },
+            },
+            {
+              name: "synthetic/source-only",
+              version: "v1.2.3",
+              source: {
+                type: sourceType,
+                url: "https://example.invalid/synthetic-fork.git",
+                reference: "0123456789012345678901234567890123456789",
+              },
+            },
+          ],
+          "packages-dev": [],
+        }),
+        "composer",
+      );
+      expect(result.status).toBe("scanned");
+      expect(result.references).toEqual([
+        expect.objectContaining({
+          ecosystem: "Packagist",
+          name: "synthetic/local",
+          version: "v1.2.3",
+        }),
+        expect.objectContaining({
+          ecosystem: "Packagist",
+          name: "synthetic/archive",
+          version: "v1.2.3",
+          resolution: "archives/library.zip",
+        }),
+        expect.objectContaining({
+          ecosystem: "Packagist",
+          name: "synthetic/source-only",
+          version: "v1.2.3",
+          resolution: "https://example.invalid/synthetic-fork.git",
+        }),
+      ]);
+    },
+  );
 
   test("counts NuGet project identities once across frameworks and ignores requested ranges", () => {
     const dependencies = {

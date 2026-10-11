@@ -616,16 +616,13 @@ function inspectComposer(content: string, sourcePath: string): InputInspection {
         );
       }
       // composerlock.go:43 retains only name/version/dist.reference. Source-only
-      // Git packages lose their origin; archives may also include Git metadata.
+      // VCS packages lose their origin; archives may also include VCS metadata.
       for (const originKey of ["dist", "source"]) {
         const origin = value[originKey];
         if (!record(origin)) continue;
         const local = localDistribution(origin["url"]);
-        const sourceOnlyGit =
-          originKey === "source" &&
-          origin["type"] === "git" &&
-          !record(value["dist"]);
-        if (origin["type"] === "path" || local || sourceOnlyGit) {
+        const sourceOnly = originKey === "source" && !record(value["dist"]);
+        if (origin["type"] === "path" || local || sourceOnly) {
           const resolution =
             typeof origin["url"] === "string" && origin["url"]
               ? origin["url"]
@@ -654,7 +651,7 @@ function inspectComposer(content: string, sourcePath: string): InputInspection {
   }
   if (result.references.length > 0) {
     result.limitations.push(
-      "Composer local sources, source-only Git packages, or development branches do not establish the contents of a published package release.",
+      "Composer local sources, source-only VCS packages, or development branches do not establish the contents of a published package release.",
     );
   }
   return result;
