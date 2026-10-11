@@ -2737,58 +2737,70 @@ for (const [layout, history] of [
 
 for (const layout of ["worker", "standard"] as const) {
   for (const duplicate of [false, true]) {
-    test(`${layout}: legacy surfaces survive interrupted terminal recovery, duplicate=${duplicate}`, async (t) => {
-      const f = await fixture(t, layout);
-      const surfaces = [
-        {
-          id: "legacy-shared",
-          label: "First legacy surface",
-          disposition: "needs_follow_up",
-          receiptRefs: [],
-        },
-        {
-          id: duplicate ? "legacy-shared" : "legacy-second",
-          label: "Second legacy surface",
-          disposition: "needs_follow_up",
-          receiptRefs: [],
-        },
-      ];
-      // Older writers accepted distinct observations with the same explicit ID.
-      await saveScanDraftCheckpoint(
-        f.context,
-        f.draft({
-          surfaces,
-          deferred: [
-            { id: "review", ...generic, surfaceIds: ["legacy-shared"] },
-          ],
-        }),
-      );
-      // The terminal checkpoint is durable before reconciled output publication.
-      await saveScanDraftCheckpoint(
-        f.context,
-        f.draft({ resolvedDeferred: [close("review")] }, true),
-        false,
-      );
-      const result = await f.write(f.draft());
-      assert.equal(result.surfaceCount, 2);
-      assert.deepEqual(
-        result.coverage.surfaces
-          .map((surface: { label: string }) => surface.label)
-          .sort(),
-        surfaces.map((surface) => surface.label).sort(),
-      );
-      assert.equal(
-        new Set(
-          result.coverage.surfaces.map((surface: { id: string }) => surface.id),
-        ).size,
-        2,
-      );
-      assert.deepEqual((await f.read()).surfaces, result.coverage.surfaces);
-      assert.deepEqual(
-        (await f.write(f.draft())).coverage.surfaces,
-        result.coverage.surfaces,
-      );
-    });
+    for (const tied of [false, true]) {
+      test(`${layout}: legacy surfaces survive interrupted terminal recovery, duplicate=${duplicate}, tied=${tied}`, async (t) => {
+        const f = await fixture(t, layout);
+        const surfaces = [
+          {
+            id: "legacy-shared",
+            label: "First legacy surface",
+            disposition: "needs_follow_up",
+            receiptRefs: [],
+          },
+          {
+            id: duplicate ? "legacy-shared" : "legacy-second",
+            label: "Second legacy surface",
+            disposition: "needs_follow_up",
+            receiptRefs: [],
+          },
+        ];
+        // Older writers accepted distinct observations with the same explicit ID.
+        await saveScanDraftCheckpoint(
+          f.context,
+          f.draft({
+            surfaces,
+            deferred: [
+              { id: "review", ...generic, surfaceIds: ["legacy-shared"] },
+            ],
+          }),
+        );
+        // The terminal checkpoint is durable before reconciled output publication.
+        await saveScanDraftCheckpoint(
+          f.context,
+          f.draft({ resolvedDeferred: [close("review")] }, true),
+          false,
+        );
+        const checkpoints = path.join(f.root, "checkpoints");
+        for (const name of await readdir(checkpoints)) {
+          const checkpoint = await readJson(checkpoints, name);
+          const timestamp = !tied && checkpoint.complete ? 200 : 100;
+          await utimes(path.join(checkpoints, name), timestamp, timestamp);
+        }
+        if (layout === "worker")
+          await utimes(path.join(f.root, "checkpoint-head.json"), 100, 100);
+        const result = await f.write(f.draft());
+        assert.equal(result.surfaceCount, 2);
+        assert.deepEqual(
+          result.coverage.surfaces
+            .map((surface: { label: string }) => surface.label)
+            .sort(),
+          surfaces.map((surface) => surface.label).sort(),
+        );
+        assert.equal(
+          new Set(
+            result.coverage.surfaces.map(
+              (surface: { id: string }) => surface.id,
+            ),
+          ).size,
+          2,
+        );
+        assert.deepEqual((await f.read()).surfaces, result.coverage.surfaces);
+        assert.deepEqual(
+          (await f.write(f.draft())).coverage.surfaces,
+          result.coverage.surfaces,
+        );
+      });
+    }
   }
 }
 

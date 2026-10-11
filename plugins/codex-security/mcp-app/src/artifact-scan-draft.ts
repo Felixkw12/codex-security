@@ -607,11 +607,14 @@ function reconcileScanDraft(
               keepsGenericWork(row) ||
               !terminalOutcomeIds.has((row.candidateId ?? row.id) as string),
           ),
-          surfaces: (progress.coverage.surfaces as JsonObject[]).filter(
-            (surface) =>
-              keepsGenericWork(surface) ||
-              (!terminalOutcomeIds.has(surface.id as string) &&
-                !terminalOutcomeIds.has(surface.candidateId as string)),
+          // Give legacy siblings distinct IDs before another progress merge.
+          surfaces: normalizeSurfaces(
+            (progress.coverage.surfaces as JsonObject[]).filter(
+              (surface) =>
+                keepsGenericWork(surface) ||
+                (!terminalOutcomeIds.has(surface.id as string) &&
+                  !terminalOutcomeIds.has(surface.candidateId as string)),
+            ),
           ),
         },
         result.coverage,
