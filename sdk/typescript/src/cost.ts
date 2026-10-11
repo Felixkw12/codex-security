@@ -50,6 +50,7 @@ interface SessionReasoning {
 
 interface SessionProgress {
   update: ScanProgress;
+  order?: number;
   position: number;
   completion: boolean;
   markerIndex: number;
@@ -396,7 +397,11 @@ export class ScanCostTracker {
       if (marker.accepted && live.position !== null)
         this.#recordParentReview(marker.progress, live.position, marker.index);
     }
-    let corrected: { progress: ScanProgress; order: number } | null = null;
+    let corrected: {
+      progress: ScanProgress;
+      order: number;
+      owner: "worker" | "live";
+    } | null = null;
     for (const { live, marker } of ready) {
       const position = live.position;
       if (position === null) continue;
@@ -442,7 +447,7 @@ export class ScanCostTracker {
           session.workerProgress.add(progressKey(progress));
           session.pendingWorkerProgress.delete(total);
           if (corrected === null || pending.order > corrected.order)
-            corrected = pending;
+            corrected = { ...pending, owner: "worker" };
         }
         if (
           session.filesTotal !== null &&
@@ -496,13 +501,13 @@ export class ScanCostTracker {
         this.#liveParentProgress.add(progressKey(progress));
         this.#highestFilesCompleted = progress.filesCompleted;
         if (corrected === null || marker.order > corrected.order)
-          corrected = { progress, order: marker.order };
+          corrected = { progress, order: marker.order, owner: "live" };
       } else if (
         this.#displayedProgress?.owner === "parent" &&
         position > (this.#displayedProgress.position ?? 0) &&
         (corrected === null || marker.order > corrected.order)
       ) {
-        corrected = { progress, order: marker.order };
+        corrected = { progress, order: marker.order, owner: "live" };
       }
       this.#parentFrontier = { position, markerIndex: marker.index };
     }
@@ -534,7 +539,7 @@ export class ScanCostTracker {
     this.#lastProgress = key;
     this.#displayedProgress = {
       update: progress,
-      owner: replacePhase ? "live" : (displayed?.owner ?? "live"),
+      owner: replacePhase ? corrected!.owner : (displayed?.owner ?? "live"),
       order: replacePhase ? corrected!.order : (displayed?.order ?? 0),
     };
     this.#options.onProgress?.(progress, {
@@ -795,7 +800,7 @@ export class ScanCostTracker {
         progress.phase === "discovery" &&
         (this.#parentProgress?.filesCompleted ?? 0) === 0 &&
         progress.filesCompleted === 0;
-      const order = ++this.#progressOrder;
+      const order = (saved.order ??= ++this.#progressOrder);
       if (
         (!parent &&
           session.filesTotal !== null &&
@@ -866,8 +871,19 @@ export class ScanCostTracker {
         this.#parentProgress = progress;
         this.#recordParentReview(progress, saved.position, saved.markerIndex);
       }
+      // A parked receipt keeps its original observation order. Admitting its
+      // equal coverage must not replay its older phase over a newer worker update.
+      const displayed = this.#displayedProgress;
+      const newerWorker =
+        parent &&
+        displayed?.owner === "worker" &&
+        filesCompleted === displayed.update.filesCompleted &&
+        order < displayed.order
+          ? displayed
+          : null;
       const update = {
         ...progress,
+        phase: newerWorker?.update.phase ?? progress.phase,
         filesCompleted,
         filesTotal: parent
           ? progress.filesTotal
@@ -886,12 +902,15 @@ export class ScanCostTracker {
       if (this.#lastProgress === key) continue;
       this.#lastProgress = key;
       this.#highestFilesCompleted = update.filesCompleted;
-      this.#displayedProgress = {
-        update,
-        owner: parent ? "parent" : "worker",
-        order,
-        ...(parent ? { position: saved.position } : {}),
-      };
+      this.#displayedProgress =
+        newerWorker !== null
+          ? { ...newerWorker, update }
+          : {
+              update,
+              owner: parent ? "parent" : "worker",
+              order,
+              ...(parent ? { position: saved.position } : {}),
+            };
       this.#options.onProgress(update);
     }
   }
