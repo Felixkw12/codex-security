@@ -4341,6 +4341,160 @@ describe("CodexSecurity orchestration", () => {
     },
   );
 
+  test.each([
+    [false, false, 7],
+    [false, true, 7],
+    [true, false, 7],
+    [true, true, 7],
+    [false, false, 8],
+    [false, true, 8],
+    [true, false, 8],
+    [true, true, 8],
+  ] as const)(
+    "keeps the newest proven inventory ahead of saved zeros (split: %p, truncated: %p, worker: %p)",
+    async (split, truncated, workerCount) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const workerRead = Promise.withResolvers<void>();
+      const oldRead = Promise.withResolvers<void>();
+      const newRead = Promise.withResolvers<void>();
+      const pollAllowed = Promise.withResolvers<void>();
+      let pausePoll = false;
+      const originalReaddir = fsPromises.readdir;
+      const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
+        ...args: Parameters<typeof originalReaddir>
+      ) => {
+        if (pausePoll && String(args[0]) === join(codexHome, "sessions"))
+          await pollAllowed.promise;
+        return originalReaddir(...args);
+      }) as typeof originalReaddir);
+      const marker = (
+        phase: ScanProgress["phase"],
+        count: number,
+        total: number,
+      ) =>
+        "CODEX_SECURITY_SCAN_PROGRESS " +
+        JSON.stringify({ phase, filesCompleted: count, filesTotal: total });
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          const parent = await writeUsageSession(codexHome, "thread-1", {});
+          const worker = await writeUsageSession(
+            codexHome,
+            "worker-thread",
+            {},
+            { parent: "thread-1" },
+          );
+          const step = async (
+            id: string,
+            phase: ScanProgress["phase"],
+            count: number,
+            total: number,
+            truncate = false,
+          ): Promise<ThreadEvent> => {
+            const text = truncate
+              ? commandOutput(marker(phase, count, total))
+              : marker(phase, count, total);
+            // Every native record is durable before its corresponding SDK item;
+            // neither the old nor the new live inventory occurrence is omitted.
+            await appendFile(
+              parent,
+              JSON.stringify({
+                type: "event_msg",
+                payload: {
+                  type: "item_completed",
+                  item: {
+                    type: "CommandExecution",
+                    id,
+                    command: [id],
+                    aggregated_output: truncate ? persistedCommandOutput : text,
+                  },
+                },
+              }) + "\n",
+            );
+            return {
+              type: "item.completed",
+              item: {
+                type: "command_execution",
+                id,
+                command: id,
+                aggregated_output: text,
+                status: "completed",
+                exit_code: 0,
+              },
+            };
+          };
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            await appendFile(
+              worker,
+              JSON.stringify({
+                type: "response_item",
+                payload: {
+                  type: "custom_tool_call_output",
+                  call_id: "worker-reviewed",
+                  output: marker("validation", workerCount, workerCount),
+                },
+              }) + "\n",
+            );
+            await workerRead.promise;
+            pausePoll = !split;
+            yield await step("old-inventory", "discovery", 0, 7);
+            if (split) await oldRead.promise;
+            pausePoll = true;
+            yield await step("new-inventory", "discovery", 0, 8, truncated);
+            pausePoll = false;
+            pollAllowed.resolve();
+            await newRead.promise;
+            yield await step("review", "discovery", 5, 8);
+            yield await step("done", "validation", 8, 8);
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      // The fake stream has no process handle to keep the unref'ed poll alive.
+      const keepAlive = setInterval(() => {}, 1_000);
+      try {
+        await client.run(repository, {
+          onProgress: (update) => updates.push(update),
+          onSessionEvent: ({ event }) => {
+            const payload = event["payload"] as {
+              call_id?: string;
+              item?: { id?: string };
+            };
+            if (payload?.call_id === "worker-reviewed") workerRead.resolve();
+            if (payload?.item?.id === "old-inventory") oldRead.resolve();
+            if (payload?.item?.id === "new-inventory") newRead.resolve();
+          },
+        });
+        expect(updates.at(-1)).toEqual({
+          phase: "validation",
+          filesCompleted: 8,
+          filesTotal: 8,
+        });
+        if (!split)
+          expect(updates.every((update) => update.filesTotal === 8)).toBe(true);
+      } finally {
+        clearInterval(keepAlive);
+        pausePoll = false;
+        pollAllowed.resolve();
+        workerRead.resolve();
+        oldRead.resolve();
+        newRead.resolve();
+        await client.close();
+        listing.mockRestore();
+      }
+    },
+  );
+
   test.each([false, true])(
     "recovers parent coverage suppressed by a provisional worker (worker remains eligible: %p)",
     async (eligibleWorker) => {

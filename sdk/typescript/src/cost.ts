@@ -904,6 +904,9 @@ export class ScanCostTracker {
         saved.position > this.#inventoryFrontier.position ||
         (saved.position === this.#inventoryFrontier.position &&
           saved.markerIndex > this.#inventoryFrontier.markerIndex);
+      // A correlated newer inventory may already have repaired scope before
+      // these saved markers are processed. Older zeros must not reset it again.
+      if (inventoryMarker && !newerInventory) continue;
       const provenInventory =
         inventoryMarker &&
         newerInventory &&
