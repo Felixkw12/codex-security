@@ -34,6 +34,7 @@ def publication_context(tmp_path, scan_id):
         now=lambda: binding["completedAt"],
         workbench_completion_binding=lambda *_args: copy.deepcopy(binding),
         expected_coverage_mode=lambda _scan: "deep_repository",
+        requested_scan_paths=lambda _scan: None,
     )
     scan = {"id": scan_id, "scan_dir": str(tmp_path), "completion_warnings_json": "[]"}
     return binding, db, scan
