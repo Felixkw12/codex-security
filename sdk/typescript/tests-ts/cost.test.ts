@@ -226,6 +226,63 @@ test.each([
   },
 );
 
+test("cost-only tracking does not retain unrelated marker-free message history", async () => {
+  const root = await codexHome();
+  await writeSession(root, "scan-thread", {
+    input_tokens: 100,
+    output_tokens: 10,
+  });
+  const history = await writeSession(root, "unrelated-history", {});
+  const file = await filesystem.open(history, "a");
+  try {
+    for (let batch = 0; batch < 200; batch++) {
+      const lines = Array.from({ length: 1_000 }, (_, index) =>
+        JSON.stringify({
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "assistant",
+            content: [
+              {
+                type: "output_text",
+                text: `Historical note ${batch * 1_000 + index}`,
+              },
+            ],
+          },
+        }),
+      );
+      await file.write(lines.join("\n") + "\n");
+    }
+  } finally {
+    await file.close();
+  }
+  const built = await Bun.build({
+    entrypoints: [fileURLToPath(new URL("../src/cost.ts", import.meta.url))],
+    target: "node",
+    format: "esm",
+  });
+  expect(built.success).toBe(true);
+  const module = join(root, "cost.mjs");
+  await writeFile(module, await built.outputs[0]!.text());
+  const { stdout } = await promisify(execFile)(
+    "node",
+    [
+      "--max-old-space-size=64",
+      "--input-type=module",
+      "--eval",
+      `
+      const { ScanCostTracker } = await import(${JSON.stringify(pathToFileURL(module).href)});
+      const tracker = new ScanCostTracker({codexHome: ${JSON.stringify(root)}, model: "gpt-5.6-sol", onCost() {}});
+      tracker.start("scan-thread");
+      const result = await tracker.stop();
+      console.log(result.usage.total_tokens);
+    `,
+    ],
+    { encoding: "utf8" },
+  );
+  expect(stdout.trim()).toBe("110");
+});
+
 test("does not retain completed command payloads when native logs are absent", async () => {
   const root = await codexHome();
   const built = await Bun.build({

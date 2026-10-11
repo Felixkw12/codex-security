@@ -539,12 +539,16 @@ export class ScanCostTracker {
     );
     for (const { live, marker } of ready) {
       const position = live.position;
+      const progress = marker.progress;
+      const deferredCoverage =
+        !marker.accepted &&
+        progress.filesCompleted > this.#highestFilesCompleted;
       if (
         position === null ||
-        !this.#afterParentFrontier(position, marker.index)
+        (!deferredCoverage &&
+          !this.#afterParentFrontier(position, marker.index))
       )
         continue;
-      const progress = marker.progress;
       const candidate: OrderedProgress & { owner: "live" } = {
         progress,
         order: marker.order,
@@ -565,15 +569,15 @@ export class ScanCostTracker {
           compareProgressOrder(candidate, corrected) > 0);
       if (!marker.accepted) {
         if (
-          this.#expectedFilesTotal !== undefined &&
-          progress.filesTotal > this.#expectedFilesTotal
+          (this.#expectedFilesTotal !== undefined &&
+            progress.filesTotal > this.#expectedFilesTotal) ||
+          progress.filesCompleted < this.#highestFilesCompleted
         ) {
-          // Saved inventory in this poll may admit the live receipt. Keep only
-          // its parsed progress available until that inventory is processed.
+          // Saved inventory can admit the live receipt or invalidate provisional
+          // worker coverage. Keep only the parsed fact until it is eligible.
           this.#readyParentMarkers.push({ live, marker });
           continue;
         }
-        if (progress.filesCompleted < this.#highestFilesCompleted) continue;
         marker.accepted = true;
         live.accepted = progress;
         live.acceptedMarkerIndex = marker.index;
@@ -595,7 +599,8 @@ export class ScanCostTracker {
       ) {
         corrected = candidate;
       }
-      this.#parentFrontier = { position, markerIndex: marker.index };
+      if (this.#afterParentFrontier(position, marker.index))
+        this.#parentFrontier = { position, markerIndex: marker.index };
     }
     const displayed = this.#displayedProgress;
     if (!inventoryChanged && corrected === null) return;
@@ -986,9 +991,14 @@ export class ScanCostTracker {
       }
       session.filesTotal = progress.filesTotal;
       session.filesCompleted = progress.filesCompleted;
-      if (parentInventory && this.#highestFilesCompleted > 0) {
-        // Resumed workers may be enumerated before the parent's inventory.
-        // Admit the scope independently while preserving eligible worker counts.
+      if (
+        parentInventory &&
+        (this.#highestFilesCompleted > 0 ||
+          (expectedFilesTotal !== undefined &&
+            progress.filesTotal !== expectedFilesTotal))
+      ) {
+        // Inventory changes apply independently of a retained display phase,
+        // including when an earlier correction temporarily excluded all counts.
         if ((this.#parentProgress?.progress.filesCompleted ?? 0) === 0)
           this.#parentProgress = {
             progress,
@@ -1576,6 +1586,7 @@ function repeatedMessageProjection(
   projection: "native" | "event" | "response",
   updates: readonly ScanProgress[],
 ): boolean {
+  if (updates.length === 0) return false;
   // Finalized messages concatenate parts; original responses retain separate
   // lines. Only suppress copies that recovered the same progress updates.
   const key = `${textDigest}:${digest(JSON.stringify(updates))}`;

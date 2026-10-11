@@ -4342,6 +4342,208 @@ describe("CodexSecurity orchestration", () => {
   );
 
   test.each([
+    ["below worker", true, false, 7],
+    ["below worker", true, false, 8],
+    ["below worker", true, true, 7],
+    ["below worker", true, true, 8],
+    ["across frontier", false, true, 7],
+    ["across frontier", true, true, 7],
+    ["across frontier", false, true, 8],
+    ["across frontier", true, true, 8],
+    ["across frontier", false, true, 9],
+    ["across frontier", true, true, 9],
+    ["inventory phase", false, false, 0],
+    ["inventory phase", true, false, 0],
+  ] as const)(
+    "retains eligible live facts through inventory admission (%s, early: %p, truncated: %p, count: %p)",
+    async (scenario, early, truncated, count) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const workerRead = Promise.withResolvers<void>();
+      const parentRead = Promise.withResolvers<void>();
+      const pollAllowed = Promise.withResolvers<void>();
+      let pausePoll = scenario === "inventory phase";
+      const originalReaddir = fsPromises.readdir;
+      const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
+        ...args: Parameters<typeof originalReaddir>
+      ) => {
+        if (pausePoll && String(args[0]) === join(codexHome, "sessions"))
+          await pollAllowed.promise;
+        return originalReaddir(...args);
+      }) as typeof originalReaddir);
+      const marker = (
+        phase: ScanProgress["phase"],
+        completed: number,
+        total: number,
+      ) =>
+        "CODEX_SECURITY_SCAN_PROGRESS " +
+        JSON.stringify({ phase, filesCompleted: completed, filesTotal: total });
+      const receipt = (id: string, text: string) => ({
+        type: "response_item",
+        payload: {
+          type: "custom_tool_call_output",
+          call_id: id,
+          output: text,
+        },
+      });
+      const command = (id: string, text: string, truncate = false) => ({
+        saved: {
+          type: "event_msg",
+          payload: {
+            type: "item_completed",
+            item: {
+              type: "CommandExecution",
+              id,
+              command: [id],
+              aggregated_output: truncate ? persistedCommandOutput : text,
+            },
+          },
+        },
+        live: {
+          type: "item.completed",
+          item: {
+            type: "command_execution",
+            id,
+            command: id,
+            aggregated_output: text,
+            status: "completed",
+            exit_code: 0,
+          },
+        } as ThreadEvent,
+      });
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          const parent = await writeUsageSession(codexHome, "thread-1", {});
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            if (scenario !== "inventory phase") {
+              const worker = await writeUsageSession(
+                codexHome,
+                "worker-thread",
+                {},
+                { parent: "thread-1" },
+              );
+              const workerCount = scenario === "below worker" ? count : 8;
+              await appendFile(
+                worker,
+                JSON.stringify(
+                  receipt(
+                    "worker-reviewed",
+                    marker("discovery", workerCount, workerCount),
+                  ),
+                ) + "\n",
+              );
+              await workerRead.promise;
+            }
+            pausePoll = true;
+            const commands =
+              scenario === "across frontier"
+                ? [
+                    command(
+                      "inventory",
+                      commandOutput(marker("discovery", 0, 9)),
+                      true,
+                    ),
+                    command(
+                      "review",
+                      commandOutput(marker("validation", count, 9)),
+                      true,
+                    ),
+                    command("parent-boundary", marker("discovery", 8, 8)),
+                  ]
+                : [
+                    command(
+                      "parent-boundary",
+                      scenario === "below worker"
+                        ? truncated
+                          ? commandOutput(marker("validation", 3, 7))
+                          : marker("validation", 3, 7)
+                        : marker("validation", 5, 8),
+                      truncated,
+                    ),
+                  ];
+            const inventories =
+              scenario === "across frontier"
+                ? []
+                : [
+                    receipt("old-inventory", marker("discovery", 0, 7)),
+                    ...(scenario === "inventory phase"
+                      ? [receipt("new-inventory", marker("discovery", 0, 8))]
+                      : []),
+                  ];
+            // All canonical records precede every corresponding SDK item. Only
+            // observer delivery/poll placement differs between paired controls.
+            await appendFile(
+              parent,
+              [...inventories, ...commands.map((item) => item.saved)]
+                .map((item) => JSON.stringify(item))
+                .join("\n") + "\n",
+            );
+            if (early) for (const item of commands) yield item.live;
+            pausePoll = false;
+            pollAllowed.resolve();
+            await parentRead.promise;
+            if (!early) for (const item of commands) yield item.live;
+            if (scenario === "inventory phase") {
+              const next = command("next", marker("reporting", 6, 8));
+              await appendFile(parent, JSON.stringify(next.saved) + "\n");
+              yield next.live;
+            }
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      // The fake stream has no process handle to keep the unref'ed poll alive.
+      const keepAlive = setInterval(() => {}, 1_000);
+      try {
+        await client.run(repository, {
+          onProgress: (update) => updates.push(update),
+          onSessionEvent: ({ event }) => {
+            const payload = event["payload"] as {
+              call_id?: string;
+              item?: { id?: string };
+            };
+            if (payload?.call_id === "worker-reviewed") workerRead.resolve();
+            if (payload?.item?.id === "parent-boundary") parentRead.resolve();
+          },
+        });
+        expect(updates.at(-1)).toEqual(
+          scenario === "below worker"
+            ? {
+                phase: count === 7 ? "discovery" : "validation",
+                filesCompleted: count === 7 ? 7 : 3,
+                filesTotal: 7,
+              }
+            : scenario === "across frontier"
+              ? {
+                  phase: count > 8 ? "validation" : "discovery",
+                  filesCompleted: Math.max(count, 8),
+                  filesTotal: 9,
+                }
+              : { phase: "reporting", filesCompleted: 6, filesTotal: 8 },
+        );
+      } finally {
+        clearInterval(keepAlive);
+        pausePoll = false;
+        pollAllowed.resolve();
+        workerRead.resolve();
+        parentRead.resolve();
+        await client.close();
+        listing.mockRestore();
+      }
+    },
+  );
+
+  test.each([
     [false, false, 7],
     [false, true, 7],
     [true, false, 7],
