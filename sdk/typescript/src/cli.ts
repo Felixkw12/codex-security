@@ -7070,7 +7070,7 @@ async function patchPublicationDestination(
   const run = (
     command: "git" | "gh" | "glab",
     args: string[],
-    options?: { trim: boolean },
+    options?: { trim: boolean; environment?: NodeJS.ProcessEnv },
   ) => dependencies.runRepositoryCommand(command, args, repository, options);
   const getPushUrls = ["remote", "get-url", "--push", "--all", "origin"];
   const output = await run("git", getPushUrls, { trim: false });
@@ -7078,7 +7078,7 @@ async function patchPublicationDestination(
     await run(
       "git",
       ["config", "--null", "--get-regexp", "^remote\\.origin\\."],
-      { trim: false },
+      { trim: false, environment: { GIT_CONFIG: undefined } },
     ).catch((error: unknown) => {
       if (isJsonObject(error) && error["code"] === 1) return "";
       throw error;
@@ -7410,6 +7410,33 @@ async function patchCommandContext(
     } finally {
       await rm(emptyObjects, { recursive: true, force: true });
     }
+  }
+
+  // Staging and Git's own child processes can change cwd. Keep relative
+  // configuration files bound to the setup directory whose controls we captured.
+  const configurationPaths = ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"]
+    .map(
+      (name) =>
+        [name, environmentValue(dependencies.environment, name)] as const,
+    )
+    .filter(
+      (entry): entry is readonly [string, string] =>
+        Boolean(entry[1]) && !isAbsolute(entry[1]!),
+    );
+  if (configurationPaths.length) {
+    const configurationDirectory = (
+      await dependencies.runRepositoryCommand(
+        "git",
+        ["rev-parse", "--path-format=absolute", "--git-path", "objects"],
+        repository,
+        { trim: false, directory, environment: { GIT_OBJECT_DIRECTORY: "." } },
+      )
+    ).replace(/\n$/u, "");
+    for (const [name, value] of configurationPaths)
+      environment[name] =
+        process.platform === "win32" && /^[a-z]:/iu.test(value)
+          ? resolve(configurationDirectory, value)
+          : `${configurationDirectory.replaceAll(sep, "/")}/${value}`;
   }
 
   const physicalDirectory = await realpath(directory);
@@ -8748,6 +8775,11 @@ async function snapshotGitPatchState(
                 nested,
                 {
                   trim: false,
+                  // Match rev-parse: GIT_CONFIG selects a file only for git config.
+                  environment:
+                    args[0] === "config"
+                      ? { GIT_CONFIG: undefined }
+                      : undefined,
                 },
               )
             ).replace(process.platform === "win32" ? /\r?\n$/u : /\n$/u, "");
