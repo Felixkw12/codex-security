@@ -114,7 +114,6 @@ interface SessionUsage {
   progress: SessionProgress[];
   position: number;
   completions: SessionCompletion[];
-  toolReceipts: Set<string>;
   workerProgress: Set<string>;
   pendingWorkerProgress: Map<number, { progress: ScanProgress; order: number }>;
   messageProjections: Map<
@@ -170,7 +169,6 @@ function createSessionUsage(): SessionUsage {
     progress: [],
     position: 0,
     completions: [],
-    toolReceipts: new Set(),
     workerProgress: new Set(),
     pendingWorkerProgress: new Map(),
     messageProjections: new Map(),
@@ -196,6 +194,7 @@ export class ScanCostTracker {
     StreamedProgressItem
   >();
   #acceptedParent: StreamedProgressItem | null = null;
+  #acceptedInventory: ParentProgressMarker | null = null;
   readonly #readyParentMarkers: Array<{
     live: StreamedProgressItem;
     marker: ParentProgressMarker;
@@ -221,6 +220,7 @@ export class ScanCostTracker {
   #lastCost: string | null = null;
   #highestFilesCompleted = 0;
   #expectedFilesTotal: number | undefined;
+  #inventoryNeedsReconciliation = false;
 
   public constructor(options: ScanCostTrackerOptions) {
     this.#options = options;
@@ -229,6 +229,11 @@ export class ScanCostTracker {
   }
 
   public setExpectedFilesTotal(filesTotal: number): void {
+    if (
+      this.#expectedFilesTotal !== undefined &&
+      this.#expectedFilesTotal !== filesTotal
+    )
+      this.#inventoryNeedsReconciliation = true;
     this.#expectedFilesTotal = filesTotal;
   }
 
@@ -239,6 +244,9 @@ export class ScanCostTracker {
     this.#liveParentItems.length = 0;
     this.#liveParentEvents = new WeakMap();
     this.#acceptedParent = null;
+    this.#acceptedInventory = null;
+    // Historical logs may omit projection kinds emitted by the new turn.
+    this.#parentSession?.messageProjections.clear();
     this.#readyParentMarkers.length = 0;
     this.#matchedParentItems = 0;
     this.#parentCompletionStart = this.#parentSession?.completions.length ?? 0;
@@ -302,6 +310,8 @@ export class ScanCostTracker {
     const marker = live.markers[live.observedMarkerIndex];
     if (marker === undefined) return;
     marker.accepted = true;
+    if (progress.phase === "discovery" && progress.filesCompleted === 0)
+      this.#acceptedInventory = marker;
     this.#acceptedParent = live;
     live.accepted = progress;
     live.acceptedMarkerIndex = live.observedMarkerIndex;
@@ -357,13 +367,13 @@ export class ScanCostTracker {
 
   #reconcileParentProgress(): void {
     const ready = this.#readyParentMarkers.splice(0);
-    let inventoryChanged = false;
     let corrected: { progress: ScanProgress; order: number } | null = null;
     for (const { live, marker } of ready) {
       const position = live.position;
       if (position === null) continue;
       const progress = marker.progress;
       if (
+        marker === this.#acceptedInventory &&
         marker.accepted &&
         progress.phase === "discovery" &&
         progress.filesCompleted === 0 &&
@@ -372,12 +382,11 @@ export class ScanCostTracker {
             marker.index > this.#inventoryFrontier.markerIndex))
       ) {
         this.#inventoryFrontier = { position, markerIndex: marker.index };
-        if (this.#expectedFilesTotal !== progress.filesTotal) {
-          this.#expectedFilesTotal = progress.filesTotal;
-          inventoryChanged = true;
-        }
+        this.setExpectedFilesTotal(progress.filesTotal);
       }
     }
+    const inventoryChanged = this.#inventoryNeedsReconciliation;
+    this.#inventoryNeedsReconciliation = false;
     if (inventoryChanged) {
       // Reconsider compact worker receipts under the proven inventory. Keep an
       // oversized receipt available without counting it as reviewed coverage.
@@ -945,7 +954,6 @@ function readSessionEvent(
   session.events?.push(event);
   const position = ++session.position;
   if (event["type"] === "response_item") {
-    const callId = payload["call_id"];
     const receipt =
       payload["type"] === "function_call_output" ||
       payload["type"] === "custom_tool_call_output";
@@ -963,14 +971,9 @@ function readSessionEvent(
     const duplicateMessage =
       message !== null &&
       repeatedMessageProjection(session, digest(message), "response");
-    const duplicateReceipt =
-      receipt && typeof callId === "string" && session.toolReceipts.has(callId);
-    const updates =
-      duplicateMessage || duplicateReceipt
-        ? []
-        : sessionProgressUpdates(payload);
-    if (receipt && updates.length > 0 && typeof callId === "string")
-      session.toolReceipts.add(callId);
+    // Code-mode notifications and the final output can share a call ID.
+    // Each appended output record remains a distinct completion receipt.
+    const updates = duplicateMessage ? [] : sessionProgressUpdates(payload);
     for (const [markerIndex, update] of updates.entries()) {
       session.progress.push({
         update,

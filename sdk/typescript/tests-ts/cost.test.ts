@@ -2101,6 +2101,117 @@ describe("live scan cost tracking", () => {
     },
   );
 
+  test.each([false, true])(
+    "preserves distinct notifications sharing a call ID (worker: %p)",
+    async (workerOutput) => {
+      const { home, parent, worker } = await workerSessionFixture();
+      const updates: ScanProgress[] = [];
+      const tracker = costTracker(home, {
+        expectedFilesTotal: 8,
+        onProgress: (update) => updates.push(update),
+      });
+      tracker.start("scan-thread");
+      await tracker.refresh();
+      const values: ScanProgress[] = [
+        { phase: "discovery", filesCompleted: 1, filesTotal: 8 },
+        { phase: "discovery", filesCompleted: 4, filesTotal: 8 },
+        { phase: "validation", filesCompleted: 8, filesTotal: 8 },
+      ];
+      if (!workerOutput)
+        values.push({ ...values[2]!, phase: "discovery" }, values[2]!);
+      for (const progress of values) {
+        await appendSessionItem(workerOutput ? worker : parent, {
+          type: "custom_tool_call_output",
+          call_id: "notify-call",
+          output: "CODEX_SECURITY_SCAN_PROGRESS " + JSON.stringify(progress),
+        });
+        await tracker.refresh();
+      }
+      await tracker.stop();
+      expect(updates).toEqual(values);
+    },
+  );
+
+  test.each([false, true])(
+    "rebases message projections after legacy history (history: %p)",
+    async (history) => {
+      const { home, parent } = await workerSessionFixture();
+      const updates: ScanProgress[] = [];
+      const tracker = costTracker(home, {
+        expectedFilesTotal: 8,
+        onProgress: (update) => {
+          if (JSON.stringify(updates.at(-1)) !== JSON.stringify(update))
+            updates.push(update);
+        },
+      });
+      const progress = (phase: "discovery" | "validation") => ({
+        phase,
+        filesCompleted: 8,
+        filesTotal: 8,
+      });
+      const marker = (phase: "discovery" | "validation") =>
+        "CODEX_SECURITY_SCAN_PROGRESS " + JSON.stringify(progress(phase));
+      const projections = (phase: "discovery" | "validation") => [
+        {
+          type: "event_msg",
+          payload: {
+            type: "item_completed",
+            item: {
+              type: "AgentMessage",
+              content: [{ type: "Text", text: marker(phase) }],
+            },
+          },
+        },
+        {
+          type: "event_msg",
+          payload: { type: "agent_message", message: marker(phase) },
+        },
+        {
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: marker(phase) }],
+          },
+        },
+      ];
+      const append = async (rows: unknown[]) =>
+        appendFile(
+          parent,
+          rows.map((row) => JSON.stringify(row)).join("\n") + "\n",
+        );
+      if (history) await append(projections("discovery").slice(1));
+      tracker.start("scan-thread");
+      await tracker.refresh();
+      tracker.beginParentTurn(true);
+      const stream = (phase: "discovery" | "validation") => {
+        const update = progress(phase);
+        const event = {
+          type: "item.completed",
+          item: { type: "agent_message", text: marker(phase) },
+        };
+        if (tracker.recordParentProgress(update, event)) {
+          tracker.acceptParentProgress(update, event);
+          if (JSON.stringify(updates.at(-1)) !== JSON.stringify(update))
+            updates.push(update);
+        }
+      };
+      stream("discovery");
+      stream("validation");
+      await append([...projections("discovery"), ...projections("validation")]);
+      await tracker.refresh();
+      await append(projections("discovery"));
+      await tracker.refresh();
+      stream("discovery");
+      await tracker.stop();
+      expect(updates.map((update) => update.phase)).toEqual([
+        "discovery",
+        "validation",
+        "discovery",
+      ]);
+    },
+  );
+
   test("deduplicates legacy parent message projections by occurrence", async () => {
     const { home, parent } = await workerSessionFixture();
     const updates: ScanProgress[] = [];

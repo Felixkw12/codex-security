@@ -4309,6 +4309,7 @@ describe("CodexSecurity orchestration", () => {
     ["complete native occurrences", true, true, false, 8, 9, 1, 1],
     ["tool-only old inventory", false, true, false, 8, 9, 1, 1],
     ["late upward inventory proof", false, true, true, 8, 9, 1, 1],
+    ["live inventory readmits pending worker", false, true, true, 8, 9, 9, 9],
     [
       "late proof admits a previously oversized worker",
       false,
@@ -4443,6 +4444,18 @@ describe("CodexSecurity orchestration", () => {
               }) + "\n",
             );
             await workerRead.promise;
+            if (_scenario === "live inventory readmits pending worker")
+              yield {
+                type: "item.completed",
+                item: {
+                  id: "restored-inventory",
+                  type: "command_execution",
+                  command: `scan-inventory ${correctedTotal}`,
+                  aggregated_output: commandOutput(marker(0, correctedTotal)),
+                  exit_code: 0,
+                  status: "completed",
+                },
+              };
             if (delayNative)
               await appendFile(
                 rollout,
@@ -4531,6 +4544,87 @@ describe("CodexSecurity orchestration", () => {
             filesTotal: correctedTotal,
           });
         }
+      } finally {
+        await client.close();
+      }
+    },
+  );
+
+  test.each([0, 3])(
+    "keeps the latest accepted inventory when only older proof arrives (%p reviewed)",
+    async (count) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const marker = (completed: number, total: number) =>
+        "CODEX_SECURITY_SCAN_PROGRESS " +
+        JSON.stringify({
+          phase: "discovery",
+          filesCompleted: completed,
+          filesTotal: total,
+        });
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          const rollout = await writeUsageSession(codexHome, "thread-1", {});
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            for (const [completed, total] of [
+              [0, 8],
+              [0, 9],
+              ...(count ? [[count, 9]] : []),
+            ])
+              yield {
+                type: "item.completed",
+                item: {
+                  type: "command_execution",
+                  id: `progress-${completed}-${total}`,
+                  command: `report-progress ${completed} ${total}`,
+                  aggregated_output: commandOutput(marker(completed!, total!)),
+                  exit_code: 0,
+                  status: "completed",
+                },
+              };
+            await appendFile(
+              rollout,
+              JSON.stringify({
+                type: "event_msg",
+                payload: {
+                  type: "item_completed",
+                  item: {
+                    type: "CommandExecution",
+                    command: ["report-progress", "0", "8"],
+                    aggregated_output: persistedCommandOutput,
+                  },
+                },
+              }) + "\n",
+            );
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      try {
+        await client.run(repository, {
+          onProgress: (update) => updates.push(update),
+        });
+        expect(updates.at(-1)).toEqual({
+          phase: "discovery",
+          filesCompleted: count,
+          filesTotal: 9,
+        });
+        const corrected = updates.findIndex(
+          (update) => update.filesTotal === 9,
+        );
+        expect(
+          updates.slice(corrected).every((update) => update.filesTotal === 9),
+        ).toBe(true);
       } finally {
         await client.close();
       }
