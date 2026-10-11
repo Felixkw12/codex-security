@@ -212,6 +212,14 @@ export async function processProof(
       ["process-probe.exe", tools, join(tools, "process-probe.exe")],
       ["process-probe.", tools, join(tools, "process-probe.com")],
       ["process-probe.bin", tools, join(tools, "process-probe.bin")],
+      ...["com", "exe"].map(
+        (extension) =>
+          [
+            `\\\\.\\${join(tools, `process-probe.${extension}`)}\\unused\\..`,
+            firstTools,
+            `\\\\.\\${join(tools, `process-probe.${extension}`)}`,
+          ] as const,
+      ),
       [
         ".\\relative-tools\\process-probe.exe",
         firstTools,
@@ -388,9 +396,14 @@ export async function processProof(
         `${batch}. `,
         `${batch}\\.`,
         `${batch}\\unused\\..`,
+        `\\\\.\\${batch}`,
+        `\\\\.\\${batch}\\.`,
+        `\\\\.\\${batch}\\unused\\..`,
         win32.toNamespacedPath(batch),
       ])
         await startupFailure(executable, [87]);
+      // Verbatim paths do not resolve the dot segments through a regular file.
+      await startupFailure(`${win32.toNamespacedPath(batch)}\\unused\\..`, [2]);
       files.unlink(widePath(batch));
       // Classify the selected image, allowing the existing .com/.exe fallback.
       const image = spawnWindowsProcess(
