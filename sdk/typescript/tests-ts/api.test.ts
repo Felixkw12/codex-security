@@ -6157,7 +6157,7 @@ describe("CodexSecurity orchestration", () => {
     },
   );
 
-  test("advances parent provenance when a worker already displayed the same phase", async () => {
+  test("advances parent provenance after equal worker progress", async () => {
     const { root, repository, codexHome, scanDir } = await scanDirectories();
     const updates: ScanProgress[] = [];
     const first = Promise.withResolvers<void>();
@@ -6236,9 +6236,10 @@ describe("CodexSecurity orchestration", () => {
         onProgress: (progress) => {
           updates.push(progress);
           if (progress.phase === "discovery") first.resolve();
-          if (progress.phase === "validation") workerRead.resolve();
         },
-        onSessionEvent: ({ event }) => {
+        onSessionEvent: ({ event, threadId }) => {
+          if (threadId === "worker-thread" && event["type"] === "response_item")
+            workerRead.resolve();
           if (
             (event["payload"] as { item?: { id?: string } } | undefined)?.item
               ?.id === "latest"
@@ -6509,10 +6510,7 @@ describe("CodexSecurity orchestration", () => {
         });
         const workerCount = counts.reduce((sum, count) => sum + count, 0);
         expect(updates.at(-1)).toEqual({
-          phase:
-            workerCount > 7 || (workerCount === 7 && !pendingFirst)
-              ? "discovery"
-              : "validation",
+          phase: workerCount > 7 ? "discovery" : "validation",
           filesCompleted: Math.max(7, workerCount),
           filesTotal: 9,
         });
@@ -6808,7 +6806,7 @@ describe("CodexSecurity orchestration", () => {
           onWorkerEvent: () => workerRead.resolve(),
         });
         expect(updates.at(-1)).toEqual({
-          phase: workerCount < 7 ? "validation" : "discovery",
+          phase: workerCount <= 7 ? "validation" : "discovery",
           filesCompleted: Math.max(7, workerCount),
           filesTotal: 9,
         });
@@ -6826,8 +6824,960 @@ describe("CodexSecurity orchestration", () => {
     },
   );
 
+  test.each([
+    [false, "discovery", "validation"],
+    [true, "discovery", "validation"],
+    [false, "attack_path", "discovery"],
+    [true, "attack_path", "discovery"],
+  ] as const)(
+    "keeps newer parent phases across a session close (split: %p, first: %s, next: %s)",
+    async (split, firstPhase, nextPhase) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const metadataRead = Promise.withResolvers<void>();
+      const firstRead = Promise.withResolvers<void>();
+      const closeEntered = Promise.withResolvers<void>();
+      const closeReleased = Promise.withResolvers<void>();
+      let parentPath = "";
+      let pauseClose = false;
+      const originalOpen = fsPromises.open;
+      const opening = spyOn(fsPromises, "open").mockImplementation((async (
+        ...args: Parameters<typeof originalOpen>
+      ) => {
+        const handle = await originalOpen(...args);
+        if (String(args[0]) !== parentPath || !pauseClose) return handle;
+        const close = handle.close.bind(handle);
+        handle.close = async () => {
+          if (pauseClose) {
+            pauseClose = false;
+            closeEntered.resolve();
+            await closeReleased.promise;
+          }
+          await close();
+        };
+        return handle;
+      }) as typeof originalOpen);
+      const marker = (phase: ScanProgress["phase"]) =>
+        "CODEX_SECURITY_SCAN_PROGRESS " +
+        JSON.stringify({ phase, filesCompleted: 8, filesTotal: 8 });
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          parentPath = await writeUsageSession(codexHome, "thread-1", {});
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            // Finish initial session association so this poll reads only its
+            // original snapshot, rather than replaying a newly associated file.
+            await metadataRead.promise;
+            await appendFile(
+              parentPath,
+              JSON.stringify({
+                type: "response_item",
+                payload: {
+                  type: "custom_tool_call_output",
+                  call_id: "first-review",
+                  output: marker(firstPhase),
+                },
+              }) + "\n",
+            );
+            if (split) {
+              pauseClose = true;
+              await closeEntered.promise;
+            } else await firstRead.promise;
+            // The newer completion is durable before its SDK projection arrives,
+            // even when the older snapshot is still waiting for file.close.
+            await appendFile(
+              parentPath,
+              JSON.stringify({
+                type: "event_msg",
+                payload: {
+                  type: "item_completed",
+                  item: {
+                    type: "AgentMessage",
+                    content: [{ type: "Text", text: marker(nextPhase) }],
+                  },
+                },
+              }) + "\n",
+            );
+            yield {
+              type: "item.completed",
+              item: {
+                id: "next-review",
+                type: "agent_message",
+                text: marker(nextPhase),
+              },
+            };
+            closeReleased.resolve();
+            await firstRead.promise;
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      // The fake stream has no process handle to keep the unref'ed poll alive.
+      const keepAlive = setInterval(() => {}, 1_000);
+      try {
+        await client.run(repository, {
+          onProgress: (update) => updates.push(update),
+          onSessionEvent: ({ event }) => {
+            if (event["type"] === "session_meta") metadataRead.resolve();
+            if (
+              (event["payload"] as { call_id?: string })?.call_id ===
+              "first-review"
+            )
+              firstRead.resolve();
+          },
+        });
+        expect(updates.at(-1)).toEqual({
+          phase: nextPhase,
+          filesCompleted: 8,
+          filesTotal: 8,
+        });
+      } finally {
+        clearInterval(keepAlive);
+        pauseClose = false;
+        metadataRead.resolve();
+        firstRead.resolve();
+        closeEntered.resolve();
+        closeReleased.resolve();
+        await client.close();
+        opening.mockRestore();
+      }
+    },
+  );
+
+  test.each([
+    [7, false, false, "validation", "discovery", "none"],
+    [7, false, true, "validation", "discovery", "none"],
+    [8, false, false, "validation", "discovery", "none"],
+    [8, false, true, "validation", "discovery", "none"],
+    [7, false, false, "discovery", "attack_path", "none"],
+    [7, false, true, "discovery", "attack_path", "none"],
+    [8, false, false, "discovery", "attack_path", "none"],
+    [8, false, true, "discovery", "attack_path", "none"],
+    [7, true, false, "validation", "discovery", "none"],
+    [8, true, true, "validation", "discovery", "none"],
+    [7, true, false, "discovery", "attack_path", "none"],
+    [8, true, true, "discovery", "attack_path", "none"],
+    [8, false, true, "validation", "discovery", "accepted"],
+    [8, false, true, "discovery", "attack_path", "accepted"],
+    [7, false, true, "validation", "discovery", "accepted"],
+    [8, false, true, "validation", "discovery", "mismatch"],
+  ] as const)(
+    "retains eligible worker phases through inventory correction (parent total: %p, worker first: %p, repeat: %p, parent: %s, worker: %s, next: %s)",
+    async (
+      parentTotal,
+      workerFirst,
+      repeat,
+      parentPhase,
+      workerPhase,
+      nextWorker,
+    ) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const metadataRead = Promise.withResolvers<void>();
+      const parentRead = Promise.withResolvers<void>();
+      const workerRead = Promise.withResolvers<void>();
+      const nextWorkerRead = Promise.withResolvers<void>();
+      const scopeChanged = Promise.withResolvers<void>();
+      const marker = (
+        phase: ScanProgress["phase"],
+        count: number,
+        total: number,
+      ) =>
+        "CODEX_SECURITY_SCAN_PROGRESS " +
+        JSON.stringify({ phase, filesCompleted: count, filesTotal: total });
+      const nextPhase =
+        workerPhase === "discovery" ? "attack_path" : "validation";
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          const parent = await writeUsageSession(codexHome, "thread-1", {});
+          let worker = "";
+          const workerReceipt = (
+            id: string,
+            phase: ScanProgress["phase"],
+            total = 3,
+          ) => ({
+            type: "response_item",
+            payload: {
+              type: "custom_tool_call_output",
+              call_id: id,
+              output: marker(phase, 3, total),
+            },
+          });
+          const appendWorker = async () => {
+            worker = await writeUsageSession(
+              codexHome,
+              "worker-thread",
+              {},
+              { parent: "thread-1" },
+            );
+            await appendFile(
+              worker,
+              JSON.stringify(workerReceipt("worker-review", workerPhase)) +
+                "\n",
+            );
+            await workerRead.promise;
+          };
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            await metadataRead.promise;
+            await appendFile(
+              parent,
+              JSON.stringify({
+                type: "event_msg",
+                payload: {
+                  type: "item_completed",
+                  item: {
+                    type: "CommandExecution",
+                    command: ["inventory"],
+                    aggregated_output: persistedCommandOutput,
+                  },
+                },
+              }) + "\n",
+            );
+            if (workerFirst) await appendWorker();
+            await appendFile(
+              parent,
+              JSON.stringify({
+                type: "event_msg",
+                payload: {
+                  type: "item_completed",
+                  item: {
+                    type: "AgentMessage",
+                    id: "parent-review",
+                    content: [
+                      {
+                        type: "Text",
+                        text: marker(parentPhase, 3, parentTotal),
+                      },
+                    ],
+                  },
+                },
+              }) + "\n",
+            );
+            await parentRead.promise;
+            if (!workerFirst) await appendWorker();
+            if (nextWorker !== "none") {
+              await appendFile(
+                worker,
+                JSON.stringify(
+                  workerReceipt(
+                    "worker-next",
+                    nextPhase,
+                    nextWorker === "mismatch" ? 4 : 3,
+                  ),
+                ) + "\n",
+              );
+              await nextWorkerRead.promise;
+            }
+            // Both native parent completions precede their SDK projections.
+            // Let the full earlier inventory reconcile before its following item.
+            yield {
+              type: "item.completed",
+              item: {
+                type: "command_execution",
+                id: "inventory",
+                command: "inventory",
+                aggregated_output: commandOutput(marker("discovery", 0, 7)),
+                status: "completed",
+                exit_code: 0,
+              },
+            };
+            await scopeChanged.promise;
+            yield {
+              type: "item.completed",
+              item: {
+                type: "agent_message",
+                id: "parent-review",
+                text: marker(parentPhase, 3, parentTotal),
+              },
+            };
+            if (repeat)
+              await appendFile(
+                worker,
+                JSON.stringify(workerReceipt("worker-repeat", workerPhase)) +
+                  "\n",
+              );
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      // The fake stream has no process handle to keep the unref'ed poll alive.
+      const keepAlive = setInterval(() => {}, 1_000);
+      try {
+        await client.run(repository, {
+          onProgress: (update) => {
+            updates.push(update);
+            if (update.filesCompleted === 3 && update.filesTotal === 7)
+              scopeChanged.resolve();
+          },
+          onSessionEvent: ({ event, threadId }) => {
+            if (event["type"] === "session_meta" && threadId === "thread-1")
+              metadataRead.resolve();
+            const payload = event["payload"] as {
+              call_id?: string;
+              item?: { id?: string };
+            };
+            if (payload?.item?.id === "parent-review") parentRead.resolve();
+            if (payload?.call_id === "worker-review") workerRead.resolve();
+            if (payload?.call_id === "worker-next") nextWorkerRead.resolve();
+          },
+        });
+        expect(updates.at(-1)).toEqual({
+          phase:
+            parentTotal === 7
+              ? parentPhase
+              : nextWorker === "accepted"
+                ? nextPhase
+                : workerPhase,
+          filesCompleted: 3,
+          filesTotal: 7,
+        });
+      } finally {
+        clearInterval(keepAlive);
+        metadataRead.resolve();
+        parentRead.resolve();
+        workerRead.resolve();
+        nextWorkerRead.resolve();
+        scopeChanged.resolve();
+        await client.close();
+      }
+    },
+  );
+
+  test.each([
+    [false, "validation", "discovery"],
+    [true, "validation", "discovery"],
+    [false, "discovery", "attack_path"],
+    [true, "discovery", "attack_path"],
+  ] as const)(
+    "recovers deferred live parents through a saved scope correction (early: %p, parent: %s, worker: %s)",
+    async (early, parentPhase, workerPhase) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const metadataRead = Promise.withResolvers<void>();
+      const inventoryRead = Promise.withResolvers<void>();
+      const firstRead = Promise.withResolvers<void>();
+      const secondRead = Promise.withResolvers<void>();
+      const closeEntered = Promise.withResolvers<void>();
+      const closeReleased = Promise.withResolvers<void>();
+      const recovered = Promise.withResolvers<void>();
+      let parentPath = "";
+      let pauseClose = false;
+      const originalOpen = fsPromises.open;
+      const opening = spyOn(fsPromises, "open").mockImplementation((async (
+        ...args: Parameters<typeof originalOpen>
+      ) => {
+        const handle = await originalOpen(...args);
+        if (String(args[0]) !== parentPath || !pauseClose) return handle;
+        const close = handle.close.bind(handle);
+        handle.close = async () => {
+          if (pauseClose) {
+            pauseClose = false;
+            closeEntered.resolve();
+            await closeReleased.promise;
+          }
+          await close();
+        };
+        return handle;
+      }) as typeof originalOpen);
+      const marker = (
+        phase: ScanProgress["phase"],
+        count: number,
+        total: number,
+      ) =>
+        "CODEX_SECURITY_SCAN_PROGRESS " +
+        JSON.stringify({ phase, filesCompleted: count, filesTotal: total });
+      const receipt = (id: string, output: string) => ({
+        type: "response_item",
+        payload: { type: "custom_tool_call_output", call_id: id, output },
+      });
+      const completion = (command: string, output: string) => ({
+        type: "event_msg",
+        payload: {
+          type: "item_completed",
+          item: {
+            type: "CommandExecution",
+            command: [command],
+            aggregated_output: output,
+          },
+        },
+      });
+      const live = (command: string, output: string): ThreadEvent => ({
+        type: "item.completed",
+        item: {
+          type: "command_execution",
+          id: command,
+          command,
+          aggregated_output: output,
+          status: "completed",
+          exit_code: 0,
+        },
+      });
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          parentPath = await writeUsageSession(codexHome, "thread-1", {});
+          const inventory = receipt("inventory", marker("discovery", 0, 6));
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            await metadataRead.promise;
+            if (early) {
+              await appendFile(parentPath, JSON.stringify(inventory) + "\n");
+              await inventoryRead.promise;
+            }
+            const first = await writeUsageSession(
+              codexHome,
+              "first-worker",
+              {},
+              { parent: "thread-1" },
+            );
+            await appendFile(
+              first,
+              JSON.stringify(receipt("first", marker(workerPhase, 3, 3))) +
+                "\n",
+            );
+            await firstRead.promise;
+            const second = await writeUsageSession(
+              codexHome,
+              "second-worker",
+              {},
+              { parent: "thread-1" },
+            );
+            await appendFile(
+              second,
+              JSON.stringify(receipt("second", marker(workerPhase, 1, 8))) +
+                "\n",
+            );
+            await secondRead.promise;
+            if (!early) {
+              pauseClose = true;
+              await closeEntered.promise;
+            }
+            // Native rows precede their ordered SDK completions, but an earlier
+            // read can finish closing before it observes those appended rows.
+            const rows = [
+              ...(early ? [] : [inventory]),
+              completion("eligible", persistedCommandOutput),
+              completion("oversized", marker(parentPhase, 4, 8)),
+            ];
+            await appendFile(
+              parentPath,
+              rows.map((row) => JSON.stringify(row)).join("\n") + "\n",
+            );
+            yield live("eligible", commandOutput(marker(parentPhase, 3, 6)));
+            yield live("oversized", marker(parentPhase, 4, 8));
+            closeReleased.resolve();
+            await recovered.promise;
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      const keepAlive = setInterval(() => {}, 1_000);
+      try {
+        await client.run(repository, {
+          onProgress: (update) => {
+            updates.push(update);
+            if (update.filesCompleted === 0 && update.filesTotal === 6)
+              inventoryRead.resolve();
+            if (update.filesCompleted === 3 && update.filesTotal === 6)
+              recovered.resolve();
+          },
+          onSessionEvent: ({ event, threadId }) => {
+            if (event["type"] === "session_meta" && threadId === "thread-1")
+              metadataRead.resolve();
+            const id = (event["payload"] as { call_id?: string })?.call_id;
+            if (id === "first") firstRead.resolve();
+            if (id === "second") secondRead.resolve();
+          },
+        });
+        expect(updates.at(-1)).toEqual({
+          phase: parentPhase,
+          filesCompleted: 3,
+          filesTotal: 6,
+        });
+      } finally {
+        clearInterval(keepAlive);
+        metadataRead.resolve();
+        inventoryRead.resolve();
+        firstRead.resolve();
+        secondRead.resolve();
+        closeReleased.resolve();
+        recovered.resolve();
+        await client.close();
+        opening.mockRestore();
+      }
+    },
+  );
+
+  test.each(
+    (["validation", "discovery"] as const).flatMap((parentPhase) =>
+      [false, true].flatMap((early) =>
+        (
+          [
+            "no-frontier",
+            "immediate",
+            "idle",
+            "lower-parent",
+            "newer-parent",
+            "restore-scope",
+            "cycle-scope",
+          ] as const
+        ).map((scenario) => [early, parentPhase, scenario] as const),
+      ),
+    ),
+  )(
+    "recovers eligible deferred parents before worker fallback (early: %p, parent: %s, scenario: %s)",
+    async (early, parentPhase, scenario) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const workerPhase =
+        parentPhase === "validation" ? "discovery" : "attack_path";
+      const newerPhase =
+        parentPhase === "validation" ? "attack_path" : "validation";
+      const restoreScope =
+        scenario === "restore-scope" || scenario === "cycle-scope";
+      let narrowed = false;
+      let restoredCountSeen = false;
+      const parentCount = scenario === "lower-parent" ? 2 : 3;
+      const updates: ScanProgress[] = [];
+      const metadataRead = Promise.withResolvers<void>();
+      const inventoryRead = Promise.withResolvers<void>();
+      const recovered = Promise.withResolvers<void>();
+      const restored = Promise.withResolvers<void>();
+      const cycled = Promise.withResolvers<void>();
+      const receipts = new Map<
+        string,
+        ReturnType<typeof Promise.withResolvers<void>>
+      >();
+      for (const id of [
+        "first",
+        "second",
+        "eligible",
+        "newer",
+        "oversized",
+        "idle-1",
+        "idle-2",
+      ])
+        receipts.set(id, Promise.withResolvers<void>());
+      const marker = (
+        phase: ScanProgress["phase"],
+        count: number,
+        total: number,
+      ) =>
+        "CODEX_SECURITY_SCAN_PROGRESS " +
+        JSON.stringify({ phase, filesCompleted: count, filesTotal: total });
+      const inventory: ThreadEvent = {
+        type: "item.completed",
+        item: {
+          type: "command_execution",
+          id: "inventory",
+          command: "inventory",
+          aggregated_output: commandOutput(marker("discovery", 0, 6)),
+          status: "completed",
+          exit_code: 0,
+        },
+      };
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          const parent = await writeUsageSession(codexHome, "thread-1", {});
+          const appendReceipt = async (
+            file: string,
+            id: string,
+            output: string,
+          ) => {
+            await appendFile(
+              file,
+              JSON.stringify({
+                type: "response_item",
+                payload: {
+                  type: "custom_tool_call_output",
+                  call_id: id,
+                  output,
+                },
+              }) + "\n",
+            );
+            await receipts.get(id)!.promise;
+          };
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            await metadataRead.promise;
+            await appendFile(
+              parent,
+              JSON.stringify({
+                type: "event_msg",
+                payload: {
+                  type: "item_completed",
+                  item: {
+                    type: "CommandExecution",
+                    command: ["inventory"],
+                    aggregated_output: persistedCommandOutput,
+                  },
+                },
+              }) + "\n",
+            );
+            const restoredInventory: ThreadEvent = {
+              type: "item.completed",
+              item: {
+                type: "command_execution",
+                id: "inventory-restored",
+                command: "inventory",
+                aggregated_output: commandOutput(marker("discovery", 0, 8)),
+                status: "completed",
+                exit_code: 0,
+              },
+            };
+            if (restoreScope)
+              await appendFile(
+                parent,
+                JSON.stringify({
+                  type: "event_msg",
+                  payload: {
+                    type: "item_completed",
+                    item: {
+                      type: "CommandExecution",
+                      command: ["inventory"],
+                      aggregated_output: persistedCommandOutput,
+                    },
+                  },
+                }) + "\n",
+              );
+            const finalInventory: ThreadEvent = {
+              type: "item.completed",
+              item: {
+                type: "command_execution",
+                id: "inventory-final",
+                command: "inventory",
+                aggregated_output: commandOutput(marker("discovery", 0, 6)),
+                status: "completed",
+                exit_code: 0,
+              },
+            };
+            if (scenario === "cycle-scope")
+              await appendFile(
+                parent,
+                JSON.stringify({
+                  type: "event_msg",
+                  payload: {
+                    type: "item_completed",
+                    item: {
+                      type: "CommandExecution",
+                      command: ["inventory"],
+                      aggregated_output: persistedCommandOutput,
+                    },
+                  },
+                }) + "\n",
+              );
+            if (early) {
+              yield inventory;
+              await inventoryRead.promise;
+              if (restoreScope) yield restoredInventory;
+              if (scenario === "cycle-scope") yield finalInventory;
+            }
+            const first = await writeUsageSession(
+              codexHome,
+              "first-worker",
+              {},
+              { parent: "thread-1" },
+            );
+            await appendReceipt(first, "first", marker(workerPhase, 3, 3));
+            const second = await writeUsageSession(
+              codexHome,
+              "second-worker",
+              {},
+              { parent: "thread-1" },
+            );
+            await appendReceipt(second, "second", marker(workerPhase, 1, 8));
+            await appendReceipt(
+              parent,
+              "eligible",
+              marker(parentPhase, parentCount, 6),
+            );
+            if (scenario === "newer-parent")
+              await appendReceipt(
+                parent,
+                "newer",
+                marker(newerPhase, parentCount, 6),
+              );
+            if (scenario !== "no-frontier")
+              await appendReceipt(
+                parent,
+                "oversized",
+                marker(parentPhase, 4, 8),
+              );
+            if (scenario === "idle" || scenario === "newer-parent") {
+              // Each receipt requires another actual poll. Deferred facts must
+              // survive while the newer parent still fits the provisional scope.
+              await appendReceipt(parent, "idle-1", "done");
+              await appendReceipt(parent, "idle-2", "done");
+            }
+            if (!early) yield inventory;
+            if (restoreScope) {
+              if (!early) {
+                await recovered.promise;
+                // Keep the temporarily ineligible accepted fact across a poll.
+                await appendReceipt(parent, "idle-1", "done");
+                await appendReceipt(parent, "idle-2", "done");
+                yield restoredInventory;
+                await restored.promise;
+                if (scenario === "cycle-scope") yield finalInventory;
+              }
+              if (scenario === "cycle-scope") await cycled.promise;
+              else await restored.promise;
+            } else await recovered.promise;
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      const keepAlive = setInterval(() => {}, 1_000);
+      try {
+        await client.run(repository, {
+          onProgress: (update) => {
+            updates.push(update);
+            if (update.filesCompleted === 0 && update.filesTotal === 6)
+              inventoryRead.resolve();
+            if (update.filesCompleted === 3 && update.filesTotal === 6) {
+              narrowed = true;
+              recovered.resolve();
+              if (early || restoredCountSeen) cycled.resolve();
+            }
+            if (
+              update.filesCompleted === 4 &&
+              update.filesTotal === 8 &&
+              (early || narrowed)
+            ) {
+              restoredCountSeen = true;
+              restored.resolve();
+            }
+          },
+          onSessionEvent: ({ event, threadId }) => {
+            if (event["type"] === "session_meta" && threadId === "thread-1")
+              metadataRead.resolve();
+            const id = (event["payload"] as { call_id?: string })?.call_id;
+            if (id !== undefined) receipts.get(id)?.resolve();
+          },
+        });
+        expect(updates.at(-1)).toEqual({
+          phase:
+            scenario === "lower-parent"
+              ? workerPhase
+              : scenario === "newer-parent"
+                ? newerPhase
+                : parentPhase,
+          filesCompleted: scenario === "restore-scope" ? 4 : 3,
+          filesTotal: scenario === "restore-scope" ? 8 : 6,
+        });
+        if (restoreScope && !early)
+          expect(
+            updates
+              .filter(
+                (update) =>
+                  update.filesTotal === 6 && update.filesCompleted === 3,
+              )
+              .at(-1),
+          ).toEqual({ phase: parentPhase, filesCompleted: 3, filesTotal: 6 });
+      } finally {
+        clearInterval(keepAlive);
+        metadataRead.resolve();
+        inventoryRead.resolve();
+        recovered.resolve();
+        restored.resolve();
+        cycled.resolve();
+        for (const receipt of receipts.values()) receipt.resolve();
+        await client.close();
+      }
+    },
+  );
+
+  test.each([
+    [false, "attack_path", "discovery", "validation"],
+    [true, "attack_path", "discovery", "validation"],
+    [false, "validation", "attack_path", "discovery"],
+    [true, "validation", "attack_path", "discovery"],
+  ] as const)(
+    "recovers worker phases when inventory uncaps accepted coverage (early: %p, parent: %s, first: %s, last: %s)",
+    async (early, parentPhase, firstPhase, lastPhase) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const metadataRead = Promise.withResolvers<void>();
+      const inventoryRead = Promise.withResolvers<void>();
+      const parentRead = Promise.withResolvers<void>();
+      const firstRead = Promise.withResolvers<void>();
+      const lastRead = Promise.withResolvers<void>();
+      const recovered = Promise.withResolvers<void>();
+      const marker = (
+        phase: ScanProgress["phase"],
+        count: number,
+        total: number,
+      ) =>
+        "CODEX_SECURITY_SCAN_PROGRESS " +
+        JSON.stringify({ phase, filesCompleted: count, filesTotal: total });
+      const inventory: ThreadEvent = {
+        type: "item.completed",
+        item: {
+          type: "command_execution",
+          id: "inventory",
+          command: "inventory",
+          aggregated_output: commandOutput(marker("discovery", 0, 10)),
+          status: "completed",
+          exit_code: 0,
+        },
+      };
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 6 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          const parent = await writeUsageSession(codexHome, "thread-1", {});
+          const receipt = (
+            id: string,
+            phase: ScanProgress["phase"],
+            count: number,
+            total: number,
+          ) => ({
+            type: "response_item",
+            payload: {
+              type: "custom_tool_call_output",
+              call_id: id,
+              output: marker(phase, count, total),
+            },
+          });
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            await metadataRead.promise;
+            await appendFile(
+              parent,
+              JSON.stringify({
+                type: "event_msg",
+                payload: {
+                  type: "item_completed",
+                  item: {
+                    type: "CommandExecution",
+                    command: ["inventory"],
+                    aggregated_output: persistedCommandOutput,
+                  },
+                },
+              }) + "\n",
+            );
+            if (early) {
+              yield inventory;
+              await inventoryRead.promise;
+            }
+            await appendFile(
+              parent,
+              JSON.stringify(receipt("parent-review", parentPhase, 6, 6)) +
+                "\n",
+            );
+            await parentRead.promise;
+            const first = await writeUsageSession(
+              codexHome,
+              "first-worker",
+              {},
+              { parent: "thread-1" },
+            );
+            await appendFile(
+              first,
+              JSON.stringify(receipt("first-worker", firstPhase, 4, 4)) + "\n",
+            );
+            await firstRead.promise;
+            const last = await writeUsageSession(
+              codexHome,
+              "last-worker",
+              {},
+              { parent: "thread-1" },
+            );
+            await appendFile(
+              last,
+              JSON.stringify(receipt("last-worker", lastPhase, 5, 5)) + "\n",
+            );
+            await lastRead.promise;
+            // Both workers were accepted under the provisional inventory. Its
+            // earlier full marker reveals their greater aggregate coverage.
+            if (!early) yield inventory;
+            await recovered.promise;
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      // The fake stream has no process handle to keep the unref'ed poll alive.
+      const keepAlive = setInterval(() => {}, 1_000);
+      try {
+        await client.run(repository, {
+          onProgress: (update) => {
+            updates.push(update);
+            if (update.filesCompleted === 0 && update.filesTotal === 10)
+              inventoryRead.resolve();
+            if (update.filesCompleted === 9 && update.filesTotal === 10)
+              recovered.resolve();
+          },
+          onSessionEvent: ({ event, threadId }) => {
+            if (event["type"] === "session_meta" && threadId === "thread-1")
+              metadataRead.resolve();
+            const id = (event["payload"] as { call_id?: string })?.call_id;
+            if (id === "parent-review") parentRead.resolve();
+            if (id === "first-worker") firstRead.resolve();
+            if (id === "last-worker") lastRead.resolve();
+          },
+        });
+        expect(updates.at(-1)).toEqual({
+          phase: lastPhase,
+          filesCompleted: 9,
+          filesTotal: 10,
+        });
+      } finally {
+        clearInterval(keepAlive);
+        metadataRead.resolve();
+        inventoryRead.resolve();
+        parentRead.resolve();
+        firstRead.resolve();
+        lastRead.resolve();
+        recovered.resolve();
+        await client.close();
+      }
+    },
+  );
+
   test.each(["command", "message"] as const)(
-    "restores the current live parent phase after polling observes workers (%s)",
+    "keeps the current parent phase while polling observes equal workers (%s)",
     async (kind) => {
       const { root, repository, codexHome, scanDir } = await scanDirectories();
       const updates: ScanProgress[] = [];
@@ -6934,7 +7884,12 @@ describe("CodexSecurity orchestration", () => {
         await client.run(repository, {
           onProgress: (update) => {
             updates.push(update);
-            if (update.filesCompleted === 8 && update.phase === "discovery")
+          },
+          onSessionEvent: ({ event, threadId }) => {
+            if (
+              threadId === "worker-thread" &&
+              event["type"] === "response_item"
+            )
               workerRead.resolve();
           },
         });
@@ -6942,7 +7897,7 @@ describe("CodexSecurity orchestration", () => {
           updates
             .filter((update) => update.filesCompleted === 8)
             .map((update) => update.phase),
-        ).toEqual(["validation", "discovery", "validation"]);
+        ).toEqual(["validation"]);
       } finally {
         clearInterval(keepAlive);
         pollAllowed.resolve();
@@ -7164,7 +8119,9 @@ describe("CodexSecurity orchestration", () => {
     [false, 9, "validation", "attack_path", false, "worker"],
     [true, 9, "validation", "attack_path", false, "worker"],
     [false, 8, "attack_path", "discovery", false, "worker"],
+    [true, 8, "attack_path", "discovery", false, "worker"],
     [false, 8, "validation", "attack_path", true, "worker"],
+    [true, 8, "validation", "attack_path", true, "worker"],
     [false, 7, "validation", "attack_path", false, "parent"],
     [true, 7, "validation", "attack_path", false, "parent"],
     [false, 8, "validation", "attack_path", false, "parent"],
@@ -7351,7 +8308,12 @@ describe("CodexSecurity orchestration", () => {
           },
         });
         expect(updates.at(-1)).toEqual({
-          phase: laterParent || parentCount > 8 ? parentPhase : workerPhase,
+          phase:
+            laterParent ||
+            parentCount > 8 ||
+            (newerSource === "worker" && parentCount === 8)
+              ? parentPhase
+              : workerPhase,
           filesCompleted: Math.max(parentCount, 8),
           filesTotal: 9,
         });
@@ -7365,7 +8327,10 @@ describe("CodexSecurity orchestration", () => {
               .slice(worker)
               .every(
                 (update) =>
-                  update.phase === workerPhase && update.filesCompleted >= 8,
+                  (newerSource === "worker" && parentCount === 8
+                    ? true
+                    : update.phase === workerPhase) &&
+                  update.filesCompleted >= 8,
               ),
           ).toBe(true);
         }

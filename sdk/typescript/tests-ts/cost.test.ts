@@ -5,7 +5,7 @@ import { jsonLines } from "./support/json.js";
 import { runNodePython } from "./support/python-probe.js";
 import * as filesystem from "node:fs/promises";
 import { appendFile, writeFile } from "node:fs/promises";
-import { join, parse, sep } from "node:path";
+import { basename, dirname, join, parse, sep } from "node:path";
 import { Codex } from "@openai/codex-sdk";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import {
@@ -2137,7 +2137,7 @@ describe("live scan cost tracking", () => {
     ]);
   });
 
-  test("does not replay a parent phase when delayed provenance follows a newer worker", async () => {
+  test("keeps a global parent phase through equal worker progress and delayed provenance", async () => {
     const { home, parent, worker } = await workerSessionFixture();
     const updates: ScanProgress[] = [];
     const tracker = costTracker(home, {
@@ -2172,10 +2172,7 @@ describe("live scan cost tracking", () => {
       }) + "\n",
     );
     await tracker.stop();
-    expect(updates.map((update) => update.phase)).toEqual([
-      "discovery",
-      "validation",
-    ]);
+    expect(updates.map((update) => update.phase)).toEqual(["discovery"]);
   });
 
   test.each([false, true])(
@@ -2442,7 +2439,7 @@ describe("live scan cost tracking", () => {
     [false, "validation", "discovery"],
     [true, "validation", "discovery"],
   ] as const)(
-    "retains distinct parent receipt order when notification repeats (%p, %s, %s)",
+    "keeps parent phase when repeated receipts meet tied worker coverage (%p, %s, %s)",
     async (repeat, parentPhase, workerPhase) => {
       const { home, parent, worker } = await workerSessionFixture();
       const updates: ScanProgress[] = [];
@@ -2514,7 +2511,7 @@ describe("live scan cost tracking", () => {
         await tracker.refresh();
         await tracker.refresh();
         expect(updates.at(-1)).toEqual({
-          phase: repeat ? parentPhase : workerPhase,
+          phase: parentPhase,
           filesCompleted: 9,
           filesTotal: 10,
         });
@@ -2746,7 +2743,355 @@ describe("live scan cost tracking", () => {
     ]);
   });
 
-  test("restores a parent phase after a different worker update", async () => {
+  test.each([
+    ["saved", false, "validation", "discovery"],
+    ["saved", true, "validation", "discovery"],
+    ["saved", false, "discovery", "attack_path"],
+    ["saved", true, "discovery", "attack_path"],
+    ["live", false, "validation", "discovery"],
+    ["live", true, "validation", "discovery"],
+    ["live", false, "discovery", "attack_path"],
+    ["live", true, "discovery", "attack_path"],
+  ] as const)(
+    "keeps the global parent phase at equal worker coverage (%s, worker first: %p, parent: %s, worker: %s)",
+    async (source, workerFirst, parentPhase, workerPhase) => {
+      const { home, usage, parent, worker } = await workerSessionFixture();
+      const updates: ScanProgress[] = [];
+      const tracker = costTracker(home, {
+        expectedFilesTotal: 9,
+        onProgress: (update) => updates.push(update),
+      });
+      const originalReaddir = filesystem.readdir;
+      const listing = spyOn(filesystem, "readdir").mockImplementation((async (
+        ...args: Parameters<typeof originalReaddir>
+      ) => {
+        const entries = await originalReaddir(...args);
+        if (String(args[0]) === dirname(parent)) {
+          const first = basename(workerFirst ? worker : parent);
+          return entries.toSorted(
+            (left, right) =>
+              Number(String(right.name) === first) -
+              Number(String(left.name) === first),
+          );
+        }
+        return entries;
+      }) as typeof originalReaddir);
+      try {
+        if (source === "saved") {
+          await appendSessionItem(parent, progressMessage(8, 9, parentPhase));
+          await appendSessionItem(worker, progressMessage(8, 8, workerPhase));
+          tracker.start("scan-thread");
+          await tracker.refresh();
+        } else {
+          tracker.start("scan-thread");
+          await tracker.refresh();
+          tracker.beginParentTurn();
+          if (workerFirst) {
+            await appendSessionItem(worker, progressMessage(8, 8, workerPhase));
+            await tracker.refresh();
+          }
+          const progress = {
+            phase: parentPhase,
+            filesCompleted: 8,
+            filesTotal: 9,
+          };
+          const event = {
+            type: "item.completed",
+            item: {
+              type: "agent_message",
+              text: "CODEX_SECURITY_SCAN_PROGRESS " + JSON.stringify(progress),
+            },
+          };
+          expect(tracker.recordParentProgress(progress, event)).toBe(true);
+          tracker.acceptParentProgress(progress, event);
+          updates.push(progress);
+          if (!workerFirst) {
+            await appendSessionItem(worker, progressMessage(8, 8, workerPhase));
+            await tracker.refresh();
+          }
+        }
+        expect(updates.at(-1)).toEqual({
+          phase: parentPhase,
+          filesCompleted: 8,
+          filesTotal: 9,
+        });
+        expect(updates.map((update) => update.phase)).toEqual(
+          workerFirst ? [workerPhase, parentPhase] : [parentPhase],
+        );
+
+        // A later global parent update remains authoritative at the same count.
+        await appendSessionItem(parent, progressMessage(8, 9, "reporting"));
+        await tracker.refresh();
+        expect(updates.at(-1)).toEqual({
+          phase: "reporting",
+          filesCompleted: 8,
+          filesTotal: 9,
+        });
+
+        // Keep each worker's coverage even when its phase did not reach the UI.
+        const additional = await writeSession(
+          home,
+          "additional-worker",
+          usage,
+          {
+            parent: "scan-thread",
+          },
+        );
+        await appendSessionItem(additional, progressMessage(1, 1, "discovery"));
+        await tracker.refresh();
+        expect(updates.at(-1)).toEqual({
+          phase: "discovery",
+          filesCompleted: 9,
+          filesTotal: 9,
+        });
+        await appendSessionItem(parent, progressMessage(9, 9, "validation"));
+        await tracker.stop();
+        expect(updates.at(-1)).toEqual({
+          phase: "validation",
+          filesCompleted: 9,
+          filesTotal: 9,
+        });
+      } finally {
+        await tracker.stop();
+        listing.mockRestore();
+      }
+    },
+  );
+
+  test.each([
+    [8, "validation", "discovery"],
+    [9, "validation", "discovery"],
+    [8, "discovery", "attack_path"],
+    [9, "discovery", "attack_path"],
+  ] as const)(
+    "keeps the global parent phase when inventory admits equal worker coverage (%p, parent: %s, worker: %s)",
+    async (workerCount, parentPhase, workerPhase) => {
+      const { home, parent, worker } = await workerSessionFixture();
+      const updates: ScanProgress[] = [];
+      const tracker = costTracker(home, {
+        expectedFilesTotal: 9,
+        onProgress: (update) => updates.push(update),
+      });
+      try {
+        await appendSessionItem(parent, progressMessage(8, 9, parentPhase));
+        tracker.start("scan-thread");
+        await tracker.refresh();
+        await appendSessionItem(
+          worker,
+          progressMessage(workerCount, 10, workerPhase),
+        );
+        await tracker.refresh();
+        expect(updates.at(-1)).toEqual({
+          phase: parentPhase,
+          filesCompleted: 8,
+          filesTotal: 9,
+        });
+        tracker.setExpectedFilesTotal(10);
+        await tracker.refresh();
+        expect(updates.at(-1)).toEqual({
+          phase: workerCount === 8 ? parentPhase : workerPhase,
+          filesCompleted: workerCount,
+          filesTotal: 10,
+        });
+      } finally {
+        await tracker.stop();
+      }
+    },
+  );
+
+  test.each([
+    [false, 7, false, "validation", "attack_path"],
+    [true, 7, false, "validation", "attack_path"],
+    [false, 8, false, "validation", "attack_path"],
+    [true, 8, false, "validation", "attack_path"],
+    [false, 7, true, "attack_path", "discovery"],
+    [true, 7, true, "attack_path", "discovery"],
+    [false, 8, true, "attack_path", "discovery"],
+    [true, 8, true, "attack_path", "discovery"],
+  ] as const)(
+    "uses only an eligible parent phase after inventory correction (live first: %p, parent total: %p, worker after: %p, parent: %s, worker: %s)",
+    async (liveFirst, parentTotal, workerAfter, parentPhase, workerPhase) => {
+      const { home, parent, worker } = await workerSessionFixture();
+      const updates: ScanProgress[] = [];
+      const tracker = costTracker(home, {
+        expectedFilesTotal: 8,
+        onProgress: (update) => updates.push(update),
+      });
+      const inventory = {
+        phase: "discovery",
+        filesCompleted: 0,
+        filesTotal: 7,
+      } as const;
+      const text = `CODEX_SECURITY_SCAN_PROGRESS ${JSON.stringify(inventory)}`;
+      const deliverInventory = () => {
+        const event = {
+          type: "item.completed",
+          item: {
+            type: "command_execution",
+            command: "inventory",
+            aggregated_output: commandOutput(text),
+          },
+        };
+        const current = tracker.recordParentProgress(inventory, event);
+        if (liveFirst && current) {
+          tracker.acceptParentProgress(inventory, event);
+          tracker.setExpectedFilesTotal(inventory.filesTotal);
+          updates.push(inventory);
+        }
+      };
+      try {
+        tracker.start("scan-thread");
+        await tracker.refresh();
+        tracker.beginParentTurn();
+        await appendFile(
+          parent,
+          JSON.stringify({
+            type: "event_msg",
+            payload: {
+              type: "item_completed",
+              item: {
+                type: "CommandExecution",
+                command: ["inventory"],
+                aggregated_output: persistedCommandOutput,
+              },
+            },
+          }) + "\n",
+        );
+        if (liveFirst) {
+          deliverInventory();
+          await tracker.refresh();
+        }
+        await appendFile(
+          parent,
+          JSON.stringify({
+            type: "event_msg",
+            payload: {
+              type: "item_completed",
+              item: {
+                type: "AgentMessage",
+                content: [
+                  {
+                    type: "Text",
+                    text: `CODEX_SECURITY_SCAN_PROGRESS ${JSON.stringify({
+                      phase: parentPhase,
+                      filesCompleted: 3,
+                      filesTotal: parentTotal,
+                    })}`,
+                  },
+                ],
+              },
+            },
+          }) + "\n",
+        );
+        await tracker.refresh();
+        if (!workerAfter) {
+          await appendSessionItem(
+            worker,
+            progressMessage(3, 3, "threat_model"),
+          );
+          await tracker.refresh();
+        }
+        // The same inventory was persisted before parent review in both cases.
+        // Its delayed live copy proves scope without resetting reviewed coverage.
+        if (!liveFirst) {
+          deliverInventory();
+          await tracker.refresh();
+        }
+        await appendSessionItem(worker, progressMessage(3, 3, workerPhase));
+        await tracker.stop();
+        expect(updates.at(-1)).toEqual({
+          phase: parentTotal === 7 ? parentPhase : workerPhase,
+          filesCompleted: 3,
+          filesTotal: 7,
+        });
+      } finally {
+        await tracker.stop();
+      }
+    },
+  );
+
+  test.each([
+    ["discovery", "validation", "attack_path"],
+    ["attack_path", "discovery", "validation"],
+  ] as const)(
+    "keeps greater newly admitted worker coverage ahead of retained phases (%s, %s, %s)",
+    async (parentPhase, pendingPhase, acceptedPhase) => {
+      const { home, parent, worker, usage } = await workerSessionFixture();
+      const accepted = await writeSession(home, "accepted-worker", usage, {
+        parent: "scan-thread",
+      });
+      const updates: ScanProgress[] = [];
+      const tracker = costTracker(home, {
+        expectedFilesTotal: 8,
+        onProgress: (update) => updates.push(update),
+      });
+      const marker = (
+        phase: ScanProgress["phase"],
+        count: number,
+        total: number,
+      ) =>
+        "CODEX_SECURITY_SCAN_PROGRESS " +
+        JSON.stringify({ phase, filesCompleted: count, filesTotal: total });
+      tracker.start("scan-thread");
+      try {
+        await tracker.refresh();
+        tracker.beginParentTurn();
+        await appendFile(
+          parent,
+          JSON.stringify({
+            type: "event_msg",
+            payload: {
+              type: "item_completed",
+              item: {
+                type: "CommandExecution",
+                command: ["inventory"],
+                aggregated_output: persistedCommandOutput,
+              },
+            },
+          }) + "\n",
+        );
+        await appendSessionItem(parent, {
+          type: "custom_tool_call_output",
+          output: marker(parentPhase, 4, 8),
+        });
+        await tracker.refresh();
+        await appendSessionItem(worker, {
+          type: "custom_tool_call_output",
+          output: marker(pendingPhase, 3, 9),
+        });
+        await tracker.refresh();
+        await appendSessionItem(accepted, {
+          type: "custom_tool_call_output",
+          output: marker(acceptedPhase, 3, 3),
+        });
+        await tracker.refresh();
+        expect(updates).toEqual([
+          { phase: parentPhase, filesCompleted: 4, filesTotal: 8 },
+        ]);
+        tracker.recordParentProgress(
+          { phase: "discovery", filesCompleted: 0, filesTotal: 9 },
+          {
+            type: "item.completed",
+            item: {
+              type: "command_execution",
+              command: "inventory",
+              aggregated_output: commandOutput(marker("discovery", 0, 9)),
+            },
+          },
+        );
+        await tracker.stop();
+        expect(updates.at(-1)).toEqual({
+          phase: pendingPhase,
+          filesCompleted: 6,
+          filesTotal: 9,
+        });
+      } finally {
+        await tracker.stop();
+      }
+    },
+  );
+
+  test("does not replace a global parent phase with equal worker progress", async () => {
     const { home, parent, worker } = await workerSessionFixture();
     const updates: ScanProgress[] = [];
     const tracker = costTracker(home, {
@@ -2762,8 +3107,6 @@ describe("live scan cost tracking", () => {
     await appendSessionItem(parent, progressMessage(8, 8, "validation"));
     await tracker.stop();
     expect(updates).toEqual([
-      { phase: "validation", filesCompleted: 8, filesTotal: 8 },
-      { phase: "discovery", filesCompleted: 8, filesTotal: 8 },
       { phase: "validation", filesCompleted: 8, filesTotal: 8 },
     ]);
   });

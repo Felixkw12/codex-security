@@ -145,6 +145,7 @@ interface SessionUsage {
   position: number;
   completions: SessionCompletion[];
   workerProgress: Set<string>;
+  latestWorkerProgress: OrderedProgress | null;
   pendingWorkerProgress: Map<number, { progress: ScanProgress; order: number }>;
   messageProjections: Map<
     string,
@@ -200,6 +201,7 @@ function createSessionUsage(): SessionUsage {
     position: 0,
     completions: [],
     workerProgress: new Set(),
+    latestWorkerProgress: null,
     pendingWorkerProgress: new Map(),
     messageProjections: new Map(),
     filesCompleted: 0,
@@ -608,6 +610,10 @@ export class ScanCostTracker {
     const inventoryChanged = this.#inventoryNeedsReconciliation;
     this.#inventoryNeedsReconciliation = false;
     if (inventoryChanged) {
+      const parentIneligible =
+        this.#parentProgress !== null &&
+        this.#parentProgress.progress.filesTotal > this.#expectedFilesTotal!;
+      let retainedWorker: OrderedProgress | null = null;
       // Reconsider compact worker receipts under the proven inventory. Keep an
       // oversized receipt available without counting it as reviewed coverage.
       for (const session of this.#sessions.values()) {
@@ -624,6 +630,13 @@ export class ScanCostTracker {
           session.filesTotal = total;
           session.filesCompleted = progress.filesCompleted;
           session.workerProgress.add(progressKey(progress));
+          const latest = session.latestWorkerProgress;
+          if (
+            latest === null ||
+            progress.filesCompleted > latest.progress.filesCompleted ||
+            pending.order > latest.order
+          )
+            session.latestWorkerProgress = pending;
           session.pendingWorkerProgress.delete(total);
           if (corrected === null || pending.order > corrected.order)
             corrected = { ...pending, owner: "worker" };
@@ -631,15 +644,40 @@ export class ScanCostTracker {
         if (
           session.filesTotal !== null &&
           session.filesTotal <= this.#expectedFilesTotal!
-        )
+        ) {
           this.#workerProgress.set(session.threadId, session.filesCompleted);
-        else this.#workerProgress.delete(session.threadId);
+          const latest = session.latestWorkerProgress;
+          if (
+            latest !== null &&
+            (retainedWorker === null || latest.order > retainedWorker.order)
+          )
+            retainedWorker = latest;
+          if (
+            parentIneligible &&
+            latest !== null &&
+            (corrected === null || latest.order > corrected.order)
+          )
+            corrected = { ...latest, owner: "worker" };
+        } else this.#workerProgress.delete(session.threadId);
       }
       const parent = this.#parentProgress?.progress ?? null;
       const parentCount =
         parent !== null && parent.filesTotal <= this.#expectedFilesTotal!
           ? parent.filesCompleted
           : 0;
+      // Scope growth can reveal already-accepted worker coverage without a new
+      // pending phase. Keep an existing pending correction when one was chosen.
+      const workerCoverage = Math.min(
+        this.#expectedFilesTotal!,
+        this.#workerProgress.values().reduce((sum, count) => sum + count, 0),
+      );
+      if (
+        corrected === null &&
+        retainedWorker !== null &&
+        workerCoverage > this.#highestFilesCompleted &&
+        workerCoverage > parentCount
+      )
+        corrected = { ...retainedWorker, owner: "worker" };
       this.#highestFilesCompleted = Math.max(
         parentCount,
         Math.min(
@@ -806,9 +844,19 @@ export class ScanCostTracker {
         displayedParentIneligible ||
         correctedCoverage > displayed.update.filesCompleted ||
         compareProgressOrder(corrected, displayed) >= 0);
-    const phase = replacePhase
-      ? corrected!.progress.phase
-      : (displayed?.update.phase ?? "discovery");
+    const selected = replacePhase ? corrected : displayed;
+    const parent = this.#parentProgress;
+    const parentAtEqualCoverage =
+      selected?.owner === "worker" &&
+      parent !== null &&
+      parent.progress.filesCompleted === this.#highestFilesCompleted &&
+      parent.progress.filesTotal <=
+        (this.#expectedFilesTotal ?? parent.progress.filesTotal);
+    const phase = parentAtEqualCoverage
+      ? parent.progress.phase
+      : replacePhase
+        ? corrected!.progress.phase
+        : (displayed?.update.phase ?? "discovery");
     const progress = {
       phase,
       filesCompleted: this.#highestFilesCompleted,
@@ -825,14 +873,19 @@ export class ScanCostTracker {
     const duplicate =
       this.#lastProgress === key && (!inventoryChanged || inventoryReported);
     this.#lastProgress = key;
-    const selected = replacePhase ? corrected : displayed;
+    const displaySource = parentAtEqualCoverage
+      ? { ...parent, owner: "parent" as const }
+      : selected;
     this.#displayedProgress = {
       update: progress,
-      owner: selected?.owner ?? "live",
-      order: selected?.order ?? 0,
-      ...(selected?.position === undefined
+      owner: displaySource?.owner ?? "live",
+      order: displaySource?.order ?? 0,
+      ...(displaySource?.position === undefined
         ? {}
-        : { position: selected.position, markerIndex: selected.markerIndex }),
+        : {
+            position: displaySource.position,
+            markerIndex: displaySource.markerIndex,
+          }),
     };
     if (duplicate) return;
     this.#options.onProgress?.(progress, {
@@ -1201,6 +1254,7 @@ export class ScanCostTracker {
       }
       session.filesTotal = progress.filesTotal;
       session.filesCompleted = progress.filesCompleted;
+      if (!parent) session.latestWorkerProgress = { progress, order };
       if (
         parentInventory &&
         (this.#highestFilesCompleted > 0 ||
@@ -1247,6 +1301,16 @@ export class ScanCostTracker {
         if (parent) session.progress.push(saved);
         continue;
       }
+      // A worker-local phase cannot replace eligible global parent authority
+      // when the aggregate count adds no reviewed files. Counts remain above.
+      if (
+        !parent &&
+        this.#parentProgress !== null &&
+        filesCompleted === this.#parentProgress.progress.filesCompleted &&
+        this.#parentProgress.progress.filesTotal <=
+          (expectedFilesTotal ?? this.#parentProgress.progress.filesTotal)
+      )
+        continue;
       if (parent)
         this.#recordParentReview(progress, saved.position, saved.markerIndex);
       // Known parent positions outrank observation order: polling can park a
@@ -1260,6 +1324,7 @@ export class ScanCostTracker {
       const newerProgress =
         parent &&
         displayed !== null &&
+        displayed.owner !== "worker" &&
         filesCompleted === displayed.update.filesCompleted &&
         compareProgressOrder(provenance, displayed) < 0
           ? displayed
