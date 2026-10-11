@@ -845,6 +845,10 @@ describe("custom validation", () => {
           },
         },
       );
+      // Keep the synthetic validation turn alive while it awaits an unref'ed poll.
+      const keepAlive = progressScenario
+        ? setInterval(() => {}, 1_000)
+        : undefined;
       try {
         const pending = client.run(repository, {
           cyberAccessProgram: "daybreak_blue",
@@ -978,6 +982,7 @@ describe("custom validation", () => {
           count === 0 ? "No findings" : "Fixture 0",
         );
       } finally {
+        clearInterval(keepAlive);
         await client.close();
       }
     },
