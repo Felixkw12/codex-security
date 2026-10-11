@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import workbench_saved_results as saved_results
 from deep_scan_config import resolve_deep_scan_config
 from finalize_scan_contract import _read_scan_local_json
 from workbench.handoff import require_current_continuation
@@ -1588,6 +1589,7 @@ def finish_deep_scan_locked(
     if len(set(omitted_worker_ids)) != len(omitted_worker_ids):
         raise SystemExit("Omitted Deep Scan worker IDs must be unique.")
     promotion: tuple[Path, Path, Path | None] | None = None
+    deadline_publication: tuple[Path, dict[str, bytes | None]] | None = None
     connection.execute("BEGIN IMMEDIATE")
     try:
         run = require_deep_scan_run(connection, scan_id)
@@ -1823,6 +1825,10 @@ def finish_deep_scan_locked(
                 kind="file",
             )
             promotion = promote_staged_file(staged_manifest_path, manifest_path)
+        if zero_discovery_deadline and standard_scan_manifest:
+            deadline_publication = saved_results.preserve_deep_deadline_draft(
+                dependencies(), connection, scan
+            )
         timestamp = dependencies().now()
         connection.execute(
             """
@@ -1837,6 +1843,8 @@ def finish_deep_scan_locked(
         connection.commit()
     except BaseException:
         connection.rollback()
+        if deadline_publication is not None:
+            saved_results._restore_published_outputs(*deadline_publication)
         if promotion is not None:
             rollback_staged_file(promotion)
         raise

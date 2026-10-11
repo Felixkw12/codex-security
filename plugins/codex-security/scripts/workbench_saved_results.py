@@ -1502,16 +1502,43 @@ def merge_saved_results(
                 manifest["scan"][key] = copy.deepcopy(parent[key])
         if isinstance(manifest["scan"].get("scope"), dict):
             manifest["scan"]["scope"].update(copy.deepcopy(binding["scope"]))
+    model_checks: dict[str, dict[str, Any] | None] = {}
+
+    def recovered_model(
+        relative: str, draft: dict[str, Any], owner: str | None
+    ) -> dict[str, Any] | None:
+        if relative not in model_checks:
+            model = copy.deepcopy(draft.get("threatModel"))
+            if isinstance(model, dict) and owner is not None:
+                model["origin"] = "recovered"
+            schema = _read_json(
+                Path(__file__).resolve().parent.parent / "schemas/scan-manifest.schema.json"
+            )
+            try:
+                _validate_schema_node(
+                    model,
+                    schema["properties"]["scan"]["properties"]["threatModel"],
+                    f"Saved threat model {relative}",
+                    schema,
+                )
+            except ContractError as exc:
+                warnings.append(f"Skipped malformed saved threat model {relative}: {exc}")
+                model = None
+            model_checks[relative] = model
+        return model_checks[relative]
+
     if frozen_model_source is not None:
-        # Publication retries retain the choice made with the frozen source set.
+        # Publication retries retain a valid choice from the frozen source set.
         model = drafts_by_path.get(frozen_model_source, {}).get("threatModel")
         if not isinstance(model, dict):
             raise ContractError("Frozen stopped-scan model source is unavailable.")
-        manifest["scan"]["threatModel"] = copy.deepcopy(model)
-        if paths[frozen_model_source] is not None:
-            manifest["scan"]["threatModel"]["origin"] = "recovered"
+        model = recovered_model(
+            frozen_model_source, drafts_by_path[frozen_model_source], paths[frozen_model_source]
+        )
+        if model is not None:
+            manifest["scan"]["threatModel"] = model
         if selected_model_source is not None:
-            selected_model_source[:] = [frozen_model_source]
+            selected_model_source[:] = [] if model is None else [frozen_model_source]
     coverage = (
         copy.deepcopy(parent["coverage"])
         if parent and parent["coverage"]
@@ -1953,7 +1980,7 @@ def merge_saved_results(
             and "threatModel" not in manifest["scan"]
             and isinstance(draft.get("threatModel"), dict)
         ):
-            model = draft["threatModel"]
+            model = recovered_model(relative, draft, worker_id)
             model_path = relative
             checkpoint_dir = Path(relative).parent
             prefer_worker_head = worker_id is not None and (
@@ -1967,6 +1994,7 @@ def merge_saved_results(
                     for path in selected_observations
                     if Path(path).parent == checkpoint_dir
                     and isinstance(drafts_by_path[path].get("threatModel"), dict)
+                    and recovered_model(path, drafts_by_path[path], worker_id) is not None
                 ]
                 if selected_models:
                     head_path = max(selected_models, key=source_order.__getitem__)
@@ -1976,13 +2004,12 @@ def merge_saved_results(
                     if not prefer_worker_head and current.get("complete") is not False:
                         prefer_worker_head = source_order[head_path] >= source_order[relative]
                     if prefer_worker_head:
-                        model = current["threatModel"]
+                        model = recovered_model(head_path, current, worker_id)
                         model_path = head_path
-            manifest["scan"]["threatModel"] = copy.deepcopy(model)
-            if worker_id is not None:
-                manifest["scan"]["threatModel"]["origin"] = "recovered"
-            if selected_model_source is not None and worker_id is not None:
-                selected_model_source[:] = [model_path]
+            if model is not None:
+                manifest["scan"]["threatModel"] = model
+                if selected_model_source is not None and worker_id is not None:
+                    selected_model_source[:] = [model_path]
         for value in draft["findings"]:
             if skip_superseded_findings and not (
                 isinstance(value, dict)
@@ -2288,9 +2315,11 @@ def coverage_for_comparison(db: Any, scan: Any) -> dict[str, Any]:
     return coverage
 
 
-def _snapshot_published_outputs(scan_dir: Path) -> dict[str, bytes | None]:
+def _snapshot_published_outputs(
+    scan_dir: Path, additional_paths: tuple[str, ...] = ()
+) -> dict[str, bytes | None]:
     snapshots: dict[str, bytes | None] = {}
-    for relative in _PUBLISHED_OUTPUTS:
+    for relative in (*_PUBLISHED_OUTPUTS, *additional_paths):
         descriptor = -1
         try:
             descriptor = open_scan_local_file_descriptor(
@@ -2321,6 +2350,67 @@ def _restore_published_outputs(scan_dir: Path, snapshots: dict[str, bytes | None
                 _remove_scan_local_file_if_exists(scan_dir, relative)
         else:
             write_scan_local_bytes(scan_dir, relative, contents)
+
+
+def preserve_deep_deadline_draft(
+    db: Any, connection: Any, scan: Any
+) -> tuple[Path, dict[str, bytes | None]]:
+    """Recover a settled, zero-accepted Deep deadline without sealing the parent."""
+    scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
+    snapshots = _snapshot_published_outputs(scan_dir, ("checkpoint-head.json",))
+    warnings = json.loads(scan["completion_warnings_json"])
+    binding = db.workbench_completion_binding(scan, db.now())
+    try:
+        documents = merge_saved_results(
+            scan_dir,
+            scan["id"],
+            binding,
+            connection.execute(
+                "SELECT * FROM deep_scan_workers WHERE scan_id = ? ORDER BY created_at, id",
+                (scan["id"],),
+            ).fetchall(),
+            warnings,
+            stopped=True,
+            project_worker_coverage=True,
+            reason=(
+                "The configured discovery time limit elapsed before any source review completed. "
+                "Saved findings and pending review were preserved without a completed reduction."
+            ),
+        )
+        if documents is None:
+            raise ContractError("Deep Scan deadline has no saved parent draft.")
+        documents[0]["scan"].pop("complete", None)
+        # Reuse stopped-result recovery's per-record validation, scope checks,
+        # source lineage, and receipt validation before admitting this draft.
+        prepared = _prepare_scan_finalization(
+            scan_dir,
+            expected_coverage_mode=db.expected_coverage_mode(scan),
+            completion_binding=binding,
+            completion_warnings=warnings,
+            draft_documents=documents,
+        )
+        manifest, findings, coverage = prepared[2:5]
+        manifest["scan"].pop("sealedAt", None)
+        manifest["scan"].pop("artifacts", None)
+        checkpoint = _parent_scan_draft(scan["id"], manifest["scan"], findings, coverage)
+        contents = _encoded(checkpoint)
+        name = f"{hashlib.sha256(contents).hexdigest()}.json"
+        write_scan_local_bytes(scan_dir, f"checkpoints/{name}", contents)
+        write_scan_local_bytes(scan_dir, "checkpoint-head.json", _encoded({"checkpoint": name}))
+        for filename, document in (
+            ("findings.json", findings),
+            ("coverage.json", coverage),
+            ("scan-manifest.json", manifest),
+        ):
+            write_scan_local_bytes(scan_dir, filename, _encoded(document))
+        connection.execute(
+            "UPDATE scans SET completion_warnings_json = ? WHERE id = ?",
+            (json.dumps(list(dict.fromkeys(warnings))), scan["id"]),
+        )
+    except BaseException:
+        _restore_published_outputs(scan_dir, snapshots)
+        raise
+    return scan_dir, snapshots
 
 
 def preserve_scan_results_locked(
@@ -2493,7 +2583,8 @@ def preserve_scan_results_locked(
                 )
         return False
     if frozen_source_digests is None or (
-        recovery_source_digests is None and saved_model_source is None and model_source
+        recovery_source_digests is None
+        and model_source != ([saved_model_source] if saved_model_source is not None else [])
     ):
         retained_sources = _source_digests(
             documents[0].get("scan", {}).get("preservedSources"),

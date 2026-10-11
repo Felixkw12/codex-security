@@ -1,3 +1,4 @@
+import { finding } from "./scan-draft-fixture.ts";
 import { readJson, writeJsonLine } from "./support/json.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import assert from "node:assert/strict";
@@ -23,11 +24,12 @@ const {
   WorkbenchDeepScanStore,
   createScanArtifactContext,
   recordCodexSecurityScanDraftViaWorkbench,
+  saveScanDraftCheckpoint,
 } = await importModule({
   stdin: {
     contents: `export { WorkbenchDeepScanStore } from "./src/deep-scan/store.ts";
 export { createScanArtifactContext } from "./src/artifact-context.ts";
-export { recordCodexSecurityScanDraftViaWorkbench } from "./src/artifact-scan-draft.ts";`,
+export { recordCodexSecurityScanDraftViaWorkbench, saveScanDraftCheckpoint } from "./src/artifact-scan-draft.ts";`,
     resolveDir: mcpAppRoot,
   },
 });
@@ -36,6 +38,7 @@ await testFreeformFailureMessagesAgainstRealWorkbench();
 await testReducerCommitAndFinishAgainstRealWorkbench();
 await testReducerCommitAndFinishAgainstRealWorkbench(true);
 await testExpiredDeadlineWithoutCompletedDiscoveryAgainstRealWorkbench();
+await testDeadlinePreservesValidWorkerCheckpoints();
 await testPartialWorkerCoverageSurvivesParentCompletion();
 await testReceiptRepairSurvivesStoppedRecovery();
 await testReceiptRepairSurvivesStoppedRecovery("nonportable");
@@ -1001,6 +1004,309 @@ async function testPartialWorkerCoverageSurvivesParentCompletion() {
     assert.equal(
       typeof (await readJson(run.scanDir, "scan-manifest.json")).scan.sealedAt,
       "string",
+    );
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true });
+  }
+}
+
+async function testDeadlinePreservesValidWorkerCheckpoints() {
+  const { fixtureRoot, targetPath, environment } = await createWorkbenchFixture(
+    "deep-scan-deadline-checkpoints-",
+  );
+  const runWorkbench = createWorkbenchRunner(environment);
+  const store = new WorkbenchDeepScanStore(runWorkbench);
+  const threadId = "deadline-checkpoint-owner";
+  try {
+    await mkdir(path.join(environment.CODEX_HOME, "codex-security"), {
+      recursive: true,
+    });
+    await writeFile(
+      path.join(environment.CODEX_HOME, "codex-security", "config.toml"),
+      "[deep_scan]\nworkers = 2\nmax_discovery_runs = 6\nmax_time_hours = 1e-12\n",
+    );
+    const run = await store.begin({
+      targetPath,
+      scope: ".",
+      threadId,
+      scanRoot: path.join(fixtureRoot, "scans"),
+    });
+    await store.claimCoordinator({ scanId: run.scanId, threadId });
+    const workers: { id: string }[] = [];
+    for (const label of [
+      "valid",
+      "second-valid",
+      "anonymous",
+      "mismatch",
+      "corrupt",
+      "missing",
+    ]) {
+      const worker = await createWorkerFixture(run, label, "discovery");
+      await store.updateWorker({ ...worker, status: "running" });
+      const context = {
+        root: worker.artifactDir,
+        layout: "worker",
+        repoRoot: targetPath,
+      };
+      const saved = {
+        ...checkpoint(
+          run.scanId,
+          "pending-review",
+          "Worker did not finish reviewing this source.",
+        ),
+        findings: [finding(label, "fixture.py")],
+      };
+      if (label === "valid" || label === "second-valid") {
+        if (label === "valid") {
+          saved.findings.push(finding("out-of-scope", "../outside.py"));
+          saved.findings.push({
+            title: "Unvalidated, incomplete finding",
+          } as (typeof saved.findings)[number]);
+        } else {
+          saved.findings = [];
+        }
+        await mkdir(path.join(worker.artifactDir, "artifacts"));
+        await writeFile(
+          path.join(worker.artifactDir, "artifacts/review.md"),
+          `Source evidence for ${label}.\n`,
+        );
+        await saveScanDraftCheckpoint(context, {
+          ...saved,
+          coverage: {
+            ...saved.coverage,
+            surfaces: [
+              {
+                id: "api",
+                label: `${label} API`,
+                disposition: "no_issue_found",
+                receiptRefs: ["artifacts/review.md"],
+              },
+            ],
+            deferred: [
+              ...saved.coverage.deferred,
+              {
+                id: "surface-review",
+                reason: "Review remains.",
+                surfaceIds: ["api"],
+              },
+            ],
+          },
+        });
+      } else if (label === "anonymous") {
+        for (const reason of [
+          "Review authentication.",
+          "Review authorization.",
+        ]) {
+          await saveScanDraftCheckpoint(context, {
+            scanId: run.scanId,
+            complete: false,
+            findings: [],
+            threatModel: {},
+            coverage: {
+              completeness: "partial",
+              surfaces: [],
+              explicitExclusions: [],
+              deferred: [{ reason }],
+            },
+          });
+        }
+      } else if (label === "mismatch") {
+        await saveScanDraftCheckpoint(context, {
+          ...saved,
+          scanId: randomUUID(),
+        });
+      } else {
+        await mkdir(path.join(worker.artifactDir, "checkpoints"), {
+          recursive: true,
+        });
+        const name = "a".repeat(64) + ".json";
+        await writeFile(
+          path.join(worker.artifactDir, "checkpoint-head.json"),
+          JSON.stringify({ checkpoint: name }),
+        );
+        if (label === "corrupt")
+          await writeFile(
+            path.join(worker.artifactDir, "checkpoints", name),
+            '{"scanId":',
+          );
+      }
+      await store.updateWorker({ ...worker, status: "canceled" });
+      workers.push(worker);
+    }
+    const context = await createScanArtifactContext(run.scanId, runWorkbench, {
+      requireRunning: true,
+    });
+    await recordCodexSecurityScanDraftViaWorkbench(
+      context,
+      {
+        scanId: run.scanId,
+        findings: [],
+        coverage: {
+          completeness: "partial",
+          surfaces: [],
+          explicitExclusions: [],
+          deferred: [
+            {
+              reason:
+                "The configured discovery time limit elapsed before any source review completed.",
+            },
+          ],
+        },
+      },
+      runWorkbench,
+    );
+    const draftNames = [
+      "scan-manifest.json",
+      "findings.json",
+      "coverage.json",
+      "checkpoint-head.json",
+    ];
+    const beforeFailure = await Promise.all(
+      draftNames.map((name) => readFile(path.join(run.scanDir, name), "utf8")),
+    );
+    const database = path.join(
+      environment.CODEX_SECURITY_STATE_DIR,
+      "workbench.sqlite3",
+    );
+    const runSql = async (sql: string) =>
+      execFileAsync(
+        process.env.PYTHON?.trim() || "python3",
+        [
+          "-c",
+          "import sqlite3,sys; connection=sqlite3.connect(sys.argv[1]); connection.executescript(sys.argv[2]); connection.close()",
+          database,
+          sql,
+        ],
+        { env: environment },
+      );
+    await runSql(
+      "CREATE TRIGGER reject_deadline_commit BEFORE UPDATE OF status ON deep_scan_runs WHEN NEW.status = 'succeeded' BEGIN SELECT RAISE(ABORT, 'fixture deadline commit failure'); END;",
+    );
+    await assert.rejects(
+      store.finish({
+        scanId: run.scanId,
+        reason: "capped",
+        manifestPath: path.join(run.scanDir, "scan-manifest.json"),
+        omittedWorkerIds: [],
+      }),
+      /fixture deadline commit failure/,
+    );
+    assert.deepEqual(
+      await Promise.all(
+        draftNames.map((name) =>
+          readFile(path.join(run.scanDir, name), "utf8"),
+        ),
+      ),
+      beforeFailure,
+      "a failed finish commit must restore the unsealed parent and accepted checkpoint head",
+    );
+    assert.equal((await store.get(run.scanId, threadId)).status, "running");
+    await runSql("DROP TRIGGER reject_deadline_commit;");
+    const finished = await store.finish({
+      scanId: run.scanId,
+      reason: "capped",
+      manifestPath: path.join(run.scanDir, "scan-manifest.json"),
+      omittedWorkerIds: [],
+    });
+    assert.equal(finished.status, "succeeded");
+    assert.equal(
+      finished.persistedWorkers.every(
+        (worker: { status: string }) => worker.status === "canceled",
+      ),
+      true,
+    );
+    const recovered = await readJson(run.scanDir, "findings.json");
+    assert.deepEqual(
+      recovered.findings.map((item: { title: string }) => item.title),
+      ["Unsafe request output valid"],
+    );
+    assert.equal(recovered.findings[0].provenance.workerId, workers[0].id);
+    const coverage = await readJson(run.scanDir, "coverage.json");
+    assert.equal(coverage.completeness, "partial");
+    assert.equal(coverage.surfaces.length, 2);
+    for (const [index, label] of ["valid", "second-valid"].entries()) {
+      const workerId: string = workers[index].id;
+      const surface = coverage.surfaces.find(
+        (row: { workerId: string }) => row.workerId === workerId,
+      );
+      const task = coverage.deferred.find(
+        (row: { id: string }) => row.id === `${workerId}/surface-review`,
+      );
+      assert.equal(surface.id, `${workerId}/api`);
+      assert.equal(surface.disposition, "no_issue_found");
+      assert.deepEqual(task.surfaceIds, [surface.id]);
+      assert.equal(
+        await readFile(path.join(run.scanDir, surface.receiptRefs[0]), "utf8"),
+        `Source evidence for ${label}.\n`,
+      );
+    }
+    assert.equal(
+      coverage.deferred.some((item: { reason: string }) =>
+        /time limit elapsed/.test(item.reason),
+      ),
+      true,
+    );
+    assert.equal(
+      coverage.deferred.some(
+        (item: { candidateId: string }) =>
+          item.candidateId === "pending-review",
+      ),
+      true,
+    );
+    const anonymousTasks = coverage.deferred.filter(
+      (row: { workerId?: string }) => row.workerId === workers[2].id,
+    );
+    assert.deepEqual(
+      new Set(anonymousTasks.map((row: { reason: string }) => row.reason)),
+      new Set(["Review authentication.", "Review authorization."]),
+    );
+    const manifest = await readJson(run.scanDir, "scan-manifest.json");
+    assert.equal(manifest.scan.threatModel, undefined);
+    const savedScan = await runWorkbench(["get-scan", "--scan-id", run.scanId]);
+    assert.match(
+      JSON.stringify(savedScan),
+      /Skipped malformed saved threat model.*missing required schema property/,
+    );
+    assert.equal(manifest.scan.sealedAt, undefined);
+    assert.equal(manifest.scan.complete, undefined);
+    assert.equal(
+      Object.keys(manifest.scan.preservedSources).some((source) =>
+        source.includes("valid/output/checkpoints/"),
+      ),
+      true,
+    );
+    const beforeReplay = await readFile(
+      path.join(run.scanDir, "scan-manifest.json"),
+      "utf8",
+    );
+    await store.finish({
+      scanId: run.scanId,
+      reason: "capped",
+      manifestPath: path.join(run.scanDir, "scan-manifest.json"),
+      omittedWorkerIds: [],
+    });
+    assert.equal(
+      await readFile(path.join(run.scanDir, "scan-manifest.json"), "utf8"),
+      beforeReplay,
+    );
+    await runWorkbench(["complete-scan", "--scan-id", run.scanId]);
+    assert.deepEqual(
+      (await readJson(run.scanDir, "coverage.json")).surfaces,
+      coverage.surfaces,
+    );
+    assert.deepEqual(
+      (await readJson(run.scanDir, "coverage.json")).deferred,
+      coverage.deferred,
+    );
+    const sealed = await readJson(run.scanDir, "scan-manifest.json");
+    assert.equal(typeof sealed.scan.sealedAt, "string");
+    assert.deepEqual(
+      (await readJson(run.scanDir, "findings.json")).findings,
+      recovered.findings,
+    );
+    assert.equal(
+      (await readJson(run.scanDir, "coverage.json")).completeness,
+      "partial",
     );
   } finally {
     await rm(fixtureRoot, { recursive: true, force: true });
