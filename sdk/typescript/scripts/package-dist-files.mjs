@@ -113,6 +113,7 @@ const distModules = [
   "scan-semantics",
   "semantic-models",
   "workbench-types",
+  "patch-tui",
   "permission-profile",
   "scan-draft-publication",
 ];
