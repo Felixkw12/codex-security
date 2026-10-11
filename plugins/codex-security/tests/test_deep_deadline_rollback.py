@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import copy
 import json
+import os
+import shutil
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from test_deep_coverage_recovery import worker
+from test_workbench_standard_deep_results import write_saved_parent
 from workbench_test_support import saved_binding, saved_draft, write_checkpoint
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
@@ -105,3 +108,98 @@ def test_deadline_rollback_does_not_reintroduce_a_later_rejected_worker_finding(
     assert previous.read_bytes() == previous_bytes
     assert head.read_bytes() == original_head
     assert list((tmp_path / "checkpoints").iterdir()) == [previous]
+
+
+@pytest.mark.parametrize("local_failure", [False, True], ids=["caller-rollback", "local-failure"])
+@pytest.mark.parametrize("newer_source", ["canonical", "unselected-checkpoint"])
+def test_deadline_rollback_preserves_parent_observation_order(
+    tmp_path, local_failure, newer_source
+):
+    scan_id = "00000000-0000-4000-8000-000000000001"
+    pending = saved_draft(
+        scan_id, deferred=[{"id": "review", "reason": "Review remains."}], complete=True
+    )
+    closed = saved_draft(
+        scan_id, closures=[{"id": "review", "reason": "Review completed."}], complete=True
+    )
+    older, newer = (pending, closed) if newer_source == "canonical" else (closed, pending)
+    older["threatModel"] = {"summary": "The earlier model."}
+    newer["threatModel"] = {"summary": "The current model."}
+    selected = write_checkpoint(tmp_path / "checkpoints", older)
+    os.utime(selected, ns=(100, 100))
+    head = tmp_path / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": selected.name}))
+    os.utime(head, ns=(100, 100))
+    canonical = newer if newer_source == "canonical" else older
+    modified = 200 if newer_source == "canonical" else 100
+    write_saved_parent(tmp_path, canonical, modified)
+    manifest_path = tmp_path / "scan-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["scan"]["threatModel"] = canonical["threatModel"]
+    manifest_path.write_text(json.dumps(manifest))
+    for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+        os.utime(tmp_path / name, ns=(modified, modified))
+    if newer_source == "unselected-checkpoint":
+        unselected = write_checkpoint(tmp_path / "checkpoints", newer)
+        os.utime(unselected, ns=(200, 200))
+    binding = {
+        **saved_binding("deep_repository", repository="synthetic", status="completed"),
+        "scanId": scan_id,
+        "startedAt": "2026-01-01T00:00:00Z",
+        "completedAt": "2026-01-01T00:01:00Z",
+        "producer": {"name": "codex-security", "version": "0.0.0"},
+    }
+    binding["target"].update(
+        revision="a" * 40, targetId="synthetic", displayName="Synthetic fixture"
+    )
+    db = SimpleNamespace(
+        require_canonical_scan_directory=finalizer._require_scan_directory,
+        now=lambda: binding["completedAt"],
+        workbench_completion_binding=lambda *_args: copy.deepcopy(binding),
+        expected_coverage_mode=lambda _scan: "deep_repository",
+    )
+    scan = {"id": scan_id, "scan_dir": str(tmp_path), "completion_warnings_json": "[]"}
+
+    class Connection:
+        def execute(self, sql, _args):
+            if sql.startswith("UPDATE") and local_failure:
+                raise RuntimeError("Synthetic publication failure")
+            return SimpleNamespace(fetchall=list)
+
+    def recover(directory):
+        result = saved.merge_saved_results(
+            directory, scan_id, binding, [], [], stopped=True, reason="Synthetic interruption."
+        )
+        assert result is not None
+        return result
+
+    def pending_ids(result):
+        return {row.get("id") for row in result[2]["deferred"] if row.get("id") == "review"}
+
+    baseline = tmp_path.with_name(tmp_path.name + "-baseline")
+    shutil.copytree(tmp_path, baseline)
+    before = recover(baseline)
+    assert pending_ids(before) == ({"review"} if newer_source == "unselected-checkpoint" else set())
+    assert before[0]["scan"]["threatModel"] == canonical["threatModel"]
+    original = {
+        path: (path.read_bytes(), path.stat().st_mtime_ns)
+        for path in [
+            head,
+            manifest_path,
+            tmp_path / "findings.json",
+            tmp_path / "coverage.json",
+            *(tmp_path / "checkpoints").glob("*.json"),
+        ]
+    }
+    if local_failure:
+        with pytest.raises(RuntimeError, match="Synthetic publication failure"):
+            saved.preserve_deep_deadline_draft(db, Connection(), scan)
+    else:
+        publication = saved.preserve_deep_deadline_draft(db, Connection(), scan)
+        saved._restore_published_outputs(*publication)
+
+    restored = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in original}
+    after = recover(tmp_path)
+    assert pending_ids(after) == pending_ids(before)
+    assert after[0]["scan"]["threatModel"] == before[0]["scan"]["threatModel"]
+    assert restored == original

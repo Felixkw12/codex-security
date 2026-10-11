@@ -6,7 +6,14 @@ import { mock } from "node:test";
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { importModule } from "./import-module.ts";
@@ -1164,6 +1171,15 @@ async function testDeadlinePreservesValidWorkerCheckpoints() {
     const beforeFailure = await Promise.all(
       draftNames.map((name) => readFile(path.join(run.scanDir, name), "utf8")),
     );
+    const readObservationTimes = () =>
+      Promise.all(
+        draftNames.map(
+          async (name) =>
+            (await stat(path.join(run.scanDir, name), { bigint: true }))
+              .mtimeNs,
+        ),
+      );
+    const observationTimesBeforeFailure = await readObservationTimes();
     const checkpointDirectory = path.join(run.scanDir, "checkpoints");
     const readParentCheckpoints = async () =>
       Promise.all(
@@ -1215,6 +1231,11 @@ async function testDeadlinePreservesValidWorkerCheckpoints() {
       await readParentCheckpoints(),
       checkpointsBeforeFailure,
       "rollback must not publish an aggregate checkpoint as new parent evidence",
+    );
+    assert.deepEqual(
+      await readObservationTimes(),
+      observationTimesBeforeFailure,
+      "rollback must preserve parent observation order",
     );
     assert.equal((await store.get(run.scanId, threadId)).status, "running");
     await runSql("DROP TRIGGER reject_deadline_commit;");

@@ -2317,8 +2317,8 @@ def coverage_for_comparison(db: Any, scan: Any) -> dict[str, Any]:
 
 def _snapshot_published_outputs(
     scan_dir: Path, relative_paths: tuple[str, ...] = _PUBLISHED_OUTPUTS
-) -> dict[str, bytes | None]:
-    snapshots: dict[str, bytes | None] = {}
+) -> dict[str, tuple[bytes, os.stat_result] | None]:
+    snapshots: dict[str, tuple[bytes, os.stat_result] | None] = {}
     for relative in relative_paths:
         descriptor = -1
         try:
@@ -2327,7 +2327,8 @@ def _snapshot_published_outputs(
             )
             with os.fdopen(descriptor, "rb") as handle:
                 descriptor = -1
-                snapshots[relative] = handle.read()
+                metadata = os.fstat(handle.fileno())
+                snapshots[relative] = (handle.read(), metadata)
         except ContractError:
             path = scan_dir / relative
             if path.exists() or path.is_symlink():
@@ -2342,19 +2343,23 @@ def _snapshot_published_outputs(
     return snapshots
 
 
-def _restore_published_outputs(scan_dir: Path, snapshots: dict[str, bytes | None]) -> None:
-    for relative, contents in snapshots.items():
-        if contents is None:
+def _restore_published_outputs(
+    scan_dir: Path, snapshots: dict[str, tuple[bytes, os.stat_result] | None]
+) -> None:
+    for relative, snapshot in snapshots.items():
+        if snapshot is None:
             path = scan_dir / relative
             if path.exists() or path.is_symlink():
                 _remove_scan_local_file_if_exists(scan_dir, relative)
         else:
+            contents, metadata = snapshot
             write_scan_local_bytes(scan_dir, relative, contents)
+            os.utime(scan_dir / relative, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
 
 
 def preserve_deep_deadline_draft(
     db: Any, connection: Any, scan: Any
-) -> tuple[Path, dict[str, bytes | None]]:
+) -> tuple[Path, dict[str, tuple[bytes, os.stat_result] | None]]:
     """Recover a settled, zero-accepted Deep deadline without sealing the parent."""
     scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
     snapshots = _snapshot_published_outputs(scan_dir, (*_PUBLISHED_OUTPUTS, "checkpoint-head.json"))

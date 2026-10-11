@@ -1589,7 +1589,7 @@ def finish_deep_scan_locked(
     if len(set(omitted_worker_ids)) != len(omitted_worker_ids):
         raise SystemExit("Omitted Deep Scan worker IDs must be unique.")
     promotion: tuple[Path, Path, Path | None] | None = None
-    deadline_publication: tuple[Path, dict[str, bytes | None]] | None = None
+    deadline_publication: tuple[Path, dict[str, tuple[bytes, os.stat_result] | None]] | None = None
     connection.execute("BEGIN IMMEDIATE")
     try:
         run = require_deep_scan_run(connection, scan_id)
