@@ -1539,7 +1539,20 @@ export class CodexSecurity {
       }
       let scopeFileCount: number | null = null;
       let reviewedFileCount = 0;
+      const reportedProgress = new Set<string>();
+      const progressKey = (progress: ScanProgress): string =>
+        `${progress.phase}:${progress.filesCompleted}:${progress.filesTotal}`;
       const reportProgress = (progress: ScanProgress): void => {
+        if (reportedProgress.has(progressKey(progress))) return;
+        if (
+          progress.phase === "discovery" &&
+          progress.filesCompleted === 0 &&
+          reviewedFileCount === 0 &&
+          progress.filesTotal !== scopeFileCount
+        ) {
+          scopeFileCount = progress.filesTotal;
+          tracker.setExpectedFilesTotal(scopeFileCount);
+        }
         if (
           scopeFileCount === null ||
           progress.filesTotal > scopeFileCount ||
@@ -1548,10 +1561,11 @@ export class CodexSecurity {
           return;
         }
         reviewedFileCount = progress.filesCompleted;
-        notifyObserver(
-          options,
-          "onProgress",
-        )({ ...progress, filesTotal: scopeFileCount });
+        const update = { ...progress, filesTotal: scopeFileCount };
+        const key = progressKey(update);
+        if (reportedProgress.has(key)) return;
+        reportedProgress.add(key);
+        notifyObserver(options, "onProgress")(update);
       };
       const reportedInaccessibleSessionLogs = new Set<string>();
       const reportTrackingError = (error: unknown): void => {
@@ -2248,18 +2262,7 @@ export class CodexSecurity {
         onTrustedAccessStatus: options.onTrustedAccessStatus,
         onReconnect: options.onReconnect,
         onActivity: options.onActivity,
-        onProgress: (progress) => {
-          if (
-            progress.phase === "discovery" &&
-            progress.filesCompleted === 0 &&
-            reviewedFileCount === 0 &&
-            progress.filesTotal !== scopeFileCount
-          ) {
-            scopeFileCount = progress.filesTotal;
-            tracker.setExpectedFilesTotal(scopeFileCount);
-          }
-          reportProgress(progress);
-        },
+        onProgress: reportProgress,
         onWorkerStatus: options.onWorkerStatus,
         onWarning: options.onWarning,
         onObserverError: options.onObserverError,

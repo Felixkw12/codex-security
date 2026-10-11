@@ -321,8 +321,8 @@ export class ScanCostTracker {
             worker,
           });
         }
-        this.#reportWorkerProgress(session);
       }
+      this.#reportSessionProgress(session, threadId === this.#threadId);
       const receipt = usages.get(threadId);
       if (
         session.usage !== null &&
@@ -348,16 +348,23 @@ export class ScanCostTracker {
     this.#reportCost(cost);
   }
 
-  #reportWorkerProgress(session: SessionUsage): void {
+  #reportSessionProgress(session: SessionUsage, parent: boolean): void {
     if (this.#options.onProgress === undefined || session.threadId === null) {
       return;
     }
     for (const progress of session.progress.splice(0)) {
       const expectedFilesTotal = this.#expectedFilesTotal;
+      const parentInventory =
+        parent &&
+        progress.phase === "discovery" &&
+        progress.filesCompleted === 0 &&
+        this.#highestFilesCompleted === 0;
       if (
-        (expectedFilesTotal !== undefined &&
+        (!parentInventory &&
+          expectedFilesTotal !== undefined &&
           progress.filesTotal > expectedFilesTotal) ||
-        (session.filesTotal !== null &&
+        (!parent &&
+          session.filesTotal !== null &&
           progress.filesTotal !== session.filesTotal) ||
         progress.filesCompleted < session.filesCompleted
       ) {
@@ -365,19 +372,26 @@ export class ScanCostTracker {
       }
       session.filesTotal = progress.filesTotal;
       session.filesCompleted = progress.filesCompleted;
-      this.#workerProgress.set(session.threadId, progress.filesCompleted);
-      const filesCompleted = Math.min(
-        expectedFilesTotal ?? Number.MAX_SAFE_INTEGER,
-        this.#workerProgress
-          .values()
-          .reduce((total, reviewed) => total + reviewed, 0),
-      );
+      // Parent markers already describe global coverage, including its workers.
+      // Only worker-local counts belong in the delegated shard sum.
+      if (!parent)
+        this.#workerProgress.set(session.threadId, progress.filesCompleted);
+      const filesCompleted = parent
+        ? progress.filesCompleted
+        : Math.min(
+            expectedFilesTotal ?? Number.MAX_SAFE_INTEGER,
+            this.#workerProgress
+              .values()
+              .reduce((total, reviewed) => total + reviewed, 0),
+          );
       if (filesCompleted < this.#highestFilesCompleted) continue;
       const update = {
         ...progress,
         filesCompleted,
-        filesTotal:
-          expectedFilesTotal ?? Math.max(progress.filesTotal, filesCompleted),
+        filesTotal: parent
+          ? progress.filesTotal
+          : (expectedFilesTotal ??
+            Math.max(progress.filesTotal, filesCompleted)),
       };
       const key = `${update.phase}:${update.filesCompleted}:${update.filesTotal}`;
       if (this.#reportedProgress.has(key)) continue;

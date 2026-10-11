@@ -1804,14 +1804,13 @@ describe("live scan cost tracking", () => {
     expect(JSON.stringify(activities)).not.toContain("must-never-be-displayed");
   });
 
-  test("forwards reviewed-file progress from descendant workers only", async () => {
-    const { home, usage, parent, worker } = await workerSessionFixture();
+  test("aggregates descendant worker progress and ignores unrelated sessions", async () => {
+    const { home, usage, worker } = await workerSessionFixture();
     const descendant = await writeSession(home, "nested-worker-thread", usage, {
       parent: "worker-thread",
     });
     const unrelated = await writeSession(home, "unrelated-thread", usage);
 
-    await appendSessionItem(parent, progressMessage(1));
     await appendSessionItem(worker, progressMessage(3));
     await appendSessionItem(worker, progressMessage(4, 9));
     await appendSessionItem(descendant, progressMessage(5));
@@ -1831,6 +1830,78 @@ describe("live scan cost tracking", () => {
     ]);
     expect([3, 5]).toContain(updates[0]!.filesCompleted);
   });
+
+  test("forwards parent custom-tool progress without adding global counts to worker totals", async () => {
+    const { home, parent, worker } = await workerSessionFixture();
+    const updates: ScanProgress[] = [];
+    const tracker = costTracker(home, {
+      expectedFilesTotal: 942,
+      onProgress: (update) => updates.push(update),
+    });
+    tracker.start("scan-thread");
+    await tracker.refresh();
+    const marker =
+      'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":49,"filesTotal":942}';
+    await appendSessionItem(parent, {
+      type: "custom_tool_call_output",
+      call_id: "parent-progress",
+      output: [
+        { type: "input_text", text: "Script completed\nOutput:" },
+        { type: "input_text", text: marker },
+      ],
+    });
+    await tracker.refresh();
+    await appendSessionItem(parent, progressMessage(49, 942));
+    await appendSessionItem(worker, progressMessage(49, 942));
+    await tracker.refresh();
+    await appendSessionItem(parent, progressMessage(49, 942, "validation"));
+    await tracker.stop();
+    expect(updates).toEqual([
+      { phase: "discovery", filesCompleted: 49, filesTotal: 942 },
+      { phase: "validation", filesCompleted: 49, filesTotal: 942 },
+    ]);
+  });
+
+  test.each([940, 944])(
+    "preserves the parent's exact inventory of %p in custom-tool progress",
+    async (filesTotal) => {
+      const { home, parent } = await workerSessionFixture();
+      const updates: ScanProgress[] = [];
+      const tracker = costTracker(home, {
+        expectedFilesTotal: 942,
+        onProgress: (update) => {
+          updates.push(update);
+          if (update.phase === "discovery" && update.filesCompleted === 0)
+            tracker.setExpectedFilesTotal(update.filesTotal);
+        },
+      });
+      tracker.start("scan-thread");
+      for (const filesCompleted of [0, 7]) {
+        await appendSessionItem(parent, {
+          type: "custom_tool_call_output",
+          call_id: `parent-progress-${filesCompleted}`,
+          output: [
+            {
+              type: "input_text",
+              text: `CODEX_SECURITY_SCAN_PROGRESS ${JSON.stringify({
+                phase: "discovery",
+                filesCompleted,
+                filesTotal,
+              })}`,
+            },
+          ],
+        });
+        await tracker.refresh();
+      }
+      await appendSessionItem(parent, progressMessage(0, filesTotal + 1));
+      await appendSessionItem(parent, progressMessage(8, filesTotal + 1));
+      await tracker.stop();
+      expect(updates).toEqual([
+        { phase: "discovery", filesCompleted: 0, filesTotal },
+        { phase: "discovery", filesCompleted: 7, filesTotal },
+      ]);
+    },
+  );
 
   test("aggregates worker progress without regressing or changing assigned shards", async () => {
     const { home, usage, parent, worker } = await workerSessionFixture();
@@ -1886,6 +1957,7 @@ describe("live scan cost tracking", () => {
     expect(updates).toEqual([
       { phase: "discovery", filesCompleted: 3, filesTotal: 1_258 },
       { phase: "discovery", filesCompleted: 5, filesTotal: 1_258 },
+      { phase: "discovery", filesCompleted: 1_200, filesTotal: 1_258 },
       { phase: "discovery", filesCompleted: 1_251, filesTotal: 1_258 },
       { phase: "validation", filesCompleted: 1_251, filesTotal: 1_258 },
     ]);
