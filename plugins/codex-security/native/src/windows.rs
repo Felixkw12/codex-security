@@ -183,7 +183,7 @@ fn windows_application_path(executable: &OsStr) -> io::Result<Vec<u16>> {
     }
     let units = absolute.as_os_str().encode_wide().collect::<Vec<_>>();
     if units.len() < MAX_PATH as usize {
-        return Ok(terminated(executable));
+        return Ok(terminated(absolute.as_os_str()));
     }
     // CreateProcessW needs a namespace for an ordinary long application path.
     let (prefix, tail) = if units.starts_with(&[b'\\' as u16; 2]) {
