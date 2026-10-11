@@ -2764,10 +2764,22 @@ for (const layout of ["worker", "standard"] as const) {
             ],
           }),
         );
+        const terminalSurface = {
+          id: "legacy-shared-2",
+          label: "Independent terminal surface",
+          disposition: "no_issue_found",
+          receiptRefs: [],
+        };
         // The terminal checkpoint is durable before reconciled output publication.
         await saveScanDraftCheckpoint(
           f.context,
-          f.draft({ resolvedDeferred: [close("review")] }, true),
+          f.draft(
+            {
+              surfaces: [terminalSurface],
+              resolvedDeferred: [close("review")],
+            },
+            true,
+          ),
           false,
         );
         const checkpoints = path.join(f.root, "checkpoints");
@@ -2779,12 +2791,12 @@ for (const layout of ["worker", "standard"] as const) {
         if (layout === "worker")
           await utimes(path.join(f.root, "checkpoint-head.json"), 100, 100);
         const result = await f.write(f.draft());
-        assert.equal(result.surfaceCount, 2);
+        assert.equal(result.surfaceCount, 3);
         assert.deepEqual(
           result.coverage.surfaces
             .map((surface: { label: string }) => surface.label)
             .sort(),
-          surfaces.map((surface) => surface.label).sort(),
+          [...surfaces, terminalSurface].map((surface) => surface.label).sort(),
         );
         assert.equal(
           new Set(
@@ -2792,7 +2804,7 @@ for (const layout of ["worker", "standard"] as const) {
               (surface: { id: string }) => surface.id,
             ),
           ).size,
-          2,
+          3,
         );
         assert.deepEqual((await f.read()).surfaces, result.coverage.surfaces);
         assert.deepEqual(

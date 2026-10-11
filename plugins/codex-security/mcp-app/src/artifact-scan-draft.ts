@@ -615,6 +615,7 @@ function reconcileScanDraft(
                 (!terminalOutcomeIds.has(surface.id as string) &&
                   !terminalOutcomeIds.has(surface.candidateId as string)),
             ),
+            result.coverage.surfaces as JsonObject[],
           ),
         },
         result.coverage,
@@ -2642,7 +2643,10 @@ function buildCoverage(
   };
 }
 
-function normalizeSurfaces(surfaces: JsonObject[]): JsonObject[] {
+function normalizeSurfaces(
+  surfaces: JsonObject[],
+  previous: JsonObject[] = [],
+): JsonObject[] {
   const reservedSurfaceIds = new Set(
     surfaces.flatMap((surface) =>
       [surface.id, surface.candidateId].filter(
@@ -2650,6 +2654,25 @@ function normalizeSurfaces(surfaces: JsonObject[]): JsonObject[] {
       ),
     ),
   );
+  const previousIds = new Set(
+    previous.flatMap((surface) =>
+      [surface.id, surface.candidateId].filter(
+        (id): id is string => typeof id === "string",
+      ),
+    ),
+  );
+  const previousIdConflict = (id: string, surface: JsonObject) =>
+    previousIds.has(id) &&
+    !previous.some(({ id: previousId, ...content }) => {
+      const { id: _id, ...current } = surface;
+      return (
+        previousId === id &&
+        isDeepStrictEqual(
+          { ...content, receiptRefs: content.receiptRefs ?? [] },
+          { ...current, receiptRefs: current.receiptRefs ?? [] },
+        )
+      );
+    });
   const surfaceIds = new Set<string>();
   return surfaces.map((surface) => {
     const explicitId = typeof surface.id === "string";
@@ -2660,12 +2683,20 @@ function normalizeSurfaces(surfaces: JsonObject[]): JsonObject[] {
           .digest("hex")
           .slice(0, 16)}`;
     let id = baseId;
-    if (surfaceIds.has(id) || (!explicitId && reservedSurfaceIds.has(id))) {
+    if (
+      surfaceIds.has(id) ||
+      (!explicitId &&
+        (reservedSurfaceIds.has(id) || previousIdConflict(id, surface)))
+    ) {
       let suffix = 2;
       do {
         id = `${baseId}-${suffix}`;
         suffix += 1;
-      } while (surfaceIds.has(id) || reservedSurfaceIds.has(id));
+      } while (
+        surfaceIds.has(id) ||
+        reservedSurfaceIds.has(id) ||
+        previousIdConflict(id, surface)
+      );
     }
     surfaceIds.add(id);
     return { ...surface, id, receiptRefs: surface.receiptRefs ?? [] };
