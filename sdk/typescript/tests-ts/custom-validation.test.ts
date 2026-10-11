@@ -286,7 +286,7 @@ describe("custom validation", () => {
       (await json<ScanManifest>(join(f.scanDir, "scan-manifest.json"))).scan[
         "complete"
       ],
-    ).not.toBe(false);
+    ).toBe(false);
     expect(await json(join(f.scanDir, resultName))).toMatchObject({
       scanId: f.scanId,
       ...output,
@@ -665,7 +665,7 @@ describe("custom validation", () => {
                       "custom_pending",
                     );
                     expect(pendingManifest.scan["complete"]).toBe(
-                      diff ? undefined : false,
+                      scenario !== "unfinished-source",
                     );
                     expect(pendingManifest.scan).not.toHaveProperty("sealedAt");
                     expect(pendingManifest.scan).not.toHaveProperty(
