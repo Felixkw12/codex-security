@@ -6966,6 +6966,8 @@ describe("CodexSecurity orchestration", () => {
     [8, true, true, "validation", "discovery", "none"],
     [7, true, false, "discovery", "attack_path", "none"],
     [8, true, true, "discovery", "attack_path", "none"],
+    [8, false, false, "validation", "discovery", "accepted"],
+    [8, false, false, "discovery", "attack_path", "accepted"],
     [8, false, true, "validation", "discovery", "accepted"],
     [8, false, true, "discovery", "attack_path", "accepted"],
     [7, false, true, "validation", "discovery", "accepted"],
@@ -7109,6 +7111,8 @@ describe("CodexSecurity orchestration", () => {
                 text: marker(parentPhase, 3, parentTotal),
               },
             };
+            // This is a new tool receipt, not a copied message projection. It
+            // replaces the earlier worker phase if the parent is ineligible.
             if (repeat)
               await appendFile(
                 worker,
@@ -7144,7 +7148,7 @@ describe("CodexSecurity orchestration", () => {
           phase:
             parentTotal === 7
               ? parentPhase
-              : nextWorker === "accepted"
+              : nextWorker === "accepted" && !repeat
                 ? nextPhase
                 : workerPhase,
           filesCompleted: 3,
@@ -8889,6 +8893,314 @@ describe("CodexSecurity orchestration", () => {
       await client.close();
     }
   });
+
+  test.each(
+    (["custom", "function", "notification"] as const).flatMap((kind) =>
+      (
+        [
+          ["validation", "discovery"],
+          ["discovery", "attack_path"],
+        ] as const
+      ).map(
+        ([firstPhase, secondPhase]) => [kind, firstPhase, secondPhase] as const,
+      ),
+    ),
+  )(
+    "preserves fresh worker receipts after another shard advances (%s, %s, %s)",
+    async (kind, firstPhase, secondPhase) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const firstRead = Promise.withResolvers<void>();
+      const secondRead = Promise.withResolvers<void>();
+      const lastRead = Promise.withResolvers<void>();
+      const receipt = (
+        id: string,
+        phase: string,
+        count: number,
+        total: number,
+      ) => ({
+        type: "response_item",
+        payload: {
+          type:
+            kind === "function"
+              ? "function_call_output"
+              : "custom_tool_call_output",
+          call_id: id,
+          output:
+            "CODEX_SECURITY_SCAN_PROGRESS " +
+            JSON.stringify({ phase, filesCompleted: count, filesTotal: total }),
+        },
+      });
+      const append = (file: string, row: unknown) =>
+        appendFile(file, JSON.stringify(row) + "\n");
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          await writeUsageSession(codexHome, "thread-1", {});
+          const first = await writeUsageSession(
+            codexHome,
+            "worker-first",
+            {},
+            { parent: "thread-1" },
+          );
+          const second = await writeUsageSession(
+            codexHome,
+            "worker-second",
+            {},
+            { parent: "thread-1" },
+          );
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            await append(first, receipt("first", firstPhase, 2, 2));
+            await firstRead.promise;
+            await append(second, receipt("second", secondPhase, 1, 6));
+            await secondRead.promise;
+            // Notifications may share their call ID; each appended output is
+            // still a fresh receipt with the same worker-local coverage.
+            await append(
+              first,
+              receipt(
+                kind === "notification" ? "first" : "next",
+                firstPhase,
+                2,
+                2,
+              ),
+            );
+            await append(first, {
+              type: "response_item",
+              payload: {
+                type: "custom_tool_call_output",
+                call_id: "observed-last",
+                output: "done",
+              },
+            });
+            await lastRead.promise;
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      const keepAlive = setInterval(() => {}, 1_000);
+      try {
+        await client.run(repository, {
+          onProgress: (progress) => updates.push(progress),
+          onSessionEvent: ({ event }) => {
+            const id = (event["payload"] as { call_id?: string })?.call_id;
+            if (id === "first") firstRead.resolve();
+            if (id === "second") secondRead.resolve();
+            if (id === "observed-last") lastRead.resolve();
+          },
+        });
+        expect(updates.filter((p) => p.filesCompleted > 0)).toEqual([
+          { phase: firstPhase, filesCompleted: 2, filesTotal: 8 },
+          { phase: secondPhase, filesCompleted: 3, filesTotal: 8 },
+          { phase: firstPhase, filesCompleted: 3, filesTotal: 8 },
+        ]);
+      } finally {
+        clearInterval(keepAlive);
+        firstRead.resolve();
+        secondRead.resolve();
+        lastRead.resolve();
+        await client.close();
+      }
+    },
+  );
+
+  test.each(
+    [false, true].flatMap((workerFirst) =>
+      [false, true].map((split) => [workerFirst, split] as const),
+    ),
+  )(
+    "keeps global parent phase through a delayed completion read (worker first: %p, split: %p)",
+    async (workerFirst, split) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const metadata = Promise.withResolvers<void>();
+      const workerMetadata = Promise.withResolvers<void>();
+      const listingEntered = Promise.withResolvers<void>();
+      const listingReleased = Promise.withResolvers<void>();
+      let holdListing = false;
+      const closeEntered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const validationRead = Promise.withResolvers<void>();
+      let parentPath = "",
+        pauseClose = false;
+      const originalOpen = fsPromises.open,
+        originalReaddir = fsPromises.readdir;
+      const opening = spyOn(fsPromises, "open").mockImplementation((async (
+        ...args: Parameters<typeof originalOpen>
+      ) => {
+        const handle = await originalOpen(...args);
+        if (String(args[0]) !== parentPath) return handle;
+        const read = handle.read.bind(handle),
+          close = handle.close.bind(handle);
+        let discoveryRead = false;
+        handle.read = (async (...readArgs: Parameters<typeof read>) => {
+          const result = await read(...readArgs);
+          if (
+            Buffer.isBuffer(result.buffer) &&
+            result.buffer
+              .toString("utf8", 0, result.bytesRead)
+              .includes('"id":"old-discovery"')
+          )
+            discoveryRead = true;
+          return result;
+        }) as typeof handle.read;
+        handle.close = async () => {
+          if (pauseClose && discoveryRead) {
+            pauseClose = false;
+            closeEntered.resolve();
+            await release.promise;
+          }
+          await close();
+        };
+        return handle;
+      }) as typeof originalOpen);
+      const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
+        ...args: Parameters<typeof originalReaddir>
+      ) => {
+        if (holdListing && String(args[0]) === join(codexHome, "sessions")) {
+          holdListing = false;
+          listingEntered.resolve();
+          await listingReleased.promise;
+        }
+        const entries = await originalReaddir(...args);
+        if (String(args[0]) !== dirname(parentPath)) return entries;
+        return entries.toSorted(
+          (left, right) =>
+            (workerFirst ? 1 : -1) *
+            (Number(String(left.name) === basename(parentPath)) -
+              Number(String(right.name) === basename(parentPath))),
+        );
+      }) as typeof originalReaddir);
+      const marker = (phase: string) =>
+        "CODEX_SECURITY_SCAN_PROGRESS " +
+        JSON.stringify({ phase, filesCompleted: 8, filesTotal: 8 });
+      const completion = (id: string, phase: string) => ({
+        type: "event_msg",
+        payload: {
+          type: "item_completed",
+          item: {
+            type: "CommandExecution",
+            id,
+            command: [id],
+            aggregated_output: marker(phase),
+          },
+        },
+      });
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          parentPath = await writeUsageSession(codexHome, "thread-1", {});
+          const worker = await writeUsageSession(
+            codexHome,
+            "worker-thread",
+            {},
+            { parent: "thread-1" },
+          );
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            await metadata.promise;
+            await workerMetadata.promise;
+            // Finish initial association before holding a fresh poll, so the
+            // buffered worker receipt and parent EOF belong to the same pass.
+            holdListing = true;
+            await listingEntered.promise;
+            await appendFile(
+              worker,
+              JSON.stringify({
+                type: "response_item",
+                payload: {
+                  type: "custom_tool_call_output",
+                  output: marker("attack_path"),
+                },
+              }) + "\n",
+            );
+            await appendFile(
+              parentPath,
+              JSON.stringify(completion("old-discovery", "discovery")) + "\n",
+            );
+            pauseClose = split;
+            if (split) {
+              listingReleased.resolve();
+              await closeEntered.promise;
+            }
+            // Discovery was omitted from live delivery. Both completed commands
+            // are durably appended before validation reaches the live stream.
+            await appendFile(
+              parentPath,
+              JSON.stringify(completion("new-validation", "validation")) + "\n",
+            );
+            yield {
+              type: "item.completed",
+              item: {
+                type: "command_execution",
+                id: "new-validation",
+                command: "new-validation",
+                aggregated_output: marker("validation"),
+                status: "completed",
+                exit_code: 0,
+              },
+            };
+            release.resolve();
+            listingReleased.resolve();
+            await validationRead.promise;
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      const keepAlive = setInterval(() => {}, 1_000);
+      try {
+        await client.run(repository, {
+          onProgress: (progress) => updates.push(progress),
+          onSessionEvent: ({ event, threadId }) => {
+            if (event["type"] === "session_meta" && threadId === "thread-1")
+              metadata.resolve();
+            if (
+              event["type"] === "session_meta" &&
+              threadId === "worker-thread"
+            )
+              workerMetadata.resolve();
+            if (
+              (event["payload"] as { item?: { id?: string } })?.item?.id ===
+              "new-validation"
+            )
+              validationRead.resolve();
+          },
+        });
+        expect(updates.at(-1)).toEqual({
+          phase: "validation",
+          filesCompleted: 8,
+          filesTotal: 8,
+        });
+      } finally {
+        clearInterval(keepAlive);
+        release.resolve();
+        listingReleased.resolve();
+        metadata.resolve();
+        workerMetadata.resolve();
+        validationRead.resolve();
+        await client.close();
+        opening.mockRestore();
+        listing.mockRestore();
+      }
+    },
+  );
 
   test.each([false, true])(
     "ignores worker duplicate projections after a newer parent phase (multiple markers: %p)",

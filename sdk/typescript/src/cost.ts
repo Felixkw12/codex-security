@@ -144,7 +144,6 @@ interface SessionUsage {
   progress: SessionProgress[];
   position: number;
   completions: SessionCompletion[];
-  workerProgress: Set<string>;
   latestWorkerProgress: OrderedProgress | null;
   pendingWorkerProgress: Map<number, { progress: ScanProgress; order: number }>;
   messageProjections: Map<
@@ -200,7 +199,6 @@ function createSessionUsage(): SessionUsage {
     progress: [],
     position: 0,
     completions: [],
-    workerProgress: new Set(),
     latestWorkerProgress: null,
     pendingWorkerProgress: new Map(),
     messageProjections: new Map(),
@@ -629,7 +627,6 @@ export class ScanCostTracker {
             continue;
           session.filesTotal = total;
           session.filesCompleted = progress.filesCompleted;
-          session.workerProgress.add(progressKey(progress));
           const latest = session.latestWorkerProgress;
           if (
             latest === null ||
@@ -1246,11 +1243,6 @@ export class ScanCostTracker {
             });
         }
         continue;
-      }
-      if (!parent) {
-        const key = progressKey(progress);
-        if (session.workerProgress.has(key)) continue;
-        session.workerProgress.add(key);
       }
       session.filesTotal = progress.filesTotal;
       session.filesCompleted = progress.filesCompleted;
