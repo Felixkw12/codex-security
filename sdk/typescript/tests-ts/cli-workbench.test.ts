@@ -27,6 +27,53 @@ import {
 } from "./support/cli-run.js";
 
 describe("CLI workbench", () => {
+  test.each(["json", "text"])(
+    "findings list retains requested aliases after history delegation in %s output",
+    async (format) => {
+      const root = await temporaryDirectory("finding-delegated-alias-");
+      try {
+        const repository = join(root, "repository");
+        const alias = join(root, "requested-alias");
+        await mkdir(repository);
+        await symlink(
+          repository,
+          alias,
+          process.platform === "win32" ? "junction" : "dir",
+        );
+        for (const args of [[], [alias]]) {
+          const cli = createCliTest(main, { stdout: format === "text" });
+          const stdout = cli.stdout;
+          const status = await cli.runCli(
+            [
+              "findings",
+              "list",
+              ...args,
+              ...(format === "json" ? ["--json"] : []),
+            ],
+            dependencies({
+              currentDirectory: alias,
+              onWorkbench: (): JsonObject => ({
+                repository,
+                findings: [
+                  { title: "Saved finding", severity: { level: "high" } },
+                ],
+                nextOffset: null,
+              }),
+            }),
+          );
+          expect(status, cli.stderr.text()).toBe(0);
+          if (format === "json") {
+            expect(JSON.parse(stdout.text()).repository).toBe(alias);
+          } else {
+            expect(stdout.text()).toContain("requested-alias");
+            expect(stdout.text()).toContain("Saved finding");
+          }
+        }
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
   test("findings list forwards directory aliases to the repository history query", async () => {
     const root = await temporaryDirectory("finding-repository-alias-");
     const originalRealpath = fs.realpath;
@@ -40,7 +87,6 @@ describe("CLI workbench", () => {
         alias,
         process.platform === "win32" ? "junction" : "dir",
       );
-      const canonical = await realpath(repository);
       for (const preserveSpelling of [false, true]) {
         if (preserveSpelling) {
           spelling = spyOn(fs, "realpath").mockImplementation((async (
@@ -70,12 +116,11 @@ describe("CLI workbench", () => {
             }),
           ),
         ).toBe(0);
-        const requested = preserveSpelling ? alias : canonical;
         expect(calls).toEqual([
           ["list-global-findings", "--repository", alias, "--status", "open"],
         ]);
         expect(JSON.parse(stdout.text())).toEqual({
-          repository: requested,
+          repository: alias,
           findings: [{ title: "Saved finding" }],
         });
       }
