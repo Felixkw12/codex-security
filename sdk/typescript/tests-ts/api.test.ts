@@ -4341,6 +4341,163 @@ describe("CodexSecurity orchestration", () => {
     },
   );
 
+  test.each(
+    (["command", "paginated message", "legacy message"] as const).flatMap(
+      (projection) =>
+        (
+          ["intact", "gap", "delayed suffix", "repeated signature"] as const
+        ).map((delivery) => [projection, delivery] as const),
+    ),
+  )(
+    "correlates parent completions across notification gaps (%s, %s)",
+    async (projection, delivery) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const pollAllowed = Promise.withResolvers<void>();
+      const closeEntered = Promise.withResolvers<void>();
+      const closeReleased = Promise.withResolvers<void>();
+      let parentPath = "";
+      let pauseClose = delivery === "delayed suffix";
+      const originalOpen = fsPromises.open;
+      const originalReaddir = fsPromises.readdir;
+      const opening = spyOn(fsPromises, "open").mockImplementation((async (
+        ...args: Parameters<typeof originalOpen>
+      ) => {
+        const handle = await originalOpen(...args);
+        if (String(args[0]) !== parentPath || !pauseClose) return handle;
+        const close = handle.close.bind(handle);
+        handle.close = async () => {
+          if (pauseClose) {
+            pauseClose = false;
+            closeEntered.resolve();
+            await closeReleased.promise;
+          }
+          await close();
+        };
+        return handle;
+      }) as typeof originalOpen);
+      const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
+        ...args: Parameters<typeof originalReaddir>
+      ) => {
+        if (String(args[0]) === join(codexHome, "sessions"))
+          await pollAllowed.promise;
+        return originalReaddir(...args);
+      }) as typeof originalReaddir);
+      const append = async (id: string, phase: ScanProgress["phase"]) => {
+        const text =
+          "CODEX_SECURITY_SCAN_PROGRESS " +
+          JSON.stringify({
+            phase,
+            filesCompleted: 4,
+            filesTotal: 8,
+          });
+        const native =
+          projection === "command"
+            ? {
+                type: "CommandExecution",
+                id,
+                command: ["review"],
+                aggregated_output: text,
+              }
+            : { type: "AgentMessage", id, content: [{ type: "Text", text }] };
+        await appendFile(
+          parentPath,
+          [
+            {
+              type: "event_msg",
+              payload:
+                projection === "legacy message"
+                  ? { type: "agent_message", message: text }
+                  : { type: "item_completed", item: native },
+            },
+            {
+              type: "response_item",
+              payload:
+                projection === "command"
+                  ? {
+                      type: "custom_tool_call_output",
+                      call_id: id,
+                      output: "done",
+                    }
+                  : {
+                      type: "message",
+                      role: "assistant",
+                      content: [{ type: "output_text", text }],
+                    },
+            },
+          ]
+            .map((row) => JSON.stringify(row))
+            .join("\n") + "\n",
+        );
+        return {
+          type: "item.completed",
+          item:
+            projection === "command"
+              ? {
+                  type: "command_execution",
+                  id,
+                  command: "review",
+                  aggregated_output: text,
+                  status: "completed",
+                  exit_code: 0,
+                }
+              : { type: "agent_message", id, text },
+        } as ThreadEvent;
+      };
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          parentPath = await writeUsageSession(codexHome, "thread-1", {});
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            const first = await append("first", "discovery");
+            if (delivery === "delayed suffix") {
+              pollAllowed.resolve();
+              await closeEntered.promise;
+            }
+            const second = await append("second", "validation");
+            // Native queue backpressure can omit an ordinary start/completion.
+            // Every saved completion here precedes its corresponding live copy.
+            if (delivery === "intact") yield first;
+            yield second;
+            if (delivery === "repeated signature")
+              yield await append("third", "discovery");
+            closeReleased.resolve();
+            pollAllowed.resolve();
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      // The fake stream has no process handle to keep the unref'ed poll alive.
+      const keepAlive = setInterval(() => {}, 1_000);
+      try {
+        await client.run(repository, {
+          onProgress: (update) => updates.push(update),
+        });
+        expect(updates.at(-1)).toEqual({
+          phase: delivery === "repeated signature" ? "discovery" : "validation",
+          filesCompleted: 4,
+          filesTotal: 8,
+        });
+      } finally {
+        clearInterval(keepAlive);
+        pollAllowed.resolve();
+        closeReleased.resolve();
+        await client.close();
+        opening.mockRestore();
+        listing.mockRestore();
+      }
+    },
+  );
+
   test.each([
     ["below worker", true, false, 7],
     ["below worker", true, false, 8],
@@ -4822,7 +4979,7 @@ describe("CodexSecurity orchestration", () => {
       1,
     ],
     [
-      "missing native occurrence uses completion-order fallback",
+      "missing earlier native occurrence preserves a later anchor",
       true,
       true,
       false,
@@ -5048,8 +5205,7 @@ describe("CodexSecurity orchestration", () => {
               parentRead.resolve();
           },
         });
-        const uncorrelated =
-          streamOld && _scenario !== "complete native occurrences";
+        const uncorrelated = streamOld && !nativeCompletion;
         if (uncorrelated) {
           // The outer tool output may be a fresh inventory or a copied preview.
           // Missing completion identity cannot distinguish these histories.

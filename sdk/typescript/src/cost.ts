@@ -65,6 +65,11 @@ interface ProgressItem {
   commandDigest?: string;
 }
 
+type ProgressOccurrenceQueues = Map<
+  string,
+  { indexes: number[]; next: number }
+>;
+
 interface NativeProgressItem extends ProgressItem {
   updates: ScanProgress[];
 }
@@ -236,7 +241,19 @@ export class ScanCostTracker {
       })
     | null = null;
   #matchedParentItems = 0;
-  #parentCompletionStart = 0;
+  #parentCompletionCursor = 0;
+  #indexedParentCompletions = 0;
+  #indexedParentItems = 0;
+  readonly #parentCompletionKeys = new Map<
+    string,
+    { indexes: number[]; next: number }
+  >();
+  readonly #parentItemKeys = new Map<
+    string,
+    { indexes: number[]; next: number }
+  >();
+  readonly #parentMatches: number[] = [];
+  readonly #pendingParentMatches = new Set<number>();
   #parentSession: SessionUsage | null = null;
   #parentTurnStart: number | null = 0;
   #parentFrontier = { position: 0, markerIndex: -1 };
@@ -277,7 +294,13 @@ export class ScanCostTracker {
     this.#parentSession?.messageProjections.clear();
     this.#readyParentMarkers.length = 0;
     this.#matchedParentItems = 0;
-    this.#parentCompletionStart = this.#parentSession?.completions.length ?? 0;
+    this.#parentCompletionCursor = this.#parentSession?.completions.length ?? 0;
+    this.#indexedParentCompletions = this.#parentCompletionCursor;
+    this.#indexedParentItems = 0;
+    this.#parentCompletionKeys.clear();
+    this.#parentItemKeys.clear();
+    this.#parentMatches.length = 0;
+    this.#pendingParentMatches.clear();
     this.#liveParentProgress.clear();
   }
 
@@ -415,25 +438,91 @@ export class ScanCostTracker {
   #matchParentCompletions(): void {
     if (this.#parentSession === null || this.#parentTurnStart === null) return;
     const completions = this.#parentSession.completions;
-    // Both projections preserve supported completion occurrences. Check each
-    // pair once; missing or unfamiliar metadata remains nonblocking.
-    while (this.#matchedParentItems < this.#liveParentItems.length) {
-      const saved =
-        completions[this.#parentCompletionStart + this.#matchedParentItems];
-      if (saved === undefined) break;
-      const live = this.#liveParentItems[this.#matchedParentItems++]!;
-      if (
-        live.item !== null &&
-        saved.item !== null &&
-        matchingProgressItem(live.item, saved.item)
-      ) {
-        live.position = saved.position;
-        for (const marker of live.markers)
-          this.#readyParentMarkers.push({ live, marker });
+    // Ordinary live completions can be dropped by native queue backpressure.
+    // Match ordered signatures, not list indexes. Identical output signatures
+    // remain ambiguous; use the earliest compatible occurrence after our anchor.
+    const add = (
+      index: number,
+      key: string,
+      queues: ProgressOccurrenceQueues,
+    ) => {
+      let queue = queues.get(key);
+      if (queue === undefined) {
+        queue = { indexes: [], next: 0 };
+        queues.set(key, queue);
       }
-      live.item = null;
-      saved.item = null;
+      queue.indexes.push(index);
+      this.#queueParentMatch(key);
+    };
+    while (this.#indexedParentCompletions < completions.length) {
+      const index = this.#indexedParentCompletions++;
+      const item = completions[index]!.item;
+      if (item !== null)
+        add(index, progressItemKey(item), this.#parentCompletionKeys);
     }
+    while (this.#indexedParentItems < this.#liveParentItems.length) {
+      const index = this.#indexedParentItems++;
+      const item = this.#liveParentItems[index]!.item;
+      if (item !== null)
+        for (const key of progressItemKeys(item))
+          add(index, key, this.#parentItemKeys);
+    }
+    while (this.#parentMatches.length > 0) {
+      const index = takeFirstIndex(this.#parentMatches);
+      this.#pendingParentMatches.delete(index);
+      if (index < this.#matchedParentItems) continue;
+      const live = this.#liveParentItems[index]!;
+      if (live.item === null) continue;
+      let matched: number | undefined;
+      for (const key of progressItemKeys(live.item)) {
+        const queue = this.#parentCompletionKeys.get(key);
+        const savedIndex = queue?.indexes[queue.next];
+        if (
+          savedIndex !== undefined &&
+          (matched === undefined || savedIndex < matched)
+        )
+          matched = savedIndex;
+      }
+      if (matched === undefined) continue;
+      live.position = completions[matched]!.position;
+      for (const marker of live.markers)
+        this.#readyParentMarkers.push({ live, marker });
+      const changed = new Set<string>();
+      const remove = (key: string, queues: ProgressOccurrenceQueues) => {
+        const queue = queues.get(key)!;
+        if (++queue.next === queue.indexes.length) queues.delete(key);
+        changed.add(key);
+      };
+      // A compatible later anchor lets both prefixes advance. Without an
+      // anchor, retain compact unmatched signatures: reads can precede writes
+      // or native persistence can fail and later retry. Neither blocks other
+      // compatible signatures, and each occurrence is indexed/consumed once.
+      while (this.#matchedParentItems <= index) {
+        const previous = this.#liveParentItems[this.#matchedParentItems++]!;
+        if (previous.item !== null) {
+          for (const key of progressItemKeys(previous.item))
+            remove(key, this.#parentItemKeys);
+          previous.item = null;
+        }
+      }
+      while (this.#parentCompletionCursor <= matched) {
+        const saved = completions[this.#parentCompletionCursor++]!;
+        if (saved.item !== null) {
+          remove(progressItemKey(saved.item), this.#parentCompletionKeys);
+          saved.item = null;
+        }
+      }
+      for (const key of changed) this.#queueParentMatch(key);
+    }
+  }
+
+  #queueParentMatch(key: string): void {
+    if (!this.#parentCompletionKeys.has(key)) return;
+    const queue = this.#parentItemKeys.get(key);
+    const index = queue?.indexes[queue.next];
+    if (index === undefined || this.#pendingParentMatches.has(index)) return;
+    this.#pendingParentMatches.add(index);
+    insertIndex(this.#parentMatches, index);
   }
 
   #reconcileParentProgress(): void {
@@ -1419,6 +1508,13 @@ function readSessionEvent(
         "event",
         updates,
       );
+      // Legacy rollouts persist the finalized message instead of the native
+      // item. It provides the same compact output signature for live matching.
+      if (session.threadId === progressThread && !duplicate)
+        session.completions.push({
+          position,
+          item: progressSignature("message", payload["message"]),
+        });
       for (const [markerIndex, update] of (duplicate
         ? []
         : updates
@@ -1664,16 +1760,45 @@ function nativeProgressItem(value: unknown): NativeProgressItem | null {
   };
 }
 
-function matchingProgressItem(
-  live: ProgressItem,
-  saved: ProgressItem,
-): boolean {
-  return (
-    live.kind === saved.kind &&
-    live.commandDigest === saved.commandDigest &&
-    (live.outputDigest === saved.outputDigest ||
-      live.persistedOutputDigest === saved.outputDigest)
-  );
+function progressItemKey(item: ProgressItem, persisted = false): string {
+  return `${item.kind}:${item.commandDigest ?? ""}:${persisted ? item.persistedOutputDigest : item.outputDigest}`;
+}
+
+function progressItemKeys(item: ProgressItem): string[] {
+  const keys = [progressItemKey(item)];
+  if (item.outputDigest !== item.persistedOutputDigest)
+    keys.push(progressItemKey(item, true));
+  return keys;
+}
+
+// Min-heap keeps compatible live occurrences ordered without rescanning the
+// unmatched prefix or sorting every completion batch.
+function insertIndex(heap: number[], index: number): void {
+  let child = heap.length;
+  heap.push(index);
+  while (child > 0) {
+    const parent = (child - 1) >>> 1;
+    if (heap[parent]! <= index) break;
+    heap[child] = heap[parent]!;
+    child = parent;
+  }
+  heap[child] = index;
+}
+
+function takeFirstIndex(heap: number[]): number {
+  const first = heap[0]!;
+  const last = heap.pop()!;
+  if (heap.length === 0) return first;
+  let parent = 0;
+  while (parent * 2 + 1 < heap.length) {
+    let child = parent * 2 + 1;
+    if (child + 1 < heap.length && heap[child + 1]! < heap[child]!) child++;
+    if (last <= heap[child]!) break;
+    heap[parent] = heap[child]!;
+    parent = child;
+  }
+  heap[parent] = last;
+  return first;
 }
 
 /** Decode the quoted argv rendering emitted by native command completions. */
