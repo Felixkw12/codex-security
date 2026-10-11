@@ -1100,18 +1100,14 @@ export class ScanCostTracker {
       if (threadId === this.#threadId) {
         const inventory = this.#inventoryFrontier;
         const parent = this.#parentProgress;
-        // Live notifications can omit both inventory and review markers.
         // Apply this batch's inventories before restoring their proven scope
-        // from a later positioned fact over an unmatched live update.
-        if (
-          inventory.filesTotal !== undefined &&
-          parent !== null &&
-          parent.position === undefined
-        ) {
+        // from a later positioned fact. That fact may already be selected while
+        // its displayed total still reflects an older unmatched live inventory.
+        if (inventory.filesTotal !== undefined && parent !== null) {
           const fact = this.#parentFacts.get(inventory.filesTotal);
           if (
             fact?.position !== undefined &&
-            fact.order > parent.order &&
+            fact.order >= parent.order &&
             (fact.position > inventory.position ||
               (fact.position === inventory.position &&
                 (fact.markerIndex ?? 0) > inventory.markerIndex))
@@ -1264,14 +1260,10 @@ export class ScanCostTracker {
       session.filesTotal = progress.filesTotal;
       session.filesCompleted = progress.filesCompleted;
       if (!parent) session.latestWorkerProgress = { progress, order };
-      if (
-        parentInventory &&
-        (this.#highestFilesCompleted > 0 ||
-          (expectedFilesTotal !== undefined &&
-            progress.filesTotal !== expectedFilesTotal))
-      ) {
-        // Inventory changes apply independently of a retained display phase,
-        // including when an earlier correction temporarily excluded all counts.
+      if (parentInventory && this.#highestFilesCompleted > 0) {
+        // An inventory behind admitted review changes scope without replaying
+        // its earlier phase. At zero coverage it follows normal source-ordered
+        // phase admission below, including when the inventory total changes.
         if ((this.#parentProgress?.progress.filesCompleted ?? 0) === 0)
           this.#parentProgress = {
             progress,

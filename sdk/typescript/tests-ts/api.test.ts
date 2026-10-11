@@ -4348,6 +4348,9 @@ describe("CodexSecurity orchestration", () => {
           "oversized-review",
           "saved-only",
           "saved-only-stale-live",
+          "inventory-phase",
+          "shrink-saved-review",
+          "shrink-delayed-inventory",
         ] as const
       ).map((delivery) => [mode, delivery] as const),
     ),
@@ -4361,18 +4364,31 @@ describe("CodexSecurity orchestration", () => {
       const completeRead = Promise.withResolvers<void>();
       const savedFirst = delivery !== "live-first";
       const completeFirst = delivery === "omitted-inventory-live-review";
+      const shrinking = delivery.startsWith("shrink-");
+      const inventoryPhase = delivery === "inventory-phase";
+      const currentTotal = shrinking ? 7 : 9;
       const total =
-        delivery === "later-inventory"
+        delivery === "later-inventory" || shrinking
           ? 7
           : delivery === "oversized-review"
             ? 10
             : 9;
-      const old = progressMarker("discovery", 0, 8);
-      const current = progressMarker("discovery", 0, 9);
+      const old = progressMarker(
+        inventoryPhase ? "threat_model" : "discovery",
+        0,
+        8,
+      );
+      const current = progressMarker("discovery", 0, currentTotal);
       const savedOnly = delivery.startsWith("saved-only");
       const finalPhase =
-        delivery === "saved-only-stale-live" ? "validation" : "discovery";
-      const complete = progressMarker(finalPhase, total, total);
+        delivery === "saved-only-stale-live" || shrinking
+          ? "validation"
+          : "discovery";
+      const complete = progressMarker(
+        shrinking ? "discovery" : finalPhase,
+        total,
+        total,
+      );
       const stale = progressMarker("attack_path", 9, 9);
       const savedMessage = (text: string) => [
         {
@@ -4429,6 +4445,18 @@ describe("CodexSecurity orchestration", () => {
             ...savedMessage(current),
           ];
           async function* events(): AsyncGenerator<ThreadEvent> {
+            if (inventoryPhase) {
+              await appendFile(rollout, jsonLines(savedMessage(old)) + "\n");
+              yield liveMessage("earlier-phase", old);
+              await boundaryRead.promise;
+              await appendFile(
+                rollout,
+                jsonLines(savedMessage(current)) + "\n",
+              );
+              await inventoryRead.promise;
+              yield liveMessage("current-inventory", current);
+              return;
+            }
             if (savedFirst) {
               await appendFile(rollout, jsonLines(persisted) + "\n");
               await inventoryRead.promise;
@@ -4473,9 +4501,18 @@ describe("CodexSecurity orchestration", () => {
               );
               yield liveMessage("final-summary", "Scan finished.");
             } else if (!completeFirst) {
-              if (delivery === "omitted-inventory-saved-review")
+              if (delivery === "omitted-inventory-saved-review" || shrinking)
                 await completeRead.promise;
-              yield liveMessage("review-complete", complete);
+              if (shrinking) {
+                if (delivery === "shrink-delayed-inventory")
+                  yield liveMessage("current-inventory", current);
+                const final = progressMarker(finalPhase, total, total);
+                await appendFile(
+                  rollout,
+                  jsonLines(savedMessage(final)) + "\n",
+                );
+                yield liveMessage("final-review", final);
+              } else yield liveMessage("review-complete", complete);
             }
             if (delivery === "later-inventory") {
               await completeRead.promise;
@@ -4499,11 +4536,18 @@ describe("CodexSecurity orchestration", () => {
             };
             const text = payload?.content?.[0]?.text;
             if (text === complete) completeRead.resolve();
-            if (text === "Synthetic poll boundary.") boundaryRead.resolve();
+            if (
+              text === "Synthetic poll boundary." ||
+              (inventoryPhase && text === old)
+            )
+              boundaryRead.resolve();
           },
           onProgress: (update) => {
             updates.push(update);
-            if (update.filesTotal === 9 && update.filesCompleted === 0)
+            if (
+              update.filesTotal === currentTotal &&
+              update.filesCompleted === 0
+            )
               inventoryRead.resolve();
           },
         });
@@ -4515,7 +4559,7 @@ describe("CodexSecurity orchestration", () => {
         } else
           expect(updates.at(-1)).toEqual({
             phase: finalPhase,
-            filesCompleted: total,
+            filesCompleted: inventoryPhase ? 0 : total,
             filesTotal: total,
           });
         if (delivery === "saved-only-stale-live") {
