@@ -97,6 +97,13 @@ import { pythonExecutable, nodeCommand, gitText } from "./support/shell.js";
 import { fail, rejecting, throwing } from "./support/errors.js";
 import { mockFs, restoreFs } from "./support/module-mocks.js";
 
+// Exact ASCII fixture for the pinned native 64 KiB persistence representation.
+const commandHead = "h".repeat(32_743);
+const commandTail = "t".repeat(32_743);
+const persistedCommandOutput = `${commandHead}\n... command output truncated for persistence ...\n${commandTail}`;
+const commandOutput = (middle: string) =>
+  `${commandHead}\n${middle}\n${commandTail}`;
+
 const REPOSITORY_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 const EXAMPLE = join(PLUGIN_ROOT, "examples", "completed-scan");
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
@@ -4069,6 +4076,16 @@ describe("CodexSecurity orchestration", () => {
       false,
     ],
     [
+      "multipart native marker",
+      [1],
+      [
+        { phase: "discovery", filesCompleted: 8, filesTotal: 8 },
+        { phase: "validation", filesCompleted: 8, filesTotal: 8 },
+      ],
+      [0],
+      false,
+    ],
+    [
       "older tool phase",
       [1],
       [
@@ -4192,7 +4209,19 @@ describe("CodexSecurity orchestration", () => {
                         item: {
                           type: "AgentMessage",
                           id: `native-${index}`,
-                          content: [{ type: "Text", text: markerTexts[index] }],
+                          content:
+                            _scenario === "multipart native marker"
+                              ? [
+                                  {
+                                    type: "Text",
+                                    text: markerTexts[index]!.slice(0, 35),
+                                  },
+                                  {
+                                    type: "Text",
+                                    text: markerTexts[index]!.slice(35),
+                                  },
+                                ]
+                              : [{ type: "Text", text: markerTexts[index] }],
                         },
                       },
                     },
@@ -4318,7 +4347,7 @@ describe("CodexSecurity orchestration", () => {
                   id: `inventory-${filesTotal}`,
                   type: "command_execution",
                   command: `scan-inventory ${filesTotal}`,
-                  aggregated_output: `head\n${marker(0, filesTotal)}\ntail`,
+                  aggregated_output: commandOutput(marker(0, filesTotal)),
                   exit_code: 0,
                   status: "completed",
                 },
@@ -4343,8 +4372,7 @@ describe("CodexSecurity orchestration", () => {
                     type: "CommandExecution",
                     id: "native-inventory",
                     command: ["scan-inventory", String(correctedTotal)],
-                    aggregated_output:
-                      "head\n... command output truncated for persistence ...\ntail",
+                    aggregated_output: persistedCommandOutput,
                   },
                 },
               });
@@ -4487,7 +4515,7 @@ describe("CodexSecurity orchestration", () => {
       const marker = (phase: string) =>
         "CODEX_SECURITY_SCAN_PROGRESS " +
         JSON.stringify({ phase, filesCompleted: 8, filesTotal: 8 });
-      const text = `head\n${phases.map(marker).join("\n")}\ntail`;
+      const text = commandOutput(phases.map(marker).join("\n"));
       const event: ThreadEvent = {
         type: "item.completed",
         item: {
@@ -4524,7 +4552,7 @@ describe("CodexSecurity orchestration", () => {
                     id: "native-batch",
                     command: ["scan-batch"],
                     aggregated_output: truncated
-                      ? `head\n${marker("discovery")}\n... command output truncated for persistence ...\ntail`
+                      ? persistedCommandOutput
                       : text,
                   },
                 },
@@ -4691,8 +4719,7 @@ describe("CodexSecurity orchestration", () => {
           type: "CommandExecution",
           id,
           command: ["scan-inventory"],
-          aggregated_output:
-            "head\n... command output truncated for persistence ...\ntail",
+          aggregated_output: persistedCommandOutput,
         },
       },
     });
@@ -4753,7 +4780,7 @@ describe("CodexSecurity orchestration", () => {
                   id: "new-live-inventory",
                   type: "command_execution",
                   command: "scan-inventory",
-                  aggregated_output: `head\n${marker("discovery", 0, 9)}\ntail`,
+                  aggregated_output: commandOutput(marker("discovery", 0, 9)),
                   exit_code: 0,
                   status: "completed",
                 },
@@ -4816,8 +4843,7 @@ describe("CodexSecurity orchestration", () => {
           type: "CommandExecution",
           id,
           command: ["scan-inventory"],
-          aggregated_output:
-            "head\n... command output truncated for persistence ...\ntail",
+          aggregated_output: persistedCommandOutput,
         },
       },
     });
@@ -4853,8 +4879,8 @@ describe("CodexSecurity orchestration", () => {
         async function* events(): AsyncGenerator<ThreadEvent> {
           await historyRead.promise;
           for (const [index, text] of [
-            "head\nno progress marker\ntail",
-            `head\n${marker("discovery", 0, 9)}\ntail`,
+            commandOutput("no progress marker"),
+            commandOutput(marker("discovery", 0, 9)),
           ].entries()) {
             yield {
               type: "item.completed",
@@ -4906,6 +4932,89 @@ describe("CodexSecurity orchestration", () => {
       await client.close();
     }
   });
+
+  test.each([false, true])(
+    "ignores worker duplicate projections after a newer parent phase (multiple markers: %p)",
+    async (multiple) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const workerRead = Promise.withResolvers<void>();
+      const marker = (phase: string) =>
+        "CODEX_SECURITY_SCAN_PROGRESS " +
+        JSON.stringify({ phase, filesCompleted: 8, filesTotal: 8 });
+      const workerPhases = multiple
+        ? (["discovery", "validation"] as const)
+        : (["discovery"] as const);
+      const workerText = workerPhases.map(marker).join("\n");
+      const parentPhase = multiple ? "attack_path" : "validation";
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          await writeUsageSession(codexHome, "thread-1", {});
+          const worker = await writeUsageSession(
+            codexHome,
+            "worker-thread",
+            {},
+            { parent: "thread-1" },
+          );
+          await appendFile(
+            worker,
+            JSON.stringify({
+              type: "event_msg",
+              payload: { type: "agent_message", message: workerText },
+            }) + "\n",
+          );
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            await workerRead.promise;
+            yield {
+              type: "item.completed",
+              item: {
+                type: "agent_message",
+                id: "parent-validation",
+                text: marker(parentPhase),
+              },
+            };
+            await appendFile(
+              worker,
+              JSON.stringify({
+                type: "response_item",
+                payload: {
+                  type: "message",
+                  role: "assistant",
+                  content: [{ type: "output_text", text: workerText }],
+                },
+              }) + "\n",
+            );
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      try {
+        await client.run(repository, {
+          onProgress: (progress) => {
+            updates.push(progress);
+            if (progress.phase === workerPhases.at(-1)) workerRead.resolve();
+          },
+        });
+        expect(
+          updates
+            .filter((progress) => progress.filesCompleted === 8)
+            .map((progress) => progress.phase),
+        ).toEqual([...workerPhases, parentPhase]);
+      } finally {
+        await client.close();
+      }
+    },
+  );
 
   test.each(["none", "sync", "async"] as const)(
     "observes workers before scan completion with %s observer errors",

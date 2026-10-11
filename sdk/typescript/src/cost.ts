@@ -1,4 +1,5 @@
 import { parseJson } from "./value.js";
+import { createHash } from "node:crypto";
 import { open, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
@@ -53,12 +54,19 @@ interface SessionProgress {
   sourcePosition: number | null;
   completion: boolean;
   markerIndex: number;
+  nativeMarkerPosition: number | null;
 }
 
 interface ProgressItem {
   kind: "message" | "command";
-  text: string;
-  command?: readonly string[];
+  outputDigest: string;
+  persistedOutputDigest: string;
+  commandDigest?: string;
+}
+
+interface NativeProgressItem extends ProgressItem {
+  updates: ScanProgress[];
+  previewKeys: string[];
 }
 
 interface SessionCompletion {
@@ -66,17 +74,18 @@ interface SessionCompletion {
   item: ProgressItem | null;
 }
 
-export interface ParentProgressSource {
-  event: Readonly<Record<string, unknown>>;
-  reconciled?: true;
-  inventory?: true;
-}
+export type ParentProgressSource =
+  | {
+      event: Readonly<Record<string, unknown>>;
+      reconciled?: false;
+      inventory?: never;
+    }
+  | { reconciled: true; inventory?: true };
 
 interface StreamedProgressItem {
   accepted: ScanProgress | null;
   observedMarkerIndex: number;
   acceptedMarkerIndex: number;
-  event: Readonly<Record<string, unknown>>;
   item: ProgressItem | null;
   position: number | null;
 }
@@ -99,6 +108,8 @@ interface SessionUsage {
   position: number;
   callPositions: Map<string, number>;
   completions: SessionCompletion[];
+  nativeMarkerPositions: Map<string, number>;
+  workerProgress: Set<string>;
   filesCompleted: number;
   filesTotal: number | null;
   prose: Set<string>;
@@ -149,6 +160,8 @@ function createSessionUsage(): SessionUsage {
     position: 0,
     callPositions: new Map(),
     completions: [],
+    nativeMarkerPositions: new Map(),
+    workerProgress: new Set(),
     filesCompleted: 0,
     filesTotal: null,
     prose: new Set(),
@@ -166,6 +179,13 @@ export class ScanCostTracker {
   #lastProgress: string | null = null;
   readonly #liveParentProgress = new Set<string>();
   readonly #liveParentItems: StreamedProgressItem[] = [];
+  #liveParentEvents = new WeakMap<
+    Readonly<Record<string, unknown>>,
+    StreamedProgressItem
+  >();
+  #acceptedParent: StreamedProgressItem | null = null;
+  #matchedParentItems = 0;
+  #parentCompletionStart = 0;
   #parentSession: SessionUsage | null = null;
   #parentTurnStart: number | null = 0;
   #parentFrontier = { position: 0, markerIndex: -1 };
@@ -193,6 +213,10 @@ export class ScanCostTracker {
     this.#parentTurnStart =
       this.#parentSession?.position ?? (resumed ? null : 0);
     this.#liveParentItems.length = 0;
+    this.#liveParentEvents = new WeakMap();
+    this.#acceptedParent = null;
+    this.#matchedParentItems = 0;
+    this.#parentCompletionStart = this.#parentSession?.completions.length ?? 0;
     this.#liveParentProgress.clear();
   }
 
@@ -204,17 +228,18 @@ export class ScanCostTracker {
       !isRecord(item) ||
       (item["type"] !== "command_execution" &&
         item["type"] !== "agent_message") ||
-      this.#liveParentItems.at(-1)?.event === event
+      this.#liveParentEvents.has(event)
     )
       return;
-    this.#liveParentItems.push({
-      event,
+    const live: StreamedProgressItem = {
       item: streamedProgressItem(event),
       position: null,
       accepted: null,
       observedMarkerIndex: -1,
       acceptedMarkerIndex: -1,
-    });
+    };
+    this.#liveParentItems.push(live);
+    this.#liveParentEvents.set(event, live);
     this.#matchParentCompletions();
   }
 
@@ -224,8 +249,8 @@ export class ScanCostTracker {
     event: Readonly<Record<string, unknown>>,
   ): boolean {
     this.recordParentItem(event);
-    const live = this.#liveParentItems.at(-1);
-    if (live?.event !== event) return true;
+    const live = this.#liveParentEvents.get(event);
+    if (live === undefined) return true;
     live.observedMarkerIndex++;
     return (
       live.position === null ||
@@ -238,8 +263,9 @@ export class ScanCostTracker {
     progress: ScanProgress,
     event: Readonly<Record<string, unknown>>,
   ): void {
-    const live = this.#liveParentItems.at(-1);
-    if (live?.event !== event) return;
+    const live = this.#liveParentEvents.get(event);
+    if (live === undefined) return;
+    this.#acceptedParent = live;
     live.accepted = progress;
     live.acceptedMarkerIndex = live.observedMarkerIndex;
     this.#lastProgress = progressKey(progress);
@@ -265,30 +291,27 @@ export class ScanCostTracker {
 
   #matchParentCompletions(): void {
     if (this.#parentSession === null || this.#parentTurnStart === null) return;
-    const completions = this.#parentSession.completions.filter(
-      (saved) => saved.position > this.#parentTurnStart!,
-    );
-    // Both projections preserve completion order for commands and messages.
-    // Verify each occurrence instead of searching for matching retained text:
-    // a later command may have the same prefix/suffix as an earlier one.
-    for (const [index, live] of this.#liveParentItems.entries()) {
-      const saved = completions[index];
+    const completions = this.#parentSession.completions;
+    // Both projections preserve supported completion occurrences. Check each
+    // pair once; missing or unfamiliar metadata remains nonblocking.
+    while (this.#matchedParentItems < this.#liveParentItems.length) {
+      const saved =
+        completions[this.#parentCompletionStart + this.#matchedParentItems];
+      if (saved === undefined) break;
+      const live = this.#liveParentItems[this.#matchedParentItems++]!;
       if (
-        live.position === null &&
         live.item !== null &&
-        saved?.item !== null &&
-        saved?.item !== undefined &&
+        saved.item !== null &&
         matchingProgressItem(live.item, saved.item)
-      ) {
+      )
         live.position = saved.position;
-      }
+      live.item = null;
+      saved.item = null;
     }
   }
 
   #reconcileParentProgress(): void {
-    const live = this.#liveParentItems.findLast(
-      (item) => item.accepted !== null,
-    );
+    const live = this.#acceptedParent;
     if (
       live?.accepted === null ||
       live?.accepted === undefined ||
@@ -331,7 +354,6 @@ export class ScanCostTracker {
     if (this.#lastProgress === key) return;
     this.#lastProgress = key;
     this.#options.onProgress?.(progress, {
-      event: live.event,
       reconciled: true,
       ...(inventory ? { inventory: true } : {}),
     });
@@ -343,24 +365,15 @@ export class ScanCostTracker {
     if (!saved.completion) {
       // Response-item previews can follow a full native completion. A later
       // tool call establishes a new receipt; a copied marker does not.
-      const native = this.#parentSession?.completions.findLast(
-        (completion) =>
-          completion.position < saved.position &&
-          scanProgressUpdatesFromText(completion.item?.text ?? "").some(
-            (progress) => progressKey(progress) === progressKey(saved.update),
-          ),
-      );
       if (
-        native !== undefined &&
+        saved.nativeMarkerPosition !== null &&
         (saved.sourcePosition === null ||
-          saved.sourcePosition <= native.position)
+          saved.sourcePosition <= saved.nativeMarkerPosition)
       )
         return false;
     }
-    const live = this.#liveParentItems.findLast(
-      (item) => item.accepted !== null,
-    );
-    if (live === undefined) return true;
+    const live = this.#acceptedParent;
+    if (live === null) return true;
     if (live.position !== null && saved.position <= live.position) return false;
     if (!this.#liveParentProgress.has(progressKey(saved.update))) return true;
     return (
@@ -607,6 +620,11 @@ export class ScanCostTracker {
       ) {
         continue;
       }
+      if (!parent) {
+        const key = progressKey(progress);
+        if (session.workerProgress.has(key)) continue;
+        session.workerProgress.add(key);
+      }
       session.filesTotal = progress.filesTotal;
       session.filesCompleted = progress.filesCompleted;
       // Parent markers already describe global coverage, including its workers.
@@ -631,7 +649,7 @@ export class ScanCostTracker {
             Math.max(progress.filesTotal, filesCompleted)),
       };
       const key = `${update.phase}:${update.filesCompleted}:${update.filesTotal}`;
-      if (parent)
+      if (parent && saved.completion)
         this.#parentFrontier = {
           position: saved.position,
           markerIndex: saved.markerIndex,
@@ -794,6 +812,8 @@ function readSessionEvent(
             : null,
         completion: false,
         markerIndex,
+        nativeMarkerPosition:
+          session.nativeMarkerPositions.get(progressKey(update)) ?? null,
       });
     }
     if (repository === undefined) return;
@@ -893,18 +913,31 @@ function readSessionEvent(
     if (
       isRecord(value) &&
       (value["type"] === "CommandExecution" || value["type"] === "AgentMessage")
-    )
-      session.completions.push({ position, item });
+    ) {
+      const signature =
+        item === null
+          ? null
+          : {
+              kind: item.kind,
+              outputDigest: item.outputDigest,
+              persistedOutputDigest: item.persistedOutputDigest,
+              ...(item.commandDigest === undefined
+                ? {}
+                : { commandDigest: item.commandDigest }),
+            };
+      session.completions.push({ position, item: signature });
+    }
     if (item !== null) {
-      for (const [markerIndex, update] of nativeProgressUpdates(
-        item,
-      ).entries()) {
+      for (const key of item.previewKeys)
+        session.nativeMarkerPositions.set(key, position);
+      for (const [markerIndex, update] of item.updates.entries()) {
         session.progress.push({
           update,
           position,
           sourcePosition: position,
           completion: true,
           markerIndex,
+          nativeMarkerPosition: position,
         });
       }
     }
@@ -930,6 +963,8 @@ function readSessionEvent(
           sourcePosition: null,
           completion: false,
           markerIndex,
+          nativeMarkerPosition:
+            session.nativeMarkerPositions.get(progressKey(update)) ?? null,
         });
       }
     }
@@ -1036,12 +1071,48 @@ function recordReasoningActivity(
 const PERSISTED_OUTPUT_GAP =
   "\n... command output truncated for persistence ...\n";
 
-function nativeProgressUpdates(item: ProgressItem): ScanProgress[] {
-  // A truncated middle can remove a Markdown fence delimiter. Its retained
-  // text is useful for identity, but only the live output establishes markers.
-  return item.kind === "command" && item.text.includes(PERSISTED_OUTPUT_GAP)
-    ? []
-    : scanProgressUpdatesFromText(item.text);
+// Native Codex 0.162.1 persists command output with a 64 KiB UTF-8 budget.
+// This signature mirrors that representation; emitted diagnostics stay intact.
+const PERSISTED_COMMAND_OUTPUT_BYTES = 64 * 1024;
+
+function digest(text: string): string {
+  return createHash("sha256").update(text).digest("hex");
+}
+
+function persistedOutputDigest(text: string, fullDigest: string): string {
+  if (Buffer.byteLength(text) <= PERSISTED_COMMAND_OUTPUT_BYTES)
+    return fullDigest;
+  const bytes = Buffer.from(text);
+  const budget =
+    PERSISTED_COMMAND_OUTPUT_BYTES - Buffer.byteLength(PERSISTED_OUTPUT_GAP);
+  let prefixEnd = Math.floor(budget / 2);
+  let suffixStart = bytes.length - (budget - prefixEnd);
+  while ((bytes[prefixEnd]! & 0xc0) === 0x80) prefixEnd--;
+  while ((bytes[suffixStart]! & 0xc0) === 0x80) suffixStart++;
+  return createHash("sha256")
+    .update(bytes.subarray(0, prefixEnd))
+    .update(PERSISTED_OUTPUT_GAP)
+    .update(bytes.subarray(suffixStart))
+    .digest("hex");
+}
+
+function progressSignature(
+  kind: ProgressItem["kind"],
+  text: string,
+  command?: readonly string[],
+): ProgressItem {
+  const outputDigest = digest(text);
+  return {
+    kind,
+    outputDigest,
+    persistedOutputDigest:
+      kind === "command"
+        ? persistedOutputDigest(text, outputDigest)
+        : outputDigest,
+    ...(command === undefined
+      ? {}
+      : { commandDigest: digest(JSON.stringify(command)) }),
+  };
 }
 
 function progressKey(progress: ScanProgress): string {
@@ -1054,7 +1125,7 @@ function streamedProgressItem(
   const item = event["item"];
   if (!isRecord(item)) return null;
   if (item["type"] === "agent_message" && typeof item["text"] === "string")
-    return { kind: "message", text: item["text"] };
+    return progressSignature("message", item["text"]);
   if (
     item["type"] !== "command_execution" ||
     typeof item["aggregated_output"] !== "string" ||
@@ -1064,36 +1135,43 @@ function streamedProgressItem(
   const command = splitCommand(item["command"]);
   return command === null
     ? null
-    : { kind: "command", text: item["aggregated_output"], command };
+    : progressSignature("command", item["aggregated_output"], command);
 }
 
-function nativeProgressItem(value: unknown): ProgressItem | null {
+function nativeProgressItem(value: unknown): NativeProgressItem | null {
   if (!isRecord(value)) return null;
+  let kind: ProgressItem["kind"];
+  let text: string;
+  let command: string[] | undefined;
   if (value["type"] === "AgentMessage" && Array.isArray(value["content"])) {
-    return {
-      kind: "message",
-      text: value["content"]
-        .filter(
-          (part): part is { text: string } =>
-            isRecord(part) &&
-            part["type"] === "Text" &&
-            typeof part["text"] === "string",
-        )
-        .map((part) => part.text)
-        .join("\n"),
-    };
-  }
-  if (
-    value["type"] !== "CommandExecution" ||
-    typeof value["aggregated_output"] !== "string" ||
-    !Array.isArray(value["command"]) ||
-    !value["command"].every((arg): arg is string => typeof arg === "string")
-  )
-    return null;
+    kind = "message";
+    text = value["content"]
+      .filter(
+        (part): part is { text: string } =>
+          isRecord(part) &&
+          part["type"] === "Text" &&
+          typeof part["text"] === "string",
+      )
+      .map((part) => part.text)
+      .join("");
+  } else if (
+    value["type"] === "CommandExecution" &&
+    typeof value["aggregated_output"] === "string" &&
+    Array.isArray(value["command"]) &&
+    value["command"].every((arg): arg is string => typeof arg === "string")
+  ) {
+    kind = "command";
+    text = value["aggregated_output"];
+    command = value["command"];
+  } else return null;
+  const markers = scanProgressUpdatesFromText(text);
   return {
-    kind: "command",
-    text: value["aggregated_output"],
-    command: value["command"],
+    ...progressSignature(kind, text, command),
+    previewKeys: markers.map(progressKey),
+    // Missing fence delimiters in the persisted middle can make quoted text
+    // look like a marker. Only full output establishes those progress updates.
+    updates:
+      kind === "command" && text.includes(PERSISTED_OUTPUT_GAP) ? [] : markers,
   };
 }
 
@@ -1101,22 +1179,11 @@ function matchingProgressItem(
   live: ProgressItem,
   saved: ProgressItem,
 ): boolean {
-  if (live.kind !== saved.kind) return false;
-  if (
-    live.kind === "command" &&
-    JSON.stringify(live.command) !== JSON.stringify(saved.command)
-  )
-    return false;
-  if (live.text === saved.text) return true;
-  if (live.kind !== "command") return false;
-  // Native persistence keeps the head and tail of long command output. Match
-  // those retained bytes, rather than requiring an omitted progress marker.
-  const parts = saved.text.split(PERSISTED_OUTPUT_GAP);
   return (
-    parts.length === 2 &&
-    live.text.startsWith(parts[0]!) &&
-    live.text.endsWith(parts[1]!) &&
-    live.text.length >= parts[0]!.length + parts[1]!.length
+    live.kind === saved.kind &&
+    live.commandDigest === saved.commandDigest &&
+    (live.outputDigest === saved.outputDigest ||
+      live.persistedOutputDigest === saved.outputDigest)
   );
 }
 

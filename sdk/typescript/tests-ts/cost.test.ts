@@ -1,3 +1,6 @@
+import { execFile } from "node:child_process";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 import { jsonLines } from "./support/json.js";
 import { runNodePython } from "./support/python-probe.js";
 import * as filesystem from "node:fs/promises";
@@ -32,6 +35,13 @@ import {
 } from "./support/usage-rollout.js";
 
 import { createApiTestFixtures } from "./support/temporary-directories.js";
+
+// Exact ASCII fixture for the pinned native 64 KiB persistence representation.
+const commandHead = "h".repeat(32_743);
+const commandTail = "t".repeat(32_743);
+const persistedCommandOutput = `${commandHead}\n... command output truncated for persistence ...\n${commandTail}`;
+const commandOutput = (middle: string) =>
+  `${commandHead}\n${middle}\n${commandTail}`;
 
 const { temporaryDirectory: codexHome, cleanup } = createApiTestFixtures(
   "codex-security-cost-",
@@ -109,6 +119,108 @@ function progressMessage(
     ],
   };
 }
+
+test("does not retain completed command payloads when native logs are absent", async () => {
+  const root = await codexHome();
+  const built = await Bun.build({
+    entrypoints: [fileURLToPath(new URL("../src/cost.ts", import.meta.url))],
+    target: "node",
+    format: "esm",
+  });
+  expect(built.success).toBe(true);
+  const module = join(root, "cost.mjs");
+  await writeFile(module, await built.outputs[0]!.text());
+  const { stdout } = await promisify(execFile)(
+    "node",
+    [
+      "--max-old-space-size=64",
+      "--expose-gc",
+      "--input-type=module",
+      "--eval",
+      `
+    const { ScanCostTracker } = await import(${JSON.stringify(pathToFileURL(module).href)});
+    const tracker = new ScanCostTracker({codexHome: ${JSON.stringify(root)}, model: "gpt-5.6-sol", onProgress() {}});
+    for (let index = 0; index < 100; index++) {
+      const output = "x".repeat(1024 * 1024) + index;
+      output.charCodeAt(output.length - 1);
+      tracker.recordParentItem({type: "item.completed", item: {type: "command_execution", id: "item-" + index, command: "inspect-source", aggregated_output: output}});
+      global.gc();
+    }
+    console.log("processed 100 command outputs");
+  `,
+    ],
+    { encoding: "utf8" },
+  );
+  expect(stdout.trim()).toBe("processed 100 command outputs");
+});
+
+test.each(["é", "漢", "😀"])(
+  "correlates commands truncated at UTF-8 boundaries (%s)",
+  async (character) => {
+    const { home, parent } = await workerSessionFixture();
+    const tracker = costTracker(home, { onProgress() {} });
+    tracker.start("scan-thread");
+    await tracker.refresh();
+    const progress = {
+      phase: "discovery",
+      filesCompleted: 8,
+      filesTotal: 8,
+    } as const;
+    const marker = "CODEX_SECURITY_SCAN_PROGRESS " + JSON.stringify(progress);
+    const fullEdge = character.repeat(40_000);
+    // Native keeps complete UTF-8 characters within each 32,743-byte edge.
+    const savedEdge = character.repeat(
+      Math.floor(32_743 / Buffer.byteLength(character)),
+    );
+    const event = {
+      type: "item.completed",
+      item: {
+        type: "command_execution",
+        command: "inspect-source",
+        aggregated_output: `${fullEdge}\n${marker}\n${fullEdge}`,
+      },
+    };
+    expect(tracker.recordParentProgress(progress, event)).toBe(true);
+    tracker.acceptParentProgress(progress, event);
+    await appendFile(
+      parent,
+      JSON.stringify({
+        type: "event_msg",
+        payload: {
+          type: "item_completed",
+          item: {
+            type: "CommandExecution",
+            command: ["inspect-source"],
+            aggregated_output: `${savedEdge}\n... command output truncated for persistence ...\n${savedEdge}`,
+          },
+        },
+      }) + "\n",
+    );
+    await appendFile(
+      parent,
+      JSON.stringify({
+        type: "event_msg",
+        payload: {
+          type: "item_completed",
+          item: {
+            type: "AgentMessage",
+            content: [
+              {
+                type: "Text",
+                text:
+                  "CODEX_SECURITY_SCAN_PROGRESS " +
+                  JSON.stringify({ ...progress, phase: "validation" }),
+              },
+            ],
+          },
+        },
+      }) + "\n",
+    );
+    await tracker.refresh();
+    expect(tracker.recordParentProgress(progress, event)).toBe(false);
+    await tracker.stop();
+  },
+);
 
 test.each([
   [
@@ -1915,7 +2027,7 @@ describe("live scan cost tracking", () => {
             type: "command_execution",
             id: `item-${index}`,
             command: `scan-progress ${index}`,
-            aggregated_output: `head\n${marker(progress)}\ntail`,
+            aggregated_output: commandOutput(marker(progress)),
           },
         };
         if (tracker.recordParentProgress(progress, event)) {
@@ -1937,8 +2049,7 @@ describe("live scan cost tracking", () => {
                 type: "CommandExecution",
                 id: "native-latest",
                 command: ["scan-progress", "1"],
-                aggregated_output:
-                  "head\n... command output truncated for persistence ...\ntail",
+                aggregated_output: persistedCommandOutput,
               },
             },
           }) + "\n",
