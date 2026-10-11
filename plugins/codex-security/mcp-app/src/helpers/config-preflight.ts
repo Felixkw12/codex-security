@@ -409,9 +409,7 @@ function remediationTable(value: unknown): Remediation {
 }
 
 function remediation(profile: Profile, context: Context): Table {
-  const { variants = [], ...result } = remediationTable(
-    profile.remediation ?? {},
-  );
+  const { variants = [], ...result } = profile.remediation ?? {};
   result.multi_agent_mode = context.mode;
   const variant = variants.find(
     (item) => requiredField(item, "mode") === context.mode,
@@ -522,6 +520,7 @@ function evaluate(values: Options): Table {
   const profile = registry.profiles[profileId];
   if (!profile)
     throw new Error(`unknown capability profile: ${diagnostic(profileId)}`);
+  profile.remediation = remediationTable(profile.remediation ?? {});
   const explicitProfile = values["codex-config-profile"];
   let profileLayer: string | undefined;
   if (explicitProfile !== undefined && values.config === undefined) {
@@ -758,7 +757,9 @@ function evaluate(values: Options): Table {
   const results = profile.requirements
     .filter(
       (requirement) =>
-        !requirement.modes?.length || requirement.modes.includes(context.mode),
+        !requirement.modes ||
+        requirement.modes.length === 0 ||
+        requirement.modes.includes(context.mode),
     )
     .map((requirement): Table => {
       const capability = capabilities[requirement.capability];
@@ -879,15 +880,14 @@ function evaluate(values: Options): Table {
         };
       }
       const key = requiredField(capability, "path");
-      const selected =
-        typeof key === "string"
-          ? configValue(
-              key,
-              kind !== "config_absent" && Object.hasOwn(capability, "default")
-                ? { value: capability.default, source: "documented-default" }
-                : undefined,
-            )
-          : undefined;
+      if (typeof key !== "string")
+        throw new TypeError("capability path must be a string");
+      const selected = configValue(
+        key,
+        kind !== "config_absent" && Object.hasOwn(capability, "default")
+          ? { value: capability.default, source: "documented-default" }
+          : undefined,
+      );
       if (kind === "config_absent")
         return {
           ...result,
