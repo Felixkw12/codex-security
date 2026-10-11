@@ -4337,17 +4337,37 @@ describe("CodexSecurity orchestration", () => {
 
   test.each(
     (["legacy", "paginated"] as const).flatMap((mode) =>
-      [false, true].map((savedFirst) => [mode, savedFirst] as const),
+      (
+        [
+          "live-first",
+          "saved-first",
+          "poll-between",
+          "omitted-inventory-saved-review",
+          "omitted-inventory-live-review",
+          "later-inventory",
+          "oversized-review",
+        ] as const
+      ).map((delivery) => [mode, delivery] as const),
     ),
   )(
-    "restores current saved inventory after an unmatched live command (%s, saved first: %p)",
-    async (mode, savedFirst) => {
+    "preserves proven inventory across legacy delivery gaps (%s, %s)",
+    async (mode, delivery) => {
       const { root, repository, codexHome, scanDir } = await scanDirectories();
       const updates: ScanProgress[] = [];
       const inventoryRead = Promise.withResolvers<void>();
+      const boundaryRead = Promise.withResolvers<void>();
+      const completeRead = Promise.withResolvers<void>();
+      const savedFirst = delivery !== "live-first";
+      const completeFirst = delivery === "omitted-inventory-live-review";
+      const total =
+        delivery === "later-inventory"
+          ? 7
+          : delivery === "oversized-review"
+            ? 10
+            : 9;
       const old = progressMarker("discovery", 0, 8);
       const current = progressMarker("discovery", 0, 9);
-      const complete = progressMarker("discovery", 9, 9);
+      const complete = progressMarker("discovery", total, total);
       const savedMessage = (text: string) => [
         {
           type: "event_msg",
@@ -4408,11 +4428,41 @@ describe("CodexSecurity orchestration", () => {
               await inventoryRead.promise;
             }
             yield completedCommand("inventory", old);
-            yield liveMessage("current-inventory", current);
+            if (delivery === "poll-between") {
+              await appendFile(
+                rollout,
+                jsonLines(savedMessage("Synthetic poll boundary.")) + "\n",
+              );
+              await boundaryRead.promise;
+            }
+            if (
+              ["live-first", "saved-first", "poll-between"].includes(delivery)
+            )
+              yield liveMessage("current-inventory", current);
             if (!savedFirst)
               await appendFile(rollout, jsonLines(persisted) + "\n");
+            if (delivery === "later-inventory")
+              await appendFile(
+                rollout,
+                jsonLines(savedMessage(progressMarker("discovery", 0, 7))) +
+                  "\n",
+              );
+            if (completeFirst) yield liveMessage("review-complete", complete);
             await appendFile(rollout, jsonLines(savedMessage(complete)) + "\n");
-            yield liveMessage("review-complete", complete);
+            if (!completeFirst) {
+              if (delivery === "omitted-inventory-saved-review")
+                await completeRead.promise;
+              yield liveMessage("review-complete", complete);
+            }
+            if (delivery === "later-inventory") {
+              await completeRead.promise;
+              const oversized = progressMarker("discovery", 9, 9);
+              await appendFile(
+                rollout,
+                jsonLines(savedMessage(oversized)) + "\n",
+              );
+              yield liveMessage("oversized-review", oversized);
+            }
           }
           return { events: completedEvents("thread-1", events()) };
         }),
@@ -4420,20 +4470,36 @@ describe("CodexSecurity orchestration", () => {
       const keepAlive = setInterval(() => {}, 1_000);
       try {
         await client.run(repository, {
+          onSessionEvent: ({ event }) => {
+            const payload = event["payload"] as {
+              content?: { text?: string }[];
+            };
+            const text = payload?.content?.[0]?.text;
+            if (text === complete) completeRead.resolve();
+            if (text === "Synthetic poll boundary.") boundaryRead.resolve();
+          },
           onProgress: (update) => {
             updates.push(update);
             if (update.filesTotal === 9 && update.filesCompleted === 0)
               inventoryRead.resolve();
           },
         });
-        expect(updates.at(-1)).toEqual({
-          phase: "discovery",
-          filesCompleted: 9,
-          filesTotal: 9,
-        });
+        if (delivery === "oversized-review") {
+          expect(updates.some((update) => update.filesCompleted === 10)).toBe(
+            false,
+          );
+          expect(updates.at(-1)?.filesCompleted).toBe(0);
+        } else
+          expect(updates.at(-1)).toEqual({
+            phase: "discovery",
+            filesCompleted: total,
+            filesTotal: total,
+          });
       } finally {
         clearInterval(keepAlive);
         inventoryRead.resolve();
+        boundaryRead.resolve();
+        completeRead.resolve();
         await client.close();
       }
     },

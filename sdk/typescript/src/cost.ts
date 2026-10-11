@@ -230,7 +230,11 @@ export class ScanCostTracker {
     live: StreamedProgressItem;
     marker: ParentProgressMarker;
   }> = [];
-  #inventoryFrontier = { position: 0, markerIndex: -1 };
+  #inventoryFrontier = {
+    position: 0,
+    markerIndex: -1,
+    filesTotal: undefined as number | undefined,
+  };
   #progressOrder = 0;
   #displayedProgress:
     | (ProgressOrder & {
@@ -583,7 +587,11 @@ export class ScanCostTracker {
       ) {
         // Inventory may precede already-admitted review even when its full live
         // marker arrives later. Restore scope without replaying that older phase.
-        this.#inventoryFrontier = { position, markerIndex: marker.index };
+        this.#inventoryFrontier = {
+          position,
+          markerIndex: marker.index,
+          filesTotal: progress.filesTotal,
+        };
         this.setExpectedFilesTotal(progress.filesTotal);
       }
     }
@@ -1084,7 +1092,29 @@ export class ScanCostTracker {
       // Fresh saved facts are observed at their source-loop position, so initial
       // inventory notifications keep their order. Recover after the batch too:
       // a later accepted parent may have hidden an eligible earlier receipt.
-      if (threadId === this.#threadId) this.#reconcileParentProgress();
+      if (threadId === this.#threadId) {
+        const inventory = this.#inventoryFrontier;
+        const parent = this.#parentProgress;
+        // A legacy inventory notification can be omitted from live delivery.
+        // After this batch's inventories are applied, a later matched receipt
+        // can restore their scope over an unmatched live update.
+        if (
+          inventory.filesTotal !== undefined &&
+          parent !== null &&
+          parent.position === undefined &&
+          this.#readyParentMarkers.some(
+            ({ live, marker }) =>
+              live.position !== null &&
+              marker.order > parent.order &&
+              marker.progress.filesTotal === inventory.filesTotal &&
+              (live.position > inventory.position ||
+                (live.position === inventory.position &&
+                  marker.index > inventory.markerIndex)),
+          )
+        )
+          this.setExpectedFilesTotal(inventory.filesTotal);
+        this.#reconcileParentProgress();
+      }
       const receipt = usages.get(threadId);
       if (
         session.usage !== null &&
@@ -1250,7 +1280,10 @@ export class ScanCostTracker {
         };
         if (this.#afterParentFrontier(saved.position, saved.markerIndex))
           this.#parentFrontier = position;
-        this.#inventoryFrontier = position;
+        this.#inventoryFrontier = {
+          ...position,
+          filesTotal: progress.filesTotal,
+        };
         this.setExpectedFilesTotal(progress.filesTotal);
         this.#reconcileParentProgress();
         continue;
@@ -1331,6 +1364,7 @@ export class ScanCostTracker {
           this.#inventoryFrontier = {
             position: saved.position,
             markerIndex: saved.markerIndex,
+            filesTotal: progress.filesTotal,
           };
       }
       this.#highestFilesCompleted = update.filesCompleted;
