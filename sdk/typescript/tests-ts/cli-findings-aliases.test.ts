@@ -81,7 +81,7 @@ test("findings list preserves exact saved aliases and rejects their stale owners
         } else {
           expect(result, stderr.text()).toBe(0);
           const output = JSON.parse(stdout.text());
-          expect(output.repository).toBe(await realpath(repository));
+          expect(output.repository).toBe(requested);
           expect(
             output.findings.map(
               (finding: { scanId: string }) => finding.scanId,
