@@ -171,3 +171,62 @@ for (const nested of [false, true]) {
     },
   );
 }
+
+test.skipIf(process.platform === "win32").each([false, true])(
+  "never snapshots a raw gitlink through its replacement-character alias (initialized: %p)",
+  async (initialized) => {
+    const root = await fixtures.create("patch-gitlink-byte-alias-");
+    const git = await initialize(root);
+    const support = await fixtures.create("patch-gitlink-byte-support-");
+    const source = join(root, "nested");
+    await initialize(source);
+    const raw = Buffer.concat([
+      Buffer.from(`${root}/nested-`),
+      Buffer.from([0xff]),
+    ]);
+    await rename(source, raw);
+    git("add", "--all");
+    git("commit", "-m", "Synthetic raw gitlink");
+    if (!initialized) {
+      await rename(raw, join(support, "original"));
+      await mkdir(raw);
+    }
+    const alias = join(root, "nested-\ufffd");
+    await writeFile(join(root, ".git/info/exclude"), "nested-\ufffd/\n");
+    const aliasGit = await initialize(alias);
+    const effect = join(support, "hook-effect");
+    await writeFile(
+      join(alias, ".git/hooks/post-index-change"),
+      `#!/bin/sh\nprintf synthetic-effect > '${effect.replaceAll("'", "'\\''")}'\n`,
+      { mode: 0o755 },
+    );
+    const aliasHead = aliasGit("rev-parse", "HEAD");
+    const aliasIndex = await readFile(join(alias, ".git/index"));
+    const aliasCommands: string[][] = [];
+    let modelCalls = 0;
+    const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
+      currentDirectory: root,
+      onRepositoryCommand: (command, args, cwd, options) => {
+        if (
+          cwd === alias ||
+          args.some((arg) => arg === alias || arg.startsWith(`${alias}/`))
+        )
+          aliasCommands.push([...args]);
+        return runGitRepositoryCommand(command, args, cwd, options);
+      },
+      onCodex: async (_args, output) => {
+        modelCalls++;
+        await writeFile(join(root, "app.ts"), "fixed\n");
+        output?.stdout.write("Synthetic patch complete.\n");
+        return 0;
+      },
+    });
+    expect(aliasCommands).toEqual([]);
+    await expect(readFile(effect)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(aliasGit("rev-parse", "HEAD")).toBe(aliasHead);
+    expect(await readFile(join(alias, ".git/index"))).toEqual(aliasIndex);
+    expect(outcome.exitCode, outcome.stderr).toBe(initialized ? 2 : 0);
+    expect(modelCalls).toBe(initialized ? 0 : 1);
+    if (initialized) expect(outcome.stderr).toContain("not valid UTF-8");
+  },
+);

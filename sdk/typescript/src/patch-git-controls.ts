@@ -69,6 +69,7 @@ type RunIndexGit = (
 export async function withPatchGitIndex<T>(
   run: RunIndexGit,
   inspect: (run: RunIndexGit) => Promise<T>,
+  files?: readonly string[],
 ): Promise<T> {
   const directory = await mkdtemp(join(tmpdir(), "codex-security-patch-tree-"));
   const indexFile = join(directory, "index");
@@ -78,9 +79,19 @@ export async function withPatchGitIndex<T>(
     const heads = await indexed(["rev-parse", "--revs-only", "HEAD"]);
     await indexed(["read-tree", ...(heads.trim() ? ["HEAD"] : ["--empty"])]);
     const entries = Buffer.from(
-      await run(["ls-files", "--stage", "--full-name", "-z"], {
-        encoding: "base64",
-      }),
+      await run(
+        [
+          "--literal-pathspecs",
+          "ls-files",
+          "--stage",
+          "--full-name",
+          "-z",
+          ...(files === undefined ? [] : ["--", ...files]),
+        ],
+        {
+          encoding: "base64",
+        },
+      ),
       "base64",
     ).toString("latin1");
     await indexed(["update-index", "-z", "--index-info"], {

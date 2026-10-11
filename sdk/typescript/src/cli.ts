@@ -6981,6 +6981,7 @@ function directPatchDigest(
 
 interface PatchPublication {
   branch: string;
+  // Opaque Git path keys, using Latin-1 to preserve filename bytes.
   dirtyFiles: Set<string>;
   ignoredFiles: Set<string>;
   ignoredDigests: Set<string>;
@@ -6995,10 +6996,16 @@ async function patchPublicationDestination(
 ) {
   const run = (command: "git" | "gh" | "glab", args: string[]) =>
     dependencies.runRepositoryCommand(command, args, repository);
+  const remoteUrl = async (args: string[]) =>
+    (
+      await dependencies.runRepositoryCommand("git", args, repository, {
+        trim: false,
+      })
+    ).replace(/\n$/u, "");
   const pushRemotes = (
-    await run("git", ["remote", "get-url", "--push", "--all", "origin"])
+    await remoteUrl(["remote", "get-url", "--push", "--all", "origin"])
   ).split("\n");
-  const fetchRemote = await run("git", ["remote", "get-url", "origin"]);
+  const fetchRemote = await remoteUrl(["remote", "get-url", "origin"]);
   const isNetwork = (remote: string) =>
     !isAbsolute(remote) &&
     !win32.isAbsolute(remote) &&
@@ -7138,8 +7145,11 @@ async function patchRepositoryRoot(
 
 async function hashPublicationFile(
   root: string,
-  relativePath: string,
+  pathKey: string,
 ): Promise<string | undefined> {
+  const relativePath = patchPathText(pathKey);
+  // This string-path reader cannot select a raw filename through its UTF-8 alias.
+  if (patchPathKey(relativePath) !== pathKey) return undefined;
   const path = resolve(root, relativePath);
   const selected = await lstat(path);
   if (!selected.isFile() || selected.size === 0) return undefined;
@@ -7247,8 +7257,8 @@ async function preparePatchPublication(
     );
   }
   const root = await patchRepositoryRoot(repository, dependencies);
-  const status = await dependencies.runRepositoryCommand(
-    "git",
+  const paths = await patchGitRecords(
+    repository,
     [
       "status",
       "--porcelain=v1",
@@ -7256,43 +7266,36 @@ async function preparePatchPublication(
       "--untracked-files=all",
       "--ignored=traditional",
     ],
-    repository,
-    { trim: false, maxBuffer: Infinity },
+    dependencies,
   );
   // A fresh index reads worktree edits hidden by assume-unchanged flags.
   const tree = await snapshotPatchTree(repository, dependencies);
-  const worktreeChanges = await dependencies.runRepositoryCommand(
-    "git",
-    ["diff", "--cached", "--name-only", "--no-renames", "-z", tree, "--"],
+  const worktreeChanges = await patchGitRecords(
     root,
-    { trim: false, maxBuffer: Infinity },
+    ["diff", "--cached", "--name-only", "--no-renames", "-z", tree, "--"],
+    dependencies,
   );
-  const paths = status.split("\0");
+  const localPath = (path: string) =>
+    relative(patchPathKey(repository), resolve(patchPathKey(root), path));
   const ignoredFiles = new Set<string>();
-  const dirtyFiles = new Set(
-    worktreeChanges
-      .split("\0")
-      .filter(Boolean)
-      .map((path) => relative(repository, resolve(root, path))),
-  );
+  const dirtyFiles = new Set(worktreeChanges.filter(Boolean).map(localPath));
   for (let index = 0; index < paths.length; index += 1) {
     const entry = paths[index]!;
     if (!entry) continue;
     (entry.startsWith("!! ") ? ignoredFiles : dirtyFiles).add(
-      relative(repository, resolve(root, entry.slice(3))),
+      localPath(entry.slice(3)),
     );
     if (/[RC]/u.test(entry.slice(0, 2)))
-      dirtyFiles.add(relative(repository, resolve(root, paths[++index]!)));
+      dirtyFiles.add(localPath(paths[++index]!));
   }
   const ignoredDigests = new Set<string>();
   if (ignoredFiles.size) {
-    const ignored = await dependencies.runRepositoryCommand(
-      "git",
-      ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"],
+    const ignored = await patchGitRecords(
       root,
-      { trim: false, maxBuffer: Infinity },
+      ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"],
+      dependencies,
     );
-    for (const path of ignored.split("\0").filter(Boolean)) {
+    for (const path of ignored.filter(Boolean)) {
       const digest = await hashPublicationFile(root, path).catch(
         (error: unknown) => {
           if (isJsonObject(error) && error["code"] === "ENOENT")
@@ -7336,11 +7339,10 @@ async function checkDeinitializedPatchSubmodules(
     )
   ).replace(/\n$/u, "");
   submodules: for (const [key, entry] of after) {
-    const path = patchPathText(key);
     if (
       !entry.startsWith("160000 ") ||
       before.get(key) === entry ||
-      existsSync(join(root, path, ".git"))
+      existsSync(patchFilePath(root, `${key}/.git`))
     )
       continue;
     // Deinitialization retains the original registration's object database.
@@ -7351,38 +7353,36 @@ async function checkDeinitializedPatchSubmodules(
         ? [parent, ref]
         : [ref];
     for (const registration of registrations) {
-      const keys = await run(
+      const records = await patchGitRecords(
+        repository,
         [
           "config",
           "--blob",
           `${registration}:.gitmodules`,
           "--null",
-          "--name-only",
-          "--fixed-value",
           "--get-regexp",
           "^submodule\\..*\\.path$",
-          path,
         ],
-        { trim: false },
+        dependencies,
       ).catch((error: unknown) => {
-        if (isJsonObject(error) && error["code"] === 1) return "";
+        if (isJsonObject(error) && error["code"] === 1) return [];
         throw error;
       });
-      for (const key of keys.split("\0").filter(Boolean)) {
-        // --get-regexp can match an earlier repeated value; native --get selects its final value.
-        const selectedPath = await run(
-          [
-            "config",
-            "--blob",
-            `${registration}:.gitmodules`,
-            "--null",
-            "--get",
-            key,
-          ],
-          { trim: false },
-        );
-        if (selectedPath !== `${path}\0`) continue;
-        const name = key.slice("submodule.".length, -".path".length);
+      // Native --get selects the final value of a repeated key.
+      const selectedPaths = new Map(
+        records.filter(Boolean).map((record) => {
+          const separator = record.indexOf("\n");
+          return [record.slice(0, separator), record.slice(separator + 1)];
+        }),
+      );
+      for (const [configKey, selectedPath] of selectedPaths) {
+        if (selectedPath !== key) continue;
+        const nameKey = configKey.slice("submodule.".length, -".path".length);
+        const name = patchPathText(nameKey);
+        if (patchPathKey(name) !== nameKey)
+          throw new Error(
+            "Patch cannot safely use Git administration paths that are not valid UTF-8.",
+          );
         const directory = (
           await run(
             [
@@ -7426,7 +7426,7 @@ async function checkDeinitializedPatchSubmodules(
           await nested(["rev-list", commit, "--not", "--remotes", "-n", "1"])
         ) {
           throw new CodexSecurityError(
-            `Submodule ${safePatchText(path)} contains a commit that is not available in its remote-tracking refs. Publish that commit before retrying this patch pull request.`,
+            `Submodule ${safePatchText(patchPathText(key))} contains a commit that is not available in its remote-tracking refs. Publish that commit before retrying this patch pull request.`,
           );
         }
         continue submodules;
@@ -7615,21 +7615,27 @@ function verifiedPatchFiles(
   });
 }
 
+// Changes and returned paths are byte keys; caller-supplied selections are UTF-8.
 function patchChangeSources(
   changes: string[],
   root: string,
   repository: string,
   files: readonly string[],
 ): { files: string[]; transferred: Set<string>; deleted: Set<string> } {
-  const selected = new Set(files);
+  const selections = files.map(patchPathKey);
+  const selected = new Set(selections);
+  const localPath = (path: string) =>
+    relative(patchPathKey(repository), resolve(patchPathKey(root), path));
   const transferred = new Set<string>();
   const deleted = new Set<string>();
   for (let index = 0; index < changes.length - 1;) {
     const status = changes[index++]!;
-    const source = relative(repository, resolve(root, changes[index++]!));
+    const source = localPath(changes[index++]!);
     if (!/^[RC]/u.test(status)) continue;
-    const destination = relative(repository, resolve(root, changes[index++]!));
-    if (files.some((file) => !isOutsidePath(relative(file, destination)))) {
+    const destination = localPath(changes[index++]!);
+    if (
+      selections.some((file) => !isOutsidePath(relative(file, destination)))
+    ) {
       transferred.add(source);
       if (status.startsWith("R")) {
         if (isOutsidePath(source))
@@ -7664,36 +7670,32 @@ async function createPatchPullRequest(
 
   const { branch, dirtyFiles, ignoredFiles, tree, root } = publication;
   const head = await snapshotPatchTree(repository, dependencies);
-  const changes = (
-    await dependencies.runRepositoryCommand(
-      "git",
-      [
-        "diff",
-        "--name-status",
-        "--find-renames",
-        "--find-copies-harder",
-        "-z",
-        tree,
-        head,
-      ],
-      root,
-      { trim: false, maxBuffer: Infinity },
-    )
-  ).split("\0");
-  const reportedFiles = files;
+  const changes = await patchGitRecords(
+    root,
+    [
+      "diff",
+      "--name-status",
+      "--find-renames",
+      "--find-copies-harder",
+      "-z",
+      tree,
+      head,
+    ],
+    dependencies,
+  );
+  const reportedFiles = files.map(patchPathKey);
   const sources = patchChangeSources(changes, root, repository, files);
-  files = sources.files;
+  const selectedFiles = sources.files;
   if (ignoredFiles.size > 0) {
-    const included = await dependencies.runRepositoryCommand(
-      "git",
-      ["ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+    const included = await patchGitRecords(
       root,
-      { trim: false, maxBuffer: Infinity },
+      ["ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+      dependencies,
     );
     const publishable = new Set(
-      included
-        .split("\0")
-        .map((file) => relative(repository, resolve(root, file))),
+      included.map((file) =>
+        relative(patchPathKey(repository), resolve(patchPathKey(root), file)),
+      ),
     );
     for (const file of ignoredFiles) {
       if (publishable.has(file)) dirtyFiles.add(file);
@@ -7701,9 +7703,9 @@ async function createPatchPullRequest(
   }
   const deleted =
     dirtyFiles.size === 0
-      ? ""
-      : await dependencies.runRepositoryCommand(
-          "git",
+      ? []
+      : await patchGitRecords(
+          root,
           [
             "diff",
             "--raw",
@@ -7713,20 +7715,18 @@ async function createPatchPullRequest(
             tree,
             head,
           ],
-          root,
-          { trim: false, maxBuffer: Infinity },
+          dependencies,
         );
   // A deleted dirty source may have been moved into a reported clean path.
   const dirty = [
     ...new Set([
-      ...files,
+      ...selectedFiles,
       ...sources.transferred,
       ...deleted
-        .split("\0")
         .filter((file, index, entries) => {
           if (index % 2 === 0) return false;
           try {
-            const metadata = lstatSync(resolve(root, file), {
+            const metadata = lstatSync(patchFilePath(root, file), {
               throwIfNoEntry: false,
             });
             return (
@@ -7740,19 +7740,21 @@ async function createPatchPullRequest(
             throw error;
           }
         })
-        .map((file) => relative(repository, resolve(root, file))),
+        .map((file) =>
+          relative(patchPathKey(repository), resolve(patchPathKey(root), file)),
+        ),
     ]),
   ].filter((file) =>
     [...dirtyFiles].some((dirty) => !isOutsidePath(relative(file, dirty))),
   );
   if (dirty.length > 0) {
     throw new CodexSecurityError(
-      `Cannot publish files with uncommitted changes before patching: ${dirty.join(", ")}. Local edits and patches were kept; review and publish them separately.`,
+      `Cannot publish files with uncommitted changes before patching: ${dirty.map(patchPathText).join(", ")}. Local edits and patches were kept; review and publish them separately.`,
     );
   }
   if (publication.ignoredDigests.size) {
-    const changed = await dependencies.runRepositoryCommand(
-      "git",
+    const changed = await patchGitRecords(
+      root,
       [
         "diff",
         "--name-only",
@@ -7762,42 +7764,50 @@ async function createPatchPullRequest(
         tree,
         head,
       ],
-      root,
-      { trim: false, maxBuffer: Infinity },
+      dependencies,
     );
-    for (const path of changed.split("\0").filter(Boolean)) {
-      const local = relative(repository, resolve(root, path));
-      if (!files.some((file) => !isOutsidePath(relative(file, local))))
+    for (const path of changed.filter(Boolean)) {
+      const local = relative(
+        patchPathKey(repository),
+        resolve(patchPathKey(root), path),
+      );
+      if (!selectedFiles.some((file) => !isOutsidePath(relative(file, local))))
         continue;
       const digest = await hashPublicationFile(root, path);
       if (digest !== undefined && publication.ignoredDigests.has(digest))
         throw new CodexSecurityError(
-          `Cannot automatically publish ${local}: it matches pre-existing ignored content. Local edits and patches were kept; review and publish them separately.`,
+          `Cannot automatically publish ${patchPathText(local)}: it matches pre-existing ignored content. Local edits and patches were kept; review and publish them separately.`,
         );
     }
   }
   const body = patchPullRequestBody(patchRiskSummary, introduction);
-  const run = (args: string[]) =>
-    dependencies.runRepositoryCommand("git", args, repository);
+  const run = (
+    args: string[],
+    options?: Parameters<CliDependencies["runRepositoryCommand"]>[3],
+  ) => dependencies.runRepositoryCommand("git", args, repository, options);
   const isDeleted = (file: string) =>
     [...sources.deleted].some((source) => relative(source, file) === "") &&
     !(
       reportedFiles.some((selected) => relative(selected, file) === "") &&
-      existsSync(resolve(repository, file)) &&
-      lstatSync(resolve(repository, file), {
+      existsSync(patchFilePath(repository, file)) &&
+      lstatSync(patchFilePath(repository, file), {
         throwIfNoEntry: false,
       })?.isDirectory()
     );
-  const stageFiles = files.filter(
-    (file) =>
-      !isDeleted(file) &&
-      !files.some((parent) => {
-        const descendant = relative(parent, file);
-        return (
-          descendant !== "" && !isDeleted(parent) && !isOutsidePath(descendant)
-        );
-      }),
-  );
+  const stageFiles = selectedFiles
+    .filter(
+      (file) =>
+        !isDeleted(file) &&
+        !selectedFiles.some((parent) => {
+          const descendant = relative(parent, file);
+          return (
+            descendant !== "" &&
+            !isDeleted(parent) &&
+            !isOutsidePath(descendant)
+          );
+        }),
+    )
+    .map(patchPathText);
   await run(["--literal-pathspecs", "add", "--dry-run", "--", ...stageFiles]);
   stderr.write(
     "Creating a draft pull request or merge request for verified patches...\n",
@@ -7820,17 +7830,11 @@ async function createPatchPullRequest(
     index === undefined
       ? rm(indexPath, { force: true })
       : writeFile(indexPath, index);
-  const temporaryIndex = await mkdtemp(
-    join(tmpdir(), "codex-security-patch-index-"),
-  );
-  const stage = (args: string[], input?: string) =>
-    dependencies.runRepositoryCommand("git", args, repository, {
-      environment: { GIT_INDEX_FILE: join(temporaryIndex, "index") },
-      input,
-    });
   const removeSources = (command: typeof run) =>
     sources.deleted.size
-      ? command(["update-index", "--force-remove", "--", ...sources.deleted])
+      ? command(["update-index", "--force-remove", "-z", "--stdin"], {
+          input: Buffer.from([...sources.deleted].join("\0") + "\0", "latin1"),
+        })
       : Promise.resolve("");
   const syncIndex = async () => {
     await run([
@@ -7846,28 +7850,26 @@ async function createPatchPullRequest(
   let committed = false;
   try {
     await run(["switch", "-c", branch]);
-    await stage(["read-tree", "HEAD"]);
-    await stage(
-      ["update-index", "-z", "--index-info"],
-      await dependencies.runRepositoryCommand(
-        "git",
-        [
-          "--literal-pathspecs",
-          "ls-files",
-          "--stage",
-          "--full-name",
-          "-z",
-          "--",
-          ...stageFiles,
-        ],
-        repository,
-        { trim: false },
-      ),
+    await withPatchGitIndex(
+      (args, options) =>
+        run(args, {
+          trim: false,
+          encoding: options?.encoding,
+          input: options?.input,
+          maxBuffer: options?.indexFile === undefined ? Infinity : undefined,
+          environment:
+            options?.indexFile === undefined
+              ? undefined
+              : { GIT_INDEX_FILE: options.indexFile },
+        }),
+      async (stage) => {
+        await stage(["--literal-pathspecs", "add", "--", ...stageFiles]);
+        await removeSources(stage);
+        await stage(["commit", "-m", PATCH_PR_TITLE]);
+        committed = true;
+      },
+      stageFiles,
     );
-    await stage(["--literal-pathspecs", "add", "--", ...stageFiles]);
-    await removeSources(stage);
-    await stage(["commit", "-m", PATCH_PR_TITLE]);
-    committed = true;
     await syncIndex();
     const commit = await run(["rev-parse", "HEAD"]);
     await run(["config", "--local", patchPullRequestBodyKey(branch), body]);
@@ -7913,8 +7915,6 @@ async function createPatchPullRequest(
       );
     }
     throw error;
-  } finally {
-    await rm(temporaryIndex, { recursive: true, force: true });
   }
   return publishPatchBranch(repository, branch, body, stderr, dependencies);
 }
@@ -8112,6 +8112,32 @@ function patchPathText(path: string): string {
   return Buffer.from(path, "latin1").toString("utf8");
 }
 
+function patchPathKey(path: string): string {
+  return Buffer.from(path).toString("latin1");
+}
+
+function patchFilePath(root: string, path: string): Buffer {
+  return Buffer.from(resolve(patchPathKey(root), path), "latin1");
+}
+
+// NUL-delimited Git records contain opaque paths, not UTF-8 display strings.
+async function patchGitRecords(
+  repository: string,
+  args: string[],
+  dependencies: CliDependencies,
+): Promise<string[]> {
+  return Buffer.from(
+    await dependencies.runRepositoryCommand("git", args, repository, {
+      trim: false,
+      encoding: "base64",
+      maxBuffer: Infinity,
+    }),
+    "base64",
+  )
+    .toString("latin1")
+    .split("\0");
+}
+
 async function retainPatchTrees(
   repository: string,
   source: string[],
@@ -8199,7 +8225,6 @@ async function snapshotGitPatchState(
       const nestedPath = directory ? `${directory}/${path}` : path;
       if (directory) files.set(nestedPath, entry);
       if (entry.startsWith("160000 ")) {
-        const nested = join(checkout, patchPathText(path));
         const gitlink = {
           commit: entry.split(" ")[2]!,
           gitDirectory: undefined as string | undefined,
@@ -8207,7 +8232,13 @@ async function snapshotGitPatchState(
           committedTree: undefined as string | undefined,
         };
         gitlinks.set(nestedPath, gitlink);
-        if (!existsSync(join(nested, ".git"))) continue;
+        if (!existsSync(patchFilePath(checkout, `${path}/.git`))) continue;
+        const nestedName = patchPathText(path);
+        if (patchPathKey(nestedName) !== path)
+          throw new Error(
+            "Patch cannot safely use Git administration whose checkout path is not valid UTF-8.",
+          );
+        const nested = join(checkout, nestedName);
         const worktree = await enclosingGitWorktreeRoot(nested, undefined, {
           requireIfPresent: true,
         });
@@ -8498,34 +8529,34 @@ async function assessPatchRisk(
         request.files === undefined
           ? undefined
           : patchChangeSources(
-              (
-                await run(
-                  [
-                    ...args,
-                    "--name-status",
-                    "--find-renames",
-                    "-z",
-                    baseTree,
-                    headTree,
-                  ],
-                  { trim: false },
-                )
-              ).split("\0"),
+              await patchGitRecords(
+                request.repository,
+                [
+                  ...args,
+                  "--name-status",
+                  "--find-renames",
+                  "-z",
+                  baseTree,
+                  headTree,
+                ],
+                dependencies,
+              ),
               checkout,
               request.repository,
               request.files,
             );
       const selected = sources?.files;
+      const checkoutKey = patchPathKey(checkout);
+      const repositoryKey = patchPathKey(request.repository);
       const files = selected?.some(
         (file) =>
-          !isOutsidePath(relative(resolve(request.repository, file), checkout)),
+          !isOutsidePath(relative(resolve(repositoryKey, file), checkoutKey)),
       )
         ? undefined
         : selected
-            ?.map((file) =>
-              relative(checkout, resolve(request.repository, file)),
-            )
-            .filter((file) => !isOutsidePath(file));
+            ?.map((file) => relative(checkoutKey, resolve(repositoryKey, file)))
+            .filter((file) => !isOutsidePath(file))
+            .map(patchPathText);
       if (files?.length === 0) continue;
       let paths = files === undefined ? [] : ["--", ...files];
       let selectedHead = headTree;
@@ -8541,13 +8572,12 @@ async function assessPatchRisk(
           ),
         );
         const entries = new Map(before!);
-        const pathKey = (path: string) => Buffer.from(path).toString("latin1");
-        const selectedFiles = request.files!.map(pathKey);
-        const deletedFiles = new Set([...sources.deleted].map(pathKey));
+        const selectedFiles = request.files!.map(patchPathKey);
+        const deletedFiles = sources.deleted;
         for (const path of new Set([...before!.keys(), ...after!.keys()])) {
           const file = relative(
-            pathKey(request.repository),
-            resolve(pathKey(checkout), path),
+            patchPathKey(request.repository),
+            resolve(patchPathKey(checkout), path),
           );
           if (
             selectedFiles.some(
