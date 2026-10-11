@@ -246,7 +246,7 @@ def _capture_saved_source(
     snapshot = (directory / "checkpoint-heads" / f"{digest}.json").as_posix()
     # Capture the selected file even if the worker created it after directory enumeration.
     if write and not (scan_dir / snapshot).exists():
-        if created_paths is not None:
+        if created_paths is not None and not os.path.lexists(scan_dir / snapshot):
             created_paths.add(snapshot)
         write_scan_local_bytes(scan_dir, snapshot, _encoded(observation))
     return {
@@ -335,7 +335,7 @@ def _freeze_source_times(
     digest = _digest(record)
     path = f"source-order/{digest}.json"
     if not (scan_dir / path).exists():
-        if created_paths is not None:
+        if created_paths is not None and not os.path.lexists(scan_dir / path):
             created_paths.add(path)
         write_scan_local_bytes(scan_dir, path, _encoded(record))
     if _read_saved_result(scan_dir, path, scan_id)[1] != digest:
@@ -1201,7 +1201,7 @@ def merge_saved_results(
                 parent_checkpoint = f"checkpoints/{parent_digest}.json"
                 checkpoint_path = scan_dir / parent_checkpoint
                 if not checkpoint_path.exists():
-                    if created_paths is not None:
+                    if created_paths is not None and not os.path.lexists(checkpoint_path):
                         created_paths.add(parent_checkpoint)
                     write_scan_local_bytes(scan_dir, parent_checkpoint, payload)
                     # A recovery copy must not appear newer than the review it copies.

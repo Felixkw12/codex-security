@@ -245,3 +245,67 @@ def test_mid_merge_failure_removes_only_created_recovery_evidence(
     }
     assert after == before
     assert unrelated.read_text() == "Unrelated worker evidence.\n"
+
+
+@pytest.mark.parametrize("directory", ["checkpoints", "checkpoint-heads", "source-order"])
+def test_deadline_rollback_preserves_preexisting_dangling_recovery_entry(
+    tmp_path: Path, workbench_api, directory: str
+):
+    scan = deadline_fixture(tmp_path)
+    canonical_parent(scan, saved_draft(scan.scan_id, findings=[scan.finding]))
+    saved = workbench_api["saved_results"]
+    original = {
+        path.relative_to(scan.directory): (path.read_bytes(), path.stat())
+        for path in scan.directory.rglob("*")
+        if path.is_file()
+    }
+    with sqlite3.connect(scan.database) as connection:
+        connection.row_factory = sqlite3.Row
+        record = workbench_api["require_scan"](connection, scan.scan_id)
+        binding = workbench_api["workbench_completion_binding"](record, workbench_api["now"]())
+        saved.merge_saved_results(
+            scan.directory, scan.scan_id, binding, [], [], stopped=True, reason="Synthetic stop."
+        )
+        created = {
+            path.relative_to(scan.directory)
+            for path in scan.directory.rglob("*")
+            if path.is_file() and path.relative_to(scan.directory) not in original
+        }
+        relative = next(path for path in created if path.parent == Path(directory))
+        for path in created:
+            (scan.directory / path).unlink()
+        for path, (contents, metadata) in original.items():
+            target = scan.directory / path
+            target.write_bytes(contents)
+            os.utime(target, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+        target = scan.directory / relative
+        try:
+            target.symlink_to("missing-target")
+        except OSError:
+            if os.name == "nt":
+                pytest.skip("Symbolic links are unavailable")
+            raise
+        with pytest.raises(saved.ContractError) as rejected:
+            saved.write_scan_local_bytes(scan.directory, relative.as_posix(), b"{}")
+        try:
+            publication = saved.preserve_deep_deadline_draft(
+                SimpleNamespace(**workbench_api), connection, record
+            )
+        except saved.ContractError as error:
+            assert str(error) == str(rejected.value)
+        else:
+            warnings = json.loads(
+                connection.execute(
+                    "SELECT completion_warnings_json FROM scans WHERE id = ?", (scan.scan_id,)
+                ).fetchone()[0]
+            )
+            assert any(str(rejected.value) in warning for warning in warnings)
+            connection.rollback()
+            saved._restore_published_outputs(*publication)
+    assert target.is_symlink()
+    assert os.readlink(target) == "missing-target"
+    assert {
+        path.relative_to(scan.directory)
+        for path in scan.directory.rglob("*")
+        if path.is_file() or path.is_symlink()
+    } == {*original, relative}
