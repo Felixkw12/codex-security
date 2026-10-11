@@ -439,6 +439,12 @@ else {
               assert.equal(effective.cli_auth_credentials_store, "file");
             if (row.kind === "login") continue;
             assert.equal(
+              row.argv.some((arg) =>
+                arg.startsWith("permissions.codex_security_policy"),
+              ),
+              false,
+            );
+            assert.equal(
               effective.model,
               recipe ? "synthetic-saved-model" : "synthetic-current-model",
             );
