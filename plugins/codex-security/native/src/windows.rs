@@ -14,8 +14,8 @@ use std::{
 };
 use windows_sys::Win32::{
     Foundation::{
-        GetLastError, LocalFree, SetLastError, ERROR_FILE_NOT_FOUND, ERROR_INVALID_HANDLE, HANDLE,
-        INVALID_HANDLE_VALUE,
+        GetLastError, LocalFree, SetLastError, ERROR_FILE_NOT_FOUND, ERROR_INVALID_HANDLE,
+        ERROR_INVALID_PARAMETER, HANDLE, INVALID_HANDLE_VALUE,
     },
     Security::{
         Authorization::{
@@ -122,9 +122,9 @@ pub struct WindowsProcessResult {
     pub status: i32,
 }
 
-fn windows_command_line(executable: &OsStr, arguments: &[OsString]) -> Vec<u16> {
+fn windows_command_line(argv0: &OsStr, arguments: &[OsString]) -> Vec<u16> {
     let mut line = vec![b'"' as u16];
-    line.extend(executable.encode_wide());
+    line.extend(argv0.encode_wide());
     line.push(b'"' as u16);
     for argument in arguments {
         line.push(b' ' as u16);
@@ -265,7 +265,14 @@ fn resolve_windows_executable(executable: &OsStr) -> io::Result<OsString> {
         candidates
             .iter()
             .map(|candidate| directory.join(candidate))
-            .find(|path| path.is_file())
+            .find(|path| {
+                windows_application_path(path.as_os_str()).is_ok_and(|path| {
+                    // Match Node's first entry selection without following file symlinks.
+                    let attributes = unsafe { GetFileAttributesW(path.as_ptr()) };
+                    attributes != INVALID_FILE_ATTRIBUTES
+                        && attributes & FILE_ATTRIBUTE_DIRECTORY == 0
+                })
+            })
             .map(|path| path.into_os_string())
     };
     if has_directory || unsafe { NeedCurrentDirectoryForExePathW([0_u16].as_ptr()) } != 0 {
@@ -285,7 +292,7 @@ fn resolve_windows_executable(executable: &OsStr) -> io::Result<OsString> {
     Err(missing())
 }
 
-fn run_exact_process(executable: &OsStr, arguments: &[OsString]) -> io::Result<i32> {
+fn run_exact_process(executable: &OsStr, argv0: &OsStr, arguments: &[OsString]) -> io::Result<i32> {
     use windows_sys::Win32::{
         Foundation::{DuplicateHandle, DUPLICATE_SAME_ACCESS, WAIT_OBJECT_0},
         System::Threading::{
@@ -336,7 +343,7 @@ fn run_exact_process(executable: &OsStr, arguments: &[OsString]) -> io::Result<i
         .as_ref()
         .map_or(null_mut(), AsRawHandle::as_raw_handle);
     let mut process: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
-    let mut command_line = windows_command_line(executable, arguments);
+    let mut command_line = windows_command_line(argv0, arguments);
     if unsafe {
         CreateProcessW(
             application.as_ptr(),
@@ -365,6 +372,17 @@ fn run_exact_process(executable: &OsStr, arguments: &[OsString]) -> io::Result<i
         return Err(io::Error::last_os_error());
     }
     Ok(exit_code as i32)
+}
+
+fn windows_batch_file(executable: &OsStr) -> bool {
+    let bytes = executable.as_encoded_bytes();
+    // Node recognizes batch extensions after trailing dots and ASCII whitespace.
+    let end = bytes
+        .iter()
+        .rposition(|byte| !matches!(byte, b'.' | b' ' | b'\t' | b'\n' | b'\r' | 11 | 12))
+        .map_or(0, |index| index + 1);
+    let extension = &bytes[end.saturating_sub(4)..end];
+    extension.eq_ignore_ascii_case(b".cmd") || extension.eq_ignore_ascii_case(b".bat")
 }
 
 /// Run only inside the Node subprocess shim: blocking here keeps pipe ownership in that process.
@@ -412,7 +430,11 @@ pub fn run_windows_process(
         if let Some(directory) = cwd {
             std::env::set_current_dir(directory)?;
         }
-        let executable = resolve_windows_executable(&executable)?;
+        let application = resolve_windows_executable(&executable)?;
+        // CreateProcessW can dispatch batch files through a shell without CRT escaping.
+        if windows_batch_file(&application) {
+            return Err(io::Error::from_raw_os_error(ERROR_INVALID_PARAMETER as i32));
+        }
         let raw_job = unsafe { CreateJobObjectW(null(), null()) };
         if raw_job.is_null() {
             return Err(io::Error::last_os_error());
@@ -439,7 +461,7 @@ pub fn run_windows_process(
         // Closing the handle on return would terminate the shim before reporting status.
         std::mem::forget(job);
         // Launch the selected image without Rust performing another extension search.
-        run_exact_process(&executable, &arguments)
+        run_exact_process(&application, &executable, &arguments)
     }
     match run(executable, arguments, cwd, environment) {
         Ok(status) => Ok(WindowsProcessResult {
