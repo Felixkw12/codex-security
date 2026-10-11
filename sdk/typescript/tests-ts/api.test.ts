@@ -4472,8 +4472,12 @@ describe("CodexSecurity orchestration", () => {
             } else if (family === "parent-only") {
               // Inventory may be absent from SDK delivery; all native records
               // are durable before either review is delivered live.
+              // Start a real read: unchanged logs are skipped by the tracker.
               pause = !early;
-              if (!early) await closeEntered.promise;
+              if (!early) {
+                await appendFile(path, "\n");
+                await closeEntered.promise;
+              }
               await append(path, [
                 native("inventory", progressMarker("discovery", 0, 8)),
                 native("eligible", progressMarker(parentPhase, 4, 8)),
@@ -4488,7 +4492,10 @@ describe("CodexSecurity orchestration", () => {
               await worker("first", 3, 3);
               await worker("second", 1, 8);
               pause = !early;
-              if (!early) await closeEntered.promise;
+              if (!early) {
+                await appendFile(path, "\n");
+                await closeEntered.promise;
+              }
               await append(path, [
                 custom("inventory6", progressMarker("discovery", 0, 6)),
                 custom("eligible", progressMarker(parentPhase, 3, 6)),
@@ -4534,6 +4541,7 @@ describe("CodexSecurity orchestration", () => {
                 await wait("scope6").promise;
               } else {
                 pause = true;
+                await appendFile(path, "\n");
                 await closeEntered.promise;
               }
               await append(path, [
@@ -4560,16 +4568,15 @@ describe("CodexSecurity orchestration", () => {
               }
               await worker("first", 3, 3);
               await worker("second", 1, 8);
+              pause = !early;
               await append(path, [
                 ...(early
                   ? []
                   : [custom("inventory6", progressMarker("discovery", 0, 6))]),
                 custom("eligible", progressMarker(parentPhase, 3, 6)),
               ]);
-              if (!early) {
-                pause = true;
-                await closeEntered.promise;
-              } else await wait("eligible").promise;
+              if (!early) await closeEntered.promise;
+              else await wait("eligible").promise;
               await append(path, [
                 native("last-parent", progressMarker(parentPhase, 4, 8)),
               ]);
@@ -6480,7 +6487,10 @@ describe("CodexSecurity orchestration", () => {
           );
           pauseClose = split;
           async function* events(): AsyncGenerator<ThreadEvent> {
-            if (split) await closeEntered.promise;
+            if (split) {
+              await appendFile(parentPath, "\n");
+              await closeEntered.promise;
+            }
             await appendFile(
               parentPath,
               [
@@ -6600,6 +6610,7 @@ describe("CodexSecurity orchestration", () => {
             // Finish initial session association so this poll reads only its
             // original snapshot, rather than replaying a newly associated file.
             await metadataRead.promise;
+            pauseClose = split;
             await appendFile(
               parentPath,
               JSON.stringify({
@@ -6611,10 +6622,8 @@ describe("CodexSecurity orchestration", () => {
                 },
               }) + "\n",
             );
-            if (split) {
-              pauseClose = true;
-              await closeEntered.promise;
-            } else await firstRead.promise;
+            if (split) await closeEntered.promise;
+            else await firstRead.promise;
             // The newer completion is durable before its SDK projection arrives,
             // even when the older snapshot is still waiting for file.close.
             await appendFile(
@@ -6964,6 +6973,7 @@ describe("CodexSecurity orchestration", () => {
             await secondRead.promise;
             if (!early) {
               pauseClose = true;
+              await appendFile(parentPath, "\n");
               await closeEntered.promise;
             }
             // Native rows precede their ordered SDK completions, but an earlier
@@ -7655,14 +7665,12 @@ describe("CodexSecurity orchestration", () => {
               await earlierReviewRead.promise;
             }
             const inventory = progressMarker("discovery", 0, 7);
+            pauseClose = split;
             await appendFile(
               parentPath,
               native("corrected-inventory", inventory),
             );
-            if (split) {
-              pauseClose = true;
-              await closeEntered.promise;
-            }
+            if (split) await closeEntered.promise;
             const review = progressMarker(
               "validation",
               7,
