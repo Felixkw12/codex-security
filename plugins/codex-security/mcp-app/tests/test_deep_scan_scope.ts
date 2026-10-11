@@ -88,7 +88,12 @@ test("composed discovery keeps typed IDs while canonical admission accepts persi
     deferred: [],
   };
   assert.throws(
-    () => parseScanDraft({ scanId: "7fc17317-9594-49e0-b06a-d72fd7e14bba", findings: [], coverage }),
+    () =>
+      parseScanDraft({
+        scanId: "7fc17317-9594-49e0-b06a-d72fd7e14bba",
+        findings: [],
+        coverage,
+      }),
     /Invalid string/,
   );
   assert.equal(

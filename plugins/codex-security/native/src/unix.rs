@@ -1,7 +1,10 @@
 use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
-use std::{ffi::{CStr, CString, OsStr}, io};
 use std::os::unix::ffi::OsStrExt;
+use std::{
+    ffi::{CStr, CString, OsStr},
+    io,
+};
 
 #[napi(object, use_nullable = true)]
 pub struct UserHomeResult {
