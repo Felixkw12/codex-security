@@ -68,11 +68,13 @@ _FILE_RENAME_POSIX_SEMANTICS = 0x00000002
 
 _FILE_TYPE_DISK = 0x0001
 _FILE_NAME_OPENED = 0x00000008
+_ERROR_INVALID_FUNCTION = 1
 _ERROR_FILE_NOT_FOUND = 2
 _ERROR_PATH_NOT_FOUND = 3
 _ERROR_ACCESS_DENIED = 5
 _ERROR_SHARING_VIOLATION = 32
 _ERROR_LOCK_VIOLATION = 33
+_ERROR_NOT_SUPPORTED = 50
 _ERROR_FILE_EXISTS = 80
 _ERROR_INVALID_PARAMETER = 87
 _ERROR_ALREADY_EXISTS = 183
@@ -615,7 +617,11 @@ def _rename_handle(handle: int, destination_path: Path) -> None:
         buffer_size,
     ):
         return
-    if ctypes.get_last_error() != _ERROR_INVALID_PARAMETER:
+    if ctypes.get_last_error() not in {
+        _ERROR_INVALID_FUNCTION,
+        _ERROR_NOT_SUPPORTED,
+        _ERROR_INVALID_PARAMETER,
+    }:
         _raise_last_error("SetFileInformationByHandle(FileRenameInfoEx)")
     # Older Windows/filesystem implementations do not support FileRenameInfoEx.
     # Keep their existing replacement behavior without retrying permission errors.

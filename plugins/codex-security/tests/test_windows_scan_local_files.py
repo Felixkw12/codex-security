@@ -281,7 +281,8 @@ def test_native_windows_snapshot_open_failure_closes_owned_handles(
 
 
 @pytest.mark.parametrize(
-    ("extended_error", "classic_error"), [(0, None), (87, 0), (87, 5), (5, None), (32, None)]
+    ("extended_error", "classic_error"),
+    [(0, None), (1, 0), (1, 5), (50, 0), (50, 5), (87, 0), (87, 5), (5, None), (32, None)],
 )
 def test_rename_uses_classic_semantics_only_when_extended_operation_is_unsupported(
     tmp_path: Path,
@@ -312,19 +313,20 @@ def test_rename_uses_classic_semantics_only_when_extended_operation_is_unsupport
     monkeypatch.setattr(
         ctypes, "FormatError", lambda code: f"synthetic native error {code}", raising=False
     )
-    expected_error = classic_error if extended_error == 87 else extended_error
+    unsupported = extended_error in {1, 50, 87}
+    expected_error = classic_error if unsupported else extended_error
     if expected_error:
         with pytest.raises(WINDOWS_FILES.WindowsScanLocalFileError) as caught:
             WINDOWS_FILES._rename_handle(123, destination)
         assert caught.value.errno == expected_error
-        operation = "FileRenameInfo" if extended_error == 87 else "FileRenameInfoEx"
+        operation = "FileRenameInfo" if unsupported else "FileRenameInfoEx"
         assert caught.value.strerror == (
             f"SetFileInformationByHandle({operation}): synthetic native error {expected_error}"
         )
     else:
         WINDOWS_FILES._rename_handle(123, destination)
     target = WINDOWS_FILES._extended_path(destination)
-    assert calls == [(123, 22, 3, target)] + ([(123, 3, 1, target)] if extended_error == 87 else [])
+    assert calls == [(123, 22, 3, target)] + ([(123, 3, 1, target)] if unsupported else [])
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires native Win32 file APIs")
