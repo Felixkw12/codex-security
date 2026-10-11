@@ -777,6 +777,11 @@ export class ScanCostTracker {
     }
     if (eligible !== null && eligible !== this.#parentProgress) {
       this.#parentProgress = eligible;
+      if (this.#afterParentFrontier(eligible.position!, eligible.markerIndex!))
+        this.#parentFrontier = {
+          position: eligible.position!,
+          markerIndex: eligible.markerIndex!,
+        };
       this.#recordParentReview(
         eligible.progress,
         eligible.position!,
@@ -1095,24 +1100,24 @@ export class ScanCostTracker {
       if (threadId === this.#threadId) {
         const inventory = this.#inventoryFrontier;
         const parent = this.#parentProgress;
-        // A legacy inventory notification can be omitted from live delivery.
-        // After this batch's inventories are applied, a later matched receipt
-        // can restore their scope over an unmatched live update.
+        // Live notifications can omit both inventory and review markers.
+        // Apply this batch's inventories before restoring their proven scope
+        // from a later positioned fact over an unmatched live update.
         if (
           inventory.filesTotal !== undefined &&
           parent !== null &&
-          parent.position === undefined &&
-          this.#readyParentMarkers.some(
-            ({ live, marker }) =>
-              live.position !== null &&
-              marker.order > parent.order &&
-              marker.progress.filesTotal === inventory.filesTotal &&
-              (live.position > inventory.position ||
-                (live.position === inventory.position &&
-                  marker.index > inventory.markerIndex)),
+          parent.position === undefined
+        ) {
+          const fact = this.#parentFacts.get(inventory.filesTotal);
+          if (
+            fact?.position !== undefined &&
+            fact.order > parent.order &&
+            (fact.position > inventory.position ||
+              (fact.position === inventory.position &&
+                (fact.markerIndex ?? 0) > inventory.markerIndex))
           )
-        )
-          this.setExpectedFilesTotal(inventory.filesTotal);
+            this.setExpectedFilesTotal(inventory.filesTotal);
+        }
         this.#reconcileParentProgress();
       }
       const receipt = usages.get(threadId);

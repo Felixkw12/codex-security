@@ -4346,6 +4346,8 @@ describe("CodexSecurity orchestration", () => {
           "omitted-inventory-live-review",
           "later-inventory",
           "oversized-review",
+          "saved-only",
+          "saved-only-stale-live",
         ] as const
       ).map((delivery) => [mode, delivery] as const),
     ),
@@ -4367,7 +4369,11 @@ describe("CodexSecurity orchestration", () => {
             : 9;
       const old = progressMarker("discovery", 0, 8);
       const current = progressMarker("discovery", 0, 9);
-      const complete = progressMarker("discovery", total, total);
+      const savedOnly = delivery.startsWith("saved-only");
+      const finalPhase =
+        delivery === "saved-only-stale-live" ? "validation" : "discovery";
+      const complete = progressMarker(finalPhase, total, total);
+      const stale = progressMarker("attack_path", 9, 9);
       const savedMessage = (text: string) => [
         {
           type: "event_msg",
@@ -4448,8 +4454,25 @@ describe("CodexSecurity orchestration", () => {
                   "\n",
               );
             if (completeFirst) yield liveMessage("review-complete", complete);
-            await appendFile(rollout, jsonLines(savedMessage(complete)) + "\n");
-            if (!completeFirst) {
+            await appendFile(
+              rollout,
+              jsonLines([
+                ...(delivery === "saved-only-stale-live"
+                  ? savedMessage(stale)
+                  : []),
+                ...savedMessage(complete),
+              ]) + "\n",
+            );
+            if (savedOnly) {
+              await completeRead.promise;
+              if (delivery === "saved-only-stale-live")
+                yield liveMessage("older-review", stale);
+              await appendFile(
+                rollout,
+                jsonLines(savedMessage("Scan finished.")) + "\n",
+              );
+              yield liveMessage("final-summary", "Scan finished.");
+            } else if (!completeFirst) {
               if (delivery === "omitted-inventory-saved-review")
                 await completeRead.promise;
               yield liveMessage("review-complete", complete);
@@ -4491,10 +4514,21 @@ describe("CodexSecurity orchestration", () => {
           expect(updates.at(-1)?.filesCompleted).toBe(0);
         } else
           expect(updates.at(-1)).toEqual({
-            phase: "discovery",
+            phase: finalPhase,
             filesCompleted: total,
             filesTotal: total,
           });
+        if (delivery === "saved-only-stale-live") {
+          const recovered = updates.findIndex(
+            (update) => update.phase === "validation",
+          );
+          expect(recovered).toBeGreaterThanOrEqual(0);
+          expect(
+            updates
+              .slice(recovered)
+              .every((update) => update.phase !== "attack_path"),
+          ).toBe(true);
+        }
       } finally {
         clearInterval(keepAlive);
         inventoryRead.resolve();
