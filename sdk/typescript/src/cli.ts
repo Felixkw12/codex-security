@@ -145,6 +145,7 @@ import {
   formatScanCost,
   formatScanCostTokens,
   formatTokenUsage,
+  type ScanTokenUsage,
 } from "./cost-model.js";
 import { readRegularInputFile, resolveScanPrompts } from "./prompt-files.js";
 import {
@@ -2102,12 +2103,15 @@ export async function main(
                     dependencies.runWorkbench,
                     target["targetId"] as string,
                   );
-            return { repository, findings: findings ?? [] };
+            return {
+              repository: requestedRepository,
+              findings: findings ?? [],
+            };
           },
         ),
         "findings",
         format,
-        { repository },
+        { repository: requestedRepository },
       );
     },
   });
@@ -3371,7 +3375,7 @@ export async function main(
     },
   })
     .command("policy", {
-      description: "Draft SECURITY.md guidance for review.",
+      description: "Draft SECURITY.md for review.",
       destructive: true,
       mcp: false,
       args: z.object({
@@ -3402,11 +3406,11 @@ export async function main(
         headless: z
           .boolean()
           .default(false)
-          .describe("Skip owner questions and authentication prompts."),
+          .describe("Skip questions and sign-in prompts."),
         dryRun: z
           .boolean()
           .default(false)
-          .describe("Validate local generation inputs without starting Codex."),
+          .describe("Check inputs without generating a policy."),
         auth: SKILL_AUTH_OPTION,
         ...MODEL_OPTIONS.shape,
         provider: PROVIDER_OPTION.describe(
@@ -3422,7 +3426,9 @@ export async function main(
         { args: { repository: "." }, options: { path: "services/api" } },
       ],
       hint:
-        "Save a draft for review:\n" +
+        "Review the diff and notes. Edit the draft, then copy only SECURITY.md to the Policy target shown.\n" +
+        "Your existing policy stays unchanged until you replace it.\n\n" +
+        "Save a draft without answering questions:\n" +
         "  codex-security policy . --headless --output-dir /path/outside/repository/policy --json",
       output: z
         .union([z.record(z.string(), z.unknown()), z.string()])
@@ -8251,6 +8257,7 @@ async function executeScan(
   let deepProgress: DeepScanProgress | null = null;
   let deepConsolidating = false;
   let runningCost: Readonly<ScanCost> | null = null;
+  let runningUsage: Readonly<ScanTokenUsage> | null = null;
   let maxCostUsd = arguments_.maxCostUsd;
   const showCost = arguments_.showCost === true || maxCostUsd !== undefined;
   let phase: string | null = null;
@@ -8483,9 +8490,13 @@ async function executeScan(
           `Files: ${fileProgress.filesCompleted.toLocaleString("en-US")}/${fileProgress.filesTotal.toLocaleString("en-US")}`,
         );
       }
-      if (runningCost !== null) {
-        details.push(`Tokens: ${formatScanCostTokens(runningCost)}`);
-        if (showCost) details.push(`Cost: ${formatScanCost(runningCost)}`);
+      const tokens =
+        runningCost !== null
+          ? formatScanCostTokens(runningCost)
+          : formatTokenUsage(runningUsage);
+      if (tokens !== null) details.push(`Tokens: ${tokens}`);
+      if (showCost && runningCost !== null) {
+        details.push(`Cost: ${formatScanCost(runningCost)}`);
       }
       return details.length === 0 ? stage : `${stage} | ${details.join(" | ")}`;
     };
@@ -8524,6 +8535,20 @@ async function executeScan(
       archiveExisting: arguments_.archiveExisting,
       parentScanId: arguments_.parentScanId,
       expectedPluginVersion: arguments_.expectedPluginVersion,
+      onUsage: async (usage) => {
+        runningUsage = usage;
+        if (dashboard !== null) {
+          dashboard.setUsage(usage);
+          return;
+        }
+        const priorCost = runningCost;
+        // The tracker queues usage before cost; let the paired cost update render once.
+        await Promise.resolve();
+        if (runningCost !== priorCost) return;
+        progress?.stopTimer();
+        progress?.stage(`Tokens: ${formatTokenUsage(usage)}.`);
+        progress?.startTimer(runningMessage());
+      },
       onCost: (cost, limit = maxCostUsd) => {
         if (limit !== maxCostUsd && limit !== undefined) {
           dashboard?.note(`Total cost limit increased to ${formatUsd(limit)}.`);
@@ -9703,9 +9728,14 @@ function componentScanEventLine(
     const progress = event.value;
     return `codex-security: ${componentName} ${scanPhase(progress.phase)} | Files: ${progress.filesCompleted.toLocaleString("en-US")}/${progress.filesTotal.toLocaleString("en-US")}\n`;
   }
-  if (event.type !== "cost") return null;
-  const cost = event.value;
-  return `codex-security: ${componentName} | Tokens: ${formatScanCostTokens(cost)}${showCost ? ` | Cost: ${formatScanCost(cost)}` : ""}\n`;
+  if (event.type === "usage") {
+    const tokens = formatTokenUsage(event.value);
+    return tokens === null
+      ? null
+      : `codex-security: ${componentName} | Tokens: ${tokens}\n`;
+  }
+  if (event.type !== "cost" || !showCost) return null;
+  return `codex-security: ${componentName} | Cost: ${formatScanCost(event.value)}\n`;
 }
 
 function protectedRootErrorMessage(
