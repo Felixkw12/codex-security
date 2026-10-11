@@ -7,7 +7,6 @@ import type {
   CodexWorkerResult,
 } from "../src/deep-scan/types.js";
 import type { resolveCodexPath as ResolveCodexPath } from "../src/deep-scan/executor.js";
-import type { bundledCodexSdkEnvironment as BundledEnvironment } from "../../../../sdk/typescript/src/codex-sdk-environment.js";
 
 export async function testPreflightBindsExecutableAndHomeBeforeChangingCwd({
   fakeCodexFixture,
@@ -29,7 +28,10 @@ export async function testPreflightBindsExecutableAndHomeBeforeChangingCwd({
     options?: Partial<CodexWorkerRequest>,
   ) => Promise<CodexWorkerResult>;
   resolveCodexPath: typeof ResolveCodexPath;
-  bundledCodexSdkEnvironment: typeof BundledEnvironment;
+  bundledCodexSdkEnvironment: (
+    command: string,
+    environment: Record<string, string>,
+  ) => Record<string, string>;
   assertWorkerProtocol: (
     invocation: Awaited<ReturnType<typeof readJson>>,
   ) => void;
