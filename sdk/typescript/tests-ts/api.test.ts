@@ -18,7 +18,7 @@ import * as fsPromises from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import * as childProcess from "node:child_process";
 import { hash } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, writeSync } from "node:fs";
 import { basename, delimiter, dirname, join, relative, win32 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
@@ -27,7 +27,14 @@ import {
   type ThreadEvent,
   type ThreadOptions,
 } from "@openai/codex-sdk";
-import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
+import {
+  afterEach,
+  describe,
+  expect,
+  mock,
+  spyOn,
+  test as nativeTest,
+} from "bun:test";
 import { parse as parseToml } from "smol-toml";
 import {
   AuthenticationRequiredError,
@@ -96,6 +103,52 @@ import { createProviderProfile } from "../src/provider-profile.js";
 import { pythonExecutable, nodeCommand, gitText } from "./support/shell.js";
 import { fail, rejecting, throwing } from "./support/errors.js";
 import { mockFs, restoreFs } from "./support/module-mocks.js";
+
+function traceApiTest(
+  register: typeof nativeTest,
+  table?: readonly unknown[],
+): typeof nativeTest {
+  return new Proxy(register, {
+    apply(target, receiver, argumentsList) {
+      const [name, callback] = argumentsList;
+      if (typeof callback === "function") {
+        // Bun requires a real callback function and uses its arity for done.
+        const traced = function (this: unknown, ...parameters: unknown[]) {
+          const rows = table?.flatMap((row, index) => {
+            const values = Array.isArray(row) ? row : [row];
+            return values.every((value, column) =>
+              Object.is(value, parameters[column]),
+            )
+              ? [index]
+              : [];
+          });
+          writeSync(
+            2,
+            `[api test] start: ${name}${rows === undefined ? "" : ` (each rows: ${rows.join(",")})`}\n`,
+          );
+          return Reflect.apply(callback, this, parameters);
+        };
+        Object.defineProperty(traced, "length", { value: callback.length });
+        Object.defineProperty(traced, "name", { value: callback.name });
+        argumentsList[1] = traced;
+      }
+      return Reflect.apply(target, receiver, argumentsList);
+    },
+    get(target, property) {
+      const value = Reflect.get(target, property);
+      if (property === "each" || property === "skipIf") {
+        return (...parameters: unknown[]) =>
+          traceApiTest(
+            Reflect.apply(value, target, parameters),
+            property === "each" ? (parameters[0] as readonly unknown[]) : table,
+          );
+      }
+      return value;
+    },
+  });
+}
+
+const test = traceApiTest(nativeTest);
 
 // Exact ASCII fixture for the pinned native 64 KiB persistence representation.
 const commandHead = "h".repeat(32_743);
