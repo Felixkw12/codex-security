@@ -5248,18 +5248,357 @@ describe("CodexSecurity orchestration", () => {
     }
   });
 
+  test.each(["command", "message"] as const)(
+    "restores the current live parent phase after polling observes workers (%s)",
+    async (kind) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const pollAllowed = Promise.withResolvers<void>();
+      const workerRead = Promise.withResolvers<void>();
+      let parentPath = "";
+      const originalReaddir = fsPromises.readdir;
+      const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
+        ...args: Parameters<typeof originalReaddir>
+      ) => {
+        if (String(args[0]) === join(codexHome, "sessions"))
+          await pollAllowed.promise;
+        const entries = await originalReaddir(...args);
+        if (String(args[0]) === dirname(parentPath))
+          return entries.toSorted(
+            (left, right) =>
+              Number(String(right.name) === basename(parentPath)) -
+              Number(String(left.name) === basename(parentPath)),
+          );
+        return entries;
+      }) as typeof originalReaddir);
+      const marker = (phase: ScanProgress["phase"]) =>
+        "CODEX_SECURITY_SCAN_PROGRESS " +
+        JSON.stringify({ phase, filesCompleted: 8, filesTotal: 8 });
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          parentPath = await writeUsageSession(codexHome, "thread-1", {});
+          const worker = await writeUsageSession(
+            codexHome,
+            "worker-thread",
+            {},
+            { parent: "thread-1" },
+          );
+          await appendFile(
+            worker,
+            JSON.stringify({
+              type: "response_item",
+              payload: {
+                type: "custom_tool_call_output",
+                output: marker("discovery"),
+              },
+            }) + "\n",
+          );
+          await appendFile(
+            parentPath,
+            JSON.stringify({
+              type: "event_msg",
+              payload: {
+                type: "item_completed",
+                item:
+                  kind === "command"
+                    ? {
+                        type: "CommandExecution",
+                        command: ["review-phase"],
+                        aggregated_output: marker("validation"),
+                      }
+                    : {
+                        type: "AgentMessage",
+                        content: [{ type: "Text", text: marker("validation") }],
+                      },
+              },
+            }) + "\n",
+          );
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            // Both sources are durable. Parent-first enumeration can lead live
+            // delivery even though the worker emitted its receipt earlier.
+            pollAllowed.resolve();
+            await workerRead.promise;
+            yield {
+              type: "item.completed",
+              item:
+                kind === "command"
+                  ? {
+                      id: "live-parent",
+                      type: "command_execution",
+                      command: "review-phase",
+                      aggregated_output: marker("validation"),
+                      status: "completed",
+                      exit_code: 0,
+                    }
+                  : {
+                      id: "live-parent",
+                      type: "agent_message",
+                      text: marker("validation"),
+                    },
+            };
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      try {
+        await client.run(repository, {
+          onProgress: (update) => {
+            updates.push(update);
+            if (update.filesCompleted === 8 && update.phase === "discovery")
+              workerRead.resolve();
+          },
+        });
+        expect(
+          updates
+            .filter((update) => update.filesCompleted === 8)
+            .map((update) => update.phase),
+        ).toEqual(["validation", "discovery", "validation"]);
+      } finally {
+        pollAllowed.resolve();
+        workerRead.resolve();
+        await client.close();
+        listing.mockRestore();
+      }
+    },
+  );
+
   test.each([
-    [false, 7, "validation", "attack_path", false],
-    [true, 7, "validation", "attack_path", false],
-    [false, 8, "validation", "attack_path", false],
-    [true, 8, "validation", "attack_path", false],
-    [false, 9, "validation", "attack_path", false],
-    [true, 9, "validation", "attack_path", false],
-    [false, 8, "attack_path", "discovery", false],
-    [false, 8, "validation", "attack_path", true],
+    [false, false, "paginated"],
+    [true, false, "paginated"],
+    [false, true, "paginated"],
+    [true, true, "paginated"],
+    [false, false, "legacy"],
+    [true, false, "legacy"],
+    [false, true, "legacy"],
+    [true, true, "legacy"],
   ] as const)(
-    "reconciles deferred parent receipts with newer worker phases (live first: %p, count: %p, parent: %s, worker: %s, later parent: %p)",
-    async (liveFirst, parentCount, parentPhase, workerPhase, laterParent) => {
+    "keeps inventory proof across a pending session close (split: %p, review already started: %p, mode: %s)",
+    async (split, reviewedEarlier, mode) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const workerRead = Promise.withResolvers<void>();
+      const workerAdmitted = Promise.withResolvers<void>();
+      const earlierReviewRead = Promise.withResolvers<void>();
+      const closeEntered = Promise.withResolvers<void>();
+      const closeReleased = Promise.withResolvers<void>();
+      let parentPath = "";
+      let pauseClose = false;
+      const originalOpen = fsPromises.open;
+      const opening = spyOn(fsPromises, "open").mockImplementation((async (
+        ...args: Parameters<typeof originalOpen>
+      ) => {
+        const handle = await originalOpen(...args);
+        if (String(args[0]) !== parentPath || !pauseClose) return handle;
+        // The read itself remains real. Delay only close after the snapshot EOF,
+        // so a later native completion can be durable before SDK delivery while
+        // still absent from this poll's already-read snapshot.
+        const close = handle.close.bind(handle);
+        handle.close = async () => {
+          if (pauseClose) {
+            pauseClose = false;
+            closeEntered.resolve();
+            await closeReleased.promise;
+          }
+          await close();
+        };
+        return handle;
+      }) as typeof originalOpen);
+      const marker = (
+        phase: ScanProgress["phase"],
+        count: number,
+        total: number,
+      ) =>
+        "CODEX_SECURITY_SCAN_PROGRESS " +
+        JSON.stringify({ phase, filesCompleted: count, filesTotal: total });
+      const native = (id: string, text: string) => {
+        if (mode === "legacy")
+          return (
+            JSON.stringify(
+              id.endsWith("inventory")
+                ? {
+                    type: "response_item",
+                    payload: {
+                      type: "custom_tool_call_output",
+                      call_id: id,
+                      output: text,
+                    },
+                  }
+                : {
+                    type: "event_msg",
+                    payload: { type: "agent_message", id, message: text },
+                  },
+            ) + "\n"
+          );
+        return (
+          JSON.stringify({
+            type: "event_msg",
+            payload: {
+              type: "item_completed",
+              item: {
+                type: "CommandExecution",
+                id,
+                command: [id],
+                aggregated_output: text,
+              },
+            },
+          }) + "\n"
+        );
+      };
+      const live = (id: string, text: string): ThreadEvent => ({
+        type: "item.completed",
+        item:
+          mode === "legacy" && !id.endsWith("inventory")
+            ? { type: "agent_message", id, text }
+            : {
+                type: "command_execution",
+                id,
+                command: id,
+                aggregated_output: text,
+                status: "completed",
+                exit_code: 0,
+              },
+      });
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          parentPath = await writeUsageSession(codexHome, "thread-1", {});
+          const worker = await writeUsageSession(
+            codexHome,
+            "worker-thread",
+            {},
+            { parent: "thread-1" },
+          );
+          await appendFile(
+            worker,
+            JSON.stringify({
+              type: "response_item",
+              payload: {
+                type: "custom_tool_call_output",
+                call_id: "worker-count",
+                output: marker("discovery", 1, 9),
+              },
+            }) + "\n",
+          );
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            await workerRead.promise;
+            const first = marker("discovery", 0, 9);
+            await appendFile(parentPath, native("first-inventory", first));
+            yield live("first-inventory", first);
+            await workerAdmitted.promise;
+            if (reviewedEarlier) {
+              const earlier = marker("validation", 3, 9);
+              await appendFile(parentPath, native("earlier-review", earlier));
+              yield live("earlier-review", earlier);
+              await earlierReviewRead.promise;
+            }
+            const inventory = marker("discovery", 0, 7);
+            await appendFile(
+              parentPath,
+              native("corrected-inventory", inventory),
+            );
+            if (split) {
+              pauseClose = true;
+              await closeEntered.promise;
+            }
+            const review = marker("validation", 7, reviewedEarlier ? 9 : 7);
+            // Both records are persisted before their corresponding live items.
+            await appendFile(parentPath, native("final-review", review));
+            yield live("corrected-inventory", inventory);
+            yield live("final-review", review);
+            closeReleased.resolve();
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      try {
+        await client.run(repository, {
+          onProgress: (update) => {
+            updates.push(update);
+            if (update.filesCompleted === 1 && update.filesTotal === 9)
+              workerAdmitted.resolve();
+          },
+          onSessionEvent: ({ event }) => {
+            const payload = event["payload"] as {
+              call_id?: string;
+              id?: string;
+              item?: { id?: string };
+            };
+            if (payload?.call_id === "worker-count") workerRead.resolve();
+            if ((payload?.item?.id ?? payload?.id) === "earlier-review")
+              earlierReviewRead.resolve();
+          },
+        });
+        expect(updates.at(-1)).toEqual({
+          phase: "validation",
+          filesCompleted: 7,
+          filesTotal: reviewedEarlier ? 9 : 7,
+        });
+        if (reviewedEarlier)
+          expect(
+            updates.every(
+              (update) =>
+                update.filesTotal === 9 || update.filesCompleted === 0,
+            ),
+          ).toBe(true);
+      } finally {
+        pauseClose = false;
+        workerRead.resolve();
+        workerAdmitted.resolve();
+        earlierReviewRead.resolve();
+        closeEntered.resolve();
+        closeReleased.resolve();
+        await client.close();
+        opening.mockRestore();
+      }
+    },
+  );
+
+  test.each([
+    [false, 7, "validation", "attack_path", false, "worker"],
+    [true, 7, "validation", "attack_path", false, "worker"],
+    [false, 8, "validation", "attack_path", false, "worker"],
+    [true, 8, "validation", "attack_path", false, "worker"],
+    [false, 9, "validation", "attack_path", false, "worker"],
+    [true, 9, "validation", "attack_path", false, "worker"],
+    [false, 8, "attack_path", "discovery", false, "worker"],
+    [false, 8, "validation", "attack_path", true, "worker"],
+    [false, 7, "validation", "attack_path", false, "parent"],
+    [true, 7, "validation", "attack_path", false, "parent"],
+    [false, 8, "validation", "attack_path", false, "parent"],
+    [true, 8, "validation", "attack_path", false, "parent"],
+    [false, 9, "validation", "attack_path", false, "parent"],
+    [true, 9, "validation", "attack_path", false, "parent"],
+    [false, 8, "attack_path", "discovery", false, "parent"],
+    [false, 8, "validation", "attack_path", true, "parent"],
+  ] as const)(
+    "reconciles deferred parent receipts with newer phases (live first: %p, count: %p, parent: %s, newer: %s, later parent: %p, source: %s)",
+    async (
+      liveFirst,
+      parentCount,
+      parentPhase,
+      workerPhase,
+      laterParent,
+      newerSource,
+    ) => {
       const { root, repository, codexHome, scanDir } = await scanDirectories();
       const updates: ScanProgress[] = [];
       const pollAllowed = Promise.withResolvers<void>();
@@ -5340,19 +5679,63 @@ describe("CodexSecurity orchestration", () => {
           async function* events(): AsyncGenerator<ThreadEvent> {
             if (liveFirst) yield inventory;
             await parentRead.promise;
-            const worker = await writeUsageSession(
-              codexHome,
-              "worker-thread",
-              {},
-              { parent: "thread-1" },
-            );
-            await appendFile(
-              worker,
-              JSON.stringify(receipt("worker-reviewed", workerPhase, 8, 8)) +
-                "\n",
-            );
+            const parts = ["Review progress: ", marker(workerPhase, 8, 8)];
+            if (newerSource === "worker") {
+              const worker = await writeUsageSession(
+                codexHome,
+                "worker-thread",
+                {},
+                { parent: "thread-1" },
+              );
+              await appendFile(
+                worker,
+                JSON.stringify(receipt("worker-reviewed", workerPhase, 8, 8)) +
+                  "\n",
+              );
+            } else {
+              // Paginated persistence finalizes native text without separators,
+              // while the original response retains independently parsed parts.
+              await appendFile(
+                parent,
+                [
+                  {
+                    type: "event_msg",
+                    payload: {
+                      type: "item_completed",
+                      item: {
+                        type: "AgentMessage",
+                        content: [{ type: "Text", text: parts.join("") }],
+                      },
+                    },
+                  },
+                  {
+                    type: "response_item",
+                    payload: {
+                      type: "message",
+                      role: "assistant",
+                      id: "worker-reviewed",
+                      content: parts.map((text) => ({
+                        type: "output_text",
+                        text,
+                      })),
+                    },
+                  },
+                ]
+                  .map((row) => JSON.stringify(row))
+                  .join("\n") + "\n",
+              );
+            }
             await workerRead.promise;
             if (!liveFirst) yield inventory;
+            if (newerSource === "parent")
+              yield {
+                type: "item.completed",
+                item: {
+                  type: "agent_message",
+                  id: "newer-message",
+                  text: parts.join(""),
+                },
+              };
             if (laterParent)
               await appendFile(
                 parent,
@@ -5372,7 +5755,11 @@ describe("CodexSecurity orchestration", () => {
               pollAllowed.resolve();
           },
           onSessionEvent: ({ event }) => {
-            const id = (event["payload"] as { call_id?: string })?.call_id;
+            const payload = event["payload"] as {
+              call_id?: string;
+              id?: string;
+            };
+            const id = payload?.call_id ?? payload?.id;
             if (id === "parent-reviewed") parentRead.resolve();
             if (id === "worker-reviewed") workerRead.resolve();
           },

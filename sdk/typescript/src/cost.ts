@@ -302,7 +302,13 @@ export class ScanCostTracker {
     if (live.position !== null) this.#readyParentMarkers.push({ live, marker });
     return (
       live.position === null ||
-      this.#afterParentFrontier(live.position, live.observedMarkerIndex)
+      this.#afterParentFrontier(live.position, live.observedMarkerIndex) ||
+      // Polling can admit this parent completion before stdout delivers it,
+      // then display a worker receipt. Its current live copy still restores the
+      // parent phase; older parent completions and earlier markers stay stale.
+      (this.#displayedProgress?.owner === "worker" &&
+        live.position === this.#parentFrontier.position &&
+        live.observedMarkerIndex === this.#parentFrontier.markerIndex)
     );
   }
 
@@ -359,6 +365,15 @@ export class ScanCostTracker {
       this.#parentReviewStart = { position, markerIndex };
   }
 
+  #precedesParentReview(position: number, markerIndex: number): boolean {
+    const first = this.#parentReviewStart;
+    return (
+      first !== null &&
+      (position < first.position ||
+        (position === first.position && markerIndex < first.markerIndex))
+    );
+  }
+
   #afterParentFrontier(position: number, index: number): boolean {
     return (
       position > this.#parentFrontier.position ||
@@ -408,12 +423,21 @@ export class ScanCostTracker {
       const progress = marker.progress;
       if (
         marker === this.#parentInventory &&
+        !marker.accepted &&
+        (this.#parentProgress?.filesCompleted ?? 0) > 0 &&
+        this.#parentReviewStart === null
+      ) {
+        // A read can reach EOF before the next completion is appended, then
+        // receive both live items while file.close is pending. Keep the compact
+        // inventory proof until the admitted review's source position resolves.
+        this.#readyParentMarkers.push({ live, marker });
+        continue;
+      }
+      if (
+        marker === this.#parentInventory &&
         (marker.accepted ||
           (this.#parentProgress?.filesCompleted ?? 0) === 0 ||
-          (this.#parentReviewStart !== null &&
-            (position < this.#parentReviewStart.position ||
-              (position === this.#parentReviewStart.position &&
-                marker.index < this.#parentReviewStart.markerIndex)))) &&
+          this.#precedesParentReview(position, marker.index)) &&
         progress.phase === "discovery" &&
         progress.filesCompleted === 0 &&
         (position > this.#inventoryFrontier.position ||
@@ -783,8 +807,52 @@ export class ScanCostTracker {
     if (this.#options.onProgress === undefined || session.threadId === null) {
       return;
     }
+    if (parent) {
+      // Legacy message projections lack native completion metadata, but still
+      // locate an already-admitted live review in the saved source. Establish
+      // that boundary before discarding duplicate observer notifications.
+      for (const saved of session.progress)
+        if (
+          !saved.receipt &&
+          this.#liveParentProgress.has(progressKey(saved.update))
+        )
+          this.#recordParentReview(
+            saved.update,
+            saved.position,
+            saved.markerIndex,
+          );
+    }
     for (const saved of session.progress.splice(0)) {
-      if (parent && !this.#savedParentProgressIsCurrent(saved)) continue;
+      const progress = saved.update;
+      const inventoryMarker =
+        parent &&
+        progress.phase === "discovery" &&
+        progress.filesCompleted === 0;
+      const newerInventory =
+        saved.position > this.#inventoryFrontier.position ||
+        (saved.position === this.#inventoryFrontier.position &&
+          saved.markerIndex > this.#inventoryFrontier.markerIndex);
+      const provenInventory =
+        inventoryMarker &&
+        newerInventory &&
+        this.#precedesParentReview(saved.position, saved.markerIndex);
+      if (
+        parent &&
+        !provenInventory &&
+        !this.#savedParentProgressIsCurrent(saved)
+      )
+        continue;
+      if (
+        inventoryMarker &&
+        newerInventory &&
+        (this.#parentProgress?.filesCompleted ?? 0) > 0 &&
+        this.#parentReviewStart === null
+      ) {
+        // Legacy logs can expose the same EOF/close race through a tool receipt
+        // before the admitted review's persisted message becomes observable.
+        session.progress.push(saved);
+        continue;
+      }
       if (saved.duplicate) {
         if (parent && saved.completion)
           this.#parentFrontier = {
@@ -793,19 +861,16 @@ export class ScanCostTracker {
           };
         continue;
       }
-      const progress = saved.update;
       const expectedFilesTotal = this.#expectedFilesTotal;
       const parentInventory =
-        parent &&
-        progress.phase === "discovery" &&
-        (this.#parentProgress?.filesCompleted ?? 0) === 0 &&
-        progress.filesCompleted === 0;
+        inventoryMarker &&
+        ((this.#parentProgress?.filesCompleted ?? 0) === 0 || provenInventory);
       const order = (saved.order ??= ++this.#progressOrder);
       if (
         (!parent &&
           session.filesTotal !== null &&
           progress.filesTotal !== session.filesTotal) ||
-        progress.filesCompleted < session.filesCompleted
+        (!parentInventory && progress.filesCompleted < session.filesCompleted)
       )
         continue;
       if (
@@ -842,13 +907,16 @@ export class ScanCostTracker {
       if (parentInventory && this.#highestFilesCompleted > 0) {
         // Resumed workers may be enumerated before the parent's inventory.
         // Admit the scope independently while preserving eligible worker counts.
-        this.#parentProgress = progress;
+        if ((this.#parentProgress?.filesCompleted ?? 0) === 0)
+          this.#parentProgress = progress;
         if (saved.completion || saved.receipt) {
-          this.#parentFrontier = {
+          const position = {
             position: saved.position,
             markerIndex: saved.markerIndex,
           };
-          this.#inventoryFrontier = { ...this.#parentFrontier };
+          if (this.#afterParentFrontier(saved.position, saved.markerIndex))
+            this.#parentFrontier = position;
+          this.#inventoryFrontier = position;
         }
         this.setExpectedFilesTotal(progress.filesTotal);
         this.#reconcileParentProgress();
@@ -867,29 +935,32 @@ export class ScanCostTracker {
               .reduce((total, reviewed) => total + reviewed, 0),
           );
       if (filesCompleted < this.#highestFilesCompleted) continue;
-      if (parent) {
-        this.#parentProgress = progress;
+      if (parent)
         this.#recordParentReview(progress, saved.position, saved.markerIndex);
-      }
       // A parked receipt keeps its original observation order. Admitting its
-      // equal coverage must not replay its older phase over a newer worker update.
+      // equal coverage must not replay its older phase over a newer update.
       const displayed = this.#displayedProgress;
-      const newerWorker =
+      const newerProgress =
         parent &&
-        displayed?.owner === "worker" &&
+        displayed !== null &&
         filesCompleted === displayed.update.filesCompleted &&
         order < displayed.order
           ? displayed
           : null;
       const update = {
         ...progress,
-        phase: newerWorker?.update.phase ?? progress.phase,
+        phase: newerProgress?.update.phase ?? progress.phase,
         filesCompleted,
         filesTotal: parent
           ? progress.filesTotal
           : (expectedFilesTotal ??
             Math.max(progress.filesTotal, filesCompleted)),
       };
+      if (parent)
+        this.#parentProgress =
+          newerProgress !== null && newerProgress.owner !== "worker"
+            ? { ...progress, phase: update.phase }
+            : progress;
       const key = `${update.phase}:${update.filesCompleted}:${update.filesTotal}`;
       if (parent && (saved.completion || saved.receipt)) {
         this.#parentFrontier = {
@@ -903,8 +974,8 @@ export class ScanCostTracker {
       this.#lastProgress = key;
       this.#highestFilesCompleted = update.filesCompleted;
       this.#displayedProgress =
-        newerWorker !== null
-          ? { ...newerWorker, update }
+        newerProgress !== null
+          ? { ...newerProgress, update }
           : {
               update,
               owner: parent ? "parent" : "worker",
