@@ -29,6 +29,7 @@ const root = await realpath(
   await mkdtemp(join(tmpdir(), "package deep % fixture-")),
 );
 const installedPlugin = join(installedRoot, "_bundled_plugin");
+let restoreSpawn;
 try {
   const detachedPlugin = join(root, "standalone plugin %", "codex-security");
   await cp(installedPlugin, detachedPlugin, { recursive: true });
@@ -59,12 +60,28 @@ try {
       ? "package-codex.exe"
       : "package-deep-codex.mjs",
   );
-  if (process.platform === "win32")
+  if (process.platform === "win32") {
     await copyFile(process.execPath, executable);
+    const { installFixtureSpawn } = await import(
+      pathToFileURL(join(root, "package-deep-spawn.mjs")).href
+    );
+    restoreSpawn = installFixtureSpawn(executable);
+  }
   await chmod(executable, 0o700);
 
-  await runInstalledSdk(installedPlugin, executable);
-  await runDetachedPlugin(detachedPlugin, executable);
+  const checks = await Promise.allSettled([
+    runInstalledSdk(installedPlugin, executable).then(() =>
+      console.log("Validated installed SDK direct Deep Scan and worker retry."),
+    ),
+    runDetachedPlugin(detachedPlugin, executable).then(() =>
+      console.log("Validated detached plugin restart and finalization."),
+    ),
+  ]);
+  const failures = checks.flatMap((check) =>
+    check.status === "rejected" ? [check.reason] : [],
+  );
+  if (failures.length > 0)
+    throw new AggregateError(failures, "Deep Scan package checks failed.");
   console.log(
     "Validated installed SDK and detached plugin: real Deep processes, bound artifact tools, checkpoints, reducer acceptance, restart before finalization, and sealed results.",
   );
@@ -78,6 +95,7 @@ try {
   }
   throw error;
 } finally {
+  restoreSpawn?.();
   await rm(root, {
     recursive: true,
     force: true,
@@ -386,43 +404,16 @@ async function runInstalledSdk(pluginRoot, executable) {
           version: manifest.version,
         },
       }),
-      // Replace only the parent model's tool choice. The installed SDK registers
-      // and finalizes the scan; the packaged MCP runs the real Deep lifecycle.
-      createCodex({ env, apiKey }) {
+      // The installed SDK runs the direct engine without a parent model turn.
+      createCodex() {
         return {
           startThread() {
             return {
               id: owner,
               async runStreamed() {
-                return {
-                  events: (async function* () {
-                    yield { type: "thread.started", thread_id: owner };
-                    scanId = env.CODEX_SECURITY_SCAN_ID;
-                    // The pinned SDK maps its apiKey option to this child variable.
-                    const rpc = await server(f, {
-                      ...env,
-                      ...(apiKey ? { CODEX_API_KEY: apiKey } : {}),
-                    });
-                    try {
-                      const result = await rpc.call(
-                        "start_codex_security_deep_scan",
-                        { scanId },
-                        metadata(f, owner),
-                      );
-                      await assertDraft(result.manifestPath);
-                    } finally {
-                      await rpc.close();
-                    }
-                    yield {
-                      type: "turn.completed",
-                      usage: {
-                        input_tokens: 1,
-                        cached_input_tokens: 0,
-                        output_tokens: 1,
-                      },
-                    };
-                  })(),
-                };
+                assert.fail(
+                  "The direct engine must not start a parent model turn.",
+                );
               },
             };
           },
@@ -439,6 +430,9 @@ async function runInstalledSdk(pluginRoot, executable) {
       maxDiscoveryRuns: 2,
       stopAfterNoNew: 1,
       outputDir: join(f.directory, "output"),
+      onScanRegistered(scan) {
+        scanId = scan.scanId;
+      },
     });
     assert.equal(result.threadId, owner);
     assert.equal(result.manifest.scan.status, "completed");
@@ -452,7 +446,7 @@ async function runInstalledSdk(pluginRoot, executable) {
   } finally {
     await client.close();
   }
-  await assertExecutions(f, scanId, 4);
+  await assertExecutions(f, scanId, 5);
 }
 
 async function assertDraft(path) {
