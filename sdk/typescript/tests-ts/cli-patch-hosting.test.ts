@@ -150,7 +150,7 @@ describe("patch change tracking", () => {
   );
 
   test.each([false, true])(
-    "preserves remote proxy settings with collision=%s",
+    "preserves remote proxy settings with collision=%j",
     async (collision) => {
       const { directory, git, remote } = await publicationRepository();
       const secondary = await fixtures.create("patch-proxy-secondary-");
