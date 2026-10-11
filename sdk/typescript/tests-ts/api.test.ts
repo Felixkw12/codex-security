@@ -93,7 +93,12 @@ import {
 } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
-import { writeSession as writeUsageSession } from "./support/usage-rollout.js";
+import {
+  progressMarker,
+  nativeCommand,
+  completedCommand,
+  writeSession as writeUsageSession,
+} from "./support/usage-rollout.js";
 import { importScan } from "../src/import-scan.js";
 import { FindingWorkflow } from "../src/finding-workflow.js";
 import { restoreScanKnowledge, scanInputIdentity } from "../src/scan-inputs.js";
@@ -3950,20 +3955,14 @@ describe("CodexSecurity orchestration", () => {
                   );
                 });
                 if (itemType === "command_execution") {
-                  yield {
-                    type: "item.completed",
-                    item: {
-                      id: "inventory-command",
-                      type: "command_execution",
-                      command: "review the files in the inventory",
-                      aggregated_output: [
-                        'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":5000}',
-                        ...texts,
-                      ].join("\n"),
-                      exit_code: 0,
-                      status: "completed",
-                    },
-                  };
+                  yield completedCommand(
+                    "review the files in the inventory",
+                    [
+                      'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":5000}',
+                      ...texts,
+                    ].join("\n"),
+                    "inventory-command",
+                  );
                 } else {
                   for (const [index, text] of texts.entries()) {
                     yield {
@@ -4025,24 +4024,15 @@ describe("CodexSecurity orchestration", () => {
           }),
           writeUsageSession(codexHome, "unrelated-thread", usage),
         ]);
-        const marker = (
-          phase: ScanProgress["phase"],
-          filesCompleted: number,
-          filesTotal: number,
-        ): string =>
-          `CODEX_SECURITY_SCAN_PROGRESS ${JSON.stringify({
-            phase,
-            filesCompleted,
-            filesTotal,
-          })}`;
+
         for (const [threadId, text] of [
-          ["worker-thread", marker("discovery", 3, 1_249)],
-          ["worker-thread", marker("discovery", 2, 2)],
-          ["worker-thread", marker("discovery", 7, 1_259)],
-          ["unrelated-thread", marker("discovery", 7, 1_258)],
-          ["worker-thread", marker("discovery", 1_250, 1_249)],
-          ["worker-thread", marker("discovery", 1_249, 1_249)],
-          ["worker-thread", marker("validation", 1_249, 1_249)],
+          ["worker-thread", progressMarker("discovery", 3, 1_249)],
+          ["worker-thread", progressMarker("discovery", 2, 2)],
+          ["worker-thread", progressMarker("discovery", 7, 1_259)],
+          ["unrelated-thread", progressMarker("discovery", 7, 1_258)],
+          ["worker-thread", progressMarker("discovery", 1_250, 1_249)],
+          ["worker-thread", progressMarker("discovery", 1_249, 1_249)],
+          ["worker-thread", progressMarker("validation", 1_249, 1_249)],
         ] as const) {
           await appendFile(
             join(
@@ -4400,39 +4390,15 @@ describe("CodexSecurity orchestration", () => {
         };
         return file;
       }) as typeof originalOpen);
-      const marker = (
-        phase: ScanProgress["phase"],
-        count: number,
-        total: number,
-      ) =>
-        "CODEX_SECURITY_SCAN_PROGRESS " +
-        JSON.stringify({ phase, filesCompleted: count, filesTotal: total });
+
       const custom = (id: string, text: string) => ({
         type: "response_item",
         payload: { type: "custom_tool_call_output", call_id: id, output: text },
       });
-      const native = (command: string, output: string) => ({
-        type: "event_msg",
-        payload: {
-          type: "item_completed",
-          item: {
-            type: "CommandExecution",
-            command: [command],
-            aggregated_output: output,
-          },
-        },
-      });
-      const live = (command: string, output: string): ThreadEvent => ({
-        type: "item.completed",
-        item: {
-          type: "command_execution",
-          id: command,
-          command,
-          aggregated_output: output,
-          status: "completed",
-          exit_code: 0,
-        },
-      });
+      const native = (command: string, output: string) =>
+        nativeCommand(command, output);
+      const live = (command: string, output: string): ThreadEvent =>
+        completedCommand(command, output);
       const append = async (file: string, rows: readonly unknown[]) => {
         await appendFile(
           file,
@@ -4446,7 +4412,9 @@ describe("CodexSecurity orchestration", () => {
           {},
           { parent: "thread-1" },
         );
-        await append(file, [custom(id, marker(workerPhase, count, total))]);
+        await append(file, [
+          custom(id, progressMarker(workerPhase, count, total)),
+        ]);
         await wait(id).promise;
       };
       const client = TestClient.withDependencies({
@@ -4475,8 +4443,8 @@ describe("CodexSecurity orchestration", () => {
             if (family === "accepted-eligibility") {
               await worker("first", 4, 4);
               const prefix = [
-                native("inventory", marker("discovery", 0, 5)),
-                native("eligible", marker(parentPhase, 4, 5)),
+                native("inventory", progressMarker("discovery", 0, 5)),
+                native("eligible", progressMarker(parentPhase, 4, 5)),
               ];
               if (early) {
                 await append(path, prefix);
@@ -4485,19 +4453,19 @@ describe("CodexSecurity orchestration", () => {
               // Native can deliver events after a persistence error, then retry
               // buffered writes. Recover a prefix before the next live receipt
               // gains saved provenance. Later retries must also remain eligible.
-              yield live("eligible", marker(parentPhase, 4, 5));
-              yield live("ineligible", marker(workerPhase, 4, 7));
-              yield live("last-parent", marker(parentPhase, 8, 8));
+              yield live("eligible", progressMarker(parentPhase, 4, 5));
+              yield live("ineligible", progressMarker(workerPhase, 4, 7));
+              yield live("last-parent", progressMarker(parentPhase, 8, 8));
               if (!early) {
                 await append(path, prefix);
                 await wait("eligible").promise;
               }
               await append(path, [
-                native("ineligible", marker(workerPhase, 4, 7)),
+                native("ineligible", progressMarker(workerPhase, 4, 7)),
               ]);
               await wait("ineligible").promise;
               await append(path, [
-                native("last-parent", marker(parentPhase, 8, 8)),
+                native("last-parent", progressMarker(parentPhase, 8, 8)),
               ]);
               await wait("last-parent").promise;
             } else if (family === "parent-only") {
@@ -4506,13 +4474,13 @@ describe("CodexSecurity orchestration", () => {
               pause = !early;
               if (!early) await closeEntered.promise;
               await append(path, [
-                native("inventory", marker("discovery", 0, 8)),
-                native("eligible", marker(parentPhase, 4, 8)),
-                native("last-parent", marker(workerPhase, 6, 9)),
+                native("inventory", progressMarker("discovery", 0, 8)),
+                native("eligible", progressMarker(parentPhase, 4, 8)),
+                native("last-parent", progressMarker(workerPhase, 6, 9)),
               ]);
               if (early) await wait("last-parent").promise;
-              yield live("eligible", marker(parentPhase, 4, 8));
-              yield live("last-parent", marker(workerPhase, 6, 9));
+              yield live("eligible", progressMarker(parentPhase, 4, 8));
+              yield live("last-parent", progressMarker(workerPhase, 6, 9));
               release.resolve();
               await wait("last-parent").promise;
             } else if (family === "fresh-batch") {
@@ -4521,14 +4489,14 @@ describe("CodexSecurity orchestration", () => {
               pause = !early;
               if (!early) await closeEntered.promise;
               await append(path, [
-                custom("inventory6", marker("discovery", 0, 6)),
-                custom("eligible", marker(parentPhase, 3, 6)),
+                custom("inventory6", progressMarker("discovery", 0, 6)),
+                custom("eligible", progressMarker(parentPhase, 3, 6)),
               ]);
               if (early) await wait("eligible").promise;
               await append(path, [
-                native("last-parent", marker(workerPhase, 4, 8)),
+                native("last-parent", progressMarker(workerPhase, 4, 8)),
               ]);
-              yield live("last-parent", marker(workerPhase, 4, 8));
+              yield live("last-parent", progressMarker(workerPhase, 4, 8));
               release.resolve();
               await wait("last-parent").promise;
             } else if (family === "admitted") {
@@ -4536,28 +4504,28 @@ describe("CodexSecurity orchestration", () => {
               if (early) {
                 yield live(
                   "inventory",
-                  commandOutput(marker("discovery", 0, 6)),
+                  commandOutput(progressMarker("discovery", 0, 6)),
                 );
                 await wait("scope6").promise;
               }
               await worker("first", 3, 3);
               await append(path, [
-                custom("eligible", marker(parentPhase, 3, 6)),
+                custom("eligible", progressMarker(parentPhase, 3, 6)),
               ]);
               await wait("eligible").promise;
               await append(path, [
-                custom("oversized", marker(parentPhase, 4, 8)),
+                custom("oversized", progressMarker(parentPhase, 4, 8)),
               ]);
               await wait("oversized").promise;
               if (!early)
                 yield live(
                   "inventory",
-                  commandOutput(marker("discovery", 0, 6)),
+                  commandOutput(progressMarker("discovery", 0, 6)),
                 );
             } else if (family === "selected-live") {
               const inventories = [
-                custom("inventory8", marker("discovery", 0, 8)),
-                custom("inventory6", marker("discovery", 0, 6)),
+                custom("inventory8", progressMarker("discovery", 0, 8)),
+                custom("inventory6", progressMarker("discovery", 0, 6)),
               ];
               if (early) {
                 await append(path, inventories);
@@ -4574,18 +4542,18 @@ describe("CodexSecurity orchestration", () => {
               ]);
               yield live(
                 "first-parent",
-                commandOutput(marker(workerPhase, 3, 8)),
+                commandOutput(progressMarker(workerPhase, 3, 8)),
               );
               yield live(
                 "last-parent",
-                commandOutput(marker(parentPhase, 3, 6)),
+                commandOutput(progressMarker(parentPhase, 3, 6)),
               );
               release.resolve();
               await wait("last-parent").promise;
             } else {
               if (early) {
                 await append(path, [
-                  custom("inventory6", marker("discovery", 0, 6)),
+                  custom("inventory6", progressMarker("discovery", 0, 6)),
                 ]);
                 await wait("scope6").promise;
               }
@@ -4594,17 +4562,17 @@ describe("CodexSecurity orchestration", () => {
               await append(path, [
                 ...(early
                   ? []
-                  : [custom("inventory6", marker("discovery", 0, 6))]),
-                custom("eligible", marker(parentPhase, 3, 6)),
+                  : [custom("inventory6", progressMarker("discovery", 0, 6))]),
+                custom("eligible", progressMarker(parentPhase, 3, 6)),
               ]);
               if (!early) {
                 pause = true;
                 await closeEntered.promise;
               } else await wait("eligible").promise;
               await append(path, [
-                native("last-parent", marker(parentPhase, 4, 8)),
+                native("last-parent", progressMarker(parentPhase, 4, 8)),
               ]);
-              yield live("last-parent", marker(parentPhase, 4, 8));
+              yield live("last-parent", progressMarker(parentPhase, 4, 8));
               release.resolve();
               await wait("last-parent").promise;
             }
@@ -4858,13 +4826,7 @@ describe("CodexSecurity orchestration", () => {
           await pollAllowed.promise;
         return originalReaddir(...args);
       }) as typeof originalReaddir);
-      const marker = (
-        phase: ScanProgress["phase"],
-        completed: number,
-        total: number,
-      ) =>
-        "CODEX_SECURITY_SCAN_PROGRESS " +
-        JSON.stringify({ phase, filesCompleted: completed, filesTotal: total });
+
       const receipt = (id: string, text: string) => ({
         type: "response_item",
         payload: {
@@ -4874,29 +4836,8 @@ describe("CodexSecurity orchestration", () => {
         },
       });
       const command = (id: string, text: string, truncate = false) => ({
-        saved: {
-          type: "event_msg",
-          payload: {
-            type: "item_completed",
-            item: {
-              type: "CommandExecution",
-              id,
-              command: [id],
-              aggregated_output: truncate ? persistedCommandOutput : text,
-            },
-          },
-        },
-        live: {
-          type: "item.completed",
-          item: {
-            type: "command_execution",
-            id,
-            command: id,
-            aggregated_output: text,
-            status: "completed",
-            exit_code: 0,
-          },
-        } as ThreadEvent,
+        saved: nativeCommand(id, truncate ? persistedCommandOutput : text, id),
+        live: completedCommand(id, text) as ThreadEvent,
       });
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
@@ -4925,7 +4866,7 @@ describe("CodexSecurity orchestration", () => {
                 JSON.stringify(
                   receipt(
                     "worker-reviewed",
-                    marker("discovery", workerCount, workerCount),
+                    progressMarker("discovery", workerCount, workerCount),
                   ),
                 ) + "\n",
               );
@@ -4937,24 +4878,27 @@ describe("CodexSecurity orchestration", () => {
                 ? [
                     command(
                       "inventory",
-                      commandOutput(marker("discovery", 0, 9)),
+                      commandOutput(progressMarker("discovery", 0, 9)),
                       true,
                     ),
                     command(
                       "review",
-                      commandOutput(marker("validation", count, 9)),
+                      commandOutput(progressMarker("validation", count, 9)),
                       true,
                     ),
-                    command("parent-boundary", marker("discovery", 8, 8)),
+                    command(
+                      "parent-boundary",
+                      progressMarker("discovery", 8, 8),
+                    ),
                   ]
                 : [
                     command(
                       "parent-boundary",
                       scenario === "below worker"
                         ? truncated
-                          ? commandOutput(marker("validation", 3, 7))
-                          : marker("validation", 3, 7)
-                        : marker("validation", 5, 8),
+                          ? commandOutput(progressMarker("validation", 3, 7))
+                          : progressMarker("validation", 3, 7)
+                        : progressMarker("validation", 5, 8),
                       truncated,
                     ),
                   ];
@@ -4962,9 +4906,14 @@ describe("CodexSecurity orchestration", () => {
               scenario === "across frontier"
                 ? []
                 : [
-                    receipt("old-inventory", marker("discovery", 0, 7)),
+                    receipt("old-inventory", progressMarker("discovery", 0, 7)),
                     ...(scenario === "inventory phase"
-                      ? [receipt("new-inventory", marker("discovery", 0, 8))]
+                      ? [
+                          receipt(
+                            "new-inventory",
+                            progressMarker("discovery", 0, 8),
+                          ),
+                        ]
                       : []),
                   ];
             // All canonical records precede every corresponding SDK item. Only
@@ -4981,7 +4930,7 @@ describe("CodexSecurity orchestration", () => {
             await parentRead.promise;
             if (!early) for (const item of commands) yield item.live;
             if (scenario === "inventory phase") {
-              const next = command("next", marker("reporting", 6, 8));
+              const next = command("next", progressMarker("reporting", 6, 8));
               await appendFile(parent, JSON.stringify(next.saved) + "\n");
               yield next.live;
             }
@@ -5075,13 +5024,7 @@ describe("CodexSecurity orchestration", () => {
           await pollAllowed.promise;
         return originalReaddir(...args);
       }) as typeof originalReaddir);
-      const marker = (
-        phase: ScanProgress["phase"],
-        count: number,
-        total: number,
-      ) =>
-        "CODEX_SECURITY_SCAN_PROGRESS " +
-        JSON.stringify({ phase, filesCompleted: count, filesTotal: total });
+
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: async (
@@ -5110,36 +5053,17 @@ describe("CodexSecurity orchestration", () => {
             truncate = false,
           ): Promise<ThreadEvent> => {
             const text = truncate
-              ? commandOutput(marker(phase, count, total))
-              : marker(phase, count, total);
+              ? commandOutput(progressMarker(phase, count, total))
+              : progressMarker(phase, count, total);
             // Every native record is durable before its corresponding SDK item;
             // neither the old nor the new live inventory occurrence is omitted.
             await appendFile(
               parent,
-              JSON.stringify({
-                type: "event_msg",
-                payload: {
-                  type: "item_completed",
-                  item: {
-                    type: "CommandExecution",
-                    id,
-                    command: [id],
-                    aggregated_output: truncate ? persistedCommandOutput : text,
-                  },
-                },
-              }) + "\n",
+              JSON.stringify(
+                nativeCommand(id, truncate ? persistedCommandOutput : text, id),
+              ) + "\n",
             );
-            return {
-              type: "item.completed",
-              item: {
-                type: "command_execution",
-                id,
-                command: id,
-                aggregated_output: text,
-                status: "completed",
-                exit_code: 0,
-              },
-            };
+            return completedCommand(id, text);
           };
           async function* events(): AsyncGenerator<ThreadEvent> {
             await appendFile(
@@ -5149,7 +5073,11 @@ describe("CodexSecurity orchestration", () => {
                 payload: {
                   type: "custom_tool_call_output",
                   call_id: "worker-reviewed",
-                  output: marker("validation", workerCount, workerCount),
+                  output: progressMarker(
+                    "validation",
+                    workerCount,
+                    workerCount,
+                  ),
                 },
               }) + "\n",
             );
@@ -5211,13 +5139,7 @@ describe("CodexSecurity orchestration", () => {
       const updates: ScanProgress[] = [];
       const workerRead = Promise.withResolvers<void>();
       const parentRead = Promise.withResolvers<void>();
-      const marker = (
-        phase: ScanProgress["phase"],
-        count: number,
-        total: number,
-      ) =>
-        "CODEX_SECURITY_SCAN_PROGRESS " +
-        JSON.stringify({ phase, filesCompleted: count, filesTotal: total });
+
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: async (
@@ -5235,17 +5157,8 @@ describe("CodexSecurity orchestration", () => {
           // until after the provisional worker and lower parent count are polled.
           await appendFile(
             parent,
-            JSON.stringify({
-              type: "event_msg",
-              payload: {
-                type: "item_completed",
-                item: {
-                  type: "CommandExecution",
-                  command: ["inventory"],
-                  aggregated_output: persistedCommandOutput,
-                },
-              },
-            }) + "\n",
+            JSON.stringify(nativeCommand("inventory", persistedCommandOutput)) +
+              "\n",
           );
           const worker = await writeUsageSession(
             codexHome,
@@ -5262,7 +5175,7 @@ describe("CodexSecurity orchestration", () => {
                 payload: {
                   type: "custom_tool_call_output",
                   call_id: "worker-review",
-                  output: marker("discovery", workerCount, workerCount),
+                  output: progressMarker("discovery", workerCount, workerCount),
                 },
               }) + "\n",
             );
@@ -5274,22 +5187,16 @@ describe("CodexSecurity orchestration", () => {
                 payload: {
                   type: "custom_tool_call_output",
                   call_id: "parent-review",
-                  output: marker("validation", 4, 7),
+                  output: progressMarker("validation", 4, 7),
                 },
               }) + "\n",
             );
             await parentRead.promise;
-            yield {
-              type: "item.completed",
-              item: {
-                type: "command_execution",
-                id: "live-inventory",
-                command: "inventory",
-                aggregated_output: commandOutput(marker("discovery", 0, 7)),
-                exit_code: 0,
-                status: "completed",
-              },
-            };
+            yield completedCommand(
+              "inventory",
+              commandOutput(progressMarker("discovery", 0, 7)),
+              "live-inventory",
+            );
           }
           return { events: completedEvents("thread-1", events()) };
         }),
@@ -5394,9 +5301,7 @@ describe("CodexSecurity orchestration", () => {
         filesCompleted: number,
         filesTotal: number,
         phase: ScanProgress["phase"] = "discovery",
-      ) =>
-        "CODEX_SECURITY_SCAN_PROGRESS " +
-        JSON.stringify({ phase, filesCompleted, filesTotal });
+      ) => progressMarker(phase, filesCompleted, filesTotal);
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: async (
@@ -5417,17 +5322,11 @@ describe("CodexSecurity orchestration", () => {
             for (const filesTotal of streamOld
               ? [originalTotal, correctedTotal]
               : [correctedTotal]) {
-              yield {
-                type: "item.completed",
-                item: {
-                  id: `inventory-${filesTotal}`,
-                  type: "command_execution",
-                  command: `scan-inventory ${filesTotal}`,
-                  aggregated_output: commandOutput(marker(0, filesTotal)),
-                  exit_code: 0,
-                  status: "completed",
-                },
-              };
+              yield completedCommand(
+                `scan-inventory ${filesTotal}`,
+                commandOutput(marker(0, filesTotal)),
+                `inventory-${filesTotal}`,
+              );
             }
             const saved: unknown[] = [
               {
@@ -5440,31 +5339,21 @@ describe("CodexSecurity orchestration", () => {
               },
             ];
             if (nativeCompletion)
-              saved.push({
-                type: "event_msg",
-                payload: {
-                  type: "item_completed",
-                  item: {
-                    type: "CommandExecution",
-                    id: "native-inventory",
-                    command: ["scan-inventory", String(correctedTotal)],
-                    aggregated_output: persistedCommandOutput,
-                  },
-                },
-              });
+              saved.push(
+                nativeCommand(
+                  ["scan-inventory", String(correctedTotal)],
+                  persistedCommandOutput,
+                  "native-inventory",
+                ),
+              );
             if (_scenario === "complete native occurrences")
-              saved.unshift({
-                type: "event_msg",
-                payload: {
-                  type: "item_completed",
-                  item: {
-                    type: "CommandExecution",
-                    id: "native-original-inventory",
-                    command: ["scan-inventory", String(originalTotal)],
-                    aggregated_output: persistedCommandOutput,
-                  },
-                },
-              });
+              saved.unshift(
+                nativeCommand(
+                  ["scan-inventory", String(originalTotal)],
+                  persistedCommandOutput,
+                  "native-original-inventory",
+                ),
+              );
             await appendFile(
               rollout,
               saved
@@ -5498,17 +5387,11 @@ describe("CodexSecurity orchestration", () => {
             );
             await workerRead.promise;
             if (_scenario === "live inventory readmits pending worker")
-              yield {
-                type: "item.completed",
-                item: {
-                  id: "restored-inventory",
-                  type: "command_execution",
-                  command: `scan-inventory ${correctedTotal}`,
-                  aggregated_output: commandOutput(marker(0, correctedTotal)),
-                  exit_code: 0,
-                  status: "completed",
-                },
-              };
+              yield completedCommand(
+                `scan-inventory ${correctedTotal}`,
+                commandOutput(marker(0, correctedTotal)),
+                "restored-inventory",
+              );
             if (delayNative)
               await appendFile(
                 rollout,
@@ -5750,12 +5633,7 @@ describe("CodexSecurity orchestration", () => {
       const staleRead = Promise.withResolvers<void>();
       const correctedRead = Promise.withResolvers<void>();
       const marker = (count: number, total: number) =>
-        "CODEX_SECURITY_SCAN_PROGRESS " +
-        JSON.stringify({
-          phase: "discovery",
-          filesCompleted: count,
-          filesTotal: total,
-        });
+        progressMarker("discovery", count, total);
       const receipt = (id: string, total: number) => ({
         type: "response_item",
         payload: {
@@ -5783,17 +5661,11 @@ describe("CodexSecurity orchestration", () => {
               JSON.stringify(receipt("stale", 8)) + "\n",
             );
             await staleRead.promise;
-            yield {
-              type: "item.completed",
-              item: {
-                type: "command_execution",
-                id: "completed-review",
-                command: "inspect-source",
-                aggregated_output: commandOutput(marker(9, 9)),
-                exit_code: 0,
-                status: "completed",
-              },
-            };
+            yield completedCommand(
+              "inspect-source",
+              commandOutput(marker(9, 9)),
+              "completed-review",
+            );
             if (split) {
               await appendFile(
                 rollout,
@@ -5801,17 +5673,10 @@ describe("CodexSecurity orchestration", () => {
               );
               await correctedRead.promise;
             }
-            const completion = {
-              type: "event_msg",
-              payload: {
-                type: "item_completed",
-                item: {
-                  type: "CommandExecution",
-                  command: ["inspect-source"],
-                  aggregated_output: persistedCommandOutput,
-                },
-              },
-            };
+            const completion = nativeCommand(
+              "inspect-source",
+              persistedCommandOutput,
+            );
             await appendFile(
               rollout,
               [...(split ? [] : [receipt("corrected", 9)]), completion]
@@ -5851,12 +5716,7 @@ describe("CodexSecurity orchestration", () => {
       const { root, repository, codexHome, scanDir } = await scanDirectories();
       const updates: ScanProgress[] = [];
       const marker = (completed: number, total: number) =>
-        "CODEX_SECURITY_SCAN_PROGRESS " +
-        JSON.stringify({
-          phase: "discovery",
-          filesCompleted: completed,
-          filesTotal: total,
-        });
+        progressMarker("discovery", completed, total);
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: async (
@@ -5876,30 +5736,19 @@ describe("CodexSecurity orchestration", () => {
               [0, 9],
               ...(count ? [[count, 9]] : []),
             ])
-              yield {
-                type: "item.completed",
-                item: {
-                  type: "command_execution",
-                  id: `progress-${completed}-${total}`,
-                  command: `report-progress ${completed} ${total}`,
-                  aggregated_output: commandOutput(marker(completed!, total!)),
-                  exit_code: 0,
-                  status: "completed",
-                },
-              };
+              yield completedCommand(
+                `report-progress ${completed} ${total}`,
+                commandOutput(marker(completed!, total!)),
+                `progress-${completed}-${total}`,
+              );
             await appendFile(
               rollout,
-              JSON.stringify({
-                type: "event_msg",
-                payload: {
-                  type: "item_completed",
-                  item: {
-                    type: "CommandExecution",
-                    command: ["report-progress", "0", "8"],
-                    aggregated_output: persistedCommandOutput,
-                  },
-                },
-              }) + "\n",
+              JSON.stringify(
+                nativeCommand(
+                  ["report-progress", "0", "8"],
+                  persistedCommandOutput,
+                ),
+              ) + "\n",
             );
           }
           return { events: completedEvents("thread-1", events()) };
@@ -5936,12 +5785,7 @@ describe("CodexSecurity orchestration", () => {
       const updates: ScanProgress[] = [];
       const previewRead = Promise.withResolvers<void>();
       const marker = (completed: number, inventory: number) =>
-        "CODEX_SECURITY_SCAN_PROGRESS " +
-        JSON.stringify({
-          phase: "discovery",
-          filesCompleted: completed,
-          filesTotal: inventory,
-        });
+        progressMarker("discovery", completed, inventory);
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: async (
@@ -5956,17 +5800,12 @@ describe("CodexSecurity orchestration", () => {
           await copyCompletedScan(root);
           const rollout = await writeUsageSession(codexHome, "thread-1", {});
           async function* events(): AsyncGenerator<ThreadEvent> {
-            const live = (completed: number): ThreadEvent => ({
-              type: "item.completed",
-              item: {
-                type: "command_execution",
-                id: `live-${completed}`,
-                command: `report-progress ${completed}`,
-                aggregated_output: commandOutput(marker(completed, total)),
-                status: "completed",
-                exit_code: 0,
-              },
-            });
+            const live = (completed: number): ThreadEvent =>
+              completedCommand(
+                `report-progress ${completed}`,
+                commandOutput(marker(completed, total)),
+                `live-${completed}`,
+              );
             yield live(0);
             await appendFile(
               rollout,
@@ -5984,18 +5823,13 @@ describe("CodexSecurity orchestration", () => {
             for (const completed of [0, count])
               await appendFile(
                 rollout,
-                JSON.stringify({
-                  type: "event_msg",
-                  payload: {
-                    type: "item_completed",
-                    item: {
-                      type: "CommandExecution",
-                      id: `native-${completed}`,
-                      command: ["report-progress", String(completed)],
-                      aggregated_output: persistedCommandOutput,
-                    },
-                  },
-                }) + "\n",
+                JSON.stringify(
+                  nativeCommand(
+                    ["report-progress", String(completed)],
+                    persistedCommandOutput,
+                    `native-${completed}`,
+                  ),
+                ) + "\n",
               );
           }
           return { events: completedEvents("thread-1", events()) };
@@ -6062,21 +5896,13 @@ describe("CodexSecurity orchestration", () => {
       const { root, repository, codexHome, scanDir } = await scanDirectories();
       const updates: ScanProgress[] = [];
       const read = Promise.withResolvers<void>();
-      const marker = (phase: string) =>
-        "CODEX_SECURITY_SCAN_PROGRESS " +
-        JSON.stringify({ phase, filesCompleted: 8, filesTotal: 8 });
+      const marker = (phase: string) => progressMarker(phase, 8, 8);
       const text = commandOutput(phases.map(marker).join("\n"));
-      const event: ThreadEvent = {
-        type: "item.completed",
-        item: {
-          id: "live-command",
-          type: "command_execution",
-          command: "scan-batch",
-          aggregated_output: text,
-          exit_code: 0,
-          status: "completed",
-        },
-      };
+      const event: ThreadEvent = completedCommand(
+        "scan-batch",
+        text,
+        "live-command",
+      );
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: async (
@@ -6093,20 +5919,11 @@ describe("CodexSecurity orchestration", () => {
           async function* events(): AsyncGenerator<ThreadEvent> {
             if (liveFirst) yield event;
             const saved: unknown[] = [
-              {
-                type: "event_msg",
-                payload: {
-                  type: "item_completed",
-                  item: {
-                    type: "CommandExecution",
-                    id: "native-batch",
-                    command: ["scan-batch"],
-                    aggregated_output: truncated
-                      ? persistedCommandOutput
-                      : text,
-                  },
-                },
-              },
+              nativeCommand(
+                "scan-batch",
+                truncated ? persistedCommandOutput : text,
+                "native-batch",
+              ),
             ];
             if (preview)
               saved.push({
@@ -6165,9 +5982,7 @@ describe("CodexSecurity orchestration", () => {
     const first = Promise.withResolvers<void>();
     const workerRead = Promise.withResolvers<void>();
     const latest = Promise.withResolvers<void>();
-    const marker = (phase: string) =>
-      "CODEX_SECURITY_SCAN_PROGRESS " +
-      JSON.stringify({ phase, filesCompleted: 8, filesTotal: 8 });
+    const marker = (phase: string) => progressMarker(phase, 8, 8);
     const client = TestClient.withDependencies({
       ...scanRuntimeDependencies(codexHome, scanDir),
       runWorkbench: async (
@@ -6182,18 +5997,9 @@ describe("CodexSecurity orchestration", () => {
         await copyCompletedScan(root);
         const rollout = await writeUsageSession(codexHome, "thread-1", {});
         const native = (id: string, phase: string) =>
-          JSON.stringify({
-            type: "event_msg",
-            payload: {
-              type: "item_completed",
-              item: {
-                type: "CommandExecution",
-                id,
-                command: ["scan-phase", phase],
-                aggregated_output: marker(phase),
-              },
-            },
-          }) + "\n";
+          JSON.stringify(
+            nativeCommand(["scan-phase", phase], marker(phase), id),
+          ) + "\n";
         async function* events(): AsyncGenerator<ThreadEvent> {
           await appendFile(rollout, native("first", "discovery"));
           await first.promise;
@@ -6216,17 +6022,11 @@ describe("CodexSecurity orchestration", () => {
           await workerRead.promise;
           await appendFile(rollout, native("latest", "validation"));
           await latest.promise;
-          yield {
-            type: "item.completed",
-            item: {
-              id: "old-stream",
-              type: "command_execution",
-              command: "scan-phase discovery",
-              aggregated_output: marker("discovery"),
-              exit_code: 0,
-              status: "completed",
-            },
-          };
+          yield completedCommand(
+            "scan-phase discovery",
+            marker("discovery"),
+            "old-stream",
+          );
         }
         return { events: completedEvents("thread-1", events()) };
       }),
@@ -6283,8 +6083,7 @@ describe("CodexSecurity orchestration", () => {
         return originalReaddir(...args);
       }) as typeof originalReaddir);
       const marker = (phase: ScanProgress["phase"], count: number) =>
-        "CODEX_SECURITY_SCAN_PROGRESS " +
-        JSON.stringify({ phase, filesCompleted: count, filesTotal: 9 });
+        progressMarker(phase, count, 9);
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: async (
@@ -6307,33 +6106,18 @@ describe("CodexSecurity orchestration", () => {
             parent,
             text
               .map((output, index) =>
-                JSON.stringify({
-                  type: "event_msg",
-                  payload: {
-                    type: "item_completed",
-                    item: {
-                      type: "CommandExecution",
-                      id: `step-${index}`,
-                      command: [`step-${index}`],
-                      aggregated_output:
-                        index === 0 ? persistedCommandOutput : output,
-                    },
-                  },
-                }),
+                JSON.stringify(
+                  nativeCommand(
+                    `step-${index}`,
+                    index === 0 ? persistedCommandOutput : output,
+                    `step-${index}`,
+                  ),
+                ),
               )
               .join("\n") + "\n",
           );
-          const item = (index: number): ThreadEvent => ({
-            type: "item.completed",
-            item: {
-              type: "command_execution",
-              id: `live-${index}`,
-              command: `step-${index}`,
-              aggregated_output: text[index]!,
-              status: "completed",
-              exit_code: 0,
-            },
-          });
+          const item = (index: number): ThreadEvent =>
+            completedCommand(`step-${index}`, text[index]!, `live-${index}`);
           async function* events(): AsyncGenerator<ThreadEvent> {
             if (pollFirst) await initialRead.promise;
             yield item(0);
@@ -6407,13 +6191,7 @@ describe("CodexSecurity orchestration", () => {
       const workersRead = Promise.withResolvers<void>();
       const parentRead = Promise.withResolvers<void>();
       const seen = new Set<string>();
-      const marker = (
-        phase: ScanProgress["phase"],
-        count: number,
-        total: number,
-      ) =>
-        "CODEX_SECURITY_SCAN_PROGRESS " +
-        JSON.stringify({ phase, filesCompleted: count, filesTotal: total });
+
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: async (
@@ -6429,17 +6207,8 @@ describe("CodexSecurity orchestration", () => {
           const parent = await writeUsageSession(codexHome, "thread-1", {});
           await appendFile(
             parent,
-            JSON.stringify({
-              type: "event_msg",
-              payload: {
-                type: "item_completed",
-                item: {
-                  type: "CommandExecution",
-                  command: ["inventory"],
-                  aggregated_output: persistedCommandOutput,
-                },
-              },
-            }) + "\n",
+            JSON.stringify(nativeCommand("inventory", persistedCommandOutput)) +
+              "\n",
           );
           const appendWorkers = async () => {
             for (const [index, count] of counts.entries()) {
@@ -6456,7 +6225,7 @@ describe("CodexSecurity orchestration", () => {
                   payload: {
                     type: "custom_tool_call_output",
                     call_id: `worker-${index}`,
-                    output: marker("discovery", count, 9),
+                    output: progressMarker("discovery", count, 9),
                   },
                 }) + "\n",
               );
@@ -6472,23 +6241,16 @@ describe("CodexSecurity orchestration", () => {
                 payload: {
                   type: "custom_tool_call_output",
                   call_id: "parent-review",
-                  output: marker("validation", 7, 8),
+                  output: progressMarker("validation", 7, 8),
                 },
               }) + "\n",
             );
             await parentRead.promise;
             if (!pendingFirst) await appendWorkers();
-            yield {
-              type: "item.completed",
-              item: {
-                type: "command_execution",
-                id: "inventory",
-                command: "inventory",
-                aggregated_output: commandOutput(marker("discovery", 0, 9)),
-                status: "completed",
-                exit_code: 0,
-              },
-            };
+            yield completedCommand(
+              "inventory",
+              commandOutput(progressMarker("discovery", 0, 9)),
+            );
           }
           return { events: completedEvents("thread-1", events()) };
         }),
@@ -6542,13 +6304,7 @@ describe("CodexSecurity orchestration", () => {
           await pollAllowed.promise;
         return originalReaddir(...args);
       }) as typeof originalReaddir);
-      const marker = (
-        phase: ScanProgress["phase"],
-        count: number,
-        total: number,
-      ) =>
-        "CODEX_SECURITY_SCAN_PROGRESS " +
-        JSON.stringify({ phase, filesCompleted: count, filesTotal: total });
+
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: async (
@@ -6562,24 +6318,16 @@ describe("CodexSecurity orchestration", () => {
         createCodex: codexFactory(async () => {
           await copyCompletedScan(root);
           const parent = await writeUsageSession(codexHome, "thread-1", {});
-          const parts = ["Review: ", marker("validation", 3, 8)];
+          const parts = ["Review: ", progressMarker("validation", 3, 8)];
           const records = [
-            ...[9, 8].map((total) => ({
-              type: "event_msg",
-              payload: {
-                type: "item_completed",
-                item: {
-                  type: "CommandExecution",
-                  command: [`inventory-${total}`],
-                  aggregated_output: persistedCommandOutput,
-                },
-              },
-            })),
+            ...[9, 8].map((total) =>
+              nativeCommand(`inventory-${total}`, persistedCommandOutput),
+            ),
             {
               type: "response_item",
               payload: {
                 type: "custom_tool_call_output",
-                output: marker("attack_path", 3, 9),
+                output: progressMarker("attack_path", 3, 9),
               },
             },
             {
@@ -6609,19 +6357,10 @@ describe("CodexSecurity orchestration", () => {
           async function* events(): AsyncGenerator<ThreadEvent> {
             if (delayed) await parentRead.promise;
             for (const total of [9, 8]) {
-              yield {
-                type: "item.completed",
-                item: {
-                  type: "command_execution",
-                  id: `inventory-${total}`,
-                  command: `inventory-${total}`,
-                  aggregated_output: commandOutput(
-                    marker("discovery", 0, total),
-                  ),
-                  status: "completed",
-                  exit_code: 0,
-                },
-              };
+              yield completedCommand(
+                `inventory-${total}`,
+                commandOutput(progressMarker("discovery", 0, total)),
+              );
               if (delayed && total === 9) await expanded.promise;
             }
             pollAllowed.resolve();
@@ -6716,8 +6455,7 @@ describe("CodexSecurity orchestration", () => {
         return entries;
       }) as typeof originalReaddir);
       const marker = (phase: ScanProgress["phase"], count: number) =>
-        "CODEX_SECURITY_SCAN_PROGRESS " +
-        JSON.stringify({ phase, filesCompleted: count, filesTotal: 9 });
+        progressMarker(phase, count, 9);
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: async (
@@ -6752,33 +6490,16 @@ describe("CodexSecurity orchestration", () => {
                     output: marker("discovery", 0),
                   },
                 },
-                {
-                  type: "event_msg",
-                  payload: {
-                    type: "item_completed",
-                    item: {
-                      type: "CommandExecution",
-                      command: ["review"],
-                      aggregated_output: persistedCommandOutput,
-                    },
-                  },
-                },
+                nativeCommand("review", persistedCommandOutput),
               ]
                 .map((row) => JSON.stringify(row))
                 .join("\n") + "\n",
             );
             if (!split) await inventoryRead.promise;
-            yield {
-              type: "item.completed",
-              item: {
-                type: "command_execution",
-                id: "review",
-                command: "review",
-                aggregated_output: commandOutput(marker("validation", 7)),
-                status: "completed",
-                exit_code: 0,
-              },
-            };
+            yield completedCommand(
+              "review",
+              commandOutput(marker("validation", 7)),
+            );
             await appendFile(
               worker,
               JSON.stringify({
@@ -6860,8 +6581,7 @@ describe("CodexSecurity orchestration", () => {
         return handle;
       }) as typeof originalOpen);
       const marker = (phase: ScanProgress["phase"]) =>
-        "CODEX_SECURITY_SCAN_PROGRESS " +
-        JSON.stringify({ phase, filesCompleted: 8, filesTotal: 8 });
+        progressMarker(phase, 8, 8);
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: async (
@@ -6991,13 +6711,7 @@ describe("CodexSecurity orchestration", () => {
       const workerRead = Promise.withResolvers<void>();
       const nextWorkerRead = Promise.withResolvers<void>();
       const scopeChanged = Promise.withResolvers<void>();
-      const marker = (
-        phase: ScanProgress["phase"],
-        count: number,
-        total: number,
-      ) =>
-        "CODEX_SECURITY_SCAN_PROGRESS " +
-        JSON.stringify({ phase, filesCompleted: count, filesTotal: total });
+
       const nextPhase =
         workerPhase === "discovery" ? "attack_path" : "validation";
       const client = TestClient.withDependencies({
@@ -7023,7 +6737,7 @@ describe("CodexSecurity orchestration", () => {
             payload: {
               type: "custom_tool_call_output",
               call_id: id,
-              output: marker(phase, 3, total),
+              output: progressMarker(phase, 3, total),
             },
           });
           const appendWorker = async () => {
@@ -7044,17 +6758,9 @@ describe("CodexSecurity orchestration", () => {
             await metadataRead.promise;
             await appendFile(
               parent,
-              JSON.stringify({
-                type: "event_msg",
-                payload: {
-                  type: "item_completed",
-                  item: {
-                    type: "CommandExecution",
-                    command: ["inventory"],
-                    aggregated_output: persistedCommandOutput,
-                  },
-                },
-              }) + "\n",
+              JSON.stringify(
+                nativeCommand("inventory", persistedCommandOutput),
+              ) + "\n",
             );
             if (workerFirst) await appendWorker();
             await appendFile(
@@ -7069,7 +6775,7 @@ describe("CodexSecurity orchestration", () => {
                     content: [
                       {
                         type: "Text",
-                        text: marker(parentPhase, 3, parentTotal),
+                        text: progressMarker(parentPhase, 3, parentTotal),
                       },
                     ],
                   },
@@ -7093,24 +6799,17 @@ describe("CodexSecurity orchestration", () => {
             }
             // Both native parent completions precede their SDK projections.
             // Let the full earlier inventory reconcile before its following item.
-            yield {
-              type: "item.completed",
-              item: {
-                type: "command_execution",
-                id: "inventory",
-                command: "inventory",
-                aggregated_output: commandOutput(marker("discovery", 0, 7)),
-                status: "completed",
-                exit_code: 0,
-              },
-            };
+            yield completedCommand(
+              "inventory",
+              commandOutput(progressMarker("discovery", 0, 7)),
+            );
             await scopeChanged.promise;
             yield {
               type: "item.completed",
               item: {
                 type: "agent_message",
                 id: "parent-review",
-                text: marker(parentPhase, 3, parentTotal),
+                text: progressMarker(parentPhase, 3, parentTotal),
               },
             };
             // This is a new tool receipt, not a copied message projection. It
@@ -7204,39 +6903,15 @@ describe("CodexSecurity orchestration", () => {
         };
         return handle;
       }) as typeof originalOpen);
-      const marker = (
-        phase: ScanProgress["phase"],
-        count: number,
-        total: number,
-      ) =>
-        "CODEX_SECURITY_SCAN_PROGRESS " +
-        JSON.stringify({ phase, filesCompleted: count, filesTotal: total });
+
       const receipt = (id: string, output: string) => ({
         type: "response_item",
         payload: { type: "custom_tool_call_output", call_id: id, output },
       });
-      const completion = (command: string, output: string) => ({
-        type: "event_msg",
-        payload: {
-          type: "item_completed",
-          item: {
-            type: "CommandExecution",
-            command: [command],
-            aggregated_output: output,
-          },
-        },
-      });
-      const live = (command: string, output: string): ThreadEvent => ({
-        type: "item.completed",
-        item: {
-          type: "command_execution",
-          id: command,
-          command,
-          aggregated_output: output,
-          status: "completed",
-          exit_code: 0,
-        },
-      });
+      const completion = (command: string, output: string) =>
+        nativeCommand(command, output);
+      const live = (command: string, output: string): ThreadEvent =>
+        completedCommand(command, output);
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: async (
@@ -7250,7 +6925,10 @@ describe("CodexSecurity orchestration", () => {
         createCodex: codexFactory(async () => {
           await copyCompletedScan(root);
           parentPath = await writeUsageSession(codexHome, "thread-1", {});
-          const inventory = receipt("inventory", marker("discovery", 0, 6));
+          const inventory = receipt(
+            "inventory",
+            progressMarker("discovery", 0, 6),
+          );
           async function* events(): AsyncGenerator<ThreadEvent> {
             await metadataRead.promise;
             if (early) {
@@ -7265,8 +6943,9 @@ describe("CodexSecurity orchestration", () => {
             );
             await appendFile(
               first,
-              JSON.stringify(receipt("first", marker(workerPhase, 3, 3))) +
-                "\n",
+              JSON.stringify(
+                receipt("first", progressMarker(workerPhase, 3, 3)),
+              ) + "\n",
             );
             await firstRead.promise;
             const second = await writeUsageSession(
@@ -7277,8 +6956,9 @@ describe("CodexSecurity orchestration", () => {
             );
             await appendFile(
               second,
-              JSON.stringify(receipt("second", marker(workerPhase, 1, 8))) +
-                "\n",
+              JSON.stringify(
+                receipt("second", progressMarker(workerPhase, 1, 8)),
+              ) + "\n",
             );
             await secondRead.promise;
             if (!early) {
@@ -7290,14 +6970,17 @@ describe("CodexSecurity orchestration", () => {
             const rows = [
               ...(early ? [] : [inventory]),
               completion("eligible", persistedCommandOutput),
-              completion("oversized", marker(parentPhase, 4, 8)),
+              completion("oversized", progressMarker(parentPhase, 4, 8)),
             ];
             await appendFile(
               parentPath,
               rows.map((row) => JSON.stringify(row)).join("\n") + "\n",
             );
-            yield live("eligible", commandOutput(marker(parentPhase, 3, 6)));
-            yield live("oversized", marker(parentPhase, 4, 8));
+            yield live(
+              "eligible",
+              commandOutput(progressMarker(parentPhase, 3, 6)),
+            );
+            yield live("oversized", progressMarker(parentPhase, 4, 8));
             closeReleased.resolve();
             await recovered.promise;
           }
@@ -7390,24 +7073,11 @@ describe("CodexSecurity orchestration", () => {
         "idle-2",
       ])
         receipts.set(id, Promise.withResolvers<void>());
-      const marker = (
-        phase: ScanProgress["phase"],
-        count: number,
-        total: number,
-      ) =>
-        "CODEX_SECURITY_SCAN_PROGRESS " +
-        JSON.stringify({ phase, filesCompleted: count, filesTotal: total });
-      const inventory: ThreadEvent = {
-        type: "item.completed",
-        item: {
-          type: "command_execution",
-          id: "inventory",
-          command: "inventory",
-          aggregated_output: commandOutput(marker("discovery", 0, 6)),
-          status: "completed",
-          exit_code: 0,
-        },
-      };
+
+      const inventory: ThreadEvent = completedCommand(
+        "inventory",
+        commandOutput(progressMarker("discovery", 0, 6)),
+      );
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: async (
@@ -7443,69 +7113,33 @@ describe("CodexSecurity orchestration", () => {
             await metadataRead.promise;
             await appendFile(
               parent,
-              JSON.stringify({
-                type: "event_msg",
-                payload: {
-                  type: "item_completed",
-                  item: {
-                    type: "CommandExecution",
-                    command: ["inventory"],
-                    aggregated_output: persistedCommandOutput,
-                  },
-                },
-              }) + "\n",
+              JSON.stringify(
+                nativeCommand("inventory", persistedCommandOutput),
+              ) + "\n",
             );
-            const restoredInventory: ThreadEvent = {
-              type: "item.completed",
-              item: {
-                type: "command_execution",
-                id: "inventory-restored",
-                command: "inventory",
-                aggregated_output: commandOutput(marker("discovery", 0, 8)),
-                status: "completed",
-                exit_code: 0,
-              },
-            };
+            const restoredInventory: ThreadEvent = completedCommand(
+              "inventory",
+              commandOutput(progressMarker("discovery", 0, 8)),
+              "inventory-restored",
+            );
             if (restoreScope)
               await appendFile(
                 parent,
-                JSON.stringify({
-                  type: "event_msg",
-                  payload: {
-                    type: "item_completed",
-                    item: {
-                      type: "CommandExecution",
-                      command: ["inventory"],
-                      aggregated_output: persistedCommandOutput,
-                    },
-                  },
-                }) + "\n",
+                JSON.stringify(
+                  nativeCommand("inventory", persistedCommandOutput),
+                ) + "\n",
               );
-            const finalInventory: ThreadEvent = {
-              type: "item.completed",
-              item: {
-                type: "command_execution",
-                id: "inventory-final",
-                command: "inventory",
-                aggregated_output: commandOutput(marker("discovery", 0, 6)),
-                status: "completed",
-                exit_code: 0,
-              },
-            };
+            const finalInventory: ThreadEvent = completedCommand(
+              "inventory",
+              commandOutput(progressMarker("discovery", 0, 6)),
+              "inventory-final",
+            );
             if (scenario === "cycle-scope")
               await appendFile(
                 parent,
-                JSON.stringify({
-                  type: "event_msg",
-                  payload: {
-                    type: "item_completed",
-                    item: {
-                      type: "CommandExecution",
-                      command: ["inventory"],
-                      aggregated_output: persistedCommandOutput,
-                    },
-                  },
-                }) + "\n",
+                JSON.stringify(
+                  nativeCommand("inventory", persistedCommandOutput),
+                ) + "\n",
               );
             if (early) {
               yield inventory;
@@ -7519,30 +7153,38 @@ describe("CodexSecurity orchestration", () => {
               {},
               { parent: "thread-1" },
             );
-            await appendReceipt(first, "first", marker(workerPhase, 3, 3));
+            await appendReceipt(
+              first,
+              "first",
+              progressMarker(workerPhase, 3, 3),
+            );
             const second = await writeUsageSession(
               codexHome,
               "second-worker",
               {},
               { parent: "thread-1" },
             );
-            await appendReceipt(second, "second", marker(workerPhase, 1, 8));
+            await appendReceipt(
+              second,
+              "second",
+              progressMarker(workerPhase, 1, 8),
+            );
             await appendReceipt(
               parent,
               "eligible",
-              marker(parentPhase, parentCount, 6),
+              progressMarker(parentPhase, parentCount, 6),
             );
             if (scenario === "newer-parent")
               await appendReceipt(
                 parent,
                 "newer",
-                marker(newerPhase, parentCount, 6),
+                progressMarker(newerPhase, parentCount, 6),
               );
             if (scenario !== "no-frontier")
               await appendReceipt(
                 parent,
                 "oversized",
-                marker(parentPhase, 4, 8),
+                progressMarker(parentPhase, 4, 8),
               );
             if (scenario === "idle" || scenario === "newer-parent") {
               // Each receipt requires another actual poll. Deferred facts must
@@ -7644,24 +7286,11 @@ describe("CodexSecurity orchestration", () => {
       const firstRead = Promise.withResolvers<void>();
       const lastRead = Promise.withResolvers<void>();
       const recovered = Promise.withResolvers<void>();
-      const marker = (
-        phase: ScanProgress["phase"],
-        count: number,
-        total: number,
-      ) =>
-        "CODEX_SECURITY_SCAN_PROGRESS " +
-        JSON.stringify({ phase, filesCompleted: count, filesTotal: total });
-      const inventory: ThreadEvent = {
-        type: "item.completed",
-        item: {
-          type: "command_execution",
-          id: "inventory",
-          command: "inventory",
-          aggregated_output: commandOutput(marker("discovery", 0, 10)),
-          status: "completed",
-          exit_code: 0,
-        },
-      };
+
+      const inventory: ThreadEvent = completedCommand(
+        "inventory",
+        commandOutput(progressMarker("discovery", 0, 10)),
+      );
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: async (
@@ -7685,24 +7314,16 @@ describe("CodexSecurity orchestration", () => {
             payload: {
               type: "custom_tool_call_output",
               call_id: id,
-              output: marker(phase, count, total),
+              output: progressMarker(phase, count, total),
             },
           });
           async function* events(): AsyncGenerator<ThreadEvent> {
             await metadataRead.promise;
             await appendFile(
               parent,
-              JSON.stringify({
-                type: "event_msg",
-                payload: {
-                  type: "item_completed",
-                  item: {
-                    type: "CommandExecution",
-                    command: ["inventory"],
-                    aggregated_output: persistedCommandOutput,
-                  },
-                },
-              }) + "\n",
+              JSON.stringify(
+                nativeCommand("inventory", persistedCommandOutput),
+              ) + "\n",
             );
             if (early) {
               yield inventory;
@@ -7806,8 +7427,7 @@ describe("CodexSecurity orchestration", () => {
         return entries;
       }) as typeof originalReaddir);
       const marker = (phase: ScanProgress["phase"]) =>
-        "CODEX_SECURITY_SCAN_PROGRESS " +
-        JSON.stringify({ phase, filesCompleted: 8, filesTotal: 8 });
+        progressMarker(phase, 8, 8);
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: async (
@@ -7955,13 +7575,7 @@ describe("CodexSecurity orchestration", () => {
         };
         return handle;
       }) as typeof originalOpen);
-      const marker = (
-        phase: ScanProgress["phase"],
-        count: number,
-        total: number,
-      ) =>
-        "CODEX_SECURITY_SCAN_PROGRESS " +
-        JSON.stringify({ phase, filesCompleted: count, filesTotal: total });
+
       const native = (id: string, text: string) => {
         if (mode === "legacy")
           return (
@@ -7981,20 +7595,7 @@ describe("CodexSecurity orchestration", () => {
                   },
             ) + "\n"
           );
-        return (
-          JSON.stringify({
-            type: "event_msg",
-            payload: {
-              type: "item_completed",
-              item: {
-                type: "CommandExecution",
-                id,
-                command: [id],
-                aggregated_output: text,
-              },
-            },
-          }) + "\n"
-        );
+        return JSON.stringify(nativeCommand(id, text, id)) + "\n";
       };
       const live = (id: string, text: string): ThreadEvent => ({
         type: "item.completed",
@@ -8036,23 +7637,23 @@ describe("CodexSecurity orchestration", () => {
               payload: {
                 type: "custom_tool_call_output",
                 call_id: "worker-count",
-                output: marker("discovery", 1, 9),
+                output: progressMarker("discovery", 1, 9),
               },
             }) + "\n",
           );
           async function* events(): AsyncGenerator<ThreadEvent> {
             await workerRead.promise;
-            const first = marker("discovery", 0, 9);
+            const first = progressMarker("discovery", 0, 9);
             await appendFile(parentPath, native("first-inventory", first));
             yield live("first-inventory", first);
             await workerAdmitted.promise;
             if (reviewedEarlier) {
-              const earlier = marker("validation", 3, 9);
+              const earlier = progressMarker("validation", 3, 9);
               await appendFile(parentPath, native("earlier-review", earlier));
               yield live("earlier-review", earlier);
               await earlierReviewRead.promise;
             }
-            const inventory = marker("discovery", 0, 7);
+            const inventory = progressMarker("discovery", 0, 7);
             await appendFile(
               parentPath,
               native("corrected-inventory", inventory),
@@ -8061,7 +7662,11 @@ describe("CodexSecurity orchestration", () => {
               pauseClose = true;
               await closeEntered.promise;
             }
-            const review = marker("validation", 7, reviewedEarlier ? 9 : 7);
+            const review = progressMarker(
+              "validation",
+              7,
+              reviewedEarlier ? 9 : 7,
+            );
             // Both records are persisted before their corresponding live items.
             await appendFile(parentPath, native("final-review", review));
             yield live("corrected-inventory", inventory);
@@ -8160,13 +7765,7 @@ describe("CodexSecurity orchestration", () => {
           await pollAllowed.promise;
         return originalReaddir(...args);
       }) as typeof originalReaddir);
-      const marker = (
-        phase: ScanProgress["phase"],
-        count: number,
-        total: number,
-      ) =>
-        "CODEX_SECURITY_SCAN_PROGRESS " +
-        JSON.stringify({ phase, filesCompleted: count, filesTotal: total });
+
       const receipt = (
         callId: string,
         phase: ScanProgress["phase"],
@@ -8177,7 +7776,7 @@ describe("CodexSecurity orchestration", () => {
         payload: {
           type: "custom_tool_call_output",
           call_id: callId,
-          output: marker(phase, count, total),
+          output: progressMarker(phase, count, total),
         },
       });
       const client = TestClient.withDependencies({
@@ -8196,37 +7795,23 @@ describe("CodexSecurity orchestration", () => {
           await appendFile(
             parent,
             [
-              {
-                type: "event_msg",
-                payload: {
-                  type: "item_completed",
-                  item: {
-                    type: "CommandExecution",
-                    command: ["inventory"],
-                    aggregated_output: persistedCommandOutput,
-                  },
-                },
-              },
+              nativeCommand("inventory", persistedCommandOutput),
               receipt("parent-reviewed", parentPhase, parentCount, 9),
             ]
               .map((row) => JSON.stringify(row))
               .join("\n") + "\n",
           );
-          const inventory: ThreadEvent = {
-            type: "item.completed",
-            item: {
-              id: "inventory",
-              type: "command_execution",
-              command: "inventory",
-              aggregated_output: commandOutput(marker("discovery", 0, 9)),
-              status: "completed",
-              exit_code: 0,
-            },
-          };
+          const inventory: ThreadEvent = completedCommand(
+            "inventory",
+            commandOutput(progressMarker("discovery", 0, 9)),
+          );
           async function* events(): AsyncGenerator<ThreadEvent> {
             if (liveFirst) yield inventory;
             await parentRead.promise;
-            const parts = ["Review progress: ", marker(workerPhase, 8, 8)];
+            const parts = [
+              "Review progress: ",
+              progressMarker(workerPhase, 8, 8),
+            ];
             if (newerSource === "worker") {
               const worker = await writeUsageSession(
                 codexHome,
@@ -8375,12 +7960,7 @@ describe("CodexSecurity orchestration", () => {
         return originalReaddir(...args);
       }) as typeof originalReaddir);
       const marker = (phase: ScanProgress["phase"], count: number) =>
-        "CODEX_SECURITY_SCAN_PROGRESS " +
-        JSON.stringify({
-          phase,
-          filesCompleted: count,
-          filesTotal: laterInventory && count > 0 ? 8 : total,
-        });
+        progressMarker(phase, count, laterInventory && count > 0 ? 8 : total);
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: async (
@@ -8397,17 +7977,7 @@ describe("CodexSecurity orchestration", () => {
           // Both records are durable before live delivery. Slow polling is the
           // only difference between the two schedules, as in the native writer.
           const records = [
-            {
-              type: "event_msg",
-              payload: {
-                type: "item_completed",
-                item: {
-                  type: "CommandExecution",
-                  command: ["inventory"],
-                  aggregated_output: persistedCommandOutput,
-                },
-              },
-            },
+            nativeCommand("inventory", persistedCommandOutput),
             {
               type: "response_item",
               payload: {
@@ -8436,17 +8006,10 @@ describe("CodexSecurity orchestration", () => {
           );
           async function* events(): AsyncGenerator<ThreadEvent> {
             if (!liveFirst) await receiptRead.promise;
-            yield {
-              type: "item.completed",
-              item: {
-                id: "inventory",
-                type: "command_execution",
-                command: "inventory",
-                aggregated_output: commandOutput(marker("discovery", 0)),
-                status: "completed",
-                exit_code: 0,
-              },
-            };
+            yield completedCommand(
+              "inventory",
+              commandOutput(marker("discovery", 0)),
+            );
             if (liveFirst) await receiptRead.promise;
           }
           return { events: completedEvents("thread-1", events()) };
@@ -8508,12 +8071,7 @@ describe("CodexSecurity orchestration", () => {
       const { root, repository, codexHome, scanDir } = await scanDirectories();
       const updates: ScanProgress[] = [];
       const marker = (count: number) =>
-        "CODEX_SECURITY_SCAN_PROGRESS " +
-        JSON.stringify({
-          phase: "discovery",
-          filesCompleted: count,
-          filesTotal: total,
-        });
+        progressMarker("discovery", count, total);
       const parent = await writeUsageSession(
         codexHome,
         "thread-1",
@@ -8658,31 +8216,15 @@ describe("CodexSecurity orchestration", () => {
   test("does not match a resumed live inventory to a historical truncated command", async () => {
     const { root, repository, codexHome, scanDir } = await scanDirectories();
     const updates: ScanProgress[] = [];
-    const marker = (
-      phase: string,
-      filesCompleted: number,
-      filesTotal: number,
-    ) =>
-      "CODEX_SECURITY_SCAN_PROGRESS " +
-      JSON.stringify({ phase, filesCompleted, filesTotal });
+
     const rollout = await writeUsageSession(
       codexHome,
       "thread-1",
       {},
       { cwd: scanDir },
     );
-    const native = (id: string) => ({
-      type: "event_msg",
-      payload: {
-        type: "item_completed",
-        item: {
-          type: "CommandExecution",
-          id,
-          command: ["scan-inventory"],
-          aggregated_output: persistedCommandOutput,
-        },
-      },
-    });
+    const native = (id: string) =>
+      nativeCommand("scan-inventory", persistedCommandOutput, id);
     await appendFile(
       rollout,
       [
@@ -8694,7 +8236,9 @@ describe("CodexSecurity orchestration", () => {
             item: {
               type: "AgentMessage",
               id: "historical-phase",
-              content: [{ type: "Text", text: marker("threat_model", 0, 8) }],
+              content: [
+                { type: "Text", text: progressMarker("threat_model", 0, 8) },
+              ],
             },
           },
         },
@@ -8734,17 +8278,11 @@ describe("CodexSecurity orchestration", () => {
           runStreamed: async () => {
             await copyCompletedScan(root);
             async function* events(): AsyncGenerator<ThreadEvent> {
-              yield {
-                type: "item.completed",
-                item: {
-                  id: "new-live-inventory",
-                  type: "command_execution",
-                  command: "scan-inventory",
-                  aggregated_output: commandOutput(marker("discovery", 0, 9)),
-                  exit_code: 0,
-                  status: "completed",
-                },
-              };
+              yield completedCommand(
+                "scan-inventory",
+                commandOutput(progressMarker("discovery", 0, 9)),
+                "new-live-inventory",
+              );
               await appendFile(
                 rollout,
                 JSON.stringify(native("current")) +
@@ -8753,7 +8291,7 @@ describe("CodexSecurity orchestration", () => {
                     type: "response_item",
                     payload: {
                       type: "custom_tool_call_output",
-                      output: marker("discovery", 1, 9),
+                      output: progressMarker("discovery", 1, 9),
                     },
                   }) +
                   "\n",
@@ -8788,25 +8326,9 @@ describe("CodexSecurity orchestration", () => {
     const { root, repository, codexHome, scanDir } = await scanDirectories();
     const updates: ScanProgress[] = [];
     const historyRead = Promise.withResolvers<void>();
-    const marker = (
-      phase: string,
-      filesCompleted: number,
-      filesTotal: number,
-    ) =>
-      "CODEX_SECURITY_SCAN_PROGRESS " +
-      JSON.stringify({ phase, filesCompleted, filesTotal });
-    const native = (id: string) => ({
-      type: "event_msg",
-      payload: {
-        type: "item_completed",
-        item: {
-          type: "CommandExecution",
-          id,
-          command: ["scan-inventory"],
-          aggregated_output: persistedCommandOutput,
-        },
-      },
-    });
+
+    const native = (id: string) =>
+      nativeCommand("scan-inventory", persistedCommandOutput, id);
     const client = TestClient.withDependencies({
       ...scanRuntimeDependencies(codexHome, scanDir),
       runWorkbench: async (
@@ -8829,7 +8351,7 @@ describe("CodexSecurity orchestration", () => {
               payload: {
                 type: "custom_tool_call_output",
                 call_id: "prior-tool-progress",
-                output: marker("threat_model", 0, 8),
+                output: progressMarker("threat_model", 0, 8),
               },
             },
           ]
@@ -8840,19 +8362,9 @@ describe("CodexSecurity orchestration", () => {
           await historyRead.promise;
           for (const [index, text] of [
             commandOutput("no progress marker"),
-            commandOutput(marker("discovery", 0, 9)),
+            commandOutput(progressMarker("discovery", 0, 9)),
           ].entries()) {
-            yield {
-              type: "item.completed",
-              item: {
-                id: `command-${index}`,
-                type: "command_execution",
-                command: "scan-inventory",
-                aggregated_output: text,
-                exit_code: 0,
-                status: "completed",
-              },
-            };
+            yield completedCommand("scan-inventory", text, `command-${index}`);
           }
           await appendFile(
             rollout,
@@ -8862,7 +8374,7 @@ describe("CodexSecurity orchestration", () => {
                 type: "response_item",
                 payload: {
                   type: "custom_tool_call_output",
-                  output: marker("discovery", 1, 9),
+                  output: progressMarker("discovery", 1, 9),
                 },
               }) +
               "\n",
@@ -9082,21 +8594,9 @@ describe("CodexSecurity orchestration", () => {
               Number(String(right.name) === basename(parentPath))),
         );
       }) as typeof originalReaddir);
-      const marker = (phase: string) =>
-        "CODEX_SECURITY_SCAN_PROGRESS " +
-        JSON.stringify({ phase, filesCompleted: 8, filesTotal: 8 });
-      const completion = (id: string, phase: string) => ({
-        type: "event_msg",
-        payload: {
-          type: "item_completed",
-          item: {
-            type: "CommandExecution",
-            id,
-            command: [id],
-            aggregated_output: marker(phase),
-          },
-        },
-      });
+      const marker = (phase: string) => progressMarker(phase, 8, 8);
+      const completion = (id: string, phase: string) =>
+        nativeCommand(id, marker(phase), id);
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: async (
@@ -9148,17 +8648,7 @@ describe("CodexSecurity orchestration", () => {
               parentPath,
               JSON.stringify(completion("new-validation", "validation")) + "\n",
             );
-            yield {
-              type: "item.completed",
-              item: {
-                type: "command_execution",
-                id: "new-validation",
-                command: "new-validation",
-                aggregated_output: marker("validation"),
-                status: "completed",
-                exit_code: 0,
-              },
-            };
+            yield completedCommand("new-validation", marker("validation"));
             release.resolve();
             listingReleased.resolve();
             await validationRead.promise;
@@ -9210,9 +8700,7 @@ describe("CodexSecurity orchestration", () => {
       const { root, repository, codexHome, scanDir } = await scanDirectories();
       const updates: ScanProgress[] = [];
       const workerRead = Promise.withResolvers<void>();
-      const marker = (phase: string) =>
-        "CODEX_SECURITY_SCAN_PROGRESS " +
-        JSON.stringify({ phase, filesCompleted: 8, filesTotal: 8 });
+      const marker = (phase: string) => progressMarker(phase, 8, 8);
       const workerPhases = multiple
         ? (["discovery", "validation"] as const)
         : (["discovery"] as const);

@@ -120,9 +120,6 @@ function compareProgressOrder(
 
 interface StreamedProgressItem {
   markers: ParentProgressMarker[];
-  accepted: ScanProgress | null;
-  observedMarkerIndex: number;
-  acceptedMarkerIndex: number;
   item: ProgressItem | null;
   position: number | null;
 }
@@ -216,7 +213,6 @@ export class ScanCostTracker {
   readonly #receipts = new Map<string, ScanTokenUsage | null>();
   readonly #workers = new Map<string, number>();
   readonly #workerProgress = new Map<string, number>();
-  #lastProgress: string | null = null;
   readonly #liveParentProgress = new Set<string>();
   readonly #liveParentItems: StreamedProgressItem[] = [];
   #liveParentEvents = new WeakMap<
@@ -245,18 +241,12 @@ export class ScanCostTracker {
   #parentCompletionCursor = 0;
   #indexedParentCompletions = 0;
   #indexedParentItems = 0;
-  readonly #parentCompletionKeys = new Map<
-    string,
-    { indexes: number[]; next: number }
-  >();
-  readonly #parentItemKeys = new Map<
-    string,
-    { indexes: number[]; next: number }
-  >();
+  readonly #parentCompletionKeys: ProgressOccurrenceQueues = new Map();
+  readonly #parentItemKeys: ProgressOccurrenceQueues = new Map();
   readonly #parentMatches: number[] = [];
   readonly #pendingParentMatches = new Set<number>();
   #parentSession: SessionUsage | null = null;
-  #parentTurnStart: number | null = 0;
+  #parentTurnStartKnown = true;
   #parentFrontier = { position: 0, markerIndex: -1 };
   #threadId: string | null = null;
   #observingWorkers = true;
@@ -285,8 +275,7 @@ export class ScanCostTracker {
 
   /** Called before launching a turn, after loading any resumed history. */
   public beginParentTurn(resumed = false): void {
-    this.#parentTurnStart =
-      this.#parentSession?.position ?? (resumed ? null : 0);
+    this.#parentTurnStartKnown = this.#parentSession !== null || !resumed;
     this.#liveParentItems.length = 0;
     this.#liveParentEvents = new WeakMap();
     this.#acceptedParent = null;
@@ -320,9 +309,6 @@ export class ScanCostTracker {
       markers: [],
       item: streamedProgressItem(event),
       position: null,
-      accepted: null,
-      observedMarkerIndex: -1,
-      acceptedMarkerIndex: -1,
     };
     this.#liveParentItems.push(live);
     this.#liveParentEvents.set(event, live);
@@ -337,10 +323,9 @@ export class ScanCostTracker {
     this.recordParentItem(event);
     const live = this.#liveParentEvents.get(event);
     if (live === undefined) return true;
-    live.observedMarkerIndex++;
     const marker = {
       progress,
-      index: live.observedMarkerIndex,
+      index: live.markers.length,
       order: ++this.#progressOrder,
       accepted: false,
     };
@@ -350,13 +335,13 @@ export class ScanCostTracker {
     if (live.position !== null) this.#readyParentMarkers.push({ live, marker });
     return (
       live.position === null ||
-      this.#afterParentFrontier(live.position, live.observedMarkerIndex) ||
+      this.#afterParentFrontier(live.position, marker.index) ||
       // Polling can admit this parent completion before stdout delivers it,
       // then display a worker receipt. Its current live copy still restores the
       // parent phase; older parent completions and earlier markers stay stale.
       (this.#displayedProgress?.owner === "worker" &&
         live.position === this.#parentFrontier.position &&
-        live.observedMarkerIndex === this.#parentFrontier.markerIndex)
+        marker.index === this.#parentFrontier.markerIndex)
     );
   }
 
@@ -367,7 +352,7 @@ export class ScanCostTracker {
   ): void {
     const live = this.#liveParentEvents.get(event);
     if (live === undefined) return;
-    const marker = live.markers[live.observedMarkerIndex];
+    const marker = live.markers.at(-1);
     if (marker === undefined) return;
     marker.accepted = true;
     this.#acceptedParent = live;
@@ -379,13 +364,10 @@ export class ScanCostTracker {
     };
     this.#parentProgress = { progress, ...provenance };
     this.#rememberParentFact(this.#parentProgress);
-    live.accepted = progress;
-    live.acceptedMarkerIndex = live.observedMarkerIndex;
     const update = {
       ...progress,
       filesTotal: this.#expectedFilesTotal ?? progress.filesTotal,
     };
-    this.#lastProgress = progressKey(update);
     this.#displayedProgress = { update, owner: "live", ...provenance };
     this.#highestFilesCompleted = Math.max(
       this.#highestFilesCompleted,
@@ -393,14 +375,10 @@ export class ScanCostTracker {
     );
     this.#liveParentProgress.add(progressKey(progress));
     if (live.position !== null) {
-      this.#recordParentReview(
-        progress,
-        live.position,
-        live.acceptedMarkerIndex,
-      );
+      this.#recordParentReview(progress, live.position, marker.index);
       this.#parentFrontier = {
         position: live.position,
-        markerIndex: live.acceptedMarkerIndex,
+        markerIndex: marker.index,
       };
     }
   }
@@ -458,7 +436,7 @@ export class ScanCostTracker {
   }
 
   #matchParentCompletions(): void {
-    if (this.#parentSession === null || this.#parentTurnStart === null) return;
+    if (this.#parentSession === null || !this.#parentTurnStartKnown) return;
     const completions = this.#parentSession.completions;
     // Ordinary live completions can be dropped by native queue backpressure.
     // Match ordered signatures, not list indexes. Identical output signatures
@@ -675,13 +653,7 @@ export class ScanCostTracker {
         workerCoverage > parentCount
       )
         corrected = { ...retainedWorker, owner: "worker" };
-      this.#highestFilesCompleted = Math.max(
-        parentCount,
-        Math.min(
-          this.#expectedFilesTotal!,
-          this.#workerProgress.values().reduce((sum, count) => sum + count, 0),
-        ),
-      );
+      this.#highestFilesCompleted = Math.max(parentCount, workerCoverage);
       if (this.#parentSession !== null) {
         this.#parentSession.filesCompleted = parentCount;
         this.#parentSession.filesTotal = this.#expectedFilesTotal!;
@@ -733,8 +705,6 @@ export class ScanCostTracker {
           continue;
         }
         marker.accepted = true;
-        live.accepted = progress;
-        live.acceptedMarkerIndex = marker.index;
         this.#acceptedParent = live;
         const selectedParent = this.#parentProgress;
         if (
@@ -868,8 +838,9 @@ export class ScanCostTracker {
     const inventoryReported =
       progress.phase === "discovery" && progress.filesCompleted === 0;
     const duplicate =
-      this.#lastProgress === key && (!inventoryChanged || inventoryReported);
-    this.#lastProgress = key;
+      displayed !== null &&
+      progressKey(displayed.update) === key &&
+      (!inventoryChanged || inventoryReported);
     const displaySource = parentAtEqualCoverage
       ? { ...parent, owner: "parent" as const }
       : selected;
@@ -1333,10 +1304,7 @@ export class ScanCostTracker {
       // Retaining a newer parent phase retains that whole receipt, including
       // its actual inventory. Mixing an older total with its phase would discard
       // valid parent coverage when a later inventory correction arrives.
-      if (
-        parent &&
-        (newerProgress === null || newerProgress.owner === "worker")
-      )
+      if (parent && newerProgress === null)
         this.#parentProgress = { progress, ...provenance };
       const key = `${update.phase}:${update.filesCompleted}:${update.filesTotal}`;
       if (parent) {
@@ -1367,8 +1335,7 @@ export class ScanCostTracker {
                 : {}),
             };
       // Distinct equal-valued receipts still advance source ownership/order.
-      if (this.#lastProgress === key) continue;
-      this.#lastProgress = key;
+      if (displayed !== null && progressKey(displayed.update) === key) continue;
       this.#options.onProgress(update);
     }
   }
