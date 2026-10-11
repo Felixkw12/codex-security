@@ -1,3 +1,4 @@
+import { testLargeScopeTransport } from "./deep_scan_executor_scope_case.ts";
 import {
   testCodeModeFrameDiagnosticBoundaries,
   trustedParentSandbox,
@@ -119,7 +120,12 @@ const {
 
 try {
   testCodeModeFrameDiagnosticBoundaries(appendItemDiagnostic, ipcFrameError);
-  await testLargeScopeTransport();
+  await testLargeScopeTransport({
+    fakeCodexFixture,
+    captureDeepScanExecutionSettings,
+    workerRequest,
+    restoreEnv,
+  });
   await testOpenAiCredentialsReachWorker();
   await testWorkerCancellation();
   await testNullUsageCompletion();
@@ -2557,129 +2563,6 @@ async function testZeroSubagentsPreservesHostRestrictions() {
       assertWorkerSubagentPolicy(invocation.argv, 0);
       assertReadOnlyWorkerPolicy(invocation.argv);
     });
-  }
-}
-
-async function testLargeScopeTransport() {
-  const names = [
-    "CODEX_CLI_PATH",
-    "CODEX_HOME",
-    "CODEX_SECURITY_CONFIG_PATH",
-    "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
-    "FAKE_CODEX_MARKER",
-  ];
-  const saved = names.map((name) => [name, process.env[name]] as const);
-  const originalSpawn = childProcess.spawn;
-  const fixture = await fakeCodexFixture();
-  const scanIds = [randomUUID(), randomUUID()];
-  try {
-    process.env.CODEX_CLI_PATH = process.execPath;
-    process.env.CODEX_HOME = fixture.root;
-    delete process.env.CODEX_SECURITY_CONFIG_PATH;
-    delete process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
-    childProcess.spawn = ((
-      command: string,
-      args: readonly string[],
-      options: SpawnOptions,
-    ) =>
-      originalSpawn(command, [fixture.executablePath, ...args], {
-        ...options,
-        env: {
-          ...options.env,
-          FAKE_CODEX_MARKER: path.join(
-            String(options.cwd ?? args[args.indexOf("--cd") + 1]),
-            "invocation.json",
-          ),
-          FAKE_CODEX_PREFLIGHT_MARKER: path.join(
-            String(options.cwd),
-            "preflight.json",
-          ),
-        },
-      })) as typeof childProcess.spawn;
-    syncBuiltinESMExports();
-    for (const kind of ["discovery", "dedup"] as const) {
-      for (const resumed of [false, true]) {
-        let control: number[] = [];
-        for (const count of [2, 16384]) {
-          const sizes = await Promise.all(
-            scanIds.map(async (scanId, index) => {
-              const workerRoot = path.join(
-                fixture.root,
-                `scan-${index} café`,
-                `${kind}-${resumed}`,
-              );
-              const output = path.join(workerRoot, "output");
-              const prompt = path.join(workerRoot, "prompt.md");
-              await mkdir(output, { recursive: true });
-              await writeFile(prompt, "CAPTURE_SCOPE_INPUT");
-              const includePaths = Array.from(
-                { length: count },
-                (_, row) =>
-                  `scan-${index}/background jobs/café-${row}-${"a".repeat(110)}`,
-              );
-              const executor = new CodexSdkWorkerExecutor({
-                parentSandbox: trustedParentSandbox,
-                artifactContext: {
-                  pluginRoot: fixture.root,
-                  repoRoot: fixture.root,
-                  scanId,
-                  scope: ".",
-                  includePaths,
-                },
-              });
-              await executor.run(
-                workerRequest(prompt, output, {
-                  kind,
-                  ...(resumed
-                    ? { resumeThreadId: `scope-thread-${index}` }
-                    : {}),
-                  artifactContext: {
-                    root: output,
-                    layout: kind === "dedup" ? "reducer" : "worker",
-                    ...(kind === "dedup"
-                      ? {
-                          deepReducer: {
-                            scanRoot: workerRoot,
-                            claimedWorkers: [
-                              {
-                                id: "source-worker",
-                                resultPath: path.join(
-                                  workerRoot,
-                                  "accepted.json",
-                                ),
-                              },
-                            ],
-                          },
-                        }
-                      : {}),
-                  },
-                }),
-              );
-              const invocation = await readJson(output, "invocation.json");
-              assert.deepEqual(invocation.scopeInput.paths, includePaths);
-              assert.equal(path.isAbsolute(invocation.scopeInput.file), true);
-              assert.equal(invocation.argv.includes("resume"), resumed);
-              const argument = nativeConfigOverrides(invocation.argv).find(
-                (value) => value.startsWith("mcp_servers="),
-              )!;
-              assert.ok(argument);
-              return Buffer.byteLength(argument);
-            }),
-          );
-          if (count === 2) control = sizes;
-          else
-            assert.deepEqual(
-              sizes,
-              control,
-              "scope size must not increase the native command arguments",
-            );
-        }
-      }
-    }
-  } finally {
-    childProcess.spawn = originalSpawn;
-    syncBuiltinESMExports();
-    for (const [name, value] of saved) restoreEnv(name, value);
   }
 }
 
