@@ -1,5 +1,14 @@
+import {
+  testCodeModeFrameDiagnosticBoundaries,
+  trustedParentSandbox,
+  trustedParentSandboxWithDenials,
+  emptyWorkerPermissionProfile,
+  deniedWorkerPermissionProfile,
+  workerPermissionProfileOverride,
+} from "./deep_scan_executor_diagnostic_cases.ts";
 import { reconstructedWorkerCases } from "./deep_scan_reconstructed_worker_cases.ts";
 import { testCapturedCustomProviderSettings } from "./captured-provider-fixture.ts";
+import { jsonLineInputSource } from "./support/json-line-input-source.ts";
 import { readJson, writeJson } from "./support/json.ts";
 import { randomUUID } from "node:crypto";
 import { loadWorkbenchProcess } from "./support/workbench-process.ts";
@@ -85,42 +94,8 @@ export { WorkbenchDeepScanStore } from "./store.js";`,
 
 const temporaryDirectories = createTemporaryDirectories(true);
 const previousMarker = process.env.FAKE_CODEX_MARKER;
-const trustedParentSandbox = Object.freeze({
-  filesystemDenies: [],
-});
-const trustedParentSandboxWithDenials = Object.freeze({
-  filesystemDenies: [
-    "/repo/.env",
-    "/repo/**/.secret",
-    "/repo/**/*.pem",
-    "/repo/temp[1]",
-    "/repo/secret[1]",
-    "/repo/.env",
-  ],
-  literalFilesystemDenies: ["/repo/temp[1]", "/repo/secret[1]"],
-  globScanMaxDepth: 3,
-});
-const emptyWorkerPermissionProfile = {
-  extends: ":read-only",
-  filesystem: { ":root": "read" },
-  network: { enabled: false },
-};
 const ipcFrameError =
   "code-mode delegate response exceeds the IPC frame limit: code-mode IPC frame length 76008279 exceeds 67108864 bytes";
-const deniedWorkerPermissionProfile = {
-  extends: ":read-only",
-  filesystem: {
-    ":root": "read",
-    "/repo/.env": "deny",
-    "/repo/**/.secret": "deny",
-    "/repo/**/*.pem": "deny",
-    "/repo/temp[1]": { ".": "deny" },
-    "/repo/secret[1]": { ".": "deny" },
-    "/": { "repo/temp[1]": "deny", "repo/secret[1]": "deny" },
-    glob_scan_max_depth: 3,
-  },
-  network: { enabled: false },
-};
 
 const {
   testIsolatedReconstructedWorkers,
@@ -143,12 +118,12 @@ const {
 });
 
 try {
-  testCodeModeFrameDiagnosticBoundaries();
+  testCodeModeFrameDiagnosticBoundaries(appendItemDiagnostic, ipcFrameError);
+  await testLargeScopeTransport();
   await testOpenAiCredentialsReachWorker();
   await testWorkerCancellation();
   await testNullUsageCompletion();
   await testWorkerRuntimeSettings();
-  await testNullUsageCompletion();
   await testWorkerProviderSelection();
   await testCapturedCustomProviderSettings({
     fakeCodexFixture,
@@ -1263,6 +1238,7 @@ env_key = "CODEX_API_KEY"
         `CAPTURE_SYNTHETIC_OPENAI_AUTH\n${virtualenv === undefined ? "" : "CAPTURE_SYNTHETIC_PYTHON\n"}`,
       );
       const executor = new CodexSdkWorkerExecutor({
+        model: "gpt-daybreak-blue-latest",
         parentSandbox: trustedParentSandbox,
       });
       for (const kind of ["discovery", "dedup"] as const) {
@@ -1285,6 +1261,11 @@ env_key = "CODEX_API_KEY"
             runtimeEnvironment.LD_LIBRARY_PATH,
           );
           assert.equal(invocation.codexHome, fixture.root);
+          assertFlagPair(
+            invocation.argv,
+            "--model",
+            "gpt-daybreak-blue-latest",
+          );
           assert.deepEqual(invocation.runtimeEnvironment, runtimeEnvironment);
           if (virtualenv !== undefined) {
             assert.equal(invocation.pythonPrefix, virtualenv);
@@ -1296,6 +1277,7 @@ env_key = "CODEX_API_KEY"
           for (const [name, value] of Object.entries(runtimeEnvironment)) {
             assert.equal(process.env[name], value);
           }
+
           assert.equal(
             invocation.openaiAuthentication.CODEX_API_KEY,
             entry.expected,
@@ -1850,6 +1832,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               pluginRoot: path.join(fixture.root, `plugin-${index}`),
               repoRoot: fixture.root,
               scanId: `fixture-scan-${modelSettings.model ?? "inherited"}`,
+              includePaths:
+                index % 2 === 0
+                  ? ["api", `background jobs ${index}`]
+                  : undefined,
               pythonCommand: `${helperPython}-${index} `,
             },
           });
@@ -1956,6 +1942,12 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 codex_security_deep_scan_worker:
                   workerConfigurations[index].permissionProfile,
               },
+            );
+            assert.equal(
+              workerLaunch.args.some((arg) =>
+                arg.startsWith("permissions.codex_security_policy"),
+              ),
+              false,
             );
             assert.equal(
               workerLaunch.environment!.CODEX_SECURITY_KNOWLEDGE_BASE,
@@ -2108,6 +2100,8 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             assert.equal(invocation.python, python);
             assertConfigOverrides(invocation.argv, {
               "mcp_servers.cs_artifacts.command": process.execPath,
+              "mcp_servers.cs_artifacts.env.CODEX_SECURITY_INCLUDE_PATHS_JSON":
+                undefined,
               "mcp_servers.cs_artifacts.env.CODEX_SECURITY_PYTHON_COMMAND": `${helperPython}-${index} `,
               "mcp_servers.cs_artifacts.args.0": path.join(
                 fixture.root,
@@ -2120,6 +2114,21 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               "mcp_servers.cs_artifacts.env.CODEX_SECURITY_ARTIFACT_LAYOUT":
                 kind === "dedup" ? "reducer" : "worker",
             });
+            const servers = nativeConfigOverrides(invocation.argv)
+              .map((value) => parseToml(value))
+              .find((value) => value["mcp_servers"])!["mcp_servers"] as Record<
+              string,
+              { env: Record<string, string> }
+            >;
+            const scopeFile =
+              servers["cs_artifacts"]!.env["CODEX_SECURITY_INCLUDE_PATHS_FILE"];
+            if (index % 2 === 0) {
+              assert.ok(scopeFile && path.isAbsolute(scopeFile));
+              assert.deepEqual(JSON.parse(await readFile(scopeFile, "utf8")), [
+                "api",
+                `background jobs ${index}`,
+              ]);
+            } else assert.equal(scopeFile, undefined);
             assert.equal(process.env.PYTHON, python);
             assert.equal(
               invocation.deepConfigPath,
@@ -2551,6 +2560,129 @@ async function testZeroSubagentsPreservesHostRestrictions() {
   }
 }
 
+async function testLargeScopeTransport() {
+  const names = [
+    "CODEX_CLI_PATH",
+    "CODEX_HOME",
+    "CODEX_SECURITY_CONFIG_PATH",
+    "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+    "FAKE_CODEX_MARKER",
+  ];
+  const saved = names.map((name) => [name, process.env[name]] as const);
+  const originalSpawn = childProcess.spawn;
+  const fixture = await fakeCodexFixture();
+  const scanIds = [randomUUID(), randomUUID()];
+  try {
+    process.env.CODEX_CLI_PATH = process.execPath;
+    process.env.CODEX_HOME = fixture.root;
+    delete process.env.CODEX_SECURITY_CONFIG_PATH;
+    delete process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
+    childProcess.spawn = ((
+      command: string,
+      args: readonly string[],
+      options: SpawnOptions,
+    ) =>
+      originalSpawn(command, [fixture.executablePath, ...args], {
+        ...options,
+        env: {
+          ...options.env,
+          FAKE_CODEX_MARKER: path.join(
+            String(options.cwd ?? args[args.indexOf("--cd") + 1]),
+            "invocation.json",
+          ),
+          FAKE_CODEX_PREFLIGHT_MARKER: path.join(
+            String(options.cwd),
+            "preflight.json",
+          ),
+        },
+      })) as typeof childProcess.spawn;
+    syncBuiltinESMExports();
+    for (const kind of ["discovery", "dedup"] as const) {
+      for (const resumed of [false, true]) {
+        let control: number[] = [];
+        for (const count of [2, 16384]) {
+          const sizes = await Promise.all(
+            scanIds.map(async (scanId, index) => {
+              const workerRoot = path.join(
+                fixture.root,
+                `scan-${index} café`,
+                `${kind}-${resumed}`,
+              );
+              const output = path.join(workerRoot, "output");
+              const prompt = path.join(workerRoot, "prompt.md");
+              await mkdir(output, { recursive: true });
+              await writeFile(prompt, "CAPTURE_SCOPE_INPUT");
+              const includePaths = Array.from(
+                { length: count },
+                (_, row) =>
+                  `scan-${index}/background jobs/café-${row}-${"a".repeat(110)}`,
+              );
+              const executor = new CodexSdkWorkerExecutor({
+                parentSandbox: trustedParentSandbox,
+                artifactContext: {
+                  pluginRoot: fixture.root,
+                  repoRoot: fixture.root,
+                  scanId,
+                  scope: ".",
+                  includePaths,
+                },
+              });
+              await executor.run(
+                workerRequest(prompt, output, {
+                  kind,
+                  ...(resumed
+                    ? { resumeThreadId: `scope-thread-${index}` }
+                    : {}),
+                  artifactContext: {
+                    root: output,
+                    layout: kind === "dedup" ? "reducer" : "worker",
+                    ...(kind === "dedup"
+                      ? {
+                          deepReducer: {
+                            scanRoot: workerRoot,
+                            claimedWorkers: [
+                              {
+                                id: "source-worker",
+                                resultPath: path.join(
+                                  workerRoot,
+                                  "accepted.json",
+                                ),
+                              },
+                            ],
+                          },
+                        }
+                      : {}),
+                  },
+                }),
+              );
+              const invocation = await readJson(output, "invocation.json");
+              assert.deepEqual(invocation.scopeInput.paths, includePaths);
+              assert.equal(path.isAbsolute(invocation.scopeInput.file), true);
+              assert.equal(invocation.argv.includes("resume"), resumed);
+              const argument = nativeConfigOverrides(invocation.argv).find(
+                (value) => value.startsWith("mcp_servers="),
+              )!;
+              assert.ok(argument);
+              return Buffer.byteLength(argument);
+            }),
+          );
+          if (count === 2) control = sizes;
+          else
+            assert.deepEqual(
+              sizes,
+              control,
+              "scope size must not increase the native command arguments",
+            );
+        }
+      }
+    }
+  } finally {
+    childProcess.spawn = originalSpawn;
+    syncBuiltinESMExports();
+    for (const [name, value] of saved) restoreEnv(name, value);
+  }
+}
+
 async function testArtifactServerUsesExtendedStartupTimeout() {
   return withWorkerFixture(async (fixture, promptPath, workingDirectory) => {
     await writeFile(promptPath, "fixture artifact worker prompt\n");
@@ -2909,83 +3041,6 @@ async function testOwnedArtifactToolFailureDiagnosticIsPreserved() {
       JSON.stringify(result),
       /Bearer synthetic-secret|private source text/i,
     );
-  }
-}
-
-function testCodeModeFrameDiagnosticBoundaries() {
-  const failedArtifactTool = {
-    type: "mcp_tool_call",
-    server: "cs_artifacts",
-    tool: "get_codex_security_deep_reducer_inputs",
-    status: "failed",
-  };
-  const resultWithText = (text: string) => ({
-    content: [{ type: "text", text }],
-  });
-  for (const item of [
-    { type: "error", message: ipcFrameError },
-    { ...failedArtifactTool, error: { message: ipcFrameError } },
-    {
-      ...failedArtifactTool,
-      server: "foreign_server",
-      error: { message: ipcFrameError },
-    },
-    { ...failedArtifactTool, result: resultWithText(ipcFrameError) },
-  ]) {
-    const diagnostics: CodexWorkerDiagnostic[] = [];
-    appendItemDiagnostic(diagnostics, failedArtifactTool);
-    appendItemDiagnostic(diagnostics, item);
-    appendItemDiagnostic(diagnostics, failedArtifactTool);
-    assert.deepEqual(diagnostics, [
-      {
-        code: "artifact_tool_failed",
-        message:
-          "Codex worker artifact tool get_codex_security_deep_reducer_inputs failed.",
-      },
-      { code: "artifact_tool_failed", message: ipcFrameError },
-    ]);
-  }
-  for (const message of [
-    `private source: ${ipcFrameError}`,
-    `${ipcFrameError} private output`,
-    `${ipcFrameError}\n`,
-    JSON.stringify({ error: ipcFrameError }),
-    ipcFrameError.replace("76008279", "unknown"),
-    "private path /customer/repo: IPC frame limit exceeded",
-  ]) {
-    const diagnostics: CodexWorkerDiagnostic[] = [];
-    appendItemDiagnostic(diagnostics, { type: "error", message });
-    appendItemDiagnostic(diagnostics, {
-      ...failedArtifactTool,
-      result: resultWithText(message),
-    });
-    assert.deepEqual(diagnostics, [
-      { code: "worker_error", message },
-      { code: "artifact_tool_failed", message },
-    ]);
-  }
-  for (const item of [
-    {
-      ...failedArtifactTool,
-      server: "foreign_server",
-      result: resultWithText(ipcFrameError),
-    },
-    {
-      ...failedArtifactTool,
-      server: "foreign_server",
-      error: { message: "Synthetic unrelated transport failure" },
-    },
-    {
-      type: "command_execution",
-      status: "failed",
-      aggregated_output: ipcFrameError,
-    },
-    { type: "agent_message", text: ipcFrameError },
-    { type: "unknown", status: "failed", error: { message: ipcFrameError } },
-  ]) {
-    const diagnostics: CodexWorkerDiagnostic[] = [];
-    appendItemDiagnostic(diagnostics, item);
-    assert.deepEqual(diagnostics, []);
   }
 }
 
@@ -3416,18 +3471,7 @@ const preflightMarkerPath = process.env.FAKE_CODEX_PREFLIGHT_MARKER ?? ${JSON.st
 if (process.argv.includes('app-server')) {
   const preflight = { argv: process.argv.slice(2), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, runnerTrackingId: process.env.RUNNER_TRACKING_ID, libraryPath: process.env.LD_LIBRARY_PATH, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), requests: [] };
   writeFileSync(preflightMarkerPath, JSON.stringify(preflight));
-  let buffer = '';
-  process.stdin.setEncoding('utf8');
-  process.stdin.on('data', (chunk) => {
-    buffer += chunk;
-    while (true) {
-      const newline = buffer.indexOf('\\n');
-      if (newline < 0) return;
-      const line = buffer.slice(0, newline).trim();
-      buffer = buffer.slice(newline + 1);
-      if (!line) continue;
-      const message = JSON.parse(line);
-      if (message.method === 'initialized') continue;
+${jsonLineInputSource(`      if (message.method === 'initialized') continue;
       if (message.method === 'config/read' || message.method === 'permissionProfile/list') {
         preflight.requests.push({ method: message.method, cwd: message.params?.cwd });
         writeFileSync(preflightMarkerPath, JSON.stringify(preflight));
@@ -3447,12 +3491,19 @@ if (process.argv.includes('app-server')) {
         process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, error: { code: -32601, message: 'Method not found' } }) + '\\n');
         continue;
       }
-      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, result }) + '\\n');
-    }
-  });
+      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, result }) + '\\n');`)}
   process.stdin.on('end', () => process.exit(0));
 } else {
 const stdin = (await process.stdin.toArray()).join('');
+let scopeInput;
+if (stdin.includes('CAPTURE_SCOPE_INPUT')) {
+  const { parse } = await import(${JSON.stringify(import.meta.resolve("smol-toml"))});
+  const configuration = process.argv.flatMap((arg, index) => arg === '--config' || arg === '-c' ? [parse(process.argv[index + 1])] : []).findLast(value => value.mcp_servers?.cs_artifacts);
+  const environment = configuration.mcp_servers.cs_artifacts.env;
+  const file = environment.CODEX_SECURITY_INCLUDE_PATHS_FILE;
+  scopeInput = { file, paths: JSON.parse(file ? readFileSync(file, 'utf8') : environment.CODEX_SECURITY_INCLUDE_PATHS_JSON) };
+}
+
 const profileIndex = process.argv.indexOf('--profile');
 const profileContents = profileIndex === -1 ? undefined : readFileSync(join(process.env.CODEX_HOME, process.argv[profileIndex + 1] + '.config.toml'), 'utf8');
 const openaiAuthentication = stdin.includes('CAPTURE_SYNTHETIC_OPENAI_AUTH') ? { OPENAI_API_KEY: process.env.OPENAI_API_KEY, CODEX_API_KEY: process.env.CODEX_API_KEY } : undefined;
@@ -3466,7 +3517,7 @@ if (pythonProbe && pythonProbe.status !== 0) throw new Error(pythonProbe.stderr 
 const pythonRuntime = pythonProbe ? JSON.parse(pythonProbe.stdout) : undefined;
 const knowledgePath = stdin.includes('synthetic worker configuration fixture') ? process.env.CODEX_SECURITY_KNOWLEDGE_BASE : undefined;
 const knowledgeDocuments = knowledgePath === undefined ? undefined : Object.fromEntries(readdirSync(knowledgePath).map(name => [name, readFileSync(join(knowledgePath, name), 'utf8')]));
-writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ executable: process.execPath, codexCliPath: process.env.CODEX_CLI_PATH, scanValue: process.env.FAKE_CODEX_SCAN_VALUE, argv: process.argv.slice(2), stdin, cwd: process.cwd(), knowledgePath, knowledgeDocuments, codexHome: process.env.CODEX_HOME, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, mcpNodePath: process.env.CODEX_MCP_NODE_PATH, bundledTool: toolProbe?.stdout.trim(), pythonPrefix: pythonRuntime?.[0], pythonLibraryPath: pythonRuntime?.[1], runtimeEnvironment, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(providerAuthentication ? { providerAuthentication } : {}), ...(profileContents === undefined ? {} : { profileContents }), ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));
+writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({ ...(scopeInput === undefined ? {} : { scopeInput }), executable: process.execPath, codexCliPath: process.env.CODEX_CLI_PATH, scanValue: process.env.FAKE_CODEX_SCAN_VALUE, argv: process.argv.slice(2), stdin, cwd: process.cwd(), knowledgePath, knowledgeDocuments, codexHome: process.env.CODEX_HOME, cacheDirectory: process.env.XDG_CACHE_HOME, gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])), configPath: process.env.CODEX_SECURITY_CONFIG_PATH, deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, python: process.env.PYTHON, mcpNodePath: process.env.CODEX_MCP_NODE_PATH, bundledTool: toolProbe?.stdout.trim(), pythonPrefix: pythonRuntime?.[0], pythonLibraryPath: pythonRuntime?.[1], runtimeEnvironment, providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE, originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, ...(providerAuthentication ? { providerAuthentication } : {}), ...(profileContents === undefined ? {} : { profileContents }), ...(stdin.includes('COMPLETE_THEN_HANG') ? { pid: process.pid } : {}), ...(openaiAuthentication ? { openaiAuthentication } : {}), ...(bedrockAuthentication ? { bedrockAuthentication } : {}) }));
 if (stdin.includes('COMPLETE_THEN_HANG')) process.on('SIGTERM', () => { if (!stdin.includes('IGNORE_TERMINATION')) setTimeout(() => process.exit(0), 100); });
 
 if (stdin.includes('THREAD_START_CONFIG_ERROR')) { console.error('Error: thread/start: thread/start failed: agents.max_threads cannot be set when features.multi_agent_v2 is enabled (code -32600)'); process.exit(1); }
@@ -3546,18 +3597,6 @@ function assertReadOnlyWorkerPolicy(args: readonly string[]) {
     "permissions.codex_security_deep_scan_worker.network.enabled": false,
   });
   assert.equal(override.includes('"write"'), false);
-}
-
-function workerPermissionProfileOverride(args: readonly string[]) {
-  assert.deepEqual(
-    args.filter((arg: string) => arg.startsWith("default_permissions=")),
-    ['default_permissions="codex_security_deep_scan_worker"'],
-  );
-  const overrides = args.filter((arg: string) =>
-    arg.startsWith("permissions.codex_security_deep_scan_worker="),
-  );
-  assert.equal(overrides.length, 1);
-  return overrides[0];
 }
 
 function assertWorkerSubagentPolicy(

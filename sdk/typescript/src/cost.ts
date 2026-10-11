@@ -1,6 +1,6 @@
 import { parseJson } from "./value.js";
 import { createHash } from "node:crypto";
-import { open, readdir, realpath } from "node:fs/promises";
+import { open, readdir, realpath, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { isRecord } from "./record.js";
@@ -110,6 +110,7 @@ interface ScanCostTrackerOptions {
   onCost?: (cost: Readonly<ScanCost>) => void;
   // Only reported when the full public estimate is unavailable.
   onCostLowerBound?: (cost: Readonly<ScanCost>) => void;
+  onUsage?: (usage: Readonly<ScanTokenUsage>) => void;
   onActivity?: (activity: ScanActivity) => void;
   onProgress?: (progress: ScanProgress) => void;
   onSessionEvent?: (event: ScanSessionEvent) => void;
@@ -180,6 +181,7 @@ export class ScanCostTracker {
   #snapshot: ScanCostSnapshot = { usage: null, cost: null };
   #lastCost: string | null = null;
   #lastCostLowerBound: string | null = null;
+  #lastUsage: string | null = null;
   #highestFilesCompleted = 0;
   #expectedFilesTotal: number | undefined;
   #attribution: ScanExecutionAttribution | null = null;
@@ -223,6 +225,7 @@ export class ScanCostTracker {
       this.#options.maxCostUsd === undefined &&
       this.#options.onCost === undefined &&
       this.#options.onCostLowerBound === undefined &&
+      this.#options.onUsage === undefined &&
       this.#options.onActivity === undefined &&
       this.#options.onProgress === undefined &&
       this.#options.onSessionEvent === undefined &&
@@ -281,6 +284,7 @@ export class ScanCostTracker {
       return this.#snapshot;
     const cost = estimateScanCost(this.#options.model, fallbackUsage);
     this.#snapshot = { usage: fallbackUsage ?? null, cost };
+    this.#reportUsage(tokenUsage(fallbackUsage));
     this.#reportCost(cost, fallbackUsage);
     return this.#snapshot;
   }
@@ -611,6 +615,7 @@ export class ScanCostTracker {
       ? null
       : estimateScanCost(this.#options.model, measured);
     this.#snapshot = { usage: unmeasuredSession ? null : measured, cost };
+    this.#reportUsage(measured);
     this.#reportCost(cost, measured, {
       ...usage,
       modelUsage: [...liveModelUsage].map(([model, tokens]) => ({
@@ -691,6 +696,14 @@ export class ScanCostTracker {
     this.#lastCost = signature;
     this.#options.onCost?.(cost);
   }
+
+  #reportUsage(usage: ScanTokenUsage | null): void {
+    if (usage === null) return;
+    const signature = JSON.stringify(usage);
+    if (signature === this.#lastUsage) return;
+    this.#lastUsage = signature;
+    this.#options.onUsage?.(usage);
+  }
 }
 
 export async function* sessionFiles(
@@ -727,6 +740,7 @@ async function readSessionUsage(
   if (session.unreadable) return;
   let file;
   try {
+    if ((await stat(path)).size === session.offset) return;
     file = await open(path, "r");
   } catch (error) {
     if (isMissingFile(error)) return;

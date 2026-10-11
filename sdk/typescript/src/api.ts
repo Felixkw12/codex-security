@@ -98,6 +98,7 @@ import {
   type ScanWorkerEvent,
 } from "./cost.js";
 import type { ScanExecutionAttribution } from "./scan-sessions.js";
+import type { ScanTokenUsage } from "./cost-model.js";
 import {
   DeepScanProgressTracker,
   type DeepScanProgress,
@@ -211,6 +212,7 @@ import {
   codexSecurityCredentialHome,
   codexSecurityHasStoredFileCredentials,
   codexSecurityStateDirectory,
+  codexExecutableReadPaths,
   createIsolatedHome,
   executablePathForSpawn,
   expandHome,
@@ -311,6 +313,8 @@ export interface ScanOptions extends ScanSettings {
   parentScanId?: string;
   expectedPluginVersion?: string;
   onCost?: (cost: Readonly<ScanCost>, maxCostUsd?: number) => void;
+  /** Observed tokens, including models without a price estimate. */
+  onUsage?: (usage: Readonly<ScanTokenUsage>) => void;
   onBudgetApproaching?: (
     budget: ScanBudget,
   ) => number | undefined | Promise<number | undefined>;
@@ -422,6 +426,7 @@ export interface ScanBudget {
 type ScanObserverName =
   | "onAuthentication"
   | "onCost"
+  | "onUsage"
   | "onOutputArchived"
   | "onOutputDirReady"
   | "onScanRegistered"
@@ -1026,6 +1031,10 @@ export class CodexSecurity {
         runtime.plugin.pluginRoot,
         ...(knowledgeBase === null ? [] : [knowledgeBase.path]),
       ].filter((path, index, roots) => roots.indexOf(path) === index);
+      const policyFilesystem = policyFilesystemPermissions(
+        inputs.gitMetadataPaths,
+        await codexExecutableReadPaths(this.#codexCommand().command),
+      );
       const { codex } = await this.#createSessionCodex(
         session,
         "policy",
@@ -1041,12 +1050,10 @@ export class CodexSecurity {
         options.auth,
         undefined,
         policyCodexConfig(session.sessionConfig),
-        inputs.gitMetadataPaths.length === 0
-          ? []
-          : [
-              // CLI override keys split on dots, so keep paths inside the TOML value.
-              `permissions.${POLICY_PERMISSION_PROFILE}.filesystem=${inlineToml(policyFilesystemPermissions(inputs.gitMetadataPaths))}`,
-            ],
+        [
+          // CLI override keys split on dots, so keep paths inside the TOML value.
+          `permissions.${POLICY_PERMISSION_PROFILE}.filesystem=${inlineToml(policyFilesystem)}`,
+        ],
       );
       const enforceCostLimit = (total: Readonly<ScanCost>): void => {
         if (
@@ -1646,6 +1653,10 @@ export class CodexSecurity {
         repository: repo,
         scanDirectory: scanDir,
         maxCostUsd: options.maxCostUsd,
+        onUsage:
+          options.onUsage === undefined
+            ? undefined
+            : (usage) => notifyObserver(options, "onUsage")(usage),
         onActivity:
           options.onActivity === undefined
             ? undefined
@@ -4202,15 +4213,32 @@ export async function runScanEvents(
       }
       return (completedTurn = { ...turn, threadId, status });
     };
-    const accept = async () => {
+    let managedFinalized = false;
+    const accept = async (execution: Awaited<ReturnType<typeof execute>>) => {
+      // Managed scans reconcile saved checkpoints before admitting canonical artifacts.
+      if (
+        options.workbenchValidated &&
+        options.onFinalize !== undefined &&
+        !managedFinalized
+      ) {
+        execution.usage =
+          (await options.onFinalize(execution.usage)) ?? execution.usage;
+        managedFinalized = true;
+      }
+      options.signal.throwIfAborted();
+      await requireScanArtifacts(
+        options.scanDir,
+        ["scan-manifest.json", "findings.json", "coverage.json"],
+        options.signal,
+      );
       // Matching, custom validation and the canonical seal remain with the caller.
       const [manifest, findings, coverage] = await Promise.all(
         ["scan-manifest.json", "findings.json", "coverage.json"].map(
           async (name) =>
             JSON.parse(
-              (
-                await readScanFile(options.scanDir, name, name, options.signal)
-              ).toString("utf8"),
+              new TextDecoder("utf-8", { fatal: true }).decode(
+                await readScanFile(options.scanDir, name, name, options.signal),
+              ),
             ),
         ),
       );
@@ -4241,7 +4269,11 @@ export async function runScanEvents(
       if (!saved || saved.status !== "completed" || saved.threadId === null)
         throw error;
       // The enclosing scan publishes its saved selection; acceptance then reads it.
-      const recovered = completedTurn ?? { ...saved, threadId: saved.threadId };
+      const recovered = completedTurn ?? {
+        ...saved,
+        threadId: saved.threadId,
+        status: saved.status,
+      };
       audit = await runAcceptedAudit({
         signal: options.signal,
         execute: async () => recovered,
@@ -4254,7 +4286,7 @@ export async function runScanEvents(
       );
     const { status, threadId, finalResponse } = audit.execution;
     let { usage } = audit.execution;
-    if (options.onFinalize !== undefined) {
+    if (!options.workbenchValidated && options.onFinalize !== undefined) {
       usage = (await options.onFinalize(usage)) ?? usage;
     }
     return await collectResult(
@@ -4645,23 +4677,11 @@ function addScanCosts(
   };
 }
 
-async function collectResult(
-  turnResult: TurnResultMetadata,
-  threadId: string,
+async function requireScanArtifacts(
   scanDir: string,
-  pluginRoot: string,
-  expectation: ScanExpectation,
+  required: readonly string[],
   signal: AbortSignal,
-  workbenchValidated = false,
-  pythonPath?: string,
-  protectedRoot?: string,
-): Promise<ScanResult> {
-  const required = [
-    "scan-manifest.json",
-    "findings.json",
-    "coverage.json",
-    "report.md",
-  ];
+): Promise<void> {
   const missing: string[] = [];
   for (const name of required) {
     try {
@@ -4680,6 +4700,24 @@ async function collectResult(
       `Codex Security scan completed without required artifacts: ${missing.join(", ")}`,
     );
   }
+}
+
+async function collectResult(
+  turnResult: TurnResultMetadata,
+  threadId: string,
+  scanDir: string,
+  pluginRoot: string,
+  expectation: ScanExpectation,
+  signal: AbortSignal,
+  workbenchValidated = false,
+  pythonPath?: string,
+  protectedRoot?: string,
+): Promise<ScanResult> {
+  await requireScanArtifacts(
+    scanDir,
+    ["scan-manifest.json", "findings.json", "coverage.json", "report.md"],
+    signal,
+  );
   const { manifest, findings, coverage } = await loadContract(scanDir, {
     pluginRoot,
     expectation,
@@ -5031,10 +5069,13 @@ export function scanRuntimeCodexConfig(
 
 function policyFilesystemPermissions(
   gitMetadataPaths: readonly string[] = [],
+  codexPaths: readonly string[] = [],
 ): JsonObject {
   return {
     ":minimal": "read",
     ":workspace_roots": "read",
+    // Linux's sandbox re-executes Codex, including installations outside /usr.
+    ...Object.fromEntries(codexPaths.map((path) => [path, { ".": "read" }])),
     // A scoped "." keeps native permission paths literal, including glob characters.
     ...Object.fromEntries(
       gitMetadataPaths.map((path) => [path, { ".": "deny" }]),

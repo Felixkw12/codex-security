@@ -426,6 +426,7 @@ def _deep_scan_state(connection: sqlite3.Connection, scan_id: str) -> dict[str, 
         "scope": scan["scope"],
         "model": scan["model"],
         "reasoningEffort": scan["reasoning_effort"],
+        "includePaths": dependencies().requested_scan_paths(scan),
         "userContext": (
             run["discovery_user_context"]
             if "discovery_user_context" in run.keys()
