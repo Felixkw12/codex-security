@@ -1874,6 +1874,22 @@ def merge_saved_results(
                 return False
         return True
 
+    def same_raw_value(left: Any, right: Any) -> bool:
+        if isinstance(left, dict):
+            return (
+                isinstance(right, dict)
+                and left.keys() == right.keys()
+                and all(same_raw_value(value, right[key]) for key, value in left.items())
+            )
+        if isinstance(left, list):
+            return (
+                isinstance(right, list)
+                and len(left) == len(right)
+                and all(same_raw_value(a, b) for a, b in zip(left, right, strict=True))
+            )
+        # JSON numbers compare by value, but booleans are a distinct scalar type.
+        return isinstance(left, bool) == isinstance(right, bool) and left == right
+
     def same_raw_content(left: dict[str, Any], right: dict[str, Any]) -> bool:
         def content(value: dict[str, Any]) -> dict[str, Any]:
             result = _finding_content(value)
@@ -1887,7 +1903,7 @@ def merge_saved_results(
                     result.pop("extensions")
             return result
 
-        return content(left) == content(right)
+        return same_raw_value(content(left), content(right))
 
     def contains_raw_value(current: Any, previous: Any) -> bool:
         if isinstance(previous, dict):
@@ -2000,7 +2016,7 @@ def merge_saved_results(
                 if (
                     group["key"] not in claimed
                     and owner == group["owner"]
-                    and value == group["latest"]
+                    and same_raw_value(value, group["latest"])
                 ):
                     assigned[index] = group
                     claimed.add(group["key"])
@@ -2052,7 +2068,7 @@ def merge_saved_results(
                 logical_rows.setdefault(saved_scope, {})[match["key"]] = match
             if match["owner"] is None:
                 match["owner"] = owner
-            if value not in match["rows"]:
+            if not any(same_raw_value(value, previous) for previous in match["rows"]):
                 match["rows"].append(value)
             observations = match.setdefault("observations", {})
             previous = observations.get(source_owner)
@@ -2842,6 +2858,7 @@ def preserve_scan_results_locked(
         completion_binding=binding,
         completion_warnings=warnings,
         draft_documents=documents,
+        finding_scope=db.requested_scan_paths(scan) if scan["mode"] == "deep" else None,
     )
     snapshots = _snapshot_published_outputs(scan_dir)
     try:

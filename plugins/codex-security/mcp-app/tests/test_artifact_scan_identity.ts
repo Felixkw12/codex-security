@@ -89,6 +89,65 @@ const variants = {
 };
 
 for (const layout of ["standard", "diff", "deep"] as const) {
+  for (const observations of [
+    [true, 1],
+    [false, 0],
+    [1, 2],
+    [0, 2],
+  ]) {
+    test(`${layout}: reordered JSON evidence ${observations.join("/")} keeps published identities`, async (t) => {
+      const normal = await fixture(t, layout);
+      const recovered = await fixture(t, layout);
+      const initial = observations.map((value) =>
+        finding("Synthetic review", {
+          extensions: { observation: { value } },
+        }),
+      );
+      for (const target of [normal, recovered]) {
+        await target.write({ ...target.draft(), findings: initial });
+        await dateDraftFiles(target.root, 100);
+      }
+      const findings = [...initial].reverse();
+      await normal.write({ ...normal.draft(), findings });
+      const snapshot = { ...recovered.draft(), findings };
+      if (typeof observations[0] === "boolean") {
+        await draftApi.saveScanDraftCheckpoint(
+          recovered.context,
+          snapshot,
+          false,
+        );
+      } else {
+        // Imported JSON can spell the same numbers differently than JSON.stringify.
+        const contents = (JSON.stringify(snapshot, null, 2) + "\n").replace(
+          /"value": (\d+)/g,
+          (_, value: string) =>
+            `"value": ${value === "0" ? "-0.0" : `${value}.0`}`,
+        );
+        const name =
+          createHash("sha256").update(contents).digest("hex") + ".json";
+        await writeFile(
+          path.join(recovered.root, "checkpoints", name),
+          contents,
+        );
+      }
+      const result = await recoverAndFinalize(
+        normal,
+        recovered,
+        [],
+        true,
+        true,
+      );
+      assert.equal(result.normal.length, 2);
+      assert.equal(result.recovered.length, 2);
+      const byId = (left: RecoveredFinding, right: RecoveredFinding) =>
+        left.findingId.localeCompare(right.findingId);
+      assert.deepEqual(result.recovered.sort(byId), result.normal.sort(byId));
+      assert.deepEqual(result.warnings, []);
+    });
+  }
+}
+
+for (const layout of ["standard", "diff", "deep"] as const) {
   for (const [variant, findings] of Object.entries(variants)) {
     test(`${layout}: first checkpoint publication preserves ${variant} identities`, async (t) => {
       const normal = await fixture(t, layout);
