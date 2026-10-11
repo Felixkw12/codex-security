@@ -1602,9 +1602,14 @@ function readSessionEvent(
   ) {
     const item = nativeProgressItem(payload["item"]);
     const value = payload["item"];
+    const duplicateCompletion =
+      item?.kind === "message" &&
+      repeatedMessageProjection(session, item.outputDigest, "native");
     if (
       isRecord(value) &&
-      (value["type"] === "CommandExecution" || value["type"] === "AgentMessage")
+      (value["type"] === "CommandExecution" ||
+        value["type"] === "AgentMessage") &&
+      !duplicateCompletion
     ) {
       const signature =
         item === null
@@ -1661,7 +1666,10 @@ function readSessionEvent(
       );
       // Legacy rollouts persist the finalized message instead of the native
       // item. It provides the same compact output signature for live matching.
-      if (session.threadId === progressThread && !duplicate)
+      if (
+        session.threadId === progressThread &&
+        !repeatedMessageProjection(session, digest(payload["message"]), "event")
+      )
         session.completions.push({
           position,
           item: progressSignature("message", payload["message"]),
@@ -1831,12 +1839,16 @@ function repeatedMessageProjection(
   session: SessionUsage,
   textDigest: string,
   projection: "native" | "event" | "response",
-  updates: readonly ScanProgress[],
+  updates?: readonly ScanProgress[],
 ): boolean {
-  if (updates.length === 0) return false;
-  // Finalized messages concatenate parts; original responses retain separate
-  // lines. Only suppress copies that recovered the same progress updates.
-  const key = `${textDigest}:${digest(JSON.stringify(updates))}`;
+  if (updates?.length === 0) return false;
+  // Completion matching counts every native/legacy message, even without
+  // progress. Keep those occurrences separate from parsed progress copies:
+  // multipart responses can recover updates absent from their native copy.
+  const key =
+    updates === undefined
+      ? textDigest
+      : `${textDigest}:${digest(JSON.stringify(updates))}`;
   let counts = session.messageProjections.get(key);
   if (counts === undefined) {
     counts = { native: 0, event: 0, response: 0 };
