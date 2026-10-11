@@ -80,6 +80,7 @@ import {
   estimateScanCost,
   ScanCostTracker,
   type ScanCost,
+  type ParentProgressSource,
   type ScanSessionEvent,
   type ScanWorkerEvent,
 } from "./cost.js";
@@ -1544,19 +1545,25 @@ export class CodexSecurity {
         `${progress.phase}:${progress.filesCompleted}:${progress.filesTotal}`;
       const reportProgress = (
         progress: ScanProgress,
-        event?: Readonly<Record<string, unknown>>,
+        source?: ParentProgressSource,
       ): void => {
+        if (
+          source !== undefined &&
+          source.reconciled !== true &&
+          !tracker.recordParentProgress(progress, source.event)
+        )
+          return;
         const inventory =
-          progress.phase === "discovery" &&
-          reviewedFileCount === 0 &&
-          progress.filesCompleted === 0;
+          source?.inventory === true ||
+          (progress.phase === "discovery" &&
+            reviewedFileCount === 0 &&
+            progress.filesCompleted === 0);
         const filesTotal = inventory ? progress.filesTotal : scopeFileCount;
         if (
           filesTotal === null ||
           progress.filesTotal > filesTotal ||
-          progress.filesCompleted < reviewedFileCount ||
-          (event !== undefined &&
-            !tracker.recordParentProgress(progress, event))
+          (source?.inventory !== true &&
+            progress.filesCompleted < reviewedFileCount)
         )
           return;
         if (inventory) {
@@ -1564,6 +1571,8 @@ export class CodexSecurity {
           tracker.setExpectedFilesTotal(filesTotal);
         }
         reviewedFileCount = progress.filesCompleted;
+        if (source !== undefined && source.reconciled !== true)
+          tracker.acceptParentProgress(progress, source.event);
         const update = { ...progress, filesTotal };
         const key = progressKey(update);
         if (lastProgress === key) return;
@@ -2087,6 +2096,7 @@ export class CodexSecurity {
       if (postScanPrompt?.trim()) {
         runPostScan = () => thread.runStreamed(postScanPrompt, turnOptions);
       }
+      tracker.beginParentTurn(resumeThreadId !== undefined);
       const events = directDeepScan
         ? (this.#dependencies.runDeepScan ?? runDeepScan)({
             codexOptions,
@@ -2265,6 +2275,10 @@ export class CodexSecurity {
         onTrustedAccessStatus: options.onTrustedAccessStatus,
         onReconnect: options.onReconnect,
         onActivity: options.onActivity,
+        onProgressItem:
+          options.onProgress === undefined
+            ? undefined
+            : (event) => tracker.recordParentItem(event),
         onProgress: reportProgress,
         onWorkerStatus: options.onWorkerStatus,
         onWarning: options.onWarning,
@@ -3883,10 +3897,8 @@ interface ScanEventRunOptions extends Pick<ScanOptions, "onReconnect"> {
   onScanStarted?: () => void;
   onTrustedAccessStatus?: (status: ScanTrustedAccessStatus) => void;
   onActivity?: (activity: ScanActivity) => void;
-  onProgress?: (
-    progress: ScanProgress,
-    event: Readonly<Record<string, unknown>>,
-  ) => void;
+  onProgressItem?: (event: Readonly<Record<string, unknown>>) => void;
+  onProgress?: (progress: ScanProgress, source: ParentProgressSource) => void;
   onWorkerStatus?: (status: ScanWorkerStatus) => void;
   onWarning?: (warning: string) => void;
   onObserverError?: (observer: ScanObserverName, error: unknown) => void;
@@ -3926,10 +3938,11 @@ export async function runScanEvents(
         )) {
           notifyObserver(options, "onActivity")(activity);
         }
+        options.onProgressItem?.(event);
         for (const progress of scanProgressUpdatesFromEvent(event)) {
           notifyObserver(
             {
-              onProgress: (update) => options.onProgress?.(update, event),
+              onProgress: (update) => options.onProgress?.(update, { event }),
               onObserverError: options.onObserverError,
             },
             "onProgress",

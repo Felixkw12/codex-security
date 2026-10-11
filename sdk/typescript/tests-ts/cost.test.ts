@@ -1918,7 +1918,10 @@ describe("live scan cost tracking", () => {
             aggregated_output: `head\n${marker(progress)}\ntail`,
           },
         };
-        if (tracker.recordParentProgress(progress, event)) report(progress);
+        if (tracker.recordParentProgress(progress, event)) {
+          tracker.acceptParentProgress(progress, event);
+          report(progress);
+        }
       }
       await appendSessionItem(parent, progressMessage(0));
       if (nativeCompletion) {
@@ -1973,7 +1976,10 @@ describe("live scan cost tracking", () => {
           text: "CODEX_SECURITY_SCAN_PROGRESS " + JSON.stringify(progress),
         },
       };
-      if (tracker.recordParentProgress(progress, event)) updates.push(progress);
+      if (tracker.recordParentProgress(progress, event)) {
+        tracker.acceptParentProgress(progress, event);
+        updates.push(progress);
+      }
     }
     await appendSessionItem(parent, progressMessage(8));
     await tracker.refresh();
@@ -2015,8 +2021,11 @@ describe("live scan cost tracking", () => {
       },
     });
     for (const progress of [discovery, validation]) {
-      if (tracker.recordParentProgress(progress, live(progress)))
+      const event = live(progress);
+      if (tracker.recordParentProgress(progress, event)) {
+        tracker.acceptParentProgress(progress, event);
         updates.push(progress);
+      }
     }
     // Commands can start in a different order. Only completion order carries
     // progress ordering; the repeated command/output is not a unique identity.
