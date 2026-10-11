@@ -4303,6 +4303,8 @@ describe("CodexSecurity orchestration", () => {
           return { events: completedEvents("thread-1", markers()) };
         }),
       });
+      // The fake stream has no process handle to keep the unref'ed poll alive.
+      const keepAlive = setInterval(() => {}, 1_000);
       try {
         await client.run(repository, {
           onProgress: (update) => {
@@ -4333,6 +4335,7 @@ describe("CodexSecurity orchestration", () => {
           ),
         ).toHaveLength(persisted.length);
       } finally {
+        clearInterval(keepAlive);
         await client.close();
       }
     },
@@ -4552,6 +4555,8 @@ describe("CodexSecurity orchestration", () => {
           return { events: completedEvents("thread-1", markers()) };
         }),
       });
+      // The fake stream has no process handle to keep the unref'ed poll alive.
+      const keepAlive = setInterval(() => {}, 1_000);
       try {
         await client.run(repository, {
           onProgress: (progress) => {
@@ -4623,6 +4628,7 @@ describe("CodexSecurity orchestration", () => {
           });
         }
       } finally {
+        clearInterval(keepAlive);
         await client.close();
       }
     },
@@ -4689,6 +4695,8 @@ describe("CodexSecurity orchestration", () => {
           return { events: completedEvents("thread-1", events()) };
         }),
       });
+      // The fake stream has no process handle to keep the unref'ed poll alive.
+      const keepAlive = setInterval(() => {}, 1_000);
       try {
         await client.run(repository, {
           onProgress: (update) => updates.push(update),
@@ -4717,6 +4725,7 @@ describe("CodexSecurity orchestration", () => {
             ),
         ).toBe(true);
       } finally {
+        clearInterval(keepAlive);
         await client.close();
       }
     },
@@ -4802,6 +4811,8 @@ describe("CodexSecurity orchestration", () => {
           return { events: completedEvents("thread-1", events()) };
         }),
       });
+      // The fake stream has no process handle to keep the unref'ed poll alive.
+      const keepAlive = setInterval(() => {}, 1_000);
       try {
         await client.run(repository, {
           onProgress: (update) => updates.push(update),
@@ -4817,6 +4828,7 @@ describe("CodexSecurity orchestration", () => {
           filesTotal: 9,
         });
       } finally {
+        clearInterval(keepAlive);
         await client.close();
       }
     },
@@ -4978,6 +4990,8 @@ describe("CodexSecurity orchestration", () => {
           return { events: completedEvents("thread-1", events()) };
         }),
       });
+      // The fake stream has no process handle to keep the unref'ed poll alive.
+      const keepAlive = setInterval(() => {}, 1_000);
       try {
         await client.run(repository, {
           onProgress: (update) => updates.push(update),
@@ -4995,6 +5009,7 @@ describe("CodexSecurity orchestration", () => {
           filesTotal: total,
         });
       } finally {
+        clearInterval(keepAlive);
         await client.close();
       }
     },
@@ -5100,6 +5115,8 @@ describe("CodexSecurity orchestration", () => {
           return { events: completedEvents("thread-1", events()) };
         }),
       });
+      // The fake stream has no process handle to keep the unref'ed poll alive.
+      const keepAlive = setInterval(() => {}, 1_000);
       try {
         await client.run(repository, {
           onProgress: (progress) => updates.push(progress),
@@ -5125,6 +5142,7 @@ describe("CodexSecurity orchestration", () => {
             : [...phases],
         );
       } finally {
+        clearInterval(keepAlive);
         await client.close();
       }
     },
@@ -5202,6 +5220,8 @@ describe("CodexSecurity orchestration", () => {
         return { events: completedEvents("thread-1", events()) };
       }),
     });
+    // The fake stream has no process handle to keep the unref'ed poll alive.
+    const keepAlive = setInterval(() => {}, 1_000);
     try {
       await client.run(repository, {
         onProgress: (progress) => {
@@ -5223,6 +5243,7 @@ describe("CodexSecurity orchestration", () => {
           .map((progress) => progress.phase),
       ).toEqual(["discovery", "validation"]);
     } finally {
+      clearInterval(keepAlive);
       await client.close();
     }
   });
@@ -5443,6 +5464,8 @@ describe("CodexSecurity orchestration", () => {
         return { events: completedEvents("thread-1", events()) };
       }),
     });
+    // The fake stream has no process handle to keep the unref'ed poll alive.
+    const keepAlive = setInterval(() => {}, 1_000);
     try {
       await client.run(repository, {
         onProgress: (progress) => updates.push(progress),
@@ -5461,6 +5484,7 @@ describe("CodexSecurity orchestration", () => {
         filesTotal: 9,
       });
     } finally {
+      clearInterval(keepAlive);
       await client.close();
     }
   });
@@ -5530,6 +5554,8 @@ describe("CodexSecurity orchestration", () => {
           return { events: completedEvents("thread-1", events()) };
         }),
       });
+      // The fake stream has no process handle to keep the unref'ed poll alive.
+      const keepAlive = setInterval(() => {}, 1_000);
       try {
         await client.run(repository, {
           onProgress: (progress) => {
@@ -5543,6 +5569,7 @@ describe("CodexSecurity orchestration", () => {
             .map((progress) => progress.phase),
         ).toEqual([...workerPhases, parentPhase]);
       } finally {
+        clearInterval(keepAlive);
         await client.close();
       }
     },
