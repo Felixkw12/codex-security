@@ -47,6 +47,30 @@ interface SessionReasoning {
   activity: ScanActivity | null;
 }
 
+interface SessionProgress {
+  update: ScanProgress;
+  position: number;
+  sourcePosition: number | null;
+  completion: boolean;
+}
+
+interface ProgressItem {
+  kind: "message" | "command";
+  text: string;
+  command?: readonly string[];
+}
+
+interface SessionCompletion {
+  position: number;
+  item: ProgressItem;
+}
+
+interface StreamedProgressItem {
+  event: Readonly<Record<string, unknown>>;
+  item: ProgressItem | null;
+  position: number | null;
+}
+
 interface SessionUsage {
   offset: number;
   decoder: StringDecoder;
@@ -61,7 +85,10 @@ interface SessionUsage {
   usage: ScanTokenUsage | null;
   calls: Map<string, ScanActivity>;
   activities: ScanActivity[];
-  progress: ScanProgress[];
+  progress: SessionProgress[];
+  position: number;
+  callPositions: Map<string, number>;
+  completions: SessionCompletion[];
   filesCompleted: number;
   filesTotal: number | null;
   prose: Set<string>;
@@ -109,6 +136,9 @@ function createSessionUsage(): SessionUsage {
     calls: new Map(),
     activities: [],
     progress: [],
+    position: 0,
+    callPositions: new Map(),
+    completions: [],
     filesCompleted: 0,
     filesTotal: null,
     prose: new Set(),
@@ -124,7 +154,10 @@ export class ScanCostTracker {
   readonly #workers = new Map<string, number>();
   readonly #workerProgress = new Map<string, number>();
   #lastProgress: string | null = null;
-  readonly #knownInventories = new Set<number>();
+  readonly #liveParentProgress = new Set<string>();
+  readonly #liveParentItems: StreamedProgressItem[] = [];
+  #parentSession: SessionUsage | null = null;
+  #lastParentPosition = 0;
   #threadId: string | null = null;
   #observingWorkers = true;
   #timer: NodeJS.Timeout | null = null;
@@ -142,7 +175,57 @@ export class ScanCostTracker {
 
   public setExpectedFilesTotal(filesTotal: number): void {
     this.#expectedFilesTotal = filesTotal;
-    this.#knownInventories.add(filesTotal);
+  }
+
+  /** Reconcile the live SDK projection with its ordered native rollout. */
+  public recordParentProgress(
+    progress: ScanProgress,
+    event: Readonly<Record<string, unknown>>,
+  ): boolean {
+    let live = this.#liveParentItems.at(-1);
+    if (live?.event !== event) {
+      live = { event, item: streamedProgressItem(event), position: null };
+      this.#liveParentItems.push(live);
+      this.#matchParentCompletions();
+    }
+    this.#liveParentProgress.add(progressKey(progress));
+    return live.position === null || live.position >= this.#lastParentPosition;
+  }
+
+  #matchParentCompletions(): void {
+    const completions = this.#parentSession?.completions;
+    if (completions === undefined) return;
+    let previous = 0;
+    for (const [index, live] of this.#liveParentItems.entries()) {
+      if (live.position === null && live.item !== null) {
+        const next = this.#liveParentItems
+          .slice(index + 1)
+          .find((item) => item.position !== null)?.position;
+        const matches = completions.filter(
+          (saved) =>
+            saved.position > previous &&
+            (next === undefined || next === null || saved.position < next) &&
+            matchingProgressItem(live.item!, saved.item),
+        );
+        // An ambiguous or unfamiliar projection supplies no ordering evidence.
+        if (matches.length === 1) live.position = matches[0]!.position;
+      }
+      if (live.position !== null) previous = live.position;
+    }
+  }
+
+  #savedParentProgressIsCurrent(saved: SessionProgress): boolean {
+    const live = this.#liveParentItems.at(-1);
+    if (live === undefined) return true;
+    if (live.position !== null && saved.position <= live.position) return false;
+    if (!this.#liveParentProgress.has(progressKey(saved.update))) return true;
+    // Preview copies can follow their native completion. A new completion or
+    // a tool call begun after the live item proves a later, legitimate repeat.
+    return (
+      live.position !== null &&
+      (saved.completion ||
+        (saved.sourcePosition !== null && saved.sourcePosition > live.position))
+    );
   }
 
   public recordUsage(usage: unknown, threadId = this.#threadId): void {
@@ -222,6 +305,8 @@ export class ScanCostTracker {
       this.#options.onActivity === undefined
         ? undefined
         : this.#options.repository;
+    const progressThread =
+      this.#options.onProgress === undefined ? undefined : this.#threadId;
     const unreadable: Array<{ session: SessionUsage; error: unknown }> = [];
     for await (const path of sessionFiles(
       join(this.#options.codexHome, "sessions"),
@@ -232,7 +317,7 @@ export class ScanCostTracker {
         this.#sessions.set(path, session);
       }
       try {
-        await readSessionUsage(path, session, repository);
+        await readSessionUsage(path, session, repository, progressThread);
       } catch (error) {
         if (session.threadId === null) throw error;
         unreadable.push({ session, error });
@@ -295,7 +380,7 @@ export class ScanCostTracker {
         // Replay only newly associated sessions, including their early events.
         session = createSessionUsage();
         session.events = [];
-        await readSessionUsage(path, session, repository);
+        await readSessionUsage(path, session, repository, progressThread);
         this.#sessions.set(path, session);
       }
       let worker: number | undefined;
@@ -324,6 +409,10 @@ export class ScanCostTracker {
             worker,
           });
         }
+      }
+      if (threadId === this.#threadId) {
+        this.#parentSession = session;
+        this.#matchParentCompletions();
       }
       this.#reportSessionProgress(session, threadId === this.#threadId);
       const receipt = usages.get(threadId);
@@ -355,14 +444,15 @@ export class ScanCostTracker {
     if (this.#options.onProgress === undefined || session.threadId === null) {
       return;
     }
-    for (const progress of session.progress.splice(0)) {
+    for (const saved of session.progress.splice(0)) {
+      if (parent && !this.#savedParentProgressIsCurrent(saved)) continue;
+      const progress = saved.update;
       const expectedFilesTotal = this.#expectedFilesTotal;
       const parentInventory =
         parent &&
         progress.phase === "discovery" &&
         this.#highestFilesCompleted === 0 &&
-        (progress.filesCompleted === 0 ||
-          this.#knownInventories.has(progress.filesTotal));
+        progress.filesCompleted === 0;
       if (
         (!parentInventory &&
           expectedFilesTotal !== undefined &&
@@ -400,6 +490,7 @@ export class ScanCostTracker {
       const key = `${update.phase}:${update.filesCompleted}:${update.filesTotal}`;
       if (this.#lastProgress === key) continue;
       this.#lastProgress = key;
+      if (parent) this.#lastParentPosition = saved.position;
       this.#highestFilesCompleted = update.filesCompleted;
       this.#options.onProgress(update);
     }
@@ -443,6 +534,7 @@ async function readSessionUsage(
   path: string,
   session: SessionUsage,
   repository?: string,
+  progressThread?: string,
 ): Promise<void> {
   if (session.unreadable) return;
   let file;
@@ -469,7 +561,12 @@ async function readSessionUsage(
           .split("\n");
         session.pendingLine.push(lines[0]!);
         for (const line of lines.slice(1)) {
-          readSessionEvent(session.pendingLine.join(""), session, repository);
+          readSessionEvent(
+            session.pendingLine.join(""),
+            session,
+            repository,
+            progressThread,
+          );
           session.pendingLine = [line];
         }
       } catch (error) {
@@ -487,6 +584,7 @@ function readSessionEvent(
   line: string,
   session: SessionUsage,
   repository?: string,
+  progressThread?: string,
 ): void {
   if (line.length === 0) return;
   const event = parseJson(() => line);
@@ -525,8 +623,29 @@ function readSessionEvent(
     return;
   }
   session.events?.push(event);
+  const position = ++session.position;
   if (event["type"] === "response_item") {
-    session.progress.push(...sessionProgressUpdates(payload));
+    const callId = payload["call_id"];
+    if (
+      session.threadId === progressThread &&
+      typeof callId === "string" &&
+      (payload["type"] === "function_call" ||
+        payload["type"] === "custom_tool_call" ||
+        payload["type"] === "local_shell_call")
+    ) {
+      session.callPositions.set(callId, position);
+    }
+    for (const update of sessionProgressUpdates(payload)) {
+      session.progress.push({
+        update,
+        position,
+        sourcePosition:
+          typeof callId === "string"
+            ? (session.callPositions.get(callId) ?? null)
+            : null,
+        completion: false,
+      });
+    }
     if (repository === undefined) return;
     if (
       payload["type"] === "reasoning" &&
@@ -615,6 +734,24 @@ function readSessionEvent(
     return;
   }
   if (
+    session.threadId === progressThread &&
+    event["type"] === "event_msg" &&
+    payload["type"] === "item_completed"
+  ) {
+    const item = nativeProgressItem(payload["item"]);
+    if (item !== null) {
+      session.completions.push({ position, item });
+      for (const update of scanProgressUpdatesFromText(item.text)) {
+        session.progress.push({
+          update,
+          position,
+          sourcePosition: position,
+          completion: true,
+        });
+      }
+    }
+  }
+  if (
     event["type"] === "event_msg" &&
     (payload["type"] === "agent_reasoning" ||
       payload["type"] === "agent_reasoning_delta" ||
@@ -626,7 +763,14 @@ function readSessionEvent(
       payload["type"] === "agent_message" &&
       typeof payload["message"] === "string"
     ) {
-      session.progress.push(...scanProgressUpdatesFromText(payload["message"]));
+      for (const update of scanProgressUpdatesFromText(payload["message"])) {
+        session.progress.push({
+          update,
+          position,
+          sourcePosition: null,
+          completion: false,
+        });
+      }
     }
     if (repository === undefined) return;
     if (payload["type"] !== "agent_message") {
@@ -726,6 +870,119 @@ function recordReasoningActivity(
   reasoning.activity = activity;
   session.prose.add(`${activity.kind}:${activity.description}`);
   session.activities.push(activity);
+}
+
+function progressKey(progress: ScanProgress): string {
+  return `${progress.phase}:${progress.filesCompleted}:${progress.filesTotal}`;
+}
+
+function streamedProgressItem(
+  event: Readonly<Record<string, unknown>>,
+): ProgressItem | null {
+  const item = event["item"];
+  if (!isRecord(item)) return null;
+  if (item["type"] === "agent_message" && typeof item["text"] === "string")
+    return { kind: "message", text: item["text"] };
+  if (
+    item["type"] !== "command_execution" ||
+    typeof item["aggregated_output"] !== "string" ||
+    typeof item["command"] !== "string"
+  )
+    return null;
+  const command = splitCommand(item["command"]);
+  return command === null
+    ? null
+    : { kind: "command", text: item["aggregated_output"], command };
+}
+
+function nativeProgressItem(value: unknown): ProgressItem | null {
+  if (!isRecord(value)) return null;
+  if (value["type"] === "AgentMessage" && Array.isArray(value["content"])) {
+    return {
+      kind: "message",
+      text: value["content"]
+        .filter(
+          (part): part is { text: string } =>
+            isRecord(part) &&
+            part["type"] === "Text" &&
+            typeof part["text"] === "string",
+        )
+        .map((part) => part.text)
+        .join("\n"),
+    };
+  }
+  if (
+    value["type"] !== "CommandExecution" ||
+    typeof value["aggregated_output"] !== "string" ||
+    !Array.isArray(value["command"]) ||
+    !value["command"].every((arg): arg is string => typeof arg === "string")
+  )
+    return null;
+  return {
+    kind: "command",
+    text: value["aggregated_output"],
+    command: value["command"],
+  };
+}
+
+function matchingProgressItem(
+  live: ProgressItem,
+  saved: ProgressItem,
+): boolean {
+  if (live.kind !== saved.kind) return false;
+  if (
+    live.kind === "command" &&
+    JSON.stringify(live.command) !== JSON.stringify(saved.command)
+  )
+    return false;
+  if (live.text === saved.text) return true;
+  if (live.kind !== "command") return false;
+  // Native persistence keeps the head and tail of long command output. Match
+  // those retained bytes, rather than requiring an omitted progress marker.
+  const parts = saved.text.split(
+    "\n... command output truncated for persistence ...\n",
+  );
+  return (
+    parts.length === 2 &&
+    live.text.startsWith(parts[0]!) &&
+    live.text.endsWith(parts[1]!) &&
+    live.text.length >= parts[0]!.length + parts[1]!.length
+  );
+}
+
+/** Decode the quoted argv rendering emitted by native command completions. */
+function splitCommand(command: string): string[] | null {
+  const words: string[] = [];
+  let word = "";
+  let started = false;
+  let quote: "'" | '"' | null = null;
+  for (let index = 0; index < command.length; index++) {
+    const character = command[index]!;
+    if (character === "\\" && quote !== "'") {
+      const next = command[++index];
+      if (next === undefined) return null;
+      if (quote === '"' && !["$", "`", '"', "\\", "\n"].includes(next))
+        word += "\\";
+      if (next !== "\n") word += next;
+      started = true;
+    } else if (quote !== null) {
+      if (character === quote) quote = null;
+      else word += character;
+    } else if (character === "'" || character === '"') {
+      quote = character;
+      started = true;
+    } else if (" \t\r\n".includes(character)) {
+      if (started) words.push(word);
+      word = "";
+      started = false;
+    } else {
+      word += character;
+      started = true;
+    }
+  }
+  if (quote !== null) return null;
+  if (started) words.push(word);
+  return words;
 }
 
 function sessionProgressUpdates(

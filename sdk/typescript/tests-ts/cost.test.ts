@@ -1884,6 +1884,228 @@ describe("live scan cost tracking", () => {
     ]);
   });
 
+  test.each([false, true])(
+    "keeps live inventory through a stale preview and worker update (native completion: %p)",
+    async (nativeCompletion) => {
+      const { home, parent, worker } = await workerSessionFixture();
+      const updates: ScanProgress[] = [];
+      const report = (progress: ScanProgress) => {
+        if (progress.phase === "discovery" && progress.filesCompleted === 0)
+          tracker.setExpectedFilesTotal(progress.filesTotal);
+        updates.push(progress);
+      };
+      const tracker = costTracker(home, {
+        expectedFilesTotal: 8,
+        onProgress: report,
+      });
+      tracker.start("scan-thread");
+      await tracker.refresh();
+      const first = {
+        phase: "discovery",
+        filesCompleted: 0,
+        filesTotal: 8,
+      } as const;
+      const latest = { ...first, filesTotal: 9 };
+      const marker = (value: ScanProgress) =>
+        "CODEX_SECURITY_SCAN_PROGRESS " + JSON.stringify(value);
+      for (const [index, progress] of [first, latest].entries()) {
+        const event = {
+          type: "item.completed",
+          item: {
+            type: "command_execution",
+            id: `item-${index}`,
+            command: `scan-progress ${index}`,
+            aggregated_output: `head\n${marker(progress)}\ntail`,
+          },
+        };
+        if (tracker.recordParentProgress(progress, event)) report(progress);
+      }
+      await appendSessionItem(parent, progressMessage(0));
+      if (nativeCompletion) {
+        // Even the full persisted completion can omit the marker. Its retained
+        // command and output identify it without waiting for the missing text.
+        await appendFile(
+          parent,
+          JSON.stringify({
+            type: "event_msg",
+            payload: {
+              type: "item_completed",
+              item: {
+                type: "CommandExecution",
+                id: "native-latest",
+                command: ["scan-progress", "1"],
+                aggregated_output:
+                  "head\n... command output truncated for persistence ...\ntail",
+              },
+            },
+          }) + "\n",
+        );
+      }
+      await tracker.refresh();
+      expect(updates.at(-1)).toEqual(latest);
+      await appendSessionItem(worker, progressMessage(1, 1));
+      await tracker.refresh();
+      expect(updates.at(-1)).toEqual({ ...latest, filesCompleted: 1 });
+      await appendSessionItem(parent, progressMessage(2, 9));
+      await tracker.stop();
+      expect(updates.at(-1)).toEqual({ ...latest, filesCompleted: 2 });
+      expect(updates.slice(2).every((update) => update.filesTotal === 9)).toBe(
+        true,
+      );
+    },
+  );
+
+  test("ignores old live phase copies without blocking new tool-only progress in legacy logs", async () => {
+    const { home, parent } = await workerSessionFixture();
+    const updates: ScanProgress[] = [];
+    const tracker = costTracker(home, {
+      expectedFilesTotal: 8,
+      onProgress: (progress) => updates.push(progress),
+    });
+    tracker.start("scan-thread");
+    await tracker.refresh();
+    for (const phase of ["discovery", "validation"] as const) {
+      const progress = { phase, filesCompleted: 8, filesTotal: 8 };
+      const event = {
+        type: "item.completed",
+        item: {
+          type: "agent_message",
+          text: "CODEX_SECURITY_SCAN_PROGRESS " + JSON.stringify(progress),
+        },
+      };
+      if (tracker.recordParentProgress(progress, event)) updates.push(progress);
+    }
+    await appendSessionItem(parent, progressMessage(8));
+    await tracker.refresh();
+    expect(updates.at(-1)?.phase).toBe("validation");
+    await appendSessionItem(parent, progressMessage(8, 8, "attack_path"));
+    await tracker.stop();
+    expect(updates.map((update) => update.phase)).toEqual([
+      "discovery",
+      "validation",
+      "attack_path",
+    ]);
+  });
+
+  test("orders repeated commands by completion and allows a later tool-only repeated phase", async () => {
+    const { home, parent } = await workerSessionFixture();
+    const updates: ScanProgress[] = [];
+    const tracker = costTracker(home, {
+      expectedFilesTotal: 8,
+      onProgress: (progress) => updates.push(progress),
+    });
+    tracker.start("scan-thread");
+    await tracker.refresh();
+    const discovery = {
+      phase: "discovery",
+      filesCompleted: 8,
+      filesTotal: 8,
+    } as const;
+    const validation = { ...discovery, phase: "validation" } as const;
+    const marker = (progress: ScanProgress) =>
+      "CODEX_SECURITY_SCAN_PROGRESS " + JSON.stringify(progress);
+    const command = `'/tool with spaces' 'a b' 'it'"'"'s' 'C:\\work'`;
+    const argv = ["/tool with spaces", "a b", "it's", "C:\\work"];
+    const live = (progress: ScanProgress) => ({
+      type: "item.completed",
+      item: {
+        type: "command_execution",
+        command,
+        aggregated_output: marker(progress),
+      },
+    });
+    for (const progress of [discovery, validation]) {
+      if (tracker.recordParentProgress(progress, live(progress)))
+        updates.push(progress);
+    }
+    // Commands can start in a different order. Only completion order carries
+    // progress ordering; the repeated command/output is not a unique identity.
+    for (const [index, progress] of [
+      discovery,
+      validation,
+      discovery,
+    ].entries()) {
+      await appendFile(
+        parent,
+        JSON.stringify({
+          type: "event_msg",
+          payload: {
+            type: "item_completed",
+            started_at_ms: [20, 10, 30][index],
+            completed_at_ms: 40 + index,
+            item: {
+              type: "CommandExecution",
+              id: `native-${index}`,
+              command: argv,
+              aggregated_output: marker(progress),
+            },
+          },
+        }) + "\n",
+      );
+    }
+    await tracker.refresh();
+    expect(updates.at(-1)).toEqual(discovery);
+    await appendSessionItem(parent, {
+      type: "custom_tool_call",
+      call_id: "later-tool",
+      input: "emit a progress receipt",
+    });
+    await appendSessionItem(parent, {
+      type: "custom_tool_call_output",
+      call_id: "later-tool",
+      output: marker(validation),
+    });
+    await tracker.stop();
+    expect(updates.map((update) => update.phase)).toEqual([
+      "discovery",
+      "validation",
+      "discovery",
+      "validation",
+    ]);
+  });
+
+  test("does not derive ordering from a mismatched or unfamiliar command projection", async () => {
+    const { home, parent } = await workerSessionFixture();
+    const updates: ScanProgress[] = [];
+    const tracker = costTracker(home, {
+      expectedFilesTotal: 8,
+      onProgress: (progress) => updates.push(progress),
+    });
+    tracker.start("scan-thread");
+    await tracker.refresh();
+    const progress = {
+      phase: "discovery",
+      filesCompleted: 1,
+      filesTotal: 8,
+    } as const;
+    const text = "CODEX_SECURITY_SCAN_PROGRESS " + JSON.stringify(progress);
+    tracker.recordParentProgress(progress, {
+      type: "item.completed",
+      item: {
+        type: "command_execution",
+        command: "'unfinished",
+        aggregated_output: text,
+      },
+    });
+    await appendSessionItem(parent, progressMessage(2));
+    await appendFile(
+      parent,
+      JSON.stringify({
+        type: "event_msg",
+        payload: {
+          type: "item_completed",
+          item: {
+            type: "CommandExecution",
+            command: ["different"],
+            aggregated_output: text,
+          },
+        },
+      }) + "\n",
+    );
+    await tracker.stop();
+    expect(updates).toEqual([{ ...progress, filesCompleted: 2 }]);
+  });
+
   test.each([940, 944])(
     "preserves the parent's exact inventory of %p in custom-tool progress",
     async (filesTotal) => {

@@ -1540,31 +1540,31 @@ export class CodexSecurity {
       let scopeFileCount: number | null = null;
       let reviewedFileCount = 0;
       let lastProgress: string | null = null;
-      const knownInventories = new Set<number>();
       const progressKey = (progress: ScanProgress): string =>
         `${progress.phase}:${progress.filesCompleted}:${progress.filesTotal}`;
-      const reportProgress = (progress: ScanProgress): void => {
-        if (
+      const reportProgress = (
+        progress: ScanProgress,
+        event?: Readonly<Record<string, unknown>>,
+      ): void => {
+        const inventory =
           progress.phase === "discovery" &&
           reviewedFileCount === 0 &&
-          (progress.filesCompleted === 0 ||
-            knownInventories.has(progress.filesTotal))
-        ) {
-          // A saved command preview can omit a streamed inventory marker.
-          // A later first review may restore that previously accepted total.
-          scopeFileCount = progress.filesTotal;
-          knownInventories.add(scopeFileCount);
-          tracker.setExpectedFilesTotal(scopeFileCount);
-        }
+          progress.filesCompleted === 0;
+        const filesTotal = inventory ? progress.filesTotal : scopeFileCount;
         if (
-          scopeFileCount === null ||
-          progress.filesTotal > scopeFileCount ||
-          progress.filesCompleted < reviewedFileCount
-        ) {
+          filesTotal === null ||
+          progress.filesTotal > filesTotal ||
+          progress.filesCompleted < reviewedFileCount ||
+          (event !== undefined &&
+            !tracker.recordParentProgress(progress, event))
+        )
           return;
+        if (inventory) {
+          scopeFileCount = filesTotal;
+          tracker.setExpectedFilesTotal(filesTotal);
         }
         reviewedFileCount = progress.filesCompleted;
-        const update = { ...progress, filesTotal: scopeFileCount };
+        const update = { ...progress, filesTotal };
         const key = progressKey(update);
         if (lastProgress === key) return;
         lastProgress = key;
@@ -3883,7 +3883,10 @@ interface ScanEventRunOptions extends Pick<ScanOptions, "onReconnect"> {
   onScanStarted?: () => void;
   onTrustedAccessStatus?: (status: ScanTrustedAccessStatus) => void;
   onActivity?: (activity: ScanActivity) => void;
-  onProgress?: (progress: ScanProgress) => void;
+  onProgress?: (
+    progress: ScanProgress,
+    event: Readonly<Record<string, unknown>>,
+  ) => void;
   onWorkerStatus?: (status: ScanWorkerStatus) => void;
   onWarning?: (warning: string) => void;
   onObserverError?: (observer: ScanObserverName, error: unknown) => void;
@@ -3924,7 +3927,13 @@ export async function runScanEvents(
           notifyObserver(options, "onActivity")(activity);
         }
         for (const progress of scanProgressUpdatesFromEvent(event)) {
-          notifyObserver(options, "onProgress")(progress);
+          notifyObserver(
+            {
+              onProgress: (update) => options.onProgress?.(update, event),
+              onObserverError: options.onObserverError,
+            },
+            "onProgress",
+          )(progress);
         }
         const workerStatus = workerStatusFromEvent(event);
         if (workerStatus !== null) {

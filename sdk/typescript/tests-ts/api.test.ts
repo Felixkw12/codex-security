@@ -4059,6 +4059,16 @@ describe("CodexSecurity orchestration", () => {
       false,
     ],
     [
+      "newer phase omitted from the preview",
+      [0, 1],
+      [
+        { phase: "discovery", filesCompleted: 8, filesTotal: 8 },
+        { phase: "validation", filesCompleted: 8, filesTotal: 8 },
+      ],
+      [0],
+      false,
+    ],
+    [
       "older tool phase",
       [1],
       [
@@ -4170,23 +4180,42 @@ describe("CodexSecurity orchestration", () => {
                 },
               };
             }
-            // Saved previews can omit a marker even when the live output included it.
+            // Native item completions retain the order even when the separate
+            // response-item preview omits a streamed marker.
+            const saved = progress.flatMap((_update, index) => [
+              ...(streamed.includes(index as never)
+                ? [
+                    {
+                      type: "event_msg",
+                      payload: {
+                        type: "item_completed",
+                        item: {
+                          type: "AgentMessage",
+                          id: `native-${index}`,
+                          content: [{ type: "Text", text: markerTexts[index] }],
+                        },
+                      },
+                    },
+                  ]
+                : []),
+              ...(persisted.includes(index as never)
+                ? [
+                    {
+                      type: "response_item",
+                      payload: {
+                        type: "custom_tool_call_output",
+                        status: "completed",
+                        output: [
+                          { type: "input_text", text: markerTexts[index] },
+                        ],
+                      },
+                    },
+                  ]
+                : []),
+            ]);
             await appendFile(
               rollout,
-              persisted
-                .map((index) =>
-                  JSON.stringify({
-                    type: "response_item",
-                    payload: {
-                      type: "custom_tool_call_output",
-                      status: "completed",
-                      output: [
-                        { type: "input_text", text: markerTexts[index] },
-                      ],
-                    },
-                  }),
-                )
-                .join("\n") + "\n",
+              saved.map((event) => JSON.stringify(event)).join("\n") + "\n",
             );
           }
           return { events: completedEvents("thread-1", markers()) };
@@ -4221,6 +4250,143 @@ describe("CodexSecurity orchestration", () => {
               ] === "custom_tool_call_output",
           ),
         ).toHaveLength(persisted.length);
+      } finally {
+        await client.close();
+      }
+    },
+  );
+
+  test.each([
+    ["legacy previews", true, false],
+    ["truncated native completion", true, true],
+    ["tool-only old inventory", false, true],
+  ] as const)(
+    "preserves live inventory when a worker follows an older preview: %s",
+    async (_scenario, streamOld, nativeCompletion) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const parentRead = Promise.withResolvers<void>();
+      const workerRead = Promise.withResolvers<void>();
+      const marker = (filesCompleted: number, filesTotal: number) =>
+        "CODEX_SECURITY_SCAN_PROGRESS " +
+        JSON.stringify({ phase: "discovery", filesCompleted, filesTotal });
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          const rollout = await writeUsageSession(codexHome, "thread-1", {});
+          async function* markers(): AsyncGenerator<ThreadEvent> {
+            for (const filesTotal of streamOld ? [8, 9] : [9]) {
+              yield {
+                type: "item.completed",
+                item: {
+                  id: `inventory-${filesTotal}`,
+                  type: "command_execution",
+                  command: `scan-inventory ${filesTotal}`,
+                  aggregated_output: `head\n${marker(0, filesTotal)}\ntail`,
+                  exit_code: 0,
+                  status: "completed",
+                },
+              };
+            }
+            const saved: unknown[] = [
+              {
+                type: "response_item",
+                payload: {
+                  type: "custom_tool_call_output",
+                  call_id: "old-preview",
+                  output: marker(0, 8),
+                },
+              },
+            ];
+            if (nativeCompletion)
+              saved.push({
+                type: "event_msg",
+                payload: {
+                  type: "item_completed",
+                  item: {
+                    type: "CommandExecution",
+                    id: "native-inventory",
+                    command: ["scan-inventory", "9"],
+                    aggregated_output:
+                      "head\n... command output truncated for persistence ...\ntail",
+                  },
+                },
+              });
+            await appendFile(
+              rollout,
+              saved.map((event) => JSON.stringify(event)).join("\n") + "\n",
+            );
+            await parentRead.promise;
+            const worker = await writeUsageSession(
+              codexHome,
+              "worker-thread",
+              {},
+              { parent: "thread-1" },
+            );
+            await appendFile(
+              worker,
+              JSON.stringify({
+                type: "response_item",
+                payload: {
+                  type: "custom_tool_call_output",
+                  output: marker(1, 1),
+                },
+              }) + "\n",
+            );
+            await workerRead.promise;
+            await appendFile(
+              rollout,
+              JSON.stringify({
+                type: "response_item",
+                payload: {
+                  type: "custom_tool_call_output",
+                  output: marker(2, 9),
+                },
+              }) + "\n",
+            );
+          }
+          return { events: completedEvents("thread-1", markers()) };
+        }),
+      });
+      try {
+        await client.run(repository, {
+          onProgress: (progress) => {
+            updates.push(progress);
+            if (progress.filesCompleted === 1) workerRead.resolve();
+          },
+          onSessionEvent: ({ threadId, event }) => {
+            if (
+              threadId === "thread-1" &&
+              (event["payload"] as Record<string, unknown> | undefined)?.[
+                "call_id"
+              ] === "old-preview"
+            )
+              parentRead.resolve();
+          },
+        });
+        expect(updates.at(-1)).toEqual({
+          phase: "discovery",
+          filesCompleted: 2,
+          filesTotal: 9,
+        });
+        const corrected = updates.findIndex(
+          (progress) => progress.filesTotal === 9,
+        );
+        expect(corrected).toBeGreaterThanOrEqual(0);
+        expect(
+          updates
+            .slice(corrected)
+            .every((progress) => progress.filesTotal === 9),
+        ).toBe(true);
       } finally {
         await client.close();
       }
