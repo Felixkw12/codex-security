@@ -74,6 +74,7 @@ export function startDeepScanEngine(options: {
             repoRoot: owned.targetPath,
             scanId: owned.scanId,
             scope: owned.scope,
+            includePaths: owned.includePaths,
             pythonCommand: options.pythonCommand,
           },
         }),

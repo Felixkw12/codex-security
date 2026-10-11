@@ -2532,6 +2532,27 @@ async function testZeroSubagentsPreservesHostRestrictions() {
 }
 
 async function testLargeScopeTransport() {
+  const engineSource = new URL("../src/deep-scan/engine.ts", import.meta.url);
+  const { startDeepScanEngine } = await importModule({
+    entryPoints: [fileURLToPath(engineSource)],
+    loader: { ".md": "text" },
+    define: { "import.meta.url": JSON.stringify(engineSource.href) },
+    banner: {
+      js: `import { createRequire as engineScopeRequire } from "node:module"; const require = engineScopeRequire(${JSON.stringify(engineSource.href)});`,
+    },
+    plugins: [
+      {
+        name: "capture-coordinator-options",
+        setup(build) {
+          build.onLoad({ filter: /[/\\]registry\.ts$/ }, () => ({
+            contents:
+              "export function startOrJoinDeepScanCoordinator(options) { return options; }",
+            loader: "js",
+          }));
+        },
+      },
+    ],
+  });
   const names = [
     "CODEX_CLI_PATH",
     "CODEX_HOME",
@@ -2588,16 +2609,33 @@ async function testLargeScopeTransport() {
                 (_, row) =>
                   `scan-${index}/background jobs/café-${row}-${"a".repeat(110)}`,
               );
-              const executor = new CodexSdkWorkerExecutor({
-                parentSandbox: trustedParentSandbox,
-                artifactContext: {
-                  pluginRoot: fixture.root,
-                  repoRoot: fixture.root,
-                  scanId,
-                  scope: ".",
-                  includePaths,
+              const run = {
+                scanId,
+                scanDir: workerRoot,
+                targetPath: fixture.root,
+                scope: ".",
+                includePaths,
+                executionSettings: {
+                  version: 1,
+                  settings: await captureDeepScanExecutionSettings(
+                    {},
+                    trustedParentSandbox,
+                  ),
                 },
+              };
+              const captured = startDeepScanEngine({
+                run,
+                store: {},
+                registry: {},
+                runWorkbench: async () => ({}),
+                pluginRoot: fixture.root,
+                pythonCommand: process.env.PYTHON || "python3",
+                parentSandbox: trustedParentSandbox,
+                threadId: "scope-parent",
               });
+              const executor = resumed
+                ? await captured.options.prepareExecutor(run)
+                : captured.options.executor;
               await executor.run(
                 workerRequest(prompt, output, {
                   kind,
