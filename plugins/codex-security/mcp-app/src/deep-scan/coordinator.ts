@@ -8,6 +8,7 @@ import {
   ensureDeepScanDirectories,
 } from "./artifacts.js";
 import {
+  aggregateDiscoveryCoverage,
   validateDiscoveryArtifacts,
   validateReducerArtifacts,
   type DeepReductionInput,
@@ -56,6 +57,7 @@ interface SchedulerResult {
   reason: DeepScanTerminalReason;
   omittedWorkerIds: string[];
   result?: DeepReductionInput;
+  discoveries: AcceptedDiscovery[];
 }
 
 export interface CoordinatorOptions {
@@ -278,14 +280,10 @@ export class DeepScanCoordinator {
       const draft = schedulerResult.result
         ? {
             ...structuredClone(schedulerResult.result),
-            // Readers require coverage.json. The coordinator has accepted this
-            // result, so mark it complete and leave review notes empty.
-            coverage: {
-              completeness: "complete",
-              surfaces: [],
-              explicitExclusions: [],
-              deferred: [],
-            },
+            coverage: aggregateDiscoveryCoverage(
+              this.artifacts,
+              schedulerResult.discoveries,
+            ),
           }
         : scanDraftInputSchema.parse({
             scanId: this.state.scanId,
@@ -620,6 +618,8 @@ export class DeepScanCoordinator {
     const active = new Map<string, Promise<DiscoveryOutcome>>();
     const recovered = await this.recoverAcceptedDiscoveries();
     let acceptedCount = recovered.length;
+    const accepted = new Map(recovered.map((worker) => [worker.id, worker]));
+    let reducerInputs: AcceptedDiscovery[] = [];
     const mergedIds = new Set(
       (this.state.persistedWorkers ?? [])
         .filter(
@@ -827,6 +827,7 @@ export class DeepScanCoordinator {
           )
         ) {
           const consumed = [...buffer].sort(compareCompletionSequence);
+          reducerInputs = consumed;
           buffer = [];
           reducerSequence += 1n;
           reducer = this.trackSchedulerWork(
@@ -903,6 +904,7 @@ export class DeepScanCoordinator {
           continue;
         }
         acceptedCount += 1;
+        accepted.set(outcome.worker.id, outcome.worker);
         this.state = { ...this.state, consecutiveErrors: 0 };
         buffer.push(outcome.worker);
         this.logProgress(acceptedCount);
@@ -930,6 +932,7 @@ export class DeepScanCoordinator {
         return await settleFailure(thresholdError);
       }
       reducerFailures = 0;
+      for (const worker of reducerInputs) mergedIds.add(worker.id);
       if (!this.canceled && !this.externallyFailed) this.state = outcome.run;
       previousReducerResultPath = outcome.resultPath;
       latestResult = outcome.result;
@@ -962,6 +965,9 @@ export class DeepScanCoordinator {
       reason: stopReason,
       omittedWorkerIds: [...new Set(omittedWorkerIds)],
       result: latestResult,
+      discoveries: [...accepted.values()].filter((worker) =>
+        mergedIds.has(worker.id),
+      ),
     };
   }
 
@@ -975,7 +981,7 @@ export class DeepScanCoordinator {
           `Accepted discovery ${worker.id} has incomplete persisted evidence.`,
         );
       }
-      await validateDiscoveryArtifacts(
+      const result = await validateDiscoveryArtifacts(
         this.artifacts,
         worker.resultManifestPath,
         this.state.scanId,
@@ -983,6 +989,7 @@ export class DeepScanCoordinator {
       recovered.push({
         id: worker.id,
         resultPath: worker.resultManifestPath,
+        result,
         completionSequence: worker.completionSequence,
       });
     }

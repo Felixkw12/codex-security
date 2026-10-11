@@ -1210,6 +1210,7 @@ def _recover_unsealed_coverage(
         partial = True
 
     surface_ids: set[str] = set()
+    receipt_paths: dict[str, str] = {}
     for field, label in (
         ("surfaces", "coverage surface"),
         ("explicitExclusions", "coverage exclusion"),
@@ -1231,6 +1232,7 @@ def _recover_unsealed_coverage(
                 if not isinstance(item, dict):
                     raise ContractError(f"{context}: expected an object")
                 if field == "surfaces":
+                    surface_receipt_paths = dict(receipt_paths)
                     surface_id = _require_str(item, "id", context)
                     if surface_id in surface_ids:
                         raise ContractError(f"{context}.id: duplicate surface id")
@@ -1265,6 +1267,11 @@ def _recover_unsealed_coverage(
                                     f"{ref_context}: expected a file under artifacts/"
                                 )
                             _require_scan_local_file(scan_dir, normalized_ref, ref_context)
+                            key = normalized_ref.lower()
+                            previous = surface_receipt_paths.get(key)
+                            if previous is not None and previous != normalized_ref:
+                                raise ContractError(f"{ref_context}: duplicate artifact path")
+                            surface_receipt_paths[key] = normalized_ref
                         except ContractError as exc:
                             warnings.append(
                                 f"Skipped malformed coverage receipt "
@@ -1294,6 +1301,7 @@ def _recover_unsealed_coverage(
 
             if field == "surfaces":
                 surface_ids.add(surface_id)
+                receipt_paths = surface_receipt_paths
             recovered.append(item)
 
         coverage[field] = recovered
