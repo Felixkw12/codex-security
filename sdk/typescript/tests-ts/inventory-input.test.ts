@@ -483,6 +483,51 @@ for (const command of [
       );
     }
 
+for (const tool of ["git", "rg"])
+  for (const rawHome of [false, true])
+    test.skipIf(process.platform === "win32")(
+      `inventory does not pass its startup pipe to ${tool} wrappers${rawHome ? " with raw HOME" : ""}`,
+      () => {
+        const f = fixture();
+        f.write("scope/visible.py");
+        if (tool === "rg") rmSync(join(f.repo, ".git"), { recursive: true });
+        const executable = Bun.which(tool, { PATH: f.toolEnvironment["PATH"] });
+        expect(executable).not.toBeNull();
+        const tools = join(f.root, "tools");
+        mkdirSync(tools);
+        const wrapper = join(tools, tool);
+        const descriptor = join(f.root, "startup-pipe");
+        writeFileSync(
+          wrapper,
+          `#!/bin/sh
+if ( : >&3 ) 2>/dev/null; then
+  state=inherited
+else
+  state=closed
+fi
+printf '%s' "$state" > '${descriptor.replaceAll("'", "'\\''")}'
+exec '${executable!.replaceAll("'", "'\\''")}' "$@"
+`,
+          { mode: 0o700 },
+        );
+        const result = runPathInventory(
+          f,
+          "make-repo-rank-input",
+          {
+            ...f.toolEnvironment,
+            PATH: `${tools}${delimiter}${f.toolEnvironment["PATH"] ?? ""}`,
+            CODEX_SECURITY_GIT: tool === "git" ? wrapper : "",
+          },
+          rawHome,
+        );
+        expect(result.status, result.stderr).toBe(0);
+        expect(JSON.parse(readFileSync(f.out, "utf8")).path).toBe(
+          "scope/visible.py",
+        );
+        expect(readFileSync(descriptor, "utf8")).toBe("closed");
+      },
+    );
+
 for (const scope of [".", "src", "./src", "src/résumé.py"]) {
   test(`path inventory preserves ripgrep spelling and byte order for ${scope}`, () => {
     const f = fixture();

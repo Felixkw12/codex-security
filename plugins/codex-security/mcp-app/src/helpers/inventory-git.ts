@@ -219,7 +219,9 @@ function spawnTool(
     // Bash (macOS /bin/sh) otherwise skips EXIT traps when exec fails.
     'if [ -n "${BASH_VERSION:-}" ]; then shopt -s execfail; fi',
     'trap \'printf "%s" "$?" >&3\' 0',
-    'exec "$@"',
+    // Restore the status pipe for a failed exec, but do not pass it to the tool
+    // or its descendants, which could otherwise keep child.close pending.
+    '{ exec "$@"; } 3>&-',
   ].join("\n");
   return spawn("/bin/sh", ["-c", script], {
     ...options,
