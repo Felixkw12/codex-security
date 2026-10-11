@@ -383,6 +383,8 @@ export async function processProof(
         `blocked.${extension}`,
         join(batchTools, `blocked.${extension.toUpperCase()}`),
         `${batch}. `,
+        `${batch}\\.`,
+        `${batch}\\unused\\..`,
         win32.toNamespacedPath(batch),
       ])
         await startupFailure(executable, [87]);
