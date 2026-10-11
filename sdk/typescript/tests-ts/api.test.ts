@@ -3871,6 +3871,7 @@ describe("CodexSecurity orchestration", () => {
                 // Exercise retries for known scan-owned logs, after metadata has been read.
                 await identified.promise;
                 denied.add(logs[0]!);
+                await appendFile(logs[0]!, "{}\n");
                 await first;
                 denied.delete(logs[0]!);
                 denied.add(logs[1]!);
