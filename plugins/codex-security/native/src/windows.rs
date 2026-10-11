@@ -265,15 +265,14 @@ fn resolve_windows_executable(executable: &OsStr) -> io::Result<OsString> {
         candidates
             .iter()
             .map(|candidate| directory.join(candidate))
-            .find(|path| {
-                windows_application_path(path.as_os_str()).is_ok_and(|path| {
-                    // Match Node's first entry selection without following file symlinks.
-                    let attributes = unsafe { GetFileAttributesW(path.as_ptr()) };
-                    attributes != INVALID_FILE_ATTRIBUTES
-                        && attributes & FILE_ATTRIBUTE_DIRECTORY == 0
-                })
+            .find_map(|path| {
+                let path = windows_application_path(path.as_os_str()).ok()?;
+                // Select, classify and launch the same path without following file symlinks.
+                let attributes = unsafe { GetFileAttributesW(path.as_ptr()) };
+                (attributes != INVALID_FILE_ATTRIBUTES
+                    && attributes & FILE_ATTRIBUTE_DIRECTORY == 0)
+                    .then(|| OsString::from_wide(&path[..path.len() - 1]))
             })
-            .map(|path| path.into_os_string())
     };
     if has_directory || unsafe { NeedCurrentDirectoryForExePathW([0_u16].as_ptr()) } != 0 {
         if let Some(path) = find(&cwd) {
