@@ -1,5 +1,11 @@
 import { createHash, type Hash } from "node:crypto";
-import { open, readdir, realpath, type FileHandle } from "node:fs/promises";
+import {
+  open,
+  readdir,
+  realpath,
+  stat,
+  type FileHandle,
+} from "node:fs/promises";
 import { pipeline, Readable } from "node:stream";
 import zlib from "node:zlib";
 import { decodeZstd } from "./zstd.js";
@@ -84,6 +90,7 @@ interface ScanCostTrackerOptions {
   maxCostUsd?: number;
   expectedFilesTotal?: number;
   onCost?: (cost: Readonly<ScanCost>, usage: unknown) => void;
+  onUsage?: (usage: Readonly<ScanTokenUsage>) => void;
   onActivity?: (activity: ScanActivity) => void;
   onProgress?: (progress: ScanProgress) => void;
   onSessionEvent?: (event: ScanSessionEvent) => void;
@@ -165,6 +172,7 @@ export class ScanCostTracker {
   };
   #lastCost: string | null = null;
   #rootOnlyReadError = false;
+  #lastUsage: string | null = null;
   #highestFilesCompleted = 0;
   #expectedFilesTotal: number | undefined;
 
@@ -198,6 +206,7 @@ export class ScanCostTracker {
     if (
       this.#options.maxCostUsd === undefined &&
       this.#options.onCost === undefined &&
+      this.#options.onUsage === undefined &&
       this.#options.onActivity === undefined &&
       this.#options.onProgress === undefined &&
       this.#options.onSessionEvent === undefined &&
@@ -853,11 +862,20 @@ export class ScanCostTracker {
   }
 
   #reportCost(cost: ScanCost | null): void {
+    this.#reportUsage(tokenUsage(this.#snapshot.usage));
     if (cost === null) return;
     const signature = JSON.stringify(cost);
     if (signature === this.#lastCost) return;
     this.#lastCost = signature;
     this.#options.onCost?.(cost, this.#snapshot.usage);
+  }
+
+  #reportUsage(usage: ScanTokenUsage | null): void {
+    if (usage === null) return;
+    const signature = JSON.stringify(usage);
+    if (signature === this.#lastUsage) return;
+    this.#lastUsage = signature;
+    this.#options.onUsage?.(usage);
   }
 }
 
@@ -1036,6 +1054,12 @@ async function readSessionUsage(
   }
   let file;
   try {
+    if (
+      !requireReadableSessions &&
+      !path.endsWith(".zst") &&
+      (await stat(path)).size === session.offset
+    )
+      return true;
     file = await open(path, "r");
   } catch (error) {
     if (isMissingFile(error)) return false;

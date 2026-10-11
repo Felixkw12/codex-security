@@ -23,6 +23,7 @@ import { readFileSync, readdirSync, renameSync, writeFileSync as writeReceiptFil
 const writeFileSync = (path, value) => { const pending = path + "." + process.pid + ".pending"; writeReceiptFile(pending, value); renameSync(pending, path); };
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
+import { parse } from ${JSON.stringify(import.meta.resolve("smol-toml"))};
 const completionMarkerPath = ${JSON.stringify(completionMarkerPath)};
 const preflightProfile = process.env.FAKE_CODEX_PREFLIGHT_PROFILE ? JSON.parse(process.env.FAKE_CODEX_PREFLIGHT_PROFILE) : ${JSON.stringify(preflightProfile)};
 const preflightAllowed = ${JSON.stringify(preflightAllowed)};
@@ -57,10 +58,17 @@ function capture() {
   const pythonProbe = stdin.includes('CAPTURE_SYNTHETIC_PYTHON') ? spawnSync(process.env.PYTHON, ['-I', '-c', 'import json,os,sys; print(json.dumps([sys.prefix,os.environ.get("LD_LIBRARY_PATH")]))'], { encoding: 'utf8' }) : undefined;
   if (pythonProbe && pythonProbe.status !== 0) throw new Error(pythonProbe.stderr || String(pythonProbe.error));
   const pythonRuntime = pythonProbe ? JSON.parse(pythonProbe.stdout) : undefined;
+  let scopeInput;
+  if (stdin.includes('CAPTURE_SCOPE_INPUT')) {
+    const configuration = process.argv.flatMap((arg, index) => arg === '--config' || arg === '-c' ? [parse(process.argv[index + 1])] : []).findLast(value => value.mcp_servers?.cs_artifacts);
+    const environment = configuration.mcp_servers.cs_artifacts.env;
+    const file = environment.CODEX_SECURITY_INCLUDE_PATHS_FILE;
+    scopeInput = { file, paths: JSON.parse(file ? readFileSync(file, 'utf8') : environment.CODEX_SECURITY_INCLUDE_PATHS_JSON) };
+  }
   const knowledgePath = stdin.includes('synthetic worker configuration fixture') ? process.env.CODEX_SECURITY_KNOWLEDGE_BASE : undefined;
   const knowledgeDocuments = knowledgePath === undefined ? undefined : Object.fromEntries(readdirSync(knowledgePath).map(name => [name, readFileSync(join(knowledgePath, name), 'utf8')]));
   writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({
-    ...environment, rpc, sequence, thread, turn, login, stdin, pid: process.pid, knowledgePath, knowledgeDocuments,
+    ...environment, ...(scopeInput === undefined ? {} : { scopeInput }), rpc, sequence, thread, turn, login, stdin, pid: process.pid, knowledgePath, knowledgeDocuments,
     mcpNodePath: process.env.CODEX_MCP_NODE_PATH, bundledTool: toolProbe?.stdout.trim(), python: process.env.PYTHON, pythonPrefix: pythonRuntime?.[0], pythonLibraryPath: pythonRuntime?.[1], runtimeEnvironment,
     originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE,
     ...(stdin.includes('CAPTURE_SYNTHETIC_OPENAI_AUTH') ? { openaiAuthentication: { OPENAI_API_KEY: process.env.OPENAI_API_KEY, CODEX_API_KEY: process.env.CODEX_API_KEY } } : {}),

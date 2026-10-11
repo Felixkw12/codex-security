@@ -113,6 +113,7 @@ const deniedWorkerPermissionProfile = {
 
 try {
   testCodeModeFrameDiagnosticBoundaries();
+  await testLargeScopeTransport();
   await testOpenAiCredentialsReachWorker();
   await testWorkerRuntimeSettings();
   await testUnsupportedProviderSnapshotFailsBeforeLaunch();
@@ -1232,6 +1233,7 @@ env_key = "CODEX_API_KEY"
         `CAPTURE_SYNTHETIC_OPENAI_AUTH\n${virtualenv === undefined ? "" : "CAPTURE_SYNTHETIC_PYTHON\n"}`,
       );
       const executor = new CodexSdkWorkerExecutor({
+        model: "gpt-daybreak-blue-latest",
         parentSandbox: trustedParentSandbox,
       });
       for (const kind of ["discovery", "dedup"] as const) {
@@ -1254,6 +1256,11 @@ env_key = "CODEX_API_KEY"
             runtimeEnvironment.LD_LIBRARY_PATH,
           );
           assert.equal(invocation.codexHome, fixture.root);
+          assertFlagPair(
+            invocation.argv,
+            "--model",
+            "gpt-daybreak-blue-latest",
+          );
           assert.deepEqual(invocation.runtimeEnvironment, runtimeEnvironment);
           if (virtualenv !== undefined) {
             assert.equal(invocation.pythonPrefix, virtualenv);
@@ -1821,6 +1828,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               pluginRoot: path.join(fixture.root, `plugin-${index}`),
               repoRoot: fixture.root,
               scanId: `fixture-scan-${modelSettings.model ?? "inherited"}`,
+              includePaths:
+                index % 2 === 0
+                  ? ["api", `background jobs ${index}`]
+                  : undefined,
               pythonCommand: `${helperPython}-${index} `,
             },
           }),
@@ -2097,6 +2108,8 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             assert.equal(invocation.python, python);
             assertConfigOverrides(invocation.argv, {
               "mcp_servers.cs_artifacts.command": process.execPath,
+              "mcp_servers.cs_artifacts.env.CODEX_SECURITY_INCLUDE_PATHS_JSON":
+                undefined,
               "mcp_servers.cs_artifacts.env.CODEX_SECURITY_PYTHON_COMMAND": `${helperPython}-${index} `,
               "mcp_servers.cs_artifacts.args.0": path.join(
                 fixture.root,
@@ -2109,6 +2122,21 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               "mcp_servers.cs_artifacts.env.CODEX_SECURITY_ARTIFACT_LAYOUT":
                 kind === "dedup" ? "reducer" : "worker",
             });
+            const servers = nativeConfigOverrides(invocation.argv)
+              .map((value) => parseToml(value))
+              .find((value) => value["mcp_servers"])!["mcp_servers"] as Record<
+              string,
+              { env: Record<string, string> }
+            >;
+            const scopeFile =
+              servers["cs_artifacts"]!.env["CODEX_SECURITY_INCLUDE_PATHS_FILE"];
+            if (index % 2 === 0) {
+              assert.ok(scopeFile && path.isAbsolute(scopeFile));
+              assert.deepEqual(JSON.parse(await readFile(scopeFile, "utf8")), [
+                "api",
+                `background jobs ${index}`,
+              ]);
+            } else assert.equal(scopeFile, undefined);
             assert.equal(process.env.PYTHON, python);
             assert.equal(
               invocation.deepConfigPath,
@@ -2521,6 +2549,129 @@ async function testZeroSubagentsPreservesHostRestrictions() {
       assertWorkerSubagentPolicy(invocation.argv, 0);
       assertReadOnlyWorkerPolicy(invocation.argv);
     });
+  }
+}
+
+async function testLargeScopeTransport() {
+  const names = [
+    "CODEX_CLI_PATH",
+    "CODEX_HOME",
+    "CODEX_SECURITY_CONFIG_PATH",
+    "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+    "FAKE_CODEX_MARKER",
+  ];
+  const saved = names.map((name) => [name, process.env[name]] as const);
+  const originalSpawn = childProcess.spawn;
+  const fixture = await fakeCodexFixture();
+  const scanIds = [randomUUID(), randomUUID()];
+  try {
+    process.env.CODEX_CLI_PATH = process.execPath;
+    process.env.CODEX_HOME = fixture.root;
+    delete process.env.CODEX_SECURITY_CONFIG_PATH;
+    delete process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
+    childProcess.spawn = ((
+      command: string,
+      args: readonly string[],
+      options: SpawnOptions,
+    ) =>
+      originalSpawn(command, [fixture.executablePath, ...args], {
+        ...options,
+        env: {
+          ...options.env,
+          FAKE_CODEX_MARKER: path.join(
+            String(options.cwd ?? args[args.indexOf("--cd") + 1]),
+            "invocation.json",
+          ),
+          FAKE_CODEX_PREFLIGHT_MARKER: path.join(
+            String(options.cwd),
+            "preflight.json",
+          ),
+        },
+      })) as typeof childProcess.spawn;
+    syncBuiltinESMExports();
+    for (const kind of ["discovery", "dedup"] as const) {
+      for (const resumed of [false, true]) {
+        let control: number[] = [];
+        for (const count of [2, 16384]) {
+          const sizes = await Promise.all(
+            scanIds.map(async (scanId, index) => {
+              const workerRoot = path.join(
+                fixture.root,
+                `scan-${index} café`,
+                `${kind}-${resumed}`,
+              );
+              const output = path.join(workerRoot, "output");
+              const prompt = path.join(workerRoot, "prompt.md");
+              await mkdir(output, { recursive: true });
+              await writeFile(prompt, "CAPTURE_SCOPE_INPUT");
+              const includePaths = Array.from(
+                { length: count },
+                (_, row) =>
+                  `scan-${index}/background jobs/café-${row}-${"a".repeat(110)}`,
+              );
+              const executor = new CodexSdkWorkerExecutor({
+                parentSandbox: trustedParentSandbox,
+                artifactContext: {
+                  pluginRoot: fixture.root,
+                  repoRoot: fixture.root,
+                  scanId,
+                  scope: ".",
+                  includePaths,
+                },
+              });
+              await executor.run(
+                workerRequest(prompt, output, {
+                  kind,
+                  ...(resumed
+                    ? { resumeThreadId: `scope-thread-${index}` }
+                    : {}),
+                  artifactContext: {
+                    root: output,
+                    layout: kind === "dedup" ? "reducer" : "worker",
+                    ...(kind === "dedup"
+                      ? {
+                          deepReducer: {
+                            scanRoot: workerRoot,
+                            claimedWorkers: [
+                              {
+                                id: "source-worker",
+                                resultPath: path.join(
+                                  workerRoot,
+                                  "accepted.json",
+                                ),
+                              },
+                            ],
+                          },
+                        }
+                      : {}),
+                  },
+                }),
+              );
+              const invocation = await readJson(output, "invocation.json");
+              assert.deepEqual(invocation.scopeInput.paths, includePaths);
+              assert.equal(path.isAbsolute(invocation.scopeInput.file), true);
+              assert.equal(invocation.argv.includes("resume"), resumed);
+              const argument = nativeConfigOverrides(invocation.argv).find(
+                (value) => value.startsWith("mcp_servers="),
+              )!;
+              assert.ok(argument);
+              return Buffer.byteLength(argument);
+            }),
+          );
+          if (count === 2) control = sizes;
+          else
+            assert.deepEqual(
+              sizes,
+              control,
+              "scope size must not increase the native command arguments",
+            );
+        }
+      }
+    }
+  } finally {
+    childProcess.spawn = originalSpawn;
+    syncBuiltinESMExports();
+    for (const [name, value] of saved) restoreEnv(name, value);
   }
 }
 

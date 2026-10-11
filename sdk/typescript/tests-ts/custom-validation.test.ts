@@ -88,6 +88,7 @@ async function publishDraft(
   scanDir: string,
   scanId: string,
   workbench: (args: readonly string[]) => Promise<Record<string, unknown>>,
+  complete?: boolean,
 ) {
   const manifest = await json<ScanManifest>(
     join(scanDir, "scan-manifest.json"),
@@ -99,6 +100,7 @@ async function publishDraft(
       scan: {
         target: manifest.scan.target,
         scope: manifest.scan.scope,
+        ...(complete === undefined ? {} : { complete }),
       },
     },
     findings: {
@@ -484,6 +486,7 @@ describe("custom validation", () => {
     "budgeted-relative-sqlite",
     "budgeted-profile-sqlite",
     "unowned-validation-worker",
+    "unfinished-source",
   ];
   test.each(workbenchScenarios)(
     "SDK owns real workbench completion: %s",
@@ -675,8 +678,36 @@ describe("custom validation", () => {
                       );
                       expect(prompt).not.toContain("run `$validation` once");
                       expect(turnOptions.outputSchema).toBeUndefined();
+                      await draft(scanDir, scanId, 0, diff);
+                      const earlyCoverage = await json<CoverageDocument>(
+                        join(scanDir, "coverage.json"),
+                      );
+                      earlyCoverage.completeness = "partial";
+                      await save(join(scanDir, "coverage.json"), earlyCoverage);
+                      await publishDraft(scanDir, scanId, workbench, false);
                       await draft(scanDir, scanId, count, diff);
-                      await publishDraft(scanDir, scanId, workbench);
+                      if (scenario === "unfinished-source") {
+                        const coverage = await json<CoverageDocument>(
+                          join(scanDir, "coverage.json"),
+                        );
+                        coverage.completeness = "partial";
+                        coverage.deferred = [
+                          {
+                            id: "unfinished-source",
+                            reason:
+                              "Requested source review remains unfinished.",
+                          },
+                        ];
+                        await save(join(scanDir, "coverage.json"), coverage);
+                      }
+                      // Follow the adapter's terminal draft instruction at the real workbench boundary.
+                      await publishDraft(
+                        scanDir,
+                        scanId,
+                        workbench,
+                        scenario !== "unfinished-source" &&
+                          /\bcomplete:\s*true\b/u.test(prompt),
+                      );
                       expect(commands).not.toContain("prepare-scan-completion");
                       expect(commands).not.toContain("complete-scan");
                       return { events: completedEvents() };
@@ -852,6 +883,21 @@ describe("custom validation", () => {
           );
           expect(commands).toContain("fail-scan");
           expect(commands).not.toContain("complete-scan");
+          return;
+        } else if (scenario === "unfinished-source") {
+          await expect(pending).rejects.toThrow(
+            "The latest saved scan draft is incomplete",
+          );
+          expect(turns).toBe(2);
+          expect(commands).not.toContain("complete-scan");
+          expect(commands).toContain("fail-scan");
+          expect(await json(join(scanDir, resultName))).toMatchObject({
+            status: "complete",
+          });
+          expect(
+            (await json<CoverageDocument>(join(scanDir, "coverage.json")))
+              .completeness,
+          ).toBe("partial");
           return;
         }
         if (scenario === "incomplete") {

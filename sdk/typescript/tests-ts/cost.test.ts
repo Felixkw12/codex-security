@@ -1,5 +1,6 @@
 import { jsonLines } from "./support/json.js";
 import { zstdCompressSync } from "node:zlib";
+import * as fs from "node:fs/promises";
 import { Codex } from "@openai/codex-sdk";
 import { runNodePython } from "./support/python-probe.js";
 import { formatTokenUsage, tokenUsage } from "../src/cost-model.js";
@@ -233,8 +234,14 @@ async function withMockAccountingSessions(
   }
   const originalOpen = fsPromises.open;
   const originalReaddir = fsPromises.readdir;
+  const originalStat = fsPromises.stat;
   mock.module("node:fs/promises", () => ({
     ...fsPromises,
+    stat: async (path: unknown) => {
+      const contents = files.get(String(path));
+      if (contents === undefined) throw new Error("Unexpected session file");
+      return { size: contents.length };
+    },
     readdir: async (path: unknown) => {
       if (String(path) !== directory)
         throw new Error("Unexpected session directory");
@@ -282,6 +289,7 @@ async function withMockAccountingSessions(
       ...fsPromises,
       open: originalOpen,
       readdir: originalReaddir,
+      stat: originalStat,
     }));
   }
 }
@@ -428,6 +436,207 @@ test.each([
 });
 
 describe("scan cost", () => {
+  test("ignores token-count events without a usage snapshot in both readers", async () => {
+    const home = await codexHome();
+    const path = await writeSession(home, childUuid7Thread, {}, scanThreadId);
+    await writeFile(
+      path,
+      jsonLines([
+        ...ownershipRollout([]),
+        {
+          type: "event_msg",
+          timestamp: "2026-07-26T12:03:00Z",
+          payload: {
+            type: "token_count",
+            info: null,
+            rate_limits: { primary: { used_percent: 5 } },
+          },
+        },
+      ]) + "\n",
+    );
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-6-astra",
+    });
+    tracker.start(scanThreadId);
+    expect((await tracker.stop()).usage).toEqual(ownedSdkUsage);
+    expect(readPythonRolloutUsage(BUNDLED_PLUGIN_ROOT, path)).toEqual({
+      usage: ownedPythonUsage,
+      warnings: [],
+    });
+  });
+
+  test("does not reopen unchanged rollouts and reads appended worker usage", async () => {
+    const { home, parent, worker } = await workerSessionFixture();
+    await writeSession(home, "unrelated-thread", {
+      input_tokens: 900,
+      output_tokens: 90,
+    });
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-6-astra",
+    });
+    tracker.start("scan-thread");
+    await tracker.refresh();
+    const opened = spyOn(fs, "open");
+    try {
+      await tracker.refresh();
+      expect(opened).not.toHaveBeenCalled();
+      await appendFile(
+        worker,
+        jsonLines([
+          {
+            type: "event_msg",
+            payload: {
+              type: "token_count",
+              info: {
+                total_token_usage: { input_tokens: 200, output_tokens: 20 },
+              },
+            },
+          },
+        ]) + "\n",
+      );
+      const snapshot = await tracker.refresh();
+      expect(opened.mock.calls.map(([path]) => path)).toEqual([worker]);
+      expect(snapshot.usage).toMatchObject({
+        input_tokens: 300,
+        output_tokens: 30,
+      });
+      expect(opened.mock.calls.map(([path]) => path)).not.toContain(parent);
+    } finally {
+      opened.mockRestore();
+      await tracker.stop();
+    }
+  });
+
+  test("reports known usage even when model pricing is unavailable", async () => {
+    const home = await codexHome();
+    await writeSession(home, "scan-thread", {
+      input_tokens: 100,
+      output_tokens: 10,
+    });
+    const usages: unknown[] = [];
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "synthetic-unpriced-model",
+      onUsage: (usage) => usages.push(usage),
+    });
+    tracker.start("scan-thread");
+    const snapshot = await tracker.stop();
+    expect(snapshot.cost).toBeNull();
+    expect(snapshot.usage).toMatchObject({
+      input_tokens: 100,
+      output_tokens: 10,
+    });
+    expect(usages).toHaveLength(1);
+    expect(usages[0]).toEqual(snapshot.usage);
+  });
+
+  test("shows distinct token categories without adding cached input twice", () => {
+    expect(
+      formatTokenUsage({
+        input_tokens: 120,
+        cached_input_tokens: 30,
+        cache_write_tokens: 12,
+        output_tokens: 15,
+      }),
+    ).toBe(
+      "78 uncached input, 30 cache reads, 12 cache writes, 15 output, 135 total",
+    );
+  });
+
+  test("distinguishes missing cache writes from a reported zero", () => {
+    const usage = {
+      input_tokens: 120,
+      cached_input_tokens: 30,
+      output_tokens: 15,
+    };
+    expect(formatTokenUsage(tokenUsage(usage))).toBe(
+      "unavailable uncached input, 30 cache reads, unavailable cache writes, 15 output, 135 total",
+    );
+    expect(formatTokenUsage({ ...usage, cache_write_input_tokens: 0 })).toBe(
+      "90 uncached input, 30 cache reads, 0 cache writes, 15 output, 135 total",
+    );
+    expect(estimateScanCost("gpt-6-astra", usage)).toMatchObject({
+      cacheWriteInputTokens: 0,
+      cacheWriteInputTokensReported: false,
+    });
+  });
+
+  test("includes the price source and rates with each estimate", () => {
+    const cost = estimateScanCost("gpt-6-astra", {
+      input_tokens: 1_000_000,
+      cached_input_tokens: 200_000,
+      cache_write_input_tokens: 300_000,
+      output_tokens: 100_000,
+    });
+    expect(cost).toEqual({
+      model: "gpt-6-astra",
+      inputTokens: 1_000_000,
+      cachedInputTokens: 200_000,
+      cacheWriteInputTokens: 300_000,
+      outputTokens: 100_000,
+      estimatedUsd: 13.95,
+      estimatedUsdRange: { min: 13.95, max: 25.4, context: "unknown" },
+      pricing: {
+        source: "https://developers.openai.com/api/docs/pricing",
+        asOf: "2026-09-14",
+        serviceTier: "standard",
+        context: "short",
+        usdPerMillionTokens: {
+          input: 10,
+          cacheRead: 1,
+          cacheWrite: 12.5,
+          output: 50,
+        },
+        longContextUsdPerMillionTokens: {
+          input: 20,
+          cacheRead: 2,
+          cacheWrite: 25,
+          output: 75,
+        },
+      },
+    });
+  });
+  test.each(["gpt-6-sol", "openai.gpt-6-sol"])(
+    "prices every token category and both context ranges for %s",
+    (model) => {
+      expect(
+        estimateScanCost(model, {
+          input_tokens: 1_000_000,
+          cached_input_tokens: 200_000,
+          cache_write_input_tokens: 300_000,
+          output_tokens: 100_000,
+        }),
+      ).toEqual({
+        model,
+        inputTokens: 1_000_000,
+        cachedInputTokens: 200_000,
+        cacheWriteInputTokens: 300_000,
+        outputTokens: 100_000,
+        estimatedUsd: 2.79,
+        estimatedUsdRange: { min: 2.79, max: 5.08, context: "unknown" },
+        pricing: {
+          source: "https://developers.openai.com/api/docs/models/gpt-6-sol",
+          asOf: "2026-10-10",
+          serviceTier: "standard",
+          context: "short",
+          usdPerMillionTokens: {
+            input: 2,
+            cacheRead: 0.2,
+            cacheWrite: 2.5,
+            output: 10,
+          },
+          longContextUsdPerMillionTokens: {
+            input: 4,
+            cacheRead: 0.4,
+            cacheWrite: 5,
+            output: 15,
+          },
+        },
+      });
+    },
+  );
   test.each([
     [{ cache_write_tokens: 15 }, 15],
     [{ cache_write_input_tokens: 0, cache_write_tokens: 15 }, 15],
@@ -1065,6 +1274,7 @@ describe("live scan cost tracking", () => {
           `${JSON.stringify({ type: "event_msg", payload: { type: "token_count", info: { total_token_usage: usage(1_000_000) } } })}\n`,
         );
         await writeSession(home, "middle", usage(20), "scan-thread");
+        await expect(tracker.refresh()).rejects.toMatchObject({ code });
         await expect(tracker.refresh()).rejects.toMatchObject({ code });
         denied = false;
         const snapshot = await tracker.stop();
