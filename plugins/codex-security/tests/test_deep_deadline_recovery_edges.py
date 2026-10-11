@@ -163,6 +163,35 @@ def test_deadline_validates_optional_parent_model_before_worker_fallback(
     assert bool(get_scan(scan.state, scan.scan_id)["scan"]["warnings"]) is not valid_parent
 
 
+def test_deadline_recovery_does_not_snapshot_untouched_optional_sarif(tmp_path):
+    scan = deadline_fixture(tmp_path, "valid")
+    external = tmp_path / "optional-export.sarif"
+    external.write_text("Unchanged optional export.\n")
+    sarif = scan.directory / "exports/results.sarif"
+    sarif.parent.mkdir()
+    try:
+        sarif.symlink_to(external)
+    except OSError:
+        if os.name == "nt":
+            pytest.skip("Symbolic links are unavailable")
+        raise
+    assert finish(scan)["deepScan"]["status"] == "succeeded"
+    assert_retained_finding(scan)
+    completion = run_workbench(
+        scan.state,
+        "complete-scan",
+        "--scan-id",
+        scan.scan_id,
+        check=False,
+        environment=scan.environment,
+    )
+    assert completion["returncode"] == 0
+    assert "automatic SARIF export failed" in completion["stderr"]
+    assert sarif.is_symlink()
+    assert os.readlink(sarif) == str(external)
+    assert external.read_text() == "Unchanged optional export.\n"
+
+
 @pytest.mark.parametrize("failure", ["publication", "commit"])
 def test_failed_deadline_without_parent_head_restores_all_recovery_evidence(
     tmp_path: Path, failure: str

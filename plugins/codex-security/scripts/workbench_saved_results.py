@@ -2394,7 +2394,9 @@ def preserve_deep_deadline_draft(
 ) -> tuple[Path, dict[str, tuple[bytes, os.stat_result] | None], set[str]] | None:
     """Recover a settled, zero-accepted Deep deadline without sealing the parent."""
     scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
-    snapshots = _snapshot_published_outputs(scan_dir, (*_PUBLISHED_OUTPUTS, "checkpoint-head.json"))
+    snapshots = _snapshot_published_outputs(
+        scan_dir, ("findings.json", "coverage.json", "scan-manifest.json", "checkpoint-head.json")
+    )
     warnings = json.loads(scan["completion_warnings_json"])
     binding = db.workbench_completion_binding(scan, db.now())
     created_paths: set[str] = set()
