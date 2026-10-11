@@ -212,6 +212,14 @@ export async function processProof(
       ["process-probe.exe", tools, join(tools, "process-probe.exe")],
       ["process-probe.", tools, join(tools, "process-probe.com")],
       ["process-probe.bin", tools, join(tools, "process-probe.bin")],
+      ...["com", "exe"].map(
+        (extension) =>
+          [
+            `\\\\.\\${join(tools, `process-probe.${extension}`)}\\unused\\..`,
+            firstTools,
+            `\\\\.\\${join(tools, `process-probe.${extension}`)}`,
+          ] as const,
+      ),
       [
         ".\\relative-tools\\process-probe.exe",
         firstTools,
@@ -254,10 +262,13 @@ export async function processProof(
           ),
           [0, null],
         );
-        assert.deepEqual(JSON.parse(Buffer.concat(output).toString()), {
-          executable: expected,
-          argv0: executable,
-        });
+        const actual = JSON.parse(Buffer.concat(output).toString());
+        // Node can retain dot components in its reported module filename.
+        assert.deepEqual(
+          { ...actual, executable: win32.normalize(actual.executable) },
+          { executable: expected, argv0: executable },
+          `${mode} selection ${JSON.stringify(executable)}`,
+        );
         assert.equal(Buffer.concat(diagnostics).toString(), "");
       }
     }
@@ -385,9 +396,14 @@ export async function processProof(
         `${batch}. `,
         `${batch}\\.`,
         `${batch}\\unused\\..`,
+        `\\\\.\\${batch}`,
+        `\\\\.\\${batch}\\.`,
+        `\\\\.\\${batch}\\unused\\..`,
         win32.toNamespacedPath(batch),
       ])
         await startupFailure(executable, [87]);
+      // Verbatim paths do not resolve the dot segments through a regular file.
+      await startupFailure(`${win32.toNamespacedPath(batch)}\\unused\\..`, [2]);
       files.unlink(widePath(batch));
       // Classify the selected image, allowing the existing .com/.exe fallback.
       const image = spawnWindowsProcess(
