@@ -60,8 +60,11 @@ _FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 
 # GetFileInformationByHandleEx / SetFileInformationByHandle classes.
 _FILE_RENAME_INFO_CLASS = 3
+_FILE_RENAME_INFO_EX_CLASS = 22
 _FILE_DISPOSITION_INFO_CLASS = 4
 _FILE_ATTRIBUTE_TAG_INFO_CLASS = 9
+_FILE_RENAME_REPLACE_IF_EXISTS = 0x00000001
+_FILE_RENAME_POSIX_SEMANTICS = 0x00000002
 
 _FILE_TYPE_DISK = 0x0001
 _FILE_NAME_OPENED = 0x00000008
@@ -71,6 +74,7 @@ _ERROR_ACCESS_DENIED = 5
 _ERROR_SHARING_VIOLATION = 32
 _ERROR_LOCK_VIOLATION = 33
 _ERROR_FILE_EXISTS = 80
+_ERROR_INVALID_PARAMETER = 87
 _ERROR_ALREADY_EXISTS = 183
 _MISSING_ERRORS = {_ERROR_FILE_NOT_FOUND, _ERROR_PATH_NOT_FOUND}
 _COLLISION_ERRORS = {_ERROR_FILE_EXISTS, _ERROR_ALREADY_EXISTS}
@@ -155,6 +159,15 @@ if os.name == "nt":
         wintypes.HANDLE,
     ]
     _CreateFileW.restype = wintypes.HANDLE
+
+    _ReOpenFile = _kernel32.ReOpenFile
+    _ReOpenFile.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.DWORD,
+    ]
+    _ReOpenFile.restype = wintypes.HANDLE
 
     _CreateDirectoryW = _kernel32.CreateDirectoryW
     _CreateDirectoryW.argtypes = [wintypes.LPCWSTR, wintypes.LPVOID]
@@ -509,7 +522,7 @@ def open_read_fd_with_path(scan_dir: Path, relative_path: str, context: str) -> 
             handle = _create_file(
                 path,
                 access=_GENERIC_READ | _FILE_READ_ATTRIBUTES,
-                # Denying write/delete sharing keeps the opened contents stable.
+                # Keep the leaf fixed until its type and resolved name are verified.
                 share=_FILE_SHARE_READ,
                 disposition=_OPEN_EXISTING,
                 flags=_FILE_FLAG_OPEN_REPARSE_POINT,
@@ -519,14 +532,27 @@ def open_read_fd_with_path(scan_dir: Path, relative_path: str, context: str) -> 
                 _verify_regular_file(handle.value, path)
                 filename = Path(_final_path(handle.value)).name
                 resolved_path = PurePosixPath(relative_path).with_name(filename).as_posix()
-                raw_handle = handle.detach()
-                try:
-                    assert _msvcrt is not None
-                    descriptor = _msvcrt.open_osfhandle(raw_handle, os.O_RDONLY | os.O_BINARY)
-                    return descriptor, resolved_path
-                except BaseException:
-                    _close_handle(raw_handle)
-                    raise
+                # Reopen the same verified object, not its path. Denying write
+                # sharing keeps this snapshot immutable while allowing a writer
+                # to atomically replace the directory entry.
+                snapshot = _ReOpenFile(
+                    handle.value,
+                    _GENERIC_READ | _FILE_READ_ATTRIBUTES,
+                    _FILE_SHARE_READ | _FILE_SHARE_DELETE,
+                    _FILE_FLAG_OPEN_REPARSE_POINT,
+                )
+                if snapshot == _INVALID_HANDLE_VALUE:
+                    _raise_last_error("ReOpenFile", path)
+                with _OwnedHandle(int(snapshot)) as snapshot_handle:
+                    handle.close()
+                    raw_handle = snapshot_handle.detach()
+                    try:
+                        assert _msvcrt is not None
+                        descriptor = _msvcrt.open_osfhandle(raw_handle, os.O_RDONLY | os.O_BINARY)
+                        return descriptor, resolved_path
+                    except BaseException:
+                        _close_handle(raw_handle)
+                        raise
     except WindowsScanLocalFileError as exc:
         if exc.errno in _MISSING_ERRORS:
             raise FileNotFoundError(
@@ -576,12 +602,24 @@ def _rename_handle(handle: int, destination_path: Path) -> None:
     )
     buffer = ctypes.create_string_buffer(buffer_size)
     info = ctypes.cast(buffer, ctypes.POINTER(_FileRenameInfo)).contents
-    info.FlagsOrReplaceIfExists = 1
+    info.FlagsOrReplaceIfExists = _FILE_RENAME_REPLACE_IF_EXISTS | _FILE_RENAME_POSIX_SEMANTICS
     # The fully qualified destination uses a null RootDirectory. Verified
     # directory handles remain open to prevent ancestor replacement.
     info.RootDirectory = None
     info.FileNameLength = len(encoded_name)
     ctypes.memmove(ctypes.addressof(buffer) + file_name_offset, encoded_name, len(encoded_name))
+    if _SetFileInformationByHandle(
+        handle,
+        _FILE_RENAME_INFO_EX_CLASS,
+        buffer,
+        buffer_size,
+    ):
+        return
+    if ctypes.get_last_error() != _ERROR_INVALID_PARAMETER:
+        _raise_last_error("SetFileInformationByHandle(FileRenameInfoEx)")
+    # Older Windows/filesystem implementations do not support FileRenameInfoEx.
+    # Keep their existing replacement behavior without retrying permission errors.
+    info.FlagsOrReplaceIfExists = _FILE_RENAME_REPLACE_IF_EXISTS
     if not _SetFileInformationByHandle(
         handle,
         _FILE_RENAME_INFO_CLASS,
