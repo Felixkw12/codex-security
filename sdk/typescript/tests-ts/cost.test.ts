@@ -1862,8 +1862,8 @@ describe("live scan cost tracking", () => {
     ]);
   });
 
-  test("waits for a streamed parent marker across rollout polls", async () => {
-    const { home, parent } = await workerSessionFixture();
+  test("restores a parent phase after a different worker update", async () => {
+    const { home, parent, worker } = await workerSessionFixture();
     const updates: ScanProgress[] = [];
     const tracker = costTracker(home, {
       expectedFilesTotal: 8,
@@ -1871,21 +1871,16 @@ describe("live scan cost tracking", () => {
     });
     tracker.start("scan-thread");
     await tracker.refresh();
-    tracker.recordParentProgress({
-      phase: "validation",
-      filesCompleted: 8,
-      filesTotal: 8,
-    });
-    await appendSessionItem(parent, progressMessage(8, 8));
-    await tracker.refresh();
-    expect(updates).toEqual([]);
     await appendSessionItem(parent, progressMessage(8, 8, "validation"));
     await tracker.refresh();
-    await appendSessionItem(parent, progressMessage(8, 8, "reporting"));
+    await appendSessionItem(worker, progressMessage(8, 8));
+    await tracker.refresh();
+    await appendSessionItem(parent, progressMessage(8, 8, "validation"));
     await tracker.stop();
     expect(updates).toEqual([
       { phase: "validation", filesCompleted: 8, filesTotal: 8 },
-      { phase: "reporting", filesCompleted: 8, filesTotal: 8 },
+      { phase: "discovery", filesCompleted: 8, filesTotal: 8 },
+      { phase: "validation", filesCompleted: 8, filesTotal: 8 },
     ]);
   });
 

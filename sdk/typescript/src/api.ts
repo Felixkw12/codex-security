@@ -1539,21 +1539,21 @@ export class CodexSecurity {
       }
       let scopeFileCount: number | null = null;
       let reviewedFileCount = 0;
-      const reportedProgress = new Set<string>();
+      let lastProgress: string | null = null;
+      const knownInventories = new Set<number>();
       const progressKey = (progress: ScanProgress): string =>
         `${progress.phase}:${progress.filesCompleted}:${progress.filesTotal}`;
-      const reportProgress = (
-        progress: ScanProgress,
-        streamed = false,
-      ): void => {
-        if (reportedProgress.has(progressKey(progress))) return;
+      const reportProgress = (progress: ScanProgress): void => {
         if (
           progress.phase === "discovery" &&
-          progress.filesCompleted === 0 &&
           reviewedFileCount === 0 &&
-          progress.filesTotal !== scopeFileCount
+          (progress.filesCompleted === 0 ||
+            knownInventories.has(progress.filesTotal))
         ) {
+          // A saved command preview can omit a streamed inventory marker.
+          // A later first review may restore that previously accepted total.
           scopeFileCount = progress.filesTotal;
+          knownInventories.add(scopeFileCount);
           tracker.setExpectedFilesTotal(scopeFileCount);
         }
         if (
@@ -1566,9 +1566,8 @@ export class CodexSecurity {
         reviewedFileCount = progress.filesCompleted;
         const update = { ...progress, filesTotal: scopeFileCount };
         const key = progressKey(update);
-        if (reportedProgress.has(key)) return;
-        reportedProgress.add(key);
-        if (streamed) tracker.recordParentProgress(progress);
+        if (lastProgress === key) return;
+        lastProgress = key;
         notifyObserver(options, "onProgress")(update);
       };
       const reportedInaccessibleSessionLogs = new Set<string>();
@@ -2266,7 +2265,7 @@ export class CodexSecurity {
         onTrustedAccessStatus: options.onTrustedAccessStatus,
         onReconnect: options.onReconnect,
         onActivity: options.onActivity,
-        onProgress: (progress) => reportProgress(progress, true),
+        onProgress: reportProgress,
         onWorkerStatus: options.onWorkerStatus,
         onWarning: options.onWarning,
         onObserverError: options.onObserverError,

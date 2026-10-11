@@ -123,8 +123,8 @@ export class ScanCostTracker {
   readonly #receipts = new Map<string, ScanTokenUsage | null>();
   readonly #workers = new Map<string, number>();
   readonly #workerProgress = new Map<string, number>();
-  readonly #reportedProgress = new Set<string>();
-  #streamedParentProgress: string | null = null;
+  #lastProgress: string | null = null;
+  readonly #knownInventories = new Set<number>();
   #threadId: string | null = null;
   #observingWorkers = true;
   #timer: NodeJS.Timeout | null = null;
@@ -136,16 +136,13 @@ export class ScanCostTracker {
 
   public constructor(options: ScanCostTrackerOptions) {
     this.#options = options;
-    this.#expectedFilesTotal = options.expectedFilesTotal;
+    if (options.expectedFilesTotal !== undefined)
+      this.setExpectedFilesTotal(options.expectedFilesTotal);
   }
 
   public setExpectedFilesTotal(filesTotal: number): void {
     this.#expectedFilesTotal = filesTotal;
-  }
-
-  /** The live stream can deliver a parent marker before its rollout is polled. */
-  public recordParentProgress(progress: ScanProgress): void {
-    this.#streamedParentProgress = `${progress.phase}:${progress.filesCompleted}:${progress.filesTotal}`;
+    this.#knownInventories.add(filesTotal);
   }
 
   public recordUsage(usage: unknown, threadId = this.#threadId): void {
@@ -359,19 +356,13 @@ export class ScanCostTracker {
       return;
     }
     for (const progress of session.progress.splice(0)) {
-      if (parent && this.#streamedParentProgress !== null) {
-        const key = `${progress.phase}:${progress.filesCompleted}:${progress.filesTotal}`;
-        // Earlier parent output must not overwrite a newer live phase or inventory.
-        // Resume normal forwarding at the marker already delivered by the stream.
-        if (key !== this.#streamedParentProgress) continue;
-        this.#streamedParentProgress = null;
-      }
       const expectedFilesTotal = this.#expectedFilesTotal;
       const parentInventory =
         parent &&
         progress.phase === "discovery" &&
-        progress.filesCompleted === 0 &&
-        this.#highestFilesCompleted === 0;
+        this.#highestFilesCompleted === 0 &&
+        (progress.filesCompleted === 0 ||
+          this.#knownInventories.has(progress.filesTotal));
       if (
         (!parentInventory &&
           expectedFilesTotal !== undefined &&
@@ -407,8 +398,8 @@ export class ScanCostTracker {
             Math.max(progress.filesTotal, filesCompleted)),
       };
       const key = `${update.phase}:${update.filesCompleted}:${update.filesTotal}`;
-      if (this.#reportedProgress.has(key)) continue;
-      this.#reportedProgress.add(key);
+      if (this.#lastProgress === key) continue;
+      this.#lastProgress = key;
       this.#highestFilesCompleted = update.filesCompleted;
       this.#options.onProgress(update);
     }

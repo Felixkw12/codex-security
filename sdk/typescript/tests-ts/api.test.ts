@@ -4056,6 +4056,7 @@ describe("CodexSecurity orchestration", () => {
         { phase: "validation", filesCompleted: 8, filesTotal: 8 },
       ],
       [0, 1],
+      false,
     ],
     [
       "older tool phase",
@@ -4065,7 +4066,8 @@ describe("CodexSecurity orchestration", () => {
         { phase: "validation", filesCompleted: 8, filesTotal: 8 },
         { phase: "attack_path", filesCompleted: 8, filesTotal: 8 },
       ],
-      [1, 2],
+      [0, 1, 2],
+      false,
     ],
     [
       "older inventory",
@@ -4075,14 +4077,47 @@ describe("CodexSecurity orchestration", () => {
         { phase: "discovery", filesCompleted: 0, filesTotal: 9 },
         { phase: "discovery", filesCompleted: 1, filesTotal: 9 },
       ],
-      [1, 2],
+      [0, 1, 2],
+      false,
+    ],
+    [
+      "truncated streamed marker",
+      [0],
+      [
+        { phase: "discovery", filesCompleted: 1, filesTotal: 8 },
+        { phase: "discovery", filesCompleted: 2, filesTotal: 8 },
+      ],
+      [1],
+      false,
+    ],
+    [
+      "truncated streamed inventory",
+      [1],
+      [
+        { phase: "discovery", filesCompleted: 0, filesTotal: 8 },
+        { phase: "discovery", filesCompleted: 0, filesTotal: 9 },
+        { phase: "discovery", filesCompleted: 1, filesTotal: 9 },
+      ],
+      [0, 2],
+      false,
+    ],
+    [
+      "worker already reported the parent phase",
+      [1],
+      [
+        { phase: "discovery", filesCompleted: 8, filesTotal: 8 },
+        { phase: "validation", filesCompleted: 8, filesTotal: 8 },
+      ],
+      [0, 1],
+      true,
     ],
   ] as const)(
-    "orders parent stream and rollout progress: %s",
-    async (_scenario, streamed, progress, expected) => {
+    "retains the latest progress across stream and rollout delivery: %s",
+    async (_scenario, streamed, progress, persisted, workerFirst) => {
       const { root, repository, codexHome, scanDir } = await scanDirectories();
       const updates: ScanProgress[] = [];
       const sessionEvents: ScanSessionEvent[] = [];
+      const workerReady = Promise.withResolvers<void>();
       const markerTexts = progress.map(
         (update) => "CODEX_SECURITY_SCAN_PROGRESS " + JSON.stringify(update),
       );
@@ -4102,29 +4137,52 @@ describe("CodexSecurity orchestration", () => {
             input_tokens: 100,
             output_tokens: 10,
           });
+          if (workerFirst) {
+            const worker = await writeUsageSession(
+              codexHome,
+              "worker-thread",
+              {
+                input_tokens: 100,
+                output_tokens: 10,
+              },
+              { parent: "thread-1" },
+            );
+            await appendFile(
+              worker,
+              JSON.stringify({
+                type: "response_item",
+                payload: {
+                  type: "custom_tool_call_output",
+                  output: [{ type: "input_text", text: markerTexts[1] }],
+                },
+              }) + "\n",
+            );
+          }
           async function* markers(): AsyncGenerator<ThreadEvent> {
-            for (const [index, text] of markerTexts.entries()) {
-              if (!new Set<number>(streamed).has(index)) continue;
+            if (workerFirst) await workerReady.promise;
+            for (const index of streamed) {
               yield {
                 type: "item.completed",
                 item: {
                   id: `parent-progress-${index}`,
                   type: "agent_message",
-                  text,
+                  text: markerTexts[index]!,
                 },
               };
             }
-            // Streamed markers arrive before the delayed parent rollout is polled.
+            // Saved previews can omit a marker even when the live output included it.
             await appendFile(
               rollout,
-              markerTexts
-                .map((text) =>
+              persisted
+                .map((index) =>
                   JSON.stringify({
                     type: "response_item",
                     payload: {
                       type: "custom_tool_call_output",
                       status: "completed",
-                      output: [{ type: "input_text", text }],
+                      output: [
+                        { type: "input_text", text: markerTexts[index] },
+                      ],
                     },
                   }),
                 )
@@ -4136,13 +4194,24 @@ describe("CodexSecurity orchestration", () => {
       });
       try {
         await client.run(repository, {
-          onProgress: (update) => updates.push(update),
+          onProgress: (update) => {
+            updates.push(update);
+            if (update.phase === "validation") workerReady.resolve();
+          },
           onSessionEvent: (event) => sessionEvents.push(event),
         });
-        expect(updates).toEqual([
-          { phase: "preflight", filesCompleted: 0, filesTotal: 8 },
-          ...expected.map((index) => progress[index]!),
-        ]);
+        expect(updates[0]).toEqual({
+          phase: "preflight",
+          filesCompleted: 0,
+          filesTotal: 8,
+        });
+        expect(updates.at(-1)).toEqual(progress.at(-1));
+        for (let index = 1; index < updates.length; index++) {
+          expect(updates[index]).not.toEqual(updates[index - 1]);
+          expect(updates[index]!.filesCompleted).toBeGreaterThanOrEqual(
+            updates[index - 1]!.filesCompleted,
+          );
+        }
         expect(
           sessionEvents.filter(
             ({ threadId, event }) =>
@@ -4151,7 +4220,7 @@ describe("CodexSecurity orchestration", () => {
                 "type"
               ] === "custom_tool_call_output",
           ),
-        ).toHaveLength(progress.length);
+        ).toHaveLength(persisted.length);
       } finally {
         await client.close();
       }
