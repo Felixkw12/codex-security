@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import sqlite3
 import uuid
 from pathlib import Path
@@ -199,6 +200,55 @@ def test_failed_deadline_without_parent_head_restores_all_recovery_evidence(
     with sqlite3.connect(scan.database) as connection:
         connection.execute("DROP TRIGGER reject_deadline")
     assert finish(scan, canonical=True)["deepScan"]["status"] == "succeeded"
+    assert_retained_finding(scan)
+
+
+@pytest.mark.parametrize("committed", [False, True])
+@pytest.mark.parametrize("staged", [False, True])
+def test_deadline_interrupt_preserves_only_committed_publication(
+    tmp_path, monkeypatch, workbench_api, committed, staged
+):
+    scan = deadline_fixture(tmp_path, "valid")
+    monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(scan.state))
+    monkeypatch.setenv("CODEX_HOME", scan.environment["CODEX_HOME"])
+    deep_scan = workbench_api["deep_scan"]
+    deep_scan.configure(SimpleNamespace(**workbench_api))
+    original_manifest = scan.manifest.read_bytes()
+    staged_path = scan.manifest.with_name("staged-manifest.json") if staged else None
+    if staged_path:
+        staged_path.write_bytes(original_manifest + b"\n")
+    arguments = SimpleNamespace(
+        omitted_worker_id=[],
+        manifest_path=str(scan.manifest),
+        staged_manifest_path=str(staged_path) if staged_path else None,
+        terminal_reason="capped",
+        coordinator_generation=int(scan.generation),
+        scan_id=scan.scan_id,
+    )
+    with sqlite3.connect(scan.database) as connection:
+        connection.row_factory = sqlite3.Row
+
+        class InterruptedCommit:
+            def __getattr__(self, name):
+                return getattr(connection, name)
+
+            def commit(self):
+                # Both success and SQLite auto-rollback end the transaction.
+                (connection.commit if committed else connection.rollback)()
+                signal.raise_signal(signal.SIGINT)
+
+        with pytest.raises(KeyboardInterrupt):
+            deep_scan.finish_deep_scan(InterruptedCommit(), arguments)
+        status = connection.execute(
+            "SELECT status FROM deep_scan_runs WHERE scan_id = ?", (scan.scan_id,)
+        ).fetchone()[0]
+    assert status == ("succeeded" if committed else "running")
+    assert (scan.directory / "findings.json").exists() is committed
+    assert (scan.directory / "checkpoint-head.json").exists() is committed
+    assert scan.manifest.read_bytes() == original_manifest + (
+        b"\n" if staged and committed else b""
+    )
+    assert finish(scan)["deepScan"]["status"] == "succeeded"
     assert_retained_finding(scan)
 
 

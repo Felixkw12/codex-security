@@ -18,6 +18,27 @@ import finalize_scan_contract as finalizer
 import workbench_saved_results as saved
 
 
+def publication_context(tmp_path, scan_id):
+    binding = {
+        **saved_binding("deep_repository", repository="synthetic", status="completed"),
+        "scanId": scan_id,
+        "startedAt": "2026-01-01T00:00:00Z",
+        "completedAt": "2026-01-01T00:01:00Z",
+        "producer": {"name": "codex-security", "version": "0.0.0"},
+    }
+    binding["target"].update(
+        revision="a" * 40, targetId="synthetic", displayName="Synthetic fixture"
+    )
+    db = SimpleNamespace(
+        require_canonical_scan_directory=finalizer._require_scan_directory,
+        now=lambda: binding["completedAt"],
+        workbench_completion_binding=lambda *_args: copy.deepcopy(binding),
+        expected_coverage_mode=lambda _scan: "deep_repository",
+    )
+    scan = {"id": scan_id, "scan_dir": str(tmp_path), "completion_warnings_json": "[]"}
+    return binding, db, scan
+
+
 @pytest.mark.parametrize("local_failure", [False, True], ids=["caller-rollback", "local-failure"])
 def test_deadline_rollback_does_not_reintroduce_a_later_rejected_worker_finding(
     tmp_path, local_failure
@@ -45,23 +66,7 @@ def test_deadline_rollback_does_not_reintroduce_a_later_rejected_worker_finding(
     head = tmp_path / "checkpoint-head.json"
     head.write_text(json.dumps({"checkpoint": previous.name}))
     original_head = head.read_bytes()
-    binding = {
-        **saved_binding("deep_repository", repository="synthetic", status="completed"),
-        "scanId": scan_id,
-        "startedAt": "2026-01-01T00:00:00Z",
-        "completedAt": "2026-01-01T00:01:00Z",
-        "producer": {"name": "codex-security", "version": "0.0.0"},
-    }
-    binding["target"].update(
-        revision="a" * 40, targetId="synthetic", displayName="Synthetic fixture"
-    )
-    db = SimpleNamespace(
-        require_canonical_scan_directory=finalizer._require_scan_directory,
-        now=lambda: binding["completedAt"],
-        workbench_completion_binding=lambda *_args: copy.deepcopy(binding),
-        expected_coverage_mode=lambda _scan: "deep_repository",
-    )
-    scan = {"id": scan_id, "scan_dir": str(tmp_path), "completion_warnings_json": "[]"}
+    binding, db, scan = publication_context(tmp_path, scan_id)
 
     class Connection:
         def execute(self, sql, _args):
@@ -142,23 +147,7 @@ def test_deadline_rollback_preserves_parent_observation_order(
     if newer_source == "unselected-checkpoint":
         unselected = write_checkpoint(tmp_path / "checkpoints", newer)
         os.utime(unselected, ns=(200, 200))
-    binding = {
-        **saved_binding("deep_repository", repository="synthetic", status="completed"),
-        "scanId": scan_id,
-        "startedAt": "2026-01-01T00:00:00Z",
-        "completedAt": "2026-01-01T00:01:00Z",
-        "producer": {"name": "codex-security", "version": "0.0.0"},
-    }
-    binding["target"].update(
-        revision="a" * 40, targetId="synthetic", displayName="Synthetic fixture"
-    )
-    db = SimpleNamespace(
-        require_canonical_scan_directory=finalizer._require_scan_directory,
-        now=lambda: binding["completedAt"],
-        workbench_completion_binding=lambda *_args: copy.deepcopy(binding),
-        expected_coverage_mode=lambda _scan: "deep_repository",
-    )
-    scan = {"id": scan_id, "scan_dir": str(tmp_path), "completion_warnings_json": "[]"}
+    binding, db, scan = publication_context(tmp_path, scan_id)
 
     class Connection:
         def execute(self, sql, _args):
