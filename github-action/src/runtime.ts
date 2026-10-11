@@ -1,4 +1,5 @@
 import { which } from '@actions/io';
+import fs from 'node:fs';
 import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, realpath, symlink, writeFile } from 'node:fs/promises';
 import { delimiter, isAbsolute, join, resolve, sep } from 'node:path';
 import { runProcess, safeLogLines } from './process.js';
@@ -72,7 +73,7 @@ export function captureRunnerPath(value = process.env.PATH ?? '/usr/bin:/bin', c
 }
 
 /** Discover the same launcher that the captured child PATH will select. */
-export async function resolveTool(name: 'npm' | 'python3' | 'sudo', runnerPath = captureRunnerPath()): Promise<string> {
+export async function resolveTool(name: 'npm' | 'python3', runnerPath = captureRunnerPath()): Promise<string> {
   for (const directory of runnerPath.split(delimiter)) {
     const executable = await which(join(directory, name));
     if (executable) return executable;
@@ -92,16 +93,16 @@ export async function setupHostedSandbox(options: {
   runnerEnvironment?: string;
   imageOS?: string;
   log?: (line: string) => void;
-}): Promise<void> {
-  // Persistent runners keep their administrator-owned host configuration.
-  if (options.runnerEnvironment !== 'github-hosted' || options.imageOS !== 'ubuntu24') return;
-  const sudo = await resolveTool('sudo', options.env.PATH);
+}, execute = runProcess): Promise<void> {
+  // Docker job containers inherit the host image labels but own their setup.
+  if (options.runnerEnvironment !== 'github-hosted' || options.imageOS !== 'ubuntu24' || fs.existsSync('/.dockerenv')) return;
+  const sudo = '/usr/bin/sudo';
   for (const args of [
-    ['-n', 'apt-get', 'update'],
-    ['-n', 'apt-get', 'install', '--yes', 'bubblewrap', 'apparmor-profiles'],
-    ['-n', 'apparmor_parser', '-r', '/usr/share/apparmor/extra-profiles/bwrap-userns-restrict'],
+    ['-n', '/usr/bin/apt-get', 'update'],
+    ['-n', '/usr/bin/apt-get', 'install', '--yes', 'bubblewrap', 'apparmor-profiles'],
+    ['-n', '/usr/sbin/apparmor_parser', '-r', '/usr/share/apparmor/extra-profiles/bwrap-userns-restrict'],
   ]) {
-    const result = await runProcess(sudo, args, options);
+    const result = await execute(sudo, args, options);
     for (const line of safeLogLines(result.stdout)) {
       try { options.log?.(line); }
       catch { /* Optional diagnostics must not interrupt sandbox preparation. */ }

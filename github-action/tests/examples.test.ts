@@ -10,6 +10,7 @@ const gate = workflow.jobs['required-review'];
 const step = gate.steps[0];
 
 test('the required PR check runs even when the scan job is skipped', () => {
+  assert.ok(workflow.on.pull_request.types.includes('edited'), 'Retargeting a PR must rerun the scan against its new base.');
   assert.equal(gate.name, 'Codex Security');
   assert.equal(gate.needs, 'security');
   assert.equal(gate.if, 'always()');

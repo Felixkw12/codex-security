@@ -66,14 +66,14 @@ require a complete scan and fail on findings at or above the selected severity.
 
 ### Ubuntu sandbox setup
 
-On GitHub-hosted Ubuntu 24.04, the Action installs `bubblewrap` and
-`apparmor-profiles` and loads the supplied `bwrap-userns-restrict` AppArmor
-profile. It then verifies that Codex can start its sandbox before using the
-scan credential. No separate setup step is needed.
+For jobs running directly on GitHub-hosted Ubuntu 24.04 VMs, the Action installs
+`bubblewrap` and `apparmor-profiles` and loads the supplied
+`bwrap-userns-restrict` AppArmor profile. It then verifies that Codex can start
+its sandbox before using the scan credential. No separate setup step is needed.
 
-Self-hosted runners must provide a working Codex sandbox. The Action checks
-sandbox startup but does not install system packages or change AppArmor on
-those runners. See the [sandbox documentation](https://learn.chatgpt.com/docs/sandboxing).
+Self-hosted runners and job containers must provide a working Codex sandbox.
+The Action checks sandbox startup in both, but does not install system packages
+or change AppArmor there. See the [sandbox documentation](https://learn.chatgpt.com/docs/sandboxing).
 
 ## Daybreak access and refusals
 
@@ -111,7 +111,7 @@ required status check in your repository rules.
 name: Codex Security PR
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review, edited]
 
 permissions:
   contents: read
@@ -174,6 +174,9 @@ The scan job fails on high or critical findings, incomplete coverage, scanner
 errors, or required reporting errors. Available findings and reports are
 preserved when the scan is incomplete. File and line annotations are enabled
 by default.
+
+The workflow also reruns on PR edits, including base-branch changes, so it
+reviews the diff against the selected base even when the head commit is unchanged.
 
 The separate **Codex Security** job runs even if the scan job is skipped. It
 passes only after a successful scan job that reports a completed scan or a
@@ -287,12 +290,10 @@ for code scanning availability and permissions.
 ## Runtime
 
 The Action installs a pinned CLI release from npm using a committed dependency
-lock. It runs on Linux x64 with Node 24 and Python 3.11 or later; the Ubuntu 24.04
-runner supplies Node and Python. The Action installs Bubblewrap and loads
-Ubuntu's `bwrap-userns-restrict` AppArmor profile on that hosted runner. This profile lets
-Bubblewrap create the sandbox's user namespace and denies capabilities to its
-child processes. It is loaded into the running kernel for the job's runner.
-Codex uses the system Bubblewrap from `PATH`.
+lock. It runs on Linux x64 with Node 24 and Python 3.11 or later.
+GitHub-hosted Ubuntu 24.04 VMs supply Node and Python. Codex uses the system
+Bubblewrap from `PATH`; see [Ubuntu sandbox setup](#ubuntu-sandbox-setup) for VM
+setup and requirements for self-hosted runners and job containers.
 
 npm and Python are found on the runner's `PATH`; `actions/setup-node` and `actions/setup-python` can select installations.
 Python helpers preserve the selected virtual environment and library settings.
@@ -310,10 +311,10 @@ report paths empty; it does not recover unvalidated partial files from disk.
 - **Checkout or history errors:** use the triggering revision, `fetch-depth: 0`
   for PRs, and `persist-credentials: false`.
 - **Authentication errors:** check the repository secret and model access.
-- **Sandbox startup errors:** inspect the Action's package-install and AppArmor
-  diagnostics on GitHub-hosted Ubuntu 24.04. On self-hosted runners, configure
-  the Codex sandbox before running the Action. Installing Bubblewrap alone
-  does not load Ubuntu's required AppArmor profile.
+- **Sandbox startup errors:** for jobs running directly on GitHub-hosted Ubuntu
+  24.04 VMs, inspect the package-install and AppArmor diagnostics. On self-hosted
+  runners and in job containers, configure the sandbox before running the Action.
+  Installing Bubblewrap alone does not load Ubuntu's required AppArmor profile.
 - **Missing SARIF uploads:** inspect `scan-status`, `report-status`, and
   `sarif-upload-ready`.
 - **Incomplete scans:** follow the summary's report link and inspect coverage
@@ -330,8 +331,9 @@ It now fails. Keep `fail-on-severity: none` for advisory scans, or allow the
 failure to block merging until the review completes. `dry-run: 'true'` also
 requires `fail-on-severity: none`; put configuration checks in a separate job.
 
-The Action now prepares the sandbox on GitHub-hosted Ubuntu 24.04. Remove the
-manual Bubblewrap/AppArmor setup step there. Self-hosted setup is unchanged.
+The Action now prepares the sandbox for jobs running directly on GitHub-hosted
+Ubuntu 24.04 VMs. Remove the manual Bubblewrap/AppArmor setup step from those
+jobs. Self-hosted runners and job containers still require a preconfigured sandbox.
 
 The workflow examples use GPT-6 Sol cost support added after CLI `0.2.0`.
 Choose the reviewed distribution commit from the coordinated CLI/Action release
