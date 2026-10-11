@@ -3236,6 +3236,9 @@ def test_equal_time_parent_and_head_preserve_pending_on_replay(
     assert other in first[2]["deferred"] and other in replay[2]["deferred"]
     assert first[2]["completeness"] == replay[2]["completeness"] == "partial"
     assert not replay[2].get("resolvedDeferred")
+    assert replay[1:] == first[1:]
+    assert replay[0]["scan"].get("complete") == first[0]["scan"].get("complete")
+    assert replay[0]["scan"]["preservedSources"] == first[0]["scan"]["preservedSources"]
 
 
 @pytest.mark.parametrize("stopped", [False, True])

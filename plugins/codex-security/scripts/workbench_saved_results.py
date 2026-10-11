@@ -928,6 +928,8 @@ def merge_saved_results(
                 parent_digest = hashlib.sha256(payload).hexdigest()
                 parent_checkpoint = f"checkpoints/{parent_digest}.json"
                 parent_context["canonical"] = parent_checkpoint
+                # Identical checkpoint content can predate this canonical publication.
+                parent_context["canonicalObservedAtNs"] = str(parent_modified)
                 checkpoint_path = scan_dir / parent_checkpoint
                 if not checkpoint_path.exists():
                     write_scan_local_bytes(scan_dir, parent_checkpoint, payload)
@@ -943,6 +945,7 @@ def merge_saved_results(
                     os.utime(head_path, ns=(parent_modified, parent_modified))
                 if frozen_source_digests is not None:
                     captured = _capture_saved_source(scan_dir, "checkpoint-head.json", scan_id)
+                    parent_context["head"] = next(iter(captured))
                     frozen_source_digests = {
                         **frozen_source_digests,
                         parent_checkpoint: parent_digest,
@@ -1110,7 +1113,9 @@ def merge_saved_results(
     if frozen_source_digests is not None and "canonical" in parent_context:
         canonical = parent_context["canonical"]
         parent = drafts_by_path[canonical]
-        parent_modified = source_order[canonical][1]
+        parent_modified = int(
+            parent_context.get("canonicalObservedAtNs", source_order[canonical][1])
+        )
         parent_is_canonical = True
     if "head" in parent_context:
         head = parent_context["head"]
@@ -1148,6 +1153,7 @@ def merge_saved_results(
             elif modified == parent_modified and draft != parent:
                 parent = _merge_tied_parent_observations(parent, draft)
                 parent_is_canonical = False
+    parent_is_root = parent is not None
     if parent is None and latest_reducer is not None:
         parent = drafts_by_path[latest_reducer]
 
@@ -1813,10 +1819,16 @@ def merge_saved_results(
         )
 
     terminal_findings: dict[str, list[dict[str, Any]]] = {}
+    # A reducer replaces only its claimed batch, not the whole parent scan.
+    parent_sources = {
+        relative
+        for relative, _, _ in all_sources
+        if Path(relative).parent == Path("checkpoints") or (relative == "parent" and parent_is_root)
+    }
     projected_paths = {
         relative
-        for relative, draft, owner in all_sources
-        if owner is None
+        for relative, draft, _ in all_sources
+        if relative in parent_sources
         and (
             relative == "parent"
             or relative == parent_context.get("canonical")
@@ -1866,10 +1878,11 @@ def merge_saved_results(
         return True
 
     terminal_sources: set[str] = set()
-    for relative, draft, owner in all_sources:
+    for relative, draft, _ in all_sources:
         if (
             scan_mode == "deep"
-            and owner is None
+            and not allow_frozen_legacy_parent
+            and relative in parent_sources
             and draft.get("complete") is not False
             and all(valid_finding(value) for value in draft["findings"])
         ):
@@ -1878,13 +1891,24 @@ def merge_saved_results(
                 identified = copy.deepcopy(draft["findings"])
                 _ensure_finding_identities(identified)
                 terminal_findings[relative] = identified
+    # Legacy projections alone do not record the submitted replacement batch.
+    if not terminal_findings:
+        terminal_sources.clear()
     pending_terminals = {
         relative
         for relative, values in terminal_findings.items()
         if not any(represented_by_parent(values, draft) for draft in projected_parents)
     }
+    committed_parent = parent
+    committed_path = None
+    if "head" in parent_context and not allow_frozen_legacy_parent:
+        head = parent_context["head"]
+        committed_path = f"checkpoints/{saved_heads[head]}"
+        committed_parent = drafts_by_path[committed_path]
+    # The selected terminal head supersedes older publications even if their clocks differ.
+    terminal_cutoffs = {committed_path} if committed_path in terminal_sources else terminal_sources
     terminal_parent_time = max(
-        (source_order[relative][1] for relative in pending_terminals or terminal_sources),
+        (source_order[relative][1] for relative in pending_terminals or terminal_cutoffs),
         default=None,
     )
     pending_terminals = {
@@ -1892,10 +1916,6 @@ def merge_saved_results(
         for relative in pending_terminals
         if source_order[relative][1] == terminal_parent_time
     }
-    committed_parent = parent
-    if "head" in parent_context and not allow_frozen_legacy_parent:
-        head = parent_context["head"]
-        committed_parent = drafts_by_path[f"checkpoints/{saved_heads[head]}"]
     current_findings = [
         previous
         for value in (committed_parent["findings"] if committed_parent else [])
@@ -2312,7 +2332,13 @@ def merge_saved_results(
                     finding_positions.setdefault(key, (len(findings), group))
                 findings.append(finding)
                 continue
-            if relative != "parent" and parent and value in parent["findings"]:
+            if (
+                relative != "parent"
+                and parent
+                and value in parent["findings"]
+                and not precedes_terminal_parent("parent", None)
+                and not replaced_parent_finding("parent", None, value)
+            ):
                 continue
             if not isinstance(value, dict):
                 warnings.append(f"Retained malformed finding evidence in {relative}.")

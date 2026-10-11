@@ -73,8 +73,9 @@ def recover(root: Path, module, workers, frozen=None):
     return result
 
 
-def test_legacy_frozen_source_order_without_parent_context_remains_readable(
-    tmp_path, saved_results
+@pytest.mark.parametrize("retain_roles", [False, True])
+def test_legacy_frozen_source_order_parent_context_remains_readable(
+    tmp_path, saved_results, retain_roles
 ):
     finding = {
         "ruleId": "fixture.review",
@@ -95,7 +96,10 @@ def test_legacy_frozen_source_order_without_parent_context_remains_readable(
         if not saved_results._is_source_order_snapshot(relative):
             continue
         record = json.loads((tmp_path / relative).read_text())
-        assert record.pop("parentContext")
+        if retain_roles:
+            assert record["parentContext"].pop("canonicalObservedAtNs")
+        else:
+            assert record.pop("parentContext")
         digest = saved_results._digest(record)
         legacy_path = f"source-order/{digest}.json"
         (tmp_path / legacy_path).write_bytes(saved_results._encoded(record))

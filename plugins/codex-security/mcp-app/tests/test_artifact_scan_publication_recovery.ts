@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdir, writeFile, readdir, utimes } from "node:fs/promises";
+import { mkdir, writeFile, readFile, readdir, utimes } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
+import { importSource } from "./import-module.ts";
 import {
   draftApi,
   draftFixture,
@@ -401,5 +402,201 @@ for (const reversed of [false, true]) {
     await dateDraftFiles(recovered.root, 100);
     const replay = await recoverAndFinalize(normal, recovered, [], true, true);
     assert.deepEqual(replay.recoveredCoverage.surfaces, rows);
+  });
+}
+
+for (const authored of [false, true]) {
+  for (const time of [99, 100, 101]) {
+    for (const cut of ["raw input", "committed head"] as const) {
+      test(`terminal Deep replacement retains unchanged siblings (authored=${authored}, time=${time}, cut=${cut})`, async (t) => {
+        const normal = await fixture(t, "deep");
+        const recovered = await fixture(t, "deep");
+        const [unchanged, removed, added] = [
+          "Unchanged",
+          "Removed",
+          "Added",
+        ].map((title) =>
+          finding(
+            title,
+            authored ? { identity: { anchor: title.toLowerCase() } } : {},
+          ),
+        );
+        for (const f of [normal, recovered]) {
+          await f.write({
+            ...f.draft({}, true),
+            findings: [unchanged, removed],
+          });
+          await dateDraftFiles(f.root, 100);
+        }
+        const checkpoints = path.join(recovered.root, "checkpoints");
+        const original = new Set(await readdir(checkpoints));
+        await normal.write({
+          ...normal.draft({}, true),
+          findings: [unchanged, added],
+        });
+        const input = {
+          ...recovered.draft({}, true),
+          findings: [unchanged, added],
+        };
+        if (cut === "raw input")
+          await draftApi.saveScanDraftCheckpoint(
+            recovered.context,
+            input,
+            false,
+          );
+        else
+          await interruptDraftWrite(
+            path.join(recovered.root, "findings.json"),
+            () => recovered.write(input),
+          );
+        for (const name of await readdir(checkpoints))
+          if (!original.has(name))
+            await utimes(path.join(checkpoints, name), time, time);
+        if (cut === "committed head")
+          await utimes(
+            path.join(recovered.root, "checkpoint-head.json"),
+            time,
+            time,
+          );
+        const result = await recoverAndFinalize(
+          normal,
+          recovered,
+          [],
+          true,
+          true,
+          true,
+        );
+        assert.equal(result.normal.length, 2);
+        assert.deepEqual(result.recovered, result.normal);
+        for (const row of result.recovered)
+          assert.deepEqual(
+            (row.evidenceProvenance as { previousFindings: unknown[] })
+              .previousFindings,
+            [],
+          );
+        assert.deepEqual(result.warnings, []);
+      });
+    }
+  }
+}
+
+for (const parentState of ["absent", "partial", "terminal"] as const) {
+  test(`a reducer preserves its claimed batch and unconsumed workers (${parentState} parent)`, async (t) => {
+    const normal = await fixture(t, "deep");
+    const recovered = await fixture(t, "deep");
+    const parentFinding = finding("Parent review", {
+      locations: [{ path: "src/parent.py", startLine: 1 }],
+    });
+    if (parentState === "partial") {
+      await recovered.write({
+        ...recovered.draft(),
+        findings: [parentFinding],
+      });
+      await dateDraftFiles(recovered.root, 100);
+    }
+    const rows = ["Assigned", "Unconsumed"].map((title) =>
+      finding(title, {
+        locations: [{ path: `src/${title.toLowerCase()}.py`, startLine: 1 }],
+      }),
+    );
+    const workers: Record<string, unknown>[] = [];
+    for (const [index, row] of rows.entries()) {
+      const id = `worker-${index + 1}`;
+      const root = path.join(
+        recovered.root,
+        "artifacts/deep_discovery/workers",
+        id,
+        "output",
+      );
+      await mkdir(root, { recursive: true });
+      const worker = draftFixture(root, "worker");
+      await worker.write({ ...worker.draft({}, true), findings: [row] });
+      await dateDraftFiles(root, 101 + index);
+      workers.push({
+        id,
+        kind: "discovery",
+        status: "succeeded",
+        completed_at: `2026-10-11T20:00:0${index}Z`,
+        artifact_dir: root,
+        result_manifest_path: path.join(root, "result.json"),
+        attempt: 1,
+      });
+    }
+    const reducer = await importSource("../src/artifact-deep-reducer.ts", {
+      absWorkingDir: import.meta.dirname,
+    });
+    const root = path.join(
+      recovered.root,
+      "artifacts/deep_discovery/dedup/reducer-1/output",
+    );
+    await mkdir(root, { recursive: true });
+    const receipt = await reducer.recordCodexSecurityDeepReduction(
+      {
+        root,
+        repoRoot: recovered.root,
+        scanId: recovered.context.scanId,
+        layout: "reducer",
+        deepReducer: {
+          scanRoot: recovered.root,
+          claimedWorkers: [
+            { id: workers[0].id, resultPath: workers[0].result_manifest_path },
+          ],
+        },
+      },
+      { scanId: recovered.context.scanId, complete: true, findings: [rows[0]] },
+    );
+    assert.deepEqual(receipt.consumedWorkerIds, ["worker-1"]);
+    await dateDraftFiles(root, 103);
+    workers.push({
+      id: "reducer-1",
+      kind: "dedup",
+      status: "succeeded",
+      completed_at: "2026-10-11T20:00:02Z",
+      artifact_dir: root,
+      result_manifest_path: path.join(root, "result.json"),
+      attempt: 1,
+    });
+    const reduced = JSON.parse(
+      await readFile(path.join(root, "result.json"), "utf8"),
+    );
+    const findings =
+      parentState === "terminal"
+        ? [parentFinding]
+        : [
+            ...(parentState === "partial" ? [parentFinding] : []),
+            ...reduced.findings,
+            {
+              ...rows[1],
+              provenance: { ...rows[1].provenance, workerId: "worker-2" },
+            },
+          ];
+    await normal.write({ ...normal.draft({}, true), findings });
+    if (parentState === "terminal") {
+      await recovered.write({ ...recovered.draft({}, true), findings });
+      for (const name of [
+        "findings.json",
+        "coverage.json",
+        "scan-manifest.json",
+        "checkpoint-head.json",
+      ])
+        await utimes(path.join(recovered.root, name), 104, 104);
+      await dateDraftFiles(path.join(recovered.root, "checkpoints"), 104);
+    }
+    const result = await recoverAndFinalize(
+      normal,
+      recovered,
+      workers,
+      true,
+      true,
+      true,
+    );
+    const byEvidence = (rows: RecoveredFinding[]) =>
+      new Map(rows.map((row) => [row.title, row]));
+    assert.equal(
+      result.normal.length,
+      parentState === "terminal" ? 1 : parentState === "partial" ? 3 : 2,
+    );
+    assert.deepEqual(byEvidence(result.recovered), byEvidence(result.normal));
+    assert.deepEqual(result.warnings, []);
   });
 }

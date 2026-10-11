@@ -135,11 +135,19 @@ def _frozen_source_times(
         context = record.get("parentContext")
         if parent_context is not None and context is not None:
             if not isinstance(context, dict) or any(
-                role not in ("canonical", "head")
-                or not isinstance(relative, str)
-                or relative not in sources
-                or (role == "canonical" and Path(relative).parent != Path("checkpoints"))
-                or (role == "head" and _checkpoint_head_directory(relative) != Path("."))
+                (
+                    "canonical" not in context
+                    or not isinstance(relative, str)
+                    or not re.fullmatch(r"-?[0-9]+", relative)
+                )
+                if role == "canonicalObservedAtNs"
+                else (
+                    role not in ("canonical", "head")
+                    or not isinstance(relative, str)
+                    or relative not in sources
+                    or (role == "canonical" and Path(relative).parent != Path("checkpoints"))
+                    or (role == "head" and _checkpoint_head_directory(relative) != Path("."))
+                )
                 for role, relative in context.items()
             ):
                 raise ContractError("saved parent context is outside the frozen sources")
@@ -193,5 +201,7 @@ def _freeze_source_times(
         raise ContractError("saved source ordering does not match its digest")
     if parent_context:
         for previous in [relative for relative in sources if _is_source_order_snapshot(relative)]:
-            del sources[previous]
+            previous_record, _, _ = _read_saved_result(scan_dir, previous, scan_id)
+            if previous_record.get("parentContext"):
+                del sources[previous]
     sources[path] = digest
