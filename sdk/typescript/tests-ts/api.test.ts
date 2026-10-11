@@ -4505,7 +4505,10 @@ describe("CodexSecurity orchestration", () => {
               // Inventory may be absent from SDK delivery; all native records
               // are durable before either review is delivered live.
               pause = !early;
-              if (!early) await closeEntered.promise;
+              if (!early) {
+                await appendFile(path, "{}\n");
+                await closeEntered.promise;
+              }
               await append(path, [
                 native("inventory", marker("discovery", 0, 8)),
                 native("eligible", marker(parentPhase, 4, 8)),
@@ -4520,7 +4523,10 @@ describe("CodexSecurity orchestration", () => {
               await worker("first", 3, 3);
               await worker("second", 1, 8);
               pause = !early;
-              if (!early) await closeEntered.promise;
+              if (!early) {
+                await appendFile(path, "{}\n");
+                await closeEntered.promise;
+              }
               await append(path, [
                 custom("inventory6", marker("discovery", 0, 6)),
                 custom("eligible", marker(parentPhase, 3, 6)),
@@ -4566,6 +4572,7 @@ describe("CodexSecurity orchestration", () => {
                 await wait("scope6").promise;
               } else {
                 pause = true;
+                await appendFile(path, "{}\n");
                 await closeEntered.promise;
               }
               await append(path, [
@@ -4600,6 +4607,7 @@ describe("CodexSecurity orchestration", () => {
               ]);
               if (!early) {
                 pause = true;
+                await appendFile(path, "{}\n");
                 await closeEntered.promise;
               } else await wait("eligible").promise;
               await append(path, [
@@ -6893,6 +6901,7 @@ describe("CodexSecurity orchestration", () => {
             );
             if (split) {
               pauseClose = true;
+              await appendFile(parentPath, "{}\n");
               await closeEntered.promise;
             } else await firstRead.promise;
             // The newer completion is durable before its SDK projection arrives,
@@ -7284,6 +7293,7 @@ describe("CodexSecurity orchestration", () => {
             await secondRead.promise;
             if (!early) {
               pauseClose = true;
+              await appendFile(parentPath, "{}\n");
               await closeEntered.promise;
             }
             // Native rows precede their ordered SDK completions, but an earlier
@@ -8060,6 +8070,7 @@ describe("CodexSecurity orchestration", () => {
             );
             if (split) {
               pauseClose = true;
+              await appendFile(parentPath, "{}\n");
               await closeEntered.promise;
             }
             const review = marker("validation", 7, reviewedEarlier ? 9 : 7);
