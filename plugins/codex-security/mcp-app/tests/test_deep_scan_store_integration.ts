@@ -6,7 +6,7 @@ import { mock } from "node:test";
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { importModule } from "./import-module.ts";
@@ -1164,6 +1164,17 @@ async function testDeadlinePreservesValidWorkerCheckpoints() {
     const beforeFailure = await Promise.all(
       draftNames.map((name) => readFile(path.join(run.scanDir, name), "utf8")),
     );
+    const checkpointDirectory = path.join(run.scanDir, "checkpoints");
+    const readParentCheckpoints = async () =>
+      Promise.all(
+        (await readdir(checkpointDirectory))
+          .sort()
+          .map(async (name) => [
+            name,
+            await readFile(path.join(checkpointDirectory, name), "utf8"),
+          ]),
+      );
+    const checkpointsBeforeFailure = await readParentCheckpoints();
     const database = path.join(
       environment.CODEX_SECURITY_STATE_DIR,
       "workbench.sqlite3",
@@ -1199,6 +1210,11 @@ async function testDeadlinePreservesValidWorkerCheckpoints() {
       ),
       beforeFailure,
       "a failed finish commit must restore the unsealed parent and accepted checkpoint head",
+    );
+    assert.deepEqual(
+      await readParentCheckpoints(),
+      checkpointsBeforeFailure,
+      "rollback must not publish an aggregate checkpoint as new parent evidence",
     );
     assert.equal((await store.get(run.scanId, threadId)).status, "running");
     await runSql("DROP TRIGGER reject_deadline_commit;");

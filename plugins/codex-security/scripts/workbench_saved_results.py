@@ -2316,10 +2316,10 @@ def coverage_for_comparison(db: Any, scan: Any) -> dict[str, Any]:
 
 
 def _snapshot_published_outputs(
-    scan_dir: Path, additional_paths: tuple[str, ...] = ()
+    scan_dir: Path, relative_paths: tuple[str, ...] = _PUBLISHED_OUTPUTS
 ) -> dict[str, bytes | None]:
     snapshots: dict[str, bytes | None] = {}
-    for relative in (*_PUBLISHED_OUTPUTS, *additional_paths):
+    for relative in relative_paths:
         descriptor = -1
         try:
             descriptor = open_scan_local_file_descriptor(
@@ -2357,7 +2357,7 @@ def preserve_deep_deadline_draft(
 ) -> tuple[Path, dict[str, bytes | None]]:
     """Recover a settled, zero-accepted Deep deadline without sealing the parent."""
     scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
-    snapshots = _snapshot_published_outputs(scan_dir, ("checkpoint-head.json",))
+    snapshots = _snapshot_published_outputs(scan_dir, (*_PUBLISHED_OUTPUTS, "checkpoint-head.json"))
     warnings = json.loads(scan["completion_warnings_json"])
     binding = db.workbench_completion_binding(scan, db.now())
     try:
@@ -2395,7 +2395,11 @@ def preserve_deep_deadline_draft(
         checkpoint = _parent_scan_draft(scan["id"], manifest["scan"], findings, coverage)
         contents = _encoded(checkpoint)
         name = f"{hashlib.sha256(contents).hexdigest()}.json"
-        write_scan_local_bytes(scan_dir, f"checkpoints/{name}", contents)
+        checkpoint_path = f"checkpoints/{name}"
+        # This draft is recoverable parent evidence too. Restore its prior state
+        # on local publication failure or a later caller transaction rollback.
+        snapshots.update(_snapshot_published_outputs(scan_dir, (checkpoint_path,)))
+        write_scan_local_bytes(scan_dir, checkpoint_path, contents)
         write_scan_local_bytes(scan_dir, "checkpoint-head.json", _encoded({"checkpoint": name}))
         for filename, document in (
             ("findings.json", findings),
