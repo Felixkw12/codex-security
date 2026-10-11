@@ -121,6 +121,49 @@ process.exitCode = result.status;
   };
 }
 
+test("committed binary detection agrees beyond the preview window", () => {
+  const f = fixture();
+  f.write("existing.py");
+  const base = f.commit();
+  f.write(
+    "payload.php",
+    Buffer.concat([
+      Buffer.from("<?php\n"),
+      Buffer.alloc(70 * 1024, 32),
+      Buffer.from("\0payload"),
+    ]),
+  );
+  f.write("visible.py", "value = 1\n");
+  f.commit();
+  expect(
+    f
+      .success("generate-in-scope-files", ["--scope", ".", "--diff-base", base])
+      .trim()
+      .split(/\r?\n/u),
+  ).toEqual(["visible.py"]);
+  expect(
+    f.rows("make-diff-rank-input", ["--base", base]).map((row) => row.path),
+  ).toEqual(["visible.py"]);
+});
+
+test("revision previews use the same read window as local files", () => {
+  const f = fixture();
+  f.write("example.py", "def first():\n    pass\n");
+  const base = f.commit();
+  f.write(
+    "example.py",
+    "def first():\n    pass\n#" +
+      "x".repeat(80_000) +
+      "\ndef outside_window():\n    pass\n",
+  );
+  f.commit();
+  const local = f.rows()[0]!.preview;
+  const revision = f.rows("make-diff-rank-input", ["--base", base])[0]!.preview;
+  expect(revision).toBe(local);
+  expect(revision).toContain("first");
+  expect(revision).not.toContain("outside_window");
+});
+
 test("revision previews retain blobs with Git's input-only NUL batch protocol", () => {
   const f = fixture();
   f.write("deleted.py", "deleted source\n");
@@ -999,7 +1042,7 @@ for (const command of ["make-repo-scope-input", "make-repo-rank-input"]) {
 }
 
 test.skipIf(process.platform === "win32")(
-  "line-breaking and non-UTF8 diff paths fail without replacing inventory",
+  "line-breaking paths fail without replacing inventory",
   () => {
     const f = fixture();
     f.write("source");
@@ -1007,30 +1050,45 @@ test.skipIf(process.platform === "win32")(
     for (const name of ["line\nname", "line\rname"]) {
       f.write(name);
       writeFileSync(f.out, "previous\n");
-      expect(f.run("generate-in-scope-files", ["--scope", "."]).status).toBe(2);
-      expect(readFileSync(f.out, "utf8")).toBe("previous\n");
+      for (const args of [
+        [],
+        ["--diff-base", base, "--diff-mode", "local-patch"],
+      ]) {
+        expect(
+          f.run("generate-in-scope-files", ["--scope", ".", ...args]).status,
+        ).toBe(2);
+        expect(readFileSync(f.out, "utf8")).toBe("previous\n");
+      }
       rmSync(join(f.repo, name));
     }
-    // APFS cannot create the invalid-UTF8 filename below.
-    if (process.platform === "darwin") return;
-    const path = Buffer.concat([
-      Buffer.from(f.repo + "/"),
-      Buffer.from([0xff]),
-    ]);
-    writeFileSync(path, "text");
-    expect(
-      f.run("generate-in-scope-files", [
+  },
+);
+
+for (const mode of ["revisions", "local-patch"]) {
+  test.skipIf(process.platform !== "linux")(
+    `${mode} diff inventory preserves raw POSIX filename bytes`,
+    () => {
+      const f = fixture();
+      f.write("source");
+      const base = f.commit();
+      const name = Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x2e, 0x70, 0x79]);
+      writeFileSync(Buffer.concat([Buffer.from(f.repo + "/"), name]), "text\n");
+      if (mode === "revisions") f.commit();
+      const result = f.run("generate-in-scope-files", [
         "--scope",
         ".",
         "--diff-base",
         base,
         "--diff-mode",
-        "local-patch",
-      ]).status,
-    ).toBe(2);
-    expect(readFileSync(f.out, "utf8")).toBe("previous\n");
-  },
-);
+        mode,
+      ]);
+      expect(result.status, result.stderr).toBe(0);
+      expect(readFileSync(f.out)).toEqual(
+        Buffer.concat([name, Buffer.from("\n")]),
+      );
+    },
+  );
+}
 
 test("inventory excludes nested Git metadata and handles long destination names", () => {
   const f = fixture();

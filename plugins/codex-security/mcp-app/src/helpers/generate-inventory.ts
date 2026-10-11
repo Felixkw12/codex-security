@@ -8,7 +8,6 @@ import { randomBytes } from "node:crypto";
 import { renameSync, unlinkSync } from "node:fs";
 import { dirname, isAbsolute, parse, relative, sep } from "node:path";
 import { parseArgs } from "node:util";
-import { isUtf8 } from "node:buffer";
 import { mkdir, readFile, writeFile } from "./helper-files";
 import { expandHome, windowsFiles, windowsJoin } from "./resolve-security-md";
 import { decodePosixBytes, encodePosixPath } from "./posix-path";
@@ -392,10 +391,6 @@ export async function generateInventory(
       }
       if (inventory) {
         const encoded = encodePosixPath(path);
-        if (!isUtf8(encoded))
-          throw new Error(
-            "Git changes contain a path that cannot be encoded as UTF-8 for the file inventory",
-          );
         if (/[\r\n]/u.test(path))
           throw new Error(
             "Git changes contain a path that cannot fit in the file inventory",

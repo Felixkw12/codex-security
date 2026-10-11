@@ -17,7 +17,7 @@ import {
 import { decodeUtf8 } from "./helpers/utf8.js";
 import { runTool } from "./helpers/inventory-git";
 import { environmentValue } from "./helpers/helper-files";
-import { encodePosixPath } from "./helpers/posix-path";
+import { decodePosixBytes, encodePosixPath } from "./helpers/posix-path";
 
 const documents = [commonSchema, reviewItemsSchema] as SchemaDocument[];
 const inventoryComponents = ["artifacts", "02_discovery", "in_scope_files.txt"];
@@ -171,7 +171,10 @@ async function readReviewItems(
       { cause: error },
     );
   });
-  const source = decodeUtf8(contents);
+  const source =
+    process.platform === "win32"
+      ? decodeUtf8(contents)
+      : decodePosixBytes(contents);
   const rows: ReviewItem[] = [];
 
   for (const [index, line] of source.split(/\r?\n/u).entries()) {
