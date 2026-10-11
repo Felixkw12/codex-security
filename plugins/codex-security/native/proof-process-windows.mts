@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { copyFileSync, mkdirSync, readFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { join, win32 } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { rootCertificates } from "node:tls";
@@ -88,7 +89,25 @@ export async function processProof(
       ),
     );
     for (const [executable, directory, path, selected] of [
-      ["process-probe", cwd, "..\\relative-tools", "process-probe.exe"],
+      ["process-probe", cwd, "..\\relative-tools", "process-probe.com"],
+      [
+        "..\\relative-tools\\process-probe",
+        cwd,
+        join(root, "absent-tools"),
+        "process-probe.com",
+      ],
+      [
+        "..\\relative-tools\\process-probe.",
+        cwd,
+        join(root, "absent-tools"),
+        "process-probe.com",
+      ],
+      [
+        join(tools, "process-probe"),
+        cwd,
+        join(root, "absent-tools"),
+        "process-probe.com",
+      ],
       [
         "..\\relative-tools\\process-probe.exe",
         cwd,
@@ -149,6 +168,105 @@ export async function processProof(
         rawSetting: "raw-\udfff",
       });
       assert.equal(process.cwd(), callerCwd);
+    }
+
+    copyFileSync(process.execPath, join(tools, "process-probe.bin"));
+    copyFileSync(process.execPath, join(tools, "process-probe.bin.exe"));
+    const firstTools = join(root, "first-tools"),
+      quotedTools = join(root, "quoted;tools");
+    mkdirSync(firstTools);
+    mkdirSync(quotedTools);
+    copyFileSync(process.execPath, join(firstTools, "process-probe.exe"));
+    copyFileSync(process.execPath, join(quotedTools, "process-probe.com"));
+    const selectionArgs = ["-e", "process.stdout.write(process.execPath)"];
+    for (const [executable, path, expected] of [
+      [
+        "process-probe",
+        `"${quotedTools}"`,
+        join(quotedTools, "process-probe.com"),
+      ],
+      [
+        "process-probe",
+        `'${quotedTools}'`,
+        join(quotedTools, "process-probe.com"),
+      ],
+      [
+        "process-probe",
+        `${firstTools};${tools}`,
+        join(firstTools, "process-probe.exe"),
+      ],
+      ["process-probe.com", tools, join(tools, "process-probe.com")],
+      ["process-probe.", tools, join(tools, "process-probe.com")],
+      ["process-probe.bin", tools, join(tools, "process-probe.bin")],
+      [
+        ".\\relative-tools\\process-probe.bin",
+        firstTools,
+        join(tools, "process-probe.bin"),
+      ],
+      [
+        join(tools, "process-probe.bin"),
+        firstTools,
+        join(tools, "process-probe.bin"),
+      ],
+    ] as const) {
+      for (const mode of ["node", "native"] as const) {
+        const options = {
+          cwd: root,
+          env: { ...relativeEnvironment, PATH: path },
+          stdio: ["ignore", "pipe", "pipe"] as ["ignore", "pipe", "pipe"],
+        };
+        const selected =
+          mode === "node"
+            ? spawn(executable, selectionArgs, options)
+            : spawnWindowsProcess(
+                binaryPath,
+                executable,
+                selectionArgs,
+                options,
+              );
+        const output: Buffer[] = [],
+          diagnostics: Buffer[] = [];
+        selected.stdout!.on("data", (chunk: Buffer) => output.push(chunk));
+        selected.stderr!.on("data", (chunk: Buffer) => diagnostics.push(chunk));
+        assert.deepEqual(
+          await processExit(
+            selected,
+            `${mode} selection ${JSON.stringify(executable)}`,
+          ),
+          [0, null],
+        );
+        assert.equal(Buffer.concat(output).toString(), expected);
+        assert.equal(Buffer.concat(diagnostics).toString(), "");
+      }
+    }
+
+    const inheritedPath = process.env["PATH"];
+    try {
+      process.env["PATH"] = tools;
+      const inherited = spawnWindowsProcess(
+        binaryPath,
+        "process-probe",
+        selectionArgs,
+        {
+          cwd: root,
+          env: relativeEnvironment,
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+      const output: Buffer[] = [];
+      inherited.stdout!.on("data", (chunk: Buffer) => output.push(chunk));
+      inherited.stderr!.resume();
+      assert.deepEqual(
+        await processExit(inherited, "omitted PATH inherits caller value"),
+        [0, null],
+      );
+      assert.equal(
+        Buffer.concat(output).toString(),
+        join(tools, "process-probe.com"),
+      );
+    } finally {
+      if (inheritedPath === undefined) delete process.env["PATH"];
+      else process.env["PATH"] = inheritedPath;
     }
 
     const executableBytes = readFileSync(process.execPath);
@@ -261,11 +379,12 @@ export async function processProof(
       assert.equal(Buffer.concat(errors).toString(), "");
     }
 
-    const shimTools = join(root, "shim-tools");
+    const shimTools = join(root, "shim-tools"),
+      absentTools = join(root, "absent-tools");
     mkdirSync(shimTools);
     copyFileSync(process.execPath, join(shimTools, "node.exe"));
     copyFileSync(process.execPath, join(shimTools, "process-probe.exe"));
-    for (const overridePath of [undefined, tools]) {
+    for (const overridePath of [undefined, tools, absentTools]) {
       const originalNode = process.execPath;
       let selectedChild: ReturnType<typeof spawnWindowsProcess>;
       try {
@@ -295,18 +414,35 @@ export async function processProof(
         errors: Buffer[] = [];
       selectedChild.stdout!.on("data", (data: Buffer) => output.push(data));
       selectedChild.stderr!.on("data", (data: Buffer) => errors.push(data));
-      assert.deepEqual(
-        await processExit(
-          selectedChild,
-          `PATH collision (override=${overridePath !== undefined})`,
-        ),
-        [0, null],
-      );
-      assert.deepEqual(JSON.parse(Buffer.concat(output).toString()), {
-        executable: join(tools, "process-probe.exe"),
-        path: tools,
-        setting: "selected target",
-      });
+      if (overridePath === absentTools) {
+        const errors: NodeJS.ErrnoException[] = [];
+        selectedChild.on("error", (error) => errors.push(error));
+        await new Promise<void>((resolve) =>
+          selectedChild.once("close", () => resolve()),
+        );
+        assert.deepEqual(
+          errors.map((error) => error.code),
+          ["WINDOWS_PROCESS_ERROR"],
+        );
+        assert.equal(
+          Buffer.concat(output).length,
+          0,
+          "missing PATH tool must not resolve beside the shim",
+        );
+      } else {
+        assert.deepEqual(
+          await processExit(
+            selectedChild,
+            `PATH collision (override=${overridePath !== undefined})`,
+          ),
+          [0, null],
+        );
+        assert.deepEqual(JSON.parse(Buffer.concat(output).toString()), {
+          executable: join(tools, "process-probe.com"),
+          path: tools,
+          setting: "selected target",
+        });
+      }
       assert.equal(Buffer.concat(errors).toString(), "");
     }
 
@@ -333,25 +469,28 @@ export async function processProof(
     );
     assert.equal(searchErrors.length, 1);
 
-    for (const [key, override] of [
-      ["NODE_DEBUG", undefined],
-      ["Node_Debug", undefined],
-      ["NODE_DEBUG", "module,net"],
+    for (const [key, value, override] of [
+      ["NODE_DEBUG", "module", undefined],
+      ["Node_Debug", "module", undefined],
+      ["NODE_DEBUG", "module", "module,net"],
+      ["NODE_DEBUG_NATIVE", "code_cache", undefined],
+      ["Node_Debug_Native", "code_cache", undefined],
+      ["NODE_DEBUG_NATIVE", "code_cache", "async_wrap"],
     ] as const) {
       const env = Object.fromEntries(
         Object.entries(process.env).filter(
-          ([name]) => name.toUpperCase() !== "NODE_DEBUG",
+          ([name]) => name.toUpperCase() !== key.toUpperCase(),
         ),
       );
-      env["node_debug"] = "ignored duplicate";
-      env[key] = "module";
+      env[key.toLowerCase()] = "ignored duplicate";
+      env[key] = value;
       const snapshot = { ...env };
       const debugChild = spawnWindowsProcess(
         binaryPath,
         process.env["ComSpec"]!,
-        ["/d", "/c", "echo %NODE_DEBUG%"],
+        ["/d", "/c", `echo %${key}%`],
         { cwd, env, stdio: ["ignore", "pipe", "pipe"] },
-        override === undefined ? {} : { Node_Debug: override },
+        override === undefined ? {} : { [key.toLowerCase()]: override },
       );
       const output: Buffer[] = [],
         errors: Buffer[] = [];
@@ -361,12 +500,66 @@ export async function processProof(
         0,
         null,
       ]);
-      assert.equal(
-        Buffer.concat(output).toString().trim(),
-        override ?? "module",
-      );
+      assert.equal(Buffer.concat(output).toString().trim(), override ?? value);
       assert.equal(Buffer.concat(errors).toString(), "");
       assert.deepEqual(env, snapshot);
+    }
+
+    for (const [index, scenario] of [
+      { key: "NODE_V8_COVERAGE", value: "coverage" },
+      { key: "Node_V8_Coverage", value: "coverage" },
+      { key: "NODE_V8_COVERAGE", value: "ignored", override: "coverage" },
+      { inherited: "coverage" },
+    ].entries()) {
+      const caller = join(root, `coverage-caller-${index}`),
+        target = join(caller, "target");
+      mkdirSync(target, { recursive: true });
+      // A separate caller keeps both correct and misplaced coverage inside the fixture.
+      const coverageChild = spawn(
+        process.execPath,
+        [
+          "--input-type=module",
+          "-e",
+          `import assert from 'node:assert/strict';
+import { spawnWindowsProcess } from ${JSON.stringify(new URL("./windows-process.mjs", import.meta.url).href)};
+const scenario = ${JSON.stringify(scenario)};
+const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => name.toUpperCase() !== 'NODE_V8_COVERAGE'));
+if (scenario.key) env[scenario.key] = scenario.value;
+if (scenario.inherited) process.env.NODE_V8_COVERAGE = scenario.inherited;
+const snapshot = { ...env };
+const child = spawnWindowsProcess(${JSON.stringify(binaryPath)}, process.execPath,
+  ['-e', 'process.stdout.write(process.env.NODE_V8_COVERAGE)'],
+  { cwd: ${JSON.stringify(target)}, env, stdio: ['ignore', 'pipe', 'pipe'] },
+  scenario.override === undefined ? {} : { Node_V8_Coverage: scenario.override });
+assert.deepEqual(env, snapshot);
+child.stdout.pipe(process.stdout);
+child.stderr.pipe(process.stderr);
+child.on('error', error => { process.stderr.write(String(error)); process.exitCode = 1; });
+child.once('close', code => { process.exitCode = code ?? 1; });`,
+        ],
+        {
+          cwd: caller,
+          env: { ...process.env, NODE_V8_COVERAGE: undefined },
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+      const output: Buffer[] = [],
+        diagnostics: Buffer[] = [];
+      coverageChild.stdout!.on("data", (chunk: Buffer) => output.push(chunk));
+      coverageChild.stderr!.on("data", (chunk: Buffer) =>
+        diagnostics.push(chunk),
+      );
+      assert.deepEqual(
+        await processExit(coverageChild, `target coverage ${index}`),
+        [0, null],
+      );
+      assert.equal(Buffer.concat(output).toString(), join(target, "coverage"));
+      assert.equal(Buffer.concat(diagnostics).toString(), "");
+      assert.deepEqual(readdirSync(caller), ["target"]);
+      const reports = readdirSync(join(target, "coverage"));
+      assert.equal(reports.length, 1, "only the target writes coverage");
+      assert.match(reports[0]!, /^coverage-.*\.json$/u);
+      assert.equal(process.cwd(), callerCwd);
     }
 
     files.writeFile(
@@ -595,12 +788,16 @@ export async function processProof(
       relativeExecutableAndPathUseTargetCwd: true,
       bareExecutableUsesTargetCwd: true,
       explicitComSelectionAndArgumentQuoting: true,
+      pathAndExplicitImageSelectionMatchNode: true,
+      omittedPathInheritsCallerValue: true,
       longAndNamespacedRawComPaths: true,
       inheritedAndOverriddenPathPrecedeShimDirectory: true,
       rawPathDoesNotFallBackToReplacementTool: true,
       disabledCurrentDirectorySearchPreserved: true,
       inheritedSettingsAndBinaryStreams: true,
       targetDebugSettingsWithoutShimDiagnostics: true,
+      targetNativeDebugSettingsWithoutShimDiagnostics: true,
+      targetCoverageUsesTargetCwdWithoutShimCoverage: true,
       targetCertificatesWithoutShimDiagnostics: true,
       inheritedModuleModeForTarget: true,
       targetPreloadsAndOverrides: true,
