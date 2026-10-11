@@ -5248,6 +5248,164 @@ describe("CodexSecurity orchestration", () => {
     }
   });
 
+  test.each([
+    [true, 9],
+    [false, 9],
+    [true, 7],
+    [false, 7],
+  ] as const)(
+    "restores resumed parent inventory independently of workers (worker first: %p, total: %p)",
+    async (workerFirst, total) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const marker = (count: number) =>
+        "CODEX_SECURITY_SCAN_PROGRESS " +
+        JSON.stringify({
+          phase: "discovery",
+          filesCompleted: count,
+          filesTotal: total,
+        });
+      const parent = await writeUsageSession(
+        codexHome,
+        "thread-1",
+        {},
+        { cwd: scanDir },
+      );
+      const worker = await writeUsageSession(
+        codexHome,
+        "worker-thread",
+        {},
+        { parent: "thread-1" },
+      );
+      await appendFile(
+        parent,
+        [0, 4]
+          .map((count) =>
+            JSON.stringify({
+              type: "response_item",
+              payload: {
+                type: "custom_tool_call_output",
+                output: marker(count),
+              },
+            }),
+          )
+          .join("\n") + "\n",
+      );
+      await appendFile(
+        worker,
+        JSON.stringify({
+          type: "event_msg",
+          payload: {
+            type: "agent_message",
+            message:
+              "CODEX_SECURITY_SCAN_PROGRESS " +
+              JSON.stringify({
+                phase: "validation",
+                filesCompleted: 1,
+                filesTotal: 1,
+              }),
+          },
+        }) + "\n",
+      );
+      const originalReaddir = fsPromises.readdir;
+      const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
+        ...args: Parameters<typeof originalReaddir>
+      ) => {
+        const entries = await originalReaddir(...args);
+        if (String(args[0]) === dirname(parent)) {
+          return entries.toSorted((left, right) => {
+            const first = workerFirst ? basename(worker) : basename(parent);
+            return (
+              Number(String(right.name) === first) -
+              Number(String(left.name) === first)
+            );
+          });
+        }
+        return entries;
+      }) as typeof originalReaddir);
+      const recipe = {
+        repository,
+        target: { kind: "repository", paths: [] },
+        repositoryRevision: "deadbeef",
+      };
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "get-cli-scan-resume"
+            ? {
+                ...mockScanRegistration(
+                  ["--registration-json-stdin", "--scan-dir", scanDir],
+                  JSON.stringify({ recipe }),
+                ),
+                threadId: "thread-1",
+                recipe,
+                scopeFileCount: 8,
+              }
+            : mockWorkbench(args, input),
+        createCodex: () => ({
+          startThread: () => {
+            throw new Error("Expected a resumed thread");
+          },
+          resumeThread: (id) => ({
+            id,
+            runStreamed: async () => {
+              await copyCompletedScan(root);
+              async function* events(): AsyncGenerator<ThreadEvent> {
+                await appendFile(
+                  parent,
+                  JSON.stringify({
+                    type: "response_item",
+                    payload: {
+                      type: "custom_tool_call_output",
+                      output: marker(5),
+                    },
+                  }) + "\n",
+                );
+                throw new Error("Synthetic stop after restored inventory");
+              }
+              return { events: completedEvents(id, events()) };
+            },
+          }),
+        }),
+      });
+      try {
+        await expect(
+          client.run(repository, {
+            mode: "deep",
+            outputDir: scanDir,
+            resumeScanId: "scan_example_001",
+            onProgress: (update) => updates.push(update),
+          }),
+        ).rejects.toThrow("Synthetic stop after restored inventory");
+        expect(updates.at(-1)).toEqual({
+          phase: "discovery",
+          filesCompleted: 5,
+          filesTotal: total,
+        });
+        const reviewed = updates.findIndex(
+          (update) => update.filesCompleted > 0,
+        );
+        expect(reviewed).toBeGreaterThanOrEqual(0);
+        expect(
+          updates
+            .slice(reviewed)
+            .every(
+              (update) =>
+                update.filesCompleted > 0 &&
+                update.filesCompleted <= update.filesTotal,
+            ),
+        ).toBe(true);
+      } finally {
+        await client.close();
+        listing.mockRestore();
+      }
+    },
+  );
+
   test("does not match a resumed live inventory to a historical truncated command", async () => {
     const { root, repository, codexHome, scanDir } = await scanDirectories();
     const updates: ScanProgress[] = [];

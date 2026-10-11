@@ -754,7 +754,7 @@ export class ScanCostTracker {
       const parentInventory =
         parent &&
         progress.phase === "discovery" &&
-        this.#highestFilesCompleted === 0 &&
+        (this.#parentProgress?.filesCompleted ?? 0) === 0 &&
         progress.filesCompleted === 0;
       const order = ++this.#progressOrder;
       if (
@@ -791,6 +791,21 @@ export class ScanCostTracker {
       }
       session.filesTotal = progress.filesTotal;
       session.filesCompleted = progress.filesCompleted;
+      if (parentInventory && this.#highestFilesCompleted > 0) {
+        // Resumed workers may be enumerated before the parent's inventory.
+        // Admit the scope independently while preserving eligible worker counts.
+        this.#parentProgress = progress;
+        if (saved.completion || saved.receipt) {
+          this.#parentFrontier = {
+            position: saved.position,
+            markerIndex: saved.markerIndex,
+          };
+          this.#inventoryFrontier = { ...this.#parentFrontier };
+        }
+        this.setExpectedFilesTotal(progress.filesTotal);
+        this.#reconcileParentProgress();
+        continue;
+      }
       // Parent markers already describe global coverage, including its workers.
       // Only worker-local counts belong in the delegated shard sum.
       if (!parent)
@@ -978,13 +993,16 @@ function readSessionEvent(
             )
             .join("")
         : null;
+    const updates = sessionProgressUpdates(payload);
     const duplicateMessage =
       message !== null &&
-      repeatedMessageProjection(session, digest(message), "response");
+      repeatedMessageProjection(session, digest(message), "response", updates);
     // Code-mode notifications and the final output can share a call ID.
     // Each appended output record remains a distinct completion receipt.
-    const updates = duplicateMessage ? [] : sessionProgressUpdates(payload);
-    for (const [markerIndex, update] of updates.entries()) {
+    for (const [markerIndex, update] of (duplicateMessage
+      ? []
+      : updates
+    ).entries()) {
       session.progress.push({
         update,
         position,
@@ -1108,7 +1126,12 @@ function readSessionEvent(
     if (item !== null) {
       const duplicate =
         item.kind === "message" &&
-        repeatedMessageProjection(session, item.outputDigest, "native");
+        repeatedMessageProjection(
+          session,
+          item.outputDigest,
+          "native",
+          item.updates,
+        );
       for (const [markerIndex, update] of item.updates.entries()) {
         session.progress.push({
           update,
@@ -1131,11 +1154,18 @@ function readSessionEvent(
   ) {
     if (
       payload["type"] === "agent_message" &&
-      typeof payload["message"] === "string" &&
-      !repeatedMessageProjection(session, digest(payload["message"]), "event")
+      typeof payload["message"] === "string"
     ) {
-      for (const [markerIndex, update] of scanProgressUpdatesFromText(
-        payload["message"],
+      const updates = scanProgressUpdatesFromText(payload["message"]);
+      const duplicate = repeatedMessageProjection(
+        session,
+        digest(payload["message"]),
+        "event",
+        updates,
+      );
+      for (const [markerIndex, update] of (duplicate
+        ? []
+        : updates
       ).entries()) {
         session.progress.push({
           update,
@@ -1296,9 +1326,13 @@ function progressSignature(
 
 function repeatedMessageProjection(
   session: SessionUsage,
-  key: string,
+  textDigest: string,
   projection: "native" | "event" | "response",
+  updates: readonly ScanProgress[],
 ): boolean {
+  // Finalized messages concatenate parts; original responses retain separate
+  // lines. Only suppress copies that recovered the same progress updates.
+  const key = `${textDigest}:${digest(JSON.stringify(updates))}`;
   let counts = session.messageProjections.get(key);
   if (counts === undefined) {
     counts = { native: 0, event: 0, response: 0 };

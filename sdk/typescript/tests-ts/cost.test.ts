@@ -2101,6 +2101,69 @@ describe("live scan cost tracking", () => {
     },
   );
 
+  test.each([
+    ["legacy", false],
+    ["legacy", true],
+    ["paginated", false],
+    ["paginated", true],
+  ] as const)(
+    "recovers multipart progress from the original response (%s, worker: %p)",
+    async (mode, workerMessage) => {
+      const { home, parent, worker } = await workerSessionFixture();
+      const updates: ScanProgress[] = [];
+      const tracker = costTracker(home, {
+        expectedFilesTotal: 8,
+        onProgress: (update) => updates.push(update),
+      });
+      const expected: ScanProgress[] = [
+        { phase: "discovery", filesCompleted: 1, filesTotal: 8 },
+        { phase: "validation", filesCompleted: 2, filesTotal: 8 },
+      ];
+      const parts = expected.map(
+        (update) => "CODEX_SECURITY_SCAN_PROGRESS " + JSON.stringify(update),
+      );
+      // Codex finalizes one concatenated message before storing the original
+      // response parts. Legacy and paginated rollouts keep different projections.
+      const finalized = parts.join("");
+      const projection =
+        mode === "legacy"
+          ? {
+              type: "event_msg",
+              payload: { type: "agent_message", message: finalized },
+            }
+          : {
+              type: "event_msg",
+              payload: {
+                type: "item_completed",
+                item: {
+                  type: "AgentMessage",
+                  content: [{ type: "Text", text: finalized }],
+                },
+              },
+            };
+      await appendFile(
+        workerMessage ? worker : parent,
+        [
+          projection,
+          {
+            type: "response_item",
+            payload: {
+              type: "message",
+              role: "assistant",
+              content: parts.map((text) => ({ type: "output_text", text })),
+            },
+          },
+        ]
+          .map((row) => JSON.stringify(row))
+          .join("\n") + "\n",
+      );
+      tracker.start("scan-thread");
+      await tracker.refresh();
+      await tracker.stop();
+      expect(updates).toEqual(expected);
+    },
+  );
+
   test.each([false, true])(
     "preserves distinct notifications sharing a call ID (worker: %p)",
     async (workerOutput) => {
