@@ -1171,7 +1171,11 @@ export class ScanCostTracker {
         continue;
       }
       if (saved.duplicate) {
-        if (parent && saved.completion)
+        if (
+          parent &&
+          saved.completion &&
+          this.#afterParentFrontier(saved.position, saved.markerIndex)
+        )
           this.#parentFrontier = {
             position: saved.position,
             markerIndex: saved.markerIndex,
@@ -1788,6 +1792,14 @@ const PERSISTED_OUTPUT_GAP =
 // Native Codex 0.162.1 persists command output with a 64 KiB UTF-8 budget.
 // This signature mirrors that representation; emitted diagnostics stay intact.
 const PERSISTED_COMMAND_OUTPUT_BYTES = 64 * 1024;
+const PERSISTED_OUTPUT_GAP_BYTES = Buffer.byteLength(PERSISTED_OUTPUT_GAP);
+const PERSISTED_COMMAND_PREFIX_BYTES = Math.floor(
+  (PERSISTED_COMMAND_OUTPUT_BYTES - PERSISTED_OUTPUT_GAP_BYTES) / 2,
+);
+const PERSISTED_COMMAND_SUFFIX_BYTES =
+  PERSISTED_COMMAND_OUTPUT_BYTES -
+  PERSISTED_OUTPUT_GAP_BYTES -
+  PERSISTED_COMMAND_PREFIX_BYTES;
 
 function digest(text: string): string {
   return createHash("sha256").update(text).digest("hex");
@@ -1797,10 +1809,8 @@ function persistedOutputDigest(text: string, fullDigest: string): string {
   if (Buffer.byteLength(text) <= PERSISTED_COMMAND_OUTPUT_BYTES)
     return fullDigest;
   const bytes = Buffer.from(text);
-  const budget =
-    PERSISTED_COMMAND_OUTPUT_BYTES - Buffer.byteLength(PERSISTED_OUTPUT_GAP);
-  let prefixEnd = Math.floor(budget / 2);
-  let suffixStart = bytes.length - (budget - prefixEnd);
+  let prefixEnd = PERSISTED_COMMAND_PREFIX_BYTES;
+  let suffixStart = bytes.length - PERSISTED_COMMAND_SUFFIX_BYTES;
   while ((bytes[prefixEnd]! & 0xc0) === 0x80) prefixEnd--;
   while ((bytes[suffixStart]! & 0xc0) === 0x80) suffixStart++;
   return createHash("sha256")
@@ -1903,13 +1913,27 @@ function nativeProgressItem(value: unknown): NativeProgressItem | null {
     command = value["command"];
   } else return null;
   let progressText = text;
-  const gap = kind === "command" ? text.indexOf(PERSISTED_OUTPUT_GAP) : -1;
-  if (gap !== -1) {
-    // Complete original prefix lines have known fence state. The gap inserts
-    // its own newline, so the last partial prefix line and the tail remain
-    // unproven without the full output.
-    const prefix = text.slice(0, gap);
-    progressText = prefix.slice(0, prefix.lastIndexOf("\n") + 1);
+  if (kind === "command") {
+    const bytes = Buffer.from(text);
+    // Native UTF-8 boundary adjustment can shorten each fragment by up to
+    // three bytes. An earlier literal sentinel is ordinary command output.
+    const gap = bytes.indexOf(
+      PERSISTED_OUTPUT_GAP,
+      PERSISTED_COMMAND_PREFIX_BYTES - 3,
+    );
+    const suffixBytes = bytes.length - gap - PERSISTED_OUTPUT_GAP_BYTES;
+    if (
+      gap !== -1 &&
+      gap <= PERSISTED_COMMAND_PREFIX_BYTES &&
+      suffixBytes >= PERSISTED_COMMAND_SUFFIX_BYTES - 3 &&
+      suffixBytes <= PERSISTED_COMMAND_SUFFIX_BYTES
+    ) {
+      // Complete original prefix lines have known fence state. The gap inserts
+      // its own newline, so the partial prefix line and tail remain unproven.
+      // Literal text at these exact boundaries is indistinguishable on disk.
+      const prefix = bytes.subarray(0, gap).toString("utf8");
+      progressText = prefix.slice(0, prefix.lastIndexOf("\n") + 1);
+    }
   }
   return {
     ...progressSignature(kind, text, command),

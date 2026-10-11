@@ -23,6 +23,7 @@ import { PLUGIN_ROOT as BUNDLED_PLUGIN_ROOT } from "./plugin-root.js";
 import {
   progressMarker,
   nativeCommand,
+  completedCommand,
   childUuid7Thread,
   higherUuid7Turn,
   lowerUuid7Turn,
@@ -121,6 +122,122 @@ function progressMessage(
     ],
   };
 }
+
+test("keeps the parent frontier ahead of duplicate saved inventory", async () => {
+  const { home, parent } = await workerSessionFixture();
+  const inventory = {
+    phase: "discovery",
+    filesCompleted: 0,
+    filesTotal: 8,
+  } as const;
+  const initial = { ...inventory, filesCompleted: 3 };
+  const older = { ...initial, phase: "attack_path" } as const;
+  const newer = { ...initial, phase: "validation" } as const;
+  await appendSessionItem(parent, progressMessage(0));
+  await appendFile(
+    parent,
+    jsonLines([
+      {
+        type: "event_msg",
+        payload: {
+          type: "item_completed",
+          item: {
+            type: "AgentMessage",
+            content: [
+              { type: "Text", text: progressMarker("discovery", 0, 8) },
+            ],
+          },
+        },
+      },
+      nativeCommand("older-review", progressMarker("attack_path", 3, 8)),
+      nativeCommand("newer-review", progressMarker("validation", 3, 8)),
+    ]) + "\n",
+  );
+  const updates: ScanProgress[] = [];
+  const tracker = costTracker(home, {
+    expectedFilesTotal: 8,
+    onProgress: (update) => updates.push(update),
+  });
+  tracker.beginParentTurn();
+  const first = completedCommand(
+    "unpersisted-review",
+    progressMarker("discovery", 3, 8),
+  );
+  expect(tracker.recordParentProgress(initial, first)).toBe(true);
+  tracker.acceptParentProgress(initial, first);
+  updates.push(initial);
+  tracker.start("scan-thread");
+  try {
+    await tracker.refresh();
+    await tracker.refresh();
+    expect(updates.at(-1)).toEqual(newer);
+    expect(
+      tracker.recordParentProgress(
+        older,
+        completedCommand("older-review", progressMarker("attack_path", 3, 8)),
+      ),
+    ).toBe(false);
+    expect(updates.at(-1)).toEqual(newer);
+  } finally {
+    await tracker.stop();
+  }
+});
+
+test.each(["short literal", "UTF-8 truncation", "earlier literal"])(
+  "recognizes native persistence gaps by their byte boundaries (%s)",
+  async (scenario) => {
+    const { home, parent } = await workerSessionFixture();
+    const gap = "\n... command output truncated for persistence ...\n";
+    const progress = {
+      phase: "validation",
+      filesCompleted: 3,
+      filesTotal: 8,
+    } as const;
+    const lead =
+      (scenario === "UTF-8 truncation" ? "" : "normal output" + gap) +
+      progressMarker("validation", 3, 8) +
+      "\n";
+    let saved = lead;
+    if (scenario !== "short literal") {
+      const fill = scenario === "UTF-8 truncation" ? "😀" : "a";
+      const tail = "\n" + progressMarker("attack_path", 4, 8) + "\n";
+      // Exact fragments of the pinned Rust64KiB persistence representation.
+      saved =
+        lead +
+        fill.repeat(
+          Math.floor(
+            (32_743 - Buffer.byteLength(lead)) / Buffer.byteLength(fill),
+          ),
+        ) +
+        gap +
+        fill.repeat(
+          Math.floor(
+            (32_743 - Buffer.byteLength(tail)) / Buffer.byteLength(fill),
+          ),
+        ) +
+        tail;
+      expect(Buffer.byteLength(saved)).toBe(
+        scenario === "UTF-8 truncation" ? 65_532 : 65_536,
+      );
+    } else expect(Buffer.byteLength(saved)).toBe(149);
+    await appendFile(
+      parent,
+      JSON.stringify(nativeCommand("review", saved)) + "\n",
+    );
+    const updates: ScanProgress[] = [];
+    const tracker = costTracker(home, {
+      expectedFilesTotal: 8,
+      onProgress: (update) => updates.push(update),
+    });
+    tracker.start("scan-thread");
+    try {
+      await tracker.refresh();
+      expect(updates).toEqual([progress]);
+    } finally {
+      await tracker.stop();
+    }
+  },
+);
 
 test.each([
   ["complete prefix", true],

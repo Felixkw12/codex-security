@@ -1238,7 +1238,9 @@ export class CodexSecurity {
     let releaseCredentialHome: (() => Promise<void>) | null = null;
     let scanFailure = false;
     let artifactRestorationFailure: OutputDirectoryError | null = null;
-    let customValidationComplete = false;
+    const customValidation = {
+      status: "pending" as "pending" | "running" | "complete",
+    };
     let completionCost: ScanCost | null = null;
     let budgetRecovery: {
       expectation: ScanExpectation;
@@ -1573,7 +1575,14 @@ export class CodexSecurity {
         reviewedFileCount = progress.filesCompleted;
         if (source !== undefined && source.reconciled !== true)
           tracker.acceptParentProgress(progress, source.event);
-        const update = { ...progress, filesTotal };
+        const update = {
+          ...progress,
+          phase:
+            customValidation.status === "running"
+              ? ("validation" as const)
+              : progress.phase,
+          filesTotal,
+        };
         const key = progressKey(update);
         if (lastProgress === key) return;
         lastProgress = key;
@@ -2177,6 +2186,7 @@ export class CodexSecurity {
               falsePositives: falsePositiveExamples,
               signal,
               run: async (validationPrompt, outputSchema) => {
+                customValidation.status = "running";
                 if (scopeFileCount !== null)
                   reportProgress({
                     phase: "validation",
@@ -2216,7 +2226,7 @@ export class CodexSecurity {
                 return turn.finalResponse;
               },
             });
-            customValidationComplete = true;
+            customValidation.status = "complete";
           }
           budgetAbortController.abort();
           const snapshot = await tracker.stop(usage).catch((error: unknown) => {
@@ -2574,7 +2584,7 @@ export class CodexSecurity {
       if (activeScan !== null && options.resumeScanId === undefined) {
         if (
           options.validationPrompt !== undefined &&
-          !customValidationComplete
+          customValidation.status !== "complete"
         ) {
           await writeCustomValidationStatus(scanDir, {
             scanId: activeScan.id,
