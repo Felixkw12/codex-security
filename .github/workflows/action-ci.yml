@@ -33,20 +33,14 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "24"
-      - &set-up-the-ubuntu-sandbox
-        name: Set up the Ubuntu sandbox
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes bubblewrap apparmor-profiles
-          sudo apparmor_parser -r /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm run validate
+      - name: Packaged Linux sandbox and configuration smoke test (no model calls)
+        run: node scripts/linux-smoke.mjs
       - name: Install the pinned CLI for integration tests
         run: npm ci --prefix runtime --ignore-scripts --no-audit --no-fund
       - name: Published CLI result and SARIF compatibility (no model calls)
         run: npm run test:cli
-      - name: Packaged Linux configuration smoke test (no model calls)
-        run: node scripts/linux-smoke.mjs
       - name: Save generated release metadata
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -67,7 +61,6 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - *actions-setup-node
-      - *set-up-the-ubuntu-sandbox
       - name: Run the packaged Action without credentials or model calls
         id: smoke
         uses: ./

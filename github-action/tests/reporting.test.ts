@@ -24,15 +24,20 @@ test('partial coverage summary preserves provisional findings and an unevaluated
     errors:['Deferred work: Dependency implementation unavailable.'],findings:[{severity:'high',title:'Potential extraction issue',summary:'Validation needs dependency evidence.',path:'src/extract.ts',startLine:12}]} as ScanResults;
   const inputs = parseInputs((name) => name === 'fail-on-severity' ? 'high' : '', '/checkout');
   const summary = resultSummary(result, inputs, {repository:'/checkout',scannedSha:'a'.repeat(40),analysisRef:'refs/heads/main',publishable:true,emptyDiff:false});
-  assert.match(resultTitle(result, inputs), /coverage is partial.*findings are provisional/i);
+  assert.match(resultTitle(result, inputs), /coverage is partial.*Enforcement requires a complete security review/i);
   assert.match(summary, /\*\*Scan:\*\* incomplete · \*\*Findings policy:\*\* not-evaluated/);
   assert.match(summary, /\*\*Failure threshold:\*\* high and above/);
-  assert.match(summary, /Partial coverage alone does not fail the job/);
+  assert.match(summary, /The job fails because enforcement requires a complete security review/);
   assert.match(summary, /findings policy was not evaluated/);
   assert.match(summary, /This is not a completed scan/);
   assert.match(summary, /Deferred work: Dependency implementation unavailable/);
   assert.match(summary, /HIGH: Potential extraction issue/);
   assert.doesNotMatch(summary, /No findings meet the failure threshold|Findings policy:\*\* passed/);
+  const advisoryInputs = parseInputs(() => '', '/checkout');
+  const advisory = resultSummary(result, advisoryInputs, {repository:'/checkout',scannedSha:'a'.repeat(40),analysisRef:'refs/heads/main',publishable:true,emptyDiff:false});
+  assert.match(resultTitle(result, advisoryInputs), /coverage is partial.*findings are provisional/i);
+  assert.match(advisory, /Partial coverage alone does not fail the job/);
+  assert.doesNotMatch(advisory, /The job fails because enforcement/);
 });
 
 test('partial coverage cannot hide a required reporting failure in the title', () => {

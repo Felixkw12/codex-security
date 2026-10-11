@@ -55585,6 +55585,9 @@ function parseInputs(read, workspace) {
   const maxTimeHours = num("max-time-hours", false, Number.MIN_VALUE, 96);
   if (maxTimeHours !== void 0 && mode !== "deep") throw new Error("max-time-hours requires mode: deep.");
   const dryRun = bool("dry-run", false);
+  const failOnSeverity = choice("fail-on-severity", ["none", "low", "medium", "high", "critical"], "none");
+  if (dryRun && failOnSeverity !== "none")
+    throw new Error("dry-run requires fail-on-severity: none. Configuration validation cannot satisfy a required security review.");
   const cyberAccessProgram = str("cyber-access-program") ? choice("cyber-access-program", ["standard", "daybreak_blue", "daybreak_red"], "standard") : void 0;
   return {
     repository: str("repository", workspace),
@@ -55597,7 +55600,7 @@ function parseInputs(read, workspace) {
     effort: choice("effort", ["minimal", "low", "medium", "high", "xhigh", "max"], "xhigh"),
     maxCost: num("max-cost", false, Number.MIN_VALUE),
     maxTimeHours,
-    failOnSeverity: choice("fail-on-severity", ["none", "low", "medium", "high", "critical"], "none"),
+    failOnSeverity,
     verbose: bool("verbose", true),
     dryRun,
     summary: bool("summary", true),
@@ -55957,6 +55960,39 @@ async function checkPython(pythonPath, cwd, env) {
   if (result.exitCode !== 0 || result.timedOut || result.interrupted || result.signal)
     throw new Error("Python 3.11 or later with sqlite3 and tomllib is required. Use actions/setup-python to select a compatible interpreter.");
 }
+async function setupHostedSandbox(options) {
+  if (options.runnerEnvironment !== "github-hosted" || options.imageOS !== "ubuntu24") return;
+  const sudo = await resolveTool("sudo", options.env.PATH);
+  for (const args of [
+    ["-n", "apt-get", "update"],
+    ["-n", "apt-get", "install", "--yes", "bubblewrap", "apparmor-profiles"],
+    ["-n", "apparmor_parser", "-r", "/usr/share/apparmor/extra-profiles/bwrap-userns-restrict"]
+  ]) {
+    const result = await runProcess(sudo, args, options);
+    for (const line of safeLogLines(result.stdout)) {
+      try {
+        options.log?.(line);
+      } catch {
+      }
+    }
+    if (result.exitCode !== 0 || result.signal || result.interrupted || result.timedOut)
+      throw new Error(`Ubuntu sandbox setup failed: sudo ${args.join(" ")} (exit ${result.exitCode}). ${result.stderr || result.stdout}`);
+  }
+}
+async function checkSandbox(nodePath, cliPath, cwd, env, log2) {
+  const result = await runProcess(nodePath, ["--input-type=module", "--eval", `
+    import { pathToFileURL } from 'node:url';
+    import { dirname, join } from 'node:path';
+    const runtime = await import(pathToFileURL(join(dirname(process.argv[1]), '../dist/runtime.js')).href);
+    await runtime.probeCodexSandbox(runtime.resolveCodexCommand(process.env), process.env);
+  `, cliPath], { cwd, env, log: log2 });
+  if (result.exitCode !== 0 || result.signal || result.interrupted || result.timedOut)
+    throw new Error(`Codex Security sandbox preflight failed. ${result.stderr || result.stdout}`);
+  try {
+    log2?.("Codex sandbox probe succeeded without model calls.");
+  } catch {
+  }
+}
 async function writeRuntimeLauncher(path6, executable, name, value) {
   const quote = (value2) => "'" + value2.replaceAll("'", "'\\''") + "'";
   await (0, import_promises3.writeFile)(path6, `#!/bin/sh
@@ -55990,6 +56026,7 @@ async function setupRuntime(options) {
     if (runnerLibraryPath !== void 0) await writeRuntimeLauncher((0, import_node_path4.join)(root, "bin", "python3"), pythonPath, "LD_LIBRARY_PATH", runnerLibraryPath);
     const env = runtimeEnvironment(paths);
     await checkPython(pythonPath, root, env);
+    await setupHostedSandbox({ cwd: root, env, runnerEnvironment: process.env.RUNNER_ENVIRONMENT, imageOS: process.env.ImageOS, log: options.log });
     const source = (0, import_node_path4.join)(actionRoot, "runtime");
     const lockPath = await regularFile((0, import_node_path4.join)(source, "package-lock.json"));
     const packagePath = await regularFile((0, import_node_path4.join)(source, "package.json"));
@@ -56008,6 +56045,7 @@ async function setupRuntime(options) {
       throw new Error(`Integrity-locked CLI installation failed (exit ${install.exitCode}${install.timedOut ? ", timed out" : ""}${install.interrupted ? ", interrupted" : ""}). Check the prefixed npm diagnostics, registry access, and runner prerequisites.`);
     }
     const cliPath = await regularFile((0, import_node_path4.join)(destination, "node_modules", "@openai", "codex-security", "bin", "codex-security.mjs"));
+    await checkSandbox(nodePath, cliPath, root, env, options.log);
     const resultsDirectory = await (0, import_promises3.mkdtemp)((0, import_node_path4.join)(tempRoot, "codex-security-reports-"));
     await (0, import_promises3.chmod)(resultsDirectory, 448);
     return { ...paths, nodePath, cliPath, resultsDirectory, env: (apiKey) => runtimeEnvironment(paths, apiKey) };
@@ -99105,7 +99143,8 @@ async function uploadReports(reports, inputs, tempRoot) {
       await (0, import_promises8.writeFile)(dest, bytes, { mode: 384, flag: "wx" });
       files.push(dest);
     }
-    await new DefaultArtifactClient().uploadArtifact(inputs.artifactName, files, staging, { retentionDays: inputs.retentionDays, compressionLevel: 0 });
+    const artifact = await new DefaultArtifactClient().uploadArtifact(inputs.artifactName, files, staging, { retentionDays: inputs.retentionDays, compressionLevel: 0 });
+    return artifact.id;
   } finally {
     await (0, import_promises8.rm)(staging, { recursive: true, force: true });
   }
@@ -99120,28 +99159,29 @@ function html(value) {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;").replace(/@/g, "&#64;").replace(/\r/g, "&#13;").replace(/\n/g, "&#10;").replace(/[\\`*_\[\]~]/g, (character) => `&#${character.charCodeAt(0)};`);
 }
 function resultTitle(result, inputs) {
-  if (result.scanStatus === "incomplete") return result.reportStatus === "failed" ? "Scan coverage is partial, and required reporting failed." : "Scan coverage is partial. Available findings are provisional.";
+  if (result.scanStatus === "incomplete") return result.reportStatus === "failed" ? "Scan coverage is partial, and required reporting failed." : inputs.failOnSeverity === "none" ? "Scan coverage is partial. Available findings are provisional." : "Scan coverage is partial. Enforcement requires a complete security review.";
   if (result.scanStatus !== "completed") return "Scan could not complete. Available findings are provisional.";
   if (result.reportStatus === "failed") return "Scan completed, but required reporting failed.";
   if (result.policyStatus === "failed") return "Scan completed. Findings meet the configured failure threshold.";
   if (inputs.failOnSeverity === "none") return "Scan completed. Findings are reported without failing the job.";
   return "Scan completed. No findings meet the failure threshold.";
 }
-function resultSummary(result, inputs, target) {
+function resultSummary(result, inputs, target, artifactUrl) {
   const esc = (value, limit = 4e3) => html(plain(value, limit));
   const counts = result.counts ? Object.entries(result.counts).map(([level, count]) => `${level}: ${count}`).join(" \xB7 ") : "unavailable";
   const parts = [
     `**Scan:** ${result.scanStatus} \xB7 **Findings policy:** ${result.policyStatus} \xB7 **Report:** ${result.reportStatus}`,
+    ...artifactUrl ? [`**Reports:** <a href="${html(artifactUrl)}">${esc(inputs.artifactName)}</a> \xB7 Retention: up to ${inputs.retentionDays} days.`] : [],
     `**Findings:** ${counts}`,
     `**Scope:** ${inputs.scope}${inputs.paths.length ? ` <code>${esc(inputs.paths.join(", "))}</code>` : ""} \xB7 **Mode:** ${inputs.mode}`,
     `**Commit:** <code>${target.scannedSha}</code>`,
     `**Model:** <code>${esc(inputs.model)}</code> \xB7 **Reasoning effort:** ${inputs.effort}`,
-    `**Failure threshold:** ${inputs.failOnSeverity === "none" ? "report-only findings" : inputs.failOnSeverity + " and above"}. Valid partial scans warn without evaluating this policy. Scanner errors, unknown coverage, and required reporting errors fail the action.`,
+    `**Failure threshold:** ${inputs.failOnSeverity === "none" ? "report-only findings. Valid partial scans warn without failing the job" : inputs.failOnSeverity + " and above. Enforcement requires complete scan coverage"}. Scanner errors, unknown coverage, and required reporting errors fail the action.`,
     ...inputs.maxCost !== void 0 ? [`**Stop threshold:** $${inputs.maxCost} (estimated; in-flight requests can exceed it)`] : [],
     "Applicable root and nested SECURITY.md policy is discovered by the scanner."
   ];
   if (result.reportStatus === "partial") parts.push("SARIF report is unavailable; scan results and other reports are still available.");
-  if (result.scanStatus === "incomplete") parts.push("Partial coverage alone does not fail the job. The findings policy was not evaluated; review the deferred work before treating the security review as complete.");
+  if (result.scanStatus === "incomplete") parts.push(`${inputs.failOnSeverity === "none" ? "Partial coverage alone does not fail the job." : "The job fails because enforcement requires a complete security review."} The findings policy was not evaluated; review the deferred work before treating the security review as complete.`);
   if (result.scanStatus !== "completed") parts.push("**Findings below are provisional. This is not a completed scan.**");
   for (const error2 of result.errors.slice(0, 10)) parts.push(`<pre>${esc(error2)}</pre>`);
   for (const finding of result.findings.slice(0, 30)) {
@@ -99333,12 +99373,15 @@ async function runAction(actionRoot, overrides = {}) {
         if (checkoutError) result.errors.unshift(checkoutError);
         if (interrupted) result.errors.unshift("Scan was interrupted or exceeded its execution limit. Available findings are provisional.");
         let reportsValidated = false;
+        let artifactUrl;
         try {
           const reports = await collectReports(result);
           reportsValidated = true;
           if (inputs.uploadArtifacts) {
             info("Uploading validated report artifacts.");
-            await uploadReports(reports, inputs, tempRoot);
+            const artifactId = await uploadReports(reports, inputs, tempRoot);
+            if (artifactId !== void 0 && process.env.GITHUB_RUN_ID)
+              artifactUrl = `${event.serverUrl}/${event.repository}/actions/runs/${process.env.GITHUB_RUN_ID}/artifacts/${artifactId}`;
           }
         } catch (error2) {
           result.reportStatus = "failed";
@@ -99351,9 +99394,9 @@ async function runAction(actionRoot, overrides = {}) {
         info(`${result.scanStatus === "completed" ? "Findings" : "Provisional findings"}: ${result.counts ? Object.entries(result.counts).map(([level, count]) => `${level}: ${count}`).join(", ") : "unavailable"}.`);
         info(`Estimated cost: ${result.estimatedCost === void 0 ? "unavailable" : `$${result.estimatedCost.toFixed(4)}`}.`);
         for (const error2 of result.errors) log2(`Report diagnostic: ${error2}`);
-        finalSummary = resultSummary(result, inputs, target);
+        finalSummary = resultSummary(result, inputs, target, artifactUrl);
         if (inputs.annotations) emitAnnotations(result);
-        success = result.reportStatus !== "failed" && (result.scanStatus === "incomplete" || result.scanStatus === "completed" && result.policyStatus === "passed");
+        success = result.reportStatus !== "failed" && (result.scanStatus === "incomplete" && inputs.failOnSeverity === "none" || result.scanStatus === "completed" && result.policyStatus === "passed");
         finalTitle = resultTitle(result, inputs);
         if (success && result.scanStatus === "incomplete")
           warning("Scan coverage is partial. Available findings are provisional; the findings policy was not evaluated. Review the deferred work in the reports.");

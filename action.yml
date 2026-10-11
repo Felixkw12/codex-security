@@ -30,13 +30,13 @@ inputs:
   max-time-hours:
     description: Positive Deep discovery duration in hours, up to 96. Unset uses the CLI default. Finalization and job timeout are separate.
   fail-on-severity:
-    description: 'none, low, medium, high, or critical. Applies to complete scans. Valid partial results warn; scanner and required reporting errors fail.'
+    description: 'none, low, medium, high, or critical. A severity threshold also requires complete coverage. With none, valid partial scans warn; scanner and required reporting errors still fail.'
     default: none
   verbose:
     description: Stream CLI diagnostics to the job log. Set false for lifecycle and elapsed-time messages only.
     default: 'true'
   dry-run:
-    description: Validate local configuration without a scan or API key. Does not verify authentication or model access. Use a separate non-required job.
+    description: 'Validate local configuration without a scan or API key. Does not verify authentication or model access. Requires fail-on-severity: none; use a separate non-required job.'
     default: 'false'
   summary:
     description: Write a human-readable job summary.
@@ -45,7 +45,7 @@ inputs:
     description: Emit up to 50 source finding annotations; complete findings remain in reports.
     default: 'true'
   upload-artifacts:
-    description: Upload an allowlist of validated reports. Reports may contain source and vulnerability details.
+    description: Upload an allowlist of validated reports and link the artifact in the job summary. Reports may contain source and vulnerability details.
     default: 'false'
   artifact-name:
     description: Report artifact name; choose distinct names for matrix jobs and multiple invocations.
@@ -63,7 +63,7 @@ outputs:
   results-directory:
     description: Runner-local reports directory; do not upload it recursively.
   scan-status:
-    description: 'completed, incomplete, failed, or skipped. Valid partial results are incomplete and warn without failing the step. Skipped is reserved for empty diffs or dry-run.'
+    description: 'completed, incomplete, failed, or skipped. Incomplete scans fail when a severity threshold is configured, otherwise warn. Skipped is reserved for empty diffs or dry-run.'
   skip-reason:
     description: empty-diff or dry-run when no scan ran; otherwise empty.
   policy-status:
@@ -71,7 +71,7 @@ outputs:
   report-status:
     description: 'ready, partial, or failed. Missing optional SARIF yields partial without failing the scan; required reporting failures yield failed.'
   exit-code:
-    description: CLI exit code, or empty if the CLI was not started. Valid partial results may return 2 without failing the Action step.
+    description: 'CLI exit code, or empty if the CLI was not started. Valid partial results may return 2 without failing the Action step when fail-on-severity is none.'
   scanned-sha:
     description: Verified checkout commit SHA.
   analysis-ref:

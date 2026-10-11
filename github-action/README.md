@@ -17,9 +17,12 @@ The matching `action-vX.Y.Z` tag and distribution commit are listed in each
 product release after the CLI and Action have both passed release checks.
 When using a fork, replace `openai` with the fork owner.
 
-This example requests Daybreak Blue. Use an API key from a project with Blue
-enabled; without Daybreak access, omit `cyber-access-program` or set it to
-`standard`. See [Daybreak access and refusals](#daybreak-access-and-refusals).
+The [repository workflow](examples/repository.yml) below uses `gpt-6-sol` and
+an estimated $5 cost limit. Change `max-cost` to adjust the budget, or remove it
+for no estimated cost limit. Requests already in progress can exceed the limit.
+Daybreak is optional; see [Daybreak access and refusals](#daybreak-access-and-refusals).
+
+<!-- action-workflow:repository:start -->
 
 ```yaml
 name: Codex Security repository
@@ -34,48 +37,43 @@ permissions:
 jobs:
   security:
     runs-on: ubuntu-24.04
+    timeout-minutes: 120
     steps:
-      # Configure Bubblewrap and AppArmor so Codex Security can run safely in its sandbox.
-      - name: Set up the Ubuntu sandbox
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes bubblewrap apparmor-profiles
-          sudo apparmor_parser -r /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: openai/codex-security@REPLACE_WITH_REVIEWED_COMMIT
+      - name: Scan the repository
+        id: security
+        uses: openai/codex-security@REPLACE_WITH_REVIEWED_COMMIT
         with:
-          model: gpt-5.6-sol
+          scope: repository
+          model: gpt-6-sol
           effort: high
-          cyber-access-program: daybreak_blue
+          max-cost: "5"
+          fail-on-severity: none
+          upload-artifacts: "true"
         env:
           OPENAI_API_KEY: ${{ secrets.CODEX_SECURITY_API_KEY }}
 ```
+
+<!-- action-workflow:repository:end -->
 
 The workflow runs weekly on Mondays at 07:23 UTC. To run it manually, use
 **Actions → Codex Security repository → Run workflow**.
 Findings are report-only by default. Valid partial results produce a warning;
 scanner and required reporting errors fail the job. Set `fail-on-severity` to
-fail on findings at or above a selected severity when the scan is complete.
+require a complete scan and fail on findings at or above the selected severity.
 
 ### Ubuntu sandbox setup
 
-Codex Security runs commands inside a sandbox to limit their filesystem and
-network access. On the Ubuntu 24.04 runner used above, that sandbox uses
-Bubblewrap (`bwrap`), and Ubuntu's AppArmor policy must allow it to create the
-required isolated environment.
+On GitHub-hosted Ubuntu 24.04, the Action installs `bubblewrap` and
+`apparmor-profiles` and loads the supplied `bwrap-userns-restrict` AppArmor
+profile. It then verifies that Codex can start its sandbox before using the
+scan credential. No separate setup step is needed.
 
-The setup step installs `bubblewrap` and `apparmor-profiles`, then uses
-`apparmor_parser -r` to load the supplied `bwrap-userns-restrict` profile. The
-profile permits Bubblewrap's sandbox setup while retaining Ubuntu's broader
-AppArmor restrictions. Keep this step before the Action: the CLI checks that
-its sandbox works before scanning and fails if it cannot start, for example
-with `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`.
-
-This setup is specific to the Linux runner. Local macOS scans use the built-in
-Seatbelt sandbox and do not need Bubblewrap. See the
-[sandbox documentation](https://learn.chatgpt.com/docs/sandboxing) for details.
+Self-hosted runners must provide a working Codex sandbox. The Action checks
+sandbox startup but does not install system packages or change AppArmor on
+those runners. See the [sandbox documentation](https://learn.chatgpt.com/docs/sandboxing).
 
 ## Daybreak access and refusals
 
@@ -83,8 +81,7 @@ Daybreak is optional. You can use the Action with a general-purpose model your
 API key can access under standard safeguards. Some security tasks may trigger
 model refusals or API cybersecurity safety blocks. **If a refusal or safety
 block aborts the scan, the Action fails**, even with `fail-on-severity: none`.
-That setting controls failures caused by findings; it does not suppress scanner
-errors. Check the job summary and logs for the reason. A failed scan does not
+The findings setting does not suppress scanner errors. Check the job summary and logs for the reason. A failed scan does not
 mean the repository has no vulnerabilities.
 
 For authorized security work that needs reduced refusals,
@@ -103,8 +100,12 @@ causes the scan to fail.
 
 ## Scan pull requests
 
-Use the same API-key secret and Action commit as above. Check out the PR head
-with full history so the Action can resolve the diff.
+Use the same API-key secret and Action commit as above. The
+[pull-request workflow](examples/pull-request.yml) checks out the PR head with
+full history and requires complete coverage. Make its **Codex Security** job a
+required status check in your repository rules.
+
+<!-- action-workflow:pull-request:start -->
 
 ```yaml
 name: Codex Security PR
@@ -122,16 +123,13 @@ concurrency:
 jobs:
   security:
     if: github.event.pull_request.head.repo.full_name == github.repository
-    name: Codex Security
+    name: Scan changes
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    outputs:
+      scan-status: ${{ steps.security.outputs.scan-status }}
+      skip-reason: ${{ steps.security.outputs.skip-reason }}
     steps:
-      # Configure Bubblewrap and AppArmor so Codex Security can run safely in its sandbox.
-      - name: Set up the Ubuntu sandbox
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes bubblewrap apparmor-profiles
-          sudo apparmor_parser -r /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.sha }}
@@ -142,17 +140,45 @@ jobs:
         uses: openai/codex-security@REPLACE_WITH_REVIEWED_COMMIT
         with:
           scope: diff
-          model: gpt-5.6-luna
-          effort: medium
+          model: gpt-6-sol
+          effort: high
+          max-cost: "5"
           fail-on-severity: high
+          upload-artifacts: "true"
         env:
           OPENAI_API_KEY: ${{ secrets.CODEX_SECURITY_API_KEY }}
+
+  required-review:
+    name: Codex Security
+    needs: security
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require a completed review or an empty diff
+        env:
+          SCAN_JOB_RESULT: ${{ needs.security.result }}
+          SCAN_STATUS: ${{ needs.security.outputs.scan-status }}
+          SKIP_REASON: ${{ needs.security.outputs.skip-reason }}
+        run: |
+          test "$SCAN_JOB_RESULT" = success
+          if [ "$SCAN_STATUS" = completed ]; then
+            exit 0
+          fi
+          test "$SCAN_STATUS" = skipped
+          test "$SKIP_REASON" = empty-diff
 ```
 
-This job fails on high or critical findings from a complete scan, or on scanner
-and required reporting errors. Valid partial results warn without failing the
-job; the severity policy is not evaluated for those results. File and line
-annotations are enabled by default.
+<!-- action-workflow:pull-request:end -->
+
+The scan job fails on high or critical findings, incomplete coverage, scanner
+errors, or required reporting errors. Available findings and reports are
+preserved when the scan is incomplete. File and line annotations are enabled
+by default.
+
+The separate **Codex Security** job runs even if the scan job is skipped. It
+passes only after a successful scan job that reports a completed scan or a
+verified empty diff. A dry run, cancellation, or skipped scan job fails this
+required check.
 
 Use PR scanning for trusted contributors with branches in the calling repository.
 To scan Dependabot PRs, also configure `CODEX_SECURITY_API_KEY` as a
@@ -160,9 +186,10 @@ To scan Dependabot PRs, also configure `CODEX_SECURITY_API_KEY` as a
 The same workflow uses that secret for Dependabot runs and the Actions secret for
 other runs. Missing credentials fail with setup guidance.
 
-Fork PRs are skipped by this example. GitHub treats skipped jobs as successful
-for required checks; skipped does not mean scanned. `pull_request_target` and
-`workflow_run` are not supported.
+The scan job skips fork PRs, so the required check fails for those PRs. Repositories
+accepting fork contributions need an approved review process for them before
+using this check as a merge requirement. `pull_request_target` and `workflow_run`
+are not supported.
 
 The scanner uses applicable `SECURITY.md` guidance from the checked-out revision,
 including policy changes in the PR. Review those changes alongside the code.
@@ -176,27 +203,31 @@ Keep unrelated credentials and deployment steps in separate jobs.
   Names such as `src/[slug]/page.tsx` are literal paths; glob characters are not expanded.
   This requires repository scope.
 - For diff scans outside PR events, set `diff-base`.
-- Set `dry-run: 'true'` to check configuration without an API key or model calls.
-  Use a separate setup job; dry-run does not assess code or verify model access.
+- Set `dry-run: 'true'` with `fail-on-severity: none` to check configuration and
+  sandbox startup without an API key or model calls. Use a separate setup job;
+  dry-run does not assess code or verify model access.
 
 For a Deep scan of a repository or selected paths, add these inputs to the scan step:
 
 ```yaml
 with:
   mode: deep
-  max-time-hours: "2"
+  max-time-hours: "1"
 ```
 
 Deep mode does not support diff scans. `max-time-hours` limits Deep discovery;
 finalization can take additional time. It is unset by default, which uses the
 CLI's default of 96 hours. Set an explicit budget for Deep scans that leaves
-room for finalization within your job timeout.
+room for finalization within your job timeout. The one-hour discovery budget
+above leaves time for setup and finalization within the repository workflow's
+two-hour job timeout.
 
 ## Reports
 
 The Action writes a job summary and source annotations. Set
-`upload-artifacts: 'true'` for downloadable reports, retained for seven days by
-default. Reports can contain source code and vulnerability details.
+`upload-artifacts: 'true'` to add a report-download link to the job summary.
+Reports are retained for seven days by default; use `retention-days` to change
+this. Reports can contain source code and vulnerability details.
 
 The Action uses the normal Actions job check. Its summary and final log message
 distinguish findings above the failure threshold from a scan that could not
@@ -204,21 +235,18 @@ complete or a required reporting failure. With `fail-on-severity: none`, finding
 are report-only; scanner and required reporting failures still fail the job.
 
 When the CLI returns a valid finalized result with partial coverage, the Action
-warns and preserves the available findings and coverage explanations. It sets
+preserves the available findings and coverage explanations. It sets
 `scan-status: incomplete`, `policy-status: not-evaluated`, and
-`sarif-upload-ready: false`. Partial coverage alone does not fail the step, even
-when `fail-on-severity` is configured or the CLI returns exit code `2`.
+`sarif-upload-ready: false`. With `fail-on-severity: none`, it warns and passes.
+With any severity threshold, it fails because the review is incomplete, even
+if there are no findings. It does not treat an incomplete review as a passed
+or failed findings policy.
 
-A successful Action step therefore does not always mean the security review is
-complete. Workflows that require complete coverage can explicitly check the
-`scan-status` output after the scan step (which must have `id: security`):
-
-```yaml
-- name: Require a complete security review
-  env:
-    SCAN_STATUS: ${{ steps.security.outputs.scan-status }}
-  run: test "$SCAN_STATUS" = completed
-```
+A verified empty diff succeeds with `scan-status: skipped` and
+`skip-reason: empty-diff`, including when a severity threshold is configured.
+A dry run checks local setup and requires `fail-on-severity: none`.
+Use the [required PR check](#scan-pull-requests) to handle skipped scan jobs as
+well as the Action's own results.
 
 Scanner failures, interruption, unknown coverage, invalid or missing required
 reports, and a changed checkout still fail the step. A partial coverage file
@@ -248,7 +276,8 @@ then add this step after it:
 ```
 
 Complete scans remain uploadable when findings exceed the severity threshold.
-Incomplete scans and dry runs are not uploadable.
+The SARIF step skips incomplete scans, empty diffs, and dry runs. Available
+reports from incomplete scans can still be saved as Actions artifacts.
 Use a distinct category for each scan scope, such as repository and PR scans.
 The Action removes the CLI scan identifier from SARIF automation details so the
 uploader can apply that category.
@@ -259,8 +288,8 @@ for code scanning availability and permissions.
 
 The Action installs a pinned CLI release from npm using a committed dependency
 lock. It runs on Linux x64 with Node 24 and Python 3.11 or later; the Ubuntu 24.04
-runner supplies Node and Python. The setup step above installs Bubblewrap and
-loads Ubuntu's `bwrap-userns-restrict` AppArmor profile. This profile lets
+runner supplies Node and Python. The Action installs Bubblewrap and loads
+Ubuntu's `bwrap-userns-restrict` AppArmor profile on that hosted runner. This profile lets
 Bubblewrap create the sandbox's user namespace and denies capabilities to its
 child processes. It is loaded into the running kernel for the job's runner.
 Codex uses the system Bubblewrap from `PATH`.
@@ -281,19 +310,32 @@ report paths empty; it does not recover unvalidated partial files from disk.
 - **Checkout or history errors:** use the triggering revision, `fetch-depth: 0`
   for PRs, and `persist-credentials: false`.
 - **Authentication errors:** check the repository secret and model access.
-- **Sandbox startup errors:** on Ubuntu 24.04, include the sandbox setup step
-  shown above. Installing Bubblewrap alone does not load the AppArmor profile.
-  A `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted` error means
-  the sandbox could not configure its network namespace. Check that the profile
-  loaded successfully before running the Action.
+- **Sandbox startup errors:** inspect the Action's package-install and AppArmor
+  diagnostics on GitHub-hosted Ubuntu 24.04. On self-hosted runners, configure
+  the Codex sandbox before running the Action. Installing Bubblewrap alone
+  does not load Ubuntu's required AppArmor profile.
 - **Missing SARIF uploads:** inspect `scan-status`, `report-status`, and
   `sarif-upload-ready`.
-- **Incomplete scans:** inspect the warning and coverage report before adjusting
-  scope or budget. A successful step with `scan-status: incomplete` has partial
-  results, not a completed review or a passed severity policy.
+- **Incomplete scans:** follow the summary's report link and inspect coverage
+  before adjusting scope or budget. Incomplete scans fail when a severity
+  threshold is set. Advisory runs warn without failing.
 
 CLI diagnostics stream by default. Set `verbose: 'false'` for lifecycle and
 elapsed-time messages only.
+
+## Upgrading from Action 0.2.0
+
+Previously, partial coverage could pass with a configured severity threshold.
+It now fails. Keep `fail-on-severity: none` for advisory scans, or allow the
+failure to block merging until the review completes. `dry-run: 'true'` also
+requires `fail-on-severity: none`; put configuration checks in a separate job.
+
+The Action now prepares the sandbox on GitHub-hosted Ubuntu 24.04. Remove the
+manual Bubblewrap/AppArmor setup step there. Self-hosted setup is unchanged.
+
+The workflow examples use GPT-6 Sol cost support added after CLI `0.2.0`.
+Choose the reviewed distribution commit from the coordinated CLI/Action release
+containing these changes; pinning an older CLI does not enable the new pricing.
 
 ## Development
 
@@ -310,6 +352,9 @@ npm --prefix github-action run test:cli
 # Linux x64 with Node 24; no model calls:
 node github-action/scripts/linux-smoke.mjs
 ```
+
+The README workflow blocks are generated from `examples/*.yml`; edit those
+files and run `npm run docs` to keep the examples synchronized.
 
 Commit source changes and the generated `dist/*.cjs` bundles together.
 Validation checks types, tests, Action metadata, documentation, and bundle
@@ -360,12 +405,12 @@ Inputs are strings. Quote booleans and use newline-separated literal paths for l
 | `effort`               | `xhigh`                   | Reasoning effort: minimal, low, medium, high, xhigh, or max (subject to model support).                                                                                                                                      |
 | `max-cost`             | Unset                     | Positive estimated USD stop threshold per invocation. In-flight requests can exceed it; unset means no cost limit.                                                                                                           |
 | `max-time-hours`       | Unset                     | Positive Deep discovery duration in hours, up to 96. Unset uses the CLI default. Finalization and job timeout are separate.                                                                                                  |
-| `fail-on-severity`     | `none`                    | none, low, medium, high, or critical. Applies to complete scans. Valid partial results warn; scanner and required reporting errors fail.                                                                                     |
+| `fail-on-severity`     | `none`                    | none, low, medium, high, or critical. A severity threshold also requires complete coverage. With none, valid partial scans warn; scanner and required reporting errors still fail.                                           |
 | `verbose`              | `true`                    | Stream CLI diagnostics to the job log. Set false for lifecycle and elapsed-time messages only.                                                                                                                               |
-| `dry-run`              | `false`                   | Validate local configuration without a scan or API key. Does not verify authentication or model access. Use a separate non-required job.                                                                                     |
+| `dry-run`              | `false`                   | Validate local configuration without a scan or API key. Does not verify authentication or model access. Requires fail-on-severity: none; use a separate non-required job.                                                    |
 | `summary`              | `true`                    | Write a human-readable job summary.                                                                                                                                                                                          |
 | `annotations`          | `true`                    | Emit up to 50 source finding annotations; complete findings remain in reports.                                                                                                                                               |
-| `upload-artifacts`     | `false`                   | Upload an allowlist of validated reports. Reports may contain source and vulnerability details.                                                                                                                              |
+| `upload-artifacts`     | `false`                   | Upload an allowlist of validated reports and link the artifact in the job summary. Reports may contain source and vulnerability details.                                                                                     |
 | `artifact-name`        | `codex-security`          | Report artifact name; choose distinct names for matrix jobs and multiple invocations.                                                                                                                                        |
 | `retention-days`       | `7`                       | Artifact retention, 1–90 days (subject to repository limits).                                                                                                                                                                |
 
@@ -373,26 +418,26 @@ Inputs are strings. Quote booleans and use newline-separated literal paths for l
 
 All outputs are strings. An empty cost or count means unavailable, not zero.
 
-| Output                | Meaning                                                                                                                                                            |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `sarif-path`          | Absolute validated SARIF file path, or empty when unavailable or withheld.                                                                                         |
-| `json-path`           | Absolute canonical findings JSON path, or empty when unavailable or withheld.                                                                                      |
-| `coverage-path`       | Absolute coverage JSON path, or empty when unavailable or withheld.                                                                                                |
-| `results-directory`   | Runner-local reports directory; do not upload it recursively.                                                                                                      |
-| `scan-status`         | completed, incomplete, failed, or skipped. Valid partial results are incomplete and warn without failing the step. Skipped is reserved for empty diffs or dry-run. |
-| `skip-reason`         | empty-diff or dry-run when no scan ran; otherwise empty.                                                                                                           |
-| `policy-status`       | passed, failed, or not-evaluated. Incomplete scans are not-evaluated, even when a severity threshold is configured.                                                |
-| `report-status`       | ready, partial, or failed. Missing optional SARIF yields partial without failing the scan; required reporting failures yield failed.                               |
-| `exit-code`           | CLI exit code, or empty if the CLI was not started. Valid partial results may return 2 without failing the Action step.                                            |
-| `scanned-sha`         | Verified checkout commit SHA.                                                                                                                                      |
-| `analysis-ref`        | GitHub ref matching the scanned revision.                                                                                                                          |
-| `sarif-upload-ready`  | true only for complete, validated reports with a publishable immutable revision. Remains true after severity-policy failure.                                       |
-| `critical-count`      | Available critical findings, or empty before results are available.                                                                                                |
-| `high-count`          | Available high findings, or empty before results are available.                                                                                                    |
-| `medium-count`        | Available medium findings, or empty before results are available.                                                                                                  |
-| `low-count`           | Available low findings, or empty before results are available.                                                                                                     |
-| `informational-count` | Available informational findings, or empty before results are available.                                                                                           |
-| `estimated-cost`      | Estimated USD cost reported by the CLI. Empty means unavailable, not zero.                                                                                         |
+| Output                | Meaning                                                                                                                                                                   |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sarif-path`          | Absolute validated SARIF file path, or empty when unavailable or withheld.                                                                                                |
+| `json-path`           | Absolute canonical findings JSON path, or empty when unavailable or withheld.                                                                                             |
+| `coverage-path`       | Absolute coverage JSON path, or empty when unavailable or withheld.                                                                                                       |
+| `results-directory`   | Runner-local reports directory; do not upload it recursively.                                                                                                             |
+| `scan-status`         | completed, incomplete, failed, or skipped. Incomplete scans fail when a severity threshold is configured, otherwise warn. Skipped is reserved for empty diffs or dry-run. |
+| `skip-reason`         | empty-diff or dry-run when no scan ran; otherwise empty.                                                                                                                  |
+| `policy-status`       | passed, failed, or not-evaluated. Incomplete scans are not-evaluated, even when a severity threshold is configured.                                                       |
+| `report-status`       | ready, partial, or failed. Missing optional SARIF yields partial without failing the scan; required reporting failures yield failed.                                      |
+| `exit-code`           | CLI exit code, or empty if the CLI was not started. Valid partial results may return 2 without failing the Action step when fail-on-severity is none.                     |
+| `scanned-sha`         | Verified checkout commit SHA.                                                                                                                                             |
+| `analysis-ref`        | GitHub ref matching the scanned revision.                                                                                                                                 |
+| `sarif-upload-ready`  | true only for complete, validated reports with a publishable immutable revision. Remains true after severity-policy failure.                                              |
+| `critical-count`      | Available critical findings, or empty before results are available.                                                                                                       |
+| `high-count`          | Available high findings, or empty before results are available.                                                                                                           |
+| `medium-count`        | Available medium findings, or empty before results are available.                                                                                                         |
+| `low-count`           | Available low findings, or empty before results are available.                                                                                                            |
+| `informational-count` | Available informational findings, or empty before results are available.                                                                                                  |
+| `estimated-cost`      | Estimated USD cost reported by the CLI. Empty means unavailable, not zero.                                                                                                |
 
 <!-- action-reference:end -->
 
