@@ -43,6 +43,8 @@ Target `NODE_OPTIONS`, `NODE_DEBUG`, and `NODE_EXTRA_CA_CERTS` values travel thr
 
 Explicitly selected `.com` paths use `CreateProcessW` with that exact application name, because Rust's `Command` otherwise prefers an existing `.com.exe` sibling. This branch preserves UTF-16 arguments with CRT quoting, duplicates the shim's standard handles for inheritance, and uses the same restored environment, job lifetime, and error reporting. Other executables continue to use `Command`.
 
+Relative and absolute executable paths without an extension try `.com` before `.exe`, matching Node's path lookup. The Windows proof covers both forms, including names with a trailing dot, while preserving the caller's working directory.
+
 Build on Windows after compiling the TypeScript tools, then run:
 
 ```sh

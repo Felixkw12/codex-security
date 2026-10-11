@@ -134,9 +134,6 @@ async function scopeCandidates(repo: string, scope: string): Promise<string[]> {
       ],
       repo,
     );
-    // The raw POSIX path bridge reports exec failures as shell statuses 126/127.
-    if (!windows && (result.status === 126 || result.status === 127))
-      throw new Error(result.stderr);
   } catch {
     const ignoreNames = [".gitignore", ".ignore", ".rgignore"];
     const isIgnoreFile = (path: string) => {

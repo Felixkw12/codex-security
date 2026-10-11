@@ -389,22 +389,20 @@ describe("Codex configuration", () => {
     expect(merged["windows"]).toEqual({ sandbox: "elevated" });
   });
 
-  test("preserves legacy elevated Windows sandbox overrides", async () => {
-    const merged = await mergedCodexConfig({
-      codexOverrides: {
+  test.each<{ name: string; overrides: JsonObject; expected: object }>([
+    {
+      name: "preserves legacy elevated Windows sandbox overrides",
+      overrides: {
         features: { elevated_windows_sandbox: true },
       },
-    });
-
-    expect(merged).toMatchObject({
-      features: { elevated_windows_sandbox: true },
-      windows: { sandbox: "elevated" },
-    });
-  });
-
-  test("projects legacy elevated Windows overrides into selected profiles", async () => {
-    const merged = await mergedCodexConfig({
-      codexOverrides: {
+      expected: {
+        features: { elevated_windows_sandbox: true },
+        windows: { sandbox: "elevated" },
+      },
+    },
+    {
+      name: "projects legacy elevated Windows overrides into selected profiles",
+      overrides: {
         profile: "elevated",
         profiles: {
           elevated: {
@@ -412,22 +410,19 @@ describe("Codex configuration", () => {
           },
         },
       },
-    });
-
-    expect(merged).toMatchObject({
-      windows: { sandbox: "elevated" },
-      profiles: {
-        elevated: {
-          features: { elevated_windows_sandbox: true },
-          windows: { sandbox: "elevated" },
+      expected: {
+        windows: { sandbox: "elevated" },
+        profiles: {
+          elevated: {
+            features: { elevated_windows_sandbox: true },
+            windows: { sandbox: "elevated" },
+          },
         },
       },
-    });
-  });
-
-  test("allows selected profiles to override root elevated sandbox defaults", async () => {
-    const merged = await mergedCodexConfig({
-      codexOverrides: {
+    },
+    {
+      name: "allows selected profiles to override root elevated sandbox defaults",
+      overrides: {
         features: { elevated_windows_sandbox: true },
         profile: "restricted",
         profiles: {
@@ -436,22 +431,19 @@ describe("Codex configuration", () => {
           },
         },
       },
-    });
-
-    expect(merged).toMatchObject({
-      windows: { sandbox: "elevated" },
-      profiles: {
-        restricted: {
-          features: { elevated_windows_sandbox: false },
-          windows: { sandbox: "unelevated" },
+      expected: {
+        windows: { sandbox: "elevated" },
+        profiles: {
+          restricted: {
+            features: { elevated_windows_sandbox: false },
+            windows: { sandbox: "unelevated" },
+          },
         },
       },
-    });
-  });
-
-  test("gives profile-local Windows sandbox overrides precedence", async () => {
-    const merged = await mergedCodexConfig({
-      codexOverrides: {
+    },
+    {
+      name: "gives profile-local Windows sandbox overrides precedence",
+      overrides: {
         profile: "restricted",
         profiles: {
           restricted: {
@@ -460,30 +452,29 @@ describe("Codex configuration", () => {
           },
         },
       },
-    });
-
-    expect(merged).toMatchObject({
-      profiles: {
-        restricted: {
-          features: { elevated_windows_sandbox: true },
-          windows: { sandbox: "unelevated" },
+      expected: {
+        profiles: {
+          restricted: {
+            features: { elevated_windows_sandbox: true },
+            windows: { sandbox: "unelevated" },
+          },
         },
       },
-    });
-  });
-
-  test("gives explicit Windows sandbox overrides precedence", async () => {
-    const merged = await mergedCodexConfig({
-      codexOverrides: {
+    },
+    {
+      name: "gives explicit Windows sandbox overrides precedence",
+      overrides: {
         features: { elevated_windows_sandbox: true },
         windows: { sandbox: "unelevated" },
       },
-    });
-
-    expect(merged).toMatchObject({
-      features: { elevated_windows_sandbox: true },
-      windows: { sandbox: "unelevated" },
-    });
+      expected: {
+        features: { elevated_windows_sandbox: true },
+        windows: { sandbox: "unelevated" },
+      },
+    },
+  ])("$name", async ({ overrides, expected }) => {
+    const merged = await mergedCodexConfig({ codexOverrides: overrides });
+    expect(merged).toMatchObject(expected);
   });
 
   test("retains the Windows sandbox in the hardened scan profile", async () => {

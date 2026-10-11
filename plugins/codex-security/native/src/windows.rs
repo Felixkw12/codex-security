@@ -329,11 +329,12 @@ pub fn run_windows_process(
         if let Some(directory) = cwd {
             std::env::set_current_dir(directory)?;
         }
-        // Rust searches PATH but omits Node's current-directory lookup for bare names.
-        if Path::new(&executable).file_name() == Some(executable.as_os_str())
-            && unsafe { NeedCurrentDirectoryForExePathW([0_u16].as_ptr()) } != 0
+        // Node tries .com before .exe for paths as well as current-directory names.
+        let filename = Path::new(&executable).file_name();
+        if filename != Some(executable.as_os_str())
+            || unsafe { NeedCurrentDirectoryForExePathW([0_u16].as_ptr()) } != 0
         {
-            let bytes = executable.as_encoded_bytes();
+            let bytes = filename.unwrap_or(&executable).as_encoded_bytes();
             let has_extension = bytes
                 .iter()
                 .position(|&byte| byte == b'.')

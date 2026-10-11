@@ -214,9 +214,18 @@ function spawnTool(
     ...(typeof options.cwd === "string"
       ? [assign(options.cwd), 'cd -P -- "$value" || exit']
       : []),
+    // A successful exec clears the trap. Report bridge failures separately from
+    // the launched program's exit status, which may also be 126 or 127.
+    // Bash (macOS /bin/sh) otherwise skips EXIT traps when exec fails.
+    'if [ -n "${BASH_VERSION:-}" ]; then shopt -s execfail; fi',
+    'trap \'printf "%s" "$?" >&3\' 0',
     'exec "$@"',
   ].join("\n");
-  return spawn("/bin/sh", ["-c", script], { ...options, cwd: undefined });
+  return spawn("/bin/sh", ["-c", script], {
+    ...options,
+    cwd: undefined,
+    stdio: [...options.stdio, "pipe"],
+  });
 }
 
 function inheritedToolPaths(additional: string[] = []): Record<string, string> {
@@ -316,12 +325,18 @@ export async function runTool(
 async function collect(child: ReturnType<typeof spawn>): Promise<ToolResult> {
   const stdout: Buffer[] = [],
     stderr: Buffer[] = [];
+  let execFailure = "";
+  child.stdio[3]?.on("data", (chunk: Buffer) => (execFailure += chunk));
   child.stdout!.on("data", (chunk: Buffer) => stdout.push(chunk));
   child.stderr!.on("data", (chunk: Buffer) => stderr.push(chunk));
   await new Promise<void>((resolve, reject) => {
     child.once("error", reject);
     child.once("close", () => resolve());
   });
+  if (execFailure)
+    throw Object.assign(new Error(Buffer.concat(stderr).toString("utf8")), {
+      code: execFailure === "127" ? "ENOENT" : "EACCES",
+    });
   return {
     status: child.exitCode,
     signal: child.signalCode,

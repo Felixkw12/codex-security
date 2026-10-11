@@ -90,6 +90,24 @@ export async function processProof(
     for (const [executable, directory, path, selected] of [
       ["process-probe", cwd, "..\\relative-tools", "process-probe.exe"],
       [
+        "..\\relative-tools\\process-probe",
+        cwd,
+        join(root, "absent-tools"),
+        "process-probe.com",
+      ],
+      [
+        "..\\relative-tools\\process-probe.",
+        cwd,
+        join(root, "absent-tools"),
+        "process-probe.com",
+      ],
+      [
+        join(tools, "process-probe"),
+        cwd,
+        join(root, "absent-tools"),
+        "process-probe.com",
+      ],
+      [
         "..\\relative-tools\\process-probe.exe",
         cwd,
         "..\\relative-tools",
