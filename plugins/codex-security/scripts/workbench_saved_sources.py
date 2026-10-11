@@ -30,6 +30,31 @@ def _digest(value: Any) -> str:
     return hashlib.sha256(_encoded(value)).hexdigest()
 
 
+def _source_digests(value: Any, error: str) -> dict[str, str]:
+    if not isinstance(value, dict) or not all(
+        isinstance(relative, str) and isinstance(digest, str) for relative, digest in value.items()
+    ):
+        raise ContractError(error)
+    return value
+
+
+def _retained_source_state(value: Any) -> tuple[dict[str, str], str | None]:
+    if isinstance(value, dict) and isinstance(value.get("sources"), dict):
+        sources = _source_digests(
+            value["sources"], "Saved stopped-scan source digests are malformed."
+        )
+        model_source = value.get("threatModelSource")
+        if not isinstance(model_source, str) or model_source not in sources:
+            raise ContractError("Saved stopped-scan model source is outside its checkpoint set.")
+        return sources, model_source
+    return _source_digests(value, "Saved stopped-scan source digests are malformed."), None
+
+
+def _encode_retained_sources(sources: dict[str, str], model_source: list[str]) -> str:
+    state = {"sources": sources, "threatModelSource": model_source[0]} if model_source else sources
+    return json.dumps(state, sort_keys=True)
+
+
 def _children(scan_dir: Path, relative: str) -> list[str]:
     cursor = scan_dir
     for part in Path(relative).parts:

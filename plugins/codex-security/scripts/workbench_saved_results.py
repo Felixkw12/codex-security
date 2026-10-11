@@ -51,12 +51,15 @@ from workbench_saved_sources import (
     _checkpoint_paths,
     _children,
     _digest,
+    _encode_retained_sources,
     _encoded,
     _freeze_source_times,
     _frozen_source_times,
     _is_source_order_snapshot,
     _parent_publication_ancestors,
     _read_saved_result,
+    _retained_source_state,
+    _source_digests,
 )
 from workbench_target import committed_diff_snapshot_digest
 from workbench_validation import path_within_scope
@@ -237,31 +240,6 @@ def _read_saved_parent_result(
     ):
         raise ContractError("Saved parent documents belong to a different scan")
     return manifest, _parent_scan_draft(scan_id, parent_scan, findings, coverage)
-
-
-def _source_digests(value: Any, error: str) -> dict[str, str]:
-    if not isinstance(value, dict) or not all(
-        isinstance(relative, str) and isinstance(digest, str) for relative, digest in value.items()
-    ):
-        raise ContractError(error)
-    return value
-
-
-def _retained_source_state(value: Any) -> tuple[dict[str, str], str | None]:
-    if isinstance(value, dict) and isinstance(value.get("sources"), dict):
-        sources = _source_digests(
-            value["sources"], "Saved stopped-scan source digests are malformed."
-        )
-        model_source = value.get("threatModelSource")
-        if not isinstance(model_source, str) or model_source not in sources:
-            raise ContractError("Saved stopped-scan model source is outside its checkpoint set.")
-        return sources, model_source
-    return _source_digests(value, "Saved stopped-scan source digests are malformed."), None
-
-
-def _encode_retained_sources(sources: dict[str, str], model_source: list[str]) -> str:
-    state = {"sources": sources, "threatModelSource": model_source[0]} if model_source else sources
-    return json.dumps(state, sort_keys=True)
 
 
 def _saved_results_changed(db: Any, connection: Any, scan: Any) -> bool:
@@ -584,6 +562,10 @@ def _ensure_finding_identities(findings: list[Any], *, deep: bool = False) -> No
         key = _semantic_identity_key(finding)
         if key in used or (id(finding) in generated_ids and key in authored):
             identity = finding["identity"]
+            if id(finding) not in generated_ids:
+                finding.setdefault("provenance", {}).setdefault(
+                    "preservedIdentity", copy.deepcopy(identity)
+                )
             base_instance = identity.get("instance", "saved")
             suffix = 2
             while True:
@@ -2032,7 +2014,9 @@ def merge_saved_results(
             candidate = finding_candidate_id(value)
             scopes = [scope, (scope[0], candidate)] if candidate else [scope]
             publication_identity = (
-                terminal_findings[relative][index]["identity"]
+                _finding_identity(
+                    value if "identity" in value else terminal_findings[relative][index]
+                )
                 if relative in terminal_findings
                 else None
             )
@@ -2176,7 +2160,11 @@ def merge_saved_results(
                     ),
                 )[1]
             if relative in terminal_findings:
-                match["identity"] = copy.deepcopy(terminal_findings[relative][index]["identity"])
+                match["identity"] = copy.deepcopy(
+                    _finding_identity(
+                        value if "identity" in value else terminal_findings[relative][index]
+                    )
+                )
             elif "identity" in value and (match["identity"] is None or relative == "parent"):
                 match["identity"] = copy.deepcopy(_finding_identity(value))
             row_groups[(relative, index)] = match
@@ -2420,7 +2408,13 @@ def merge_saved_results(
                 provenance.setdefault("workerId", worker_id)
             group = row_groups.get((relative, index))
             if relative in terminal_findings:
-                finding["identity"] = copy.deepcopy(terminal_findings[relative][index]["identity"])
+                terminal = terminal_findings[relative][index]
+                finding["identity"] = copy.deepcopy(terminal["identity"])
+                if "preservedIdentity" in terminal.get("provenance", {}):
+                    provenance.setdefault(
+                        "preservedIdentity",
+                        copy.deepcopy(terminal["provenance"]["preservedIdentity"]),
+                    )
             elif group is not None and group["identity"] is not None:
                 finding.setdefault("identity", copy.deepcopy(group["identity"]))
             if worker_id is not None and "identity" not in finding:
@@ -2429,9 +2423,12 @@ def merge_saved_results(
             if not valid_finding(finding):
                 findings.append(finding)
                 continue
+            # Terminal siblings remain separate even when their preserved authored
+            # identities and locations coincide. Worker revisions reuse the group.
             key = (
                 group["key"]
-                if group is not None and group["identity"] is None
+                if group is not None
+                and (group["identity"] is None or relative in terminal_findings)
                 else _finding_key(finding)
             )
             if group is not None:
@@ -2672,7 +2669,9 @@ def merge_saved_results(
         if key in identities and (
             previous_variant != variant or distinct_reports(group, previous_group)
         ):
-            finding.setdefault("provenance", {})["preservedIdentity"] = copy.deepcopy(identity)
+            finding.setdefault("provenance", {}).setdefault(
+                "preservedIdentity", copy.deepcopy(identity)
+            )
             base_instance = identity.get("instance", "saved")
             suffix = 2
             while True:

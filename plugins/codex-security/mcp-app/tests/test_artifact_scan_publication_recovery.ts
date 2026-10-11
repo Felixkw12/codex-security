@@ -717,8 +717,93 @@ for (const reversed of [false, true]) {
     );
     assert.equal(result.recovered.length, 2);
     assert.deepEqual(result.recovered, result.normal);
+    assert.deepEqual(
+      result.preservedIdentities[1],
+      result.preservedIdentities[0],
+    );
     assert.deepEqual(result.warnings, []);
   });
+}
+
+for (const [metadata, preservedIdentity] of Object.entries({
+  omitted: undefined,
+  annotation: "Synthetic preserved annotation",
+  authored: { anchor: "same", description: "Earlier authored identity" },
+})) {
+  const preserved = preservedIdentity !== undefined;
+  for (const workerUpdate of ["none", "unchanged", "revised"]) {
+    test(`interrupted terminal collisions retain authored identity with ${workerUpdate} worker (metadata=${metadata})`, async (t) => {
+      const normal = await fixture(t, "deep"),
+        recovered = await fixture(t, "deep");
+      const identity = { anchor: "same", description: "Authored identity" };
+      const findings = ["First report", "Second report"].map((title, index) =>
+        finding(title, {
+          identity,
+          locations: [{ path: "src/example.py", startLine: index + 1 }],
+          provenance: {
+            source: "local_plugin",
+            workerId: "reviewer",
+            candidateId: `candidate-${index}`,
+            ...(preserved ? { preservedIdentity } : {}),
+          },
+        }),
+      );
+      await normal.write({ ...normal.draft({}, true), findings });
+      await interruptDraftAfterRaw(() =>
+        recovered.write({ ...recovered.draft({}, true), findings }),
+      );
+      await dateDraftFiles(recovered.root, 100);
+      const workers = [];
+      if (workerUpdate !== "none") {
+        const workerRoot = path.join(recovered.root, "reviewer");
+        await mkdir(workerRoot);
+        const worker = draftFixture(workerRoot, "worker");
+        const revised = {
+          ...findings[1]!,
+          ...(workerUpdate === "revised"
+            ? {
+                summary: "Revised synthetic evidence.",
+                severity: { level: "high" },
+              }
+            : {}),
+        };
+        await worker.write({ ...worker.draft({}, true), findings: [revised] });
+        await dateDraftFiles(workerRoot, 200);
+        workers.push({
+          id: "reviewer",
+          kind: "discovery",
+          artifact_dir: workerRoot,
+          result_manifest_path: path.join(workerRoot, "result.json"),
+          attempt: 1,
+        });
+        await normal.write({
+          ...normal.draft({}, true),
+          findings: [findings[0]!, revised],
+        });
+      }
+      const result = await recoverAndFinalize(
+        normal,
+        recovered,
+        workers,
+        true,
+        true,
+      );
+      assert.equal(result.normal.length, 2);
+      assert.equal(result.recovered.length, 2);
+      assert.deepEqual(result.recovered, result.normal);
+      assert.deepEqual(result.preservedIdentities, [
+        [
+          preserved ? preservedIdentity : null,
+          preserved ? preservedIdentity : identity,
+        ],
+        [
+          preserved ? preservedIdentity : null,
+          preserved ? preservedIdentity : identity,
+        ],
+      ]);
+      assert.deepEqual(result.warnings, []);
+    });
+  }
 }
 
 for (const cut of ["published", "pending"] as const) {
