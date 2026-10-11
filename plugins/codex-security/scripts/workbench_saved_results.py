@@ -33,6 +33,7 @@ from finalize_scan_contract import (
     _recover_unsealed_findings,
     _remove_scan_local_file_if_exists,
     _require_portable_relative_path,
+    _require_safe_json_value,
     _validate_completion_binding,
     _validate_resolved_deferred,
     _validate_schema_node,
@@ -1534,6 +1535,7 @@ def merge_saved_results(
                 Path(__file__).resolve().parent.parent / "schemas/scan-manifest.schema.json"
             )
             try:
+                _require_safe_json_value(model, f"Saved threat model {relative}")
                 _validate_schema_node(
                     model,
                     schema["properties"]["scan"]["properties"]["threatModel"],

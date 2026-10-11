@@ -14,7 +14,13 @@ import workbench_saved_results as saved
 
 
 @pytest.mark.parametrize(
-    "invalid_model", [{}, {"summary": ""}, {"summary": "Review", "assets": [42]}]
+    "invalid_model",
+    [
+        {},
+        {"summary": ""},
+        {"summary": "Review", "assets": [42]},
+        pytest.param({"summary": "\ud800"}, id="lone-surrogate"),
+    ],
 )
 @pytest.mark.parametrize("with_fallback", [False, True])
 def test_invalid_optional_context_does_not_block_findings_or_frozen_replay(
