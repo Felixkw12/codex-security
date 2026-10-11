@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { copyFileSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
+import {
+  copyFileSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  symlinkSync,
+} from "node:fs";
 import { join, win32 } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { rootCertificates } from "node:tls";
@@ -24,6 +30,7 @@ async function processExit(
 
 export async function processProof(
   root: string,
+  symlinks: boolean,
 ): Promise<Record<string, boolean>> {
   const native = loadWindowsBinding(),
     files = windowsFileSystem(native);
@@ -44,7 +51,7 @@ export async function processProof(
         `space ${"\\".repeat(count)}`,
       ]),
     ];
-    const script = `const fs=require('node:fs'), native=require(${JSON.stringify(binaryPath)}); const args=native.windowsArguments().slice(3).map(value=>value.toString('utf16le')); const cwd=native.windowsAbsolutePath(Buffer.from('.', 'utf16le')).value.toString('utf16le'); process.stderr.write(JSON.stringify({args,cwd,executable:process.execPath,setting:process.env.INVENTORY_PROCESS_FIXTURE,rawSetting:native.windowsEnvironment(Buffer.from("INVENTORY_PROCESS_RAW", "utf16le")).toString("utf16le")})); process.stdout.write(fs.readFileSync(0)); process.exitCode=23;`;
+    const script = `const fs=require('node:fs'), native=require(${JSON.stringify(binaryPath)}); const argv=native.windowsArguments().map(value=>value.toString('utf16le')); const args=argv.slice(3); const cwd=native.windowsAbsolutePath(Buffer.from('.', 'utf16le')).value.toString('utf16le'); process.stderr.write(JSON.stringify({args,argv0:argv[0],cwd,executable:process.execPath,setting:process.env.INVENTORY_PROCESS_FIXTURE,rawSetting:native.windowsEnvironment(Buffer.from("INVENTORY_PROCESS_RAW", "utf16le")).toString("utf16le")})); process.stdout.write(fs.readFileSync(0)); process.exitCode=23;`;
     const child = spawnWindowsProcess(
       binaryPath,
       process.execPath,
@@ -70,6 +77,7 @@ export async function processProof(
     assert.deepEqual(Buffer.concat(stdout), bytes);
     const result = JSON.parse(Buffer.concat(stderr).toString("utf8"));
     assert.deepEqual(result.args, arguments_);
+    assert.equal(result.argv0, process.execPath);
     assert.equal(result.cwd.toLowerCase(), cwd.toLowerCase());
     assert.equal(result.setting, "inherited");
     assert.equal(result.rawSetting, "raw-\udfff");
@@ -162,6 +170,7 @@ export async function processProof(
       assert.deepEqual(Buffer.concat(output), bytes);
       assert.deepEqual(JSON.parse(Buffer.concat(errors).toString()), {
         args: arguments_,
+        argv0: executable,
         cwd: directory,
         executable: join(tools, selected),
         setting: "relative target",
@@ -178,7 +187,10 @@ export async function processProof(
     mkdirSync(quotedTools);
     copyFileSync(process.execPath, join(firstTools, "process-probe.exe"));
     copyFileSync(process.execPath, join(quotedTools, "process-probe.com"));
-    const selectionArgs = ["-e", "process.stdout.write(process.execPath)"];
+    const selectionArgs = [
+      "-e",
+      "process.stdout.write(JSON.stringify({executable:process.execPath,argv0:process.argv0}))",
+    ];
     for (const [executable, path, expected] of [
       [
         "process-probe",
@@ -196,8 +208,14 @@ export async function processProof(
         join(firstTools, "process-probe.exe"),
       ],
       ["process-probe.com", tools, join(tools, "process-probe.com")],
+      ["process-probe.exe", tools, join(tools, "process-probe.exe")],
       ["process-probe.", tools, join(tools, "process-probe.com")],
       ["process-probe.bin", tools, join(tools, "process-probe.bin")],
+      [
+        ".\\relative-tools\\process-probe.exe",
+        firstTools,
+        join(tools, "process-probe.exe"),
+      ],
       [
         ".\\relative-tools\\process-probe.bin",
         firstTools,
@@ -235,8 +253,72 @@ export async function processProof(
           ),
           [0, null],
         );
-        assert.equal(Buffer.concat(output).toString(), expected);
+        assert.deepEqual(JSON.parse(Buffer.concat(output).toString()), {
+          executable: expected,
+          argv0: executable,
+        });
         assert.equal(Buffer.concat(diagnostics).toString(), "");
+      }
+    }
+
+    for (const kind of [
+      "directory",
+      ...(symlinks ? ["dangling-file", "dangling-directory"] : []),
+    ]) {
+      const first = join(root, `${kind}-tools`);
+      mkdirSync(first);
+      const candidate = join(first, "process-probe.exe");
+      if (kind === "directory") mkdirSync(candidate);
+      else
+        symlinkSync(
+          join(first, "missing"),
+          candidate,
+          kind === "dangling-file" ? "file" : "dir",
+        );
+      for (const mode of ["node", "native"] as const) {
+        const options = {
+          cwd: root,
+          env: { ...relativeEnvironment, PATH: `${first};${tools}` },
+          stdio: ["ignore", "pipe", "pipe"] as ["ignore", "pipe", "pipe"],
+        };
+        const selected =
+          mode === "node"
+            ? spawn("process-probe", selectionArgs, options)
+            : spawnWindowsProcess(
+                binaryPath,
+                "process-probe",
+                selectionArgs,
+                options,
+              );
+        const output: Buffer[] = [],
+          diagnostics: Buffer[] = [];
+        const errors: Error[] = [];
+        selected.stdout!.on("data", (chunk: Buffer) => output.push(chunk));
+        selected.stderr!.on("data", (chunk: Buffer) => diagnostics.push(chunk));
+        selected.on("error", (error) => errors.push(error));
+        const status = await new Promise<number | null>((resolve) =>
+          selected.once("close", (code) => resolve(code)),
+        );
+        if (kind === "dangling-file") {
+          assert.equal(
+            errors.length,
+            1,
+            `${mode} must report the first candidate's launch failure`,
+          );
+          assert.equal(
+            Buffer.concat(output).length,
+            0,
+            "a later PATH image must not run",
+          );
+        } else {
+          assert.deepEqual(errors, []);
+          assert.equal(status, 0);
+          assert.deepEqual(JSON.parse(Buffer.concat(output).toString()), {
+            executable: join(tools, "process-probe.com"),
+            argv0: "process-probe",
+          });
+        }
+        assert.equal(Buffer.concat(diagnostics).length, 0);
       }
     }
 
@@ -260,10 +342,10 @@ export async function processProof(
         await processExit(inherited, "omitted PATH inherits caller value"),
         [0, null],
       );
-      assert.equal(
-        Buffer.concat(output).toString(),
-        join(tools, "process-probe.com"),
-      );
+      assert.deepEqual(JSON.parse(Buffer.concat(output).toString()), {
+        executable: join(tools, "process-probe.com"),
+        argv0: "process-probe",
+      });
     } finally {
       if (inheritedPath === undefined) delete process.env["PATH"];
       else process.env["PATH"] = inheritedPath;
@@ -356,7 +438,7 @@ export async function processProof(
         executable,
         [
           "-e",
-          `const native=require(${JSON.stringify(binaryPath)}); process.stdout.write(JSON.stringify({selected:process.execPath.endsWith('.com'),args:native.windowsArguments().slice(3).map(value=>value.toString('utf16le'))}));`,
+          `const native=require(${JSON.stringify(binaryPath)}); const argv=native.windowsArguments().map(value=>value.toString('utf16le')); process.stdout.write(JSON.stringify({selected:process.execPath.endsWith('.com'),argv0:argv[0],args:argv.slice(3)}));`,
           ...arguments_,
         ],
         { cwd, stdio: ["ignore", "pipe", "pipe"] },
@@ -374,6 +456,7 @@ export async function processProof(
       );
       assert.deepEqual(JSON.parse(Buffer.concat(output).toString()), {
         selected: true,
+        argv0: executable,
         args: arguments_,
       });
       assert.equal(Buffer.concat(errors).toString(), "");
@@ -789,6 +872,9 @@ child.once('close', code => { process.exitCode = code ?? 1; });`,
       bareExecutableUsesTargetCwd: true,
       explicitComSelectionAndArgumentQuoting: true,
       pathAndExplicitImageSelectionMatchNode: true,
+      originalArgv0Preserved: true,
+      executableSymlinkSelectionMatchesNode: symlinks,
+      executableDirectoryCandidatesSkipped: true,
       omittedPathInheritsCallerValue: true,
       longAndNamespacedRawComPaths: true,
       inheritedAndOverriddenPathPrecedeShimDirectory: true,
