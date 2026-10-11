@@ -196,6 +196,7 @@ import {
   codexSecurityCredentialHome,
   codexSecurityHasStoredFileCredentials,
   codexSecurityStateDirectory,
+  codexExecutableReadPaths,
   createIsolatedHome,
   executablePathForSpawn,
   expandHome,
@@ -1037,6 +1038,10 @@ export class CodexSecurity {
         outputDir,
         runtime.environment,
       );
+      const policyFilesystem = policyFilesystemPermissions(
+        inputs.gitMetadataPaths,
+        await codexExecutableReadPaths(this.#codexCommand().command),
+      );
       const { codex, environment: policyEnvironment } =
         await this.#createSessionCodex(
           session,
@@ -1054,12 +1059,10 @@ export class CodexSecurity {
           options.auth,
           undefined,
           policyConfig,
-          inputs.gitMetadataPaths.length === 0
-            ? []
-            : [
-                // CLI override keys split on dots, so keep paths inside the TOML value.
-                `permissions.${POLICY_PERMISSION_PROFILE}.filesystem=${inlineToml(policyFilesystemPermissions(inputs.gitMetadataPaths))}`,
-              ],
+          [
+            // CLI override keys split on dots, so keep paths inside the TOML value.
+            `permissions.${POLICY_PERMISSION_PROFILE}.filesystem=${inlineToml(policyFilesystem)}`,
+          ],
         );
       const reportCost = (current: Readonly<ScanCost>): void => {
         const total = addScanCosts(accumulatedCost, current);
@@ -4882,10 +4885,13 @@ export function scanRuntimeCodexConfig(
 
 function policyFilesystemPermissions(
   gitMetadataPaths: readonly string[] = [],
+  codexPaths: readonly string[] = [],
 ): JsonObject {
   return {
     ":minimal": "read",
     ":workspace_roots": "read",
+    // Linux's sandbox re-executes Codex, including installations outside /usr.
+    ...Object.fromEntries(codexPaths.map((path) => [path, { ".": "read" }])),
     // A scoped "." keeps native permission paths literal, including glob characters.
     ...Object.fromEntries(
       gitMetadataPaths.map((path) => [path, { ".": "deny" }]),
