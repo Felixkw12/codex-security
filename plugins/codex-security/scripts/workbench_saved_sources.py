@@ -273,7 +273,7 @@ def _admit_parent_checkpoint(scan_dir: Path, scan_id: str, checkpoint: dict[str,
     try:
         previous, _, _ = _read_saved_result(scan_dir, "checkpoint-head.json", scan_id)
     except (ContractError, OSError, ValueError):
-        pass
+        pass  # An absent or unreadable previous head contributes no predecessor.
     return _encoded(
         {
             **checkpoint,

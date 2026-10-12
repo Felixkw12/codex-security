@@ -97,9 +97,11 @@ def test_legacy_frozen_source_order_parent_context_remains_readable(
             continue
         record = json.loads((tmp_path / relative).read_text())
         if retain_roles:
-            assert record["parentContext"].pop("canonicalObservedAtNs")
+            observed_at = record["parentContext"].pop("canonicalObservedAtNs")
+            assert observed_at
         else:
-            assert record.pop("parentContext")
+            parent_context = record.pop("parentContext")
+            assert parent_context
         digest = saved_results._digest(record)
         legacy_path = f"source-order/{digest}.json"
         (tmp_path / legacy_path).write_bytes(saved_results._encoded(record))
