@@ -100,7 +100,7 @@ test.each(["GIT_DIR", "GIT_WORK_TREE"])(
 
 for (const nested of [false, true]) {
   test
-    .skipIf(process.platform === "win32")
+    .skipIf(process.platform !== "linux")
     .each(["unicode", "raw", "both", "delete raw"])(
     `patch assessment retains distinct filename bytes (${nested ? "nested" : "root"}): %s`,
     async (change) => {
@@ -172,7 +172,7 @@ for (const nested of [false, true]) {
   );
 }
 
-test.skipIf(process.platform === "win32").each([false, true])(
+test.skipIf(process.platform !== "linux").each([false, true])(
   "never snapshots a raw gitlink through its replacement-character alias (initialized: %p)",
   async (initialized) => {
     const root = await fixtures.create("patch-gitlink-byte-alias-");
