@@ -380,9 +380,10 @@ export async function generateInventory(
         try {
           inside(repo, canonical(absolute));
         } catch {
+          if (inventory) continue;
           contained = false;
         }
-        if (contained || inventory) {
+        if (contained) {
           const [sample, binary] = sampleFile(absolute);
           if (binary) continue;
           if (!inventory)

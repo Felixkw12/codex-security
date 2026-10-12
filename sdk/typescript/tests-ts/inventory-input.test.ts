@@ -896,6 +896,107 @@ for (const mode of ["revisions", "local-patch"] as const) {
   }
 }
 
+for (const location of ["outside", "repository-extra", "inside"]) {
+  for (const binary of [false, true]) {
+    test(`local diff inventory confines ${location} directory links with ${binary ? "binary" : "text"} contents`, () => {
+      const f = fixture();
+      const contents = binary ? Buffer.from("\0selected\n") : "selected\n";
+      f.write("inside/source.py", contents);
+      f.write("safe.py", "before\n");
+      const base = f.commit();
+      f.write("src/nested/source.py", "staged\n");
+      git(f.repo, "add", "src/nested/source.py");
+      f.write("safe.py", "after\n");
+      const destination =
+        location === "inside" ? join(f.repo, "inside") : join(f.root, location);
+      if (location !== "inside") {
+        mkdirSync(destination);
+        writeFileSync(join(destination, "source.py"), contents);
+      }
+      rmSync(join(f.repo, "src", "nested"), { recursive: true });
+      symlinkSync(destination, join(f.repo, "src", "nested"), "junction");
+
+      const retained = location === "inside" && !binary;
+      expect(
+        f.success("generate-in-scope-files", [
+          "--scope",
+          ".",
+          "--diff-base",
+          base,
+          "--diff-mode",
+          "local-patch",
+        ]),
+      ).toBe(`safe.py\n${retained ? "src/nested/source.py\n" : ""}`);
+      expect(
+        f.rows("make-diff-rank-input", [
+          "--base",
+          base,
+          "--mode",
+          "local-patch",
+        ]),
+      ).toEqual([
+        { path: "safe.py", area: "diff", preview: "after" },
+        ...(location !== "inside" || !binary
+          ? [
+              {
+                path: "src/nested/source.py",
+                area: "diff",
+                preview: retained ? "selected" : "",
+              },
+            ]
+          : []),
+      ]);
+    });
+  }
+}
+
+test.skipIf(process.platform === "win32")(
+  "local diff inventory does not open outside directory-link targets",
+  () => {
+    const f = fixture();
+    f.write("safe.py", "before\n");
+    const base = f.commit();
+    f.write("nested/source.py", "staged\n");
+    git(f.repo, "add", "nested/source.py");
+    f.write("safe.py", "after\n");
+    const outside = join(f.root, "outside");
+    mkdirSync(outside);
+    const outsideFile = join(outside, "source.py");
+    writeFileSync(outsideFile, "synthetic outside contents\n");
+    rmSync(join(f.repo, "nested"), { recursive: true });
+    symlinkSync(outside, join(f.repo, "nested"), "dir");
+    const marker = join(f.root, "read-attempt");
+    writeFileSync(marker, "untouched");
+    const preload = join(f.root, "observe-open.cjs");
+    writeFileSync(
+      preload,
+      `
+const fs = require("node:fs");
+const open = fs.openSync;
+fs.openSync = (path, ...args) => {
+  if (${JSON.stringify([join(f.repo, "nested", "source.py"), outsideFile])}.includes(String(path))) {
+    fs.writeFileSync(${JSON.stringify(marker)}, "opened");
+    throw new Error("Synthetic outside-file read tripwire");
+  }
+  return open(path, ...args);
+};
+require("node:module").syncBuiltinESMExports();
+`,
+    );
+    const result = f.run(
+      "generate-in-scope-files",
+      ["--scope", ".", "--diff-base", base, "--diff-mode", "local-patch"],
+      {
+        ...f.toolEnvironment,
+        NODE_OPTIONS: `${f.toolEnvironment["NODE_OPTIONS"] ?? ""} --require ${JSON.stringify(preload)}`,
+      },
+    );
+    expect(result.status, result.stderr).toBe(0);
+    expect(readFileSync(f.out, "utf8")).toBe("safe.py\n");
+    expect(readFileSync(marker, "utf8")).toBe("untouched");
+  },
+);
+
 test("local diff inventory skips unreadable files", () => {
   const f = fixture();
   f.write("tracked.py");
