@@ -492,39 +492,43 @@ for (const command of [
   "make-repo-rank-input",
 ])
   for (const status of [126, 127])
-    for (const rawHome of [false, true]) {
-      test.skipIf(process.platform === "win32")(
-        `${command} preserves a launched ripgrep wrapper's exit ${status}${rawHome ? " with raw HOME" : ""}`,
-        () => {
-          const f = fixture();
-          rmSync(join(f.repo, ".git"), { recursive: true });
-          f.write("scope/visible.py");
-          const first = join(f.root, "first");
-          mkdirSync(first);
-          writeFileSync(
-            join(first, "rg"),
-            `#!/bin/sh\nprintf "synthetic tool failure\\n" >&2\nexit ${status}\n`,
-            { mode: 0o700 },
-          );
-          writeFileSync(f.out, "previous\n");
-          const result = runPathInventory(
-            f,
-            command,
-            {
-              ...f.toolEnvironment,
-              PATH: `${first}${delimiter}${f.toolEnvironment["PATH"] ?? ""}`,
-              CODEX_SECURITY_GIT: "",
-            },
-            rawHome,
-          );
-          expect(result.status).toBe(
-            command === "generate-in-scope-files" ? 2 : 1,
-          );
-          expect(result.stderr).toContain("synthetic tool failure");
-          expect(readFileSync(f.out, "utf8")).toBe("previous\n");
-        },
-      );
-    }
+    for (const rawHome of [false, true])
+      for (const shebang of [false, true]) {
+        test.skipIf(process.platform === "win32")(
+          `${command} preserves a launched ripgrep wrapper's exit ${status}${rawHome ? " with raw HOME" : ""}${shebang ? "" : " without a shebang"}`,
+          () => {
+            const f = fixture();
+            rmSync(join(f.repo, ".git"), { recursive: true });
+            f.write("scope/visible.py");
+            const first = join(f.root, "first");
+            mkdirSync(first);
+            writeFileSync(
+              join(first, "rg"),
+              `${shebang ? "#!/bin/sh\n" : ""}printf "synthetic tool failure\\n\\00000000000-0000-4000-8000-000000000000\\000127\\000\\n" >&2\nexit ${status}\n`,
+              { mode: 0o700 },
+            );
+            writeFileSync(f.out, "previous\n");
+            const result = runPathInventory(
+              f,
+              command,
+              {
+                ...f.toolEnvironment,
+                PATH: `${first}${delimiter}${f.toolEnvironment["PATH"] ?? ""}`,
+                CODEX_SECURITY_GIT: "",
+              },
+              rawHome,
+            );
+            expect(result.status).toBe(
+              command === "generate-in-scope-files" ? 2 : 1,
+            );
+            expect(result.stderr).toContain("synthetic tool failure");
+            expect(result.stderr).toContain(
+              "\u000000000000-0000-4000-8000-000000000000\u0000127\u0000",
+            );
+            expect(readFileSync(f.out, "utf8")).toBe("previous\n");
+          },
+        );
+      }
 
 for (const tool of ["git", "rg"])
   for (const rawHome of [false, true])
@@ -543,11 +547,11 @@ for (const tool of ["git", "rg"])
         writeFileSync(
           wrapper,
           `#!/bin/sh
-if ( : >&3 ) 2>/dev/null; then
-  state=inherited
-else
-  state=closed
-fi
+state=closed
+for fd in /dev/fd/*; do
+  case "$fd" in /dev/fd/0|/dev/fd/1|/dev/fd/2) continue;; esac
+  if [ -p "$fd" ] || [ -S "$fd" ]; then state=inherited; fi
+done
 printf '%s' "$state" > '${descriptor.replaceAll("'", "'\\''")}'
 exec '${executable!.replaceAll("'", "'\\''")}' "$@"
 `,

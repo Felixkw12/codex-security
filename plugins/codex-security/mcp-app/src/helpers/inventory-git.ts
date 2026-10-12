@@ -7,13 +7,13 @@ import {
   type SpawnOptions,
   type ChildProcessWithoutNullStreams,
 } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import type { Writable } from "node:stream";
 import {
   basename,
   dirname,
   delimiter,
   isAbsolute,
-  relative,
   resolve,
   sep,
 } from "node:path";
@@ -193,7 +193,7 @@ function spawnTool(
   if (!values.some(rawToolValue))
     return {
       child: spawn(command, args, { ...options, stdio }),
-      execFailure: undefined,
+      failureMarker: undefined,
     };
   if (windows) {
     const binary = createRequire(import.meta.url).resolve(
@@ -201,7 +201,7 @@ function spawnTool(
     );
     return {
       child: spawnWindowsProcess(binary, command, args, options, environment),
-      execFailure: undefined,
+      failureMarker: undefined,
     };
   }
   // Node encodes argv/cwd as UTF-8. POSIX sh can reconstruct raw filename bytes
@@ -214,7 +214,8 @@ function spawnTool(
       .join("");
     return `value=$(printf '%b.' '${octal}'); value=\${value%.}`;
   };
-  const statusFd = stdio.length;
+  const failureMarker = `\0${randomUUID()}\0`;
+  const reportFailure = `printf '${failureMarker.replaceAll("\0", "\\000")}' >&2`;
   const script = [
     "set --",
     ...Object.entries(environment).flatMap(([name, value]) => [
@@ -228,14 +229,16 @@ function spawnTool(
     ...(typeof options.cwd === "string"
       ? [assign(options.cwd), 'cd -P -- "$value" || exit']
       : []),
-    // A successful exec clears the trap. Report bridge failures separately from
-    // the launched program's exit status, which may also be 126 or 127.
-    // Bash (macOS /bin/sh) otherwise skips EXIT traps when exec fails.
+    // Only a failed exec emits this launch-specific frame. A tool may itself
+    // exit 126/127, and a separate status pipe can leak through shell redirects.
     'if [ -n "${BASH_VERSION:-}" ]; then shopt -s execfail; fi',
-    `trap 'printf "%s" "$?" >&${statusFd}' 0`,
-    // Restore the status pipe for a failed exec, but do not pass it to the tool
-    // or its descendants, which could otherwise keep child.close pending.
-    `{ exec "$@"; } ${statusFd}>&-`,
+    `trap "${reportFailure}" 0`,
+    'exec "$@"',
+    // Bash 3.2 clears EXIT traps on failed exec; dash exits through the trap.
+    "status=$?",
+    "trap - 0",
+    reportFailure,
+    'exit "$status"',
   ].join("\n");
   // Loader settings belong to the tool: decoded raw values can fail at shell
   // startup, and macOS system shells also strip ordinary DYLD_* values.
@@ -245,9 +248,9 @@ function spawnTool(
     ...options,
     env,
     cwd: undefined,
-    stdio: [...stdio, "pipe"],
+    stdio,
   });
-  return { child, execFailure: child.stdio[statusFd] };
+  return { child, failureMarker };
 }
 
 function inheritedToolPaths(additional: string[] = []): Record<string, string> {
@@ -357,27 +360,33 @@ export async function runTool(
 
 async function collect({
   child,
-  execFailure: statusPipe,
+  failureMarker,
 }: ReturnType<typeof spawnTool>): Promise<ToolResult> {
   const stdout: Buffer[] = [],
     stderr: Buffer[] = [];
-  let execFailure = "";
-  statusPipe?.on("data", (chunk: Buffer) => (execFailure += chunk));
   child.stdout!.on("data", (chunk: Buffer) => stdout.push(chunk));
   child.stderr!.on("data", (chunk: Buffer) => stderr.push(chunk));
   await new Promise<void>((resolve, reject) => {
     child.once("error", reject);
     child.once("close", () => resolve());
   });
-  if (execFailure)
-    throw Object.assign(new Error(Buffer.concat(stderr).toString("utf8")), {
-      code: execFailure === "127" ? "ENOENT" : "EACCES",
-    });
+  const diagnostic = Buffer.concat(stderr);
+  const start = failureMarker ? diagnostic.indexOf(failureMarker) : -1;
+  if (start >= 0)
+    throw Object.assign(
+      new Error(
+        Buffer.concat([
+          diagnostic.subarray(0, start),
+          diagnostic.subarray(start + failureMarker!.length),
+        ]).toString("utf8"),
+      ),
+      { code: child.exitCode === 127 ? "ENOENT" : "EACCES" },
+    );
   return {
     status: child.exitCode,
     signal: child.signalCode,
     stdout: Buffer.concat(stdout),
-    stderr: Buffer.concat(stderr).toString("utf8"),
+    stderr: diagnostic.toString("utf8"),
   };
 }
 
