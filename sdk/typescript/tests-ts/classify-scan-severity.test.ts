@@ -824,9 +824,23 @@ test("classifying another scan preserves both recurring-finding assessments", as
     rubricPath: first.rubricPath,
     codex,
   };
-  await classifyScanDirectorySeverity(first.scanDirectory, options);
-  await classifyScanDirectorySeverity(second.scanDirectory, options);
-  expect(calls).toHaveLength(4);
+  const firstResult = await classifyScanDirectorySeverity(
+    first.scanDirectory,
+    options,
+  );
+  expect(calls).toEqual(first.findings.map((finding) => finding.findingId));
+  const secondResult = await classifyScanDirectorySeverity(
+    second.scanDirectory,
+    options,
+  );
+  expect(calls).toEqual(first.findings.map((finding) => finding.findingId));
+  expect(secondResult.scanId).toBe(manifest.scan.id);
+  expect(secondResult.assessments).toEqual(
+    firstResult.assessments.map((assessment, index) => ({
+      ...assessment,
+      occurrenceId: `occ_${sha256([manifest.scan.id, first.findings[index]!.fingerprints.primary].join("\0")).slice(0, 24)}`,
+    })),
+  );
   calls.length = 0;
   for (const scan of [first, second, first, second]) {
     expect(
@@ -837,7 +851,12 @@ test("classifying another scan preserves both recurring-finding assessments", as
         })
       ).issues,
     ).toHaveLength(2);
-    await classifyScanDirectorySeverity(scan.scanDirectory, options);
+    expect(
+      (await classifyScanDirectorySeverity(scan.scanDirectory, options))
+        .assessments,
+    ).toEqual(
+      scan === first ? firstResult.assessments : secondResult.assessments,
+    );
   }
   expect(calls).toEqual([]);
 });

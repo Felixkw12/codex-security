@@ -465,6 +465,85 @@ for (const status of ["canceled", "failed"]) {
   });
 }
 
+for (const operation of ["cancel", "fail", "canceled", "failed"]) {
+  test(`native ${operation} retains published results when lock release fails`, async (t) => {
+    const rejoin = operation === "canceled" || operation === "failed";
+    const scan = {
+      scanId: "synthetic-parent",
+      scanDir: "/synthetic/scan",
+      mode: "deep",
+      handoffClaimToken: "synthetic-claim",
+      progress: { status: rejoin ? operation : "running" },
+      failureMessage: "Synthetic original failure.",
+      findings: ["synthetic-retained-finding"],
+      usage: { inputTokens: 100, outputTokens: 10 },
+      cost: { estimatedUsd: 0.25 },
+      warnings: ["Synthetic retained publication warning"],
+    };
+    const releaseError = new Error(
+      "Cannot close scan execution lock (Windows error 6).",
+    );
+    const warnings = [];
+    t.mock.method(console, "warn", (...args) => warnings.push(args));
+    let publications = 0;
+    let releases = 0;
+    const server = serverFor({
+      stateDirectory: "/synthetic/state",
+      async cancel() {},
+      async waitForScanExecution() {
+        return () => {
+          releases++;
+          throw releaseError;
+        };
+      },
+      async workbench([command]) {
+        if (command === "list-scans") return {};
+        if (command === "resolve-scan-root")
+          return { scanRoot: "/synthetic/scans" };
+        if (command === "preserve-scan-results") publications++;
+        return {
+          scan,
+          workspace: { setup: { submitted: true }, results: scan },
+        };
+      },
+      async run() {
+        assert.fail("Terminal scans cannot launch a runner");
+      },
+    });
+    const result = await server.tools.get(
+      rejoin
+        ? "start_codex_security_deep_scan"
+        : `${operation}_codex_security_scan`,
+    )(
+      {
+        scanId: scan.scanId,
+        handoffClaimToken: scan.handoffClaimToken,
+        message: scan.failureMessage,
+      },
+      nativeMeta,
+    );
+    assert.equal(result.isError === true, operation === "failed");
+    if (rejoin) {
+      assert.equal(result.structuredContent.status, operation);
+      if (operation === "failed")
+        assert.match(result.content[0].text, /Synthetic original failure/);
+      for (const key of ["usage", "cost", "warnings"])
+        assert.deepEqual(result.structuredContent[key], scan[key]);
+    } else {
+      assert.deepEqual(
+        operation === "cancel"
+          ? result.structuredContent.workspace.results
+          : result.structuredContent.scan,
+        scan,
+      );
+    }
+    assert.equal(publications, 1);
+    assert.equal(releases, 1);
+    assert.equal(warnings.length, 1);
+    assert.equal(warnings[0][1], releaseError);
+  });
+}
+
 for (const completed of [false, true]) {
   test(`native completion returns sealed accounting (rejoin=${completed})`, async () => {
     const metadata = {

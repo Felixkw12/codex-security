@@ -2179,7 +2179,16 @@ async function finalizeNativeStoppedScan(
       ),
     ]);
   } finally {
-    release?.();
+    try {
+      release?.();
+    } catch (error) {
+      try {
+        console.warn(
+          "Could not release the native scan execution lock:",
+          error,
+        );
+      } catch {}
+    }
   }
 }
 
