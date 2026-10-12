@@ -21,6 +21,7 @@ import {
   runWorkflow,
 } from "./cli-patch-fixtures.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
+import { patchSnapshotEnvironment } from "./support/patch-snapshot-environment.js";
 
 const fixtures = createTemporaryDirectories(true);
 afterEach(fixtures.cleanup);
@@ -175,16 +176,19 @@ test("native snapshots retain Windows Git home fallbacks when HOME is unset", as
     HOMEDRIVE: parse(home).root.slice(0, -1),
     HOMEPATH: home.slice(parse(home).root.length - 1),
   };
-  const environment: NodeJS.ProcessEnv = {
-    ...process.env,
-    ...fallback,
-    HOME: undefined,
-    CODEX_HOME: home,
-    GIT_CONFIG_GLOBAL:
-      process.platform === "win32" ? undefined : join(home, ".gitconfig"),
-    GIT_CONFIG_SYSTEM: emptyConfig,
-    GIT_CONFIG_NOSYSTEM: "1",
-  };
+  const environment = patchSnapshotEnvironment(
+    await fixtures.create("patch-home-fallback-temp-"),
+    {
+      ...process.env,
+      ...fallback,
+      HOME: undefined,
+      CODEX_HOME: home,
+      GIT_CONFIG_GLOBAL:
+        process.platform === "win32" ? undefined : join(home, ".gitconfig"),
+      GIT_CONFIG_SYSTEM: emptyConfig,
+      GIT_CONFIG_NOSYSTEM: "1",
+    },
+  );
   const clean = join(root, "clean.cjs");
   await writeFile(
     clean,
@@ -262,7 +266,7 @@ test("native snapshots retain Windows Git home fallbacks when HOME is unset", as
     },
   });
   expect(outcome.exitCode, outcome.stderr).toBe(2);
-  expect(trees).toEqual([
+  expect(trees, outcome.stdout + outcome.stderr).toEqual([
     git("rev-parse", "HEAD^{tree}"),
     git("rev-parse", "HEAD^{tree}"),
   ]);
@@ -301,7 +305,10 @@ test
     git("add", ".");
     git("commit", "-m", "Synthetic LFS baseline");
     let storage = join(repository, ".git", "lfs");
-    const environment: NodeJS.ProcessEnv = { ...process.env, CODEX_HOME: home };
+    const environment = patchSnapshotEnvironment(
+      await fixtures.create("patch-first-lfs-temp-"),
+      { ...process.env, CODEX_HOME: home },
+    );
     if (
       mode === "selector" ||
       mode === "selector-include" ||
@@ -499,13 +506,16 @@ test.each([
     const cleanCommand = `node ${JSON.stringify(clean.replaceAll("\\", "/"))}`;
     const filterSettings = `[filter "synthetic-selector"]\n clean = ${JSON.stringify(cleanCommand)}\n`;
     await writeFile(filterConfig, filterSettings);
-    const environment: NodeJS.ProcessEnv = {
-      ...process.env,
-      HOME: home,
-      USERPROFILE: home,
-      XDG_CONFIG_HOME: home,
-      CODEX_HOME: home,
-    };
+    const environment = patchSnapshotEnvironment(
+      await fixtures.create("patch-native-config-temp-"),
+      {
+        ...process.env,
+        HOME: home,
+        USERPROFILE: home,
+        XDG_CONFIG_HOME: home,
+        CODEX_HOME: home,
+      },
+    );
     for (const name of Object.keys(environment))
       if (/^GIT_CONFIG(?:_|$)/iu.test(name)) delete environment[name];
     Object.assign(environment, {
@@ -662,7 +672,10 @@ test.each([
     expect(await readFile(join(repository, ".git", "index"))).toEqual(index);
     expect(git("diff", "--exit-code")).toBe("");
     expect(outcome.exitCode, outcome.stdout + outcome.stderr).toBe(2);
-    expect(JSON.parse(outcome.stdout).error.code).toBe("NO_PATCH_APPLIED");
+    expect(
+      JSON.parse(outcome.stdout).error.code,
+      outcome.stdout + outcome.stderr,
+    ).toBe("NO_PATCH_APPLIED");
     expect(snapshots).toBeGreaterThan(0);
     expect(trees).toHaveLength(2);
     expect(trees[1]).toBe(trees[0]);
@@ -689,24 +702,27 @@ test.each([
     await Promise.all([mkdir(repository), mkdir(home)]);
     const global = join(root, "empty-gitconfig");
     await writeFile(global, "");
-    const environment = {
-      PATH: process.env["PATH"],
-      ...(process.env["SystemRoot"] === undefined
-        ? {}
-        : { SystemRoot: process.env["SystemRoot"] }),
-      CODEX_HOME:
-        mode === "stored credentials" ? join(root, "absent-home") : home,
-      CODEX_SECURITY_STATE_DIR: state,
-      GIT_CONFIG_GLOBAL: global,
-      GIT_CONFIG_NOSYSTEM: "1",
-      ...(mode === "Git config tuple"
-        ? {
-            GIT_CONFIG_COUNT: "1",
-            GIT_CONFIG_KEY_0: "core.quotePath",
-            GIT_CONFIG_VALUE_0: "false",
-          }
-        : {}),
-    };
+    const environment = patchSnapshotEnvironment(
+      await fixtures.create("patch-prepared-context-temp-"),
+      {
+        PATH: process.env["PATH"],
+        ...(process.env["SystemRoot"] === undefined
+          ? {}
+          : { SystemRoot: process.env["SystemRoot"] }),
+        CODEX_HOME:
+          mode === "stored credentials" ? join(root, "absent-home") : home,
+        CODEX_SECURITY_STATE_DIR: state,
+        GIT_CONFIG_GLOBAL: global,
+        GIT_CONFIG_NOSYSTEM: "1",
+        ...(mode === "Git config tuple"
+          ? {
+              GIT_CONFIG_COUNT: "1",
+              GIT_CONFIG_KEY_0: "core.quotePath",
+              GIT_CONFIG_VALUE_0: "false",
+            }
+          : {}),
+      },
+    );
     const git = repositoryGit(repository);
     git("init", "--initial-branch=main");
     git("config", "user.name", "Synthetic User");
@@ -855,11 +871,14 @@ if(process.argv.includes("fail")){process.stderr.write("Synthetic Git failure de
   ).toBeGreaterThan(128 * 1024);
   const sandbox = {
     directory: repository,
-    environment: {
-      ...process.env,
-      CODEX_HOME: home,
-      SNAPSHOT_USER_FILTERED: "excluded",
-    },
+    environment: patchSnapshotEnvironment(
+      await fixtures.create("patch-binding-temp-"),
+      {
+        ...process.env,
+        CODEX_HOME: home,
+        SNAPSHOT_USER_FILTERED: "excluded",
+      },
+    ),
     gitEnvironment,
     profile: {
       extends: ":workspace",
@@ -1002,7 +1021,10 @@ process.stdout.write(input);
       "index",
     );
     const originalIndex = await readFile(index);
-    const environment = { ...process.env, CODEX_HOME: home };
+    const environment = patchSnapshotEnvironment(
+      await fixtures.create("patch-storage-temp-"),
+      { ...process.env, CODEX_HOME: home },
+    );
     const result = await runWorkflow(["patch", "Synthetic issue", "--json"], {
       currentDirectory: repository,
       environment,

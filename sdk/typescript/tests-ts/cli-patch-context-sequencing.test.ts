@@ -13,6 +13,7 @@ import {
   savedScan,
 } from "./cli-patch-fixtures.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
+import { patchSnapshotEnvironment } from "./support/patch-snapshot-environment.js";
 const fixtures = createTemporaryDirectories(true);
 afterEach(fixtures.cleanup);
 for (const policy of ["set", "exclude", "control"] as const) {
@@ -39,15 +40,18 @@ for (const policy of ["set", "exclude", "control"] as const) {
       await chmod(home, 0o700);
       const emptyConfig = join(home, "empty.gitconfig");
       await writeFile(emptyConfig, "");
-      const environment: NodeJS.ProcessEnv = {
-        ...process.env,
-        CODEX_HOME: home,
-        GIT_CONFIG: undefined,
-        GIT_CONFIG_GLOBAL: emptyConfig,
-        GIT_CONFIG_SYSTEM: emptyConfig,
-        GIT_CONFIG_NOSYSTEM: "1",
-        SNAPSHOT_STYLE: "host",
-      };
+      const environment = patchSnapshotEnvironment(
+        await fixtures.create("patch-policy-temp-"),
+        {
+          ...process.env,
+          CODEX_HOME: home,
+          GIT_CONFIG: undefined,
+          GIT_CONFIG_GLOBAL: emptyConfig,
+          GIT_CONFIG_SYSTEM: emptyConfig,
+          GIT_CONFIG_NOSYSTEM: "1",
+          SNAPSHOT_STYLE: "host",
+        },
+      );
       const effective =
         policy === "set" ? "policy" : policy === "exclude" ? "unset" : "host";
       await writeFile(

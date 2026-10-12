@@ -2906,15 +2906,20 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
             );
             return 0;
           },
-          onRepositoryCommand: (command, args) => {
+          onRepositoryCommand: (command, args, _cwd, options) => {
             if (command === "git" && args.includes("--absolute-git-dir"))
               return directory;
             commandStarted ||=
               (command !== "git" && args[1] !== "list") ||
               ["checkout", "commit", "push"].includes(args[0]!);
-            return status === "outside" && args.includes("--name-only")
-              ? "src/finding-1.ts\0"
-              : "";
+            if (command === "gh" && args[1] === "list") return "[]";
+            const output =
+              status === "outside" && args.includes("--name-only")
+                ? "src/finding-1.ts\0"
+                : "";
+            return options?.encoding === "base64"
+              ? Buffer.from(output).toString("base64")
+              : output;
           },
         },
       );

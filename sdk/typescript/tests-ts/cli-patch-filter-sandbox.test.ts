@@ -9,6 +9,7 @@ import {
   runWorkflow,
 } from "./cli-patch-fixtures.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
+import { patchSnapshotEnvironment } from "./support/patch-snapshot-environment.js";
 
 const fixtures = createTemporaryDirectories(true);
 afterEach(fixtures.cleanup);
@@ -40,7 +41,10 @@ test.each([
         ? 'windows = { sandbox = "unelevated" }\n'
         : "";
     await writeFile(join(home, "config.toml"), configuration);
-    const environment = { ...process.env, CODEX_HOME: home };
+    const environment = patchSnapshotEnvironment(
+      await fixtures.create("patch-filter-temp-"),
+      { ...process.env, CODEX_HOME: home },
+    );
     const script = (changed: boolean) => `const fs = require("node:fs");
 ${changed ? `try { fs.writeFileSync(${JSON.stringify(witness)}, "model-changed"); } catch (error) { if (error.code !== "EACCES" && error.code !== "EPERM" && error.code !== "EROFS") throw error; }` : ""}
 process.stdout.write(fs.readFileSync(0, "utf8").toUpperCase());\n`;
@@ -198,7 +202,10 @@ if (process.argv[2] === "fail") { process.stderr.write("Synthetic snapshot failu
   );
   const sandbox = {
     directory: repository,
-    environment: { ...process.env, CODEX_HOME: home },
+    environment: patchSnapshotEnvironment(
+      await fixtures.create("patch-profile-temp-"),
+      { ...process.env, CODEX_HOME: home },
+    ),
     profile: {
       extends: ":workspace",
       description: "Synthetic profile metadata. ".repeat(6000),
