@@ -3,6 +3,7 @@ import { dirname, isAbsolute, join, relative, sep, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual, parseArgs } from "node:util";
 import { parse as parseToml } from "smol-toml";
+import { parseTOML } from "toml-eslint-parser";
 import {
   readFile,
   normalizePath,
@@ -184,7 +185,18 @@ function metadata(path: string) {
 function readToml(path: string, required = false): Table {
   try {
     // TOML distinguishes integer capacities from floats, including 8 versus 8.0.
-    return parseToml(decodeUtf8(readFile(path)), { integersAsBigInt: true });
+    const source = decodeUtf8(readFile(path));
+    const result = parseToml(source, { integersAsBigInt: true });
+    // Check calendar syntax without changing smol-toml's value types or precision.
+    for (const token of parseTOML(source.replace(/^\uFEFF/, "")).tokens)
+      if (
+        (token.type === "LocalDate" ||
+          token.type === "LocalDateTime" ||
+          token.type === "OffsetDateTime") &&
+        token.value.startsWith("0000-")
+      )
+        throw new Error(`Invalid TOML date: ${token.value}`);
+    return result;
   } catch (error) {
     if (!required && (error as NodeJS.ErrnoException).code === "ENOENT")
       return {};
@@ -944,7 +956,7 @@ function evaluate(values: Options): Table {
 function expandOptionPrefixes(args: string[]): string[] {
   const names = [...optionNames, ...repeatedOptions, "help"];
   let terminated = false;
-  return args.map((argument) => {
+  const expanded = args.map((argument) => {
     if (argument === "--") terminated = true;
     if (terminated || !argument.startsWith("--")) return argument;
     const separator = argument.indexOf("=");
@@ -959,6 +971,24 @@ function expandOptionPrefixes(args: string[]): string[] {
       ? `--${matches[0]}${separator < 0 ? "" : argument.slice(separator)}`
       : argument;
   });
+  // argparse accepts negative-number-shaped strings as separate option values.
+  for (
+    let index = 0;
+    index < expanded.length && expanded[index] !== "--";
+    index++
+  ) {
+    const option = expanded[index]!;
+    const name = option.slice(2);
+    if (!option.startsWith("--") || !names.includes(name) || name === "help")
+      continue;
+    const value = expanded[index + 1];
+    const negative = value?.match(
+      /^-(?:\p{Decimal_Number}+|\p{Decimal_Number}*\.\p{Decimal_Number}+)\n?$/u,
+    );
+    if (negative && negative[0] === value)
+      expanded.splice(index, 2, `${expanded[index]}=${value}`);
+  }
+  return expanded;
 }
 
 export function configPreflightCommand(args: string[]): number {
