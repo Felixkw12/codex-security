@@ -10439,6 +10439,395 @@ describe("CodexSecurity orchestration", () => {
     );
   });
 
+  describe("inventory authority across source partitions", () => {
+    const progress = (
+      phase: ScanProgress["phase"],
+      filesCompleted: number,
+      filesTotal: number,
+    ): ScanProgress => ({ phase, filesCompleted, filesTotal });
+    const inventory = (total: number) => progress("discovery", 0, total);
+    type Value = string | ScanProgress | readonly ScanProgress[];
+    type Step =
+      | readonly [
+          "save" | "live" | "save-message" | "live-message",
+          string,
+          Value,
+        ]
+      | readonly ["worker" | "check" | "receipt", ScanProgress]
+      | readonly ["poll"];
+    type Scenario = {
+      name: string;
+      expected: ScanProgress;
+      steps: readonly Step[];
+      stopBeforeResolution?: boolean;
+    };
+    const text = (value: Value) =>
+      typeof value === "string"
+        ? value
+        : [value]
+            .flat()
+            .map((p) => progressMarker(p.phase, p.filesCompleted, p.filesTotal))
+            .join("\n");
+    const partitioned: Scenario[] = [6, 7].flatMap((total) =>
+      ["oversized", "without-oversized", "eligible-review"].flatMap((control) =>
+        Array.from({ length: 8 }, (_, partition) => {
+          const final = progress(
+            total === 6 ? "validation" : "reporting",
+            total === 6 ? 3 : 2,
+            total,
+          );
+          const rows = [
+            inventory(5),
+            progress("validation", 3, control === "eligible-review" ? 5 : 8),
+            inventory(total),
+            final,
+          ];
+          const steps: Step[] = [["worker", progress("attack_path", 6, 8)]];
+          for (const [index, row] of rows.entries()) {
+            if (!(control === "without-oversized" && index === 1))
+              steps.push(["save", `row-${index}`, row]);
+            if (index === rows.length - 1 || (partition & (1 << index)) !== 0)
+              steps.push(["poll"]);
+          }
+          return {
+            name: `${total}-file prefix (${control}, partition=${partition})`,
+            expected:
+              control === "eligible-review"
+                ? progress("validation", 3, 5)
+                : final,
+            steps,
+          };
+        }),
+      ),
+    );
+    const delayed: Scenario[] = [
+      {
+        name: "an exact message uses each source prefix once",
+        expected: progress("reporting", 2, 8),
+        steps: [
+          ["save", "initial", inventory(5)],
+          ["live", "initial", inventory(5)],
+          ["poll"],
+          [
+            "live-message",
+            "message",
+            [
+              progress("validation", 3, 8),
+              inventory(8),
+              progress("reporting", 2, 8),
+            ],
+          ],
+          [
+            "save-message",
+            "message",
+            [
+              progress("validation", 3, 8),
+              inventory(8),
+              progress("reporting", 2, 8),
+            ],
+          ],
+          ["poll"],
+          ["save", "anchor", "done"],
+          ["live", "anchor", "done"],
+        ] as const,
+      },
+      {
+        name: "bounded raw review uses its preceding scope",
+        expected: progress("validation", 2, 6),
+        steps: [
+          ["save", "initial", inventory(8)],
+          ["live", "initial", inventory(8)],
+          ["poll"],
+          [
+            "live",
+            "displayed",
+            [progress("threat_model", 0, 5), progress("validation", 3, 8)],
+          ],
+          ["save", "preceding", inventory(5)],
+          [
+            "save",
+            "original",
+            [progress("threat_model", 0, 5), progress("validation", 3, 8)],
+          ],
+          ["save", "later", inventory(6)],
+          ["save", "review", progress("validation", 2, 6)],
+          ["save", "anchor", "done"],
+          ["live", "anchor", "done"],
+        ] as const,
+      },
+      {
+        name: "admitted saved coverage before an unresolved command boundary",
+        expected: progress("reporting", 4, 8),
+        steps: [
+          ["live", "displayed", progress("validation", 3, 8)],
+          ["receipt", progress("reporting", 4, 8)],
+          ["poll"],
+          ["save", "anchor", "done"],
+          ["live", "anchor", "done"],
+          ["poll"],
+          ["save", "late inventory", inventory(5)],
+          ["save", "late review", progress("validation", 1, 5)],
+        ] as const,
+      },
+      ...[
+        { older: 5, current: 8, count: 1 },
+        { older: 8, current: 10, count: 3 },
+      ].flatMap(({ older, current, count }) =>
+        [false, true].map((reviewLocated) => {
+          const review = progress("validation", count, current);
+          const steps: Step[] = [
+            ["live", "older displayed", inventory(older)],
+            ["save", "older", inventory(older)],
+            ["poll"],
+            ["live", "current", inventory(current)],
+            ["live", reviewLocated ? "review" : "review displayed", review],
+            ["save", "current", inventory(current)],
+          ];
+          if (reviewLocated) steps.push(["save", "review", review]);
+          steps.push(["poll"], ["check", review]);
+          if (!reviewLocated) steps.push(["save", "review", review]);
+          steps.push(["save", "anchor", "done"], ["live", "anchor", "done"]);
+          return {
+            name: `accepted ${older}-to-${current} growth (review located=${reviewLocated})`,
+            expected: review,
+            steps,
+          };
+        }),
+      ),
+      ...["provisional", "without-zero", "exact-review"].map((control) => {
+        const review = progress("reporting", 3, 8);
+        const steps: Step[] = [
+          [
+            "live",
+            control === "exact-review" ? "review" : "review displayed",
+            review,
+          ],
+          ["save", "smaller", inventory(5)],
+        ];
+        if (control !== "without-zero")
+          steps.push(["save", "zero", progress("threat_model", 0, 5)]);
+        steps.push(
+          ["save", "current", inventory(8)],
+          ["poll"],
+          ["save", "review", review],
+          ["save", "anchor", "done"],
+          ["live", "anchor", "done"],
+        );
+        return {
+          name: `unpositioned review (${control})`,
+          expected: review,
+          steps,
+        };
+      }),
+      ...[
+        "repeated-zero",
+        "without-repeat",
+        "full-prefix",
+        "full-output",
+        "exact-command",
+      ].map((control) => {
+        const first = text(inventory(9));
+        const review = progress("validation", 3, 9);
+        const markers = [first, text(review)];
+        if (control !== "without-repeat") markers.push(first);
+        const prefixMarkers =
+          control === "full-prefix" ? markers.join("\n") : first;
+        const prefix =
+          prefixMarkers + "\n" + "h".repeat(32_743 - prefixMarkers.length - 1);
+        const middle =
+          control === "full-prefix"
+            ? "details" + "m".repeat(128)
+            : markers.slice(1).join("\n");
+        const output =
+          control === "full-output"
+            ? markers.join("\n")
+            : `${prefix}\n${middle}\n${commandTail}`;
+        const persisted = `${prefix}\n... command output truncated for persistence ...\n${commandTail}`;
+        return {
+          name: `command progress sequence (${control})`,
+          expected: review,
+          steps: [
+            [
+              "live",
+              control === "exact-command" ? "original" : "displayed",
+              output,
+            ],
+            [
+              "save",
+              "original",
+              control === "full-output" ? output : persisted,
+            ],
+            ["save", "smaller", inventory(5)],
+            ["save", "later", progress("reporting", 1, 5)],
+            ["save", "anchor", "done"],
+            ["live", "anchor", "done"],
+          ] as const,
+        };
+      }),
+    ].flatMap((scenario) =>
+      [false, true].map((stopBeforeResolution) => ({
+        ...scenario,
+        stopBeforeResolution,
+      })),
+    );
+    test.each(
+      [...partitioned, ...delayed].flatMap((scenario) =>
+        [false, true].map((workerFirst) => ({ ...scenario, workerFirst })),
+      ),
+    )(
+      "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution)",
+      async ({ steps, expected, workerFirst, stopBeforeResolution }) => {
+        const { root, repository, codexHome, scanDir } =
+          await scanDirectories();
+        const updates: ScanProgress[] = [];
+        const checkpoints: {
+          actual: ScanProgress | undefined;
+          expected: ScanProgress;
+        }[] = [];
+        let tracker: ScanCostTracker | undefined;
+        const originalStart = ScanCostTracker.prototype.start;
+        const starting = spyOn(
+          ScanCostTracker.prototype,
+          "start",
+        ).mockImplementation(function (
+          this: ScanCostTracker,
+          threadId: string,
+        ) {
+          originalStart.call(this, threadId);
+          if (threadId === "thread-1") tracker = this;
+        });
+        let parentPath = "",
+          workerPath = "";
+        const originalReaddir = fsPromises.readdir;
+        const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
+          ...args: Parameters<typeof originalReaddir>
+        ) => {
+          const entries = await originalReaddir(...args);
+          if (String(args[0]) !== dirname(parentPath)) return entries;
+          const first = basename(workerFirst ? workerPath : parentPath);
+          return entries.toSorted(
+            (left, right) =>
+              Number(String(right.name) === first) -
+              Number(String(left.name) === first),
+          );
+        }) as typeof originalReaddir);
+        const client = TestClient.withDependencies({
+          ...scanRuntimeDependencies(codexHome, scanDir),
+          runWorkbench: async (
+            _options: unknown,
+            args: readonly string[],
+            input?: string,
+          ): Promise<JsonObject> =>
+            args[0] === "register-cli-scan"
+              ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+              : mockWorkbench(args, input),
+          createCodex: codexFactory(async () => {
+            await copyCompletedScan(root);
+            parentPath = await writeUsageSession(codexHome, "thread-1", {});
+            workerPath = await writeUsageSession(
+              codexHome,
+              "worker-thread",
+              {},
+              { parent: "thread-1" },
+            );
+            async function* events(): AsyncGenerator<ThreadEvent> {
+              expect(tracker).toBeDefined();
+              await tracker!.stop();
+              const resolution = steps.findLastIndex(
+                (step) => step[0] === "live" && step[1] === "anchor",
+              );
+              for (const [index, step] of steps.entries()) {
+                if (stopBeforeResolution && index === resolution) {
+                  await tracker!.stop();
+                  await tracker!.refresh();
+                }
+                if (step[0] === "poll") await tracker!.refresh();
+                else if (step[0] === "check")
+                  checkpoints.push({
+                    actual: updates.at(-1),
+                    expected: step[1],
+                  });
+                else if (step[0] === "live-message")
+                  yield {
+                    type: "item.completed",
+                    item: {
+                      id: `item-${index}`,
+                      type: "agent_message",
+                      text: text(step[2]),
+                    },
+                  };
+                else if (step[0] === "save-message")
+                  await appendFile(
+                    parentPath,
+                    jsonLines([
+                      {
+                        type: "event_msg",
+                        payload: {
+                          type: "item_completed",
+                          item: {
+                            type: "AgentMessage",
+                            id: `native-${index}`,
+                            content: [{ type: "Text", text: text(step[2]) }],
+                          },
+                        },
+                      },
+                    ]) + "\n",
+                  );
+                else if (step[0] === "live")
+                  yield completedCommand(
+                    step[1],
+                    text(step[2]),
+                    `item-${index}`,
+                  );
+                else if (step[0] === "save")
+                  await appendFile(
+                    parentPath,
+                    jsonLines([
+                      nativeCommand(step[1], text(step[2]), `native-${index}`),
+                    ]) + "\n",
+                  );
+                else
+                  await appendFile(
+                    step[0] === "receipt" ? parentPath : workerPath,
+                    jsonLines([
+                      {
+                        type: "response_item",
+                        payload: {
+                          type: "custom_tool_call_output",
+                          call_id: `worker-${index}`,
+                          output: text(step[1]),
+                        },
+                      },
+                    ]) + "\n",
+                  );
+              }
+              await tracker!.refresh();
+              await tracker!.refresh();
+              await tracker!.stop();
+            }
+            return { events: completedEvents("thread-1", events()) };
+          }),
+        });
+        try {
+          await client.run(repository, {
+            onProgress: (update) => updates.push(update),
+          });
+          expect(updates.at(-1)).toEqual(expected);
+          for (const checkpoint of checkpoints)
+            expect(checkpoint.actual).toEqual(checkpoint.expected);
+          const settled = [...updates];
+          await tracker!.refresh();
+          await tracker!.stop();
+          expect(updates).toEqual(settled);
+        } finally {
+          await client.close();
+          starting.mockRestore();
+          listing.mockRestore();
+        }
+      },
+    );
+  });
+
   describe("source eligibility and applied progress", () => {
     const progress = (
       phase: ScanProgress["phase"],
