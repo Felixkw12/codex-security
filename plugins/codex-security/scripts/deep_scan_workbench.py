@@ -2399,14 +2399,17 @@ def final_deep_scan_reducer(connection: sqlite3.Connection, scan_id: str) -> sql
         "SELECT workers.*, attempts.accepted_result_path, attempts.accepted_result_sha256 "
         "FROM deep_scan_workers AS workers LEFT JOIN deep_scan_attempts AS attempts "
         "ON attempts.worker_id = workers.id AND attempts.attempt = workers.attempt "
+        "LEFT JOIN deep_scan_merge_claims AS own_claim "
+        "ON own_claim.worker_id = workers.id AND own_claim.scan_id = workers.scan_id "
         "WHERE workers.scan_id = ? AND workers.kind = 'dedup' AND workers.status = 'succeeded' "
         "AND NOT EXISTS (SELECT 1 FROM deep_scan_merge_claims AS claims "
         "JOIN deep_scan_workers AS successor ON successor.id = claims.worker_id "
         "WHERE claims.previous_worker_id = workers.id AND claims.scan_id = workers.scan_id "
         "AND successor.scan_id = workers.scan_id AND successor.kind = 'dedup' "
         "AND successor.status = 'succeeded') "
-        # Legacy reducers retain the producer's completion and insertion order.
-        "ORDER BY workers.completed_at DESC, workers.rowid DESC LIMIT 1",
+        # Committed claims supersede legacy aggregates; legacy-only runs retain their order.
+        "ORDER BY (own_claim.worker_id IS NOT NULL) DESC, "
+        "workers.completed_at DESC, workers.rowid DESC LIMIT 1",
         (scan_id,),
     ).fetchone()
 

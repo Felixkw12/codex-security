@@ -18,6 +18,7 @@ import pytest
         ("later", "failed"),
         ("legacy", "succeeded"),
         ("legacy-tied", "succeeded"),
+        ("legacy-earlier", "succeeded"),
     ],
 )
 def test_final_selection_follows_committed_reducer_chain(
@@ -197,6 +198,8 @@ def test_final_selection_follows_committed_reducer_chain(
         ).fetchone()
         if timing == "later":
             clock[0] = "2030-01-01T00:00:03Z"
+        elif timing == "legacy-earlier":
+            clock[0] = "2030-01-01T00:00:00Z"
         expected_worker = worker(3, [worker(4)])
         claim = workbench_db.execute(
             "SELECT * FROM deep_scan_merge_claims WHERE worker_id = ?", (expected_worker,)
