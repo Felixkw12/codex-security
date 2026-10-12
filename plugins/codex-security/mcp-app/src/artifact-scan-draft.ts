@@ -2,11 +2,14 @@ import type { JsonObject } from "./types.js";
 import { isRecord as isObject, isNonEmptyString } from "./record.js";
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { basename, dirname, join, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, posix, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type * as z from "zod/v4";
 import commonSchema from "../../schemas/definitions/artifact-common.schema.json";
 import scanDraftDocument from "../../schemas/tools/scan-draft.schema.json";
+import scanManifestDocument from "../../schemas/scan-manifest.schema.json";
+import coverageDocument from "../../schemas/coverage.schema.json";
+import findingsDocument from "../../schemas/findings.schema.json";
 import type { ArtifactContext } from "./artifact-context.js";
 import type { RunArtifactWorkbench } from "./artifact-context.js";
 import {
@@ -78,6 +81,68 @@ export const scanDraftInputSchema = loadArtifactZodSchema(
   "scanDraftInput",
 ) as z.ZodType<ScanDraftInput>;
 
+// Keep draft completion/host-field handling, using canonical persisted field rules.
+const canonicalScanDraftInputSchema = loadArtifactZodSchema(
+  [
+    commonSchema,
+    {
+      ...scanDraftDocument,
+      $defs: {
+        ...scanManifestDocument.$defs,
+        ...findingsDocument.$defs,
+        ...scanDraftDocument.$defs,
+        scanId: scanManifestDocument.properties.scan.properties.id,
+        scope: {
+          ...scanDraftDocument.$defs.scope,
+          properties:
+            scanManifestDocument.properties.scan.properties.scope.properties,
+        },
+        threatModel:
+          scanManifestDocument.properties.scan.properties.threatModel,
+        finding: {
+          ...scanDraftDocument.$defs.finding,
+          properties: findingsDocument.properties.findings.items.properties,
+        },
+        coverage: {
+          ...scanDraftDocument.$defs.coverage,
+          properties: {
+            ...coverageDocument.properties,
+            surfaces: {
+              ...coverageDocument.properties.surfaces,
+              items: {
+                ...coverageDocument.properties.surfaces.items,
+                required: scanDraftDocument.$defs.surface.required,
+              },
+            },
+            deferred: {
+              ...coverageDocument.properties.deferred,
+              items: {
+                ...coverageDocument.properties.deferred.items,
+                required:
+                  scanDraftDocument.$defs.coverage.properties.deferred.items
+                    .required,
+              },
+            },
+            // String questions are normalized by the finalizer after admission.
+            openQuestions: {
+              ...coverageDocument.properties.openQuestions,
+              items: {
+                anyOf: [
+                  scanDraftDocument.$defs.coverage.properties.openQuestions
+                    .items.anyOf[0],
+                  coverageDocument.properties.openQuestions.items,
+                ],
+              },
+            },
+          },
+        },
+      },
+    },
+  ] as SchemaDocument[],
+  scanDraftDocument.$id,
+  "scanDraftInput",
+) as z.ZodType<ScanDraftInput>;
+
 export const completedScanInputSchema = loadArtifactZodSchema(
   schemaDocuments,
   scanDraftDocument.$id,
@@ -123,7 +188,14 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
     );
     const target = buildTarget(context, contract, trustedTarget);
     const scope = buildScope(context, trustedScope, reconciled.scope);
-    const findings = buildFindings(reconciled.findings, context.mode);
+    const scopedFindings =
+      context.mode === "deep"
+        ? findingsWithinScope(
+            reconciled.findings,
+            scope.includePaths as string[],
+          )
+        : reconciled.findings;
+    const findings = buildFindings(scopedFindings, context.mode);
     const coverage = buildCoverage(
       context,
       contract,
@@ -147,7 +219,9 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
       coverage,
       manifest: { scan: manifestScan },
     };
-    const checkpoint = finalDeepDraft ? reconciled : parsed;
+    const checkpoint = finalDeepDraft
+      ? { ...reconciled, findings: scopedFindings }
+      : parsed;
     const expectedDigest = preserved.previousDigest;
     let documentWarnings: string[] | undefined;
     const checkpointPath = await artifactDestination(
@@ -262,20 +336,14 @@ export async function recordCodexSecurityWorkerScanDraft(
     );
   }
 
-  const scope = context.scope;
-  let scoped =
-    scope && scope !== "."
-      ? {
-          ...parsed,
-          findings: parsed.findings.filter((finding) =>
-            (finding.locations as JsonObject[]).some((location) => {
-              const path = (location.path as string).replace(/^\.\//u, "");
-              return path === scope || path.startsWith(`${scope}/`);
-            }),
-          ),
-        }
-      : parsed;
+  const includePaths = context.includePaths ?? [context.scope || "."];
+  let scoped = {
+    ...parsed,
+    findings: findingsWithinScope(parsed.findings, includePaths),
+  };
   scoped = (await preserveScanDraft(context, scoped)).input;
+  // Older checkpoints predate the coordinator's requested-path binding.
+  scoped.findings = findingsWithinScope(scoped.findings, includePaths);
   const destination = await artifactDestination(
     context,
     ["result.json"],
@@ -296,6 +364,22 @@ export async function recordCodexSecurityWorkerScanDraft(
     status: "draft_written",
     ...(documentWarning === undefined ? {} : { warnings: [documentWarning] }),
   };
+}
+
+/** Keep findings with at least one location in the host's requested paths. */
+export function findingsWithinScope(
+  findings: JsonObject[],
+  includePaths: readonly string[],
+): JsonObject[] {
+  if (includePaths.includes(".")) return findings;
+  return findings.filter((finding) =>
+    (finding.locations as JsonObject[]).some((location) => {
+      const path = (location.path as string).replace(/^\.\//u, "");
+      return includePaths.some(
+        (scope) => path === scope || path.startsWith(`${scope}/`),
+      );
+    }),
+  );
 }
 
 /** Keep the semantic input before any replaceable worker or canonical artifact. */
@@ -1144,10 +1228,10 @@ async function readSavedCheckpoints(
       await readArtifactText(context, ["checkpoints", entry.name], label),
       label,
     );
-    const input =
-      kind === "current"
-        ? parsePersistedCheckpoint(draft)
-        : parsePersistedScanDraft(draft);
+    let input: ScanDraftInput;
+    if (kind === "archived") input = parsePersistedScanDraft(draft);
+    else if (context.layout === "scan") input = parseCanonicalCheckpoint(draft);
+    else input = parsePersistedCheckpoint(draft);
     if (kind === "archived") requireMatchingScan(context, input);
     else if (input.scanId !== context.scanId) {
       throw new Error(
@@ -1227,7 +1311,6 @@ async function readPreviousScanDraft(
     contents[2]!,
     "previous scan draft coverage",
   );
-  const scan = requireObject(manifest.scan, "previous scan draft.scan");
   return {
     digest,
     // File-authored coverage may leave its manifest unchanged; tool writes have a head.
@@ -1235,12 +1318,10 @@ async function readPreviousScanDraft(
       (await readCheckpointHead(context, "current")) === undefined
         ? saved[2]!.modifiedMs
         : Math.min(...saved.map((record) => record!.modifiedMs)),
-    input: parsePersistedCheckpoint({
+    input: parseCanonicalScanDraft({
       scanId: context.scanId,
-      ...(scan.complete === false ? { complete: false } : {}),
-      ...(isObject(scan.scope) ? { scope: scan.scope } : {}),
-      ...(isObject(scan.threatModel) ? { threatModel: scan.threatModel } : {}),
-      findings: findings.findings,
+      manifest,
+      findings,
       coverage,
     }),
   };
@@ -1766,8 +1847,83 @@ export async function getCodexSecurityCompletedScan(
   return { scanId: parsed.scanId, manifest, findings, coverage };
 }
 
+function safeRelativePath(value: string, context: string): string {
+  const parts = value.split("/");
+  if (
+    value.trim().length === 0 ||
+    Buffer.from(value, "utf8").toString("utf8") !== value ||
+    value === "." ||
+    value.startsWith("/") ||
+    /^[A-Za-z]:/.test(value) ||
+    parts.includes("..") ||
+    value.includes("\\") ||
+    /[\u0000-\u001f]/u.test(value)
+  ) {
+    throw new Error(`${context}: expected a safe scan-relative POSIX path.`);
+  }
+  const normalized = posix.normalize(value).replace(/\/+$/, "");
+  if (
+    normalized === "." ||
+    normalized.startsWith("../") ||
+    isAbsolute(normalized)
+  ) {
+    throw new Error(`${context}: expected a safe scan-relative POSIX path.`);
+  }
+  return normalized;
+}
+
+/** Admit canonical fields while retaining shared audit semantics and path safety. */
+export function parseCanonicalScanDraft(input: {
+  scanId?: string;
+  manifest: JsonObject;
+  findings: JsonObject;
+  coverage: JsonObject;
+}): ScanDraftInput {
+  const scan = requireObject(input.manifest.scan, "scan draft manifest.scan");
+  for (const scanId of [
+    scan.id,
+    input.findings.scanId,
+    input.coverage.scanId,
+  ]) {
+    if (scanId !== undefined && scanId !== input.scanId) {
+      throw new Error(
+        "scan draft: canonical documents belong to a different scan.",
+      );
+    }
+  }
+  return parseCanonicalCheckpoint({
+    scanId: input.scanId,
+    ...(scan.complete === undefined ? {} : { complete: scan.complete }),
+    ...(scan.scope === undefined ? {} : { scope: scan.scope }),
+    ...(scan.threatModel === undefined
+      ? {}
+      : { threatModel: scan.threatModel }),
+    findings: input.findings.findings,
+    coverage: input.coverage,
+  });
+}
+
+function parseCanonicalCheckpoint(
+  input: Record<string, unknown>,
+): ScanDraftInput {
+  const parsed = parsePersistedCheckpoint(input, canonicalScanDraftInputSchema);
+  for (const [index, finding] of parsed.findings.entries()) {
+    for (const field of ["locations", "codeEvidence"] as const) {
+      for (const [locationIndex, location] of (
+        (finding[field] as JsonObject[] | undefined) ?? []
+      ).entries()) {
+        safeRelativePath(
+          location.path as string,
+          `findings[${index}].${field}[${locationIndex}].path`,
+        );
+      }
+    }
+  }
+  return parsed;
+}
+
 export function parseScanDraft(input: ScanDraftInput): ScanDraftInput {
-  const parsed = parseScanDraftDocument(input);
+  const parsed = parseSemanticScanDraft(input, scanDraftInputSchema);
   const deferredIds = new Set<string>();
   const ambiguousIds = ambiguousGenericDeferredIds([parsed]);
   for (const row of parsed.coverage.deferred as JsonObject[]) {
@@ -1789,9 +1945,15 @@ export function parseScanDraft(input: ScanDraftInput): ScanDraftInput {
   return parsed;
 }
 
-function parseScanDraftDocument(input: unknown): ScanDraftInput {
-  const parsed = scanDraftInputSchema.parse(input);
-  validateFindingSemantics(parsed.findings);
+function parseSemanticScanDraft(
+  input: unknown,
+  schema: z.ZodType<ScanDraftInput>,
+): ScanDraftInput {
+  const parsed = schema.parse(input);
+  validateFindingSemantics(
+    parsed.findings,
+    schema !== canonicalScanDraftInputSchema,
+  );
   validateCoverageSemantics(parsed.coverage);
   return parsed;
 }
@@ -1800,19 +1962,24 @@ function parseScanDraftDocument(input: unknown): ScanDraftInput {
 export function parsePersistedScanDraft(
   input: Record<string, unknown>,
 ): ScanDraftInput {
-  const compatible = structuredClone(input);
-  if (!Array.isArray(compatible.findings)) {
-    return parseScanDraftDocument(compatible);
+  return parsePersistedDraft(structuredClone(input), scanDraftInputSchema);
+}
+
+function parsePersistedDraft(
+  compatible: Record<string, unknown>,
+  schema: z.ZodType<ScanDraftInput>,
+): ScanDraftInput {
+  if (Array.isArray(compatible.findings)) {
+    for (const finding of compatible.findings) {
+      if (isObject(finding)) normalizePersistedFindingDetails(finding);
+    }
   }
-  for (const finding of compatible.findings) {
-    if (!isObject(finding)) continue;
-    normalizePersistedFindingDetails(finding);
-  }
-  return parseScanDraftDocument(compatible);
+  return parseSemanticScanDraft(compatible, schema);
 }
 
 function parsePersistedCheckpoint(
   input: Record<string, unknown>,
+  schema = scanDraftInputSchema,
 ): ScanDraftInput {
   const compatible = structuredClone(input);
   if (isObject(compatible.scope)) {
@@ -1841,7 +2008,7 @@ function parsePersistedCheckpoint(
       delete finding.fingerprints;
     }
   }
-  return parsePersistedScanDraft(compatible);
+  return parsePersistedDraft(compatible, schema);
 }
 
 function normalizePersistedFindingDetails(finding: JsonObject): void {
@@ -2370,7 +2537,10 @@ function inventoryStrategy(
   return "repository";
 }
 
-function validateFindingSemantics(findings: JsonObject[]): void {
+function validateFindingSemantics(
+  findings: JsonObject[],
+  enforceLegacyEvidenceBounds: boolean,
+): void {
   for (const [findingIndex, finding] of findings.entries()) {
     const severity = finding.severity as JsonObject;
     if (
@@ -2412,6 +2582,7 @@ function validateFindingSemantics(findings: JsonObject[]): void {
         }
         evidenceIds.add(id);
         if (
+          (evidenceName === "codeEvidence" || enforceLegacyEvidenceBounds) &&
           typeof evidence.endLine === "number" &&
           evidence.endLine < (evidence.startLine as number)
         ) {
