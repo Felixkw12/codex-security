@@ -502,7 +502,10 @@ function timestampOrderKey(value: string): string {
   const whole = instant.toISOString().slice(0, -5);
   // An offset can carry a supported four-digit local year into UTC year 10000.
   const year = String(instant.getUTCFullYear()).padStart(5, "0");
-  const fraction = (match![2] ?? "").replace(/0+$/, "");
+  const digits = match![2] ?? "";
+  let fractionEnd = digits.length;
+  while (fractionEnd > 0 && digits[fractionEnd - 1] === "0") fractionEnd--;
+  const fraction = digits.slice(0, fractionEnd);
   return `${year}${whole.slice(whole.indexOf("-"))}${fraction ? `.${fraction}` : ""}`;
 }
 

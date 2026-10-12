@@ -1733,8 +1733,8 @@ test.each([
   ["0001-01-01T00:00:00Z", "0001-01-01T00:00:00.1Z"],
   ["9999-12-31T23:30:00Z", "9999-12-31T23:30:00-01:00"],
   [
-    `2099-01-01T00:00:00.${"0".repeat(4999)}1Z`,
-    `2099-01-01T00:00:00.${"0".repeat(4999)}2Z`,
+    `2099-01-01T00:00:00.${"0".repeat(100_000)}1Z`,
+    `2099-01-01T00:00:00.${"0".repeat(100_000)}2Z`,
   ],
   ["2099-01-01T00:00:00", "2099-01-01T01:00:00"],
 ] as const)(
@@ -1798,58 +1798,69 @@ test.each([false, true])(
   },
 );
 
-test("latest leaves unrelated malformed history to its own workbench scope", async () => {
-  const f = await fixture();
-  const unrelated = join(f.root, "unrelated");
-  await mkdir(join(unrelated, "src"), { recursive: true });
-  await writeFile(join(unrelated, "src", "extract.py"), "# Other fixture\n");
-  const other = await f.scan("other-scan", unrelated);
-  const db = new Database(
-    join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
-  );
-  try {
-    db.query(
-      "UPDATE scans SET updated_at = 'not-a-timestamp' WHERE id = ?",
-    ).run(other.scanId);
-    db.query(
-      "UPDATE scan_progress SET updated_at = 'not-a-timestamp' WHERE scan_id = ?",
-    ).run(other.scanId);
-  } finally {
-    db.close();
-  }
-  expect((await latestFor(f, f.repository)).scanId).toBe(f.second.scanId);
-});
-
-test("latest ties equivalent instants by start time, then binary scan ID", async () => {
-  const f = await fixture();
-  const [first, second] = [f.first, f.second].sort((a, b) =>
-    a.scanId < b.scanId ? -1 : 1,
-  );
-  const db = new Database(
-    join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
-  );
-  try {
-    for (const [scan, timestamp] of [
-      [first!, "2099-01-01T02:00:00.100+02:00"],
-      [second!, "2099-01-01T00:00:00.1Z"],
-    ] as const) {
-      db.query(
-        "UPDATE scans SET started_at = '2098-01-01T00:00:00Z', updated_at = ? WHERE id = ?",
-      ).run(timestamp, scan.scanId);
+test.each(["not-a-timestamp", `2099-01-01T00:00:00.${"0".repeat(100_000)}1Z`])(
+  "latest leaves unrelated history to its own workbench scope %#",
+  async (timestamp) => {
+    const f = await fixture();
+    const unrelated = join(f.root, "unrelated");
+    await mkdir(join(unrelated, "src"), { recursive: true });
+    await writeFile(join(unrelated, "src", "extract.py"), "# Other fixture\n");
+    const other = await f.scan("other-scan", unrelated);
+    const db = new Database(
+      join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+    );
+    try {
+      db.query("UPDATE scans SET updated_at = ? WHERE id = ?").run(
+        timestamp,
+        other.scanId,
+      );
       db.query("UPDATE scan_progress SET updated_at = ? WHERE scan_id = ?").run(
         timestamp,
-        scan.scanId,
+        other.scanId,
       );
+    } finally {
+      db.close();
     }
-    expect((await latestFor(f, f.repository)).scanId).toBe(first!.scanId);
-    db.query(
-      "UPDATE scans SET started_at = '2098-01-01T00:00:00.0001Z' WHERE id = ?",
-    ).run(second!.scanId);
-    expect((await latestFor(f, f.repository)).scanId).toBe(second!.scanId);
-  } finally {
-    db.close();
-  }
-});
+    expect((await latestFor(f, f.repository)).scanId).toBe(f.second.scanId);
+  },
+);
+
+test.each([
+  [".100", ".1"],
+  [".000", ""],
+  [`.${"0".repeat(100_000)}`, ""],
+])(
+  "latest ties equivalent instants by start time, then binary scan ID %#",
+  async (firstFraction, secondFraction) => {
+    const f = await fixture();
+    const [first, second] = [f.first, f.second].sort((a, b) =>
+      a.scanId < b.scanId ? -1 : 1,
+    );
+    const db = new Database(
+      join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+    );
+    try {
+      for (const [scan, timestamp] of [
+        [first!, `2099-01-01T02:00:00${firstFraction}+02:00`],
+        [second!, `2099-01-01T00:00:00${secondFraction}Z`],
+      ] as const) {
+        db.query(
+          "UPDATE scans SET started_at = '2098-01-01T00:00:00Z', updated_at = ? WHERE id = ?",
+        ).run(timestamp, scan.scanId);
+        db.query(
+          "UPDATE scan_progress SET updated_at = ? WHERE scan_id = ?",
+        ).run(timestamp, scan.scanId);
+      }
+      expect((await latestFor(f, f.repository)).scanId).toBe(first!.scanId);
+      db.query(
+        "UPDATE scans SET started_at = '2098-01-01T00:00:00.0001Z' WHERE id = ?",
+      ).run(second!.scanId);
+      expect((await latestFor(f, f.repository)).scanId).toBe(second!.scanId);
+    } finally {
+      db.close();
+    }
+  },
+);
 
 for (const removedComponent of [false, true]) {
   test.skipIf(process.platform === "win32")(
