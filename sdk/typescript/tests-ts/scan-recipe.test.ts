@@ -74,7 +74,7 @@ test.each([true, false])(
           if (args[0] === "register-cli-scan") {
             expect(
               (await readdir(savedHome)).filter((name) =>
-                name.endsWith(".config.toml"),
+                name.endsWith(".config.json"),
               ),
             ).toHaveLength(1);
             if (rejected) throw new Error("Synthetic registration rejected");
@@ -96,7 +96,7 @@ test.each([true, false])(
       await client.close();
       expect(
         (await readdir(savedHome)).filter((name) =>
-          name.endsWith(".config.toml"),
+          name.endsWith(".config.json"),
         ),
       ).toHaveLength(rejected ? 0 : 1);
     } finally {
@@ -108,7 +108,14 @@ test.each([true, false])(
 test.each(
   (["openrouter", "fireworks", "gateway"] as const).flatMap((provider) =>
     (["standard", "deep"] as const).flatMap((mode) =>
-      ["partial", "different-key", "model-only"].map((profileKind) => ({
+      [
+        "partial",
+        "different-key",
+        "model-only",
+        "clear-fields",
+        "clear-agent",
+        "clear-table",
+      ].map((profileKind) => ({
         provider,
         mode,
         profileKind,
@@ -132,7 +139,12 @@ test.each(
           : `[model_providers.${provider}]\n` +
             (profileKind === "partial"
               ? "request_max_retries=4\n"
-              : 'env_key="SYNTHETIC_OLD_PROVIDER_KEY"\n')),
+              : 'env_key="SYNTHETIC_OLD_PROVIDER_KEY"\n')) +
+        (profileKind.startsWith("clear-")
+          ? `[model_providers.${provider}.http_headers]\nX-Inherited="synthetic-inherited-header"\n` +
+            `[model_providers.${provider}.auth]\ncommand="synthetic-auth"\n` +
+            '[model_providers.agent]\nname="Inherited agent"\nwire_api="responses"\n'
+          : ""),
     );
     const python = Bun.which("python3") ?? Bun.which("python");
     if (python === null) throw new Error("Python is required for this test.");
@@ -163,7 +175,11 @@ test.each(
       ...standard,
       env_key: "SYNTHETIC_PROVIDER_KEY",
       base_url: customEndpoint,
-      http_headers: { "X-Synthetic-Credential": header },
+      http_headers:
+        profileKind === "clear-fields"
+          ? null
+          : { "X-Synthetic-Credential": header },
+      ...(profileKind.startsWith("clear-") ? { auth: null } : {}),
     };
     const alternateProvider = {
       name: "Synthetic agent provider",
@@ -171,15 +187,22 @@ test.each(
       env_key: "SYNTHETIC_AGENT_KEY",
       wire_api: "responses",
     };
-    const explicitProviders = {
-      [provider]: explicitProvider,
-      agent: alternateProvider,
-    };
+    const explicitProviders =
+      profileKind === "clear-table"
+        ? null
+        : {
+            [provider]: explicitProvider,
+            agent: profileKind === "clear-agent" ? null : alternateProvider,
+          };
     const overrides = {
       profile: "review",
-      model_provider: provider,
+      model_provider: profileKind === "clear-table" ? "openai" : provider,
       model_providers: explicitProviders,
     };
+    const initial = await mergedCodexConfig(
+      { codexOverrides: overrides },
+      home,
+    );
     let providerProfilePath: string | undefined;
     const client = new TestClient(
       {
@@ -193,24 +216,42 @@ test.each(
           deepScanConfigPath: join(runtimeHome, "deep-scan-config.toml"),
         }),
         resolvePluginPython: async () => python,
-        runWorkbench: async (_runtime, args, input) => command(args, input),
+        runWorkbench: async (_runtime, args, input) => {
+          if (mode === "deep" && args[0] === "fail-scan")
+            throw new Error("Synthetic disconnected workbench");
+          return command(args, input);
+        },
         createCodex: async (options) => {
-          expect(typeof options.nativeProfile).toBe("string");
-          providerProfilePath = join(
-            options.env!["CODEX_HOME"]!,
-            `${options.nativeProfile}.config.toml`,
-          );
-          expect(
-            parseToml(await readFile(providerProfilePath, "utf8")),
-          ).toMatchObject({
-            model_providers: {
-              [provider]: {
-                http_headers: { "X-Synthetic-Credential": header },
+          if (profileKind === "clear-table") {
+            expect(options.nativeProfile).toBeUndefined();
+          } else {
+            expect(typeof options.nativeProfile).toBe("string");
+            providerProfilePath = join(
+              options.env!["CODEX_HOME"]!,
+              `${options.nativeProfile}.config.toml`,
+            );
+            expect<unknown>(
+              parseToml(await readFile(providerProfilePath, "utf8")),
+            ).toEqual({
+              model_providers: resolveCodexProfile(initial)["model_providers"],
+            });
+          }
+          return {
+            startThread: () => ({
+              id: "synthetic-recipe-thread",
+              async runStreamed() {
+                return {
+                  events: (async function* () {
+                    yield {
+                      type: "thread.started" as const,
+                      thread_id: "synthetic-recipe-thread",
+                    };
+                    throw new Error("Synthetic stop after registration");
+                  })(),
+                };
               },
-              agent: alternateProvider,
-            },
-          });
-          throw new Error("Synthetic stop after registration");
+            }),
+          };
         },
       },
     );
@@ -233,18 +274,14 @@ test.each(
       expect(recipe.providerProfile.home).toBe("managed");
       const savedProfilePath = join(
         codexSecurityCredentialHome(environment),
-        `${recipe.providerProfile.name}.config.toml`,
+        `${recipe.providerProfile.name}.config.json`,
       );
       if (process.platform !== "win32")
         expect((await stat(savedProfilePath)).mode & 0o777).toBe(0o600);
       await client.close();
-      expect(parseToml(await readFile(savedProfilePath, "utf8"))).toEqual({
+      expect(JSON.parse(await readFile(savedProfilePath, "utf8"))).toEqual({
         model_providers: explicitProviders,
       });
-      const initial = await mergedCodexConfig(
-        { codexOverrides: overrides },
-        home,
-      );
       const replay = await mergedCodexConfig(
         {
           codexOverrides: await restoreProviderProfile(
@@ -256,26 +293,31 @@ test.each(
         home,
       );
       expect(replay["model_providers"]).toEqual(initial["model_providers"]);
-      const { runCli } = createCliTest(main);
+      const { runCli, stderr } = createCliTest(main);
       let replayOverrides: JsonObject | undefined;
-      expect(
-        await runCli(["scans", "rerun", scans[0]!.scanId, "--json"], {
-          ...dependencies({
-            environment,
-            currentDirectory: root,
-            onConfig: ({ codexOverrides }) => {
-              replayOverrides = codexOverrides;
-            },
+      for (const operation of mode === "deep"
+        ? ["rerun", "resume"]
+        : ["rerun"]) {
+        expect(
+          await runCli(["scans", operation, scans[0]!.scanId, "--json"], {
+            ...dependencies({
+              environment,
+              currentDirectory: root,
+              onConfig: ({ codexOverrides }) => {
+                replayOverrides = codexOverrides;
+              },
+            }),
+            runWorkbench: command,
           }),
-          runWorkbench: command,
-        }),
-      ).toBe(0);
-      expect(replayOverrides).toBeDefined();
-      expect(
-        (await mergedCodexConfig({ codexOverrides: replayOverrides }, home))[
-          "model_providers"
-        ],
-      ).toEqual(initial["model_providers"]);
+          `${operation}: ${stderr.text()}`,
+        ).toBe(0);
+        expect(replayOverrides).toBeDefined();
+        expect(
+          (await mergedCodexConfig({ codexOverrides: replayOverrides }, home))[
+            "model_providers"
+          ],
+        ).toEqual(initial["model_providers"]);
+      }
       await writeFile(
         join(home, "review.config.toml"),
         `model="synthetic-model"\nmodel_provider="${provider}"\n[model_providers.${provider}]\nrequest_max_retries=8\nbase_url="https://changed.example.invalid/"\n`,
@@ -284,10 +326,14 @@ test.each(
         (await mergedCodexConfig({ codexOverrides: replayOverrides }, home))[
           "model_providers"
         ],
-      ).toEqual({
-        [provider]: { ...explicitProvider, request_max_retries: 8 },
-        agent: alternateProvider,
-      });
+      ).toEqual(
+        explicitProviders === null
+          ? null
+          : {
+              [provider]: { ...explicitProvider, request_max_retries: 8 },
+              agent: profileKind === "clear-agent" ? null : alternateProvider,
+            },
+      );
       expect(JSON.stringify(recipe)).not.toContain(header);
       expect(JSON.stringify(recipe)).not.toContain(customEndpoint);
       expect(

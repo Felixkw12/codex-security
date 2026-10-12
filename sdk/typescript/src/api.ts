@@ -1730,12 +1730,16 @@ export class CodexSecurity {
         delete recipeConfig["model_providers"];
         const explicitProviders =
           this.config.codexOverrides?.["model_providers"];
-        if (options.resumeScanId === undefined && isRecord(explicitProviders)) {
+        if (
+          options.resumeScanId === undefined &&
+          (explicitProviders === null || isRecord(explicitProviders))
+        ) {
           savedProviderProfile = await createProviderProfile(
             codexSecurityCredentialHome(this.#dependencies.environment),
             {
-              model_providers: explicitProviders as JsonObject,
+              model_providers: explicitProviders as JsonObject | null,
             },
+            { replay: true },
           );
         }
       }

@@ -11,6 +11,7 @@ import {
   modelProviderConfigOverride,
   inlineToml,
   writeCodexConfig,
+  writePrivateConfig,
   type JsonObject,
 } from "./config.js";
 import { isRecord } from "./record.js";
@@ -66,11 +67,18 @@ export async function providerPreflightCommand(
 export async function createProviderProfile(
   codexHome: string,
   config: JsonObject,
-  options: Parameters<typeof requirePrivateCredentialHome>[2] = {},
+  options: Parameters<typeof requirePrivateCredentialHome>[2] & {
+    replay?: boolean;
+  } = {},
 ): Promise<ProviderProfile> {
-  const providers = resolveCodexProfile(config)["model_providers"];
+  const providers = options.replay
+    ? config["model_providers"]
+    : resolveCodexProfile(config)["model_providers"];
   const name = `codex_security_${randomUUID()}`;
-  const path = join(codexHome, `${name}.config.toml`);
+  const path = join(
+    codexHome,
+    `${name}.config.${options.replay ? "json" : "toml"}`,
+  );
   if ((options.platform ?? process.platform) === "win32") {
     await mkdir(codexHome, { recursive: true, mode: 0o700 });
     await requirePrivateCredentialHome(
@@ -79,9 +87,16 @@ export async function createProviderProfile(
       options,
     );
   }
-  await writeCodexConfig(path, {
-    model_providers: isRecord(providers) ? providers : {},
-  });
+  if (options.replay) {
+    await writePrivateConfig(
+      path,
+      JSON.stringify({ model_providers: providers }),
+    );
+  } else {
+    await writeCodexConfig(path, {
+      model_providers: isRecord(providers) ? providers : {},
+    });
+  }
   return { name, path, cleanup: () => rm(path, { force: true }) };
 }
 
@@ -110,19 +125,31 @@ export async function restoreProviderProfile(
       : codexSecurityCredentialHome(environment);
   if (profile["home"] === "managed")
     await requireSecureCredentialHome(codexHome);
-  const saved = parse(
-    await readFile(join(codexHome, `${profile["name"]}.config.toml`), "utf8"),
-  );
-  if (!isRecord(saved["model_providers"])) {
+  let saved: unknown;
+  try {
+    saved = JSON.parse(
+      await readFile(join(codexHome, `${profile["name"]}.config.json`), "utf8"),
+    );
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    saved = parse(
+      await readFile(join(codexHome, `${profile["name"]}.config.toml`), "utf8"),
+    );
+  }
+  if (
+    !isRecord(saved) ||
+    (!isRecord(saved["model_providers"]) && saved["model_providers"] !== null)
+  ) {
     throw new CodexSecurityError(
       "The saved provider profile contains no provider configuration.",
     );
   }
   return {
     ...config,
-    ...(Object.keys(saved["model_providers"]).length === 0
-      ? {}
-      : { model_providers: saved["model_providers"] as JsonObject }),
+    ...(saved["model_providers"] === null ||
+    Object.keys(saved["model_providers"]).length > 0
+      ? { model_providers: saved["model_providers"] as JsonObject | null }
+      : {}),
   };
 }
 
