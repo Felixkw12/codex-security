@@ -16,6 +16,7 @@ import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { brotliCompressSync, brotliDecompressSync, gzipSync } from "node:zlib";
 import { describe, expect, test } from "bun:test";
+import { runCommand } from "./support/shell.js";
 import {
   archive,
   cleanCompressedPayload,
@@ -513,7 +514,7 @@ describe("npm package tar listings", () => {
     "ordinary-pax-then-wrong-long-name",
     "ordinary-pax-then-correct-long-name",
     "ordinary-long-name-then-pax",
-  ])("validates archive assets as npm installs them: %s", (representation) => {
+  ])("validates assets as npm installs them: %s", async (representation) => {
     const root = mkdtempSync(join(tmpdir(), "codex-package-npm-sparse-"));
     try {
       const logo = readFileSync(
@@ -619,14 +620,14 @@ describe("npm package tar listings", () => {
       );
       const nativeRoot = join(root, "native");
       mkdirSync(nativeRoot);
-      const extracted = spawnSync(
+      const extracted = await runCommand(
         "tar",
         ["-xzf", archivePath, "-C", nativeRoot],
-        { encoding: "buffer", timeout: 30_000, windowsHide: true },
+        { timeout: 30_000, windowsHide: true },
       );
       expect({
         status: extracted.status,
-        stderr: extracted.stderr.toString(),
+        stderr: extracted.stderr,
       }).toEqual({ status: 0, stderr: "" });
       // These incompatible packages do not promise a portable native asset path.
       if (!wrongLongName)
@@ -719,7 +720,7 @@ describe("npm package tar listings", () => {
     "pax-full",
     "pax-path",
     "oldgnu-readme",
-  ])("validates the manifest npm installs: %s", (representation) => {
+  ])("validates the manifest npm installs: %s", async (representation) => {
     const root = mkdtempSync(join(tmpdir(), "codex-package-npm-manifest-"));
     try {
       const path = "package/package.json";
@@ -794,16 +795,15 @@ describe("npm package tar listings", () => {
       }
       const archivePath = join(root, "package.tgz");
       writeFileSync(archivePath, gzipSync(packageTar({ overrides })));
-      const extracted = spawnSync("tar", ["-xOzf", archivePath, path], {
-        encoding: "buffer",
+      const extracted = await runCommand("tar", ["-xOzf", archivePath, path], {
         timeout: 30_000,
         windowsHide: true,
       });
       expect({
         status: extracted.status,
-        stderr: extracted.stderr.toString(),
+        stderr: extracted.stderr,
       }).toEqual({ status: 0, stderr: "" });
-      expect(extracted.stdout.equals(manifest)).toBe(true);
+      expect(Buffer.from(extracted.stdout, "utf8").equals(manifest)).toBe(true);
       const environment: NodeJS.ProcessEnv = {
         ...process.env,
         npm_config_cache: join(root, "npm-cache"),
