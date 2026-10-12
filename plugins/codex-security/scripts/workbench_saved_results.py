@@ -1195,6 +1195,7 @@ def merge_saved_results(
             relative
             for draft in saved_parents.values()
             for relative in draft["previousParentCheckpoints"]
+            if isinstance(relative, str)
         }
         for relative, draft in saved_parents.items():
             if relative not in previous_parents:

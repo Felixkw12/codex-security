@@ -113,6 +113,43 @@ def checkpoint_scan():
     return scan_id, pending, closed, binding
 
 
+@pytest.mark.parametrize("ancestry", [[], [{}], [[]], ["unknown", None, 7, False, {}, []]])
+@pytest.mark.parametrize("has_ancestor", [False, True])
+def test_frozen_parent_replay_ignores_nonreference_ancestry(
+    tmp_path: Path, checkpoint_scan, ancestry: list, has_ancestor: bool
+) -> None:
+    scan_id, pending, _, binding = checkpoint_scan
+    previous = []
+    if has_ancestor:
+        older = saved_draft(scan_id, complete=False)
+        older["previousParentCheckpoints"] = []
+        older["coverage"]["openQuestions"] = [{"question": "Earlier parent question."}]
+        checkpoint = write_checkpoint(tmp_path / "checkpoints", older)
+        previous.append(checkpoint.relative_to(tmp_path).as_posix())
+        os.utime(checkpoint, ns=(100, 100))
+    pending["previousParentCheckpoints"] = [*previous, *ancestry]
+    checkpoint = write_checkpoint(tmp_path / "checkpoints", pending)
+    os.utime(checkpoint, ns=(200, 200))
+    originals = {path: path.read_bytes() for path in (tmp_path / "checkpoints").iterdir()}
+    warnings = []
+    first = saved.merge_saved_results(
+        tmp_path, scan_id, binding, [], warnings, stopped=True, reason="interrupted"
+    )
+    assert warnings == []
+    assert {path.relative_to(tmp_path).as_posix() for path in originals} <= first[0]["scan"][
+        "preservedSources"
+    ].keys()
+    replay = replay_saved_results(saved, first, tmp_path, scan_id, binding)
+    repeated = replay_saved_results(saved, replay, tmp_path, scan_id, binding)
+    for result in (first, replay, repeated):
+        assert pending["coverage"]["deferred"][0] in result[2]["deferred"]
+    assert replay[2] == repeated[2]
+    assert replay[0]["scan"]["complete"] is True
+    if has_ancestor:
+        assert replay[2]["openQuestions"] == older["coverage"]["openQuestions"]
+    assert all(path.read_bytes() == original for path, original in originals.items())
+
+
 @pytest.mark.parametrize("has_receipts", [False, True])
 @pytest.mark.parametrize("has_canonical", [False, True])
 def test_recovery_keeps_one_surface_with_optional_empty_receipts(
