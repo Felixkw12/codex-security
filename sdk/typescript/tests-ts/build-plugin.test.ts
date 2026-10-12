@@ -73,6 +73,9 @@ describe("bundled plugin build", () => {
     const source = new URL("../../../plugins/codex-security/", import.meta.url);
     await mkdir(native, { recursive: true });
     await mkdir(sdk, { recursive: true });
+    await cp(new URL("../src", import.meta.url), join(sdk, "src"), {
+      recursive: true,
+    });
     await symlink(
       fileURLToPath(new URL("../node_modules", import.meta.url)),
       join(sdk, "node_modules"),
