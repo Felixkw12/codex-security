@@ -338,6 +338,13 @@ test.each([
       filtered,
     })),
   ),
+  ...["set", "unset", "empty"].flatMap((state) =>
+    [false, true].map((filtered) => ({
+      selector: "GIT_ATTR_NOSYSTEM",
+      state,
+      filtered,
+    })),
+  ),
   ...[false, true].map((filtered) => ({
     selector: "GIT_ALTERNATE_OBJECT_DIRECTORIES",
     state: "set",
@@ -410,6 +417,14 @@ test.each([
     } else if (selector === "GIT_ATTR_SOURCE") {
       environment[selector] = undefined;
       policySet[selector] = state === "set" ? "HEAD" : "synthetic-attributes";
+    } else if (selector === "GIT_ATTR_NOSYSTEM") {
+      environment[selector] =
+        state === "set" ? "1" : state === "empty" ? "" : undefined;
+      policySet[selector] = state === "set" ? "0" : "1";
+      await writeFile(
+        clean,
+        `const fs=require("node:fs");const input=fs.readFileSync(0,"utf8");process.stdout.write(process.env.GIT_ATTR_NOSYSTEM===${JSON.stringify(environment[selector])} ? input.toUpperCase() : input);\n`,
+      );
     } else if (selector !== "GIT_ALTERNATE_OBJECT_DIRECTORIES") {
       environment[selector] =
         state === "set" ? filterConfig : state === "empty" ? "" : undefined;
@@ -442,7 +457,7 @@ test.each([
     git("init", "--initial-branch=main");
     git("config", "user.name", "Synthetic User");
     git("config", "user.email", "synthetic@example.test");
-    if (selector === "GIT_ATTR_SOURCE")
+    if (selector === "GIT_ATTR_SOURCE" || selector === "GIT_ATTR_NOSYSTEM")
       git("config", "filter.synthetic-selector.clean", cleanCommand);
     await writeFile(
       join(repository, ".gitattributes"),

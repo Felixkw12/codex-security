@@ -3115,18 +3115,34 @@ describe("patch publication integrity", () => {
         },
       );
       expect(outcome.exitCode).toBe(status);
-      expect(JSON.parse(outcome.stdout)).toMatchObject({
-        applied: true,
-        filesChanged: 2,
+      const response = JSON.parse(outcome.stdout);
+      expect(response).toMatchObject({
+        ok: false,
+        error: { code: "PATCH_FAILED" },
+        files: ["src/finding-1.ts"],
         patches: [
-          { occurrenceId: "occ_1", status: "verified" },
+          {
+            occurrenceId: "occ_1",
+            status: "verified",
+            files: ["src/finding-1.ts"],
+            verification: "The exploit fails and focused tests pass.",
+          },
           {
             occurrenceId: "occ_2",
             status: "failed",
-            files: ["src/finding-2.ts"],
+            files: [],
           },
         ],
       });
+      expect(response).not.toHaveProperty("applied");
+      expect(response).not.toHaveProperty("filesChanged");
+      expect(response.error.message).toContain("not fully inspected");
+      expect(response.patches[1].reason).toContain("not inspected");
+      expect(calls).toBe(2);
+      for (const index of [1, 2])
+        expect(
+          await readFile(join(directory, `src/finding-${index}.ts`), "utf8"),
+        ).toBe("changed\n");
     },
   );
 

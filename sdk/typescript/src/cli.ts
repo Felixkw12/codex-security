@@ -211,6 +211,7 @@ import {
   bundledPluginRoot,
   acquireCodexSecurityCredentialHomeLock,
   withCredentialHomeLock,
+  requirePrivateCredentialHome,
   requireOutputOutsideRepositories,
   canonicalizeModelSafePath,
   codexSecurityCredentialHome,
@@ -1234,11 +1235,20 @@ const readHeader = (chunk) => {
   const end = header.indexOf(10);
   if (end < 0) return;
   process.stdin.off("data", readHeader);
+  const nativeGitOptions = [];
+  if (process.platform === "win32") {
+    // The native sandbox grants its Windows user access to the checkout.
+    for (let index = 0; index < Number(process.env.GIT_CONFIG_COUNT ?? 0); index++) {
+      const value = process.env["GIT_CONFIG_VALUE_" + index];
+      if (process.env["GIT_CONFIG_KEY_" + index] === "safe.directory" && value)
+        nativeGitOptions.push("-c", "safe.directory=" + value);
+    }
+  }
   for (const [name, value] of JSON.parse(header.subarray(0, end).toString())) {
     if (value === null) delete process.env[name];
     else process.env[name] = value;
   }
-  const child = spawn(command, args, { stdio: ["pipe", "inherit", "inherit"] });
+  const child = spawn(command, [...nativeGitOptions, ...args], { stdio: ["pipe", "inherit", "inherit"] });
   child.on("error", (error) => { console.error(error); process.exitCode = 1; });
   child.on("exit", (code, signal) => {
     if (signal) process.kill(process.pid, signal);
@@ -1280,10 +1290,12 @@ export async function runRepositoryCommand(
   try {
     if (sandbox !== undefined) {
       // Native file layers keep literal path keys out of command-line arguments.
-      const path = join(
-        configuredCodexHome(sandbox.environment),
-        `${profile}.config.toml`,
-      );
+      const home = configuredCodexHome(sandbox.environment);
+      if (process.platform === "win32") {
+        await mkdir(home, { recursive: true, mode: 0o700 });
+        await requirePrivateCredentialHome(await lstat(home), home);
+      }
+      const path = join(home, `${profile}.config.toml`);
       const file = await open(path, "wx", 0o600);
       profileFile = path;
       try {
@@ -2113,6 +2125,7 @@ export async function main(
                       ...Object.keys(NESTED_PATCH_GIT_ENVIRONMENT),
                       "GIT_ALTERNATE_OBJECT_DIRECTORIES",
                       "GIT_ATTR_SOURCE",
+                      "GIT_ATTR_NOSYSTEM",
                       "HOME",
                       "USERPROFILE",
                       "HOMEDRIVE",
