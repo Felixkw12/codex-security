@@ -1949,15 +1949,23 @@ export class CodexSecurity {
           onUsage:
             options.onUsage === undefined && mode !== "deep"
               ? undefined
-              : (usage) =>
-                  reportUsage(
+              : (usage) => {
+                  const key =
                     scanDirectory === scanDir ||
-                      scanDirectory ===
-                        join(scanDir, "artifacts", "deep-scan", "merge")
+                    scanDirectory ===
+                      join(scanDir, "artifacts", "deep-scan", "merge")
                       ? "merge"
-                      : relative(scanDir, scanDirectory).split(sep).join("/"),
-                    usage,
-                  ),
+                      : relative(scanDir, scanDirectory).split(sep).join("/");
+                  // Completed-child logs may have lost some workers. Optional
+                  // recovery can enrich a receipt, but cannot lower its total.
+                  if (
+                    optionalUsageOnly &&
+                    usage.total_tokens <
+                      (observedUsage.get(key)?.total_tokens ?? 0)
+                  )
+                    return;
+                  reportUsage(key, usage);
+                },
         });
         historical.start(threadId);
         if (optionalUsageOnly) {

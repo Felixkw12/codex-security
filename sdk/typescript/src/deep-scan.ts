@@ -427,7 +427,14 @@ export async function runDeepScans(
       input.onCost(pass.directory, null);
       const savedUsage = record["usage"];
       let usage: ScanTokenUsage | null = null;
-      if (isRecord(savedUsage)) {
+      // A completed child's cost receipt covers all of its work. A partial
+      // usage projection cannot replace those saved counters.
+      if (
+        isRecord(savedUsage) &&
+        (record.progress.status !== "complete" ||
+          record.cost == null ||
+          savedUsage["coverage"] === "complete")
+      ) {
         usage = tokenUsage({
           input_tokens: savedUsage["inputTokens"],
           cached_input_tokens: savedUsage["cachedInputTokens"],

@@ -32,7 +32,7 @@ import {
 } from "../src/deep-scan.js";
 import { loadDeepScanCheckpoint } from "../src/deep-scan-checkpoint.js";
 import { estimateScanCost, ScanCostTracker } from "../src/cost.js";
-import { tokenUsage } from "../src/cost-model.js";
+import { tokenUsage, type ScanTokenUsage } from "../src/cost-model.js";
 import { DeepScanProgressTracker } from "../src/deep-progress.js";
 import { semanticCoverage, semanticFinding } from "./helpers/semantic-scan.js";
 import { createApiTestFixtures } from "./support/api-events.js";
@@ -899,6 +899,12 @@ test.each([
   { receipt: "legacy", rollout: true, moreWork: false },
   { receipt: "measured", rollout: false, moreWork: false },
   { receipt: "unavailable", rollout: false, moreWork: false },
+  { receipt: "partial", rollout: false, moreWork: false },
+  { receipt: "partial", rollout: false, moreWork: true },
+  { receipt: "measured", rollout: "partial", moreWork: false },
+  { receipt: "legacy", rollout: "partial", moreWork: true },
+  { receipt: "legacy", rollout: "additional", moreWork: false },
+  { receipt: "unpriced-partial", rollout: false, moreWork: false },
 ] as const)(
   "Deep resume retains each completed child's usage: %j",
   async ({ receipt, rollout, moreWork }) => {
@@ -926,6 +932,22 @@ test.each([
       ([, record]) => record.mode === "standard",
     )!;
     const childCost = estimateScanCost("gpt-6-astra", measured)!;
+    const partial = {
+      ...measured,
+      input_tokens: 5,
+      output_tokens: 1,
+      reasoning_output_tokens: 1,
+    };
+    const additional = {
+      ...measured,
+      input_tokens: 15,
+      output_tokens: 5,
+      reasoning_output_tokens: 3,
+    };
+    const partialReceipt =
+      receipt === "partial" || receipt === "unpriced-partial";
+    const savedUsage = partialReceipt ? partial : measured;
+    const priced = receipt !== "unavailable" && receipt !== "unpriced-partial";
     const database = new Database(join(h.root, "state", "workbench.sqlite3"));
     try {
       const saved =
@@ -935,16 +957,16 @@ test.each([
               receipt === "legacy"
                 ? childCost
                 : {
-                    cost: childCost,
+                    cost: priced ? childCost : null,
                     usage: {
-                      coverage: "complete",
-                      inputTokens: measured.input_tokens,
-                      cachedInputTokens: measured.cached_input_tokens,
+                      coverage: partialReceipt ? "partial" : "complete",
+                      inputTokens: savedUsage.input_tokens,
+                      cachedInputTokens: savedUsage.cached_input_tokens,
                       cacheWriteInputTokens: 0,
-                      outputTokens: measured.output_tokens,
-                      reasoningOutputTokens: measured.reasoning_output_tokens,
+                      outputTokens: savedUsage.output_tokens,
+                      reasoningOutputTokens: savedUsage.reasoning_output_tokens,
                       totalTokens:
-                        measured.input_tokens + measured.output_tokens,
+                        savedUsage.input_tokens + savedUsage.output_tokens,
                     },
                   },
             );
@@ -969,14 +991,26 @@ test.each([
       expect<unknown>(savedChild["cost"]).toEqual(childCost);
       expect(savedChild["usage"]).toBeUndefined();
     }
-    if (!rollout)
-      await rm(
-        join(
-          h.home,
-          "sessions",
-          `rollout-${savedChild["continuationThreadId"]}.jsonl`,
-        ),
+    const rolloutPath = join(
+      h.home,
+      "sessions",
+      `rollout-${savedChild["continuationThreadId"]}.jsonl`,
+    );
+    if (!rollout) await rm(rolloutPath);
+    else if (rollout === "partial") {
+      // A completed receipt can include pruned workers while only the root's
+      // smaller cumulative usage survives in the session directory.
+      const metadata = (await readFile(rolloutPath, "utf8")).split("\n")[0]!;
+      await writeFile(
+        rolloutPath,
+        metadata + "\n" + JSON.stringify(tokenUsageEvent(partial)) + "\n",
       );
+    } else if (rollout === "additional") {
+      await appendFile(
+        rolloutPath,
+        JSON.stringify(tokenUsageEvent(additional)) + "\n",
+      );
+    }
     h.failChildProjection(false);
     const subsequent = {
       input_tokens: 5,
@@ -985,39 +1019,50 @@ test.each([
       reasoning_output_tokens: 1,
     };
     h.setUsage(subsequent);
-    const updates: unknown[] = [];
+    const updates: Readonly<ScanTokenUsage>[] = [];
     await using resumed = h.makeClient();
     const result = await resumed.run(h.repository, {
       ...options,
       signal: undefined,
       resumeScanId: parentId,
-      ...(moreWork ? { onUsage: (snapshot) => updates.push(snapshot) } : {}),
+      onUsage: (snapshot) => updates.push(snapshot),
     });
     const laterTurns = moreWork ? 2 : 0;
+    const recovered =
+      receipt === "unpriced-partial"
+        ? partial
+        : rollout === "additional"
+          ? additional
+          : measured;
     const expected =
       receipt === "unavailable"
         ? null
         : tokenUsage({
-            ...measured,
+            ...recovered,
             input_tokens:
-              measured.input_tokens + subsequent.input_tokens * laterTurns,
+              recovered.input_tokens + subsequent.input_tokens * laterTurns,
             output_tokens:
-              measured.output_tokens + subsequent.output_tokens * laterTurns,
+              recovered.output_tokens + subsequent.output_tokens * laterTurns,
             reasoning_output_tokens:
-              (receipt === "measured" || rollout
-                ? measured.reasoning_output_tokens
+              (receipt === "measured" ||
+              receipt === "unpriced-partial" ||
+              rollout === true ||
+              rollout === "additional"
+                ? recovered.reasoning_output_tokens
                 : 0) +
               subsequent.reasoning_output_tokens * laterTurns,
           });
     expect(result.turnResult.usage).toEqual(expected);
-    if (receipt === "unavailable") expect(result.cost).toBeNull();
+    if (!priced) expect(result.cost).toBeNull();
     else {
       expect(result.cost).toMatchObject({
-        inputTokens: expected!.input_tokens,
-        cachedInputTokens: expected!.cached_input_tokens,
-        cacheWriteInputTokens: expected!.cache_write_input_tokens,
+        inputTokens:
+          measured.input_tokens + subsequent.input_tokens * laterTurns,
+        cachedInputTokens: measured.cached_input_tokens,
+        cacheWriteInputTokens: 0,
         cacheWriteInputTokensReported: false,
-        outputTokens: expected!.output_tokens,
+        outputTokens:
+          measured.output_tokens + subsequent.output_tokens * laterTurns,
       });
       expect(result.cost!.estimatedUsd).toBeCloseTo(
         childCost.estimatedUsd +
@@ -1027,7 +1072,15 @@ test.each([
       );
     }
     expect(h.launches).toHaveLength(1 + laterTurns);
-    if (moreWork) expect(updates.at(-1)).toEqual(expected);
+    if (expected === null) expect(updates).toEqual([]);
+    else expect(updates.at(-1)).toEqual(expected);
+    expect(
+      updates.every(
+        (snapshot, index) =>
+          index === 0 ||
+          snapshot.total_tokens >= updates[index - 1]!.total_tokens,
+      ),
+    ).toBe(true);
   },
 );
 
