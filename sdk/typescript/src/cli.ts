@@ -1985,9 +1985,15 @@ export async function main(
                     [
                       ...Object.keys(NESTED_PATCH_GIT_ENVIRONMENT),
                       "GIT_INDEX_FILE",
+                      "GIT_CONFIG",
+                      "GIT_CONFIG_GLOBAL",
+                      "GIT_CONFIG_SYSTEM",
+                      "GIT_CONFIG_NOSYSTEM",
+                      "GIT_CONFIG_COUNT",
+                      "GIT_CONFIG_PARAMETERS",
                       ...Object.keys(parentDependencies.environment).filter(
                         (name) =>
-                          /^GIT_CONFIG_(?:COUNT|KEY_\d+|VALUE_\d+|PARAMETERS)$/u.test(
+                          /^GIT_CONFIG_(?:KEY|VALUE)_\d+$/u.test(
                             process.platform === "win32"
                               ? name.toUpperCase()
                               : name,
@@ -1995,7 +2001,7 @@ export async function main(
                       ),
                     ].map((name) => [
                       name,
-                      environmentValue(parentDependencies.environment, name),
+                      environmentEntry(parentDependencies.environment, name),
                     ]),
                   ),
                   ...gitEnvironment,

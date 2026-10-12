@@ -1,6 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { stringify as stringifyToml } from "smol-toml";
 import { runCodexSkillCommand, runRepositoryCommand } from "../src/cli.js";
 import { resolveCodexCommand } from "../src/runtime.js";
 import { repositoryGit, runWorkflow } from "./cli-patch-fixtures.js";
@@ -12,6 +14,159 @@ const windows =
   process.platform === "win32" ? 'windows = { sandbox = "unelevated" }\n' : "";
 const provider =
   'model_provider = "synthetic"\n[model_providers.synthetic]\nname = "Synthetic"\nbase_url = "http://127.0.0.1:9/v1"\nwire_api = "responses"\n';
+
+test.each([
+  ...["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM"].flatMap(
+    (selector) =>
+      ["set", "unset", "empty"].map((state) => ({
+        selector,
+        state,
+        filtered: true,
+      })),
+  ),
+  { selector: "GIT_CONFIG_COUNT", state: "unset", filtered: true },
+  { selector: "GIT_CONFIG_PARAMETERS", state: "unset", filtered: true },
+  { selector: "GIT_CONFIG_GLOBAL", state: "set", filtered: false },
+])(
+  "native no-op snapshots preserve coordinator Git configuration: %j",
+  async ({ selector, state, filtered }) => {
+    const root = await fixtures.create("patch-native-config-");
+    const repository = join(root, "repository"),
+      home = join(root, "home");
+    await Promise.all([mkdir(repository), mkdir(home, { mode: 0o700 })]);
+    const emptyConfig = join(root, "empty.gitconfig"),
+      filterConfig = join(root, "filter.gitconfig"),
+      clean = join(root, "clean.cjs");
+    await writeFile(emptyConfig, "");
+    await writeFile(
+      clean,
+      'const fs=require("node:fs");process.stdout.write(fs.readFileSync(0,"utf8").toUpperCase());\n',
+    );
+    const cleanCommand = `node ${JSON.stringify(clean.replaceAll("\\", "/"))}`;
+    const filterSettings = `[filter "synthetic-selector"]\n clean = ${JSON.stringify(cleanCommand)}\n`;
+    await writeFile(filterConfig, filterSettings);
+    const environment: NodeJS.ProcessEnv = {
+      ...process.env,
+      HOME: home,
+      USERPROFILE: home,
+      XDG_CONFIG_HOME: home,
+      CODEX_HOME: home,
+    };
+    for (const name of Object.keys(environment))
+      if (/^GIT_CONFIG(?:_|$)/iu.test(name)) delete environment[name];
+    Object.assign(environment, {
+      GIT_CONFIG_GLOBAL: emptyConfig,
+      GIT_CONFIG_SYSTEM: emptyConfig,
+      GIT_CONFIG_NOSYSTEM: "1",
+    });
+    const policySet: Record<string, string> = {};
+    if (selector === "GIT_CONFIG_NOSYSTEM") {
+      environment["GIT_CONFIG_SYSTEM"] = filterConfig;
+      environment[selector] =
+        state === "set" ? "1" : state === "empty" ? "" : undefined;
+      Object.assign(policySet, {
+        GIT_CONFIG_SYSTEM: filterConfig,
+        GIT_CONFIG_NOSYSTEM: state === "set" ? "0" : "1",
+      });
+    } else if (selector === "GIT_CONFIG_COUNT") {
+      Object.assign(policySet, {
+        GIT_CONFIG_COUNT: "1",
+        GIT_CONFIG_KEY_0: "filter.synthetic-selector.clean",
+        GIT_CONFIG_VALUE_0: cleanCommand,
+      });
+    } else if (selector === "GIT_CONFIG_PARAMETERS") {
+      policySet["GIT_CONFIG_PARAMETERS"] =
+        `'filter.synthetic-selector.clean=${cleanCommand.replaceAll("'", "'\\''")}'`;
+    } else {
+      environment[selector] =
+        state === "set" ? filterConfig : state === "empty" ? "" : undefined;
+      policySet[selector] = state === "set" ? emptyConfig : filterConfig;
+      if (selector === "GIT_CONFIG_SYSTEM") {
+        environment["GIT_CONFIG_NOSYSTEM"] = "0";
+        policySet["GIT_CONFIG_NOSYSTEM"] = "0";
+      }
+      if (selector === "GIT_CONFIG_GLOBAL" && state === "empty")
+        await writeFile(join(home, ".gitconfig"), filterSettings);
+    }
+    await writeFile(
+      join(home, "config.toml"),
+      windows +
+        stringifyToml({
+          shell_environment_policy: {
+            inherit: "all",
+            exclude: filtered ? ["GIT_*"] : [],
+            set: filtered ? policySet : {},
+          },
+        }),
+    );
+    const git = (...args: string[]) =>
+      execFileSync("git", args, {
+        cwd: repository,
+        env: environment,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      }).trim();
+    git("init", "--initial-branch=main");
+    git("config", "user.name", "Synthetic User");
+    git("config", "user.email", "synthetic@example.test");
+    await writeFile(
+      join(repository, ".gitattributes"),
+      "data filter=synthetic-selector\n",
+    );
+    await writeFile(join(repository, "data"), "original lowercase data\n");
+    git("add", ".");
+    git("commit", "-m", "Synthetic configuration baseline");
+    const index = await readFile(join(repository, ".git", "index"));
+    let snapshots = 0;
+    const bindings: NodeJS.ProcessEnv[] = [];
+    const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
+      currentDirectory: repository,
+      environment,
+      onCodex: async (_args, output) => {
+        output!.appServer!.onPermissions!({
+          directory: repository,
+          environment,
+          snapshotStoragePaths: output!.appServer!.snapshotStoragePaths,
+          profile: {
+            extends: ":workspace",
+            network: { enabled: false },
+            workspace_roots: {},
+            filesystem: Object.fromEntries(
+              output!.appServer!.permissions!.readOnlyPaths.map((path) => [
+                path,
+                { ".": "read" },
+              ]),
+            ),
+          },
+        });
+        output!.stdout.write("Synthetic no-op model turn.\n");
+        return 0;
+      },
+      onRepositoryCommand(command, args, cwd, options) {
+        if (options?.sandbox) {
+          snapshots++;
+          bindings.push(options.sandbox.gitEnvironment!);
+        }
+        return runRepositoryCommand(command, args, cwd, {
+          ...options,
+          environment: { ...environment, ...options?.environment },
+        });
+      },
+    });
+    expect(await readFile(join(repository, "data"), "utf8")).toBe(
+      "original lowercase data\n",
+    );
+    expect(await readFile(join(repository, ".git", "index"))).toEqual(index);
+    expect(git("diff", "--exit-code")).toBe("");
+    expect(outcome.exitCode, outcome.stdout + outcome.stderr).toBe(2);
+    expect(JSON.parse(outcome.stdout).error.code).toBe("NO_PATCH_APPLIED");
+    expect(snapshots).toBeGreaterThan(0);
+    if (filtered)
+      for (const binding of bindings)
+        expect(binding).toHaveProperty(selector, environment[selector]);
+  },
+  30_000,
+);
 
 test.each([
   "stored credentials",
