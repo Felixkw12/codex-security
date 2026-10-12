@@ -142,7 +142,11 @@ import {
   type KnowledgeBaseSnapshot,
 } from "./knowledge-base.js";
 import { scanInputIdentity, saveScanKnowledge } from "./scan-inputs.js";
-import { FindingWorkflow, workflowDigest } from "./finding-workflow.js";
+import {
+  FindingWorkflow,
+  workflowDigest,
+  scanRequestDigest,
+} from "./finding-workflow.js";
 import {
   ScanResult,
   type RepositoryFinding,
@@ -590,22 +594,9 @@ export class CodexSecurity {
       await workflow.protectArtifacts(options.outputDir);
     const state = await workflow.bind({
       repositoryPath: local.repository,
-      scanRequestDigest: workflowDigest({
-        config: this.config,
-        options: {
-          ...options,
-          ...local.prompts,
-          target: options.target ?? "repository",
-          mode: options.mode ?? DEFAULT_SCAN_MODE,
-          outputDir:
-            options.outputDir === undefined
-              ? undefined
-              : resolve(expandHome(options.outputDir)),
-          workflowId: undefined,
-          signal: undefined,
-          auth: undefined,
-          archiveExisting: undefined,
-        },
+      scanRequestDigest: scanRequestDigest(this.config, {
+        ...options,
+        ...local.prompts,
       }),
     });
     type ScanMetadata = Pick<
@@ -1694,6 +1685,7 @@ export class CodexSecurity {
         auth: options.auth,
         cyberAccessProgram: options.cyberAccessProgram,
       });
+      recipe["scanRequestDigest"] = scanRequestDigest(this.config, options);
       if (options.scanPrompt?.trim()) recipe["requiresScanPrompt"] = true;
       recipe["scanInputs"] = scanInputIdentity(
         options.scanPrompt,

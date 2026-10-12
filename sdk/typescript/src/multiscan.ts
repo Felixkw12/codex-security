@@ -33,12 +33,17 @@ import {
 } from "node:path";
 import { promisify } from "node:util";
 import Papa from "papaparse";
-import type { CodexSecurity } from "./api.js";
+import type { CodexSecurity, ScanOptions } from "./api.js";
 import type { CodexSecurityConfig } from "./config.js";
-import { hasSealedReport, loadContract } from "./contract.js";
+import {
+  hasSealedReport,
+  loadContract,
+  loadContractWithScanDirectory,
+} from "./contract.js";
 import type { ScanCost } from "./cost.js";
 import { readThreatModelPath } from "./artifact-export.js";
 import {
+  ContractValidationError,
   OutputDirectoryNotEmptyError,
   InvalidTargetError,
   PluginPythonUnavailableError,
@@ -76,8 +81,12 @@ import {
   type ScanPromptSettings,
   type ScanSettings,
 } from "./scan-settings.js";
-import { workflowDigest } from "./finding-workflow.js";
+import { workflowDigest, scanRequestDigest } from "./finding-workflow.js";
 import type { ScanResult } from "./result.js";
+import {
+  readRegisteredScanAuthority,
+  type RegisteredScanAuthority,
+} from "./saved-scan-bootstrap.js";
 import {
   inspectTrustedExecutable,
   resolveTrustedExecutable,
@@ -451,6 +460,15 @@ async function runCampaign(
         receipt,
         checkout,
         options.scanOptionsByMode?.[task.mode]?.target,
+        scanRequestDigest(
+          options.config,
+          campaignScanOptions(
+            options,
+            task,
+            artifactOutput,
+            knowledgeByMode[task.mode]?.snapshot,
+          ),
+        ),
         options.signal,
         options.githubHost,
         restoreReport,
@@ -590,14 +608,77 @@ async function runCampaign(
                 knowledgeBaseFailure = true;
                 throw knowledge.failure.error;
               }
-              result = await options.recoverScan(scanDir, {
-                ...options,
-                knowledgeBaseSnapshot: knowledge?.snapshot,
-              });
+              const requestDigest = scanRequestDigest(
+                options.config,
+                campaignScanOptions(
+                  options,
+                  task,
+                  scanDir,
+                  knowledge?.snapshot,
+                ),
+              );
+              const authority = await readRegisteredScanAuthority(
+                scanDir,
+                process.env,
+                options.signal,
+              );
+              if (authority?.recipe["scanRequestDigest"] === requestDigest) {
+                const normalCheckout = join(checkoutRoot, task.id);
+                const targetRoots = await campaignCheckoutRoots(
+                  normalCheckout,
+                  retainedCheckout,
+                  Array.isArray(
+                    task.scope === undefined
+                      ? options.scanOptionsByMode?.[task.mode]?.target
+                      : [task.scope],
+                  ) &&
+                    resolve(authority.target_path) !== resolve(normalCheckout),
+                );
+                const before =
+                  authority.status === "complete"
+                    ? await loadRegisteredCampaignScan(
+                        scanDir,
+                        await resolveResumePluginRoot(),
+                        requestDigest,
+                        options.signal,
+                      )
+                    : undefined;
+                if (before instanceof Error) throw before;
+                if (
+                  (authority.status !== "complete" || before !== undefined) &&
+                  registeredTaskMatches(
+                    before?.authority ?? authority,
+                    task.revision,
+                    targetRoots,
+                  )
+                ) {
+                  result = await options.recoverScan(scanDir, {
+                    ...options,
+                    knowledgeBaseSnapshot: knowledge?.snapshot,
+                  });
+                  if (result !== undefined) {
+                    const accepted = await loadRegisteredCampaignScan(
+                      scanDir,
+                      await resolveResumePluginRoot(),
+                      requestDigest,
+                      options.signal,
+                    );
+                    if (accepted instanceof Error) throw accepted;
+                    result =
+                      accepted === undefined ||
+                      !registeredTaskMatches(
+                        accepted.authority,
+                        task.revision,
+                        targetRoots,
+                      )
+                        ? undefined
+                        : { ...result, ...accepted.contract };
+                  }
+                }
+              }
               attemptedResume = result !== undefined;
             }
           }
-          const scanSettings = options.scanOptionsByMode?.[task.mode];
           if (result === undefined) {
             if (options.recoverScan !== undefined) attempt = ++maxAttempt;
             scanDir = join(artifactRoot, `attempt-${attempt}`);
@@ -648,28 +729,13 @@ async function runCampaign(
               }
               resolvedScope = outside.split(sep).join("/") || ".";
             }
-            const scanPrompt = [options.scanPrompt?.trim(), task.prompt]
-              .filter(Boolean)
-              .join("\n\n");
             result = await security.run(checkout, {
-              ...scanSettings,
-              knowledgeBaseSnapshot: knowledge?.snapshot,
-              ...(task.scope === undefined ? {} : { target: [task.scope] }),
-              ...(options.knowledgeBasePaths?.length
-                ? { knowledgeBasePaths: options.knowledgeBasePaths }
-                : {}),
-              mode: task.mode,
-              outputDir: scanDir,
-              ...(scanPrompt ? { scanPrompt } : {}),
-              ...(options.validationPrompt === undefined
-                ? {}
-                : { validationPrompt: options.validationPrompt }),
-              ...(options.postScanPrompt === undefined
-                ? {}
-                : { postScanPrompt: options.postScanPrompt }),
-              ...(options.maxCostUsd === undefined
-                ? {}
-                : { maxCostUsd: options.maxCostUsd }),
+              ...campaignScanOptions(
+                options,
+                task,
+                scanDir,
+                knowledge?.snapshot,
+              ),
               onWarning: (warning) => {
                 runWarnings.push(warning);
                 notifyProgress(options, {
@@ -699,7 +765,8 @@ async function runCampaign(
           targetId = result.manifest?.scan.target.targetId;
           scanId = result.manifest?.scan.id;
           snapshotDigest = result.manifest?.scan.target.snapshotDigest;
-          const failureSeverity = scanSettings?.failureSeverity;
+          const failureSeverity =
+            options.scanOptionsByMode?.[task.mode]?.failureSeverity;
           if (failureSeverity !== undefined) {
             attemptPolicyFailed = result.findings.findings.some((finding) =>
               meetsSeverity(finding, failureSeverity),
@@ -1285,12 +1352,106 @@ async function readReceipts(
   return receipts;
 }
 
+function campaignScanOptions(
+  options: MultiscanOptions,
+  task: MultiscanTask,
+  scanDir: string,
+  knowledgeBaseSnapshot?: KnowledgeBaseSnapshot,
+): ScanOptions {
+  const scanPrompt = [options.scanPrompt?.trim(), task.prompt]
+    .filter(Boolean)
+    .join("\n\n");
+  return {
+    ...options.scanOptionsByMode?.[task.mode],
+    knowledgeBaseSnapshot,
+    ...(task.scope === undefined ? {} : { target: [task.scope] }),
+    ...(options.knowledgeBasePaths?.length
+      ? { knowledgeBasePaths: options.knowledgeBasePaths }
+      : {}),
+    mode: task.mode,
+    outputDir: scanDir,
+    ...(scanPrompt ? { scanPrompt } : {}),
+    ...(options.validationPrompt === undefined
+      ? {}
+      : { validationPrompt: options.validationPrompt }),
+    ...(options.postScanPrompt === undefined
+      ? {}
+      : { postScanPrompt: options.postScanPrompt }),
+    ...(options.maxCostUsd === undefined
+      ? {}
+      : { maxCostUsd: options.maxCostUsd }),
+  };
+}
+
+function registeredTaskMatches(
+  authority: RegisteredScanAuthority,
+  revision: string,
+  targetRoots: readonly string[],
+): boolean {
+  return (
+    authority.target_revision === revision &&
+    targetRoots.some((root) => resolve(root) === resolve(authority.target_path))
+  );
+}
+
+async function campaignCheckoutRoots(
+  checkout: string,
+  recoveryCheckout: string,
+  validateRecoveryParents: boolean,
+): Promise<string[]> {
+  if (process.platform === "win32" && validateRecoveryParents) {
+    // Validate lexical parents before canonicalization follows Windows aliases.
+    await ensureOutputDirectory(dirname(dirname(recoveryCheckout)));
+    await ensureOutputDirectory(dirname(recoveryCheckout));
+  }
+  return [
+    checkout,
+    process.platform === "win32"
+      ? await canonicalCreationPath(recoveryCheckout)
+      : recoveryCheckout,
+  ];
+}
+
+async function loadRegisteredCampaignScan(
+  path: string,
+  pluginRoot: string,
+  expectedRequestDigest: string,
+  signal?: AbortSignal,
+) {
+  const loaded = await loadContractWithScanDirectory(path, {
+    pluginRoot,
+    signal,
+  }).catch(() => {
+    signal?.throwIfAborted();
+    return undefined;
+  });
+  if (loaded === undefined) return undefined;
+  const authority = await readRegisteredScanAuthority(
+    loaded.scanDirectory,
+    process.env,
+    signal,
+  );
+  if (authority === undefined) return undefined;
+  if (authority.id !== loaded.contract.manifest.scan.id)
+    return new ContractValidationError(
+      `Scan artifacts do not match selected scan ${authority.id}.`,
+    );
+  if (
+    authority.status !== "complete" ||
+    authority.recipe["scanRequestDigest"] !== expectedRequestDigest ||
+    authority.seal_manifest_digest !== loaded.manifestDigest
+  )
+    return undefined;
+  return { contract: loaded.contract, authority };
+}
+
 async function loadResumableScan(
   path: string,
   pluginRoot: string,
   receipt: MultiscanReceipt,
   checkout: string,
   configuredTarget: ScanTarget | undefined,
+  expectedRequestDigest: string,
   signal: AbortSignal | undefined,
   githubHost: string | undefined,
   restoreReport: (
@@ -1312,11 +1473,25 @@ async function loadResumableScan(
     }
   | undefined
 > {
-  const saved = await loadContract(path, { pluginRoot, signal }).catch(() => {
-    if (signal?.aborted === true) signal.throwIfAborted();
+  const accepted = await loadRegisteredCampaignScan(
+    path,
+    pluginRoot,
+    expectedRequestDigest,
+    signal,
+  );
+  if (accepted instanceof Error) {
+    // Registered report recovery must retain its selected-scan integrity error.
+    // Otherwise invalid saved evidence starts a new scan at the original CSV target.
+    if (
+      recoverScan !== undefined &&
+      (await lstat(join(path, "report.md")).catch(undefinedIfMissingFile)) ===
+        undefined
+    )
+      throw accepted;
     return undefined;
-  });
-  if (saved === undefined) return undefined;
+  }
+  if (accepted === undefined) return undefined;
+  const { contract: saved, authority } = accepted;
   const { manifest, findings, coverage } = saved;
   const { target, scope, producer } = manifest.scan;
   const campaignRoot = dirname(dirname(dirname(path)));
@@ -1328,22 +1503,13 @@ async function loadResumableScan(
   );
   const recoveryTarget =
     receipt.scope === undefined ? configuredTarget : [receipt.scope];
-  if (
-    process.platform === "win32" &&
-    Array.isArray(recoveryTarget) &&
-    target.targetId !==
-      `target_sha256_${createHash("sha256").update(`local-workspace\0${checkout}`).digest("hex")}`
-  ) {
-    // Validate the lexical parents before canonicalization follows Windows aliases.
-    await ensureOutputDirectory(join(campaignRoot, "recovery-checkouts"));
-    await ensureOutputDirectory(dirname(recoveryCheckout));
-  }
-  const targetRoots = [
+  const targetRoots = await campaignCheckoutRoots(
     checkout,
-    process.platform === "win32"
-      ? await canonicalCreationPath(recoveryCheckout)
-      : recoveryCheckout,
-  ];
+    recoveryCheckout,
+    Array.isArray(recoveryTarget) &&
+      target.targetId !==
+        `target_sha256_${createHash("sha256").update(`local-workspace\0${checkout}`).digest("hex")}`,
+  );
   const matchedRoot = targetRoots.find(
     (root) =>
       target.targetId ===
@@ -1366,6 +1532,7 @@ async function loadResumableScan(
     manifest.scan.status !== "completed" ||
     producer.name !== "codex-security-plugin" ||
     matchedRoot === undefined ||
+    !registeredTaskMatches(authority, receipt.revision, [matchedRoot]) ||
     (receipt.targetId !== undefined && receipt.targetId !== target.targetId) ||
     target.kind !== "git_revision" ||
     target.snapshotDigest !== undefined ||
@@ -1559,48 +1726,6 @@ async function loadResumableScan(
     ) {
       return undefined;
     }
-    if (
-      completeness === "complete" &&
-      (coverage.deferred.length !== 0 ||
-        coverage.surfaces.some(
-          (surface) => surface.disposition === "needs_follow_up",
-        ))
-    ) {
-      return undefined;
-    }
-    const surfaceIds = new Set<string>();
-    for (const surface of coverage.surfaces) {
-      if (surfaceIds.has(surface.id)) return undefined;
-      surfaceIds.add(surface.id);
-    }
-    const findingIds = new Set<string>();
-    const occurrenceIds = new Set<string>();
-    for (const finding of findings.findings) {
-      if (
-        findingIds.has(finding.findingId) ||
-        occurrenceIds.has(finding.occurrenceId)
-      ) {
-        return undefined;
-      }
-      findingIds.add(finding.findingId);
-      occurrenceIds.add(finding.occurrenceId);
-      if (
-        finding.locations.some(
-          (location) =>
-            location.endLine !== undefined &&
-            location.endLine < location.startLine,
-        )
-      ) {
-        return undefined;
-      }
-      const evidenceIds = new Set<string>();
-      for (const evidence of finding.codeEvidence ?? []) {
-        if (evidenceIds.has(evidence.id)) return undefined;
-        evidenceIds.add(evidence.id);
-      }
-      // loadContract preserves supported sealed references through canonical legacy validation.
-    }
-
     if (!reportSealed) await restoreReport(path, pluginRoot, matchedRoot);
     return {
       completeness,
@@ -1825,6 +1950,7 @@ async function checkoutRevision(
         await ensureOutputDirectory(join(canonicalObjects, "pack"), true);
       for (const entry of [
         "config",
+        "config.worktree",
         "FETCH_HEAD",
         "shallow",
         "index",
@@ -1851,26 +1977,100 @@ async function checkoutRevision(
       const refs = await lstat(join(gitDirectory, "refs")).catch(
         undefinedIfMissingFile,
       );
-      if (head === undefined || refs === undefined) {
-        const common = await readFile(
-          join(gitDirectory, "commondir"),
-          "utf8",
-        ).catch(undefinedIfMissingFile);
+      const commonBinding = await readFile(
+        join(gitDirectory, "commondir"),
+        "utf8",
+      ).catch(undefinedIfMissingFile);
+      if (
+        commonBinding !== undefined &&
+        (await realpath(resolve(gitDirectory, commonBinding.trim()))) !==
+          canonicalGit
+      )
+        throw new Error(
+          "The retained campaign checkout has Git bindings outside its own directory.",
+        );
+
+      // Retained repository configuration is data, not permission to run filters.
+      // Preserve it outside Git's active config filenames before the first command.
+      const savedConfig = new Map<string, string>();
+      for (const name of ["config", "config.worktree"]) {
+        const selected = join(gitDirectory, name);
+        if (await lstat(selected).catch(undefinedIfMissingFile)) {
+          const saved = `${selected}.retained-${randomUUID()}`;
+          await rename(selected, saved);
+          savedConfig.set(name, saved);
+        }
+      }
+      const configured = async (
+        file: string | undefined,
+        key: string,
+        type: "bool" | "path",
+      ): Promise<string | undefined> => {
+        if (file === undefined) return undefined;
+        try {
+          const value = await gitOutput([
+            "config",
+            "--null",
+            "--no-includes",
+            "--file",
+            file,
+            `--type=${type}`,
+            "--get",
+            key,
+          ]);
+          return value.subarray(0, -1).toString("utf8");
+        } catch (error) {
+          if ((error as { code?: number }).code === 1) return undefined;
+          throw error;
+        }
+      };
+      const local = savedConfig.get("config");
+      const layers = [
+        local,
+        ...((await configured(local, "extensions.worktreeConfig", "bool")) ===
+        "true"
+          ? [savedConfig.get("config.worktree")]
+          : []),
+      ];
+      const structural = new Map<string, string>();
+      for (const file of layers) {
+        const worktree = await configured(file, "core.worktree", "path");
         if (
-          common !== undefined &&
-          (await realpath(resolve(gitDirectory, common.trim()))) !==
-            canonicalGit
-        ) {
+          worktree !== undefined &&
+          (await realpath(
+            isAbsolute(worktree)
+              ? worktree
+              : `${gitDirectory}${sep}${worktree}`,
+          )) !== (await realpath(path))
+        )
           throw new Error(
             "The retained campaign checkout has Git bindings outside its own directory.",
           );
+        for (const key of [
+          "core.ignorecase",
+          "core.filemode",
+          "core.symlinks",
+        ]) {
+          const value = await configured(file, key, "bool");
+          if (value !== undefined) structural.set(key, value);
         }
+      }
+      if (head === undefined || refs === undefined) {
         if (
           await lstat(join(gitDirectory, "refs")).catch(undefinedIfMissingFile)
         )
           await ensureOutputDirectory(join(gitDirectory, "refs"), true);
-        await git("init", "--quiet", "--template=");
       }
+      await git("init", "--quiet", "--template=");
+      for (const [key, value] of structural)
+        await git(
+          "config",
+          "--file",
+          join(gitDirectory, "config"),
+          "--type=bool",
+          key,
+          value,
+        );
       const [common, objects, worktree] = await Promise.all([
         git("rev-parse", "--path-format=absolute", "--git-common-dir"),
         git("rev-parse", "--path-format=absolute", "--git-path", "objects"),

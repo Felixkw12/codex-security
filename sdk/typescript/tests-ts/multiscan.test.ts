@@ -3,7 +3,8 @@ import { gitText } from "./support/shell.js";
 import { parseJsonLines, readJsonLines } from "./support/json.js";
 import { resolving } from "./support/promises.js";
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { Database } from "bun:sqlite";
+import { createHash, randomUUID } from "node:crypto";
 import {
   access,
   appendFile,
@@ -50,7 +51,7 @@ import { normalizeTarget } from "../src/targets.js";
 import { resolveTrustedExecutable } from "../src/trusted-executable.js";
 import { DiffTarget } from "../src/targets.js";
 import { prepareOutputDir } from "../src/runtime.js";
-import { workflowDigest } from "../src/finding-workflow.js";
+import { workflowDigest, scanRequestDigest } from "../src/finding-workflow.js";
 import { TestClient, mockWorkbench } from "./support/api-client.js";
 import { preparedRuntime } from "./support/api-events.js";
 import * as runtime from "../src/runtime.js";
@@ -69,14 +70,35 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures(
 const testPosix = process.platform === "win32" ? test.skip : test;
 
 const fixtureRoots = new Set<string>();
+const fixtureRequests = new Map<
+  string,
+  { repository: string; revision: string; digest: string }
+>();
+const fixtureScanIds = new Map<string, string>();
+const originalState = process.env["CODEX_SECURITY_STATE_DIR"];
+let fixtureState: string | undefined;
 afterEach(async () => {
   await cleanup();
   fixtureRoots.clear();
+  fixtureRequests.clear();
+  fixtureScanIds.clear();
+  fixtureState = undefined;
+  if (originalState === undefined)
+    delete process.env["CODEX_SECURITY_STATE_DIR"];
+  else process.env["CODEX_SECURITY_STATE_DIR"] = originalState;
 });
 
 async function fixture() {
   const root = await temporaryDirectory();
   fixtureRoots.add(root);
+  if (fixtureState === undefined) {
+    fixtureState = join(root, "state");
+    process.env["CODEX_SECURITY_STATE_DIR"] = fixtureState;
+    await runtime.runWorkbench(
+      { python: PYTHON, pluginRoot: PLUGIN_ROOT, environment: process.env },
+      ["list-scans"],
+    );
+  }
   return {
     root,
     input: join(root, "repositories.csv"),
@@ -123,11 +145,29 @@ async function repositoryFixture(name: string, id = name) {
   return { paths, source };
 }
 
+async function fixtureTask(outputDir: string) {
+  const root = [...fixtureRoots].find((root) =>
+    outputDir.startsWith(root + sep),
+  );
+  if (root === undefined) return undefined;
+  const inventory = await readFile(
+    join(root, "repositories.csv"),
+    "utf8",
+  ).catch(() => undefined);
+  if (inventory === undefined) return undefined;
+  const id = basename(dirname(outputDir)).toLowerCase();
+  return Papa.parse<Record<string, string>>(inventory, {
+    header: true,
+    skipEmptyLines: true,
+  }).data.find((entry) => entry["id"]?.trim().toLowerCase() === id);
+}
+
 async function completedScan(
   outputDir: string,
   completeness: "complete" | "partial" | "unknown" = "complete",
   targetRoot?: string,
 ): Promise<ScanResult> {
+  targetRoot ??= fixtureRequests.get(outputDir)?.repository;
   await mkdir(outputDir, { recursive: true, mode: 0o700 });
   await chmod(outputDir, 0o700);
   await cp(join(PLUGIN_ROOT, "examples", "completed-scan"), outputDir, {
@@ -146,58 +186,52 @@ async function completedScan(
   const coverage = JSON.parse(
     await readFile(coveragePath, "utf8"),
   ) as ScanResult["coverage"];
+  if (fixtureRequests.has(outputDir)) {
+    manifest.scan.id = fixtureScanIds.get(outputDir) ?? randomUUID();
+    findings.scanId = manifest.scan.id;
+    coverage.scanId = manifest.scan.id;
+    fixtureScanIds.set(outputDir, manifest.scan.id);
+    if (targetRoot !== undefined)
+      fixtureRequests.get(outputDir)!.repository = targetRoot;
+  }
   const id = basename(dirname(outputDir));
   const campaignRoot = dirname(dirname(dirname(outputDir)));
-  const fixtureRoot = [...fixtureRoots].find((root) =>
-    outputDir.startsWith(root + sep),
-  );
-  const inventory =
-    fixtureRoot === undefined
-      ? undefined
-      : await readFile(join(fixtureRoot, "repositories.csv"), "utf8").catch(
-          () => undefined,
-        );
-  if (inventory !== undefined) {
-    const task = Papa.parse<Record<string, string>>(inventory, {
-      header: true,
-      skipEmptyLines: true,
-    }).data.find((entry) => entry["id"] === id);
-    if (task !== undefined) {
-      manifest.scan.target.kind = "git_revision";
-      manifest.scan.target.targetId = `target_sha256_${createHash("sha256")
-        .update(
-          `local-workspace\0${targetRoot ?? join(campaignRoot, "checkouts", id)}`,
-        )
-        .digest("hex")}`;
-      manifest.scan.target.displayName = basename(
-        targetRoot ?? join(campaignRoot, "checkouts", id),
+  const task = await fixtureTask(outputDir);
+  if (task !== undefined) {
+    manifest.scan.target.kind = "git_revision";
+    manifest.scan.target.targetId = `target_sha256_${createHash("sha256")
+      .update(
+        `local-workspace\0${targetRoot ?? join(campaignRoot, "checkouts", id)}`,
+      )
+      .digest("hex")}`;
+    manifest.scan.target.displayName = basename(
+      targetRoot ?? join(campaignRoot, "checkouts", id),
+    );
+    manifest.scan.target.revision = task["revision"]!;
+    delete manifest.scan.target.snapshotDigest;
+    const scope = task["scope"]?.trim();
+    let normalizedScope = scope ? posix.normalize(scope) : ".";
+    if (scope) {
+      const checkout = targetRoot ?? join(campaignRoot, "checkouts", id);
+      const canonicalScope = await realpath(join(checkout, scope)).catch(
+        () => undefined,
       );
-      manifest.scan.target.revision = task["revision"]!;
-      delete manifest.scan.target.snapshotDigest;
-      const scope = task["scope"]?.trim();
-      let normalizedScope = scope ? posix.normalize(scope) : ".";
-      if (scope) {
-        const checkout = targetRoot ?? join(campaignRoot, "checkouts", id);
-        const canonicalScope = await realpath(join(checkout, scope)).catch(
-          () => undefined,
-        );
-        if (canonicalScope !== undefined) {
-          normalizedScope =
-            relative(await realpath(checkout), canonicalScope)
-              .split(sep)
-              .join("/") || ".";
-        }
+      if (canonicalScope !== undefined) {
+        normalizedScope =
+          relative(await realpath(checkout), canonicalScope)
+            .split(sep)
+            .join("/") || ".";
       }
-      const includePaths = [normalizedScope];
-      manifest.scan.scope.includePaths = includePaths;
-      coverage.includePaths = includePaths;
-      coverage.mode = scope
-        ? "scoped_path"
-        : task["mode"]?.trim() === "deep"
-          ? "deep_repository"
-          : "repository";
-      coverage.inventoryStrategy = scope ? "scoped_path" : "repository";
     }
+    const includePaths = [normalizedScope];
+    manifest.scan.scope.includePaths = includePaths;
+    coverage.includePaths = includePaths;
+    coverage.mode = scope
+      ? "scoped_path"
+      : task["mode"]?.trim() === "deep"
+        ? "deep_repository"
+        : "repository";
+    coverage.inventoryStrategy = scope ? "scoped_path" : "repository";
   }
   for (const finding of findings.findings) {
     const fingerprint = `codex-security/v1:sha256:${createHash("sha256")
@@ -240,6 +274,80 @@ async function reseal(outputDir: string): Promise<void> {
       .digest("hex");
   }
   await writeFile(path, `${JSON.stringify(manifest, null, 2)}\n`);
+  await recordFixtureAuthority(outputDir);
+}
+
+async function recordFixtureRequest(
+  repository: string,
+  settings: NonNullable<Parameters<SecurityClient["run"]>[1]>,
+  config: MultiscanOptions["config"] = {},
+  revision?: string,
+): Promise<void> {
+  // The coordinator verified this immutable task SHA before calling the producer.
+  revision ??= (await fixtureTask(settings.outputDir!))?.["revision"]
+    ?.trim()
+    .toLowerCase();
+  if (revision === undefined)
+    throw new Error("Fixture scan has no pinned task revision.");
+  fixtureRequests.set(settings.outputDir!, {
+    repository,
+    revision,
+    digest: scanRequestDigest(config, settings),
+  });
+}
+
+// This producer double mirrors private registration/completion. Real workbench
+// registration and seal binding are exercised separately in multiscan-authority.
+async function recordFixtureAuthority(outputDir: string): Promise<void> {
+  const request = fixtureRequests.get(outputDir);
+  if (!request || !fixtureState) return;
+  const bytes = await readFile(join(outputDir, "scan-manifest.json")).catch(
+    () => undefined,
+  );
+  let manifest: ScanResult["manifest"] | undefined;
+  try {
+    if (bytes) manifest = JSON.parse(bytes.toString("utf8"));
+  } catch {
+    return;
+  }
+  if (manifest && manifest.scan.id !== fixtureScanIds.get(outputDir)) return;
+  const id = fixtureScanIds.get(outputDir) ?? randomUUID();
+  fixtureScanIds.set(outputDir, id);
+  const database = new Database(join(fixtureState, "workbench.sqlite3"));
+  try {
+    const prior = database
+      .query("SELECT id FROM scans WHERE scan_dir = ?")
+      .get(outputDir) as { id: string } | null;
+    if (prior && prior.id !== id) return;
+    const timestamp = new Date().toISOString();
+    database.run(
+      "INSERT OR IGNORE INTO workspaces (id, target_path, created_at, updated_at) VALUES (?, ?, ?, ?)",
+      [id, request.repository, timestamp, timestamp],
+    );
+    database.run(
+      `INSERT INTO scans (id, workspace_id, target_path, target_revision, target_id, scope, mode, scan_dir, status, phase, started_at, created_at, updated_at, recipe_json, seal_manifest_digest)
+      VALUES (?, ?, ?, ?, ?, '.', 'standard', ?, ?, 'reporting', ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET target_path=excluded.target_path, status=excluded.status, recipe_json=excluded.recipe_json, seal_manifest_digest=excluded.seal_manifest_digest`,
+      [
+        id,
+        id,
+        request.repository,
+        request.revision,
+        manifest?.scan.target.targetId ?? "fixture-running-target",
+        outputDir,
+        bytes ? "complete" : "running",
+        timestamp,
+        timestamp,
+        timestamp,
+        JSON.stringify({ scanRequestDigest: request.digest }),
+        bytes
+          ? `sha256:${createHash("sha256").update(bytes).digest("hex")}`
+          : null,
+      ],
+    );
+  } finally {
+    database.close();
+  }
 }
 
 const completeRun: SecurityClient["run"] = async (
@@ -268,7 +376,7 @@ function options(
   security: SecurityClient,
   overrides: Partial<MultiscanOptions> = {},
 ): MultiscanOptions {
-  return {
+  const selected: MultiscanOptions = {
     inputPath: paths.input,
     outputDir: paths.output,
     workers: 1,
@@ -278,6 +386,22 @@ function options(
     createSecurity: () => security,
     ...overrides,
   };
+  const create = selected.createSecurity;
+  selected.createSecurity = (config) => {
+    const instance = create(config);
+    return {
+      close: () => instance.close(),
+      run: async (repository, settings = {}) => {
+        await recordFixtureRequest(repository, settings, config);
+        try {
+          return await instance.run(repository, settings);
+        } finally {
+          await recordFixtureAuthority(settings.outputDir!);
+        }
+      },
+    };
+  };
+  return selected;
 }
 
 const results = readJsonLines<Record<string, unknown>>;
@@ -666,6 +790,13 @@ describe("multiscan", () => {
     await mkdir(checkout, { recursive: true });
     await writeFile(join(orphan, "checkpoint"), "keep checkpoint");
     await writeFile(join(checkout, "source"), "keep checkout");
+    await recordFixtureRequest(
+      checkout,
+      { outputDir: orphan, mode: "deep" },
+      {},
+      source.revision,
+    );
+    await recordFixtureAuthority(orphan);
     const inode = (await lstat(checkout)).ino;
     const resumed = mock(resolving<undefined, [string]>(undefined));
     const runs = mock<SecurityClient["run"]>(async (repo, scan = {}) => {
@@ -1359,6 +1490,15 @@ describe("multiscan", () => {
         "legacy",
       );
       const outputDir = join(paths.output, "artifacts", "legacy", "attempt-1");
+      await recordFixtureRequest(
+        join(paths.output, "checkouts", "legacy"),
+        {
+          outputDir,
+          mode: "standard",
+        },
+        {},
+        source.revision,
+      );
       await completedScan(outputDir, completeness);
       const cost = {
         model: "gpt-5.6-sol",
@@ -1515,10 +1655,12 @@ describe("multiscan", () => {
         return {
           ...security,
           run: async (repository, scan = {}) => {
+            await recordFixtureRequest(repository, scan, config);
             const completed = await completedScan(
               scan.outputDir!,
               completeness,
             );
+            result.manifest.scan.id = completed.manifest.scan.id;
             result.manifest.scan.target = completed.manifest.scan.target;
             return security.run(repository, scan);
           },
@@ -7871,6 +8013,7 @@ for (const scenario of [
           recipe: {
             repository: checkout,
             repositoryRevision: source.revision,
+            scanRequestDigest: fixtureRequests.get(outputDir)?.digest,
             mode: "standard",
             target: { kind: "repository", paths: [] },
             config: {},
