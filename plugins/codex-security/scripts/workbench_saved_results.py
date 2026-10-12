@@ -1092,6 +1092,8 @@ def merge_saved_results(
     frozen_model_source: str | None = None,
     selected_model_source: list[str] | None = None,
     canonical_model: dict[str, Any] | None = None,
+    canonical_model_source: str | None = None,
+    canonical_sources: dict[str, str] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None:
     """Read only bound parent/worker files; return an unsealed loss-preserving union."""
     initial_warnings = set(warnings)
@@ -1105,7 +1107,8 @@ def merge_saved_results(
     parent_manifest: dict[str, Any] | None = None
     parent_is_canonical = False
     parent_modified = 0
-    canonical_model_source: str | None = None
+    canonical_model_order: tuple[int, int] | None = None
+    canonical_model_digest: str | None = None
     if frozen_source_digests is None or allow_frozen_legacy_parent:
         try:
             parent_manifest, parent = _read_saved_parent_result(scan_dir, scan_id)
@@ -1150,6 +1153,8 @@ def merge_saved_results(
                 parent_checkpoint = f"checkpoints/{parent_digest}.json"
                 if isinstance(parent.get("threatModel"), dict):
                     canonical_model_source = parent_checkpoint
+                    canonical_model_order = (0, parent_modified)
+                    canonical_model_digest = parent_digest
                 checkpoint_path = scan_dir / parent_checkpoint
                 if not checkpoint_path.exists():
                     write_scan_local_bytes(scan_dir, parent_checkpoint, payload)
@@ -1508,18 +1513,30 @@ def merge_saved_results(
             manifest["scan"]["scope"].update(copy.deepcopy(binding["scope"]))
     if frozen_model_source is None and not isinstance((parent or {}).get("threatModel"), dict):
         # Model fallback is independent of whether older findings are superseded.
-        # Prefer an accepted root model; otherwise keep the canonical model's source.
-        if canonical_model_source is None and isinstance(canonical_model, dict):
-            # Older publications did not retain a separate model-source pointer.
-            canonical_model_source = next(
-                (
-                    path
-                    for path, draft in drafts_by_path.items()
-                    if Path(path).parent == Path("checkpoints")
-                    and draft.get("threatModel") == canonical_model
-                ),
-                None,
+        canonical_model = manifest["scan"].get("threatModel", canonical_model)
+        if (
+            canonical_model_source is not None
+            and Path(canonical_model_source).parent != Path("checkpoints")
+        ) or (
+            canonical_model_source is None
+            and isinstance(canonical_model, dict)
+            and canonical_model.get("origin") == "recovered"
+        ):
+            # Worker models follow their own selected head and independent result.
+            canonical_model = None
+            canonical_model_source = None
+        if canonical_model_source in drafts_by_path and (
+            canonical_model_digest is None
+            or source_digests[canonical_model_source] == canonical_model_digest
+        ):
+            canonical_model = drafts_by_path[canonical_model_source].get("threatModel")
+            canonical_model_order = max(
+                canonical_model_order or source_order[canonical_model_source],
+                source_order[canonical_model_source],
             )
+        else:
+            # A skipped checkpoint cannot supply provenance for valid canonical data.
+            canonical_model_source = None
         root_models = [
             path
             for path in drafts_by_path
@@ -1528,19 +1545,36 @@ def merge_saved_results(
             and isinstance(drafts_by_path[path].get("threatModel"), dict)
         ]
         selected_root_models = [path for path in root_models if path in authoritative_heads]
-        if canonical_model_source is not None:
-            root_models.append(canonical_model_source)
+        if isinstance(canonical_model, dict) and canonical_model_order is None:
+            # Legacy publications have no model-source identity. Only newly admitted
+            # observations can supersede that fallback without an explicit selection.
+            new_models = {
+                f"checkpoints/{checkpoint}"
+                for head, checkpoint in saved_heads.items()
+                if _checkpoint_head_directory(head) == Path(".")
+                and head not in (canonical_sources or {})
+            }
+            root_models = [path for path in root_models if path in new_models]
         model_source = max(
             selected_root_models or root_models,
-            key=lambda path: (source_order[path], path == canonical_model_source),
+            key=lambda path: source_order[path],
             default=None,
         )
-        if model_source is not None:
+        if model_source is not None and (
+            selected_root_models
+            or not isinstance(canonical_model, dict)
+            or canonical_model_order is None
+            or source_order[model_source] > canonical_model_order
+        ):
             manifest["scan"]["threatModel"] = copy.deepcopy(
                 drafts_by_path[model_source]["threatModel"]
             )
             if selected_model_source is not None:
                 selected_model_source[:] = [model_source]
+        elif isinstance(canonical_model, dict):
+            manifest["scan"]["threatModel"] = copy.deepcopy(canonical_model)
+            if selected_model_source is not None and canonical_model_source is not None:
+                selected_model_source[:] = [canonical_model_source]
     if frozen_model_source is not None:
         # Publication retries retain the choice made with the frozen source set.
         model = drafts_by_path.get(frozen_model_source, {}).get("threatModel")
@@ -1961,7 +1995,7 @@ def merge_saved_results(
     for relative, draft, worker_id in sources:
         if (
             worker_id is not None
-            and relative in selected_observations
+            and relative in authoritative_heads
             and draft.get("complete") is not False
         ):
             order = source_order[relative]
@@ -1977,11 +2011,28 @@ def merge_saved_results(
             )
     for relative, draft, worker_id in all_sources:
         worker_result_order = terminal_worker_orders.get(worker_id)
-        selected_coverage_superseded = worker_id in selected_terminal_orders and (
-            source_order[relative] < selected_terminal_orders[worker_id]
-            or (
-                relative in current_results
-                and source_order[relative] <= selected_terminal_orders[worker_id]
+        selected_terminal_order = selected_terminal_orders.get(worker_id)
+        terminal_coverage_order = max(
+            (
+                order
+                for order in (worker_result_order, selected_terminal_order)
+                if order is not None
+            ),
+            default=None,
+        )
+        selected_coverage_superseded = (
+            terminal_coverage_order is not None and source_order[relative] < terminal_coverage_order
+        ) or (
+            selected_terminal_order is not None
+            and (
+                relative in selected_observations
+                and relative not in authoritative_heads
+                and relative not in current_results
+                or (
+                    relative in current_results
+                    and relative not in authoritative_heads
+                    and source_order[relative] <= selected_terminal_order
+                )
             )
         )
         selected_candidates = {
@@ -2448,6 +2499,7 @@ def preserve_scan_results_locked(
             frozen_source_times = retained.get("sourceTimes")
         if saved_model_source is not None:
             model_source.append(saved_model_source)
+    canonical_sources = frozen_source_digests
     if recovery_source_digests is not None:
         frozen_source_digests = recovery_source_digests
         checkpoint_heads = recovery_checkpoint_heads
@@ -2571,6 +2623,16 @@ def preserve_scan_results_locked(
         **db.workbench_completion_binding(scan, scan["completed_at"], existing),
         "status": outcome,
     }
+    canonical_model_source = saved_model_source
+    if canonical_model_source is None and existing is None and frozen_source_digests is not None:
+        try:
+            _, canonical_draft = _read_saved_parent_result(scan_dir, scan_id)
+            digest = _digest(canonical_draft)
+            path = f"checkpoints/{digest}.json"
+            if frozen_source_digests.get(path) == digest:
+                canonical_model_source = path
+        except (ContractError, OSError, ValueError):
+            pass
     if recovery_source_digests is not None and not pending_recovery:
         model_source.clear()
     try:
@@ -2595,6 +2657,8 @@ def preserve_scan_results_locked(
             canonical_model=existing_scan.get("threatModel")
             if isinstance(existing_scan, dict)
             else None,
+            canonical_model_source=canonical_model_source,
+            canonical_sources=canonical_sources,
             allow_frozen_legacy_parent=(
                 include_parent_with_recovery
                 or (
@@ -2669,6 +2733,7 @@ def preserve_scan_results_locked(
         retained_state = (
             _encode_retained_sources(retained_sources, model_source),
             json.dumps(retained_heads, sort_keys=True),
+            json.dumps(list(dict.fromkeys(warnings))),
             scan_id,
             raw_frozen_sources,
         )
@@ -2678,7 +2743,7 @@ def preserve_scan_results_locked(
             with connection:
                 connection.execute(
                     "UPDATE scans SET retained_source_digests_json = ?, "
-                    "retained_checkpoint_heads_json = ? "
+                    "retained_checkpoint_heads_json = ?, completion_warnings_json = ? "
                     "WHERE id = ? AND retained_source_digests_json IS ?",
                     retained_state,
                 )
