@@ -2906,15 +2906,20 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
             );
             return 0;
           },
-          onRepositoryCommand: (command, args) => {
+          onRepositoryCommand: (command, args, _cwd, options) => {
             if (command === "git" && args.includes("--absolute-git-dir"))
               return directory;
             commandStarted ||=
               (command !== "git" && args[1] !== "list") ||
               ["checkout", "commit", "push"].includes(args[0]!);
-            return status === "outside" && args.includes("--name-only")
-              ? "src/finding-1.ts\0"
-              : "";
+            if (command === "gh" && args[1] === "list") return "[]";
+            const output =
+              status === "outside" && args.includes("--name-only")
+                ? "src/finding-1.ts\0"
+                : "";
+            return options?.encoding === "base64"
+              ? Buffer.from(output).toString("base64")
+              : output;
           },
         },
       );
@@ -4766,18 +4771,34 @@ describe("patch publication integrity", () => {
         },
       );
       expect(outcome.exitCode).toBe(status);
-      expect(JSON.parse(outcome.stdout)).toMatchObject({
-        applied: true,
-        filesChanged: 2,
+      const response = JSON.parse(outcome.stdout);
+      expect(response).toMatchObject({
+        ok: false,
+        error: { code: "PATCH_FAILED" },
+        files: ["src/finding-1.ts"],
         patches: [
-          { occurrenceId: "occ_1", status: "verified" },
+          {
+            occurrenceId: "occ_1",
+            status: "verified",
+            files: ["src/finding-1.ts"],
+            verification: "The exploit fails and focused tests pass.",
+          },
           {
             occurrenceId: "occ_2",
             status: "failed",
-            files: ["src/finding-2.ts"],
+            files: [],
           },
         ],
       });
+      expect(response).not.toHaveProperty("applied");
+      expect(response).not.toHaveProperty("filesChanged");
+      expect(response.error.message).toContain("not fully inspected");
+      expect(response.patches[1].reason).toContain("not inspected");
+      expect(calls).toBe(2);
+      for (const index of [1, 2])
+        expect(
+          await readFile(join(directory, `src/finding-${index}.ts`), "utf8"),
+        ).toBe("changed\n");
     },
   );
 
@@ -6440,7 +6461,7 @@ describe("inherited patch publication context", () => {
               assessments++;
               expect(request.repository).toBe(tree);
               expect(request.directory).toBe(directory);
-              expect(request.files).toEqual(["app.ts"]);
+              expect(request.files).toBeUndefined();
               expect(
                 await runGitRepositoryCommand(
                   "git",
@@ -7026,18 +7047,34 @@ describe("inherited patch publication context", () => {
         },
       );
       expect(outcome.exitCode).toBe(status);
-      expect(JSON.parse(outcome.stdout)).toMatchObject({
-        applied: true,
-        filesChanged: 2,
+      const response = JSON.parse(outcome.stdout);
+      expect(response).toMatchObject({
+        ok: false,
+        error: { code: "PATCH_FAILED" },
+        files: ["src/finding-1.ts"],
         patches: [
-          { occurrenceId: "occ_1", status: "verified" },
+          {
+            occurrenceId: "occ_1",
+            status: "verified",
+            files: ["src/finding-1.ts"],
+            verification: "The exploit fails and focused tests pass.",
+          },
           {
             occurrenceId: "occ_2",
             status: "failed",
-            files: ["src/finding-2.ts"],
+            files: [],
           },
         ],
       });
+      expect(response).not.toHaveProperty("applied");
+      expect(response).not.toHaveProperty("filesChanged");
+      expect(response.error.message).toContain("not fully inspected");
+      expect(response.patches[1].reason).toContain("not inspected");
+      expect(calls).toBe(2);
+      for (const index of [1, 2])
+        expect(
+          await readFile(join(directory, `src/finding-${index}.ts`), "utf8"),
+        ).toBe("changed\n");
     },
   );
 
@@ -9369,7 +9406,7 @@ describe("ordinary patch snapshot context", () => {
             current.assessPatchRisk = async (request) => {
               assessmentCalls++;
               expect(request.repository).toBe(root);
-              expect(request.files).toContain("app.ts");
+              expect(request.files).toBeUndefined();
               return patchRiskAssessment();
             };
           },

@@ -11,7 +11,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { join, parse } from "node:path";
+import { join, parse, resolve } from "node:path";
 import { stringify as stringifyToml } from "smol-toml";
 import { runCodexSkillCommand, runRepositoryCommand } from "../src/cli.js";
 import { resolveCodexCommand } from "../src/runtime.js";
@@ -21,6 +21,7 @@ import {
   runWorkflow,
 } from "./cli-patch-fixtures.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
+import { patchSnapshotEnvironment } from "./support/patch-snapshot-environment.js";
 
 const fixtures = createTemporaryDirectories(true);
 afterEach(fixtures.cleanup);
@@ -34,6 +35,7 @@ test
   .each([
     "configured",
     "git-dir",
+    "inaccessible",
     ...(spawnSync("git", ["lfs", "version"]).status === 0 ? ["used"] : []),
   ])(
   "patches non-LFS files without requiring unused writable LFS storage: %s",
@@ -66,7 +68,7 @@ test
     const index = await readFile(join(repository, ".git", "index"));
     const head = git("rev-parse", "HEAD");
     let patched = false;
-    await chmod(readOnly, 0o555);
+    await chmod(readOnly, mode === "inaccessible" ? 0 : 0o555);
     try {
       const outcome = await runWorkflow(
         ["patch", "Synthetic issue", "--json"],
@@ -101,6 +103,67 @@ test
   },
 );
 
+test.each(["unused", "abort", "unexpected failure"])(
+  "preserves optional LFS configuration behavior: %s",
+  async (mode) => {
+    const root = await fixtures.create("patch-optional-lfs-config-");
+    const repository = join(root, "repository");
+    await mkdir(repository);
+    const git = repositoryGit(repository);
+    git("init", "--initial-branch=main");
+    git("config", "user.name", "Synthetic User");
+    git("config", "user.email", "synthetic@example.test");
+    await writeFile(join(repository, "app.ts"), "before\n");
+    git("add", ".");
+    git("commit", "-m", "Synthetic optional LFS baseline");
+    const index = await readFile(join(repository, ".git", "index"));
+    const head = git("rev-parse", "HEAD");
+    const selector = join(root, "selected.gitconfig");
+    const contents = "Synthetic ordinary file\n";
+    await writeFile(selector, contents);
+    const environment = { ...process.env, GIT_CONFIG: selector };
+    const canceled = new AbortController();
+    canceled.abort();
+    const failure: Error | undefined =
+      mode === "abort"
+        ? canceled.signal.reason
+        : mode === "unexpected failure"
+          ? Object.assign(new Error("Synthetic Git invocation failure"), {
+              code: 1,
+            })
+          : undefined;
+    let started = false;
+    const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
+      currentDirectory: repository,
+      environment,
+      onRepositoryCommand: (command, args, cwd, options) => {
+        if (failure !== undefined && args.includes("lfs.storage"))
+          throw failure;
+        return runGitRepositoryCommand(command, args, cwd, {
+          ...options,
+          environment: { ...environment, ...options?.environment },
+        });
+      },
+      onCodex: async (_args, output) => {
+        started = true;
+        expect(output!.appServer!.snapshotStoragePaths).toContain(
+          await realpath(join(repository, ".git", "lfs", "objects")),
+        );
+        await writeFile(join(repository, "app.ts"), "after\n");
+        output!.stdout.write("Synthetic patch complete.\n");
+        return 0;
+      },
+    });
+    expect(started).toBe(failure === undefined);
+    expect(outcome.exitCode, outcome.stderr).toBe(failure ? 2 : 0);
+    if (failure !== undefined)
+      expect(outcome.stderr).toContain(failure.message);
+    expect(await readFile(selector, "utf8")).toBe(contents);
+    expect(await readFile(join(repository, ".git", "index"))).toEqual(index);
+    expect(git("rev-parse", "HEAD")).toBe(head);
+  },
+);
+
 test("native snapshots retain Windows Git home fallbacks when HOME is unset", async () => {
   const root = await fixtures.create("patch-home-fallbacks-");
   const repository = join(root, "repository"),
@@ -113,16 +176,19 @@ test("native snapshots retain Windows Git home fallbacks when HOME is unset", as
     HOMEDRIVE: parse(home).root.slice(0, -1),
     HOMEPATH: home.slice(parse(home).root.length - 1),
   };
-  const environment: NodeJS.ProcessEnv = {
-    ...process.env,
-    ...fallback,
-    HOME: undefined,
-    CODEX_HOME: home,
-    GIT_CONFIG_GLOBAL:
-      process.platform === "win32" ? undefined : join(home, ".gitconfig"),
-    GIT_CONFIG_SYSTEM: emptyConfig,
-    GIT_CONFIG_NOSYSTEM: "1",
-  };
+  const environment = patchSnapshotEnvironment(
+    await fixtures.create("patch-home-fallback-temp-"),
+    {
+      ...process.env,
+      ...fallback,
+      HOME: undefined,
+      CODEX_HOME: home,
+      GIT_CONFIG_GLOBAL:
+        process.platform === "win32" ? undefined : join(home, ".gitconfig"),
+      GIT_CONFIG_SYSTEM: emptyConfig,
+      GIT_CONFIG_NOSYSTEM: "1",
+    },
+  );
   const clean = join(root, "clean.cjs");
   await writeFile(
     clean,
@@ -200,7 +266,7 @@ test("native snapshots retain Windows Git home fallbacks when HOME is unset", as
     },
   });
   expect(outcome.exitCode, outcome.stderr).toBe(2);
-  expect(trees).toEqual([
+  expect(trees, outcome.stdout + outcome.stderr).toEqual([
     git("rev-parse", "HEAD^{tree}"),
     git("rev-parse", "HEAD^{tree}"),
   ]);
@@ -211,7 +277,14 @@ test("native snapshots retain Windows Git home fallbacks when HOME is unset", as
 
 test
   .skipIf(spawnSync("git", ["lfs", "version"]).status !== 0)
-  .each(["missing", "symlink", "configured-symlink"] as const)(
+  .each([
+    "missing",
+    "symlink",
+    "configured-symlink",
+    "selector",
+    "selector-include",
+    "malformed-selector",
+  ] as const)(
   "prepares canonical LFS storage for the first filtered file: %s",
   async (mode) => {
     const root = await fixtures.create("patch-first-lfs-");
@@ -232,7 +305,34 @@ test
     git("add", ".");
     git("commit", "-m", "Synthetic LFS baseline");
     let storage = join(repository, ".git", "lfs");
-    if (mode !== "missing") {
+    const environment = patchSnapshotEnvironment(
+      await fixtures.create("patch-first-lfs-temp-"),
+      { ...process.env, CODEX_HOME: home },
+    );
+    if (
+      mode === "selector" ||
+      mode === "selector-include" ||
+      mode === "malformed-selector"
+    ) {
+      if (mode !== "malformed-selector")
+        storage = join(root, "selected-storage");
+      const selector = join(root, "lfs.gitconfig");
+      const settings = `[lfs]\n storage = ${JSON.stringify(storage.replaceAll("\\", "/"))}\n`;
+      if (mode === "selector-include") {
+        const included = join(root, "included.gitconfig");
+        await writeFile(included, settings);
+        await writeFile(
+          selector,
+          `[include]\n path = ${JSON.stringify(included.replaceAll("\\", "/"))}\n`,
+        );
+      } else if (mode === "malformed-selector") {
+        await writeFile(
+          selector,
+          `[lfs]\n storage = ${JSON.stringify(join(root, "discarded-storage").replaceAll("\\", "/"))}\n[invalid\n`,
+        );
+      } else await writeFile(selector, settings);
+      environment["GIT_CONFIG"] = selector;
+    } else if (mode !== "missing") {
       const target = join(root, "storage-target");
       await mkdir(target);
       const alias = mode === "symlink" ? storage : join(root, "storage-alias");
@@ -249,15 +349,37 @@ test
     await expect(lstat(join(storage, "objects"))).rejects.toMatchObject({
       code: "ENOENT",
     });
+    if (
+      mode === "selector" ||
+      mode === "selector-include" ||
+      mode === "malformed-selector"
+    ) {
+      const lfsEnvironment = spawnSync("git", ["lfs", "env"], {
+        cwd: repository,
+        env: environment,
+        encoding: "utf8",
+      });
+      expect(lfsEnvironment.status, lfsEnvironment.stderr).toBe(0);
+      if (mode === "malformed-selector")
+        expect(lfsEnvironment.stderr).toContain("bad config line");
+      const media = lfsEnvironment.stdout
+        .split(/\r?\n/u)
+        .find((line) => line.startsWith("LocalMediaDir="));
+      expect(media).toBeDefined();
+      expect(resolve(media!.slice("LocalMediaDir=".length))).toBe(
+        resolve(join(storage, "objects")),
+      );
+    }
     const originalConfig = await readFile(join(repository, ".git", "config"));
     const originalIndex = await readFile(join(repository, ".git", "index"));
     const payload = "Synthetic first LFS payload\n";
-    const environment = { ...process.env, CODEX_HOME: home };
+    let storagePaths: readonly string[] = [];
     const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
       currentDirectory: repository,
       environment,
       manualCodexPreparation: true,
       onCodex: async (_args, output) => {
+        storagePaths = output!.appServer!.snapshotStoragePaths ?? [];
         output!.appServer!.onPermissions!({
           directory: repository,
           environment,
@@ -266,12 +388,18 @@ test
             extends: ":workspace",
             network: { enabled: false },
             workspace_roots: {},
-            filesystem: Object.fromEntries(
-              output!.appServer!.permissions!.readOnlyPaths.map((path) => [
-                path,
-                { ".": "read" },
-              ]),
-            ),
+            filesystem: {
+              ...Object.fromEntries(
+                output!.appServer!.permissions!.readOnlyPaths.map((path) => [
+                  path,
+                  { ".": "read" },
+                ]),
+              ),
+              // An external cache needs explicit snapshot data-directory grants.
+              ...(mode === "selector" || mode === "selector-include"
+                ? { [storage]: { ".": "read" } }
+                : {}),
+            },
           },
         });
         await output!.appServer!.onBeforeTurn?.();
@@ -286,6 +414,17 @@ test
         }),
     });
     expect(outcome.exitCode, outcome.stdout + outcome.stderr).toBe(0);
+    expect(storagePaths).toContain(await realpath(join(storage, "objects")));
+    expect(storagePaths).toContain(await realpath(join(storage, "tmp")));
+    if (mode === "malformed-selector") {
+      expect(storagePaths).toEqual([
+        await realpath(join(storage, "objects")),
+        await realpath(join(storage, "tmp")),
+      ]);
+      await expect(
+        lstat(join(root, "discarded-storage")),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+    }
     const digest = createHash("sha256").update(payload).digest("hex");
     expect(
       await readFile(
@@ -337,6 +476,13 @@ test.each([
       filtered,
     })),
   ),
+  ...["set", "unset", "empty"].flatMap((state) =>
+    [false, true].map((filtered) => ({
+      selector: "GIT_ATTR_NOSYSTEM",
+      state,
+      filtered,
+    })),
+  ),
   ...[false, true].map((filtered) => ({
     selector: "GIT_ALTERNATE_OBJECT_DIRECTORIES",
     state: "set",
@@ -360,13 +506,16 @@ test.each([
     const cleanCommand = `node ${JSON.stringify(clean.replaceAll("\\", "/"))}`;
     const filterSettings = `[filter "synthetic-selector"]\n clean = ${JSON.stringify(cleanCommand)}\n`;
     await writeFile(filterConfig, filterSettings);
-    const environment: NodeJS.ProcessEnv = {
-      ...process.env,
-      HOME: home,
-      USERPROFILE: home,
-      XDG_CONFIG_HOME: home,
-      CODEX_HOME: home,
-    };
+    const environment = patchSnapshotEnvironment(
+      await fixtures.create("patch-native-config-temp-"),
+      {
+        ...process.env,
+        HOME: home,
+        USERPROFILE: home,
+        XDG_CONFIG_HOME: home,
+        CODEX_HOME: home,
+      },
+    );
     for (const name of Object.keys(environment))
       if (/^GIT_CONFIG(?:_|$)/iu.test(name)) delete environment[name];
     Object.assign(environment, {
@@ -409,6 +558,14 @@ test.each([
     } else if (selector === "GIT_ATTR_SOURCE") {
       environment[selector] = undefined;
       policySet[selector] = state === "set" ? "HEAD" : "synthetic-attributes";
+    } else if (selector === "GIT_ATTR_NOSYSTEM") {
+      environment[selector] =
+        state === "set" ? "1" : state === "empty" ? "" : undefined;
+      policySet[selector] = state === "set" ? "0" : "1";
+      await writeFile(
+        clean,
+        `const fs=require("node:fs");const input=fs.readFileSync(0,"utf8");process.stdout.write(process.env.GIT_ATTR_NOSYSTEM===${JSON.stringify(environment[selector])} ? input.toUpperCase() : input);\n`,
+      );
     } else if (selector !== "GIT_ALTERNATE_OBJECT_DIRECTORIES") {
       environment[selector] =
         state === "set" ? filterConfig : state === "empty" ? "" : undefined;
@@ -441,7 +598,7 @@ test.each([
     git("init", "--initial-branch=main");
     git("config", "user.name", "Synthetic User");
     git("config", "user.email", "synthetic@example.test");
-    if (selector === "GIT_ATTR_SOURCE")
+    if (selector === "GIT_ATTR_SOURCE" || selector === "GIT_ATTR_NOSYSTEM")
       git("config", "filter.synthetic-selector.clean", cleanCommand);
     await writeFile(
       join(repository, ".gitattributes"),
@@ -515,7 +672,10 @@ test.each([
     expect(await readFile(join(repository, ".git", "index"))).toEqual(index);
     expect(git("diff", "--exit-code")).toBe("");
     expect(outcome.exitCode, outcome.stdout + outcome.stderr).toBe(2);
-    expect(JSON.parse(outcome.stdout).error.code).toBe("NO_PATCH_APPLIED");
+    expect(
+      JSON.parse(outcome.stdout).error.code,
+      outcome.stdout + outcome.stderr,
+    ).toBe("NO_PATCH_APPLIED");
     expect(snapshots).toBeGreaterThan(0);
     expect(trees).toHaveLength(2);
     expect(trees[1]).toBe(trees[0]);
@@ -542,24 +702,27 @@ test.each([
     await Promise.all([mkdir(repository), mkdir(home)]);
     const global = join(root, "empty-gitconfig");
     await writeFile(global, "");
-    const environment = {
-      PATH: process.env["PATH"],
-      ...(process.env["SystemRoot"] === undefined
-        ? {}
-        : { SystemRoot: process.env["SystemRoot"] }),
-      CODEX_HOME:
-        mode === "stored credentials" ? join(root, "absent-home") : home,
-      CODEX_SECURITY_STATE_DIR: state,
-      GIT_CONFIG_GLOBAL: global,
-      GIT_CONFIG_NOSYSTEM: "1",
-      ...(mode === "Git config tuple"
-        ? {
-            GIT_CONFIG_COUNT: "1",
-            GIT_CONFIG_KEY_0: "core.quotePath",
-            GIT_CONFIG_VALUE_0: "false",
-          }
-        : {}),
-    };
+    const environment = patchSnapshotEnvironment(
+      await fixtures.create("patch-prepared-context-temp-"),
+      {
+        PATH: process.env["PATH"],
+        ...(process.env["SystemRoot"] === undefined
+          ? {}
+          : { SystemRoot: process.env["SystemRoot"] }),
+        CODEX_HOME:
+          mode === "stored credentials" ? join(root, "absent-home") : home,
+        CODEX_SECURITY_STATE_DIR: state,
+        GIT_CONFIG_GLOBAL: global,
+        GIT_CONFIG_NOSYSTEM: "1",
+        ...(mode === "Git config tuple"
+          ? {
+              GIT_CONFIG_COUNT: "1",
+              GIT_CONFIG_KEY_0: "core.quotePath",
+              GIT_CONFIG_VALUE_0: "false",
+            }
+          : {}),
+      },
+    );
     const git = repositoryGit(repository);
     git("init", "--initial-branch=main");
     git("config", "user.name", "Synthetic User");
@@ -708,11 +871,14 @@ if(process.argv.includes("fail")){process.stderr.write("Synthetic Git failure de
   ).toBeGreaterThan(128 * 1024);
   const sandbox = {
     directory: repository,
-    environment: {
-      ...process.env,
-      CODEX_HOME: home,
-      SNAPSHOT_USER_FILTERED: "excluded",
-    },
+    environment: patchSnapshotEnvironment(
+      await fixtures.create("patch-binding-temp-"),
+      {
+        ...process.env,
+        CODEX_HOME: home,
+        SNAPSHOT_USER_FILTERED: "excluded",
+      },
+    ),
     gitEnvironment,
     profile: {
       extends: ":workspace",
@@ -855,7 +1021,10 @@ process.stdout.write(input);
       "index",
     );
     const originalIndex = await readFile(index);
-    const environment = { ...process.env, CODEX_HOME: home };
+    const environment = patchSnapshotEnvironment(
+      await fixtures.create("patch-storage-temp-"),
+      { ...process.env, CODEX_HOME: home },
+    );
     const result = await runWorkflow(["patch", "Synthetic issue", "--json"], {
       currentDirectory: repository,
       environment,

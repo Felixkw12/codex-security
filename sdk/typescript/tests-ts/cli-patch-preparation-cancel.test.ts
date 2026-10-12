@@ -78,7 +78,8 @@ test.each(["saved", "supplied"])(
         currentDirectory: repository,
         onWorkbench: () =>
           savedScan(resultWithFindings(["high"]), "scan-1", repository),
-        onCodex: () => {
+        onCodex: async () => {
+          await writeFile(join(repository, "app.ts"), "partial edit\n");
           interrupted = true;
           return 143;
         },
@@ -91,14 +92,110 @@ test.each(["saved", "supplied"])(
     expect(outcome.exitCode, outcome.stderr).toBe(143);
     expect(interrupted).toBe(true);
     expect(snapshots).toEqual([]);
+    const response = JSON.parse(outcome.stdout);
+    expect(response).not.toHaveProperty("applied");
+    expect(response).not.toHaveProperty("filesChanged");
+    expect(response.error.message).toContain("not fully inspected");
+    expect(await readFile(join(repository, "app.ts"), "utf8")).toBe(
+      "partial edit\n",
+    );
+  },
+);
+
+test.each([false, true])(
+  "retains completed batch changes when the next patch is interrupted (Git: %p)",
+  async (useGit) => {
+    const repository = await fixtures.create("patch-interrupted-batch-");
+    await mkdir(join(repository, "src"));
+    for (const name of ["src/finding-1.ts", "src/finding-2.ts", "local.txt"])
+      await writeFile(join(repository, name), "original\n");
+    if (useGit) {
+      const git = repositoryGit(repository);
+      git("init", "--initial-branch=main");
+      git("config", "user.name", "Synthetic User");
+      git("config", "user.email", "synthetic@example.test");
+      git("add", ".");
+      git("commit", "-m", "Synthetic batch baseline");
+    }
+    await writeFile(join(repository, "local.txt"), "pre-existing edit\n");
+    let calls = 0;
+    let interrupted = false;
+    const snapshots: string[][] = [];
+    const outcome = await runWorkflow(["patch", "--scan", "scan-1", "--json"], {
+      currentDirectory: repository,
+      onWorkbench: () =>
+        savedScan(resultWithFindings(["high", "high"]), "scan-1", repository),
+      onRepositoryCommand: (command, args, cwd, options) => {
+        if (interrupted && options?.patchSnapshot) snapshots.push([...args]);
+        if (!useGit) throw new Error("fatal: not a git repository");
+        return runGitRepositoryCommand(command, args, cwd, options);
+      },
+      onCodex: async (_args, output) => {
+        calls++;
+        await writeFile(
+          join(repository, `src/finding-${calls}.ts`),
+          "partial edit\n",
+        );
+        if (calls === 2) {
+          interrupted = true;
+          return 143;
+        }
+        output!.stdout.write(
+          JSON.stringify({
+            patches: [
+              {
+                occurrenceId: "occ_1",
+                status: "verified",
+                files: ["src/finding-1.ts"],
+                verification: "Synthetic check.",
+              },
+            ],
+          }),
+        );
+        return 0;
+      },
+    });
+    expect(outcome.exitCode, outcome.stderr).toBe(143);
+    expect(calls).toBe(2);
+    expect(snapshots).toEqual([]);
+    const response = JSON.parse(outcome.stdout);
+    expect(response.files).toEqual(["src/finding-1.ts"]);
+    expect(response).not.toHaveProperty("applied");
+    expect(response).not.toHaveProperty("filesChanged");
+    expect(response.error.message).toContain("not fully inspected");
+    expect(response.patches[0]).toMatchObject({
+      status: "verified",
+      files: ["src/finding-1.ts"],
+    });
+    expect(response.patches[1]).toMatchObject({
+      status: "failed",
+      reason: expect.stringContaining("not inspected"),
+    });
+    for (const name of ["src/finding-1.ts", "src/finding-2.ts"])
+      expect(await readFile(join(repository, name), "utf8")).toBe(
+        "partial edit\n",
+      );
+    expect(await readFile(join(repository, "local.txt"), "utf8")).toBe(
+      "pre-existing edit\n",
+    );
   },
 );
 
 test
   .skipIf(process.platform === "win32")
-  .each(["supplied SIGTERM", "saved SIGTERM", "app-server exit"] as const)(
+  .each([
+    "supplied SIGTERM",
+    "saved SIGTERM",
+    "app-server exit",
+    "supplied preflight exit",
+    "saved pre-turn exit",
+  ] as const)(
   "cancels an active pre-turn Git snapshot without restarting: %s",
   async (mode) => {
+    const saved = mode.startsWith("saved");
+    const preflight = mode === "supplied preflight exit";
+    const nativeExit = mode.endsWith("exit");
+    const snapshotCount = saved || preflight ? 2 : 1;
     const root = await fixtures.create("patch-preparation-cancel-");
     const repository = join(root, "repository"),
       home = join(root, "home");
@@ -111,6 +208,12 @@ test
     await writeFile(join(repository, "app.ts"), "original\n");
     git("add", ".");
     git("commit", "-m", "Synthetic cancellation baseline");
+    if (preflight) {
+      const remote = join(root, "remote");
+      await mkdir(remote);
+      git("init", "--bare", remote);
+      git("remote", "add", "origin", remote);
+    }
     const fifo = join(root, "slow-input"),
       ready = join(root, "ready"),
       serverPid = join(root, "server-pid"),
@@ -122,6 +225,18 @@ test
       `
 import { createInterface } from "node:readline";
 import { writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+if (process.argv[2] === "sandbox") {
+  const separator = process.argv.indexOf("--");
+  if (separator < 0) throw new Error("Synthetic executor did not receive a command.");
+  const [command, ...args] = process.argv.slice(separator + 1);
+  const child = spawn(command, args, { stdio: "inherit" });
+  child.once("error", (error) => { console.error(error); process.exitCode = 1; });
+  child.once("exit", (code, signal) => {
+    if (signal) process.kill(process.pid, signal);
+    else process.exitCode = code ?? 1;
+  });
+} else {
 writeFileSync(${JSON.stringify(serverPid)}, String(process.pid));
 process.on("SIGUSR1", () => process.exit(7));
 const send = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
@@ -133,8 +248,18 @@ for await (const line of createInterface({ input: process.stdin })) {
   else if (request.method === "turn/start") writeFileSync(${JSON.stringify(lateTurn)}, "unexpected");
   else if (request.id !== undefined) send({ id: request.id, result: {} });
 }
+}
 `,
     );
+    // This fixture exercises cancellation through its synthetic executor.
+    // Native permission enforcement has separate integration coverage.
+    const executor = join(root, "executor");
+    const quoted = [process.execPath, server]
+      .map((value) => `'${value.replaceAll("'", "'\\''")}'`)
+      .join(" ");
+    await writeFile(executor, `#!/bin/sh\nexec ${quoted} "$@"\n`, {
+      mode: 0o755,
+    });
     const wrapper = join(root, "wrapper.mts");
     await writeFile(
       wrapper,
@@ -144,12 +269,15 @@ import { capture, dependencies } from ${JSON.stringify(new URL("./cli-fixtures.t
 import { main, runCodexSkillCommand, runRepositoryCommand } from ${JSON.stringify(new URL("../src/cli.ts", import.meta.url).href)};
 let snapshots = 0;
 const stdout = capture(), stderr = capture();
-const exitCode = await main(${JSON.stringify(mode === "saved SIGTERM" ? ["patch", "--scan", "scan-1", "--json"] : ["patch", "Synthetic issue", "--json"])}, stdout.stream, stderr.stream, dependencies({
-  currentDirectory: ${JSON.stringify(repository)}, environment: { ...process.env, CODEX_HOME: ${JSON.stringify(home)} }, manualCodexPreparation: true,
+const exitCode = await main(${JSON.stringify(saved ? ["patch", "--scan", "scan-1", "--json"] : ["patch", "Synthetic issue", ...(preflight ? ["--create-pr"] : []), "--json"])}, stdout.stream, stderr.stream, dependencies({
+  currentDirectory: ${JSON.stringify(repository)}, environment: { ...process.env, CODEX_HOME: ${JSON.stringify(home)}, CODEX_CLI_PATH: ${JSON.stringify(executor)} }, manualCodexPreparation: true,
   onWorkbench: () => (${JSON.stringify(savedScan(resultWithFindings(["high"]), "scan-1", repository))}),
   onCodex: (args, output, environment) => runCodexSkillCommand([${JSON.stringify(server)}], { ...output, auth: undefined }, { command: process.execPath }, environment),
   onRepositoryCommand: (command, args, cwd, options) => {
-    if (options?.patchSnapshot && args.includes("write-tree") && ++snapshots === ${mode === "saved SIGTERM" ? 2 : 1}) {
+    if (command !== "git") return "[]";
+    if (options?.sandbox && options.sandbox.environment.CODEX_CLI_PATH !== ${JSON.stringify(executor)})
+      throw new Error("Cancellation fixture lost its synthetic executor.");
+    if (options?.patchSnapshot && args.includes("write-tree") && ++snapshots === ${snapshotCount}) {
       writeFileSync(${JSON.stringify(ready)}, "ready");
       return runRepositoryCommand("git", ["hash-object", ${JSON.stringify(fifo)}], cwd, options);
     }
@@ -193,7 +321,7 @@ process.exitCode = outcome.exitCode;
           await delay(25);
         }
       }
-      if (mode === "app-server exit") {
+      if (nativeExit) {
         process.kill(Number(await readFile(serverPid, "utf8")), "SIGUSR1");
       } else {
         invocation.kill("SIGTERM");
@@ -207,11 +335,15 @@ process.exitCode = outcome.exitCode;
         }),
       ]);
       expect(status, output + diagnostic).toBe(
-        mode === "app-server exit" ? 7 : 143,
+        nativeExit ? (saved ? 2 : 7) : 143,
       );
-      expect(JSON.parse(output.trim()).snapshots).toBe(
-        mode === "saved SIGTERM" ? 2 : 1,
-      );
+      expect(JSON.parse(output.trim()).snapshots).toBe(snapshotCount);
+      if (mode !== "app-server exit") {
+        const response = JSON.parse(JSON.parse(output.trim()).stdout);
+        expect(response).not.toHaveProperty("applied");
+        expect(response).not.toHaveProperty("filesChanged");
+        expect(response.error.message).toContain("not fully inspected");
+      }
       let readerError: unknown;
       try {
         writeSync(writer!, "probe");
