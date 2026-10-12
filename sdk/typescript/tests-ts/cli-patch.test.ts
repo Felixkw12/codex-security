@@ -1640,16 +1640,20 @@ describe("scan and patch workflow", () => {
             );
             return 0;
           },
-          onRepositoryCommand: (command, args) => {
+          onRepositoryCommand: (command, args, _cwd, options) => {
             commandStarted ||=
               (command !== "git" &&
                 args[1] !== "list" &&
                 !(args[0] === "repo" && args[1] === "view")) ||
               ["checkout", "commit", "push"].includes(args[0]!);
             if (command === "gh" && args[1] === "list") return "[]";
-            return status === "outside" && args.includes("--name-only")
-              ? "src/finding-1.ts\0"
-              : "";
+            const output =
+              status === "outside" && args.includes("--name-only")
+                ? "src/finding-1.ts\0"
+                : "";
+            return options?.encoding === "base64"
+              ? Buffer.from(output).toString("base64")
+              : output;
           },
         },
       );

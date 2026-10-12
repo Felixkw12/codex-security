@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import {
   mkdir,
   readFile,
+  realpath,
   rename,
   rm,
   symlink,
@@ -32,7 +33,7 @@ async function initialize(directory: string) {
 }
 
 test.each(["GIT_DIR", "GIT_WORK_TREE"])(
-  "patch assessment preserves symlink traversal in relative %s",
+  "patch assessment preserves native directory-link traversal in relative %s",
   async (selector) => {
     const root = await fixtures.create("patch-relative-selector-");
     const checkout = join(root, "storage", "checkout");
@@ -41,7 +42,9 @@ test.each(["GIT_DIR", "GIT_WORK_TREE"])(
     await mkdir(caller);
     await mkdir(join(root, "storage", "child"));
     await symlink(
-      join(root, "storage", "child"),
+      process.platform === "win32"
+        ? join(root, "storage")
+        : join(root, "storage", "child"),
       join(caller, "alias"),
       process.platform === "win32" ? "junction" : "dir",
     );
@@ -50,11 +53,15 @@ test.each(["GIT_DIR", "GIT_WORK_TREE"])(
     const environment = {
       GIT_DIR: metadata,
       GIT_WORK_TREE: checkout,
-      [selector]: `alias${sep}..${sep}${selector === "GIT_DIR" ? "metadata" : "checkout"}`,
+      // Windows resolves alias/.. lexically; POSIX traverses the link first.
+      [selector]: `alias${sep}${process.platform === "win32" ? "" : `..${sep}`}${selector === "GIT_DIR" ? "metadata" : "checkout"}`,
     };
     const git = (args: string[]) =>
       runGitRepositoryCommand("git", args, caller, { environment });
     const before = await git(["rev-parse", "HEAD"]);
+    expect(await realpath(await git(["rev-parse", "--show-toplevel"]))).toBe(
+      await realpath(checkout),
+    );
     let assessments = 0;
     const outcome = await runWorkflow(
       ["patch", "Synthetic issue", "--assess-patch-risk", "--json"],
