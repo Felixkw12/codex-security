@@ -2143,12 +2143,16 @@ async function finalizeNativeStoppedScan(
   const scan = isJsonObject(current.scan) ? current.scan : undefined;
   if (typeof scan?.scanDir !== "string")
     throw new Error("The workbench returned no scan directory.");
-  // Another host may own the scan. Its lock remains held until all children drain.
-  const release = await waitForScanExecution(
-    codexSecurityStateDirectory(),
-    scan.scanDir,
-    PLUGIN_ROOT,
-  );
+  // Independent Deep executions drain before publication. Ordinary scans can
+  // call this tool in-turn while their SDK caller still owns the execution lock.
+  const release =
+    scan.mode === "deep"
+      ? await waitForScanExecution(
+          codexSecurityStateDirectory(),
+          scan.scanDir,
+          PLUGIN_ROOT,
+        )
+      : undefined;
   try {
     return await runWorkbench([
       "preserve-scan-results",
@@ -2164,7 +2168,7 @@ async function finalizeNativeStoppedScan(
       ),
     ]);
   } finally {
-    release();
+    release?.();
   }
 }
 

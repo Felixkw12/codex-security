@@ -100,6 +100,7 @@ for (const entry of [
     const scan = {
       scanId: "synthetic-parent",
       scanDir: "/synthetic/scan",
+      mode: "deep",
       handoffClaimToken: "synthetic-claim",
       progress: { status: entry === "completed" ? "complete" : "running" },
       reportAvailable: false,
@@ -189,6 +190,7 @@ for (const operation of ["cancel", "fail"]) {
     const scan = () => ({
       scanId,
       scanDir: "/synthetic/scan",
+      mode: "deep",
       handoffClaimToken: claimToken,
       findings: [...lateFindings],
     });
@@ -306,6 +308,7 @@ for (const status of ["canceled", "failed"]) {
     const scan = {
       scanId: "synthetic-parent",
       scanDir: "/synthetic/scan",
+      mode: "deep",
       handoffClaimToken: "synthetic-claim",
       progress: { status },
       failureMessage: status === "failed" ? "Synthetic scan failure." : null,
@@ -371,6 +374,7 @@ for (const completed of [false, true]) {
     const scan = {
       scanId: "synthetic-parent",
       scanDir: "/synthetic/scan",
+      mode: "deep",
       handoffClaimToken: "synthetic-claim",
       progress: { status: completed ? "complete" : "running" },
     };
@@ -412,8 +416,10 @@ for (const completed of [false, true]) {
   });
 }
 
-for (const operation of ["cancel", "fail"]) {
-  test(`native ${operation} waits for a remote owner's execution lock before sealing`, async () => {
+for (const [operation, mode] of ["cancel", "fail"].flatMap((operation) =>
+  ["deep", "standard", "diff"].map((mode) => [operation, mode]),
+)) {
+  test(`${mode} ${operation} respects execution ownership before publication`, async () => {
     const root = await mkdtemp(join(tmpdir(), "native-remote-stop-"));
     const scanDir = join(root, "scan");
     await mkdir(scanDir);
@@ -468,6 +474,7 @@ for (const operation of ["cancel", "fail"]) {
       const scan = {
         scanId: "synthetic-parent",
         scanDir,
+        mode,
         handoffClaimToken: "synthetic-claim",
       };
       const fixture = {
@@ -486,7 +493,7 @@ for (const operation of ["cancel", "fail"]) {
           assert.equal(command, "preserve-scan-results");
           assert.equal(
             await readFile(receipt, "utf8"),
-            "Accepted late evidence",
+            mode === "deep" ? "Accepted late evidence" : "Before drain",
           );
           await assert.rejects(
             acquireScanExecution(root, scanDir, plugin),
@@ -513,8 +520,13 @@ for (const operation of ["cancel", "fail"]) {
           (error) => error,
         ),
       ]);
-      assert.equal(early, "waiting");
-      assert.equal(preserved, false);
+      assert.equal(early, mode === "deep" ? "waiting" : "returned");
+      assert.equal(preserved, mode !== "deep");
+      if (mode !== "deep")
+        await assert.rejects(
+          acquireScanExecution(root, scanDir, plugin),
+          /already running/,
+        );
       child.stdin.end("drain\n");
       await pending;
       assert.equal(preserved, true);
