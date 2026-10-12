@@ -139,7 +139,18 @@ def test_failed_publication_keeps_order_after_identical_result_rewrite(
     published_sources = json.loads((scan_dir / "scan-manifest.json").read_text())["scan"][
         "preservedSources"
     ]
-    assert all(published_sources[path] == digest for path, digest in sources.items())
+    times = saved._frozen_source_times(scan_dir, scan_id, published_sources)
+    for path, digest in sources.items():
+        if Path(path).name == "checkpoint-head.json":
+            assert saved._read_saved_result(scan_dir, path, scan_id)[1] == digest
+            assert path not in published_sources
+            captured = saved._capture_saved_source(scan_dir, path, scan_id, write=False)
+            for snapshot, (expected, observed) in captured.items():
+                assert published_sources[snapshot] == expected
+                if Path(snapshot).parent.name == "checkpoint-heads":
+                    assert times[snapshot] == observed == frozen["sourceTimes"][path]
+        else:
+            assert published_sources[path] == digest
 
 
 @pytest.mark.parametrize("explicit_recovery", [False, True])

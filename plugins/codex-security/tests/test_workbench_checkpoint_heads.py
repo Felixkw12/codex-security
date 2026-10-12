@@ -754,7 +754,7 @@ def test_head_snapshot_reads_content_and_time_from_one_descriptor(
     }
 
 
-def test_legacy_live_head_sources_keep_their_recorded_digest(
+def test_legacy_live_head_sources_convert_their_recorded_observation(
     tmp_path: Path, checkpoint_scan
 ) -> None:
     scan_id, pending, closed, binding = checkpoint_scan
@@ -775,7 +775,18 @@ def test_legacy_live_head_sources_keep_their_recorded_digest(
     )
     assert first is not None
     assert pending["coverage"]["deferred"][0] not in first[2]["deferred"]
-    assert first[0]["scan"]["preservedSources"] == frozen
+    published = first[0]["scan"]["preservedSources"]
+    assert "checkpoint-head.json" not in published
+    assert published[paths[0]] == frozen[paths[0]]
+    assert (
+        saved._read_saved_result(tmp_path, "checkpoint-head.json", scan_id)[1]
+        == frozen["checkpoint-head.json"]
+    )
+    snapshot = next(path for path in published if path.startswith("checkpoint-heads/"))
+    assert json.loads((tmp_path / snapshot).read_text()) == {
+        "checkpoint": checkpoint.name,
+        "observedAtNs": "200",
+    }
     select(tmp_path, checkpoint, 300)
     with pytest.raises(
         saved.ContractError, match="Frozen stopped-scan checkpoint set is incomplete"
@@ -790,6 +801,8 @@ def test_legacy_live_head_sources_keep_their_recorded_digest(
             reason="interrupted",
             frozen_source_digests=frozen,
         )
+    replayed = replay_saved_results(saved, first, tmp_path, scan_id, binding, [], stopped=True)
+    assert replayed[2] == first[2]
 
 
 @pytest.mark.parametrize("evidence", ["deferred", "reported"])
