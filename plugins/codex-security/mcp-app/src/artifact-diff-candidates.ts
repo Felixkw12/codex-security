@@ -684,13 +684,17 @@ export function preserveUnresolvedDiffCandidates(
       };
     });
   const receiptDecisions = new Set(
-    (submitted.coverage.surfaces as JsonObject[])
+    [
+      ...(submitted.coverage.surfaces as JsonObject[]),
+      ...(submitted.coverage.explicitExclusions as JsonObject[]),
+    ]
       .filter(
         (surface) =>
           isTerminalCandidateDecision(surface) &&
           !confirmed.has(coverageCandidateKey(surface)) &&
-          Array.isArray(surface.receiptRefs) &&
-          surface.receiptRefs.length > 0,
+          surface.receiptRefs !== undefined &&
+          (!Array.isArray(surface.receiptRefs) ||
+            surface.receiptRefs.length > 0),
       )
       .map((surface) => coverageCandidateKey(surface)),
   );

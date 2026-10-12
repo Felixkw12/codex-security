@@ -36,9 +36,16 @@ export async function recoverWorkerCandidateReceipts(
         ? surface.candidateId
         : undefined;
     const retainedRefs: string[] = [];
-    for (const ref of (surface.receiptRefs as string[] | undefined) ?? []) {
+    const refs = surface.receiptRefs === undefined ? [] : surface.receiptRefs;
+    for (const ref of Array.isArray(refs) ? refs : [refs]) {
       let contents: Buffer;
       try {
+        if (!Array.isArray(refs))
+          throw new Error(
+            "Worker candidate receipt references must be an array.",
+          );
+        if (typeof ref !== "string")
+          throw new Error("Worker candidate receipt must be a string.");
         if (!ref.startsWith("artifacts/"))
           throw new Error("Worker candidate receipt must be under artifacts/.");
         contents = await readArtifactBytes(

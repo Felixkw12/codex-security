@@ -32,15 +32,29 @@ const { recordCodexSecurityCandidateValidations } = await importSource(
   options,
 );
 
-for (const termination of ["fail-scan", "cancel-scan"]) {
-  for (const receipt of ["valid", "missing", "replacement"]) {
-    const missing = receipt === "missing";
+for (const [section, termination] of ["surfaces", "explicitExclusions"].flatMap(
+  (section) =>
+    ["fail-scan", "cancel-scan"].map(
+      (termination) => [section, termination] as const,
+    ),
+)) {
+  for (const receipt of [
+    "valid",
+    "missing",
+    "replacement",
+    ...(section === "explicitExclusions"
+      ? ["object", "null", "array-null"]
+      : []),
+  ]) {
+    const malformed = ["object", "null", "array-null"].includes(receipt);
+    const missing = receipt === "missing" || malformed;
     for (const decision of [
       "pending",
       "suppressed",
       "not_applicable",
     ] as const) {
-      test(`receipt recovery precedes saved Diff decisions: termination=${termination}, receipt=${receipt}, ledger=${decision}`, async (t) => {
+      if (malformed && decision !== "pending") continue;
+      test(`receipt recovery precedes saved Diff decisions: section=${section}, termination=${termination}, receipt=${receipt}, ledger=${decision}`, async (t) => {
         const directory = await temporaryDirectory("candidate-receipt-", true);
         t.after(() => rm(directory, { recursive: true, force: true }));
         const target = path.join(directory, "target");
@@ -190,6 +204,12 @@ for (const termination of ["fail-scan", "cancel-scan"]) {
           path.join(context.root, ref),
           "Synthetic decision evidence.\n",
         );
+        const submittedGap = {
+          id: "authored-gap",
+          candidateId,
+          reason: "Caller-supplied receipt proof gap.",
+          paths: ["app.ts"],
+        };
         await record(
           context,
           {
@@ -198,28 +218,46 @@ for (const termination of ["fail-scan", "cancel-scan"]) {
             complete: true,
             findings: [],
             coverage: {
-              completeness: "complete",
-              surfaces: [
+              completeness: "partial",
+              surfaces: [],
+              explicitExclusions: [],
+              [section]: [
                 {
                   id: "authored-decision",
                   candidateId,
                   label: "Authored candidate review",
                   disposition: "rejected",
                   notes: "Authored decision with receipt.",
-                  receiptRefs: [ref],
+                  pattern: "app.ts",
+                  reason: "Authored decision with receipt.",
+                  receiptRefs:
+                    receipt === "object"
+                      ? { ref }
+                      : receipt === "null"
+                        ? null
+                        : receipt === "array-null"
+                          ? [null]
+                          : [ref],
                 },
               ],
-              explicitExclusions: [],
-              deferred: [],
+              deferred: [submittedGap],
             },
           },
           workbench,
         );
         const coveragePath = path.join(context.root, "coverage.json");
         const published = JSON.parse(await readFile(coveragePath, "utf8"));
-        assert.equal(published.deferred.length, 0);
-        assert.equal(published.surfaces[0].disposition, "rejected");
-        if (receipt !== "valid") await unlink(path.join(context.root, ref));
+        const publishedGap = published.deferred.find(
+          (row: { reason: string }) => row.reason === submittedGap.reason,
+        );
+        assert.ok(
+          publishedGap,
+          "The submitted proof gap is retained until verification.",
+        );
+        assert.deepEqual(publishedGap.paths, submittedGap.paths);
+        assert.equal(published[section][0].disposition, "rejected");
+        if (receipt === "missing" || receipt === "replacement")
+          await unlink(path.join(context.root, ref));
         if (receipt === "replacement") {
           const replacement = "artifacts/proof/replacement.txt";
           await writeFile(
@@ -235,10 +273,11 @@ for (const termination of ["fail-scan", "cancel-scan"]) {
               findings: [],
               coverage: {
                 completeness: "complete",
-                surfaces: [
-                  { ...published.surfaces[0], receiptRefs: [replacement] },
-                ],
+                surfaces: [],
                 explicitExclusions: [],
+                [section]: [
+                  { ...published[section][0], receiptRefs: [replacement] },
+                ],
                 deferred: [],
               },
             },
@@ -268,7 +307,7 @@ for (const termination of ["fail-scan", "cancel-scan"]) {
             (row: { candidateId?: string }) => row.candidateId === candidateId,
           );
           assert.equal(pending.length > 0, missing, command);
-          const surfaces = coverage.surfaces.filter(
+          const surfaces = coverage[section].filter(
             (row: { candidateId?: string }) => row.candidateId === candidateId,
           );
           assert.ok(surfaces.length > 0, command);
@@ -280,6 +319,14 @@ for (const termination of ["fail-scan", "cancel-scan"]) {
             command,
           );
           if (missing) {
+            const originalGap = pending.find(
+              (row: { reason: string }) => row.reason === submittedGap.reason,
+            );
+            assert.ok(
+              originalGap,
+              "The submitted proof gap survives receipt recovery.",
+            );
+            assert.deepEqual(originalGap.paths, submittedGap.paths);
             assert.equal(coverage.completeness, "partial", command);
             assert.ok(
               surfaces.every(

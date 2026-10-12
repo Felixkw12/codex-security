@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { test } from "node:test";
 import { promises as fs } from "node:fs";
 import {
@@ -15,7 +16,11 @@ import { finding, scanId, workerDraft } from "./scan-draft-fixture.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import { readJson } from "./support/json.ts";
 
-const { recordCodexSecurityWorkerScanDraft } = await importSource(
+const {
+  recordCodexSecurityWorkerScanDraft,
+  parseScanDraft,
+  parsePersistedScanDraft,
+} = await importSource(
   new URL("../src/artifact-scan-draft.ts", import.meta.url).pathname,
 );
 const { recordCodexSecurityDeepReduction, getCodexSecurityDeepReducerInputs } =
@@ -72,6 +77,117 @@ async function fixture() {
       },
     },
   };
+}
+
+for (const archived of [false, true]) {
+  for (const [label, refs, valid] of [
+    ["object", { receipt: "artifacts/review.bin" }, false],
+    ["null", null, false],
+    ["number", 1, false],
+    ["boolean", false, false],
+    ["string", "artifacts/review.bin", false],
+    ["null element", [null], false],
+    ["object element", [{}], false],
+    ["mixed elements", ["artifacts/review.bin", null], false],
+    ["valid", ["artifacts/review.bin"], true],
+    ["empty", [], true],
+    ["absent", undefined, true],
+  ] as const) {
+    test(`accepted exclusion receipt metadata recovers: ${label}, archived=${archived}`, async () => {
+      const f = await fixture();
+      try {
+        await mkdir(path.join(f.output, "artifacts"));
+        await writeFile(
+          path.join(f.output, "artifacts/review.bin"),
+          "Synthetic receipt.",
+        );
+        const candidate = {
+          evidence: "Retain the authored candidate evidence.",
+        };
+        const draft = workerDraft([], {
+          complete: true,
+          coverage: {
+            completeness: "complete",
+            surfaces: [],
+            explicitExclusions: [
+              {
+                candidateId: "candidate",
+                pattern: "src/example.ts",
+                reason: "Synthetic candidate decision.",
+                disposition: "rejected",
+                candidate,
+                ...(refs === undefined ? {} : { receiptRefs: refs }),
+              },
+            ],
+            deferred: [],
+          },
+        });
+        for (const parse of [parseScanDraft, parsePersistedScanDraft])
+          assert.deepEqual(
+            parse(draft).coverage.explicitExclusions[0].receiptRefs,
+            refs,
+          );
+        await recordCodexSecurityWorkerScanDraft(f.worker, draft);
+        const source = archived
+          ? path.join(f.workerRoot, "attempts", "attempt-01")
+          : f.output;
+        if (archived) await archiveDirectory(f.output, source);
+        const original = await readFile(path.join(source, "result.json"));
+        const python = JSON.parse(
+          execFileSync(
+            process.env.PYTHON?.trim() || "python3",
+            [
+              "-c",
+              `import json,sys
+from pathlib import Path
+sys.path.insert(0,sys.argv[1])
+from workbench_budget_candidates import recover_candidate_receipts
+from candidate_identity import unresolved_candidates
+root=Path(sys.argv[2]); draft=json.loads((root/'result.json').read_text()); warnings=[]
+recovered=recover_candidate_receipts(draft,root,warnings)
+print(json.dumps({'pending':unresolved_candidates(recovered['coverage'],recovered['findings']),'coverage':recovered['coverage']}))`,
+              path.join(import.meta.dirname, "../../scripts"),
+              source,
+            ],
+            { encoding: "utf8" },
+          ),
+        );
+        assert.equal(python.pending.length, valid ? 0 : 1);
+        for (let replay = 0; replay < 2; replay++) {
+          if (archived)
+            await recordCodexSecurityWorkerScanDraft(f.worker, workerDraft([]));
+          const inputs = await getCodexSecurityDeepReducerInputs(f.reducer);
+          assert.equal(
+            inputs.discoveries[0].result.unresolvedCandidates?.length ?? 0,
+            valid ? 0 : 1,
+          );
+          await recordCodexSecurityDeepReduction(f.reducer, {
+            scanId,
+            findings: [],
+          });
+          const saved = await readJson(path.join(f.reducerRoot, "result.json"));
+          const published = deepReductionScanDraft(saved);
+          assert.equal(
+            unresolvedCandidates(published.coverage, published.findings).length,
+            valid ? 0 : 1,
+          );
+          if (!valid) {
+            assert.deepEqual(
+              saved.unresolvedCandidates[0].candidate,
+              candidate,
+            );
+            assert.equal(published.coverage.completeness, "partial");
+          }
+          assert.deepEqual(
+            await readFile(path.join(source, "result.json")),
+            original,
+          );
+        }
+      } finally {
+        await rm(f.root, { recursive: true, force: true });
+      }
+    });
+  }
 }
 
 for (const receipt of [
