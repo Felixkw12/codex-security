@@ -23,6 +23,7 @@ from test_workbench_standard_deep_results import (
 from workbench_test_support import (
     empty_target_scan,
     get_scan,
+    load_script,
     preserve_scan_results,
     replay_saved_results,
     run_workbench,
@@ -31,6 +32,63 @@ from workbench_test_support import (
     write_checkpoint,
     write_completed_contract,
 )
+
+
+@pytest.mark.parametrize("boolean", [False, True])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_published_candidate_keeps_boolean_and_numeric_proof_gaps(
+    tmp_path: Path, boolean: bool, reverse: bool
+) -> None:
+    state, target, scan_id, scan_dir = empty_target_scan(tmp_path)
+    write_completed_contract(scan_dir, scan_id, target)
+    documents = {
+        name: json.loads((scan_dir / filename).read_text())
+        for name, filename in (
+            ("manifest", "scan-manifest.json"),
+            ("findings", "findings.json"),
+            ("coverage", "coverage.json"),
+        )
+    }
+    values = [boolean, int(boolean)]
+    if reverse:
+        values.reverse()
+    rows = [
+        {
+            "id": "saved-gap",
+            "candidateId": "candidate-one",
+            "reason": "Review the recorded response.",
+            "candidate": {
+                "title": "Saved response evidence",
+                "evidence": "The request reached the handler.",
+                "observations": [{"response": value}],
+            },
+        }
+        for value in values
+    ]
+    documents["findings"]["findings"] = []
+    documents["manifest"]["scan"]["complete"] = True
+    documents["coverage"].update(
+        completeness="partial", surfaces=[], explicitExclusions=[], deferred=rows
+    )
+    staged = scan_dir / "drafts" / f"{uuid.uuid4()}.json"
+    staged.parent.mkdir(exist_ok=True)
+    staged.write_text(json.dumps(documents))
+    run_workbench(state, "write-scan-draft", "--scan-id", scan_id, "--draft-path", str(staged))
+    run_workbench(state, "prepare-scan-completion", "--scan-id", scan_id)
+    run_workbench(state, "complete-scan", "--scan-id", scan_id)
+
+    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    assert json.dumps(coverage["deferred"], sort_keys=True) == json.dumps(rows, sort_keys=True)
+    candidates = load_script("candidate_identity")
+    assert len(candidates.unresolved_candidates(coverage, [], sealed=True)) == 1
+    selected = candidates.unresolved_candidate_rows(coverage, [], sealed=True)
+    assert json.dumps(selected, sort_keys=True) == json.dumps(rows, sort_keys=True)
+    report = (scan_dir / "report.md").read_text()
+    assert "| Unresolved candidates | 1 |" in report
+    assert report.count("| candidate-one |") == 2
+    saved = {name: (scan_dir / name).read_bytes() for name in ("coverage.json", "report.md")}
+    run_workbench(state, "complete-scan", "--scan-id", scan_id)
+    assert {name: (scan_dir / name).read_bytes() for name in saved} == saved
 
 
 @pytest.mark.parametrize("disposition", ["rejected", "not_applicable"])

@@ -139,7 +139,9 @@ def reducer_coverage(coverage: dict[str, Any], candidates: list[Any]) -> dict[st
 
 
 def _saved_row_key(value: Any) -> Any:
-    # Saved rows are JSON values; preserve dict equality and numeric equality.
+    # Preserve JSON object and numeric equality without conflating booleans.
+    if isinstance(value, bool):
+        return (bool, value)
     if isinstance(value, dict):
         return frozenset((key, _saved_row_key(child)) for key, child in value.items())
     if isinstance(value, list):

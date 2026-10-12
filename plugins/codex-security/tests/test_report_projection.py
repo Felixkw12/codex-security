@@ -1227,14 +1227,14 @@ def test_projection_includes_surface_evidence_receipts() -> None:
     assert "Reviewed parser entrypoints. Evidence: artifacts/receipts/parser.jsonl" in markdown
 
 
-def test_saved_candidate_proof_rows_preserve_order_and_python_equality() -> None:
+def test_saved_candidate_proof_rows_preserve_order_and_json_equality() -> None:
     first = {
         "candidateId": "same-review",
         "reason": "First proof gap.",
         "evidence": {"count": 1, "checks": [False, {"done": None}]},
     }
     equivalent = {
-        "evidence": {"checks": [0, {"done": None}], "count": 1.0},
+        "evidence": {"checks": [False, {"done": None}], "count": 1.0},
         "reason": "First proof gap.",
         "candidateId": "same-review",
     }
@@ -1245,6 +1245,35 @@ def test_saved_candidate_proof_rows_preserve_order_and_python_equality() -> None
     assert CANDIDATES.unresolved_candidates(coverage) == [first]
     coverage["surfaces"] = [{"candidateId": "same-review", "disposition": "rejected"}]
     assert CANDIDATES.unresolved_candidate_rows(coverage) == []
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "count"),
+    [
+        (True, 1, 2),
+        (False, 0, 2),
+        ({"checks": [True, {"done": False}]}, {"checks": [1, {"done": 0}]}, 2),
+        (True, ["bool", 1], 2),
+        (False, ["bool", 0], 2),
+        (True, True, 1),
+        (False, False, 1),
+        (1, 1.0, 1),
+        (0, 0.0, 1),
+        ([1, 2], [2, 1], 2),
+        (None, 0, 2),
+    ],
+)
+def test_saved_candidate_proof_rows_distinguish_boolean_evidence(first, second, count) -> None:
+    rows = [
+        {"candidateId": "same-review", "reason": "Review remains.", "candidate": {"value": value}}
+        for value in (first, second)
+    ]
+    for ordered in (rows, rows[::-1]):
+        coverage = {"deferred": ordered, "surfaces": [], "explicitExclusions": []}
+        selected = CANDIDATES.unresolved_candidate_rows(coverage)
+        assert len(selected) == count
+        assert selected[0] is ordered[0]
+        assert len(CANDIDATES.unresolved_candidates(coverage)) == 1
 
 
 def test_large_saved_candidate_projection_preserves_all_identities_and_proof_gaps() -> None:
