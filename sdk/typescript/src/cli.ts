@@ -1240,7 +1240,9 @@ const readHeader = (chunk) => {
     // The native sandbox grants its Windows user access to the checkout.
     for (let index = 0; index < Number(process.env.GIT_CONFIG_COUNT ?? 0); index++) {
       const value = process.env["GIT_CONFIG_VALUE_" + index];
-      if (process.env["GIT_CONFIG_KEY_" + index] === "safe.directory" && value)
+      if (process.env["GIT_CONFIG_KEY_" + index]?.toLowerCase() !== "safe.directory") continue;
+      if (value === "") nativeGitOptions.length = 0;
+      else if (value !== undefined)
         nativeGitOptions.push("-c", "safe.directory=" + value);
     }
   }

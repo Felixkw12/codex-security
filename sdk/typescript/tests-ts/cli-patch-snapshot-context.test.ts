@@ -11,7 +11,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { join, parse } from "node:path";
+import { join, parse, resolve } from "node:path";
 import { stringify as stringifyToml } from "smol-toml";
 import { runCodexSkillCommand, runRepositoryCommand } from "../src/cli.js";
 import { resolveCodexCommand } from "../src/runtime.js";
@@ -99,6 +99,67 @@ test
     } finally {
       await chmod(readOnly, 0o755);
     }
+  },
+);
+
+test.each(["unused", "abort", "unexpected failure"])(
+  "preserves optional LFS configuration behavior: %s",
+  async (mode) => {
+    const root = await fixtures.create("patch-optional-lfs-config-");
+    const repository = join(root, "repository");
+    await mkdir(repository);
+    const git = repositoryGit(repository);
+    git("init", "--initial-branch=main");
+    git("config", "user.name", "Synthetic User");
+    git("config", "user.email", "synthetic@example.test");
+    await writeFile(join(repository, "app.ts"), "before\n");
+    git("add", ".");
+    git("commit", "-m", "Synthetic optional LFS baseline");
+    const index = await readFile(join(repository, ".git", "index"));
+    const head = git("rev-parse", "HEAD");
+    const selector = join(root, "selected.gitconfig");
+    const contents = "Synthetic ordinary file\n";
+    await writeFile(selector, contents);
+    const environment = { ...process.env, GIT_CONFIG: selector };
+    const canceled = new AbortController();
+    canceled.abort();
+    const failure: Error | undefined =
+      mode === "abort"
+        ? canceled.signal.reason
+        : mode === "unexpected failure"
+          ? Object.assign(new Error("Synthetic Git invocation failure"), {
+              code: 1,
+            })
+          : undefined;
+    let started = false;
+    const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
+      currentDirectory: repository,
+      environment,
+      onRepositoryCommand: (command, args, cwd, options) => {
+        if (failure !== undefined && args.includes("lfs.storage"))
+          throw failure;
+        return runGitRepositoryCommand(command, args, cwd, {
+          ...options,
+          environment: { ...environment, ...options?.environment },
+        });
+      },
+      onCodex: async (_args, output) => {
+        started = true;
+        expect(output!.appServer!.snapshotStoragePaths).toContain(
+          await realpath(join(repository, ".git", "lfs", "objects")),
+        );
+        await writeFile(join(repository, "app.ts"), "after\n");
+        output!.stdout.write("Synthetic patch complete.\n");
+        return 0;
+      },
+    });
+    expect(started).toBe(failure === undefined);
+    expect(outcome.exitCode, outcome.stderr).toBe(failure ? 2 : 0);
+    if (failure !== undefined)
+      expect(outcome.stderr).toContain(failure.message);
+    expect(await readFile(selector, "utf8")).toBe(contents);
+    expect(await readFile(join(repository, ".git", "index"))).toEqual(index);
+    expect(git("rev-parse", "HEAD")).toBe(head);
   },
 );
 
@@ -212,7 +273,14 @@ test("native snapshots retain Windows Git home fallbacks when HOME is unset", as
 
 test
   .skipIf(spawnSync("git", ["lfs", "version"]).status !== 0)
-  .each(["missing", "symlink", "configured-symlink"] as const)(
+  .each([
+    "missing",
+    "symlink",
+    "configured-symlink",
+    "selector",
+    "selector-include",
+    "malformed-selector",
+  ] as const)(
   "prepares canonical LFS storage for the first filtered file: %s",
   async (mode) => {
     const root = await fixtures.create("patch-first-lfs-");
@@ -233,7 +301,31 @@ test
     git("add", ".");
     git("commit", "-m", "Synthetic LFS baseline");
     let storage = join(repository, ".git", "lfs");
-    if (mode !== "missing") {
+    const environment: NodeJS.ProcessEnv = { ...process.env, CODEX_HOME: home };
+    if (
+      mode === "selector" ||
+      mode === "selector-include" ||
+      mode === "malformed-selector"
+    ) {
+      if (mode !== "malformed-selector")
+        storage = join(root, "selected-storage");
+      const selector = join(root, "lfs.gitconfig");
+      const settings = `[lfs]\n storage = ${JSON.stringify(storage.replaceAll("\\", "/"))}\n`;
+      if (mode === "selector-include") {
+        const included = join(root, "included.gitconfig");
+        await writeFile(included, settings);
+        await writeFile(
+          selector,
+          `[include]\n path = ${JSON.stringify(included.replaceAll("\\", "/"))}\n`,
+        );
+      } else if (mode === "malformed-selector") {
+        await writeFile(
+          selector,
+          `[lfs]\n storage = ${JSON.stringify(join(root, "discarded-storage").replaceAll("\\", "/"))}\n[invalid\n`,
+        );
+      } else await writeFile(selector, settings);
+      environment["GIT_CONFIG"] = selector;
+    } else if (mode !== "missing") {
       const target = join(root, "storage-target");
       await mkdir(target);
       const alias = mode === "symlink" ? storage : join(root, "storage-alias");
@@ -250,15 +342,37 @@ test
     await expect(lstat(join(storage, "objects"))).rejects.toMatchObject({
       code: "ENOENT",
     });
+    if (
+      mode === "selector" ||
+      mode === "selector-include" ||
+      mode === "malformed-selector"
+    ) {
+      const lfsEnvironment = spawnSync("git", ["lfs", "env"], {
+        cwd: repository,
+        env: environment,
+        encoding: "utf8",
+      });
+      expect(lfsEnvironment.status, lfsEnvironment.stderr).toBe(0);
+      if (mode === "malformed-selector")
+        expect(lfsEnvironment.stderr).toContain("bad config line");
+      const media = lfsEnvironment.stdout
+        .split(/\r?\n/u)
+        .find((line) => line.startsWith("LocalMediaDir="));
+      expect(media).toBeDefined();
+      expect(resolve(media!.slice("LocalMediaDir=".length))).toBe(
+        resolve(join(storage, "objects")),
+      );
+    }
     const originalConfig = await readFile(join(repository, ".git", "config"));
     const originalIndex = await readFile(join(repository, ".git", "index"));
     const payload = "Synthetic first LFS payload\n";
-    const environment = { ...process.env, CODEX_HOME: home };
+    let storagePaths: readonly string[] = [];
     const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
       currentDirectory: repository,
       environment,
       manualCodexPreparation: true,
       onCodex: async (_args, output) => {
+        storagePaths = output!.appServer!.snapshotStoragePaths ?? [];
         output!.appServer!.onPermissions!({
           directory: repository,
           environment,
@@ -267,12 +381,18 @@ test
             extends: ":workspace",
             network: { enabled: false },
             workspace_roots: {},
-            filesystem: Object.fromEntries(
-              output!.appServer!.permissions!.readOnlyPaths.map((path) => [
-                path,
-                { ".": "read" },
-              ]),
-            ),
+            filesystem: {
+              ...Object.fromEntries(
+                output!.appServer!.permissions!.readOnlyPaths.map((path) => [
+                  path,
+                  { ".": "read" },
+                ]),
+              ),
+              // An external cache needs explicit snapshot data-directory grants.
+              ...(mode === "selector" || mode === "selector-include"
+                ? { [storage]: { ".": "read" } }
+                : {}),
+            },
           },
         });
         await output!.appServer!.onBeforeTurn?.();
@@ -287,6 +407,17 @@ test
         }),
     });
     expect(outcome.exitCode, outcome.stdout + outcome.stderr).toBe(0);
+    expect(storagePaths).toContain(await realpath(join(storage, "objects")));
+    expect(storagePaths).toContain(await realpath(join(storage, "tmp")));
+    if (mode === "malformed-selector") {
+      expect(storagePaths).toEqual([
+        await realpath(join(storage, "objects")),
+        await realpath(join(storage, "tmp")),
+      ]);
+      await expect(
+        lstat(join(root, "discarded-storage")),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+    }
     const digest = createHash("sha256").update(payload).digest("hex");
     expect(
       await readFile(

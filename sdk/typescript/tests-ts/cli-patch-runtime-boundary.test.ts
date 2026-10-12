@@ -36,6 +36,14 @@ for (const configuration of [
       );
       for (const path of [repository, callerRepository, deniedRepository])
         repositoryGit(path)("init", "--initial-branch=main");
+      const repositoryToplevel = repositoryGit(repository)(
+        "rev-parse",
+        "--show-toplevel",
+      );
+      const callerToplevel = repositoryGit(callerRepository)(
+        "rev-parse",
+        "--show-toplevel",
+      );
       const clean = join(root, "clean.cjs");
       await writeFile(
         clean,
@@ -98,7 +106,7 @@ if(${filtered}) {
   Object.assign(env,{GIT_CONFIG_COUNT:"2",GIT_CONFIG_KEY_0:"filter.snapshot.clean",GIT_CONFIG_VALUE_0:"cat",GIT_CONFIG_KEY_1:"core.autocrlf",GIT_CONFIG_VALUE_1:"true"});
 }
 let count=Number(env.GIT_CONFIG_COUNT??0)||0;
-for(const path of ${JSON.stringify([repository, `${repository}/*`])}) {
+for(const path of ${JSON.stringify([repositoryToplevel, `${repositoryToplevel}/*`])}) {
   env["GIT_CONFIG_KEY_"+count]="safe.directory";
   env["GIT_CONFIG_VALUE_"+count]=path;
   count++;
@@ -136,7 +144,9 @@ child.on("exit",code=>process.exitCode=code??1);
           });
           return;
         }
-        expect(await run(["rev-parse", "--show-toplevel"])).toBe(repository);
+        expect(await run(["rev-parse", "--show-toplevel"])).toBe(
+          repositoryToplevel,
+        );
         expect(
           await run(
             ["hash-object", "--path=data", "--stdin"],
@@ -148,13 +158,13 @@ child.on("exit",code=>process.exitCode=code??1);
         const grants = (
           await run(["config", "--get-all", "safe.directory"])
         ).split("\n");
-        expect(grants).toContain(repository);
-        expect(grants).toContain(`${repository}/*`);
+        expect(grants).toContain(repositoryToplevel);
+        expect(grants).toContain(`${repositoryToplevel}/*`);
         if (populated) {
           expect(grants).toContain(callerRepository);
           expect(
             await run(["rev-parse", "--show-toplevel"], callerRepository),
-          ).toBe(callerRepository);
+          ).toBe(callerToplevel);
         }
         await expect(
           run(["rev-parse", "--show-toplevel"], deniedRepository),
