@@ -1,3 +1,4 @@
+import { syntheticModelCatalog } from "./support/model-catalog.js";
 import { resolving } from "./support/promises.js";
 import { parseJsonLines } from "./support/json.js";
 import {
@@ -3448,21 +3449,77 @@ describe("CLI", () => {
   );
 
   test.each([
-    ["openrouter", "rerun", OPENROUTER_CODEX_PROVIDER, "OPENROUTER_API_KEY"],
-    ["openrouter", "resume", OPENROUTER_CODEX_PROVIDER, "OPENROUTER_API_KEY"],
-    ["fireworks", "rerun", FIREWORKS_CODEX_PROVIDER, "FIREWORKS_API_KEY"],
-    ["fireworks", "resume", FIREWORKS_CODEX_PROVIDER, "FIREWORKS_API_KEY"],
+    [
+      "openrouter",
+      "rerun",
+      OPENROUTER_CODEX_PROVIDER,
+      "OPENROUTER_API_KEY",
+      false,
+    ],
+    [
+      "openrouter",
+      "resume",
+      OPENROUTER_CODEX_PROVIDER,
+      "OPENROUTER_API_KEY",
+      false,
+    ],
+    [
+      "fireworks",
+      "rerun",
+      FIREWORKS_CODEX_PROVIDER,
+      "FIREWORKS_API_KEY",
+      false,
+    ],
+    [
+      "fireworks",
+      "resume",
+      FIREWORKS_CODEX_PROVIDER,
+      "FIREWORKS_API_KEY",
+      false,
+    ],
+    ...(["rerun", "resume"] as const).map(
+      (command) =>
+        [
+          "synthetic",
+          command,
+          {
+            name: "Synthetic",
+            wire_api: "responses",
+            env_key: "SYNTHETIC_KEY",
+          },
+          "SYNTHETIC_KEY",
+          true,
+        ] as const,
+    ),
   ] as const)(
-    "ordinary %s %s provider recipes remain executable after a display-name override",
-    async (provider, command, defaults, key) => {
+    "%s %s provider recipes preserve saved execution settings",
+    async (provider, command, defaults, key, native) => {
       const root = await temporaryDirectory("provider-replay-");
       try {
         const home = join(root, "home");
         const repository = join(root, "repository");
         await mkdir(home, { mode: 0o700 });
         await mkdir(repository);
+        const instructions = join(root, "instructions.md");
+        const catalog = join(root, "models.json");
+        const settings: JsonObject = native
+          ? {
+              analytics: { enabled: false },
+              shell_environment_policy: {
+                inherit: "none",
+                set: { SYNTHETIC_SETTING: "saved" },
+              },
+              model_instructions_file: instructions,
+              model_catalog_json: catalog,
+            }
+          : {};
+        if (native) {
+          await writeFile(instructions, "Synthetic saved instructions.");
+          await writeFile(catalog, JSON.stringify(syntheticModelCatalog));
+        }
         const originalConfig = {
-          model: "synthetic-model",
+          ...settings,
+          model: native ? "synthetic-catalog-model" : "synthetic-model",
           model_provider: provider,
           model_providers: {
             [provider]: {
@@ -3481,7 +3538,10 @@ describe("CLI", () => {
           { codexOverrides: originalConfig },
           {
             environment,
-            prepareRuntime: async () => preparedRuntime(home),
+            prepareRuntime: async () => ({
+              ...preparedRuntime(home),
+              ...(native ? { preserveCodexHomeConfig: true } : {}),
+            }),
             resolvePluginPython: async () => "python3",
             runWorkbench: async (_options, args, input) => {
               if (args[0] === "register-cli-scan")
@@ -3494,14 +3554,30 @@ describe("CLI", () => {
         await expect(
           initial.run(repository, {
             outputDir: join(root, "initial"),
-            auth: "api-key",
-            mode: command === "resume" ? "deep" : "standard",
+            auth: native ? "auto" : "api-key",
+            mode: native || command === "resume" ? "deep" : "standard",
+            preserveProviderEnvironment: native,
           }),
         ).rejects.toThrow("Synthetic recipe captured");
         expect(savedRecipe).toBeDefined();
         expect(JSON.stringify(savedRecipe)).not.toContain(
           "synthetic-unsaved-key",
         );
+        if (native) {
+          expect(savedRecipe?.["providerProfile"]).toMatchObject({
+            home: "ambient",
+          });
+          expect(savedRecipe?.["config"]).not.toHaveProperty(
+            "shell_environment_policy",
+          );
+          await writeCodexConfig(join(home, "config.toml"), {
+            ...originalConfig,
+            analytics: { enabled: true },
+            shell_environment_policy: { inherit: "core" },
+            model_instructions_file: "current-instructions.md",
+            model_catalog_json: "current-models.json",
+          });
+        }
         let replayConfig: CodexSecurityConfig | undefined;
         let launched: ScanOptions | undefined;
         const stderr = capture();
@@ -3531,6 +3607,11 @@ describe("CLI", () => {
         expect(launched?.resumeScanId).toBe(
           command === "resume" ? "scan-original" : undefined,
         );
+        expect(replayConfig?.codexOverrides).toMatchObject(settings);
+        expect(launched?.preserveProviderEnvironment).toBe(native);
+        expect(launched?.mode).toBe(
+          native || command === "resume" ? "deep" : "standard",
+        );
         const effective = await mergedCodexConfig(replayConfig!);
         await writeCodexConfig(
           join(home, "config.toml"),
@@ -3550,9 +3631,9 @@ describe("CLI", () => {
           },
         );
         expect(checked.status, checked.stderr).toBe(0);
-        expect(effective["model_providers"]).toMatchObject({
-          [provider]: defaults,
-        });
+        expect(effective["model_providers"]).toMatchObject(
+          native ? originalConfig.model_providers : { [provider]: defaults },
+        );
       } finally {
         await rm(root, { recursive: true, force: true });
       }

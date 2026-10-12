@@ -6513,7 +6513,7 @@ async function prepareScanArgumentsFromRecipe(
     recipe["preserveProviderEnvironment"] === true
       ? nativeScanConfiguration(
           environment,
-          { recipe: { config } },
+          { recipe: { config, providerProfile: recipe["providerProfile"] } },
           deepScan.data?.subagents ?? DEFAULT_DEEP_SCAN_SETTINGS.subagents,
         )
       : restoreProviderProfile(config, recipe["providerProfile"], environment);

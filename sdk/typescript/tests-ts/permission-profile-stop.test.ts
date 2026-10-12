@@ -1,11 +1,15 @@
 import { fixtureSpawn } from "./support/codex-process.js";
 import { expect, spyOn, test } from "bun:test";
 import * as childProcess from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPermissionCheckedCodex } from "../src/permission-profile.js";
-import { ScanPermissionError } from "../src/scan-execution.js";
+import {
+  acquireScanExecution,
+  ScanPermissionError,
+} from "../src/scan-execution.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
 
 test("cancellation drains a preflight child that ignores graceful termination", async () => {
   const root = await mkdtemp(join(tmpdir(), "permission-stop-"));
@@ -36,7 +40,7 @@ test("cancellation drains a preflight child that ignores graceful termination", 
   const controller = new AbortController();
   const codex = createPermissionCheckedCodex({
     codexPathOverride: executable,
-    env: { PATH: process.env["PATH"] ?? "" },
+    env: { PATH: process.env["PATH"] ?? "", CODEX_HOME: root },
     config: {
       default_permissions: "fixture",
       permissions: {
@@ -109,7 +113,7 @@ test.each(
     );
     const codex = createPermissionCheckedCodex({
       codexPathOverride: executable,
-      env: { PATH: process.env["PATH"] ?? "" },
+      env: { PATH: process.env["PATH"] ?? "", CODEX_HOME: root },
       config: {
         default_permissions: "fixture",
         permissions: {
@@ -171,3 +175,65 @@ test.each(
   },
   10000,
 );
+
+test("preflight waits are isolated by home and can be canceled before spawning", async () => {
+  const root = await mkdtemp(join(tmpdir(), "permission-home-lock-"));
+  const homes = [join(root, "first"), join(root, "second")];
+  await Promise.all(homes.map((home) => mkdir(home, { mode: 0o700 })));
+  const release = await acquireScanExecution(homes[0]!, homes[0]!, PLUGIN_ROOT);
+  const executable = join(root, "synthetic-codex.exe");
+  const script = join(root, "preflight.cjs");
+  await writeFile(
+    script,
+    `
+    require("node:readline").createInterface({ input: process.stdin }).on("line", line => {
+      const request = JSON.parse(line);
+      if (request.method === "initialize") console.log(JSON.stringify({ id: request.id, result: {} }));
+      if (request.method === "config/read") process.stderr.write("ready\\n");
+    });
+  `,
+  );
+  const ready = Promise.withResolvers<void>();
+  const spawnedHomes: string[] = [];
+  const spawning = spyOn(childProcess, "spawn").mockImplementation(
+    fixtureSpawn(executable, script, (child, _args, options) => {
+      spawnedHomes.push(options.env!["CODEX_HOME"]!);
+      child.stderr!.on("data", (bytes: Buffer) => {
+        if (bytes.toString().includes("ready")) ready.resolve();
+      });
+    }),
+  );
+  const controllers = homes.map(() => new AbortController());
+  const pending = homes.map((home, index) =>
+    createPermissionCheckedCodex({
+      codexPathOverride: executable,
+      env: { PATH: process.env["PATH"] ?? "", CODEX_HOME: home },
+      config: {
+        default_permissions: "fixture",
+        permissions: {
+          fixture: { filesystem: { "/": "read" }, network: { enabled: false } },
+        },
+      },
+    })
+      .startThread({ workingDirectory: root })
+      .runStreamed("inert fixture", { signal: controllers[index]!.signal })
+      .catch((error: unknown) => error),
+  );
+  try {
+    await ready.promise;
+    expect(spawnedHomes).toEqual([homes[1]!]);
+    for (const controller of controllers)
+      controller.abort(new Error("Synthetic stopped preflight"));
+    const failures = await Promise.all(pending);
+    expect(failures).toEqual(
+      controllers.map((controller) => controller.signal.reason),
+    );
+    expect(spawnedHomes).toEqual([homes[1]!]);
+  } finally {
+    for (const controller of controllers) controller.abort();
+    await Promise.all(pending);
+    release();
+    spawning.mockRestore();
+    await rm(root, { recursive: true, force: true });
+  }
+}, 10000);

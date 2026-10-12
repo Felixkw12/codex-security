@@ -1,6 +1,6 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
 import * as childProcess from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { mkdir, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { parse } from "smol-toml";
@@ -64,6 +64,13 @@ for (const role of ["comparison", "classification"] as const) {
         await writeFile(
           stub,
           `
+${
+  scenario === "accepted"
+    ? `import { existsSync } from "node:fs";
+import { setTimeout } from "node:timers/promises";
+while (!existsSync(${JSON.stringify(join(root, "models-ready"))})) await setTimeout(10);`
+    : ""
+}
 process.stdin.resume();
 await new Promise(resolve => process.stdin.on("end", resolve));
 console.log(JSON.stringify({type:"thread.started",thread_id:"synthetic-read-only"}));
@@ -72,8 +79,12 @@ console.log(JSON.stringify({type:"item.completed",item:{id:"answer",type:"agent_
 console.log(JSON.stringify({type:"turn.completed",usage:{input_tokens:1,cached_input_tokens:0,output_tokens:1}}));
 `,
         );
+        const controller = new AbortController();
+        const pending: Promise<string>[] = [];
         const executions: Array<{ args: string[]; config: JsonObject }> = [];
         const preflights: string[][] = [];
+        let activePreflights = 0;
+        let peakPreflights = 0;
         const original = childProcess.spawn;
         const spawn = spyOn(childProcess, "spawn").mockImplementation(((
           ...parameters: Parameters<typeof childProcess.spawn>
@@ -89,7 +100,13 @@ console.log(JSON.stringify({type:"turn.completed",usage:{input_tokens:1,cached_i
                 "--config",
                 'default_permissions=":read-only"',
               );
-            return original(command, argv, options ?? {});
+            const child = original(command, argv, options ?? {});
+            activePreflights += 1;
+            peakPreflights = Math.max(peakPreflights, activePreflights);
+            child.once("close", () => {
+              activePreflights -= 1;
+            });
+            return child;
           }
           if (argv.includes("exec")) {
             const name = argv[argv.indexOf("--profile") + 1]!;
@@ -99,50 +116,70 @@ console.log(JSON.stringify({type:"turn.completed",usage:{input_tokens:1,cached_i
                 readFileSync(join(home, `${name}.config.toml`), "utf8"),
               ) as JsonObject,
             });
+            if (scenario === "accepted" && executions.length === 4)
+              writeFileSync(join(root, "models-ready"), "ready");
             return original(process.execPath, [stub], options ?? {});
           }
           return original(command, args ?? [], options ?? {});
         }) as typeof childProcess.spawn);
         try {
-          const result = runReadOnlyCodex(
-            "Synthetic findings are supplied in the prompt.",
-            { type: "object" },
-            {
-              environment,
-              workingDirectory: cwd,
-              preserveProviderEnvironment: true,
-              config: {
-                codexOverrides: {
-                  model_provider: "synthetic.private",
-                  model_providers: { "synthetic.private": provider },
+          const run = () =>
+            runReadOnlyCodex(
+              "Synthetic findings are supplied in the prompt.",
+              { type: "object" },
+              {
+                environment,
+                signal: controller.signal,
+                workingDirectory: cwd,
+                preserveProviderEnvironment: true,
+                config: {
+                  codexOverrides: {
+                    model_provider: "synthetic.private",
+                    model_providers: { "synthetic.private": provider },
+                  },
                 },
-              },
-              ...(inherited
-                ? {
-                    inheritedPermissions: {
-                      filesystem: {
-                        [join(root, "denied")]: "deny",
-                        [cwd]: "write",
-                        glob_scan_max_depth: 6,
+                ...(inherited
+                  ? {
+                      inheritedPermissions: {
+                        filesystem: {
+                          [join(root, "denied")]: "deny",
+                          [cwd]: "write",
+                          glob_scan_max_depth: 6,
+                        },
+                        network: { enabled: true },
                       },
-                      network: { enabled: true },
-                    },
-                  }
-                : {}),
-            },
-            {
-              surface: "sdk",
-              command: role,
-              threadSource:
-                role === "comparison"
-                  ? CODEX_SECURITY_THREAD_SOURCES.scanComparison
-                  : CODEX_SECURITY_THREAD_SOURCES.severityClassification,
-            },
-          );
-          if (scenario === "accepted") expect(await result).toBe("{}");
-          else await expect(result).rejects.toBeInstanceOf(ScanPermissionError);
-          expect(preflights).toHaveLength(1);
-          expect(executions).toHaveLength(scenario === "rejected" ? 0 : 1);
+                    }
+                  : {}),
+              },
+              {
+                surface: "sdk",
+                command: role,
+                threadSource:
+                  role === "comparison"
+                    ? CODEX_SECURITY_THREAD_SOURCES.scanComparison
+                    : CODEX_SECURITY_THREAD_SOURCES.severityClassification,
+              },
+            );
+          const count = scenario === "accepted" ? 4 : 1;
+          pending.push(...Array.from({ length: count }, run));
+          if (scenario === "accepted") {
+            expect(
+              await Promise.all(
+                pending.map((operation) =>
+                  operation.catch((error) => {
+                    controller.abort(error);
+                    throw error;
+                  }),
+                ),
+              ),
+            ).toEqual(Array(count).fill("{}"));
+            expect(peakPreflights).toBe(1);
+          } else
+            await expect(pending[0]).rejects.toBeInstanceOf(
+              ScanPermissionError,
+            );
+          expect(preflights).toHaveLength(count);
+          expect(executions).toHaveLength(scenario === "rejected" ? 0 : count);
           const expected = {
             extends: ":read-only",
             filesystem: {
@@ -179,6 +216,8 @@ console.log(JSON.stringify({type:"turn.completed",usage:{input_tokens:1,cached_i
             ),
           ).toEqual([]);
         } finally {
+          controller.abort();
+          await Promise.allSettled(pending);
           spawn.mockRestore();
         }
       });

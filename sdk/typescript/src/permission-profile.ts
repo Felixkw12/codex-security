@@ -15,7 +15,9 @@ import {
   codexConfigOverrides,
   type JsonObject,
 } from "./config.js";
-import { ScanPermissionError } from "./scan-execution.js";
+import { configuredCodexHome } from "./auth.js";
+import { bundledPluginRoot } from "./runtime.js";
+import { acquireScanExecution, ScanPermissionError } from "./scan-execution.js";
 import { VERSION } from "./version.js";
 
 /** Verify managed permissions before each fresh or resumed Deep Scan worker turn. */
@@ -106,15 +108,29 @@ export function createPermissionCheckedCodex(
       if (parentSignal?.aborted) abort();
       else parentSignal?.addEventListener("abort", abort, { once: true });
       try {
-        await verifyPermissionProfile({
-          executable: options.codexPathOverride,
-          cwd: threadOptions.workingDirectory ?? process.cwd(),
-          environment,
-          overrides: effectiveOverrides,
-          profileId,
-          expectedProfile,
+        // Cold-home SQLite initialization must finish before another preflight starts.
+        // Release before model execution so independent turns remain concurrent.
+        const home = configuredCodexHome(environment);
+        const release = await acquireScanExecution(
+          home,
+          home,
+          await bundledPluginRoot(),
+          true,
           signal,
-        });
+        );
+        try {
+          await verifyPermissionProfile({
+            executable: options.codexPathOverride,
+            cwd: threadOptions.workingDirectory ?? process.cwd(),
+            environment,
+            overrides: effectiveOverrides,
+            profileId,
+            expectedProfile,
+            signal,
+          });
+        } finally {
+          release();
+        }
       } catch (error) {
         detachAbort();
         throw error;
