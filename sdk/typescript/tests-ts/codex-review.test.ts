@@ -135,7 +135,7 @@ const failureReasons: Record<string, string> = {
   "policy-refusal-text":
     "This request was refused because of the safety policy.",
   "policy-first-refusal-text":
-    "Cybersecurity policy: this request is refused. I can offer a defensive alternative.",
+    "Cybersecurity policy: this request is refused because it would facilitate unauthorized access.",
   "policy-reported-error":
     "Required review check could not be completed: Request refusal due to the safety policy.",
   "text-only": "Codex did not submit a validated review",
@@ -922,6 +922,9 @@ test.each([
   "The safety policy requires a refusal of your review.",
   "Under the safety policy, this request is refused.",
   "Cybersecurity policy: this request is refused.",
+  "Safety policy: this request is refused because it would facilitate harm.",
+  "Content policy: your request has been blocked because it contains disallowed content.",
+  "Cybersecurity policy: this request is refused as it requests disallowed assistance.",
   "Cybersecurity policy: this request is refused. I can offer a defensive alternative.",
   "Cybersecurity policy: this request is refused. Please ask for defensive guidance instead.",
   "Content policy: your request has been blocked.",

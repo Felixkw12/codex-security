@@ -13,7 +13,7 @@ const refusalMessages = {
   "policy-refusal-text":
     "This request was refused because of the safety policy.",
   "policy-first-refusal-text":
-    "Cybersecurity policy: this request is refused. I can offer a defensive alternative.",
+    "Cybersecurity policy: this request is refused because it would facilitate unauthorized access.",
 };
 const turnFailures = {
   "policy-turn-code": {
