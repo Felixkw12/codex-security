@@ -354,6 +354,7 @@ export class ScanCostTracker {
     if (progress.phase === "discovery" && progress.filesCompleted === 0)
       this.#parentInventory = marker;
     if (live.position !== null) this.#readyParentMarkers.set(marker, live);
+    const current = this.#parentFacts.get(progress.filesTotal);
     return (
       live.position === null ||
       this.#afterParentFrontier(live.position, marker.index) ||
@@ -363,8 +364,11 @@ export class ScanCostTracker {
       ((this.#displayedProgress?.owner === "worker" ||
         (this.#displayedProgress?.owner === "live" &&
           this.#displayedProgress.position === undefined)) &&
-        live.position === this.#parentFrontier.position &&
-        marker.index === this.#parentFrontier.markerIndex)
+        ((live.position === this.#parentFrontier.position &&
+          marker.index === this.#parentFrontier.markerIndex) ||
+          (current?.position === this.#parentFrontier.position &&
+            current.markerIndex === this.#parentFrontier.markerIndex &&
+            progressKey(current.progress) === progressKey(progress))))
     );
   }
 
@@ -399,10 +403,11 @@ export class ScanCostTracker {
     this.#liveParentProgress.add(progressKey(progress));
     if (live.position !== null) {
       this.#recordParentReview(progress, live.position, marker.index);
-      this.#parentFrontier = {
-        position: live.position,
-        markerIndex: marker.index,
-      };
+      if (this.#afterParentFrontier(live.position, marker.index))
+        this.#parentFrontier = {
+          position: live.position,
+          markerIndex: marker.index,
+        };
     }
   }
 
@@ -1068,6 +1073,14 @@ export class ScanCostTracker {
     // Treat it as a receipt; a copied truncated preview can consequently hide
     // omitted same-count phases from its earlier command. This is best effort.
     if (saved.receipt) return true;
+    // Native inventory has its own source frontier and review boundary. A later
+    // completion retains that provenance even if its total appeared live.
+    if (
+      saved.completion &&
+      saved.update.phase === "discovery" &&
+      saved.update.filesCompleted === 0
+    )
+      return true;
     const live = this.#acceptedParent;
     if (live === null) return true;
     // A later saved occurrence may legitimately repeat an earlier live tuple,
@@ -1523,13 +1536,21 @@ export class ScanCostTracker {
         // An inventory behind admitted review changes scope without replaying
         // its earlier phase. At zero coverage it follows normal source-ordered
         // phase admission below, including when the inventory total changes.
-        if ((this.#parentProgress?.progress.filesCompleted ?? 0) === 0)
-          this.#parentProgress = {
+        let inventory = progress;
+        if ((this.#parentProgress?.progress.filesCompleted ?? 0) === 0) {
+          const candidate = {
             progress,
             order,
             position: saved.position,
             markerIndex: saved.markerIndex,
           };
+          if (
+            this.#parentProgress === null ||
+            compareProgressOrder(candidate, this.#parentProgress) >= 0
+          )
+            this.#parentProgress = candidate;
+          inventory = this.#parentProgress.progress;
+        }
         const position = {
           position: saved.position,
           markerIndex: saved.markerIndex,
@@ -1540,7 +1561,7 @@ export class ScanCostTracker {
           ...position,
           filesTotal: progress.filesTotal,
         };
-        this.setExpectedFilesTotal(progress.filesTotal);
+        this.setExpectedFilesTotal(inventory.filesTotal);
         continue;
       }
       // Parent markers already describe global coverage, including its workers.
