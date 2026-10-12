@@ -104,6 +104,7 @@ process.stdout.write(fs.readFileSync(0, "utf8").toUpperCase());\n`;
             environment: { ...environment, ...options?.environment },
           });
         },
+        manualCodexPreparation: true,
         onCodex: async (_args, output) => {
           if (output?.appServer?.prompt.includes("immutable patch artifact")) {
             assessments++;
@@ -138,6 +139,7 @@ process.stdout.write(fs.readFileSync(0, "utf8").toUpperCase());\n`;
                 },
               },
             });
+          await output!.appServer!.onBeforeTurn?.();
           await writeFile(filter, script(true));
           await writeFile(join(nested, "data"), "fixed\n");
           output!.stdout.write("Synthetic patch complete.\n");

@@ -178,8 +178,9 @@ test.each([
     const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
       currentDirectory: repository,
       environment,
+      manualCodexPreparation: true,
       onCodex: async (_args, output) => {
-        expect(trees).toEqual([git("rev-parse", "HEAD^{tree}")]);
+        expect(trees).toEqual([]);
         output!.appServer!.onPermissions!({
           directory: repository,
           environment,
@@ -196,6 +197,8 @@ test.each([
             ),
           },
         });
+        await output!.appServer!.onBeforeTurn?.();
+        expect(trees).toEqual([git("rev-parse", "HEAD^{tree}")]);
         output!.stdout.write("Synthetic no-op model turn.\n");
         return 0;
       },
@@ -330,6 +333,7 @@ send({method:"turn/completed",params:{threadId:thread,turn:{id:"synthetic-turn",
       {
         currentDirectory: repository,
         environment,
+        manualCodexPreparation: true,
         onCodex: (args, output, selected) =>
           runCodexSkillCommand(
             [proxy, resolveCodexCommand(selected).command, ...args],
@@ -561,6 +565,7 @@ process.stdout.write(input);
     const result = await runWorkflow(["patch", "Synthetic issue", "--json"], {
       currentDirectory: repository,
       environment,
+      manualCodexPreparation: true,
       onCodex: async (_args, output) => {
         output!.appServer!.onPermissions!({
           directory: repository,
@@ -578,6 +583,7 @@ process.stdout.write(input);
             ),
           },
         });
+        await output!.appServer!.onBeforeTurn?.();
         await writeFile(join(checkout, "app.ts"), "after\n");
         output!.stdout.write("Synthetic patch complete.\n");
         return 0;

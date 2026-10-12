@@ -114,10 +114,13 @@ glob_scan_max_depth = 8
       child.stdin.write(`${JSON.stringify({ id, method, params })}\n`);
     });
   const stopped = "Synthetic stop before model execution";
+  let snapshotsPrepared = false;
   const input = new Writable({
     write(chunk, _encoding, callback) {
       const request = JSON.parse(String(chunk)) as RpcMessage;
       requests.push(request);
+      if (request["method"] === "turn/start")
+        expect(snapshotsPrepared).toBe(true);
       // Resolve real native policies without executing commands or model turns.
       if (
         request["method"] === "command/exec" ||
@@ -155,6 +158,12 @@ glob_scan_max_depth = 8
       input,
       onPermissions(profile) {
         snapshotProfile = profile;
+      },
+      async onBeforeTurn() {
+        expect(snapshotProfile).toBeDefined();
+        expect(requests.at(-1)?.["method"]).toBe("command/exec");
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        snapshotsPrepared = true;
       },
       permissions: {
         name: "codex_security_patch",
@@ -260,3 +269,44 @@ test("native patch profiles ignore inactive repository grants and remain isolate
   expect(first.filesystem).not.toHaveProperty(second.administration);
   expect(second.filesystem).not.toHaveProperty(first.administration);
 }, 30_000);
+
+test("a failed prepared snapshot prevents the model turn and preserves its diagnostic", async () => {
+  const stream = new PassThrough();
+  const requests: RpcMessage[] = [];
+  const input = new Writable({
+    write(chunk, _encoding, callback) {
+      requests.push(JSON.parse(String(chunk)));
+      callback();
+    },
+  });
+  for (const reply of [
+    { id: 1, result: {} },
+    { id: 4, result: { config: {} } },
+    {
+      id: 2,
+      result: {
+        thread: { id: "synthetic" },
+        sandbox: { type: "workspaceWrite" },
+      },
+    },
+    { id: 5, result: { exitCode: 0, stdout: "", stderr: "" } },
+  ])
+    stream.write(`${JSON.stringify(reply)}\n`);
+  stream.end();
+  const diagnostic = "Synthetic snapshot error with original details";
+  await expect(
+    readSkillCommandOutput(stream, {
+      directory: process.cwd(),
+      prompt: "Synthetic patch",
+      threadSource: "security_remediation",
+      input,
+      permissions: { name: "synthetic", readOnlyPaths: [] },
+      async onBeforeTurn() {
+        throw new Error(diagnostic);
+      },
+    }),
+  ).rejects.toThrow(diagnostic);
+  expect(requests.some((request) => request["method"] === "turn/start")).toBe(
+    false,
+  );
+});

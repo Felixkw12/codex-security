@@ -1056,6 +1056,7 @@ interface SkillCommandOutput {
     readonly externalSandbox?: boolean;
     readonly onEvent?: (event: Readonly<Record<string, unknown>>) => void;
     readonly onPermissions?: (context: PatchSnapshotSandbox) => void;
+    readonly onBeforeTurn?: () => Promise<void>;
   };
 }
 
@@ -1100,6 +1101,7 @@ interface SkillRunOptions {
   validationPrompt?: string;
   verificationIds?: readonly string[];
   onEvent?: (event: Readonly<Record<string, unknown>>) => void;
+  onBeforeTurn?: () => Promise<void>;
   provider?: string;
   providerConfiguration?: JsonObject;
   environment?: NodeJS.ProcessEnv;
@@ -1798,6 +1800,7 @@ export async function runCodexSkillCommand(
                       permissions: output.appServer.permissions,
                       externalSandbox: output.appServer.externalSandbox,
                       onEvent: output.appServer.onEvent,
+                      onBeforeTurn: output.appServer.onBeforeTurn,
                       onPermissions: (profile, configuration) =>
                         output.appServer!.onPermissions?.({
                           profile,
@@ -5613,25 +5616,32 @@ export async function main(
               selected.repository,
               dependencies.currentDirectory(),
             );
-            const publication =
-              options.createPr && selected.findings.length > 0
+            let publication: PatchPublication | undefined;
+            let patchRiskState: GitPatchState | undefined;
+            let patchBase: GitPatchState | Map<string, string> | undefined;
+            const preparePatch = async () => {
+              if (patchBase !== undefined) return;
+              publication = options.createPr
                 ? await preparePatchPublication(
                     selected.repository,
                     selected.scanId,
                     dependencies,
                   )
                 : undefined;
-            const patchRiskState = options.assessPatchRisk
-              ? await snapshotGitPatchState(
-                  await patchRepositoryRoot(selected.repository, dependencies),
-                  dependencies,
-                  true,
-                )
-              : undefined;
-            const patchRiskBase = patchRiskState?.tree;
-            const patchBase =
-              patchRiskState ??
-              (await snapshotPatchState(selected.repository, dependencies));
+              patchRiskState = options.assessPatchRisk
+                ? await snapshotGitPatchState(
+                    await patchRepositoryRoot(
+                      selected.repository,
+                      dependencies,
+                    ),
+                    dependencies,
+                    true,
+                  )
+                : undefined;
+              patchBase =
+                patchRiskState ??
+                (await snapshotPatchState(selected.repository, dependencies));
+            };
             const patchRun = await runFindingPatches(
               selected,
               options,
@@ -5641,15 +5651,19 @@ export async function main(
                 auth: options.auth,
                 externalSandbox: options.externalSandbox,
                 validationPrompt,
+                onBeforeTurn: preparePatch,
               },
             );
             const { patches } = patchRun;
             exitCode = patchRun.exitCode;
-            const files = await changedPatchFiles(
-              selected.repository,
-              patchBase,
-              dependencies,
-            );
+            const files =
+              patchBase === undefined
+                ? []
+                : await changedPatchFiles(
+                    selected.repository,
+                    patchBase,
+                    dependencies,
+                  );
             patchResult = {
               scanId: selected.scanId,
               repository: selected.repository,
@@ -5668,6 +5682,7 @@ export async function main(
               `Patch applied. Files changed: ${files.length}.\n`,
             );
             let patchRisk: PatchRiskAssessment | undefined;
+            const patchRiskBase = patchRiskState?.tree;
             if (patchRiskBase !== undefined) {
               const files = verifiedPatchFiles(selected, patches);
               if (files.length > 0) {
@@ -5741,33 +5756,38 @@ export async function main(
             imports.length === 0
               ? undefined
               : withoutLinearCredentials(dependencies.environment);
-          const patchRiskState = options.assessPatchRisk
-            ? await snapshotGitPatchState(gitRepository, dependencies, true)
-            : undefined;
-          const patchGitBase =
-            patchRiskState?.tree ??
-            (options.createPr
-              ? await snapshotPatchTree(gitRepository, dependencies)
-              : undefined);
-          const patchBase =
-            patchRiskState ??
-            patchGitBase ??
-            (await snapshotPatchState(repository, dependencies));
-          if (options.createPr) {
-            await requireCleanPatchPullRequestBase(
-              gitRepository,
-              patchGitBase!,
-              dependencies,
-            );
-          }
+          let patchRiskState: GitPatchState | undefined;
+          let patchGitBase: string | undefined;
+          let patchBase:
+            GitPatchState | Map<string, string> | string | undefined;
+          let publication: PatchPublication | undefined;
           const identifier = directPatchIdentifier(positionals, imports);
-          const publication = options.createPr
-            ? await preparePatchPublication(
+          const preparePatch = async () => {
+            patchRiskState = options.assessPatchRisk
+              ? await snapshotGitPatchState(gitRepository, dependencies, true)
+              : undefined;
+            patchGitBase =
+              patchRiskState?.tree ??
+              (options.createPr
+                ? await snapshotPatchTree(gitRepository, dependencies)
+                : undefined);
+            patchBase =
+              patchRiskState ??
+              patchGitBase ??
+              (await snapshotPatchState(repository, dependencies));
+            if (options.createPr) {
+              await requireCleanPatchPullRequestBase(
+                gitRepository,
+                patchGitBase!,
+                dependencies,
+              );
+              publication = await preparePatchPublication(
                 gitRepository,
                 identifier ?? directPatchDigest(positionals, imports),
                 dependencies,
-              )
-            : undefined;
+              );
+            }
+          };
           const report = captureOutput();
           exitCode = await runSkill(
             "fix-finding",
@@ -5781,14 +5801,14 @@ export async function main(
               auth: options.auth,
               externalSandbox: options.externalSandbox,
               validationPrompt,
+              onBeforeTurn: preparePatch,
             },
           );
           if (!jsonOutput) output.write(report.text());
-          const files = await changedPatchFiles(
-            gitRepository,
-            patchBase,
-            dependencies,
-          );
+          const files =
+            patchBase === undefined
+              ? []
+              : await changedPatchFiles(gitRepository, patchBase, dependencies);
           patchResult = {
             repository,
             applied: files.length > 0,
@@ -8995,7 +9015,7 @@ async function runFindingPatches(
     let status: number;
     let changedFiles: string[];
     try {
-      const base = await snapshotPatchState(selected.repository, dependencies);
+      let base: GitPatchState | Map<string, string> | undefined;
       status = await runSkill(
         "fix-finding",
         [],
@@ -9005,6 +9025,10 @@ async function runFindingPatches(
         dependencies,
         {
           ...options,
+          onBeforeTurn: async () => {
+            await options.onBeforeTurn?.();
+            base = await snapshotPatchState(selected.repository, dependencies);
+          },
           directory: selected.repository,
           findings: [finding],
           findingInstructions: instruction?.trim()
@@ -9013,11 +9037,10 @@ async function runFindingPatches(
           onEvent: progress.observe.bind(progress),
         },
       );
-      changedFiles = await changedPatchFiles(
-        selected.repository,
-        base,
-        dependencies,
-      );
+      changedFiles =
+        base === undefined
+          ? []
+          : await changedPatchFiles(selected.repository, base, dependencies);
     } finally {
       progress.stop();
     }
@@ -9440,6 +9463,9 @@ async function runSkill(
                     },
                     snapshotStoragePaths: gitControls!.snapshotStoragePaths,
                   }),
+              ...(options.onBeforeTurn === undefined
+                ? {}
+                : { onBeforeTurn: options.onBeforeTurn }),
               ...(options.onEvent === undefined
                 ? {}
                 : { onEvent: options.onEvent }),
@@ -9460,6 +9486,7 @@ export async function readSkillCommandOutput(
     readonly apiKey?: string;
     readonly modelProvider?: string;
     readonly onThreadStarted?: () => Promise<void>;
+    readonly onBeforeTurn?: () => Promise<void>;
     readonly onPermissions?: (
       profile: JsonObject,
       configuration: JsonObject,
@@ -9743,6 +9770,7 @@ export async function readSkillCommandOutput(
             appServer.input.end();
             continue;
           }
+          await appServer.onBeforeTurn?.();
           startTurn();
         } else if (value["id"] === 3) {
           turnId = (value["result"] as { turn: { id: string } }).turn.id;

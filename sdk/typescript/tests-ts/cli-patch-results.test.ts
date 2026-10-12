@@ -104,6 +104,7 @@ lines.on("line", (line) => {
     const outcome = await fixture.patch(
       ["Synthetic issue", "--external-sandbox"],
       {
+        manualCodexPreparation: true,
         onCodex: nodeCodex(source),
       },
     );
@@ -278,6 +279,7 @@ lines.on("line", (line) => {
       const outcome = await fixture.patch(
         ["Synthetic issue", "--full-output"],
         {
+          manualCodexPreparation: true,
           onCodex: nodeCodex(source),
         },
       );
