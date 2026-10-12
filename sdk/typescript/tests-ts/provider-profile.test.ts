@@ -18,11 +18,13 @@ import {
   createProfileCodex,
   createProviderProfile,
   providerPreflightCommand,
+  restoreProviderProfile,
 } from "../src/provider-profile.js";
 import { CodexLoginHandle } from "../src/auth.js";
 import { structuredCodexConfig } from "../src/config.js";
 import {
   bundledPluginRoot,
+  codexSecurityCredentialHome,
   resolveCodexCommand,
   runCodexCommand,
 } from "../src/runtime.js";
@@ -57,6 +59,51 @@ const startupProviders = {
   omitted: null,
   "synthetic.gateway": startupProvider,
 };
+
+test("saved managed provider profiles remain isolated across concurrent scans", async () => {
+  const root = await temporaryDirectory();
+  const environment = {
+    CODEX_HOME: join(root, "ambient"),
+    CODEX_SECURITY_STATE_DIR: join(root, "state"),
+  };
+  const home = codexSecurityCredentialHome(environment);
+  const providers = ["first", "second"].map((name) => ({
+    openrouter: {
+      base_url: `https://${name}.example.invalid/`,
+      http_headers: { "X-Synthetic-Token": `synthetic-${name}-value` },
+    },
+  }));
+  const profiles = await Promise.all(
+    providers.map((model_providers) =>
+      createProviderProfile(home, { model_providers }),
+    ),
+  );
+  expect(profiles[0]!.name).not.toBe(profiles[1]!.name);
+  const restore = (index: number) =>
+    restoreProviderProfile(
+      { model_provider: "openrouter" },
+      { name: profiles[index]!.name, home: "managed" },
+      environment,
+    );
+  const restored = await Promise.all([restore(0), restore(1)]);
+  for (const [index, profile] of profiles.entries()) {
+    expect(restored[index]).toEqual({
+      model_provider: "openrouter",
+      model_providers: providers[index]!,
+    });
+    if (process.platform !== "win32")
+      expect((await stat(profile.path)).mode & 0o777).toBe(0o600);
+  }
+  await profiles[0]!.cleanup();
+  expect(await restore(1)).toEqual(restored[1]);
+  await expect(
+    restoreProviderProfile(
+      {},
+      { name: "../outside", home: "managed" },
+      environment,
+    ),
+  ).rejects.toThrow("invalid provider profile");
+});
 
 test.each([
   [

@@ -1,15 +1,27 @@
 import { createCliTest } from "./support/cli-run.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { workbenchCommand } from "./support/workbench-command.js";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { parse as parseToml } from "smol-toml";
 import { main } from "../src/cli.js";
-import { runWorkbench } from "../src/runtime.js";
+import { codexSecurityCredentialHome, runWorkbench } from "../src/runtime.js";
+import { restoreProviderProfile } from "../src/provider-profile.js";
 import { dependencies } from "./cli-fixtures.js";
-import { TestClient } from "./support/api-client.js";
-import { preparedRuntime } from "./support/api-events.js";
+import { mockWorkbench, TestClient } from "./support/api-client.js";
+import {
+  completedCodex,
+  preparedRuntime,
+  scanRuntimeDependencies,
+} from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import {
   EXTERNAL_CODEX_PROVIDERS,
@@ -20,6 +32,78 @@ import {
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
+
+test.each([true, false])(
+  "private provider lifetime follows registration (rejected: %p)",
+  async (rejected) => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const home = join(root, "profile-home");
+    const runtimeHome = join(root, "runtime-home");
+    const scanDir = join(root, "scan");
+    await Promise.all([mkdir(repository), mkdir(home), mkdir(runtimeHome)]);
+    await mkdir(scanDir, { mode: 0o700 });
+    await writeFile(join(repository, "source.py"), "value = 1\n");
+    await writeFile(
+      join(home, "review.config.toml"),
+      'model="synthetic-model"\nmodel_provider="openrouter"\n[model_providers.openrouter]\nname="Synthetic"\nwire_api="responses"\n',
+    );
+    const environment = {
+      CODEX_HOME: home,
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+      OPENROUTER_API_KEY: "synthetic-launch-key",
+      PATH: process.env["PATH"],
+    };
+    const savedHome = codexSecurityCredentialHome(environment);
+    let completed = false;
+    const client = new TestClient(
+      {
+        pluginPath: PLUGIN_ROOT,
+        codexOverrides: {
+          profile: "review",
+          model_providers: {
+            openrouter: { base_url: "https://custom.example.invalid/" },
+          },
+        },
+      },
+      {
+        environment,
+        ...scanRuntimeDependencies(runtimeHome, scanDir),
+        createCodex: completedCodex(root),
+        runWorkbench: async (_runtime, args, input) => {
+          if (args[0] === "register-cli-scan") {
+            expect(
+              (await readdir(savedHome)).filter((name) =>
+                name.endsWith(".config.toml"),
+              ),
+            ).toHaveLength(1);
+            if (rejected) throw new Error("Synthetic registration rejected");
+          }
+          if (args[0] === "complete-scan") completed = true;
+          return mockWorkbench(args, input);
+        },
+      },
+    );
+    try {
+      if (rejected) {
+        await expect(client.run(repository)).rejects.toThrow(
+          "Synthetic registration rejected",
+        );
+      } else {
+        await client.run(repository);
+        expect(completed).toBe(true);
+      }
+      await client.close();
+      expect(
+        (await readdir(savedHome)).filter((name) =>
+          name.endsWith(".config.toml"),
+        ),
+      ).toHaveLength(rejected ? 0 : 1);
+    } finally {
+      await client.close();
+    }
+  },
+);
 
 test.each(
   (["openrouter", "fireworks"] as const).flatMap((provider) =>
@@ -63,25 +147,23 @@ test.each(
         args,
         input,
       );
+    const header = "synthetic-provider-header";
+    const customEndpoint = "https://provider.example.invalid/custom";
+    const explicitProvider = {
+      ...standard,
+      base_url: customEndpoint,
+      http_headers: { "X-Synthetic-Credential": header },
+    };
     const overrides = {
       profile: "review",
       model_provider: provider,
-      model_providers: { [provider]: standard },
+      model_providers: { [provider]: explicitProvider },
     };
-    const header = "synthetic-provider-header";
     let providerProfilePath: string | undefined;
     const client = new TestClient(
       {
         pluginPath: PLUGIN_ROOT,
-        codexOverrides: {
-          ...overrides,
-          model_providers: {
-            [provider]: {
-              ...standard,
-              http_headers: { "X-Synthetic-Credential": header },
-            },
-          },
-        },
+        codexOverrides: overrides,
       },
       {
         environment,
@@ -120,21 +202,71 @@ test.each(
       expect(scans).toHaveLength(1);
       const recipe = (
         await command(["get-scan-recipe", "--scan-id", scans[0]!.scanId])
-      )["recipe"] as { config: JsonObject };
-      expect(recipe.config).toMatchObject({
-        profile: "review",
-        model_providers: { [provider]: standard },
+      )["recipe"] as {
+        config: JsonObject;
+        providerProfile: { name: string; home: string };
+      };
+      expect(recipe.config).toMatchObject({ profile: "review" });
+      expect(recipe.config).not.toHaveProperty("model_providers");
+      expect(recipe.providerProfile.home).toBe("managed");
+      const savedProfilePath = join(
+        codexSecurityCredentialHome(environment),
+        `${recipe.providerProfile.name}.config.toml`,
+      );
+      if (process.platform !== "win32")
+        expect((await stat(savedProfilePath)).mode & 0o777).toBe(0o600);
+      await client.close();
+      expect(parseToml(await readFile(savedProfilePath, "utf8"))).toEqual({
+        model_providers: { [provider]: explicitProvider },
       });
       const initial = await mergedCodexConfig(
         { codexOverrides: overrides },
         home,
       );
       const replay = await mergedCodexConfig(
-        { codexOverrides: recipe.config },
+        {
+          codexOverrides: await restoreProviderProfile(
+            recipe.config,
+            recipe.providerProfile,
+            environment,
+          ),
+        },
         home,
       );
       expect(replay["model_providers"]).toEqual(initial["model_providers"]);
+      const { runCli } = createCliTest(main);
+      let replayOverrides: JsonObject | undefined;
+      expect(
+        await runCli(["scans", "rerun", scans[0]!.scanId, "--json"], {
+          ...dependencies({
+            environment,
+            currentDirectory: root,
+            onConfig: ({ codexOverrides }) => {
+              replayOverrides = codexOverrides;
+            },
+          }),
+          runWorkbench: command,
+        }),
+      ).toBe(0);
+      expect(replayOverrides).toBeDefined();
+      expect(
+        (await mergedCodexConfig({ codexOverrides: replayOverrides }, home))[
+          "model_providers"
+        ],
+      ).toEqual(initial["model_providers"]);
+      await writeFile(
+        join(home, "review.config.toml"),
+        `model="synthetic-model"\nmodel_provider="${provider}"\n[model_providers.${provider}]\nrequest_max_retries=8\nbase_url="https://changed.example.invalid/"\n`,
+      );
+      expect(
+        (await mergedCodexConfig({ codexOverrides: replayOverrides }, home))[
+          "model_providers"
+        ],
+      ).toEqual({
+        [provider]: { ...explicitProvider, request_max_retries: 8 },
+      });
       expect(JSON.stringify(recipe)).not.toContain(header);
+      expect(JSON.stringify(recipe)).not.toContain(customEndpoint);
       expect(
         JSON.stringify(
           await command(["get-scan", "--scan-id", scans[0]!.scanId]),

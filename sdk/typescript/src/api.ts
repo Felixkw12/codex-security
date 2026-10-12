@@ -1251,6 +1251,7 @@ export class CodexSecurity {
     let deepProgressTracker: DeepScanProgressTracker | null = null;
     let releaseCredentialHome: (() => Promise<void>) | null = null;
     let scanFailure = false;
+    let savedProviderProfile: ProviderProfile | undefined;
     let artifactRestorationFailure: OutputDirectoryError | null = null;
     let customValidationComplete = false;
     let completionCost: ScanCost | null = null;
@@ -1725,8 +1726,8 @@ export class CodexSecurity {
         !(isRecord(inlineProfiles) && isRecord(inlineProfiles[profileName]))
       ) {
         recipeConfig["profile"] = profileName;
-        // Reload file settings, retaining only standard provider values that
-        // the caller explicitly overrode rather than preflight's projection.
+        // Reload inherited file settings, retaining explicit provider refinements
+        // separately from the readable recipe.
         const provider = scanModelProvider(preflightConfig);
         if (isExternalModelProvider(provider)) {
           const fileProfile = await readCodexFileProfile(
@@ -1741,16 +1742,18 @@ export class CodexSecurity {
             const explicitProvider = isRecord(explicitProviders)
               ? explicitProviders[provider]
               : undefined;
-            const savedProvider: JsonObject = {};
-            if (isRecord(explicitProvider)) {
-              for (const [key, value] of Object.entries(
-                EXTERNAL_CODEX_PROVIDERS[provider],
-              )) {
-                if (explicitProvider[key] === value) savedProvider[key] = value;
-              }
-            }
-            if (Object.keys(savedProvider).length > 0) {
-              recipeConfig["model_providers"] = { [provider]: savedProvider };
+            if (
+              options.resumeScanId === undefined &&
+              isRecord(explicitProvider)
+            ) {
+              savedProviderProfile = await createProviderProfile(
+                codexSecurityCredentialHome(this.#dependencies.environment),
+                {
+                  model_providers: {
+                    [provider]: explicitProvider as JsonObject,
+                  },
+                },
+              );
             }
           }
         }
@@ -1771,6 +1774,12 @@ export class CodexSecurity {
         auth: options.auth,
         cyberAccessProgram: options.cyberAccessProgram,
       });
+      if (savedProviderProfile !== undefined) {
+        recipe["providerProfile"] = {
+          name: savedProviderProfile.name,
+          home: "managed",
+        };
+      }
       if (options.scanPrompt?.trim()) recipe["requiresScanPrompt"] = true;
       recipe["scanInputs"] = scanInputIdentity(
         options.scanPrompt,
@@ -1822,6 +1831,8 @@ export class CodexSecurity {
                 workflowId: options.workflowId,
               }),
             );
+      // The registered recipe now owns the private snapshot, including after completion.
+      savedProviderProfile = undefined;
       const scanId = registration["scanId"];
       const resumeThreadId =
         options.resumeScanId === undefined
@@ -2694,6 +2705,7 @@ export class CodexSecurity {
         for (const cleanup of await Promise.allSettled([
           knowledgeBase?.cleanup(),
           removeTargetPathsFile(targetPathsFile),
+          savedProviderProfile?.cleanup(),
         ])) {
           if (cleanup.status === "rejected") {
             warnCleanupFailed(options, cleanup.reason);

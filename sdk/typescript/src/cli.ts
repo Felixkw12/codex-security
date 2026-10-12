@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { listenForAbort } from "./cli-signals.js";
 import { isNonEmptyString, parseJson } from "./value.js";
+import { restoreProviderProfile } from "./provider-profile.js";
 
 import {
   execFile as execFileCallback,
@@ -2306,6 +2307,7 @@ export async function main(
                   : undefined,
             },
             dependencies.currentDirectory(),
+            dependencies.environment,
           );
           scanArguments.resumeScanId = saved["scanId"];
           scanArguments.outputDir = resolveCliPath(
@@ -2465,6 +2467,7 @@ export async function main(
                     ),
             },
             dependencies.currentDirectory(),
+            dependencies.environment,
           );
           scanArguments.verbose = options.verbose;
           scanArguments.showCost = options.showCost;
@@ -4719,6 +4722,7 @@ export async function main(
                             : undefined,
                       },
                       currentDirectory,
+                      dependencies.environment,
                     );
                     const security = dependencies.createSecurity({
                       pluginPath: options.pluginPath,
@@ -6318,6 +6322,7 @@ async function prepareScanArgumentsFromRecipe(
     "scanPrompt" | "scanPromptFile" | "validationPromptFile"
   >,
   directory: string,
+  environment: CliDependencies["environment"],
 ): Promise<ScanArguments> {
   if (recipe === undefined || !isJsonObject(recipe)) {
     throw new CodexSecurityError(
@@ -6482,6 +6487,11 @@ async function prepareScanArgumentsFromRecipe(
       "This scan used additional instructions. The --scan-prompt-file must not be empty.",
     );
   }
+  const replayConfig = await restoreProviderProfile(
+    config,
+    recipe["providerProfile"],
+    environment,
+  );
   return {
     repository,
     auth: auth.data ?? DEFAULT_SCAN_AUTH,
@@ -6503,9 +6513,9 @@ async function prepareScanArgumentsFromRecipe(
     mode,
     ...deepScan.data,
     archiveExisting: false,
-    codexOverrides: Object.hasOwn(config, "approval_policy")
-      ? config
-      : { ...config, approval_policy: "never" },
+    codexOverrides: Object.hasOwn(replayConfig, "approval_policy")
+      ? replayConfig
+      : { ...replayConfig, approval_policy: "never" },
     failureSeverity: threshold.data,
     maxCostUsd,
     dryRun: false,
