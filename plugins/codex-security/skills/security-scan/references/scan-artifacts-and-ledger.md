@@ -85,7 +85,7 @@ These variables are temporary values in the calling shell, not application setti
 
 ### Windows Diff Worklist Generation
 
-In PowerShell, replace the placeholders inside single quotes with literal paths and revisions, doubling any single quote in a value. Use the command for the selected diff mode.
+In PowerShell, replace the path placeholders inside single quotes with literal paths, doubling any single quote in a path. For revisions, use the full commit object IDs already resolved for the scan target. Use the command for the selected diff mode.
 
 For PR, commit, and branch diffs:
 
@@ -93,8 +93,8 @@ For PR, commit, and branch diffs:
 $env:worklistPluginRoot = Convert-Path -LiteralPath '<plugin_dir>' -ErrorAction Stop
 $env:worklistRepoRoot = Convert-Path -LiteralPath '<repo_root>' -ErrorAction Stop
 $env:worklistDiscoveryDir = Convert-Path -LiteralPath '<discovery_dir>' -ErrorAction Stop
-$env:worklistBase = '<base>'
-$env:worklistHead = '<head>'
+$env:worklistBase = '<resolved_base_object_id>'
+$env:worklistHead = '<resolved_head_object_id>'
 cmd.exe /d /v:off /s /c '""%worklistPluginRoot%\scripts\launch_codex_security_mcp.cmd" --helper make-diff-rank-input --repo "%worklistRepoRoot%\." --base "%worklistBase%" --mode revisions --head "%worklistHead%" --out "%worklistDiscoveryDir%\rank_input.jsonl""'
 ```
 
@@ -104,11 +104,13 @@ For a local patch:
 $env:worklistPluginRoot = Convert-Path -LiteralPath '<plugin_dir>' -ErrorAction Stop
 $env:worklistRepoRoot = Convert-Path -LiteralPath '<repo_root>' -ErrorAction Stop
 $env:worklistDiscoveryDir = Convert-Path -LiteralPath '<discovery_dir>' -ErrorAction Stop
-$env:worklistBase = '<base>'
+$env:worklistBase = '<resolved_base_object_id>'
 cmd.exe /d /v:off /s /c '""%worklistPluginRoot%\scripts\launch_codex_security_mcp.cmd" --helper make-diff-rank-input --repo "%worklistRepoRoot%\." --base "%worklistBase%" --mode local-patch --out "%worklistDiscoveryDir%\rank_input.jsonl""'
 ```
 
 These variables are temporary shell values, not application settings. The plugin, repository, and discovery directories must exist; `rank_input.jsonl` does not need to exist. Resolving paths before CMD starts supports relative paths and PowerShell locations on UNC shares. CMD expands the references once with delayed expansion disabled, preserving literal `%` and `!`. The repository's `\.` suffix also preserves a drive-root path through native argument parsing.
+
+The SDK accepts literal Git revision expressions and resolves them through Git argument arrays. These CMD examples use the resulting object IDs because embedded quotes in a revision expression would change CMD argument parsing.
 
 ## Candidate Finding Coverage
 
