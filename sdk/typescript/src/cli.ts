@@ -1033,6 +1033,9 @@ interface PatchSnapshotSandbox {
   readonly profile: JsonObject;
   readonly environment: NodeJS.ProcessEnv;
   readonly directory: string;
+  readonly configuration?: JsonObject;
+  readonly gitEnvironment?: NodeJS.ProcessEnv;
+  readonly snapshotStoragePaths?: readonly string[];
 }
 
 interface SkillCommandOutput {
@@ -1049,9 +1052,10 @@ interface SkillCommandOutput {
     readonly threadSource: SkillThreadSource;
     readonly sandbox?: "read-only" | "workspace-write";
     readonly permissions?: SkillPermissions;
+    readonly snapshotStoragePaths?: readonly string[];
     readonly externalSandbox?: boolean;
     readonly onEvent?: (event: Readonly<Record<string, unknown>>) => void;
-    readonly onPermissions?: (profile: JsonObject) => void;
+    readonly onPermissions?: (context: PatchSnapshotSandbox) => void;
   };
 }
 
@@ -1212,15 +1216,48 @@ interface CliDependencies {
   checkForUpdate(signal: AbortSignal): Promise<UpdateNotice | undefined>;
 }
 
+// Apply coordinator-owned Git bindings after native shell environment filtering.
+const PATCH_GIT_ENVIRONMENT_RUNNER = `
+const { spawn } = require("node:child_process");
+const [command, ...args] = process.argv.slice(1);
+let header = Buffer.alloc(0);
+const readHeader = (chunk) => {
+  header = Buffer.concat([header, chunk]);
+  const end = header.indexOf(10);
+  if (end < 0) return;
+  process.stdin.off("data", readHeader);
+  for (const [name, value] of JSON.parse(header.subarray(0, end).toString())) {
+    if (value === null) delete process.env[name];
+    else process.env[name] = value;
+  }
+  const child = spawn(command, args, { stdio: ["pipe", "inherit", "inherit"] });
+  child.on("error", (error) => { console.error(error); process.exitCode = 1; });
+  child.on("exit", (code, signal) => {
+    if (signal) process.kill(process.pid, signal);
+    else process.exitCode = code === 0 ? (process.exitCode ?? 0) : (code ?? 1);
+  });
+  child.stdin.on("error", (error) => {
+    if (error.code !== "EPIPE") { console.error(error); process.exitCode = 1; }
+    process.stdin.unpipe(child.stdin);
+    process.stdin.resume();
+  });
+  child.stdin.write(header.subarray(end + 1));
+  header = undefined;
+  process.stdin.pipe(child.stdin);
+};
+process.stdin.on("data", readHeader);
+`;
+
 export async function runRepositoryCommand(
   command: Parameters<CliDependencies["runRepositoryCommand"]>[0],
   args: readonly string[],
   repository: string,
   options?: Parameters<CliDependencies["runRepositoryCommand"]>[3],
 ): Promise<string> {
+  const sandbox = options?.sandbox;
   const executable = await resolveTrustedExecutable(
     command,
-    process.env,
+    sandbox?.environment ?? process.env,
     repository,
   );
   if (executable === null) {
@@ -1228,7 +1265,6 @@ export async function runRepositoryCommand(
       `${command} is not available on a trusted PATH.`,
     );
   }
-  const sandbox = options?.sandbox;
   const codex = sandbox && resolveCodexCommand(sandbox.environment);
   const profile = `codex_security_snapshot_${randomUUID()}`;
   let profileFile: string | undefined;
@@ -1244,7 +1280,14 @@ export async function runRepositoryCommand(
       try {
         await file.chmod(0o600);
         await file.writeFile(
-          `permissions=${inlineToml({ [profile]: sandbox.profile })}\n`,
+          Object.entries({
+            ...sandbox.configuration,
+            permissions: { [profile]: sandbox.profile },
+          })
+            .map(
+              ([key, value]) => `${JSON.stringify(key)}=${inlineToml(value)}`,
+            )
+            .join("\n") + "\n",
         );
       } finally {
         await file.close();
@@ -1273,6 +1316,10 @@ export async function runRepositoryCommand(
             profile,
             "--include-managed-config",
             "--",
+            process.execPath,
+            "-e",
+            PATCH_GIT_ENVIRONMENT_RUNNER,
+            "--",
             executable.executable,
             "-C",
             repository,
@@ -1287,27 +1334,35 @@ export async function runRepositoryCommand(
       },
     );
     const input =
-      options?.input === undefined
+      options?.input === undefined && sandbox === undefined
         ? undefined
         : new Promise<void>((resolve, reject) => {
             execution.child.stdin!.once("error", reject);
-            execution.child.stdin!.end(options.input, resolve);
+            if (sandbox !== undefined)
+              execution.child.stdin!.write(
+                JSON.stringify(
+                  Object.entries(sandbox.gitEnvironment ?? {}).map(
+                    ([key, value]) => [key, value ?? null],
+                  ),
+                ) + "\n",
+              );
+            execution.child.stdin!.end(options?.input, resolve);
           });
-    const [{ stdout }] = await Promise.all([execution, input]).catch(
-      (error: unknown) => {
-        // Keep command diagnostics as text when stdout was requested as bytes.
-        if (error instanceof Error) {
-          for (const field of ["stdout", "stderr"] as const) {
-            const value = (error as Error & Record<typeof field, unknown>)[
-              field
-            ];
-            if (Buffer.isBuffer(value))
-              Object.assign(error, { [field]: value.toString("utf8") });
-          }
+    const [{ stdout }, inputError] = await Promise.all([
+      execution,
+      input?.then(() => undefined).catch((error: unknown) => error),
+    ]).catch((error: unknown) => {
+      // Keep command diagnostics as text when stdout was requested as bytes.
+      if (error instanceof Error) {
+        for (const field of ["stdout", "stderr"] as const) {
+          const value = (error as Error & Record<typeof field, unknown>)[field];
+          if (Buffer.isBuffer(value))
+            Object.assign(error, { [field]: value.toString("utf8") });
         }
-        throw error;
-      },
-    );
+      }
+      throw error;
+    });
+    if (inputError !== undefined) throw inputError;
     const output = Buffer.isBuffer(stdout)
       ? stdout.toString(options?.encoding ?? "utf8")
       : stdout;
@@ -1743,7 +1798,27 @@ export async function runCodexSkillCommand(
                       permissions: output.appServer.permissions,
                       externalSandbox: output.appServer.externalSandbox,
                       onEvent: output.appServer.onEvent,
-                      onPermissions: output.appServer.onPermissions,
+                      onPermissions: (profile, configuration) =>
+                        output.appServer!.onPermissions?.({
+                          profile,
+                          directory: output.appServer!.directory,
+                          environment,
+                          snapshotStoragePaths:
+                            output.appServer!.snapshotStoragePaths,
+                          configuration: Object.fromEntries(
+                            [
+                              ...new Set([
+                                "model_provider",
+                                "model_providers",
+                                ...Object.keys(output.codexOverrides ?? {}),
+                              ]),
+                            ].flatMap((key) =>
+                              configuration[key] == null
+                                ? []
+                                : [[key, configuration[key]]],
+                            ),
+                          ),
+                        }),
                     },
               ),
               new Promise<undefined>((resolve) => {
@@ -1837,17 +1912,12 @@ export async function main(
     ...parentDependencies,
     runCodex(args, output, environment, input) {
       if (output?.appServer?.permissions !== undefined) {
-        const directory = output.appServer.directory;
         output = {
           ...output,
           appServer: {
             ...output.appServer,
-            onPermissions(profile) {
-              patchSandbox = {
-                profile,
-                directory,
-                environment: environment ?? dependencies.environment,
-              };
+            onPermissions(context) {
+              patchSandbox = context;
             },
           },
         };
@@ -1910,15 +1980,28 @@ export async function main(
           : {
               sandbox: {
                 ...patchSandbox,
+                gitEnvironment: {
+                  ...Object.fromEntries(
+                    [
+                      ...Object.keys(NESTED_PATCH_GIT_ENVIRONMENT),
+                      "GIT_INDEX_FILE",
+                    ].map((name) => [
+                      name,
+                      environmentValue(parentDependencies.environment, name),
+                    ]),
+                  ),
+                  ...gitEnvironment,
+                  ...options.environment,
+                },
                 profile: {
                   ...patchSandbox.profile,
                   filesystem: {
                     ...(patchSandbox.profile["filesystem"] as JsonObject),
                     ...Object.fromEntries(
-                      options.patchSnapshot.map((path) => [
-                        path,
-                        { ".": "write" },
-                      ]),
+                      [
+                        ...(patchSandbox.snapshotStoragePaths ?? []),
+                        ...options.patchSnapshot,
+                      ].map((path) => [path, { ".": "write" }]),
                     ),
                   },
                 },
@@ -9337,6 +9420,7 @@ async function runSkill(
                       name: patchPermissions,
                       readOnlyPaths: gitControls!.readOnlyPaths,
                     },
+                    snapshotStoragePaths: gitControls!.snapshotStoragePaths,
                   }),
               ...(options.onEvent === undefined
                 ? {}
@@ -9358,7 +9442,10 @@ export async function readSkillCommandOutput(
     readonly apiKey?: string;
     readonly modelProvider?: string;
     readonly onThreadStarted?: () => Promise<void>;
-    readonly onPermissions?: (profile: JsonObject) => void;
+    readonly onPermissions?: (
+      profile: JsonObject,
+      configuration: JsonObject,
+    ) => void;
     readonly directory?: string;
     readonly prompt: string;
     readonly threadSource: SkillThreadSource;
@@ -9543,7 +9630,7 @@ export async function readSkillCommandOutput(
                 : {}),
             },
           };
-          appServer.onPermissions?.(profile);
+          appServer.onPermissions?.(profile, config as JsonObject);
           startThread({ permissions: { [permissionProfile!]: profile } });
         } else if (value["id"] === 4 && appServer.sandbox === "read-only") {
           const result = value["result"];

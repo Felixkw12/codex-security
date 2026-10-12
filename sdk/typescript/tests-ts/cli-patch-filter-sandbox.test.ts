@@ -120,18 +120,22 @@ process.stdout.write(fs.readFileSync(0, "utf8").toUpperCase());\n`;
           }
           if (!externalSandbox)
             output!.appServer!.onPermissions!({
-              extends: ":workspace",
-              network: { enabled: false },
-              workspace_roots: grantOutside ? { [outside]: true } : {},
-              filesystem: {
-                ...Object.fromEntries(
-                  output!.appServer!.permissions!.readOnlyPaths.map((path) => [
-                    path,
-                    { ".": "read" },
-                  ]),
-                ),
-                ":tmpdir": {},
-                ":slash_tmp": {},
+              directory,
+              environment,
+              snapshotStoragePaths: output!.appServer!.snapshotStoragePaths,
+              profile: {
+                extends: ":workspace",
+                network: { enabled: false },
+                workspace_roots: grantOutside ? { [outside]: true } : {},
+                filesystem: {
+                  ...Object.fromEntries(
+                    output!.appServer!.permissions!.readOnlyPaths.map(
+                      (path) => [path, { ".": "read" }],
+                    ),
+                  ),
+                  ":tmpdir": {},
+                  ":slash_tmp": {},
+                },
               },
             });
           await writeFile(filter, script(true));

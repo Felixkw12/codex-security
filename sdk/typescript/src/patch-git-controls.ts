@@ -10,7 +10,15 @@ import {
   symlink,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import {
+  dirname,
+  isAbsolute,
+  join,
+  parse,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 
 // Git hook entrypoints: https://git-scm.com/docs/githooks
 const GIT_HOOKS = [
@@ -108,6 +116,7 @@ export async function withPatchGitIndex<T>(
 
 export interface PatchGitControls {
   readonly readOnlyPaths: readonly string[];
+  readonly snapshotStoragePaths: readonly string[];
   validate(): Promise<void>;
 }
 
@@ -457,6 +466,7 @@ export async function capturePatchGitControls(
       allowDirectoryChanges: boolean;
     }
   >();
+  const snapshotStoragePaths = new Set<string>();
   const inaccessibleIncludes = new Set<string>();
   const inaccessibleHooks = new Set<string>();
   const hookIsAvailable = async (path: string): Promise<boolean> => {
@@ -758,7 +768,31 @@ export async function capturePatchGitControls(
             "Git's worktree root does not match the selected checkout's .git marker. Select the intended checkout explicitly or fix its Git configuration.",
           );
       }
-      if (capture) await captureReferences(checkout);
+      if (capture) {
+        await captureReferences(checkout);
+        const [common, storage] = await Promise.all([
+          runControl(root, checkout, [
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-common-dir",
+          ]),
+          runControl(
+            root,
+            checkout,
+            ["config", "--null", "--default=lfs", "--get", "lfs.storage"],
+            { environment: configurationEnvironment },
+          ),
+        ]);
+        const configured = storage.replace(/\0$/u, "") || "lfs";
+        const absolute =
+          isAbsolute(configured) &&
+          (process.platform !== "win32" || parse(configured).root.length > 1);
+        const lfs = absolute
+          ? configured
+          : join(common.replace(/\n$/u, ""), configured);
+        for (const path of [join(lfs, "objects"), join(lfs, "tmp")])
+          snapshotStoragePaths.add(path);
+      }
       let tracked: Buffer;
       let untracked: Buffer;
       try {
@@ -891,15 +925,10 @@ export async function capturePatchGitControls(
           .filter(
             ({ identity, readOnly }) => identity !== undefined && readOnly,
           )
-          .map(({ canonical }) => canonical)
-          .filter(
-            (path) =>
-              ![...administrationRoots.keys()].some((root) =>
-                inside(root, path),
-              ),
-          ),
+          .map(({ canonical }) => canonical),
       ]),
     ],
+    snapshotStoragePaths: [...snapshotStoragePaths],
     validate: () => discover(false),
   };
 }
