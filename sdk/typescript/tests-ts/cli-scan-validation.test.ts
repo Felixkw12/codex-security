@@ -642,16 +642,18 @@ print(json.dumps({"scan":{"targetPath":record["targetPath"]}}))
       });
       const observed = JSON.parse(await readFile(marker, "utf8"));
       expect(observed.state).toBe(state);
-      expect(observed.python).toBe(
-        execNodePython(
-          python,
-          ["-c", "import sys; print(sys.executable)"],
-          process.env,
-        ).trim(),
+      expect(await realpath(observed.python)).toBe(
+        await realpath(
+          execNodePython(
+            python,
+            ["-c", "import sys; print(sys.executable)"],
+            process.env,
+          ).trim(),
+        ),
       );
       if (kind === "directory")
-        expect(observed.script).toBe(
-          join(plugin, "scripts", "workbench_db.py"),
+        expect(await realpath(observed.script)).toBe(
+          await realpath(join(plugin, "scripts", "workbench_db.py")),
         );
       else
         expect(
