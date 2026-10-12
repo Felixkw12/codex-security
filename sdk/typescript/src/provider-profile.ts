@@ -64,25 +64,25 @@ export async function providerPreflightCommand(
   };
 }
 
-/** Keep explicit removals and private providers while reloading other file settings. */
-export function privateReplayOverrides(config: JsonObject): JsonObject {
-  const clears = (source: JsonObject): JsonObject => {
-    const result: JsonObject = {};
-    for (const [key, value] of Object.entries(source)) {
-      if (value === null) result[key] = null;
-      else if (isRecord(value)) {
-        const nested = clears(value as JsonObject);
-        if (Object.keys(nested).length > 0) result[key] = nested;
-      }
+/** Retain explicit settings omitted from the readable recipe when its file reloads. */
+export function privateReplayOverrides(
+  config: JsonObject,
+  recipe: JsonObject,
+): JsonObject {
+  const result: JsonObject = {};
+  for (const [key, value] of Object.entries(config)) {
+    const saved = recipe[key];
+    if (value === null || saved === undefined) {
+      result[key] = structuredClone(value);
+    } else if (isRecord(value) && isRecord(saved)) {
+      const nested = privateReplayOverrides(
+        value as JsonObject,
+        saved as JsonObject,
+      );
+      if (Object.keys(nested).length > 0) result[key] = nested;
     }
-    return result;
-  };
-  return {
-    ...clears(config),
-    ...(config["model_providers"] === undefined
-      ? {}
-      : { model_providers: config["model_providers"] }),
-  };
+  }
+  return result;
 }
 
 /** Provider definitions use a native file layer, never process arguments. */
@@ -163,9 +163,9 @@ export async function restoreProviderProfile(
       "The saved provider profile contains no provider configuration.",
     );
   }
-  const { model_providers: providers, ...clears } = saved;
+  const { model_providers: providers, ...overrides } = saved;
   return {
-    ...deepMerge({ ...config }, clears as JsonObject),
+    ...deepMerge({ ...config }, overrides as JsonObject),
     ...(providers === null ||
     (isRecord(providers) && Object.keys(providers).length > 0)
       ? { model_providers: providers as JsonObject | null }

@@ -1726,12 +1726,16 @@ export class CodexSecurity {
         !(isRecord(inlineProfiles) && isRecord(inlineProfiles[profileName]))
       ) {
         recipeConfig["profile"] = profileName;
-        // Reload inherited file settings, retaining explicit removals and provider
-        // refinements separately from the readable recipe.
+        // Reload inherited file settings, retaining explicit refinements omitted
+        // from the readable recipe in the existing private replay snapshot.
         delete recipeConfig["model_providers"];
         const replayOverrides = privateReplayOverrides(
           this.config.codexOverrides ?? {},
+          recipeConfig,
         );
+        resolveAgentPaths(replayOverrides, scanDir);
+        resolveSkillPaths(replayOverrides, scanDir);
+        resolveOtelPaths(replayOverrides, scanDir);
         if (
           options.resumeScanId === undefined &&
           Object.keys(replayOverrides).length > 0
