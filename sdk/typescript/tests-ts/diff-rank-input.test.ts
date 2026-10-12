@@ -283,7 +283,7 @@ testPosix(
 
 for (const mode of ["revisions", "local-patch"] as const)
   test.skipIf(process.platform !== "win32")(
-    `documented Windows ${mode} ranking command preserves literal paths and refs`,
+    `documented Windows ${mode} ranking command preserves literal paths with resolved revisions`,
     async () => {
       const root = temporaryRoots.create("codex-security-diff-docs-");
       const repository = join(root, "repository %USERNAME% !EXPAND! 雪's");
@@ -313,8 +313,20 @@ for (const mode of ["revisions", "local-patch"] as const)
             "<plugin_dir>": launcher.plugin,
             "<repo_root>": repository,
             "<discovery_dir>": discovery,
-            "<base>": base,
-            "<head>": "HEAD",
+            "<resolved_base_object_id>": git(
+              repository,
+              "rev-parse",
+              "--verify",
+              "--end-of-options",
+              `${base}^{commit}`,
+            ),
+            "<resolved_head_object_id>": git(
+              repository,
+              "rev-parse",
+              "--verify",
+              "--end-of-options",
+              "HEAD^{commit}",
+            ),
           },
           undefined,
           root,
