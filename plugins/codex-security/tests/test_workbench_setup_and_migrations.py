@@ -5,6 +5,7 @@ import errno
 import json
 import os
 import runpy
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -2678,3 +2679,119 @@ def test_repository_identity_upgrade_keeps_named_scan_history(installed: str) ->
             assert migrations["persist repository identities"][0] == 48
             for name, timestamp in timestamps.items():
                 assert migrations[name][1] == timestamp
+
+
+@pytest.mark.parametrize("spelling", ["canonical", "dot", "trailing"])
+def test_correcting_aliased_workspace_setup_retains_target(tmp_path: Path, spelling: str) -> None:
+    state = tmp_path / "state"
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    canonical = str(repository)
+    original = (
+        canonical + ({"canonical": "", "dot": os.sep + "." + os.sep, "trailing": os.sep}[spelling])
+    )
+    workspace = str(uuid.uuid4())
+    create_workspace(state, workspace, "--target-path", original, "--scope", "missing")
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        before = connection.execute("SELECT id, current_path FROM security_targets").fetchall()
+        assert len(before) == 1
+        assert before[0][1] == original
+    save_workspace(state, workspace, canonical, ".", "standard")
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        assert (
+            connection.execute("SELECT id, current_path FROM security_targets").fetchall() == before
+        )
+        assert connection.execute(
+            "SELECT target_id, target_path, submitted FROM workspaces WHERE id = ?", (workspace,)
+        ).fetchone() == (before[0][0], canonical, 1)
+    scan_id, _ = start_workspace_scan(state, workspace, tmp_path / "scans")
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        assert (
+            connection.execute("SELECT target_id FROM scans WHERE id = ?", (scan_id,)).fetchone()[0]
+            == before[0][0]
+        )
+
+
+@pytest.mark.parametrize("before_version", [48, 49])
+@pytest.mark.parametrize("with_scan", [False, True])
+def test_identity_migrations_skip_unavailable_historical_git(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, before_version: int, with_scan: bool
+) -> None:
+    git = Path(shutil.which("git") or "git").resolve()
+    historical = str(git.parent)
+    monkeypatch.setenv("CODEX_SECURITY_GIT", str(git))
+    connection, apply_migrations = create_historical_database(before_version)
+    timestamp = "2026-08-01T00:00:00Z"
+    target_id, workspace_id = "historical-target", str(uuid.uuid4())
+    connection.execute(
+        "INSERT INTO security_targets(id, current_path, display_name, created_at, updated_at) "
+        "VALUES (?, ?, 'Historical tools', ?, ?)",
+        (target_id, historical, timestamp, timestamp),
+    )
+    connection.execute(
+        "INSERT INTO workspaces(id, target_id, target_path, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (workspace_id, target_id, historical, timestamp, timestamp),
+    )
+    old_identity = "repository_sha256_" + "1" * 64 if before_version == 49 else None
+    if old_identity is not None:
+        connection.execute("UPDATE security_targets SET repository_identity = ?", (old_identity,))
+    if with_scan:
+        connection.execute(
+            "INSERT INTO scans(id, workspace_id, target_id, target_path, target_revision, "
+            "scope, mode, scan_dir, status, phase, started_at, created_at, updated_at) "
+            "VALUES ('historical-scan', ?, ?, ?, 'unversioned', '.', 'standard', "
+            "'historical-output', 'complete', 'reporting', ?, ?, ?)",
+            (workspace_id, target_id, historical, timestamp, timestamp, timestamp),
+        )
+    apply_migrations(connection)
+    assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 49
+    assert tuple(
+        connection.execute(
+            "SELECT id, current_path, repository_identity FROM security_targets"
+        ).fetchone()
+    ) == (target_id, historical, old_identity)
+    assert tuple(
+        connection.execute(
+            "SELECT target_id, target_path FROM workspaces WHERE id = ?", (workspace_id,)
+        ).fetchone()
+    ) == (target_id, historical)
+    if with_scan:
+        assert tuple(
+            connection.execute("SELECT id, target_id, target_path FROM scans").fetchone()
+        ) == ("historical-scan", target_id, historical)
+    with pytest.raises(SystemExit, match="outside the protected repository"):
+        apply_migrations.__globals__["ensure_security_target"](connection, historical)
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    with sqlite3.connect(state / "workbench.sqlite3") as saved:
+        connection.backup(saved)
+    connection.close()
+    unrelated = tmp_path / "unrelated"
+    unrelated.mkdir()
+    workspace = create_saved_workspace(state, unrelated)
+    scan_id, _ = start_workspace_scan(state, str(workspace["id"]), tmp_path / "scans")
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT target_path FROM scans WHERE id = ?", (scan_id,)
+        ).fetchone()[0] == str(unrelated)
+
+
+def test_registration_keeps_a_competing_targets_existing_id(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    connection, apply_migrations = create_historical_database(50)
+    connection.executescript("""
+        CREATE TRIGGER competing_target BEFORE INSERT ON security_targets
+        WHEN NEW.id <> 'existing-target'
+        BEGIN
+            INSERT INTO security_targets(id, current_path, display_name, created_at, updated_at)
+            VALUES ('existing-target', NEW.current_path, NEW.display_name, NEW.created_at, NEW.updated_at);
+            SELECT RAISE(IGNORE);
+        END;
+    """)
+    target = apply_migrations.__globals__["ensure_security_target"](connection, str(repository))
+    assert target == "existing-target"
+    assert [
+        tuple(row) for row in connection.execute("SELECT id, current_path FROM security_targets")
+    ] == [(target, str(repository))]

@@ -559,9 +559,13 @@ def verified_repository_identity(
     *,
     stored_identity: str | None = None,
 ) -> str | None:
-    return _inspect_repository_target(
-        connection, target_id, target_path, stored_identity
-    ).verified_identity
+    try:
+        return _inspect_repository_target(
+            connection, target_id, target_path, stored_identity
+        ).verified_identity
+    except SystemExit:
+        # Historical identity enrichment is optional; active registration stays strict.
+        return None
 
 
 def scan_repository_generation(scan: sqlite3.Row | dict) -> str | None:
@@ -732,9 +736,12 @@ def upgrade_linux_repository_generations(connection: sqlite3.Connection) -> None
         "AND repository_generation GLOB 'repository_sha256_*')"
     ).fetchall()
     for target in targets:
-        state = _inspect_repository_target(
-            connection, target["id"], target["current_path"], target["repository_identity"]
-        )
+        try:
+            state = _inspect_repository_target(
+                connection, target["id"], target["current_path"], target["repository_identity"]
+            )
+        except SystemExit:
+            continue
         _upgrade_repository_generation(connection, state)
 
 
@@ -993,13 +1000,23 @@ def register_security_target(
         )
         existing = connection.execute(target_query, (target_path,)).fetchone()
         if existing is None:
-            raise SystemExit("The repository target changed while it was being registered.")
+            existing = connection.execute(
+                "SELECT * FROM security_targets WHERE id = ?", (target_id,)
+            ).fetchone()
+            if existing is None or Path(existing["current_path"]) != Path(target_path):
+                raise SystemExit("The repository target changed while it was being registered.")
+            target_path = existing["current_path"]
     target_id = str(existing["id"])
     if not supports_identity:
         return RegisteredRepositoryTarget(target_id, None)
-    state = _inspect_repository_target(
-        connection, target_id, target_path, existing["repository_identity"]
-    )
+    try:
+        state = _inspect_repository_target(
+            connection, target_id, target_path, existing["repository_identity"]
+        )
+    except SystemExit:
+        if verify_ownership:
+            raise
+        return RegisteredRepositoryTarget(target_id, None)
     if not state.has_historical_scans and state.live_identity != state.stored_identity:
         _bind_unscanned_repository_identity(
             connection,

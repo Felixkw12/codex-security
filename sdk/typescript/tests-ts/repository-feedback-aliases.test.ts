@@ -1,9 +1,9 @@
-import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { runCommand } from "./support/shell.js";
 
-test("reuses reviewed feedback only across matching persisted repository identities", () => {
+test("reuses reviewed feedback only across matching persisted repository identities", async () => {
   const python = (Bun.which("python3") ?? Bun.which("python"))!;
   const probe = `
 import json, sqlite3, sys
@@ -131,11 +131,11 @@ if scenario == "identities":
 print(json.dumps(result))
 `;
 
-  const run = (scenario: "identities" | "legacy") => {
-    const execution = spawnSync(
+  const run = async (scenario: "identities" | "legacy") => {
+    const execution = await runCommand(
       python,
       ["-I", "-B", "-c", probe, join(PLUGIN_ROOT, "scripts"), scenario],
-      { encoding: "utf8", timeout: 10_000 },
+      { timeout: 10_000 },
     );
     expect(execution.status, execution.stderr).toBe(0);
     return JSON.parse(execution.stdout) as Record<
@@ -148,7 +148,7 @@ print(json.dumps(result))
     >;
   };
 
-  const identities = run("identities");
+  const identities = await run("identities");
   expect(identities["primary"]).toMatchObject({
     scanId: "current-primary",
     targetId: "primary",
@@ -184,7 +184,7 @@ print(json.dumps(result))
     identities["linked"]?.falsePositives,
   );
 
-  const legacy = run("legacy");
+  const legacy = await run("legacy");
   expect(legacy["primary"]?.falsePositives).toMatchObject([
     { findingId: "reopened-across-alias", sourceScanId: "primary-reviewed" },
     {
