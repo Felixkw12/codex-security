@@ -63,7 +63,6 @@ import {
   isExternalModelProvider,
   hasCommandAuth,
   mergedCodexConfig,
-  readCodexFileProfile,
   resolveCodexProfile,
   resolveCommandAuthConfig,
   resolveAgentPaths,
@@ -1728,34 +1727,24 @@ export class CodexSecurity {
         recipeConfig["profile"] = profileName;
         // Reload inherited file settings, retaining explicit provider refinements
         // separately from the readable recipe.
+        delete recipeConfig["model_providers"];
         const provider = scanModelProvider(preflightConfig);
-        if (isExternalModelProvider(provider)) {
-          const fileProfile = await readCodexFileProfile(
-            effectiveConfig,
-            scanCodexHome(this.#dependencies.environment),
+        const explicitProviders =
+          this.config.codexOverrides?.["model_providers"];
+        if (
+          options.resumeScanId === undefined &&
+          typeof provider === "string" &&
+          isRecord(explicitProviders) &&
+          isRecord(explicitProviders[provider])
+        ) {
+          savedProviderProfile = await createProviderProfile(
+            codexSecurityCredentialHome(this.#dependencies.environment),
+            {
+              model_providers: {
+                [provider]: explicitProviders[provider] as JsonObject,
+              },
+            },
           );
-          const providers = fileProfile["model_providers"];
-          if (isRecord(providers) && isRecord(providers[provider])) {
-            delete recipeConfig["model_providers"];
-            const explicitProviders =
-              this.config.codexOverrides?.["model_providers"];
-            const explicitProvider = isRecord(explicitProviders)
-              ? explicitProviders[provider]
-              : undefined;
-            if (
-              options.resumeScanId === undefined &&
-              isRecord(explicitProvider)
-            ) {
-              savedProviderProfile = await createProviderProfile(
-                codexSecurityCredentialHome(this.#dependencies.environment),
-                {
-                  model_providers: {
-                    [provider]: explicitProvider as JsonObject,
-                  },
-                },
-              );
-            }
-          }
         }
       }
       const scanKnowledge =

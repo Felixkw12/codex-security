@@ -106,9 +106,9 @@ test.each([true, false])(
 );
 
 test.each(
-  (["openrouter", "fireworks"] as const).flatMap((provider) =>
+  (["openrouter", "fireworks", "gateway"] as const).flatMap((provider) =>
     (["standard", "deep"] as const).flatMap((mode) =>
-      ["partial", "different-key"].map((profileKind) => ({
+      ["partial", "different-key", "model-only"].map((profileKind) => ({
         provider,
         mode,
         profileKind,
@@ -116,7 +116,7 @@ test.each(
     ),
   ),
 )(
-  "saved launches retain explicit standard provider refinements: %j",
+  "saved launches retain explicit provider refinements: %j",
   async ({ provider, mode, profileKind }) => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -126,20 +126,30 @@ test.each(
     await writeFile(join(repository, "fixture.py"), "value = 1\n");
     await writeFile(
       join(home, "review.config.toml"),
-      `model="synthetic-model"\nmodel_provider="${provider}"\n[model_providers.${provider}]\n` +
-        (profileKind === "partial"
-          ? "request_max_retries=4\n"
-          : 'env_key="SYNTHETIC_OLD_PROVIDER_KEY"\n'),
+      `model="synthetic-model"\nmodel_provider="${provider}"\n` +
+        (profileKind === "model-only"
+          ? ""
+          : `[model_providers.${provider}]\n` +
+            (profileKind === "partial"
+              ? "request_max_retries=4\n"
+              : 'env_key="SYNTHETIC_OLD_PROVIDER_KEY"\n')),
     );
     const python = Bun.which("python3") ?? Bun.which("python");
     if (python === null) throw new Error("Python is required for this test.");
-    const standard = EXTERNAL_CODEX_PROVIDERS[provider];
+    const standard =
+      provider === "gateway"
+        ? {
+            name: "Synthetic gateway",
+            env_key: "SYNTHETIC_PROVIDER_KEY",
+            wire_api: "responses",
+          }
+        : EXTERNAL_CODEX_PROVIDERS[provider];
     const environment = {
       PATH: process.env["PATH"],
       SystemRoot: process.env["SystemRoot"],
       CODEX_HOME: home,
       CODEX_SECURITY_STATE_DIR: join(root, "state"),
-      [standard.env_key]: "synthetic-launch-key",
+      SYNTHETIC_PROVIDER_KEY: "synthetic-launch-key",
     };
     const command = (args: readonly string[], input?: string) =>
       runWorkbench(
@@ -151,6 +161,7 @@ test.each(
     const customEndpoint = "https://provider.example.invalid/custom";
     const explicitProvider = {
       ...standard,
+      env_key: "SYNTHETIC_PROVIDER_KEY",
       base_url: customEndpoint,
       http_headers: { "X-Synthetic-Credential": header },
     };
