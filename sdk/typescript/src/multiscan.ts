@@ -1971,12 +1971,11 @@ async function checkoutRevision(
           );
         }
       }
-      const head = await lstat(join(gitDirectory, "HEAD")).catch(
-        undefinedIfMissingFile,
-      );
       const refs = await lstat(join(gitDirectory, "refs")).catch(
         undefinedIfMissingFile,
       );
+      if (refs !== undefined)
+        await ensureOutputDirectory(join(gitDirectory, "refs"), true);
       const commonBinding = await readFile(
         join(gitDirectory, "commondir"),
         "utf8",
@@ -2054,12 +2053,6 @@ async function checkoutRevision(
           const value = await configured(file, key, "bool");
           if (value !== undefined) structural.set(key, value);
         }
-      }
-      if (head === undefined || refs === undefined) {
-        if (
-          await lstat(join(gitDirectory, "refs")).catch(undefinedIfMissingFile)
-        )
-          await ensureOutputDirectory(join(gitDirectory, "refs"), true);
       }
       await git("init", "--quiet", "--template=");
       for (const [key, value] of structural)

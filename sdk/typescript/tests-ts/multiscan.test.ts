@@ -6362,8 +6362,14 @@ for (const selection of [
   );
 }
 
-for (const entry of ["info", "loose-object", "hooks", "refs"] as const) {
-  test(`current native recovery preserves external ${entry} initialization and fetch destinations`, async () => {
+for (const [entry, removeHead] of [
+  ["info", true],
+  ["loose-object", false],
+  ["hooks", true],
+  ["refs", true],
+  ["refs", false],
+] as const) {
+  test(`current native recovery preserves external ${entry} initialization and fetch destinations (HEAD removed: ${removeHead})`, async () => {
     const paths = await fixture();
     const source = await repository(paths.root, "linked-native-source");
     const interrupted = join(paths.root, "interrupted-checkout");
@@ -6408,7 +6414,7 @@ repo,${source.path},${revision},src
         : join(checkout, ".git", "objects", object.slice(0, 2));
     await rm(destination, { recursive: true, force: true });
     await symlink(outside, destination, "junction");
-    if (entry !== "loose-object") await rm(join(checkout, ".git", "HEAD"));
+    if (removeHead) await rm(join(checkout, ".git", "HEAD"));
     let failed = false;
     try {
       await runMultiscan(campaign);
