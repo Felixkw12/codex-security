@@ -295,6 +295,8 @@ export class ScanCostTracker {
     this.#parentInventory = null;
     // Historical logs may omit projection kinds emitted by the new turn.
     this.#parentSession?.messageProjections.clear();
+    for (const completion of this.#parentSession?.completions ?? [])
+      completion.item = null;
     this.#readyParentMarkers.length = 0;
     this.#matchedParentItems = 0;
     this.#parentCompletionCursor = this.#parentSession?.completions.length ?? 0;
@@ -464,6 +466,7 @@ export class ScanCostTracker {
       !this.#parentTurnStartKnown ||
       live?.position !== null ||
       live.item?.kind !== "command" ||
+      this.#liveParentItems.indexOf(live) < this.#matchedParentItems ||
       this.#parentProgress === null ||
       this.#parentProgress.position !== undefined
     )
@@ -556,14 +559,14 @@ export class ScanCostTracker {
         if (previous.item !== null) {
           for (const key of progressItemKeys(previous.item))
             remove(key, this.#parentItemKeys);
-          previous.item = null;
+          if (previous.position !== null) previous.item = null;
         }
       }
       while (this.#parentCompletionCursor <= matched) {
         const saved = completions[this.#parentCompletionCursor++]!;
         if (saved.item !== null) {
           remove(progressItemKey(saved.item), this.#parentCompletionKeys);
-          saved.item = null;
+          if (saved.position === live.position) saved.item = null;
         }
       }
       for (const key of changed) this.#queueParentMatch(key);
@@ -577,6 +580,58 @@ export class ScanCostTracker {
     if (index === undefined || this.#pendingParentMatches.has(index)) return;
     this.#pendingParentMatches.add(index);
     insertIndex(this.#parentMatches, index);
+  }
+
+  #corroboratedInventory(
+    live: StreamedProgressItem,
+    marker: ParentProgressMarker,
+  ): ParentProgressMarker | undefined {
+    const inventory = this.#parentInventory;
+    if (
+      !this.#parentTurnStartKnown ||
+      inventory === null ||
+      inventory.accepted ||
+      marker.progress.filesCompleted === 0 ||
+      marker.progress.filesTotal !== inventory.progress.filesTotal ||
+      live.position === null
+    )
+      return undefined;
+    const pending = this.#liveParentItems.find((item) =>
+      item.markers.includes(inventory),
+    );
+    const item = pending?.item;
+    if (
+      pending?.position !== null ||
+      item?.kind !== "command" ||
+      item.outputDigest === item.persistedOutputDigest ||
+      this.#liveParentItems.indexOf(pending) >=
+        this.#liveParentItems.indexOf(live)
+    )
+      return undefined;
+    let source: SessionCompletion | undefined;
+    for (const completion of this.#parentSession?.completions ?? []) {
+      if (
+        completion.item?.kind !== "command" ||
+        completion.item.outputDigest !== item.persistedOutputDigest
+      )
+        continue;
+      if (source !== undefined) return undefined;
+      source = completion;
+    }
+    // Corroborate scope without assigning the lost command an occurrence.
+    // A consumed unmatched prefix remains relevant to collision ambiguity.
+    return source !== undefined &&
+      source.position > this.#inventoryFrontier.position &&
+      source.position < live.position &&
+      !this.#parentSession?.progress.some(
+        (saved) =>
+          saved.update.phase === "discovery" &&
+          saved.update.filesCompleted === 0 &&
+          saved.position > source.position &&
+          saved.position < live.position!,
+      )
+      ? inventory
+      : undefined;
   }
 
   #reconcileParentProgress(): void {
@@ -607,7 +662,8 @@ export class ScanCostTracker {
     for (const { live, marker } of ready) {
       const position = live.position;
       if (position === null) continue;
-      const progress = marker.progress;
+      const corroborated = this.#corroboratedInventory(live, marker);
+      const progress = (corroborated ?? marker).progress;
       if (
         marker === this.#parentInventory &&
         !marker.accepted &&
@@ -621,10 +677,11 @@ export class ScanCostTracker {
         continue;
       }
       if (
-        marker === this.#parentInventory &&
-        (marker.accepted ||
-          (this.#parentProgress?.progress.filesCompleted ?? 0) === 0 ||
-          this.#precedesParentReview(position, marker.index)) &&
+        (corroborated !== undefined ||
+          (marker === this.#parentInventory &&
+            (marker.accepted ||
+              (this.#parentProgress?.progress.filesCompleted ?? 0) === 0 ||
+              this.#precedesParentReview(position, marker.index)))) &&
         progress.phase === "discovery" &&
         progress.filesCompleted === 0 &&
         (position > this.#inventoryFrontier.position ||
@@ -632,7 +689,8 @@ export class ScanCostTracker {
             marker.index > this.#inventoryFrontier.markerIndex))
       ) {
         // Inventory may precede already-admitted review even when its full live
-        // marker arrives later. Restore scope without replaying that older phase.
+        // marker arrives later. For lossy output, the real matched review marks
+        // the scope-proof boundary; the missing inventory position stays unknown.
         this.#inventoryFrontier = {
           position,
           markerIndex: marker.index,
@@ -803,6 +861,22 @@ export class ScanCostTracker {
         ? this.#parentProgress
         : null;
     for (const candidate of this.#parentFacts.values()) {
+      // Process preceding inventories before promoting a retained phase past
+      // them. Their source order can still change the admitted coverage.
+      if (
+        this.#parentSession?.progress.some(
+          (saved) =>
+            saved.update.phase === "discovery" &&
+            saved.update.filesCompleted === 0 &&
+            (saved.position > this.#inventoryFrontier.position ||
+              (saved.position === this.#inventoryFrontier.position &&
+                saved.markerIndex > this.#inventoryFrontier.markerIndex)) &&
+            (saved.position < candidate.position! ||
+              (saved.position === candidate.position &&
+                saved.markerIndex < candidate.markerIndex!)),
+        )
+      )
+        continue;
       if (
         candidate.progress.filesTotal >
           (this.#expectedFilesTotal ?? Number.MAX_SAFE_INTEGER) ||
