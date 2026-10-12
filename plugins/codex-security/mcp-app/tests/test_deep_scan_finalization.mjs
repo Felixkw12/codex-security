@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { promises as fs, renameSync, symlinkSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import {
   mkdir,
   mkdtemp,
@@ -36,6 +38,85 @@ const {
   `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
 );
 const scanId = "4e7b4acb-ac80-4d68-98cd-3d5ac5581cd1";
+
+for (const mode of ["normal", "symlink", "swapped", "changed", "canceled"]) {
+  test(`selected reducer read preserves accepted-file boundary: ${mode}`, async (t) => {
+    const root = await realpath(
+      await mkdtemp(path.join(tmpdir(), "selected-reader-")),
+    );
+    try {
+      const scanDir = path.join(root, "scan");
+      await mkdir(scanDir, { mode: 0o700 });
+      const selected = path.join(scanDir, "selected.json");
+      const outside = path.join(root, "outside.json");
+      const contents = JSON.stringify({
+        scanId,
+        complete: true,
+        findings: [],
+        sourceCoverage: {
+          completeness: "complete",
+          surfaces: [],
+          explicitExclusions: [],
+          deferred: [],
+        },
+      });
+      await writeFile(selected, contents);
+      await writeFile(outside, contents);
+      const selection = {
+        version: 1,
+        resultPath: "selected.json",
+        resultSha256: createHash("sha256").update(contents).digest("hex"),
+        terminalReason: "capped",
+        omittedWorkerIds: [],
+        selectedAt: "2030-01-01T00:00:00Z",
+      };
+      const swap = () => {
+        renameSync(selected, `${selected}.original`);
+        symlinkSync(outside, selected, "file");
+      };
+      if (mode === "symlink") swap();
+      if (mode === "changed") await fs.appendFile(selected, "\n");
+      const controller = new AbortController();
+      if (mode === "canceled")
+        controller.abort(new Error("Stopped selected publication"));
+      const lstat = fs.lstat;
+      let swapped = false;
+      const spy = t.mock.method(fs, "lstat", async (...args) => {
+        const result = await lstat(...args);
+        if (mode === "swapped" && args[0] === selected && !swapped) {
+          swap();
+          swapped = true;
+        }
+        return result;
+      });
+      syncBuiltinESMExports();
+      try {
+        const reading = readSelectedDeepScanDraft(
+          createDeepScanArtifacts(scanDir),
+          scanId,
+          selection,
+          controller.signal,
+        );
+        if (mode === "normal") assert.equal((await reading).scanId, scanId);
+        else
+          await assert.rejects(
+            reading,
+            mode === "canceled"
+              ? /Stopped selected publication/
+              : mode === "changed"
+                ? /changed after acceptance/
+                : /file|directory|symlink/,
+          );
+        if (mode === "swapped") assert.equal(swapped, true);
+      } finally {
+        spy.mock.restore();
+        syncBuiltinESMExports();
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
 
 for (const terminalReason of ["capped", "saturated"]) {
   test(`replays the selected ${terminalReason} input after replaceable results change`, async () => {

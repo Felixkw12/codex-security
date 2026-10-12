@@ -11,12 +11,14 @@ import {
   type DeepScanPublication,
 } from "../artifact-scan-draft.js";
 import { WorkbenchDeepScanStore } from "./store.js";
-import { createDeepScanArtifacts } from "./artifacts.js";
+import {
+  createDeepScanArtifacts,
+  type DeepScanArtifacts,
+} from "./artifacts.js";
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { type ScanDraftInput } from "../artifact-scan-draft.js";
-import { requireRegularFile, type DeepScanArtifacts } from "./artifacts.js";
+import { readScanFile } from "../../../../../sdk/typescript/src/scan-files.js";
 import type {
   DeepScanFinalizationInput,
   DeepScanRunState,
@@ -47,6 +49,7 @@ export async function publishSelectedDeepScan(input: {
     artifacts,
     run.scanId,
     selection,
+    signal,
   );
   await input.publish(draft, signal, {
     coordinatorGeneration: run.coordinatorGeneration,
@@ -69,6 +72,7 @@ export async function readSelectedDeepScanDraft(
   artifacts: DeepScanArtifacts,
   scanId: string,
   selection: DeepScanFinalizationInput,
+  signal?: AbortSignal,
 ): Promise<ScanDraftInput> {
   if (selection.version !== 1)
     throw new Error("Unsupported Deep Scan finalization input version.");
@@ -97,9 +101,12 @@ export async function readSelectedDeepScanDraft(
       },
     };
   }
-  const resultPath = join(artifacts.scanDir, selection.resultPath);
-  await requireRegularFile(resultPath, artifacts.scanDir);
-  const contents = await readFile(resultPath);
+  const contents = await readScanFile(
+    artifacts.scanDir,
+    selection.resultPath,
+    "Selected Deep Scan result",
+    signal,
+  );
   if (
     createHash("sha256").update(contents).digest("hex") !==
     selection.resultSha256

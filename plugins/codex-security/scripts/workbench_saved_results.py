@@ -20,6 +20,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from finalize_scan_contract import (
     ContractError,
+    PreparedScanFinalization,
     RecoverableContractError,
     _finding_strength,
     _populate_unsealed_artifact_envelope,
@@ -2274,12 +2275,15 @@ def budget_exhausted_draft(
     before_selection: bool = False,
     accepted_result: dict[str, Any] | None = None,
     unmerged_workers: list[sqlite3.Row] = (),
-) -> None:
-    documents: dict[str, dict[str, Any]] = {}
-    for name in ("scan-manifest.json", "findings.json", "coverage.json"):
-        path = db.artifact_path(scan_dir, name, required=False)
-        if path is not None:
-            documents[name] = db.read_json_object(path)
+    draft_documents: tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    names = ("scan-manifest.json", "findings.json", "coverage.json")
+    documents = dict(zip(names, copy.deepcopy(draft_documents))) if draft_documents else {}
+    if draft_documents is None:
+        for name in names:
+            path = db.artifact_path(scan_dir, name, required=False)
+            if path is not None:
+                documents[name] = db.read_json_object(path)
     interrupted_documents = {}
     if documents and len(documents) != 3:
         if not before_selection or set(documents) not in (
@@ -2306,19 +2310,8 @@ def budget_exhausted_draft(
                 raise SystemExit(
                     "Budget-exhausted scan cannot replace an already sealed scan draft."
                 )
-            # The seal can reach disk before parent completion commits. Validate
-            # it without changing bytes; the existing finalizer commits replay.
-            try:
-                _prepare_scan_finalization(
-                    scan_dir,
-                    expected_coverage_mode=db.expected_coverage_mode(scan),
-                    completion_binding=db.workbench_completion_binding(
-                        scan, scan["started_at"], manifest
-                    ),
-                )
-            except ContractError as exc:
-                raise SystemExit(str(exc)) from exc
-            return
+            # Completion verifies sealed bytes directly from disk.
+            return manifest, findings, coverage
     else:
         target_contract = contract["target"]
         target: dict[str, Any] = {
@@ -2467,6 +2460,7 @@ def budget_exhausted_draft(
             )
         except (ContractError, OSError, TypeError, ValueError) as exc:
             raise SystemExit(f"Budget-exhausted scan draft could not be saved: {exc}") from exc
+    return manifest, findings, coverage
 
 
 def retain_unmerged_budget_coverage(
@@ -2974,23 +2968,15 @@ def _require_selected_result(scan: Any, selection: dict[str, Any]) -> None:
         )
 
 
-def _selected_publication_digest_for_documents(db: Any, scan: Any, documents: Any) -> str:
-    prepared = _prepare_scan_finalization(
-        Path(scan["scan_dir"]),
-        expected_coverage_mode=db.expected_coverage_mode(scan),
-        completion_binding=db.workbench_completion_binding(scan, db.now(), documents[0]),
-        draft_documents=documents,
-    )
-    return _selected_publication_digest(prepared)
-
-
-def record_selected_publication(db: Any, connection: Any, scan: Any, documents: Any) -> None:
+def record_selected_publication(
+    db: Any, connection: Any, scan: Any, prepared: PreparedScanFinalization
+) -> None:
     run = db.deep_scan.require_deep_scan_run(connection, scan["id"])
     selection = db.deep_scan.deep_scan_finalization_input(run)
     if selection is None:
         return
     _require_selected_result(scan, selection)
-    selection["publicationSha256"] = _selected_publication_digest_for_documents(db, scan, documents)
+    selection["publicationSha256"] = _selected_publication_digest(prepared)
     with connection:
         connection.execute(
             "UPDATE deep_scan_runs SET finalization_input_json = ? WHERE scan_id = ?",
@@ -3130,8 +3116,20 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
                 (json.dumps(document, allow_nan=False, indent=2) + "\n").encode(),
             )
         model_warning = write_threat_model_projection_if_possible(scan_dir, manifest)
-        if scan["mode"] == "deep":
-            record_selected_publication(db, connection, scan, (manifest, findings, coverage))
+        if (
+            scan["mode"] == "deep"
+            and db.deep_scan.deep_scan_finalization_input(
+                db.deep_scan.require_deep_scan_run(connection, scan_id)
+            )
+            is not None
+        ):
+            prepared = _prepare_scan_finalization(
+                scan_dir,
+                expected_coverage_mode=db.expected_coverage_mode(scan),
+                completion_binding=binding,
+                draft_documents=(manifest, findings, coverage),
+            )
+            record_selected_publication(db, connection, scan, prepared)
         # Accepted Standard drafts are evidence of review or report assembly,
         # even when the parent omitted its explicit progress call.
         model_only_checkpoint = (

@@ -165,14 +165,11 @@ def test_cost_completion_retains_independent_unmerged_surfaces_and_receipts(
         message="Scan reached its original cost limit.",
     )
     if replay != "fresh":
-        saved = budget.__globals__["saved_results"]
-        retain = saved.retain_unmerged_budget_coverage
 
-        def legacy_projection(*args):
-            retain(*args)
+        def legacy_projection(coverage):
             # Older writers kept host identity but omitted source descriptions.
             for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions"):
-                items = args[2].get(field, [])
+                items = coverage.get(field, [])
                 for item in list(items):
                     if item.get("provenance", {}).get("workerId") == worker_id:
                         if replay == "duplicated" and any(
@@ -184,7 +181,15 @@ def test_cost_completion_retains_independent_unmerged_surfaces_and_receipts(
                         for key in descriptions:
                             item["provenance"].pop(key, None)
 
-        def interrupt_before_seal(connection, *_args):
+        def interrupt_before_seal(connection, *_args, **_kwargs):
+            coverage_path = scan.scan_dir / "coverage.json"
+            coverage = json.loads(coverage_path.read_text())
+            legacy_projection(coverage)
+            # The old writer appended the budget marker after projecting worker rows.
+            coverage["deferred"].sort(key=lambda item: item.get("id") == "scan-cost-limit")
+            coverage_path.write_text(
+                json.dumps(coverage, allow_nan=False, indent=2, sort_keys=True) + "\n"
+            )
             selection = json.loads(
                 connection.execute(
                     "SELECT finalization_input_json FROM deep_scan_runs WHERE scan_id = ?",
@@ -205,14 +210,6 @@ def test_cost_completion_retains_independent_unmerged_surfaces_and_receipts(
             connection.execute("PRAGMA foreign_keys = ON")
             workbench_db.backup(connection)
             with monkeypatch.context() as patch:
-                patch.setattr(saved, "retain_unmerged_budget_coverage", legacy_projection)
-                # The legacy writer predates the selected-publication digest.
-                patch.setattr(saved, "record_selected_publication", lambda *args: None)
-                patch.setattr(
-                    budget.__globals__["deep_scan"],
-                    "_selected_publication_digest_for_documents",
-                    lambda *args: None,
-                )
                 patch.setitem(budget.__globals__, "complete_scan_locked", interrupt_before_seal)
                 with pytest.raises(RuntimeError, match="budget draft committed"):
                     budget(connection, args)

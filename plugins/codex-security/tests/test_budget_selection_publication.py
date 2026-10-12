@@ -706,7 +706,15 @@ def test_budget_rejects_unrelated_incomplete_drafts(
 
 @pytest.mark.parametrize(
     "state",
-    ["changed-findings", "wrong-scan", "running-discovery", "canceled", "other-owner", "complete"],
+    [
+        "changed-findings",
+        "late-findings",
+        "wrong-scan",
+        "running-discovery",
+        "canceled",
+        "other-owner",
+        "complete",
+    ],
 )
 def test_budget_sealed_replay_keeps_integrity_and_ownership_guards(
     workbench_api, workbench_db, publication_scan, monkeypatch, state
@@ -729,7 +737,7 @@ def test_budget_sealed_replay_keeps_integrity_and_ownership_guards(
         patch.setitem(
             budget.__globals__,
             "complete_scan_locked",
-            lambda *a: complete(*a, prepare_only=True),
+            lambda *a, **kw: complete(*a, **kw, prepare_only=True),
         )
         budget(workbench_db, args)
     manifest = scan.scan_dir / "scan-manifest.json"
@@ -744,6 +752,17 @@ def test_budget_sealed_replay_keeps_integrity_and_ownership_guards(
         else:
             document["scan"]["id"] = "69078890-d24c-4416-a6fa-c286825bef88"
         path.write_text(json.dumps(document))
+    elif state == "late-findings":
+
+        def change_before_completion(*a, **kw):
+            path = scan.scan_dir / "findings.json"
+            document = json.loads(path.read_text())
+            document["findings"] = []
+            path.write_text(json.dumps(document))
+            before_files["findings.json"] = path.read_bytes()
+            return complete(*a, **kw)
+
+        monkeypatch.setitem(budget.__globals__, "complete_scan_locked", change_before_completion)
     elif state == "running-discovery":
         with workbench_db:
             workbench_db.execute("UPDATE deep_scan_runs SET status = 'running'")

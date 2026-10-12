@@ -17,6 +17,7 @@ from typing import Any, Callable
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from deep_scan_config import resolve_deep_scan_config
 from finalize_scan_contract import (
+    PreparedScanFinalization,
     _read_scan_local_json,
     open_scan_local_file_descriptor,
     write_scan_local_bytes,
@@ -25,7 +26,7 @@ from workbench.handoff import require_current_continuation
 from workbench.storage import create_private_directory
 from workbench_saved_results import (
     _restore_published_outputs,
-    _selected_publication_digest_for_documents,
+    _selected_publication_digest,
     _snapshot_published_outputs,
     _worker_checkpoint_head,
 )
@@ -2405,6 +2406,23 @@ def finish_deep_scan_locked(
     return deep_scan_result(connection, scan_id)
 
 
+def final_deep_scan_reducer(connection: sqlite3.Connection, scan_id: str) -> sqlite3.Row | None:
+    return connection.execute(
+        "SELECT workers.*, attempts.accepted_result_path, attempts.accepted_result_sha256 "
+        "FROM deep_scan_workers AS workers LEFT JOIN deep_scan_attempts AS attempts "
+        "ON attempts.worker_id = workers.id AND attempts.attempt = workers.attempt "
+        "WHERE workers.scan_id = ? AND workers.kind = 'dedup' AND workers.status = 'succeeded' "
+        "AND NOT EXISTS (SELECT 1 FROM deep_scan_merge_claims AS claims "
+        "JOIN deep_scan_workers AS successor ON successor.id = claims.worker_id "
+        "WHERE claims.previous_worker_id = workers.id AND claims.scan_id = workers.scan_id "
+        "AND successor.scan_id = workers.scan_id AND successor.kind = 'dedup' "
+        "AND successor.status = 'succeeded') "
+        # Legacy reducers without claims retain their previous ordering.
+        "ORDER BY workers.completed_at DESC, workers.id DESC LIMIT 1",
+        (scan_id,),
+    ).fetchone()
+
+
 def selected_deep_scan_finalization(
     connection: sqlite3.Connection,
     run: sqlite3.Row,
@@ -2423,17 +2441,11 @@ def selected_deep_scan_finalization(
         if not zero_discovery_deadline:
             raise SystemExit("Deep Scan finalization requires its accepted reducer result.")
     else:
-        accepted = connection.execute(
-            "SELECT attempts.accepted_result_path, attempts.accepted_result_sha256 "
-            "FROM deep_scan_workers AS workers LEFT JOIN deep_scan_attempts AS attempts "
-            "ON attempts.worker_id = workers.id AND attempts.attempt = workers.attempt "
-            "WHERE workers.id = (SELECT id FROM deep_scan_workers WHERE scan_id = ? "
-            "AND kind = 'dedup' AND status = 'succeeded' ORDER BY completed_at DESC, id DESC LIMIT 1) "
-            "AND (workers.result_manifest_path = ? OR attempts.accepted_result_path = ?)",
-            (scan["id"], result_path, result_path),
-        ).fetchone()
+        accepted = final_deep_scan_reducer(connection, scan["id"])
         if (
             accepted is None
+            or result_path
+            not in (accepted["result_manifest_path"], accepted["accepted_result_path"])
             or not accepted["accepted_result_path"]
             or not accepted["accepted_result_sha256"]
         ):
@@ -2476,8 +2488,8 @@ def prepare_budget_exhausted_deep_scan(
     scan: sqlite3.Row,
     scan_dir: Path,
     warning: str,
-    write_draft: Callable[[dict[str, Any] | None, list[sqlite3.Row]], None],
-) -> None:
+    write_draft: Callable[[dict[str, Any] | None, list[sqlite3.Row]], PreparedScanFinalization],
+) -> PreparedScanFinalization:
     """Finish local budget publication without starting or promoting scan work."""
     snapshots = _snapshot_published_outputs(scan_dir)
     connection.execute("BEGIN IMMEDIATE")
@@ -2488,14 +2500,7 @@ def prepare_budget_exhausted_deep_scan(
         if run["finalization_input_json"] is not None:
             selection = json.loads(run["finalization_input_json"])
         else:
-            reducer = connection.execute(
-                "SELECT attempts.accepted_result_path FROM deep_scan_workers AS workers "
-                "LEFT JOIN deep_scan_attempts AS attempts ON attempts.worker_id = workers.id "
-                "AND attempts.attempt = workers.attempt WHERE workers.scan_id = ? "
-                "AND workers.kind = 'dedup' AND workers.status = 'succeeded' "
-                "ORDER BY workers.completed_at DESC, workers.id DESC LIMIT 1",
-                (scan["id"],),
-            ).fetchone()
+            reducer = final_deep_scan_reducer(connection, scan["id"])
             if reducer is not None and not reducer["accepted_result_path"]:
                 raise SystemExit("Budget completion requires the committed reducer reference.")
             selection = selected_deep_scan_finalization(
@@ -2526,14 +2531,8 @@ def prepare_budget_exhausted_deep_scan(
                 or not isinstance(accepted.get("sourceCoverage"), dict)
             ):
                 raise SystemExit("Budget completion requires the accepted complete reducer.")
-        write_draft(accepted, unmerged)
-        documents = tuple(
-            _read_scan_local_json(scan_dir, name, name)
-            for name in ("scan-manifest.json", "findings.json", "coverage.json")
-        )
-        selection["publicationSha256"] = _selected_publication_digest_for_documents(
-            dependencies(), scan, documents
-        )
+        prepared = write_draft(accepted, unmerged)
+        selection["publicationSha256"] = _selected_publication_digest(prepared)
         timestamp = dependencies().now()
         cancel_active_workers(connection, scan["id"], timestamp)
         connection.execute(
@@ -2558,6 +2557,7 @@ def prepare_budget_exhausted_deep_scan(
                 (json.dumps([*warnings, warning]), scan["id"]),
             )
         connection.commit()
+        return prepared
     except BaseException:
         connection.rollback()
         _restore_published_outputs(scan_dir, snapshots)

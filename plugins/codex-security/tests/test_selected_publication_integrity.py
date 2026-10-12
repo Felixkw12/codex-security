@@ -209,3 +209,108 @@ def test_stopped_recovery_keeps_accepted_reviews_with_later_parent_coverage(
     )
     assert (scan.scan_dir / "scan-manifest.json").read_bytes() == manifest
     assert accepted.read_bytes() == contents
+
+
+@pytest.mark.parametrize("cut", ["none", "projection", "selected-validation", "completion"])
+def test_budget_completion_uses_one_accepted_snapshot(
+    workbench_api, workbench_db, publication_scan, monkeypatch, cut
+):
+    scan = publication_scan()
+    api, connection = workbench_api, workbench_db
+    if cut == "selected-validation":
+        accepted, _ = publish_selected(api, connection, scan)
+    else:
+        _, accepted, _ = accept_reducer(connection, scan)
+        for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+            (scan.scan_dir / name).unlink()
+        with connection:
+            connection.execute(
+                "UPDATE deep_scan_runs SET status='running', phase='discovery', "
+                "workflow_version='deep-security-scan/v2', manifest_path=NULL, "
+                "terminal_reason=NULL, completed_at=NULL"
+            )
+    original = accepted.read_bytes()
+    title = json.loads(original)["findings"][0]["title"]
+    with connection:
+        recipe = json.loads(connection.execute("SELECT recipe_json FROM scans").fetchone()[0])
+        recipe["maxCostUsd"] = 0.005
+        connection.execute("UPDATE scans SET recipe_json=?", (json.dumps(recipe),))
+    replaced = []
+
+    def replace_canonical():
+        if replaced:
+            return
+        path = scan.scan_dir / "findings.json"
+        document = json.loads(path.read_bytes())
+        document["findings"][0]["title"] = "Synthetic replacement after acceptance"
+        path.write_text(json.dumps(document))
+        replaced.append(True)
+
+    if cut == "selected-validation":
+        original_check = api["saved_results"].require_selected_publication
+
+        def check(*args):
+            value = original_check(*args)
+            replace_canonical()
+            return value
+
+        monkeypatch.setattr(api["saved_results"], "require_selected_publication", check)
+    elif cut != "none":
+        namespace = api["complete_budget_exhausted_scan"].__globals__
+        key = "budget_exhausted_draft" if cut == "projection" else "complete_scan_locked"
+        original_call = namespace[key]
+
+        def call(*args, **kwargs):
+            if cut == "completion":
+                replace_canonical()
+            value = original_call(*args, **kwargs)
+            if cut == "projection":
+                replace_canonical()
+            return value
+
+        monkeypatch.setitem(namespace, key, call)
+    api["complete_budget_exhausted_scan"](
+        connection, Namespace(scan_id=scan.scan_id, cost_json=json.dumps(BUDGET_COST), message=None)
+    )
+    assert bool(replaced) is (cut != "none")
+    assert accepted.read_bytes() == original
+    assert connection.execute("SELECT status FROM scans").fetchone()[0] == "complete"
+    published = json.loads((scan.scan_dir / "findings.json").read_bytes())
+    assert published["findings"][0]["title"] == title
+    published["findings"][0]["title"] = "Synthetic corruption after sealing"
+    (scan.scan_dir / "findings.json").write_text(json.dumps(published))
+    with pytest.raises(SystemExit):
+        api["complete_scan"](
+            connection, Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None)
+        )
+
+
+@pytest.mark.parametrize("replace", [False, True])
+def test_completion_checks_the_manifest_it_prepares(
+    workbench_api, workbench_db, publication_scan, monkeypatch, replace
+):
+    scan = publication_scan()
+    namespace = workbench_api["complete_scan_locked"].__globals__
+    prepare = namespace["_prepare_scan_finalization"]
+
+    def prepare_after_replacement(*args, **kwargs):
+        if replace:
+            path = scan.scan_dir / "scan-manifest.json"
+            manifest = json.loads(path.read_bytes())
+            manifest["scan"]["complete"] = False
+            path.write_text(json.dumps(manifest))
+        return prepare(*args, **kwargs)
+
+    monkeypatch.setitem(namespace, "_prepare_scan_finalization", prepare_after_replacement)
+    args = Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None)
+    if replace:
+        with pytest.raises(SystemExit, match="incomplete"):
+            workbench_api["complete_scan"](workbench_db, args)
+        assert workbench_db.execute("SELECT status FROM scans").fetchone()[0] == "running"
+        assert (
+            "sealedAt"
+            not in json.loads((scan.scan_dir / "scan-manifest.json").read_bytes())["scan"]
+        )
+    else:
+        workbench_api["complete_scan"](workbench_db, args)
+        assert workbench_db.execute("SELECT status FROM scans").fetchone()[0] == "complete"

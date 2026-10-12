@@ -46,6 +46,7 @@ import workbench_scan_usage as scan_usage
 from finalize_scan_contract import (
     PRODUCER_NAME,
     ContractError,
+    PreparedScanFinalization,
     RecoverableContractError,
     _prepare_scan_finalization,
     _write_prepared_scan_finalization,
@@ -1213,25 +1214,30 @@ def complete_budget_exhausted_scan(
                 f"${measured['estimatedUsd']:.6g}; {retained}."
             )
         selection = deep_scan.deep_scan_finalization_input(run)
-        if selection is not None:
-            try:
+        draft_documents = None
+        try:
+            if selection is not None:
                 saved_results._require_selected_result(scan, selection)
                 if "publicationSha256" in selection:
-                    prepared = _prepare_scan_finalization(
+                    draft_documents = tuple(
+                        saved_results._read_scan_local_json(scan_dir, name, name)
+                        for name in ("scan-manifest.json", "findings.json", "coverage.json")
+                    )
+                    manifest = draft_documents[0]
+                    sealed = manifest["scan"].get("sealedAt") is not None or bool(
+                        manifest["scan"].get("artifacts")
+                    )
+                    validated = _prepare_scan_finalization(
                         scan_dir,
                         expected_coverage_mode=expected_coverage_mode(scan),
-                        completion_binding=workbench_completion_binding(
-                            scan, now(), read_json_object(scan_dir / ARTIFACTS["manifest"])
-                        ),
+                        completion_binding=workbench_completion_binding(scan, now(), manifest),
+                        draft_documents=None if sealed else draft_documents,
                     )
                     saved_results.require_selected_publication(
-                        _WORKBENCH_DB_CONTEXT, connection, scan, prepared
+                        _WORKBENCH_DB_CONTEXT, connection, scan, validated
                     )
-            except ContractError as exc:
-                raise SystemExit(str(exc)) from exc
-        if before_selection:
-            try:
-                deep_scan.prepare_budget_exhausted_deep_scan(
+            if before_selection:
+                prepared = deep_scan.prepare_budget_exhausted_deep_scan(
                     connection,
                     scan,
                     scan_dir,
@@ -1244,34 +1250,24 @@ def complete_budget_exhausted_scan(
                         before_selection=True,
                         accepted_result=accepted,
                         unmerged_workers=unmerged,
+                        draft_documents=draft_documents,
                     ),
                 )
-            except ContractError as exc:
-                raise SystemExit(str(exc)) from exc
-        else:
-            budget_exhausted_draft(
-                scan,
-                scan_dir,
-                candidates,
-                warning,
-                unmerged_workers=deep_scan.budget_unmerged_workers(connection, scan_id),
-            )
-        if (
-            deep_scan.deep_scan_finalization_input(
-                deep_scan.require_deep_scan_run(connection, scan_id)
-            )
-            is not None
-        ):
-            documents = tuple(
-                saved_results._read_scan_local_json(scan_dir, name, name)
-                for name in ("scan-manifest.json", "findings.json", "coverage.json")
-            )
-            try:
-                saved_results.record_selected_publication(
-                    _WORKBENCH_DB_CONTEXT, connection, scan, documents
+            else:
+                prepared = budget_exhausted_draft(
+                    scan,
+                    scan_dir,
+                    candidates,
+                    warning,
+                    unmerged_workers=deep_scan.budget_unmerged_workers(connection, scan_id),
+                    draft_documents=draft_documents,
                 )
-            except ContractError as exc:
-                raise SystemExit(str(exc)) from exc
+                if selection is not None:
+                    saved_results.record_selected_publication(
+                        _WORKBENCH_DB_CONTEXT, connection, scan, prepared
+                    )
+        except ContractError as exc:
+            raise SystemExit(str(exc)) from exc
         warnings = json.loads(scan["completion_warnings_json"])
         if warning not in warnings:
             connection.execute(
@@ -1280,7 +1276,14 @@ def complete_budget_exhausted_scan(
             )
             connection.commit()
         # A priced subtotal proves the stop but is not the saved total estimate.
-        return complete_scan_locked(connection, scan_id, None, None if lower_bound else cost_json)
+        # Sealed replay must verify current disk bytes again at completion.
+        return complete_scan_locked(
+            connection,
+            scan_id,
+            None,
+            None if lower_bound else cost_json,
+            prepared=None if prepared[5] else prepared,
+        )
 
 
 def budget_exhausted_candidates(scan: sqlite3.Row, scan_dir: Path) -> list[dict[str, Any]]:
@@ -1364,8 +1367,9 @@ def budget_exhausted_draft(
     before_selection: bool = False,
     accepted_result: dict[str, Any] | None = None,
     unmerged_workers: list[sqlite3.Row] = (),
-) -> None:
-    saved_results.budget_exhausted_draft(
+    draft_documents: tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None = None,
+) -> PreparedScanFinalization:
+    documents = saved_results.budget_exhausted_draft(
         _WORKBENCH_DB_CONTEXT,
         scan,
         scan_dir,
@@ -1375,6 +1379,16 @@ def budget_exhausted_draft(
         before_selection=before_selection,
         accepted_result=accepted_result,
         unmerged_workers=unmerged_workers,
+        draft_documents=draft_documents,
+    )
+    manifest = documents[0]
+    sealed = manifest["scan"].get("sealedAt") is not None or bool(manifest["scan"].get("artifacts"))
+    return _prepare_scan_finalization(
+        scan_dir,
+        expected_coverage_mode=expected_coverage_mode(scan),
+        completion_binding=workbench_completion_binding(scan, now(), manifest),
+        draft_documents=None if sealed else documents,
+        finding_scope=requested_scan_paths(scan),
     )
 
 
@@ -1414,6 +1428,7 @@ def complete_scan_locked(
     *,
     prepare_only: bool = False,
     thread_id: str | None = None,
+    prepared: PreparedScanFinalization | None = None,
 ) -> dict[str, Any]:
     scan = require_scan(connection, scan_id)
     if scan["status"] == "complete":
@@ -1442,15 +1457,19 @@ def complete_scan_locked(
     scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
     completion_timestamp = now()
     current_manifest_path = artifact_path(scan_dir, ARTIFACTS["manifest"], required=False)
-    current_manifest = None
-    if current_manifest_path is not None:
+    current_manifest = prepared[2] if prepared else None
+    if current_manifest_path is not None and prepared is None:
         current_manifest = read_json_object(current_manifest_path)
     already_sealed = (
-        current_manifest_path is not None
-        and isinstance(current_manifest.get("scan"), dict)
-        and (
-            current_manifest["scan"].get("sealedAt") is not None
-            or current_manifest["scan"].get("artifacts") is not None
+        prepared[5]
+        if prepared
+        else (
+            current_manifest_path is not None
+            and isinstance(current_manifest.get("scan"), dict)
+            and (
+                current_manifest["scan"].get("sealedAt") is not None
+                or current_manifest["scan"].get("artifacts") is not None
+            )
         )
     )
     completion_binding = workbench_completion_binding(scan, completion_timestamp, current_manifest)
@@ -1483,39 +1502,35 @@ def complete_scan_locked(
             if merge_parent_draft
             else nullcontext()
         ):
-            draft_documents = (
-                saved_results.merge_saved_results(
-                    scan_dir,
-                    scan["id"],
-                    completion_binding,
-                    connection.execute(
-                        "SELECT * FROM deep_scan_workers WHERE scan_id = ? ORDER BY created_at, id",
-                        (scan["id"],),
-                    ).fetchall(),
-                    warnings,
-                    stopped=False,
-                    reason="",
+            if prepared is None:
+                draft_documents = (
+                    saved_results.merge_saved_results(
+                        scan_dir,
+                        scan["id"],
+                        completion_binding,
+                        connection.execute(
+                            "SELECT * FROM deep_scan_workers WHERE scan_id = ? ORDER BY created_at, id",
+                            (scan["id"],),
+                        ).fetchall(),
+                        warnings,
+                        stopped=False,
+                        reason="",
+                    )
+                    if merge_parent_draft
+                    else None
                 )
-                if merge_parent_draft
-                else None
-            )
-            completion_manifest = draft_documents[0] if draft_documents else current_manifest
-            if (
-                completion_manifest is not None
-                and isinstance(completion_manifest.get("scan"), dict)
-                and completion_manifest["scan"].get("complete") is False
-            ):
+                prepared = _prepare_scan_finalization(
+                    scan_dir,
+                    expected_coverage_mode=expected_coverage_mode(scan),
+                    completion_binding=completion_binding,
+                    completion_warnings=warnings if scan["mode"] != "deep" else None,
+                    draft_documents=draft_documents,
+                    finding_scope=requested_scan_paths(scan) if scan["mode"] == "deep" else None,
+                )
+            if prepared[2]["scan"].get("complete") is False:
                 raise RecoverableContractError(
                     "The latest saved scan draft is incomplete; continue the scan before completing it."
                 )
-            prepared = _prepare_scan_finalization(
-                scan_dir,
-                expected_coverage_mode=expected_coverage_mode(scan),
-                completion_binding=completion_binding,
-                completion_warnings=warnings if scan["mode"] != "deep" else None,
-                draft_documents=draft_documents,
-                finding_scope=requested_scan_paths(scan) if scan["mode"] == "deep" else None,
-            )
         saved_results.require_selected_publication(
             _WORKBENCH_DB_CONTEXT, connection, scan, prepared
         )
