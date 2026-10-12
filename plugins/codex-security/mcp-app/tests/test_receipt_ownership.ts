@@ -588,3 +588,89 @@ for (const spelling of ["original", "returned"] as const) {
     }
   });
 }
+
+for (const disposition of ["rejected", "not_applicable"]) {
+  for (const archived of [false, true]) {
+    test(`a ${disposition} decision cycle resolves fresh receipts (archived=${archived})`, async () => {
+      const f = await fixture();
+      try {
+        const ref = "artifacts/evidence.txt";
+        const candidateId = "candidate-1";
+        await receipt(f.root, ref, "Old shared evidence\n");
+        await recordCodexSecurityWorkerScanDraft(
+          f.worker,
+          draft([ref], { disposition, candidateId }),
+        );
+        for (const [index, next] of [
+          "needs_follow_up",
+          disposition,
+        ].entries()) {
+          if (archived)
+            await archiveDirectory(
+              f.workerRoot,
+              path.join(
+                path.dirname(f.workerRoot),
+                "attempts",
+                `attempt-0${index + 1}`,
+              ),
+            );
+          await receipt(
+            f.workerRoot,
+            ref,
+            index ? "New final local evidence\n" : "Reopened local evidence\n",
+          );
+          const input = draft([ref], { disposition: next, candidateId });
+          const result = await recordCodexSecurityWorkerScanDraft(f.worker, {
+            ...input,
+            coverage: {
+              ...input.coverage,
+              ...(next === "needs_follow_up"
+                ? {
+                    completeness: "partial",
+                    deferred: [
+                      {
+                        id: candidateId,
+                        candidateId,
+                        reason: "Revalidate the candidate.",
+                      },
+                    ],
+                  }
+                : {}),
+            },
+          });
+          assert.deepEqual(result.coverage.surfaces[0].receiptRefs, [
+            `${f.prefix}/${ref}`,
+          ]);
+        }
+        for (const reconstructed of [false, true]) {
+          if (reconstructed) {
+            await rm(path.join(f.workerRoot, "result.json"));
+            await recordCodexSecurityWorkerScanDraft(f.worker, workerDraft([]));
+          }
+          const sources = await readDeepReductionSources(f.reducer);
+          const coverage = sources.discoveries[0].coverage;
+          assert.equal(coverage.completeness, "complete");
+          assert.deepEqual(coverage.deferred, []);
+          assert.equal(coverage.surfaces.length, 1);
+          assert.equal(coverage.surfaces[0].disposition, disposition);
+          assert.deepEqual(coverage.surfaces[0].receiptRefs, [
+            `${f.prefix}/${ref}`,
+          ]);
+          assert.equal(
+            await readFile(
+              path.join(f.root, coverage.surfaces[0].receiptRefs[0]),
+              "utf8",
+            ),
+            "New final local evidence\n",
+          );
+          const recovered = recoverCoverage(f, true, archived ? 3 : 1);
+          assert.deepEqual(recovered.refs, [`${f.prefix}/${ref}`]);
+          assert.equal(recovered.surfaces[0].disposition, disposition);
+          assert.deepEqual(recovered.warnings, []);
+        }
+      } finally {
+        await rm(f.root, { recursive: true, force: true });
+      }
+    });
+  }
+}

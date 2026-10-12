@@ -564,11 +564,20 @@ async function preserveScanDraft(
     sameAuthoredSurface(left, right);
   if (context.layout === "worker") {
     // Retained observations keep saved ownership; fresh observations use this worker.
-    await qualifyWorkerReceipts(context, result, (surface) =>
-      sources
+    await qualifyWorkerReceipts(context, result, (surface) => {
+      const previous = sources
         .flatMap((source) => source.coverage.surfaces as JsonObject[])
-        .find((saved) => sameSavedSurface(surface, saved)),
-    );
+        .find(
+          (saved) =>
+            (typeof surface.id === "string" &&
+              surface.id === saved.id &&
+              !ambiguousSurfaceIds.has(surface.id)) ||
+            sameAuthoredSurface(surface, saved),
+        );
+      return previous?.disposition === surface.disposition
+        ? previous
+        : undefined;
+    });
     // Persist the resolved ownership in the observation as well as its result.
     input = structuredClone(result);
     if (saveObservation) await saveScanDraftCheckpoint(context, input, false);
