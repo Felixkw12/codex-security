@@ -27,7 +27,83 @@ const runCommand: typeof runGitRepositoryCommand = (
       ? "[]"
       : "https://github.example.test/example/repository/pull/1";
 
-test.skipIf(process.platform === "win32")(
+test.skipIf(process.platform !== "linux").each([false, true])(
+  "checks ignored content at a raw publication path (copied: %p)",
+  async (copied) => {
+    const { directory, git, remote } = await publicationRepository(fixtures);
+    await writeFile(join(directory, ".gitignore"), ".env\n");
+    git("add", ".gitignore");
+    git("commit", "-m", "Synthetic ignored baseline");
+    const ignored = "SYNTHETIC_IGNORED_CONTENT\n";
+    await writeFile(join(directory, ".env"), ignored);
+    const original = git("rev-parse", "HEAD");
+    const index = await readFile(join(directory, ".git/index"));
+    const rawName = Buffer.concat([
+      Buffer.from("src/new-"),
+      Buffer.from([0xff]),
+    ]);
+    const raw = Buffer.concat([Buffer.from(`${directory}/`), rawName]);
+    const alias = join(directory, "src/new-\ufffd");
+    const outcome = await runWorkflow(
+      ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+      {
+        currentDirectory: directory,
+        onWorkbench: () =>
+          savedScan(resultWithFindings(["high"]), "scan-1", directory),
+        onRepositoryCommand: runCommand,
+        onCodex: async (_args, output) => {
+          await writeFile(
+            raw,
+            copied ? ignored : "Independent synthetic content\n",
+          );
+          await writeFile(alias, "Distinct Unicode alias\n");
+          output!.stdout.write(
+            JSON.stringify({
+              patches: [
+                {
+                  occurrenceId: "occ_1",
+                  status: "verified",
+                  files: ["src"],
+                  verification: "Synthetic directory check.",
+                },
+              ],
+            }),
+          );
+          return 0;
+        },
+      },
+    );
+    expect(outcome.exitCode, outcome.stderr).toBe(copied ? 2 : 0);
+    if (copied) {
+      expect(outcome.stderr).toContain("matches pre-existing ignored content");
+      expect(git("rev-parse", "HEAD")).toBe(original);
+      expect(await readFile(join(directory, ".git/index"))).toEqual(index);
+      expect(repositoryGit(remote)("for-each-ref", "--format=%(refname)")).toBe(
+        "",
+      );
+    } else {
+      const names = Buffer.from(
+        await runGitRepositoryCommand(
+          "git",
+          [
+            "ls-tree",
+            "-r",
+            "--name-only",
+            "-z",
+            "refs/heads/codex-security/patch-scan-1",
+          ],
+          remote,
+          { encoding: "base64" },
+        ),
+        "base64",
+      );
+      expect(names.includes(rawName)).toBe(true);
+    }
+    expect(await readFile(alias, "utf8")).toBe("Distinct Unicode alias\n");
+  },
+);
+
+test.skipIf(process.platform !== "linux")(
   "assesses and publishes the exact raw rename source without deleting its Unicode alias",
   async () => {
     const { directory, git, remote } = await publicationRepository(fixtures);
@@ -128,7 +204,7 @@ test.skipIf(process.platform === "win32")(
   },
 );
 
-test.skipIf(process.platform === "win32").each(["root", "src"])(
+test.skipIf(process.platform !== "linux").each(["root", "src"])(
   "publishes a selected directory without importing a replacement-decoded index path from %s",
   async (scope) => {
     const { directory, git, remote } = await publicationRepository(fixtures);
@@ -204,7 +280,7 @@ test.skipIf(process.platform === "win32").each(["root", "src"])(
   },
 );
 
-test.skipIf(process.platform === "win32").each([false, true])(
+test.skipIf(process.platform !== "linux").each([false, true])(
   "checks the actual registration for a deinitialized raw gitlink beside a Unicode alias (published: %p)",
   async (published) => {
     const { directory, git, remote } = await publicationRepository(fixtures);
@@ -305,7 +381,7 @@ test.skipIf(process.platform === "win32").each([false, true])(
   },
 );
 
-test.skipIf(process.platform === "win32").each([false, true])(
+test.skipIf(process.platform !== "linux").each([false, true])(
   "keeps ignored byte paths distinct from clean tracked Unicode paths (same contents: %p)",
   async (sameContents) => {
     const { directory, git, remote } = await publicationRepository(fixtures);

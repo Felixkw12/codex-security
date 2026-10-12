@@ -26,11 +26,14 @@ for (const policy of ["set", "exclude", "control"] as const) {
     "batch-risk",
     "batch-publish",
     "batch-risk-publish",
+    "inline-publish",
   ] as const) {
     test(`prepared snapshot context preserves ${policy} filter policy for ${action}`, async () => {
       const batch = action.startsWith("batch");
       const risk = action.includes("risk");
       const publish = action.endsWith("publish");
+      const inline = action === "inline-publish";
+      const dataPath = inline ? "src/data" : "data";
       const { directory, remote } = await publicationRepository(fixtures);
       const home = await fixtures.create("patch-policy-home-");
       await chmod(home, 0o700);
@@ -73,16 +76,17 @@ process.stdout.write(input+(process.env.SNAPSHOT_STYLE??"unset")+"\\n"+(input.st
       ]);
       await writeFile(
         join(directory, ".gitattributes"),
-        "data filter=synthetic\nsrc/new-*.txt filter=synthetic\n",
+        `${dataPath} filter=synthetic\nsrc/new-*.txt filter=synthetic\n`,
       );
-      await writeFile(join(directory, "data"), "Unchanged filter input\n");
+      await writeFile(join(directory, dataPath), "Unchanged filter input\n");
       // Publication starts with an index recorded using the selected filter policy.
-      const recorded = publish
-        ? {
-            ...environment,
-            SNAPSHOT_STYLE: policy === "exclude" ? undefined : effective,
-          }
-        : environment;
+      const recorded =
+        publish && !inline
+          ? {
+              ...environment,
+              SNAPSHOT_STYLE: policy === "exclude" ? undefined : effective,
+            }
+          : environment;
       git(["add", "."], recorded);
       git(["commit", "-m", "Synthetic filter baseline"], recorded);
       const index = await readFile(join(directory, ".git", "index"));
@@ -92,8 +96,12 @@ process.stdout.write(input+(process.env.SNAPSHOT_STYLE??"unset")+"\\n"+(input.st
         assessments = 0;
       const outcome = await runWorkflow(
         [
-          "patch",
-          ...(batch ? ["--scan", "scan-1"] : ["Synthetic issue"]),
+          ...(inline
+            ? ["scan", directory, "--patch"]
+            : [
+                "patch",
+                ...(batch ? ["--scan", "scan-1"] : ["Synthetic issue"]),
+              ]),
           ...(risk ? ["--assess-patch-risk"] : []),
           ...(publish ? ["--create-pr"] : []),
           "--json",
@@ -101,6 +109,7 @@ process.stdout.write(input+(process.env.SNAPSHOT_STYLE??"unset")+"\\n"+(input.st
         {
           currentDirectory: directory,
           environment,
+          ...(inline ? { result: resultWithFindings(["high"]) } : {}),
           manualCodexPreparation: true,
           onWorkbench: () =>
             savedScan(
@@ -113,7 +122,8 @@ process.stdout.write(input+(process.env.SNAPSHOT_STYLE??"unset")+"\\n"+(input.st
               return args[1] === "list"
                 ? "[]"
                 : "https://github.example.test/example/repository/pull/1";
-            if (args.includes("add")) expect(options?.sandbox).toBeDefined();
+            if (args.includes("add") && !inline)
+              expect(options?.sandbox).toBeDefined();
             const result = await runRepositoryCommand(command, args, cwd, {
               ...options,
               environment: { ...environment, ...options?.environment },
@@ -176,16 +186,15 @@ process.stdout.write(input+(process.env.SNAPSHOT_STYLE??"unset")+"\\n"+(input.st
               );
             }
             output!.stdout.write(
-              batch
+              batch || inline
                 ? JSON.stringify({
                     patches: [
                       {
                         occurrenceId: `occ_${turns}`,
                         status: "verified",
-                        files: [
-                          `src/finding-${turns}.ts`,
-                          `src/new-${turns}.txt`,
-                        ],
+                        files: inline
+                          ? ["src"]
+                          : [`src/finding-${turns}.ts`, `src/new-${turns}.txt`],
                         verification: "Synthetic edit verified.",
                       },
                     ],
@@ -197,7 +206,7 @@ process.stdout.write(input+(process.env.SNAPSHOT_STYLE??"unset")+"\\n"+(input.st
         },
       );
       expect(turns, outcome.stderr).toBe(batch ? 2 : 1);
-      expect(await readFile(join(directory, "data"), "utf8")).toBe(
+      expect(await readFile(join(directory, dataPath), "utf8")).toBe(
         "Unchanged filter input\n",
       );
       if (action === "no-op") {
@@ -205,6 +214,14 @@ process.stdout.write(input+(process.env.SNAPSHOT_STYLE??"unset")+"\\n"+(input.st
         expect(JSON.parse(outcome.stdout).error.code).toBe("NO_PATCH_APPLIED");
         expect(trees).toHaveLength(2);
         expect(trees[0]).toBe(trees[1]);
+      } else if (inline) {
+        expect(outcome.exitCode, outcome.stdout + outcome.stderr).toBe(
+          policy === "control" ? 0 : 2,
+        );
+        if (policy !== "control")
+          expect(outcome.stderr).toContain(
+            "uncommitted changes before patching",
+          );
       } else {
         expect(outcome.exitCode, outcome.stdout + outcome.stderr).toBe(0);
         expect(JSON.parse(outcome.stdout).files).toEqual(
@@ -223,7 +240,7 @@ process.stdout.write(input+(process.env.SNAPSHOT_STYLE??"unset")+"\\n"+(input.st
         await expect(readFile(outsideWrite)).rejects.toMatchObject({
           code: "ENOENT",
         });
-      if (publish) {
+      if (publish && !(inline && policy !== "control")) {
         const published = repositoryGit(remote);
         const branch = published(
           "for-each-ref",
@@ -247,7 +264,7 @@ process.stdout.write(input+(process.env.SNAPSHOT_STYLE??"unset")+"\\n"+(input.st
                 .join(""),
             );
         }
-        expect(published("show", `${branch}:data`)).toBe(
+        expect(published("show", `${branch}:${dataPath}`)).toBe(
           `Unchanged filter input\n${effective}`,
         );
       } else
