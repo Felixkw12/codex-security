@@ -1138,6 +1138,7 @@ interface PatchRiskReport {
 
 interface PatchRiskAssessment extends PatchRiskReport {
   summary: string;
+  tree?: string;
 }
 
 interface CliDependencies {
@@ -5708,6 +5709,8 @@ export async function main(
                   errorOutput,
                   dependencies,
                   patchRisk?.summary,
+                  undefined,
+                  patchRisk?.tree,
                 )
               : undefined;
             if (structuredOutput) {
@@ -5856,6 +5859,7 @@ export async function main(
               identifier === undefined
                 ? "Applies a security fix generated from supplied issue data."
                 : `Applies a security fix generated for ${identifier}.`,
+              patchRisk?.tree,
             );
           }
           if (structuredOutput)
@@ -7893,6 +7897,7 @@ async function createPatchPullRequest(
   dependencies: CliDependencies,
   patchRiskSummary?: string,
   introduction = PATCH_PR_BODY,
+  capturedTree?: string,
 ): Promise<{ branch: string; url: string } | undefined> {
   if (files.length === 0) {
     stderr.write("No verified patch changes to publish.\n");
@@ -7900,7 +7905,8 @@ async function createPatchPullRequest(
   }
 
   const { branch, dirtyFiles, ignoredFiles, tree, root } = publication;
-  const head = await snapshotPatchTree(repository, dependencies);
+  const head =
+    capturedTree ?? (await snapshotPatchTree(repository, dependencies));
   const changes = await patchGitRecords(
     root,
     [
@@ -8039,7 +8045,30 @@ async function createPatchPullRequest(
         }),
     )
     .map(patchPathText);
-  await run(["--literal-pathspecs", "add", "--dry-run", "--", ...stageFiles]);
+  const indexCommand =
+    (sandbox: boolean): Parameters<typeof withPatchGitIndex>[0] =>
+    (args, options) =>
+      run(args, {
+        trim: false,
+        encoding: options?.encoding,
+        input: options?.input,
+        maxBuffer: options?.indexFile === undefined ? Infinity : undefined,
+        patchSnapshot: sandbox
+          ? options?.indexFile === undefined
+            ? []
+            : [dirname(options.indexFile)]
+          : undefined,
+        environment:
+          options?.indexFile === undefined
+            ? undefined
+            : { GIT_INDEX_FILE: options.indexFile },
+      });
+  await withPatchGitIndex(
+    indexCommand(true),
+    (stage) =>
+      stage(["--literal-pathspecs", "add", "--dry-run", "--", ...stageFiles]),
+    stageFiles,
+  );
   stderr.write(
     "Creating a draft pull request or merge request for verified patches...\n",
   );
@@ -8082,19 +8111,18 @@ async function createPatchPullRequest(
   try {
     await run(["switch", "-c", branch]);
     await withPatchGitIndex(
-      (args, options) =>
-        run(args, {
-          trim: false,
-          encoding: options?.encoding,
-          input: options?.input,
-          maxBuffer: options?.indexFile === undefined ? Infinity : undefined,
-          environment:
-            options?.indexFile === undefined
-              ? undefined
-              : { GIT_INDEX_FILE: options.indexFile },
-        }),
+      indexCommand(false),
       async (stage) => {
-        await stage(["--literal-pathspecs", "add", "--", ...stageFiles]);
+        // Reuse captured blobs and modes without running clean filters again.
+        await stage([
+          "--literal-pathspecs",
+          "reset",
+          "-q",
+          "--no-refresh",
+          head,
+          "--",
+          ...stageFiles,
+        ]);
         await removeSources(stage);
         await stage(["commit", "-m", PATCH_PR_TITLE]);
         committed = true;
@@ -8608,9 +8636,15 @@ async function runPatchRiskAssessment(
   dependencies: CliDependencies,
 ): Promise<PatchRiskAssessment> {
   stderr.write("\nAssessing the completed patch...\n");
+  const state =
+    request.state === undefined
+      ? undefined
+      : await snapshotGitPatchState(request.state.root, dependencies, true);
+  const head =
+    state?.tree ?? (await snapshotPatchTree(request.repository, dependencies));
   const result = await (
     dependencies.assessPatchRisk ??
-    ((input) => assessPatchRisk(input, stderr, dependencies))
+    ((input) => assessPatchRisk(input, stderr, dependencies, head, state))
   )(request);
   if (!result.report.trim()) {
     throw new CodexSecurityError("Patch risk assessment returned no report.");
@@ -8619,13 +8653,15 @@ async function runPatchRiskAssessment(
   stderr.write(
     `Patch risk assessment:\n${safePatchReport(assessment.report)}\n`,
   );
-  return assessment;
+  return { ...assessment, tree: head };
 }
 
 async function assessPatchRisk(
   request: PatchRiskRequest,
   stderr: Writable,
   dependencies: CliDependencies,
+  head: string,
+  state?: GitPatchState,
 ): Promise<PatchRiskReport> {
   const run = (
     args: string[],
@@ -8638,13 +8674,6 @@ async function assessPatchRisk(
   const root = await mkdtemp(join(tmpdir(), "codex-security-patch-risk-"));
   const patchPath = join(root, "patch.diff");
   try {
-    const state =
-      request.state === undefined
-        ? undefined
-        : await snapshotGitPatchState(request.state.root, dependencies, true);
-    const head =
-      state?.tree ??
-      (await snapshotPatchTree(request.repository, dependencies));
     await writeFile(patchPath, "", { encoding: "utf8", mode: 0o600 });
     const changedFiles = new Set<string>();
     const repositoryRoot = state?.root ?? request.repository;

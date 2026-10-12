@@ -21,13 +21,15 @@ for (const policy of ["set", "exclude", "control"] as const) {
     "edit",
     "risk",
     "publish",
+    "risk-publish",
     "batch",
     "batch-risk",
     "batch-publish",
+    "batch-risk-publish",
   ] as const) {
     test(`prepared snapshot context preserves ${policy} filter policy for ${action}`, async () => {
       const batch = action.startsWith("batch");
-      const risk = action.endsWith("risk");
+      const risk = action.includes("risk");
       const publish = action.endsWith("publish");
       const { directory, remote } = await publicationRepository(fixtures);
       const home = await fixtures.create("patch-policy-home-");
@@ -50,9 +52,12 @@ for (const policy of ["set", "exclude", "control"] as const) {
         `${process.platform === "win32" ? 'windows={sandbox="unelevated"}\n' : ""}[shell_environment_policy]\ninherit="all"\n${policy === "exclude" ? 'exclude=["SNAPSHOT_STYLE"]\n' : ""}${policy === "set" ? '[shell_environment_policy.set]\nSNAPSHOT_STYLE="policy"\n' : ""}`,
       );
       const clean = join(home, "clean.cjs");
+      const outsideWrite = join(home, "filter-write.txt");
       await writeFile(
         clean,
-        'const fs=require("node:fs");process.stdout.write(fs.readFileSync(0,"utf8")+(process.env.SNAPSHOT_STYLE??"unset")+"\\n");\n',
+        `const fs=require("node:fs");const input=fs.readFileSync(0,"utf8");
+if(input.startsWith("new")){try{fs.writeFileSync(${JSON.stringify(outsideWrite)},"unexpected");}catch(error){if(!["EACCES","EPERM","EROFS"].includes(error.code))throw error;}}
+process.stdout.write(input+(process.env.SNAPSHOT_STYLE??"unset")+"\\n"+(input.startsWith("new")?require("node:crypto").randomUUID()+"\\n":""));\n`,
       );
       const git = (args: string[], selected = environment) =>
         execFileSync("git", args, {
@@ -68,7 +73,7 @@ for (const policy of ["set", "exclude", "control"] as const) {
       ]);
       await writeFile(
         join(directory, ".gitattributes"),
-        "data filter=synthetic\n",
+        "data filter=synthetic\nsrc/new-*.txt filter=synthetic\n",
       );
       await writeFile(join(directory, "data"), "Unchanged filter input\n");
       // Publication starts with an index recorded using the selected filter policy.
@@ -82,6 +87,7 @@ for (const policy of ["set", "exclude", "control"] as const) {
       git(["commit", "-m", "Synthetic filter baseline"], recorded);
       const index = await readFile(join(directory, ".git", "index"));
       const trees: string[] = [];
+      let assessedPatch = "";
       let turns = 0,
         assessments = 0;
       const outcome = await runWorkflow(
@@ -107,10 +113,15 @@ for (const policy of ["set", "exclude", "control"] as const) {
               return args[1] === "list"
                 ? "[]"
                 : "https://github.example.test/example/repository/pull/1";
+            if (args.includes("add")) expect(options?.sandbox).toBeDefined();
             const result = await runRepositoryCommand(command, args, cwd, {
               ...options,
               environment: { ...environment, ...options?.environment },
             });
+            if (args.includes("--dry-run"))
+              await expect(readFile(outsideWrite)).rejects.toMatchObject({
+                code: "ENOENT",
+              });
             if (args.includes("write-tree")) trees.push(result.trim());
             return result;
           },
@@ -125,6 +136,9 @@ for (const policy of ["set", "exclude", "control"] as const) {
                   .find((line) => line.startsWith('{"path":'))!,
               );
               const patch = await readFile(artifact.path, "utf8");
+              assessedPatch = patch;
+              expect(patch).toContain(`+${effective}\n`);
+              expect(patch).toContain("+new 1\n");
               expect(patch).toContain("+fixed");
               expect(patch).not.toContain("diff --git a/data");
               output.stdout.write(patchRiskAssessment().report);
@@ -138,21 +152,29 @@ for (const policy of ["set", "exclude", "control"] as const) {
                 extends: ":workspace",
                 network: { enabled: false },
                 workspace_roots: {},
-                filesystem: Object.fromEntries(
-                  output!.appServer!.permissions!.readOnlyPaths.map((path) => [
-                    path,
-                    { ".": "read" },
-                  ]),
-                ),
+                filesystem: {
+                  ...Object.fromEntries(
+                    output!.appServer!.permissions!.readOnlyPaths.map(
+                      (path) => [path, { ".": "read" }],
+                    ),
+                  ),
+                  ":tmpdir": {},
+                  ":slash_tmp": {},
+                },
               },
             });
             await output!.appServer!.onBeforeTurn?.();
             turns++;
-            if (action !== "no-op")
+            if (action !== "no-op") {
               await writeFile(
                 join(directory, `src/finding-${turns}.ts`),
                 `fixed ${turns}\n`,
               );
+              await writeFile(
+                join(directory, `src/new-${turns}.txt`),
+                `new ${turns}\n`,
+              );
+            }
             output!.stdout.write(
               batch
                 ? JSON.stringify({
@@ -160,7 +182,10 @@ for (const policy of ["set", "exclude", "control"] as const) {
                       {
                         occurrenceId: `occ_${turns}`,
                         status: "verified",
-                        files: [`src/finding-${turns}.ts`],
+                        files: [
+                          `src/finding-${turns}.ts`,
+                          `src/new-${turns}.txt`,
+                        ],
                         verification: "Synthetic edit verified.",
                       },
                     ],
@@ -184,11 +209,20 @@ for (const policy of ["set", "exclude", "control"] as const) {
         expect(outcome.exitCode, outcome.stdout + outcome.stderr).toBe(0);
         expect(JSON.parse(outcome.stdout).files).toEqual(
           batch
-            ? ["src/finding-1.ts", "src/finding-2.ts"]
-            : ["src/finding-1.ts"],
+            ? [
+                "src/finding-1.ts",
+                "src/finding-2.ts",
+                "src/new-1.txt",
+                "src/new-2.txt",
+              ]
+            : ["src/finding-1.ts", "src/new-1.txt"],
         );
       }
       expect(assessments).toBe(risk ? 1 : 0);
+      if (!publish)
+        await expect(readFile(outsideWrite)).rejects.toMatchObject({
+          code: "ENOENT",
+        });
       if (publish) {
         const published = repositoryGit(remote);
         const branch = published(
@@ -201,6 +235,18 @@ for (const policy of ["set", "exclude", "control"] as const) {
           expect(published("show", `${branch}:src/finding-2.ts`)).toBe(
             "fixed 2",
           );
+        for (let turn = 1; turn <= turns; turn++) {
+          const blob = published("show", `${branch}:src/new-${turn}.txt`);
+          expect(blob).toStartWith(`new ${turn}\n${effective}\n`);
+          // Each filtering produces a new nonce: the commit must use the exact assessed blob.
+          if (risk)
+            expect(assessedPatch).toContain(
+              blob
+                .split("\n")
+                .map((line) => `+${line}\n`)
+                .join(""),
+            );
+        }
         expect(published("show", `${branch}:data`)).toBe(
           `Unchanged filter input\n${effective}`,
         );
@@ -209,6 +255,52 @@ for (const policy of ["set", "exclude", "control"] as const) {
     }, 30_000);
   }
 }
+
+test("publication keeps mixed valid and missing selected-path errors before branching", async () => {
+  const { directory, git } = await publicationRepository(fixtures);
+  const original = git("rev-parse", "HEAD");
+  const index = await readFile(join(directory, ".git", "index"));
+  const outcome = await runWorkflow(
+    ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+    {
+      currentDirectory: directory,
+      onWorkbench: () =>
+        savedScan(resultWithFindings(["high"]), "scan-1", directory),
+      onRepositoryCommand: (command, args, cwd, options) =>
+        command === "git"
+          ? runGitRepositoryCommand(command, args, cwd, options)
+          : args[1] === "list"
+            ? "[]"
+            : "https://github.example.test/example/repository/pull/1",
+      onCodex: async (_args, output) => {
+        await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
+        output!.stdout.write(
+          JSON.stringify({
+            patches: [
+              {
+                occurrenceId: "occ_1",
+                status: "verified",
+                files: ["src/finding-1.ts", "src/missing.ts"],
+                verification: "Synthetic edit verified.",
+              },
+            ],
+          }),
+        );
+        return 0;
+      },
+    },
+  );
+  expect(outcome.exitCode).toBe(2);
+  expect(outcome.stderr).toContain(
+    "pathspec 'src/missing.ts' did not match any files",
+  );
+  expect(git("rev-parse", "HEAD")).toBe(original);
+  expect(git("branch", "--show-current")).toBe("main");
+  expect(
+    git("for-each-ref", "--format=%(refname)", "refs/heads/codex-security/"),
+  ).toBe("");
+  expect(await readFile(join(directory, ".git", "index"))).toEqual(index);
+});
 
 test.skipIf(process.platform === "win32")(
   "an unreadable patched file still fails required snapshotting",
