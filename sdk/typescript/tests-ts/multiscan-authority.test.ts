@@ -247,8 +247,11 @@ for (const registerOnly of [false, true]) {
       });
       const scanDir = join(value.options.outputDir, "artifacts/repo/attempt-1");
       const database = new Database(join(value.state, "workbench.sqlite3"), {
-        readonly: true,
+        readonly: process.platform !== "darwin",
+        readwrite: process.platform === "darwin",
+        create: false,
       });
+      database.exec("PRAGMA query_only = ON");
       const registered = database
         .query("SELECT id,target_revision FROM scans WHERE scan_dir=?")
         .get(scanDir) as { id: string; target_revision: string };
