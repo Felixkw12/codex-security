@@ -33,7 +33,7 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures(
 );
 afterEach(cleanup);
 
-async function fixture(git = false) {
+async function fixture(git = false, completedAt?: readonly [string, string]) {
   const root = await temporaryDirectory();
   const repository = join(root, "repository");
   await mkdir(join(repository, "src"), { recursive: true });
@@ -64,7 +64,7 @@ async function fixture(git = false) {
   };
   const python = await resolvePluginPython({ environment });
   const options = { environment, python, pluginRoot: PLUGIN_ROOT };
-  async function scan(name: string, target = repository) {
+  async function scan(name: string, target = repository, timestamp?: string) {
     const scanDir = join(root, name);
     await mkdir(scanDir, { mode: 0o700 });
     const registered = await runWorkbench(options, [
@@ -96,6 +96,24 @@ async function fixture(git = false) {
       ).trim();
     delete manifest.scan.sealedAt;
     delete manifest.scan.artifacts;
+    if (timestamp !== undefined) {
+      const targetContract = (
+        registered["contract"] as {
+          target: {
+            targetId: string;
+            displayName: string;
+            requiredSnapshotDigest: string;
+          };
+        }
+      ).target;
+      manifest.scan.completedAt = timestamp;
+      manifest.scan.target = {
+        kind: "directory_snapshot",
+        targetId: targetContract.targetId,
+        displayName: targetContract.displayName,
+        snapshotDigest: targetContract.requiredSnapshotDigest,
+      };
+    }
     await writeFile(
       join(scanDir, "scan-manifest.json"),
       JSON.stringify(manifest),
@@ -130,11 +148,25 @@ async function fixture(git = false) {
     );
     coverage.scanId = scanId;
     await writeFile(join(scanDir, "coverage.json"), JSON.stringify(coverage));
+    if (timestamp !== undefined)
+      execFileSync(
+        python,
+        [
+          "-I",
+          "-B",
+          join(PLUGIN_ROOT, "scripts", "finalize_scan_contract.py"),
+          "--scan-dir",
+          scanDir,
+          "--source-root",
+          target,
+        ],
+        { env: environment },
+      );
     await runWorkbench(options, ["complete-scan", "--scan-id", scanId]);
     return { scanId, scanDir };
   }
-  const first = await scan("first");
-  const second = await scan("second");
+  const first = await scan("first", repository, completedAt?.[0]);
+  const second = await scan("second", repository, completedAt?.[1]);
   const embed = mock(async (findings: readonly Finding[]) =>
     findings.map(() => ({ model: "synthetic", vector: [1, 0, 0] })),
   );
@@ -1683,31 +1715,140 @@ test.each(["removed", "recreated directory", "replacement Git checkout"])(
   },
 );
 
-test("latest preserves submillisecond update ordering ahead of scan-ID ties", async () => {
+test.each([
+  ["2099-01-01T02:00:00+02:00", "2099-01-01T01:00:00Z"],
+  ["2099-01-01T00:00:00Z", "2099-01-01T00:00:00.500Z"],
+] as const)(
+  "latest orders sealed completion instants %s and %s",
+  async (older, newer) => {
+    const f = await fixture(false, [older, newer]);
+    expect((await latestFor(f, f.repository)).scanId).toBe(f.second.scanId);
+  },
+);
+
+test.each([
+  ["2099-01-01T00:00:00.000100Z", "2099-01-01T00:00:00.000200Z"],
+  ["2099-01-01t02:00:00.10+02:00", "2099-01-01t00:00:00.1001z"],
+  ["2099-01-01T23:59:59-01:00", "2099-01-02T01:00:00Z"],
+  ["0001-01-01T00:00:00Z", "0001-01-01T00:00:00.1Z"],
+  ["9999-12-31T23:30:00Z", "9999-12-31T23:30:00-01:00"],
+  [
+    `2099-01-01T00:00:00.${"0".repeat(4999)}1Z`,
+    `2099-01-01T00:00:00.${"0".repeat(4999)}2Z`,
+  ],
+  ["2099-01-01T00:00:00", "2099-01-01T01:00:00"],
+] as const)(
+  "latest preserves exact update ordering ahead of scan-ID ties %#",
+  async (olderTime, newerTime) => {
+    const f = await fixture();
+    const [older, newer] = [f.first, f.second].sort((left, right) =>
+      left.scanId.localeCompare(right.scanId),
+    );
+    const db = new Database(
+      join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+    );
+    try {
+      for (const [scan, timestamp] of [
+        [older!, olderTime],
+        [newer!, newerTime],
+      ] as const) {
+        db.query(
+          "UPDATE scans SET started_at = '2099-01-01T00:00:00Z', updated_at = ? WHERE id = ?",
+        ).run(timestamp, scan.scanId);
+        db.query(
+          "UPDATE scan_progress SET updated_at = ? WHERE scan_id = ?",
+        ).run(timestamp, scan.scanId);
+      }
+    } finally {
+      db.close();
+    }
+    expect((await latestFor(f, f.repository)).scanId).toBe(newer!.scanId);
+  },
+);
+
+test.each([false, true])(
+  "latest takes the exact scan/progress maximum (progress newer: %p)",
+  async (progressNewer) => {
+    const f = await fixture();
+    const db = new Database(
+      join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+    );
+    try {
+      const older = "2099-01-01T02:00:00+02:00";
+      const newer = "2099-01-01T00:00:00.0002Z";
+      db.query("UPDATE scans SET updated_at = ? WHERE id = ?").run(
+        progressNewer ? older : newer,
+        f.first.scanId,
+      );
+      db.query("UPDATE scan_progress SET updated_at = ? WHERE scan_id = ?").run(
+        progressNewer ? newer : older,
+        f.first.scanId,
+      );
+      for (const table of ["scans", "scan_progress"]) {
+        const id = table === "scans" ? "id" : "scan_id";
+        db.query(`UPDATE ${table} SET updated_at = ? WHERE ${id} = ?`).run(
+          "2099-01-01T00:00:00.0001Z",
+          f.second.scanId,
+        );
+      }
+    } finally {
+      db.close();
+    }
+    expect((await latestFor(f, f.repository)).scanId).toBe(f.first.scanId);
+  },
+);
+
+test("latest leaves unrelated malformed history to its own workbench scope", async () => {
   const f = await fixture();
-  const [older, newer] = [f.first, f.second].sort((left, right) =>
-    left.scanId.localeCompare(right.scanId),
+  const unrelated = join(f.root, "unrelated");
+  await mkdir(join(unrelated, "src"), { recursive: true });
+  await writeFile(join(unrelated, "src", "extract.py"), "# Other fixture\n");
+  const other = await f.scan("other-scan", unrelated);
+  const db = new Database(
+    join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+  );
+  try {
+    db.query(
+      "UPDATE scans SET updated_at = 'not-a-timestamp' WHERE id = ?",
+    ).run(other.scanId);
+    db.query(
+      "UPDATE scan_progress SET updated_at = 'not-a-timestamp' WHERE scan_id = ?",
+    ).run(other.scanId);
+  } finally {
+    db.close();
+  }
+  expect((await latestFor(f, f.repository)).scanId).toBe(f.second.scanId);
+});
+
+test("latest ties equivalent instants by start time, then binary scan ID", async () => {
+  const f = await fixture();
+  const [first, second] = [f.first, f.second].sort((a, b) =>
+    a.scanId < b.scanId ? -1 : 1,
   );
   const db = new Database(
     join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
   );
   try {
     for (const [scan, timestamp] of [
-      [older!, "2099-01-01T00:00:00.000100Z"],
-      [newer!, "2099-01-01T00:00:00.000200Z"],
+      [first!, "2099-01-01T02:00:00.100+02:00"],
+      [second!, "2099-01-01T00:00:00.1Z"],
     ] as const) {
       db.query(
-        "UPDATE scans SET started_at = '2099-01-01T00:00:00Z', updated_at = ? WHERE id = ?",
+        "UPDATE scans SET started_at = '2098-01-01T00:00:00Z', updated_at = ? WHERE id = ?",
       ).run(timestamp, scan.scanId);
       db.query("UPDATE scan_progress SET updated_at = ? WHERE scan_id = ?").run(
         timestamp,
         scan.scanId,
       );
     }
+    expect((await latestFor(f, f.repository)).scanId).toBe(first!.scanId);
+    db.query(
+      "UPDATE scans SET started_at = '2098-01-01T00:00:00.0001Z' WHERE id = ?",
+    ).run(second!.scanId);
+    expect((await latestFor(f, f.repository)).scanId).toBe(second!.scanId);
   } finally {
     db.close();
   }
-  expect((await latestFor(f, f.repository)).scanId).toBe(newer!.scanId);
 });
 
 for (const removedComponent of [false, true]) {

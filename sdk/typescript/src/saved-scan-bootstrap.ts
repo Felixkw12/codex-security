@@ -348,15 +348,35 @@ async function latestTargets(
       (column) => column.name,
     ),
   );
-  const scans = readRows<ScanTarget>(
+  const scans = readRows<
+    ScanTarget & {
+      updated_at: string;
+      progress_updated_at: string;
+      started_at: string;
+    }
+  >(
     database,
-    `SELECT scans.id, scans.target_path,
+    `SELECT scans.id, scans.target_path, scans.updated_at, scans.started_at,
+        progress.updated_at AS progress_updated_at,
         ${columns.has("repository_generation") ? "scans.repository_generation" : "NULL"} AS repository_generation
       FROM scans JOIN scan_progress AS progress ON progress.scan_id = scans.id
-      WHERE scans.status = 'complete' ${columns.has("canceled_at") ? "AND scans.canceled_at IS NULL" : ""}
-      ORDER BY MAX(scans.updated_at, progress.updated_at) DESC,
-        scans.started_at DESC, scans.id`,
-  );
+      WHERE scans.status = 'complete' ${columns.has("canceled_at") ? "AND scans.canceled_at IS NULL" : ""}`,
+  )
+    .map((scan) => {
+      const updated = timestampOrderKey(scan.updated_at);
+      const progress = timestampOrderKey(scan.progress_updated_at);
+      return {
+        ...scan,
+        updatedKey: updated > progress ? updated : progress,
+        startedKey: timestampOrderKey(scan.started_at),
+      };
+    })
+    .sort(
+      (left, right) =>
+        compareOrderKeys(right.updatedKey, left.updatedKey) ||
+        compareOrderKeys(right.startedKey, left.startedKey) ||
+        compareOrderKeys(left.id, right.id),
+    );
   const paths = [...new Set(scans.map((scan) => scan.target_path))];
   const related = new Map<string, { originFallback: boolean }>();
   for (const path of paths)
@@ -465,6 +485,29 @@ async function latestTargets(
       "No completed saved scan matched this exact path, and Git-based matching across worktrees or clones is unavailable. Use an explicit saved scan ID: codex-security dedupe --scan SCAN_ID",
     );
   return selected;
+}
+
+function timestampOrderKey(value: string): string {
+  const match =
+    /^(\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2})(?:\.([0-9]+))?([Zz]|[+-]\d{2}:\d{2})$/.exec(
+      value,
+    );
+  const seconds = match
+    ? Date.parse(`${match[1]}${match[3]}`.toUpperCase())
+    : NaN;
+  // Legacy naive or malformed rows retain opaque text ordering. The scoped
+  // workbench query still owns their diagnostics, without using the host timezone.
+  if (!Number.isFinite(seconds)) return `0${value}`;
+  const instant = new Date(seconds);
+  const whole = instant.toISOString().slice(0, -5);
+  // An offset can carry a supported four-digit local year into UTC year 10000.
+  const year = String(instant.getUTCFullYear()).padStart(5, "0");
+  const fraction = (match![2] ?? "").replace(/0+$/, "");
+  return `${year}${whole.slice(whole.indexOf("-"))}${fraction ? `.${fraction}` : ""}`;
+}
+
+function compareOrderKeys(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 // Match the workbench history's host/path identity across HTTPS and SSH origins.
