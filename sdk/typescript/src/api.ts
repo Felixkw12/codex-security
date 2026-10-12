@@ -1570,8 +1570,11 @@ export class CodexSecurity {
           progress.filesTotal > filesTotal ||
           (source?.inventory !== true &&
             progress.filesCompleted < reviewedFileCount)
-        )
+        ) {
+          if (source !== undefined && source.reconciled !== true)
+            tracker.deferParentInventory(source.event);
           return;
+        }
         if (inventory) {
           scopeFileCount = filesTotal;
           tracker.setExpectedFilesTotal(filesTotal);

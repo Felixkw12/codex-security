@@ -82,8 +82,6 @@ interface SessionCompletion {
 
 interface UnresolvedParentCommand {
   live: StreamedProgressItem;
-  completion?: SessionCompletion;
-  truncated?: boolean;
   after: number;
 }
 
@@ -100,7 +98,6 @@ interface ParentProgressMarker {
   index: number;
   order: number;
   accepted: boolean;
-  corroboratedInventory?: { position: number; markerIndex: number };
 }
 
 interface ProgressOrder {
@@ -242,7 +239,8 @@ export class ScanCostTracker {
   #inventoryFrontier = {
     position: 0,
     markerIndex: -1,
-    filesTotal: undefined as number | undefined,
+    order: 0,
+    progress: undefined as ScanProgress | undefined,
   };
   #progressOrder = 0;
   #displayedProgress:
@@ -358,7 +356,10 @@ export class ScanCostTracker {
     if (progress.phase === "discovery" && progress.filesCompleted === 0)
       this.#parentInventory = marker;
     if (live.position !== null) this.#readyParentMarkers.set(marker, live);
-    const current = this.#parentFacts.get(progress.filesTotal);
+    const current =
+      progress.phase === "discovery" && progress.filesCompleted === 0
+        ? this.#retainedInventory()
+        : this.#parentFacts.get(progress.filesTotal);
     return (
       live.position === null ||
       this.#afterParentFrontier(live.position, marker.index) ||
@@ -377,6 +378,18 @@ export class ScanCostTracker {
   }
 
   /** Source acceptance is independent of duplicate observer notifications. */
+  public deferParentInventory(event: Readonly<Record<string, unknown>>): void {
+    const marker = this.#liveParentEvents.get(event)?.markers.at(-1);
+    // Parent inventory can invalidate provisional worker coverage. Reconcile
+    // it before displaying anything, so still-eligible coverage never drops.
+    if (
+      marker !== undefined &&
+      marker === this.#parentInventory &&
+      (this.#parentProgress?.progress.filesCompleted ?? 0) === 0
+    )
+      marker.accepted = true;
+  }
+
   public acceptParentProgress(
     progress: ScanProgress,
     event: Readonly<Record<string, unknown>>,
@@ -433,6 +446,11 @@ export class ScanCostTracker {
         compareProgressOrder(candidate, previous) > 0)
     )
       this.#parentFacts.set(total, candidate);
+  }
+
+  #retainedInventory(): OrderedProgress | undefined {
+    const { progress, ...source } = this.#inventoryFrontier;
+    return progress === undefined ? undefined : { progress, ...source };
   }
 
   #recordParentReview(
@@ -498,7 +516,8 @@ export class ScanCostTracker {
         (previous) =>
           previous.position === null && previous.item?.kind === "command",
       );
-    let pending: UnresolvedParentCommand | undefined;
+    let pending = false;
+    let latest: SessionCompletion | undefined;
     for (const completion of session.completions) {
       if (
         completion.position > before &&
@@ -507,9 +526,8 @@ export class ScanCostTracker {
         (completion.item.outputDigest === item.outputDigest ||
           completion.item.outputDigest === item.persistedOutputDigest)
       ) {
-        // Equal output is still occurrence-ordered when argv displays differ.
-        // Reserve each earlier saved copy for the earlier unmatched live item;
-        // a missing later copy cannot borrow its predecessor's inventory proof.
+        // Reserve earlier compatible copies without assigning an occurrence:
+        // dropped live callbacks can leave other equal saved output in the gap.
         const preceding = earlier.findIndex(
           (previous) =>
             completion.item!.outputDigest === previous.item!.outputDigest ||
@@ -518,20 +536,27 @@ export class ScanCostTracker {
         );
         if (preceding !== -1) {
           earlier.splice(preceding, 1);
-          pending = { live, after };
+          pending = true;
           continue;
         }
-        return {
-          live,
-          completion,
-          truncated: completion.item.outputDigest !== item.outputDigest,
-          after,
-        };
+        latest = completion;
       }
     }
-    // The current live occurrence is still pending after earlier copies have
-    // been reserved. Keep its authority until its own receipt or a later anchor.
-    return pending;
+    if (latest === undefined && !pending) return undefined;
+    // A later exact anchor closes the source interval. If a full projection
+    // retains the current state, rows after every compatible copy can advance
+    // it. Equal output alone never identifies the live occurrence or inventory.
+    const visible = latest?.lastCommandProgress;
+    return {
+      live,
+      after:
+        after !== Infinity &&
+        visible !== undefined &&
+        progressKey(visible.update) ===
+          progressKey(this.#parentProgress.progress)
+          ? visible.position + 1
+          : after,
+    };
   }
 
   #matchParentCompletions(): void {
@@ -729,7 +754,11 @@ export class ScanCostTracker {
       }
     }
     let acceptedInventory:
-      (ProgressOrder & { marker: ParentProgressMarker }) | undefined;
+      | (ProgressOrder & {
+          marker: ParentProgressMarker;
+          live: StreamedProgressItem;
+        })
+      | undefined;
     for (const live of this.#liveParentItems) {
       for (const marker of live.markers) {
         if (
@@ -740,6 +769,7 @@ export class ScanCostTracker {
           continue;
         const candidate = {
           marker,
+          live,
           position: live.position ?? undefined,
           markerIndex: marker.index,
           order: marker.order,
@@ -791,11 +821,42 @@ export class ScanCostTracker {
         this.#inventoryFrontier = {
           position,
           markerIndex: marker.index,
-          filesTotal: progress.filesTotal,
+          order: marker.order,
+          progress,
         };
         this.setExpectedFilesTotal(progress.filesTotal);
       }
     }
+    if (
+      acceptedInventory !== undefined &&
+      acceptedInventory.marker === this.#parentInventory &&
+      acceptedInventory.live.position === null &&
+      (this.#parentProgress?.progress.filesCompleted ?? 0) === 0 &&
+      acceptedInventory.order > (this.#parentProgress?.order ?? 0)
+    ) {
+      // This live inventory was accepted for deferred scope reconciliation;
+      // its saved occurrence remains unknown until source matching resolves it.
+      const progress = acceptedInventory.marker.progress;
+      this.#acceptedParent = acceptedInventory.live;
+      this.#parentProgress = { progress, order: acceptedInventory.order };
+      this.#liveParentProgress.add(progressKey(progress));
+      this.setExpectedFilesTotal(progress.filesTotal);
+      corrected = { ...this.#parentProgress, owner: "live" };
+    }
+    const unresolvedCommand =
+      this.#parentSession === null
+        ? undefined
+        : this.#unresolvedParentCommand(this.#parentSession);
+    const inventory = this.#retainedInventory();
+    const parentPosition = this.#parentProgress?.position;
+    if (
+      inventory !== undefined &&
+      ((parentPosition !== undefined &&
+        inventory.position! >= parentPosition) ||
+        (unresolvedCommand !== undefined &&
+          inventory.position! >= unresolvedCommand.after))
+    )
+      this.setExpectedFilesTotal(inventory.progress.filesTotal);
     const inventoryChanged = this.#inventoryNeedsReconciliation;
     this.#inventoryNeedsReconciliation = false;
     if (inventoryChanged) {
@@ -957,24 +1018,16 @@ export class ScanCostTracker {
     }
     // Parent facts outlive display admission and queue draining. Preserve the
     // greatest eligible coverage for each original inventory, then source order.
-    const unresolvedCommand =
-      this.#parentSession === null
-        ? undefined
-        : this.#unresolvedParentCommand(this.#parentSession);
-    const projection = unresolvedCommand?.completion?.lastCommandProgress;
-    const missingProgress =
-      unresolvedCommand !== undefined &&
-      (projection === undefined ||
-        (unresolvedCommand.truncated &&
-          progressKey(projection.update) !==
-            progressKey(this.#parentProgress!.progress)));
     let eligible =
       this.#parentProgress !== null &&
       this.#parentProgress.progress.filesTotal <=
         (this.#expectedFilesTotal ?? Number.MAX_SAFE_INTEGER)
         ? this.#parentProgress
         : null;
-    for (const candidate of this.#parentFacts.values()) {
+    for (const candidate of [
+      ...this.#parentFacts.values(),
+      ...(inventory === undefined ? [] : [inventory]),
+    ]) {
       // Process preceding inventories before promoting a retained phase past
       // them. Their source order can still change the admitted coverage.
       if (
@@ -1004,19 +1057,19 @@ export class ScanCostTracker {
           eligible.progress.filesCompleted &&
           // Keep unresolved live authority until an exact later completion
           // releases its retained rows. Discarded prefix-only facts stay stale.
-          (eligible.position !== undefined ||
-            (this.#acceptedParent?.position === null &&
-              this.#liveParentItems.indexOf(this.#acceptedParent) <
-                this.#matchedParentItems &&
-              this.#parentSession?.progress.some(
-                (saved) =>
-                  saved.order !== undefined &&
-                  (!missingProgress ||
-                    saved.position >= (unresolvedCommand?.after ?? Infinity)) &&
-                  saved.position === candidate.position &&
-                  saved.markerIndex === candidate.markerIndex,
-              ))) &&
-          compareProgressOrder(candidate, eligible) > 0)
+          (eligible.position === undefined && unresolvedCommand !== undefined
+            ? candidate.position! >= unresolvedCommand.after
+            : (eligible.position !== undefined ||
+                (this.#acceptedParent?.position === null &&
+                  this.#liveParentItems.indexOf(this.#acceptedParent) <
+                    this.#matchedParentItems &&
+                  this.#parentSession?.progress.some(
+                    (saved) =>
+                      saved.order !== undefined &&
+                      saved.position === candidate.position &&
+                      saved.markerIndex === candidate.markerIndex,
+                  ))) &&
+              compareProgressOrder(candidate, eligible) > 0))
       )
         eligible = candidate;
     }
@@ -1138,27 +1191,13 @@ export class ScanCostTracker {
     // A later saved occurrence may legitimately repeat an earlier live tuple,
     // including progress recovered only from the original multipart response.
     if (live.position !== null) return saved.position > live.position;
-    // Inventory provenance outlives a non-inventory phase on the parent display.
-    // A raw receipt with the same count does not locate a native occurrence.
-    const inventory = this.#liveParentItems
-      .flatMap((item) => item.markers)
-      .findLast(
-        (marker) =>
-          marker.accepted &&
-          marker.progress.phase === "discovery" &&
-          marker.progress.filesCompleted === 0,
-      )?.corroboratedInventory;
+    // A later exact anchor and positioned state release the unbound live
+    // prefix. A raw receipt alone does not locate that earlier live tuple.
     if (
-      saved.completion &&
-      saved.update.phase === "discovery" &&
-      saved.update.filesCompleted === 0 &&
-      inventory !== undefined
+      this.#parentProgress?.position !== undefined &&
+      this.#liveParentItems.indexOf(live) < this.#matchedParentItems
     )
-      return (
-        saved.position > inventory.position ||
-        (saved.position === inventory.position &&
-          saved.markerIndex > inventory.markerIndex)
-      );
+      return true;
     return !this.#liveParentProgress.has(progressKey(saved.update));
   }
 
@@ -1386,8 +1425,8 @@ export class ScanCostTracker {
         // Apply this batch's inventories before restoring their proven scope
         // from a later positioned fact. That fact may already be selected while
         // its displayed total still reflects an older unmatched live inventory.
-        if (inventory.filesTotal !== undefined && parent !== null) {
-          const fact = this.#parentFacts.get(inventory.filesTotal);
+        if (inventory.progress !== undefined && parent !== null) {
+          const fact = this.#parentFacts.get(inventory.progress.filesTotal);
           if (
             fact?.position !== undefined &&
             fact.order >= parent.order &&
@@ -1395,7 +1434,7 @@ export class ScanCostTracker {
               (fact.position === inventory.position &&
                 (fact.markerIndex ?? 0) > inventory.markerIndex))
           )
-            this.setExpectedFilesTotal(inventory.filesTotal);
+            this.setExpectedFilesTotal(inventory.progress.filesTotal);
         }
         this.#reconcileParentProgress();
       }
@@ -1433,64 +1472,14 @@ export class ScanCostTracker {
     if (this.#options.onProgress === undefined || session.threadId === null) {
       return;
     }
-    let corroborated: SessionProgress | undefined;
-    let unresolvedCommandState = false;
     const live = this.#acceptedParent;
     const current = this.#parentProgress;
-    if (
+    const unresolvedCommandState =
       parent &&
       command?.live === live &&
-      command.completion?.item !== null &&
       live?.position === null &&
       current !== null &&
-      current.position === undefined
-    ) {
-      // Parsed command evidence survives draining the notification queue.
-      // An absent receipt is pending; an empty projection can omit live output.
-      const saved = command.completion?.lastCommandProgress;
-      const key = progressKey(current.progress);
-      if (
-        saved === undefined ||
-        (command.truncated && progressKey(saved.update) !== key)
-      ) {
-        // Truncation may retain older markers but lose the current one. Its
-        // digest cannot locate live state, even after a marker-free anchor.
-        unresolvedCommandState = true;
-      }
-      if (saved !== undefined && progressKey(saved.update) === key) {
-        unresolvedCommandState = true;
-        if (
-          (current.progress.phase === "discovery" &&
-            current.progress.filesCompleted === 0) ||
-          session.progress.every(
-            (row) =>
-              row.position <= saved.position || progressKey(row.update) === key,
-          )
-        ) {
-          // A visible inventory marker proves its scope occurrence even when
-          // later inventories differ. It does not locate omitted command phases.
-          // Non-inventory phases still require the latest saved state to agree.
-          corroborated = saved;
-          const queued = session.progress.indexOf(saved);
-          if (queued !== -1) session.progress.splice(queued, 1);
-          session.progress.unshift(saved);
-          if (
-            saved.update.phase === "discovery" &&
-            saved.update.filesCompleted === 0
-          ) {
-            const marker = live.markers.findLast(
-              (marker) =>
-                marker.accepted && progressKey(marker.progress) === key,
-            );
-            if (marker !== undefined)
-              marker.corroboratedInventory = {
-                position: saved.position,
-                markerIndex: saved.markerIndex,
-              };
-          }
-        }
-      }
-    }
+      current.position === undefined;
     if (parent) {
       // Legacy message projections lack native completion metadata, but still
       // locate an already-admitted live review in the saved source. Establish
@@ -1548,8 +1537,6 @@ export class ScanCostTracker {
       }
       if (
         unresolvedCommandState &&
-        corroborated === undefined &&
-        saved !== corroborated &&
         saved.position < (command?.after ?? Infinity) &&
         this.#afterParentFrontier(saved.position, saved.markerIndex) &&
         !provenInventory &&
@@ -1562,7 +1549,6 @@ export class ScanCostTracker {
       }
       if (
         parent &&
-        saved !== corroborated &&
         !provenInventory &&
         !deferredCoverage &&
         !this.#savedParentProgressIsCurrent(saved)
@@ -1634,7 +1620,6 @@ export class ScanCostTracker {
           };
           if (
             this.#parentProgress === null ||
-            saved === corroborated ||
             this.#parentProgress.progress.phase !== "discovery" ||
             compareProgressOrder(candidate, this.#parentProgress) >= 0
           )
@@ -1649,7 +1634,8 @@ export class ScanCostTracker {
           this.#parentFrontier = position;
         this.#inventoryFrontier = {
           ...position,
-          filesTotal: progress.filesTotal,
+          order,
+          progress,
         };
         this.setExpectedFilesTotal(inventory.filesTotal);
         continue;
@@ -1698,7 +1684,6 @@ export class ScanCostTracker {
         parent &&
         displayed !== null &&
         displayed.owner !== "worker" &&
-        saved !== corroborated &&
         filesCompleted === displayed.update.filesCompleted &&
         compareProgressOrder(provenance, displayed) < 0
           ? displayed
@@ -1730,7 +1715,8 @@ export class ScanCostTracker {
           this.#inventoryFrontier = {
             position: saved.position,
             markerIndex: saved.markerIndex,
-            filesTotal: progress.filesTotal,
+            order,
+            progress,
           };
       }
       this.#highestFilesCompleted = update.filesCompleted;

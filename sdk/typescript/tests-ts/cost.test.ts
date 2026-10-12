@@ -1215,7 +1215,7 @@ describe("inventory source ordering", () => {
       [false, true].map((changedDisplay) => ({ workerFirst, changedDisplay })),
     ),
   )(
-    "positions an inventory observed during close (workers first=$workerFirst, changed display=$changedDisplay)",
+    "bounds an inventory observed during close with a later exact completion (workers first=$workerFirst, changed display=$changedDisplay)",
     async ({ workerFirst, changedDisplay }) => {
       const f = await fixture(workerFirst);
       const initial = {
@@ -1243,6 +1243,16 @@ describe("inventory source ordering", () => {
           filesCompleted: 5,
           filesTotal: 9,
         });
+        // The read boundary and equal output do not locate the live command.
+        // An exact later completion bounds it before the new saved inventory.
+        await appendFile(
+          f.parent,
+          JSON.stringify(nativeCommand("anchor", "Inventory batch finished.")) +
+            "\n",
+        );
+        f.tracker.recordParentItem(
+          completedCommand("anchor", "Inventory batch finished."),
+        );
         await appendFile(
           f.parent,
           JSON.stringify(
