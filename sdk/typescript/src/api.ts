@@ -926,6 +926,7 @@ export class CodexSecurity {
             settingsDigest: workflowDigest({
               configuration: session.effectiveConfig,
               cyberAccessProgram: options.cyberAccessProgram ?? null,
+              safetyIdentifier: options.safetyIdentifier ?? null,
               baseUrl: environmentValue(runtime.environment, "OPENAI_BASE_URL"),
               command: this.#codexCommand(),
               pluginVersion: runtime.plugin.version,

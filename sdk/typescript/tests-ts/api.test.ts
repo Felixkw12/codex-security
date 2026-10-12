@@ -1249,6 +1249,7 @@ describe("CodexSecurity finding validation", () => {
       outputDir: undefined,
       scanId: "recorded-scan",
       workflowId: "validation-retry",
+      safetyIdentifier: "synthetic-validation-first",
     };
     const first = await originalClient.validate(request);
     await expect(
@@ -1269,7 +1270,7 @@ describe("CodexSecurity finding validation", () => {
     await client.validate({ ...request, finding: "Second candidate" });
     expect(modelCalls).toBe(3);
     client.config.codexOverrides!["model"] = "changed-validation-model";
-    await client.validate(request);
+    const changedModel = await client.validate(request);
     expect(modelCalls).toBe(4);
     const blue = await client.validate({
       ...request,
@@ -1291,11 +1292,24 @@ describe("CodexSecurity finding validation", () => {
       await client.validate({ ...request, cyberAccessProgram: "daybreak_red" }),
     ).toEqual(red);
     expect(modelCalls).toBe(6);
+    for (const safetyIdentifier of ["synthetic-validation-second", undefined]) {
+      const previousCalls = modelCalls;
+      const changedRequest = { ...request, safetyIdentifier };
+      const assessment = await client.validate(changedRequest);
+      expect(modelCalls).toBe(previousCalls + 1);
+      expect(resumed.captured.codex?.env?.["CODEX_SAFETY_IDENTIFIER"]).toBe(
+        safetyIdentifier,
+      );
+      expect(await client.validate(changedRequest)).toEqual(assessment);
+      expect(modelCalls).toBe(previousCalls + 1);
+    }
+    expect(await client.validate(request)).toEqual(changedModel);
+    expect(modelCalls).toBe(8);
     targetChanged = true;
     await expect(client.validate(request)).rejects.toThrow(
       "scan target changed",
     );
-    expect(modelCalls).toBe(6);
+    expect(modelCalls).toBe(8);
   });
 
   test.each([
