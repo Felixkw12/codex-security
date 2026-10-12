@@ -147,11 +147,15 @@ glob_scan_max_depth = 8
     child.kill();
   }, 20_000);
   try {
+    let snapshotProfile: RpcMessage | undefined;
     const reader = await readSkillCommandOutput(stream, {
       directory: repository,
       prompt: "Synthetic local-only profile resolution.",
       threadSource: "security_remediation",
       input,
+      onPermissions(profile) {
+        snapshotProfile = profile;
+      },
       permissions: {
         name: "codex_security_patch",
         readOnlyPaths: [administration],
@@ -216,6 +220,7 @@ glob_scan_max_depth = 8
       RpcMessage
     >;
     expect(Object.keys(profiles)).toEqual([name]);
+    expect(snapshotProfile).toEqual(profiles[name]);
     expect(profiles[name]!["filesystem"]).toEqual({
       [administration]: { ".": "read" },
       ...(configured ? { ":tmpdir": {}, ":slash_tmp": {} } : {}),

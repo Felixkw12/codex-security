@@ -1029,6 +1029,12 @@ interface SkillPermissions {
   readonly readOnlyPaths: readonly string[];
 }
 
+interface PatchSnapshotSandbox {
+  readonly profile: JsonObject;
+  readonly environment: NodeJS.ProcessEnv;
+  readonly directory: string;
+}
+
 interface SkillCommandOutput {
   readonly directory?: string;
   readonly auth?: ScanAuthMode;
@@ -1045,6 +1051,7 @@ interface SkillCommandOutput {
     readonly permissions?: SkillPermissions;
     readonly externalSandbox?: boolean;
     readonly onEvent?: (event: Readonly<Record<string, unknown>>) => void;
+    readonly onPermissions?: (profile: JsonObject) => void;
   };
 }
 
@@ -1185,6 +1192,8 @@ interface CliDependencies {
       environment?: NodeJS.ProcessEnv;
       maxBuffer?: number;
       input?: string | Uint8Array;
+      patchSnapshot?: readonly string[];
+      sandbox?: PatchSnapshotSandbox;
     },
   ): Promise<string>;
   assessPatchRisk?: (request: PatchRiskRequest) => Promise<PatchRiskReport>;
@@ -1201,6 +1210,111 @@ interface CliDependencies {
   ): Promise<JsonObject>;
   matchFindings: typeof matchScanFindings;
   checkForUpdate(signal: AbortSignal): Promise<UpdateNotice | undefined>;
+}
+
+export async function runRepositoryCommand(
+  command: Parameters<CliDependencies["runRepositoryCommand"]>[0],
+  args: readonly string[],
+  repository: string,
+  options?: Parameters<CliDependencies["runRepositoryCommand"]>[3],
+): Promise<string> {
+  const executable = await resolveTrustedExecutable(
+    command,
+    process.env,
+    repository,
+  );
+  if (executable === null) {
+    throw new CodexSecurityError(
+      `${command} is not available on a trusted PATH.`,
+    );
+  }
+  const sandbox = options?.sandbox;
+  const codex = sandbox && resolveCodexCommand(sandbox.environment);
+  const profile = `codex_security_snapshot_${randomUUID()}`;
+  let profileFile: string | undefined;
+  try {
+    if (sandbox !== undefined) {
+      // Native file layers keep literal path keys out of command-line arguments.
+      const path = join(
+        configuredCodexHome(sandbox.environment),
+        `${profile}.config.toml`,
+      );
+      const file = await open(path, "wx", 0o600);
+      profileFile = path;
+      try {
+        await file.chmod(0o600);
+        await file.writeFile(
+          `permissions=${inlineToml({ [profile]: sandbox.profile })}\n`,
+        );
+      } finally {
+        await file.close();
+      }
+    }
+    const environment = { ...executable.environment, ...options?.environment };
+    if (sandbox !== undefined) {
+      for (const name of Object.keys(environment))
+        if (name.toUpperCase() === "CODEX_HOME") delete environment[name];
+      environment["CODEX_HOME"] = configuredCodexHome(sandbox.environment);
+    }
+    const execution = execFile(
+      codex === undefined
+        ? executable.executable
+        : executablePathForSpawn(codex.command),
+      codex === undefined
+        ? [...args]
+        : [
+            ...(codex.args ?? []),
+            "sandbox",
+            "--cd",
+            sandbox!.directory,
+            "--profile",
+            profile,
+            "--permission-profile",
+            profile,
+            "--include-managed-config",
+            "--",
+            executable.executable,
+            "-C",
+            repository,
+            ...args,
+          ],
+      {
+        cwd: repository,
+        env: environment,
+        maxBuffer: options?.maxBuffer,
+        encoding: options?.encoding === "base64" ? "buffer" : "utf8",
+        windowsHide: true,
+      },
+    );
+    const input =
+      options?.input === undefined
+        ? undefined
+        : new Promise<void>((resolve, reject) => {
+            execution.child.stdin!.once("error", reject);
+            execution.child.stdin!.end(options.input, resolve);
+          });
+    const [{ stdout }] = await Promise.all([execution, input]).catch(
+      (error: unknown) => {
+        // Keep command diagnostics as text when stdout was requested as bytes.
+        if (error instanceof Error) {
+          for (const field of ["stdout", "stderr"] as const) {
+            const value = (error as Error & Record<typeof field, unknown>)[
+              field
+            ];
+            if (Buffer.isBuffer(value))
+              Object.assign(error, { [field]: value.toString("utf8") });
+          }
+        }
+        throw error;
+      },
+    );
+    const output = Buffer.isBuffer(stdout)
+      ? stdout.toString(options?.encoding ?? "utf8")
+      : stdout;
+    return options?.trim === false ? output : output.trim();
+  } finally {
+    if (profileFile !== undefined) await rm(profileFile);
+  }
 }
 
 const DEFAULT_DEPENDENCIES: CliDependencies = {
@@ -1263,51 +1377,7 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
       environment,
       input,
     ),
-  runRepositoryCommand: async (command, args, repository, options) => {
-    const executable = await resolveTrustedExecutable(
-      command,
-      process.env,
-      repository,
-    );
-    if (executable === null) {
-      throw new CodexSecurityError(
-        `${command} is not available on a trusted PATH.`,
-      );
-    }
-    const execution = execFile(executable.executable, [...args], {
-      cwd: repository,
-      env: { ...executable.environment, ...options?.environment },
-      maxBuffer: options?.maxBuffer,
-      encoding: options?.encoding === "base64" ? "buffer" : "utf8",
-      windowsHide: true,
-    });
-    const input =
-      options?.input === undefined
-        ? undefined
-        : new Promise<void>((resolve, reject) => {
-            execution.child.stdin!.once("error", reject);
-            execution.child.stdin!.end(options.input, resolve);
-          });
-    const [{ stdout }] = await Promise.all([execution, input]).catch(
-      (error: unknown) => {
-        // Keep command diagnostics as text when stdout was requested as bytes.
-        if (error instanceof Error) {
-          for (const field of ["stdout", "stderr"] as const) {
-            const value = (error as Error & Record<typeof field, unknown>)[
-              field
-            ];
-            if (Buffer.isBuffer(value))
-              Object.assign(error, { [field]: value.toString("utf8") });
-          }
-        }
-        throw error;
-      },
-    );
-    const output = Buffer.isBuffer(stdout)
-      ? stdout.toString(options?.encoding ?? "utf8")
-      : stdout;
-    return options?.trim === false ? output : output.trim();
-  },
+  runRepositoryCommand,
   exportFindings: runArtifactExport,
   runWorkbench: async (args, input, signal, pythonPath) => {
     const environment = {
@@ -1673,6 +1743,7 @@ export async function runCodexSkillCommand(
                       permissions: output.appServer.permissions,
                       externalSandbox: output.appServer.externalSandbox,
                       onEvent: output.appServer.onEvent,
+                      onPermissions: output.appServer.onPermissions,
                     },
               ),
               new Promise<undefined>((resolve) => {
@@ -1761,8 +1832,28 @@ export async function main(
   const parentDependencies = dependencies;
   let gitEnvironment: NodeJS.ProcessEnv | undefined;
   let gitRepository: string | undefined;
+  let patchSandbox: PatchSnapshotSandbox | undefined;
   dependencies = {
     ...parentDependencies,
+    runCodex(args, output, environment, input) {
+      if (output?.appServer?.permissions !== undefined) {
+        const directory = output.appServer.directory;
+        output = {
+          ...output,
+          appServer: {
+            ...output.appServer,
+            onPermissions(profile) {
+              patchSandbox = {
+                profile,
+                directory,
+                environment: environment ?? dependencies.environment,
+              };
+            },
+          },
+        };
+      }
+      return parentDependencies.runCodex(args, output, environment, input);
+    },
     async runRepositoryCommand(command, args, repository, options) {
       if (command === "git") {
         gitRepository ??= repository;
@@ -1814,6 +1905,25 @@ export async function main(
       options = {
         ...options,
         environment: { ...gitEnvironment, ...options?.environment },
+        ...(options?.patchSnapshot === undefined || patchSandbox === undefined
+          ? {}
+          : {
+              sandbox: {
+                ...patchSandbox,
+                profile: {
+                  ...patchSandbox.profile,
+                  filesystem: {
+                    ...(patchSandbox.profile["filesystem"] as JsonObject),
+                    ...Object.fromEntries(
+                      options.patchSnapshot.map((path) => [
+                        path,
+                        { ".": "write" },
+                      ]),
+                    ),
+                  },
+                },
+              },
+            }),
       };
       return parentDependencies.runRepositoryCommand(
         command,
@@ -8673,6 +8783,25 @@ async function snapshotPatchTree(
   dependencies: CliDependencies,
   commandRoot = repository,
 ): Promise<string> {
+  const objects = (
+    await dependencies.runRepositoryCommand(
+      "git",
+      [
+        "-C",
+        repository,
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-path",
+        "objects",
+      ],
+      commandRoot,
+      {
+        trim: false,
+        environment:
+          commandRoot === repository ? undefined : NESTED_PATCH_GIT_ENVIRONMENT,
+      },
+    )
+  ).replace(/\n$/u, "");
   return withPatchGitIndex(
     (args, options) =>
       dependencies.runRepositoryCommand(
@@ -8684,6 +8813,13 @@ async function snapshotPatchTree(
           maxBuffer: options?.indexFile === undefined ? Infinity : undefined,
           encoding: options?.encoding,
           input: options?.input,
+          // Keep filters within the patch workspace while allowing snapshot outputs.
+          patchSnapshot: [
+            objects,
+            ...(options?.indexFile === undefined
+              ? []
+              : [dirname(options.indexFile)]),
+          ],
           environment: {
             ...(commandRoot === repository
               ? {}
@@ -9222,6 +9358,7 @@ export async function readSkillCommandOutput(
     readonly apiKey?: string;
     readonly modelProvider?: string;
     readonly onThreadStarted?: () => Promise<void>;
+    readonly onPermissions?: (profile: JsonObject) => void;
     readonly directory?: string;
     readonly prompt: string;
     readonly threadSource: SkillThreadSource;
@@ -9386,29 +9523,28 @@ export async function readSkillCommandOutput(
             ]),
           );
           // Extend the effective native workspace policy without resetting its settings.
-          startThread({
-            permissions: {
-              [permissionProfile!]: {
-                extends: ":workspace",
-                network: { enabled: workspace["network_access"] === true },
-                workspace_roots: Object.fromEntries(
-                  ((workspace["writable_roots"] ?? []) as string[]).map(
-                    (root) => [root, true],
-                  ),
-                ),
-                filesystem: {
-                  ...filesystem,
-                  // Remove implicit temp grants without narrowing explicit writable roots.
-                  ...(workspace["exclude_tmpdir_env_var"] === true
-                    ? { ":tmpdir": {} }
-                    : {}),
-                  ...(workspace["exclude_slash_tmp"] === true
-                    ? { ":slash_tmp": {} }
-                    : {}),
-                },
-              },
+          const profile = {
+            extends: ":workspace",
+            network: { enabled: workspace["network_access"] === true },
+            workspace_roots: Object.fromEntries(
+              ((workspace["writable_roots"] ?? []) as string[]).map((root) => [
+                root,
+                true,
+              ]),
+            ),
+            filesystem: {
+              ...filesystem,
+              // Remove implicit temp grants without narrowing explicit writable roots.
+              ...(workspace["exclude_tmpdir_env_var"] === true
+                ? { ":tmpdir": {} }
+                : {}),
+              ...(workspace["exclude_slash_tmp"] === true
+                ? { ":slash_tmp": {} }
+                : {}),
             },
-          });
+          };
+          appServer.onPermissions?.(profile);
+          startThread({ permissions: { [permissionProfile!]: profile } });
         } else if (value["id"] === 4 && appServer.sandbox === "read-only") {
           const result = value["result"];
           const layers =

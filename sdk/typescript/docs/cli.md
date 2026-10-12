@@ -1490,6 +1490,9 @@ output prints its report; saved-finding JSON includes `patchRisk.report`.
 With `--create-pr`, the draft description includes the concise Markdown summary.
 The assessment does not change the patch or merge state.
 
+Post-patch Git snapshots, including initialized submodules, use the patch's
+workspace permissions and configured Git filters.
+
 Patching first checks that its sandbox can start. Failure reports
 `SANDBOX_UNAVAILABLE`; no file changes from the task reports `NO_PATCH_APPLIED`.
 Results list `applied`, `filesChanged`, and `files`, excluding preexisting edits.
