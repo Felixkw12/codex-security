@@ -8,6 +8,7 @@ import { configuredCodexHome } from "./auth.js";
 import { CodexSecurityError } from "./errors.js";
 import {
   resolveCodexProfile,
+  deepMerge,
   modelProviderConfigOverride,
   inlineToml,
   writeCodexConfig,
@@ -63,6 +64,27 @@ export async function providerPreflightCommand(
   };
 }
 
+/** Keep explicit removals and private providers while reloading other file settings. */
+export function privateReplayOverrides(config: JsonObject): JsonObject {
+  const clears = (source: JsonObject): JsonObject => {
+    const result: JsonObject = {};
+    for (const [key, value] of Object.entries(source)) {
+      if (value === null) result[key] = null;
+      else if (isRecord(value)) {
+        const nested = clears(value as JsonObject);
+        if (Object.keys(nested).length > 0) result[key] = nested;
+      }
+    }
+    return result;
+  };
+  return {
+    ...clears(config),
+    ...(config["model_providers"] === undefined
+      ? {}
+      : { model_providers: config["model_providers"] }),
+  };
+}
+
 /** Provider definitions use a native file layer, never process arguments. */
 export async function createProviderProfile(
   codexHome: string,
@@ -71,9 +93,6 @@ export async function createProviderProfile(
     replay?: boolean;
   } = {},
 ): Promise<ProviderProfile> {
-  const providers = options.replay
-    ? config["model_providers"]
-    : resolveCodexProfile(config)["model_providers"];
   const name = `codex_security_${randomUUID()}`;
   const path = join(
     codexHome,
@@ -88,11 +107,9 @@ export async function createProviderProfile(
     );
   }
   if (options.replay) {
-    await writePrivateConfig(
-      path,
-      JSON.stringify({ model_providers: providers }),
-    );
+    await writePrivateConfig(path, JSON.stringify(config));
   } else {
+    const providers = resolveCodexProfile(config)["model_providers"];
     await writeCodexConfig(path, {
       model_providers: isRecord(providers) ? providers : {},
     });
@@ -100,7 +117,7 @@ export async function createProviderProfile(
   return { name, path, cleanup: () => rm(path, { force: true }) };
 }
 
-/** Restore a saved provider from the credential home, never from scan artifacts. */
+/** Restore private replay settings from the credential home, never scan artifacts. */
 export async function restoreProviderProfile(
   config: JsonObject,
   profile: unknown,
@@ -138,17 +155,20 @@ export async function restoreProviderProfile(
   }
   if (
     !isRecord(saved) ||
-    (!isRecord(saved["model_providers"]) && saved["model_providers"] !== null)
+    (saved["model_providers"] !== undefined &&
+      saved["model_providers"] !== null &&
+      !isRecord(saved["model_providers"]))
   ) {
     throw new CodexSecurityError(
       "The saved provider profile contains no provider configuration.",
     );
   }
+  const { model_providers: providers, ...clears } = saved;
   return {
-    ...config,
-    ...(saved["model_providers"] === null ||
-    Object.keys(saved["model_providers"]).length > 0
-      ? { model_providers: saved["model_providers"] as JsonObject | null }
+    ...deepMerge({ ...config }, clears as JsonObject),
+    ...(providers === null ||
+    (isRecord(providers) && Object.keys(providers).length > 0)
+      ? { model_providers: providers as JsonObject | null }
       : {}),
   };
 }

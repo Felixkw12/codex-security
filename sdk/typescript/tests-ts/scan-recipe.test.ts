@@ -1,4 +1,5 @@
 import { createCliTest } from "./support/cli-run.js";
+import { writeSession } from "./support/usage-rollout.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { workbenchCommand } from "./support/workbench-command.js";
 import {
@@ -33,9 +34,13 @@ import {
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
 
-test.each([true, false])(
-  "private provider lifetime follows registration (rejected: %p)",
-  async (rejected) => {
+test.each(
+  [true, false].flatMap((rejected) =>
+    [true, false].map((providers) => ({ rejected, providers })),
+  ),
+)(
+  "private replay lifetime follows registration: %j",
+  async ({ rejected, providers }) => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const home = join(root, "profile-home");
@@ -61,9 +66,13 @@ test.each([true, false])(
         pluginPath: PLUGIN_ROOT,
         codexOverrides: {
           profile: "review",
-          model_providers: {
-            openrouter: { base_url: "https://custom.example.invalid/" },
-          },
+          ...(providers
+            ? {
+                model_providers: {
+                  openrouter: { base_url: "https://custom.example.invalid/" },
+                },
+              }
+            : { model_instructions_file: null }),
         },
       },
       {
@@ -480,15 +489,21 @@ const modelFileRecipeKeys = [
   "experimental_compact_prompt_file",
 ] as const;
 test.each(
-  modelFileRecipeKeys.flatMap((key) =>
-    ["root-relative", "inline-relative", "root-absolute"].map((kind) => ({
+  modelFileRecipeKeys.flatMap((key) => [
+    ...["root-relative", "inline-relative", "root-absolute"].map((kind) => ({
       key,
       kind,
+      mode: "standard" as const,
     })),
-  ),
+    ...(["standard", "deep"] as const).map((mode) => ({
+      key,
+      kind: "file-cleared",
+      mode,
+    })),
+  ]),
 )(
-  "saved launch retains its original model file bytes: %j",
-  async ({ key, kind }) => {
+  "saved launch retains model file paths and explicit clears: %j",
+  async ({ key, kind, mode }) => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const home = join(root, "codex-home");
@@ -511,8 +526,21 @@ test.each(
       kind === "root-absolute"
         ? modelFile
         : relative(originalOutput, modelFile);
-    const overrides: JsonObject =
-      kind === "inline-relative"
+    const cleared = kind === "file-cleared";
+    if (cleared) {
+      await writeFile(
+        join(home, "review.config.toml"),
+        `model="synthetic-model"\n${key}="inherited.txt"\n[analytics]\nenabled=true\n[agents.reviewer]\nconfig_file="reviewer.toml"\ndescription="initial reviewer"\n`,
+      );
+    }
+    const overrides: JsonObject = cleared
+      ? {
+          profile: "review",
+          [key]: null,
+          analytics: null,
+          agents: { reviewer: { config_file: null } },
+        }
+      : kind === "inline-relative"
         ? {
             profile: "active",
             profiles: {
@@ -536,21 +564,63 @@ test.each(
         args,
         input,
       );
+    let launches = 0;
+    const runtimeDependencies = {
+      environment,
+      prepareRuntime: async () => ({
+        ...preparedRuntime(home),
+        deepScanConfigPath: join(home, "deep-scan-config.toml"),
+      }),
+      resolvePluginPython: async () => python,
+      runWorkbench: async (
+        _options: unknown,
+        args: readonly string[],
+        input?: string,
+      ) => {
+        if (mode === "deep" && args[0] === "fail-scan")
+          throw new Error("Synthetic disconnected workbench");
+        return command(args, input);
+      },
+      createCodex: ({ config }: { config?: JsonObject }) => {
+        launches++;
+        if (cleared) {
+          expect(config).not.toHaveProperty(key);
+          expect(config).not.toHaveProperty("analytics");
+          expect(config).not.toHaveProperty("agents.reviewer.config_file");
+        }
+        const thread = (id: string, cwd?: string) => ({
+          id,
+          async runStreamed() {
+            await writeSession(home, id, {}, { cwd });
+            return {
+              events: (async function* () {
+                yield {
+                  type: "thread.started" as const,
+                  thread_id: id,
+                };
+                throw new Error("Synthetic stop after registration");
+              })(),
+            };
+          },
+        });
+        return {
+          startThread: (options?: { workingDirectory?: string }) =>
+            thread(
+              `synthetic-model-file-thread-${launches}`,
+              options?.workingDirectory,
+            ),
+          resumeThread: (id: string, options?: { workingDirectory?: string }) =>
+            thread(id, options?.workingDirectory),
+        };
+      },
+    };
     const client = new TestClient(
       { pluginPath: PLUGIN_ROOT, codexOverrides: overrides },
-      {
-        environment,
-        prepareRuntime: async () => preparedRuntime(home),
-        resolvePluginPython: async () => python,
-        runWorkbench: async (_options, args, input) => command(args, input),
-        createCodex: () => {
-          throw new Error("Synthetic stop after registration");
-        },
-      },
+      runtimeDependencies,
     );
     try {
       await expect(
-        client.run(repository, { mode: "standard", outputDir: originalOutput }),
+        client.run(repository, { mode, outputDir: originalOutput }),
       ).rejects.toThrow("Synthetic stop after registration");
       const scans = (await command(["list-scans", "--repository", repository]))[
         "scans"
@@ -558,10 +628,47 @@ test.each(
       expect(scans).toHaveLength(1);
       const recipe = (
         await command(["get-scan-recipe", "--scan-id", scans[0]!.scanId])
-      )["recipe"] as { config: JsonObject };
-      const replay = resolveCodexProfile(
-        await mergedCodexConfig({ codexOverrides: recipe.config }, home),
+      )["recipe"] as { config: JsonObject; providerProfile?: unknown };
+      const replayOverrides = await restoreProviderProfile(
+        recipe.config,
+        recipe.providerProfile,
+        environment,
       );
+      const replay = resolveCodexProfile(
+        await mergedCodexConfig({ codexOverrides: replayOverrides }, home),
+      );
+      if (cleared) {
+        await client.close();
+        await writeFile(
+          join(home, "review.config.toml"),
+          `model="synthetic-model"\n${key}="changed.txt"\n[analytics]\nenabled=false\n[agents.reviewer]\nconfig_file="changed-reviewer.toml"\ndescription="updated reviewer"\n`,
+        );
+        for (const operation of mode === "deep"
+          ? ["rerun", "resume"]
+          : ["rerun"]) {
+          const { runCli, stderr } = createCliTest(main);
+          expect(
+            await runCli(["scans", operation, scans[0]!.scanId, "--json"], {
+              ...dependencies({ environment, currentDirectory: root }),
+              runWorkbench: command,
+              createSecurity: (config) =>
+                new TestClient(config, runtimeDependencies),
+            }),
+          ).toBe(2);
+          expect(stderr.text()).toContain("Synthetic stop after registration");
+          const reloaded = resolveCodexProfile(
+            await mergedCodexConfig({ codexOverrides: replayOverrides }, home),
+          );
+          expect(reloaded).toMatchObject({
+            agents: { reviewer: { description: "updated reviewer" } },
+          });
+        }
+        expect(launches).toBe(mode === "deep" ? 3 : 2);
+        expect(replay).not.toHaveProperty(key);
+        expect(replay).not.toHaveProperty("analytics");
+        expect(replay).not.toHaveProperty("agents.reviewer.config_file");
+        return;
+      }
       expect(replay[key]).toBe(modelFile);
       expect(
         await readFile(resolve(rerunOutput, replay[key] as string), "utf8"),

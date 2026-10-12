@@ -3,6 +3,8 @@ import childProcess, { type SpawnOptions } from "node:child_process";
 import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { importModule } from "./import-module.ts";
 import { parse as parseToml } from "smol-toml";
 import { readJson } from "./support/json.ts";
 import { assertFlagPair } from "./assertions.ts";
@@ -43,6 +45,14 @@ export async function testWorkerSelectedProfileFiles<Profile>({
   ) => void;
   restoreEnv: (name: string, value: string | undefined) => void;
 }) {
+  const { mergedCodexConfig, resolveCodexProfile, writeCodexConfig } =
+    await importModule({
+      entryPoints: [
+        fileURLToPath(
+          new URL("../../../../sdk/typescript/src/config.ts", import.meta.url),
+        ),
+      ],
+    });
   const cases: [string, string | undefined, boolean?][] = [
     ["", undefined],
     ['model_reasoning_summary = "none"\n', "none"],
@@ -264,6 +274,30 @@ client-private-key = ${JSON.stringify(path.join(codexHome, "tls", "client.key"))
                 `web_search = ${JSON.stringify(index % 2 === 0 ? "disabled" : "cached")}`,
               ),
           );
+          if (modelFiles && index % 2 === 0) {
+            // SDK replay clears file-profile values before the worker TOML is written.
+            const profile = `replay-${index}`;
+            await writeFile(
+              path.join(codexHome, `${profile}.config.toml`),
+              await readFile(selected, "utf8"),
+            );
+            await writeCodexConfig(
+              selected,
+              resolveCodexProfile(
+                await mergedCodexConfig(
+                  {
+                    codexOverrides: {
+                      profile,
+                      model_instructions_file: null,
+                      model_catalog_json: null,
+                      experimental_compact_prompt_file: null,
+                    },
+                  },
+                  codexHome,
+                ),
+              ),
+            );
+          }
           return selected;
         }),
       );
@@ -392,17 +426,21 @@ client-private-key = ${JSON.stringify(path.join(codexHome, "tls", "client.key"))
               process.env.SYNTHETIC_GATEWAY_KEY,
               providerKeys.at(-1),
             );
+            const clearedFiles = modelFiles && index % 2 === 0;
             assertConfigOverrides(invocation.argv, {
               model_reasoning_summary: expected,
-              model_catalog_json: modelFiles
-                ? path.join(fixture.root, `catalog-${index}.json`)
-                : undefined,
-              experimental_compact_prompt_file: modelFiles
-                ? path.join(fixture.root, `compact-${index}.md`)
-                : undefined,
-              model_instructions_file: instructions
-                ? path.join(fixture.root, `instructions-${index}.md`)
-                : undefined,
+              model_catalog_json:
+                modelFiles && !clearedFiles
+                  ? path.join(fixture.root, `catalog-${index}.json`)
+                  : undefined,
+              experimental_compact_prompt_file:
+                modelFiles && !clearedFiles
+                  ? path.join(fixture.root, `compact-${index}.md`)
+                  : undefined,
+              model_instructions_file:
+                instructions && !clearedFiles
+                  ? path.join(fixture.root, `instructions-${index}.md`)
+                  : undefined,
               model_verbosity: instructions
                 ? index % 2 === 0
                   ? "high"

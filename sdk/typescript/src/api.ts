@@ -36,6 +36,7 @@ import { isRecord } from "./record.js";
 import {
   createProfileCodex,
   createProviderProfile,
+  privateReplayOverrides,
   legacyWorkerUsesScanProvider,
   providerPreflightCommand,
   type ProviderProfile,
@@ -1725,20 +1726,19 @@ export class CodexSecurity {
         !(isRecord(inlineProfiles) && isRecord(inlineProfiles[profileName]))
       ) {
         recipeConfig["profile"] = profileName;
-        // Reload inherited file settings, retaining explicit provider refinements
-        // separately from the readable recipe.
+        // Reload inherited file settings, retaining explicit removals and provider
+        // refinements separately from the readable recipe.
         delete recipeConfig["model_providers"];
-        const explicitProviders =
-          this.config.codexOverrides?.["model_providers"];
+        const replayOverrides = privateReplayOverrides(
+          this.config.codexOverrides ?? {},
+        );
         if (
           options.resumeScanId === undefined &&
-          (explicitProviders === null || isRecord(explicitProviders))
+          Object.keys(replayOverrides).length > 0
         ) {
           savedProviderProfile = await createProviderProfile(
             codexSecurityCredentialHome(this.#dependencies.environment),
-            {
-              model_providers: explicitProviders as JsonObject | null,
-            },
+            replayOverrides,
             { replay: true },
           );
         }
