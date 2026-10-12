@@ -499,6 +499,24 @@ def _restore_checkpoint_head(
         heads.pop(directory, None)
 
 
+def _legacy_checkpoint_observed_at(
+    scan_dir: Path, scan_id: str, sources: dict[str, str], selected: str
+) -> int | None:
+    times = _frozen_source_times(scan_dir, scan_id, sources)
+    checkpoint = Path(selected)
+    observations = []
+    for relative, expected_digest in sources.items():
+        if _checkpoint_head_directory(relative) != checkpoint.parent.parent:
+            continue
+        head, digest, observed = _read_saved_result(scan_dir, relative, scan_id)
+        if digest != expected_digest:
+            raise ContractError("checkpoint changed after the scan stopped")
+        if head["checkpoint"] == checkpoint.name:
+            observations.append(times.get(relative, observed))
+    # Payload-only selections used the newest retained observation for that payload.
+    return max(observations, default=None)
+
+
 def _saved_results_changed(db: Any, connection: Any, scan: Any) -> bool:
     try:
         scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
@@ -574,8 +592,13 @@ def _saved_results_changed(db: Any, connection: Any, scan: Any) -> bool:
                 )
                 current_sources.update({path: value[0] for path, value in captured.items()})
                 directory = Path(path).parent.as_posix()
-                if published_heads.get(directory) in captured:
-                    checkpoint_heads[directory] = published_heads[directory]
+                previous_head = published_heads.get(directory)
+                if previous_head in captured and Path(previous_head).parent.name == "checkpoints":
+                    observed = captured[checkpoint_heads[directory]][1]
+                    if observed == _legacy_checkpoint_observed_at(
+                        scan_dir, scan["id"], published_sources, previous_head
+                    ):
+                        checkpoint_heads[directory] = previous_head
             except (ContractError, OSError, ValueError):
                 _restore_checkpoint_head(checkpoint_heads, published_heads, published_sources, path)
         return current_sources != published_sources or checkpoint_heads != published_heads

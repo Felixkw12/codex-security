@@ -311,6 +311,81 @@ def save_disposition(scan, directory, disposition):
     return draft
 
 
+@pytest.mark.parametrize("legacy_publication", [False, True], ids=["observation", "payload"])
+@pytest.mark.parametrize("selected_time", [100, 300], ids=["restored-older", "unchanged-latest"])
+def test_recovery_needed_compares_checkpoint_observation(
+    workbench_api,
+    workbench_db,
+    publication_scan,
+    monkeypatch,
+    legacy_publication,
+    selected_time,
+):
+    scan = publication_scan()
+    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
+    result = add_worker(workbench_db, scan, status="canceled")
+    result.write_text(json.dumps(save_disposition(scan, result.parent, "reported")))
+    os.utime(result, ns=(200, 200))
+    save_disposition(scan, result.parent, "rejected")
+    head = result.parent / "checkpoint-head.json"
+    os.utime(head, ns=(100, 100))
+    directory = result.parent.relative_to(scan.scan_dir).as_posix()
+    saved = workbench_api["saved_results"]
+    context = workbench_api["_WORKBENCH_DB_CONTEXT"]
+    capture = saved._capture_saved_source
+
+    def capture_legacy_head(scan_dir, relative, scan_id, **kwargs):
+        captured = capture(scan_dir, relative, scan_id, **kwargs)
+        heads = kwargs.get("checkpoint_heads")
+        if heads is not None and relative == f"{directory}/checkpoint-head.json":
+            # Legacy writers selected the payload while retaining every observation.
+            heads[directory] = next(
+                path for path in captured if Path(path).parent.name == "checkpoints"
+            )
+        return captured
+
+    with monkeypatch.context() as patch:
+        if legacy_publication:
+            patch.setattr(saved, "_capture_saved_source", capture_legacy_head)
+        stopped = saved.fail_scan(
+            context,
+            workbench_db,
+            Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
+        )["scan"]
+        assert stopped["findingCount"] == 1
+        os.utime(head, ns=(300, 300))
+        published = saved.recover_scan_results(
+            context, workbench_db, Namespace(scan_id=scan.scan_id)
+        )["scan"]
+        assert published["findingCount"] == 0
+
+    manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())["scan"]
+    sources = manifest["preservedSources"]
+    assert sorted(
+        int(json.loads((scan.scan_dir / path).read_text())["observedAtNs"])
+        for path in sources
+        if Path(path).parent.as_posix() == f"{directory}/checkpoint-heads"
+    ) == [100, 300]
+    assert Path(manifest["preservedCheckpointHeads"][directory]).parent.name == (
+        "checkpoints" if legacy_publication else "checkpoint-heads"
+    )
+    assert not workbench_api["scan_context"](workbench_db, scan.scan_id)["scan"][
+        "resultsRecoveryNeeded"
+    ]
+    os.utime(head, ns=(selected_time, selected_time))
+    assert workbench_api["scan_context"](workbench_db, scan.scan_id)["scan"][
+        "resultsRecoveryNeeded"
+    ] is (selected_time == 100)
+    recovered = saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))[
+        "scan"
+    ]
+    assert recovered["findingCount"] == (1 if selected_time == 100 else 0)
+    assert not recovered["resultsRecoveryNeeded"]
+    final = json.loads((scan.scan_dir / "scan-manifest.json").read_text())["scan"]
+    assert final["preservedSources"] == sources
+    assert final["preservedCheckpointHeads"][directory] == captured_head(scan.scan_dir, directory)
+
+
 @pytest.mark.parametrize("archived", [False, True], ids=["current-head", "newer-archive"])
 @pytest.mark.parametrize("disposition", ["reported", "rejected"])
 def test_newer_checkpoint_disposition_precedes_older_archived_head(
