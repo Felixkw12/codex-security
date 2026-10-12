@@ -60,7 +60,7 @@ function candidate(path: string): JsonObject {
 async function startMcp(root: string) {
   const { request, close } = await startMcpClient(
     {
-      command: process.execPath,
+      command: nodeCommand().command,
       args: [join(PLUGIN_ROOT, "mcp", "server.mjs"), "--stdio"],
       env: {
         ...process.env,
