@@ -217,10 +217,9 @@ for (const selector of ["GIT_DIR", "GIT_COMMON_DIR"] as const) {
           },
         },
       );
-      const rejectsRetarget = retarget && selector === "GIT_DIR";
-      expect(outcome.exitCode, outcome.stderr).toBe(rejectsRetarget ? 2 : 0);
+      expect(outcome.exitCode, outcome.stderr).toBe(retarget ? 2 : 0);
       expect(launches).toBe(1);
-      if (rejectsRetarget) {
+      if (retarget) {
         expect(outcome.stderr).toContain(
           "Git configuration or hooks changed location during the patch",
         );

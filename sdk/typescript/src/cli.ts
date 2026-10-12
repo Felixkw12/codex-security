@@ -8159,7 +8159,7 @@ async function preparePatchPublication(
   );
   const localPath = (path: string) =>
     relativePatchPath(
-      patchPathKey(repository),
+      patchPathKey(directory),
       resolve(patchPathKey(root), path),
     );
   const ignoredFiles = new Set<string>();

@@ -6456,7 +6456,7 @@ describe("inherited patch publication context", () => {
               assessments++;
               expect(request.repository).toBe(tree);
               expect(request.directory).toBe(directory);
-              expect(request.files).toEqual(["app.ts"]);
+              expect(request.files).toBeUndefined();
               expect(
                 await runGitRepositoryCommand(
                   "git",
@@ -9401,7 +9401,7 @@ describe("ordinary patch snapshot context", () => {
             current.assessPatchRisk = async (request) => {
               assessmentCalls++;
               expect(request.repository).toBe(root);
-              expect(request.files).toContain("app.ts");
+              expect(request.files).toBeUndefined();
               return patchRiskAssessment();
             };
           },
