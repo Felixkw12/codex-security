@@ -89,6 +89,7 @@ test.each(
             if (rejected) throw new Error("Synthetic registration rejected");
           }
           if (args[0] === "complete-scan") completed = true;
+          if (args[0] === "list-scans") return { scans: [] };
           return mockWorkbench(args, input);
         },
       },

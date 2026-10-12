@@ -1819,7 +1819,49 @@ export class CodexSecurity {
                 userContext: options.scanPrompt,
                 workflowId: options.workflowId,
               }),
-            );
+            ).catch(async (error: unknown) => {
+              const profile = savedProviderProfile;
+              if (profile !== undefined) {
+                // Registration can commit before cancellation or an output error.
+                // Delete the snapshot only after confirming no saved recipe owns it.
+                savedProviderProfile = undefined;
+                try {
+                  const lookupOptions = {
+                    ...workbenchOptions,
+                    signal: undefined,
+                  };
+                  const { scans } = await workbench(lookupOptions, [
+                    "list-scans",
+                    "--scan-root",
+                    scanDir,
+                  ]);
+                  let referenced = false;
+                  for (const scan of scans as JsonObject[]) {
+                    if (scan["recipeAvailable"] === false) continue;
+                    const { recipe: savedRecipe } = await workbench(
+                      lookupOptions,
+                      [
+                        "get-scan-recipe",
+                        "--scan-id",
+                        scan["scanId"] as string,
+                      ],
+                    );
+                    if (
+                      isRecord(savedRecipe) &&
+                      isRecord(savedRecipe["providerProfile"]) &&
+                      savedRecipe["providerProfile"]["name"] === profile.name
+                    ) {
+                      referenced = true;
+                      break;
+                    }
+                  }
+                  if (!referenced) savedProviderProfile = profile;
+                } catch {
+                  // An unavailable receipt cannot establish that cleanup is safe.
+                }
+              }
+              throw error;
+            });
       // The registered recipe now owns the private snapshot, including after completion.
       savedProviderProfile = undefined;
       const scanId = registration["scanId"];
