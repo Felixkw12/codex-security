@@ -13,3 +13,6 @@
 
 # Bundled dependencies contain intentional whitespace in strings and comments.
 github-action/dist/*.cjs linguist-generated=true -whitespace
+
+# Unified-diff context keeps the upstream indentation.
+plugins/codex-security/mcp-app/patches/toml-eslint-parser@1.0.3.patch -whitespace
