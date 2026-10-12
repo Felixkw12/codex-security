@@ -7,6 +7,9 @@ import type { CodexOptions } from "@openai/codex-sdk";
 import { TestClient, mockWorkbench } from "./support/api-client.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { preparedRuntime } from "./support/api-events.js";
+import * as providerProfiles from "../src/provider-profile.js";
+import type { JsonObject } from "../src/config.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
@@ -179,3 +182,277 @@ test.each([false, true])(
     }
   },
 );
+
+const replaySettings = {
+  shell: {
+    shell_environment_policy: {
+      set: { SYNTHETIC_REPLAY_TOKEN: "synthetic-test-only" },
+    },
+  },
+  provider: {
+    model_provider: "synthetic.provider",
+    model_providers: {
+      "synthetic.provider": {
+        name: "Synthetic provider",
+        http_headers: { "X-Synthetic": "synthetic-test-only" },
+      },
+    },
+  },
+  none: {},
+};
+
+async function replayProfileFixture() {
+  const root = await temporaryDirectory();
+  const repository = join(root, "repository");
+  const scan = join(root, "scan");
+  const state = join(root, "state");
+  const home = join(state, "codex-home");
+  const missingSkill = join(root, "missing-skill-plugin");
+  await Promise.all(
+    [repository, scan, home, missingSkill].map((directory) =>
+      mkdir(directory, { recursive: true, mode: 0o700 }),
+    ),
+  );
+  return {
+    repository,
+    scan,
+    state,
+    home,
+    missingSkill,
+    profiles: async () =>
+      (await readdir(home)).filter((name) =>
+        /^codex_security_.*\.config\.toml$/.test(name),
+      ),
+  };
+}
+
+test.each([
+  ["shell", "skill", "standard"],
+  ["shell", "registration", "standard"],
+  ["shell", "registration", "deep"],
+  ["provider", "registration", "standard"],
+  ["none", "registration", "standard"],
+  ["shell", "registered", "standard"],
+  ["provider", "registered", "standard"],
+  ["shell", "native", "standard"],
+] as const)(
+  "owns replay profiles across %s %s startup (%s)",
+  async (settings, stage, mode) => {
+    const h = await replayProfileFixture();
+    const failure = new Error("Synthetic scan startup failure");
+    let recipe: JsonObject | undefined;
+    let registrationCalls = 0;
+    const client = new TestClient(
+      { codexOverrides: replaySettings[settings] },
+      {
+        environment: { CODEX_SECURITY_STATE_DIR: h.state },
+        prepareRuntime: async () => {
+          const runtime = preparedRuntime(h.home);
+          if (stage === "skill") runtime.plugin.pluginRoot = h.missingSkill;
+          return runtime;
+        },
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => h.scan,
+        repositoryRevision: async () => "deadbeef",
+        runWorkbench: async (_options, args, input) => {
+          if (args[0] === "register-cli-scan") {
+            registrationCalls++;
+            recipe = JSON.parse(input!).recipe;
+            expect(await h.profiles()).toHaveLength(
+              settings === "none" ? 0 : 1,
+            );
+            if (stage === "registration") throw failure;
+          }
+          if (args[0] === "get-scan-feedback") throw failure;
+          return mockWorkbench(args, input);
+        },
+      },
+    );
+    try {
+      const run = client.run(h.repository, {
+        mode,
+        ...(stage === "native"
+          ? {
+              outputDir: h.scan,
+              registeredScan: {
+                scanId: "scan_example_001",
+                scanDir: h.scan,
+                threadId: "synthetic-native-owner",
+                handoffClaimToken: "synthetic-claim",
+              },
+            }
+          : {}),
+      });
+      if (stage === "skill")
+        await expect(run).rejects.toThrow(
+          "Installed plugin is missing scan skill",
+        );
+      else await expect(run).rejects.toBe(failure);
+      expect(registrationCalls).toBe(stage === "skill" ? 0 : 1);
+      const profiles = await h.profiles();
+      const ownsRecipe = stage === "registered" || stage === "native";
+      expect(profiles).toHaveLength(ownsRecipe ? 1 : 0);
+      if (ownsRecipe) {
+        expect(recipe!["providerProfile"]).toMatchObject({ home: "managed" });
+        const restored = await providerProfiles.restoreProviderProfile(
+          {},
+          recipe!["providerProfile"],
+          { CODEX_SECURITY_STATE_DIR: h.state },
+        );
+        expect(restored).toMatchObject(
+          settings === "provider"
+            ? { model_providers: replaySettings.provider.model_providers }
+            : replaySettings.shell,
+        );
+      }
+    } finally {
+      await client.close();
+    }
+  },
+);
+
+test.each(
+  (["shell", "provider"] as const).flatMap((settings) =>
+    (["standard", "deep"] as const).flatMap((mode) =>
+      (["resume", "registered"] as const).map((continuation) => ({
+        settings,
+        mode,
+        continuation,
+      })),
+    ),
+  ),
+)(
+  "resumed scans retain their saved replay profile without leaving a new copy: %j",
+  async ({ settings, mode, continuation }) => {
+    const h = await replayProfileFixture();
+    const failure = new Error("Synthetic failure after registration");
+    let saved: JsonObject | undefined;
+    const profilesAtResume: string[][] = [];
+    const client = new TestClient(
+      { codexOverrides: replaySettings[settings] },
+      {
+        environment: { CODEX_SECURITY_STATE_DIR: h.state },
+        prepareRuntime: async () => preparedRuntime(h.home),
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => h.scan,
+        repositoryRevision: async () => "deadbeef",
+        runWorkbench: async (_options, args, input) => {
+          if (args[0] === "get-scan") {
+            profilesAtResume.push(await h.profiles());
+            return { recipe: saved!["recipe"]! };
+          }
+          if (args[0] === "register-cli-scan") {
+            if (saved !== undefined) return saved;
+            saved = {
+              ...mockWorkbench(args, input),
+              recipe: JSON.parse(input!).recipe,
+              threadId: null,
+            };
+            return saved;
+          }
+          if (args[0] === "get-cli-scan-resume") {
+            profilesAtResume.push(await h.profiles());
+            return saved!;
+          }
+          if (args[0] === "get-scan-feedback") throw failure;
+          return mockWorkbench(args, input);
+        },
+      },
+    );
+    try {
+      const scanOptions = {
+        mode,
+        deepScanPass: mode === "standard",
+        onRegisteredScan: async () => {
+          throw failure;
+        },
+      };
+      await expect(client.run(h.repository, scanOptions)).rejects.toBe(failure);
+      const original = await h.profiles();
+      expect(original).toHaveLength(1);
+      await expect(
+        client.run(h.repository, {
+          ...scanOptions,
+          outputDir: h.scan,
+          ...(continuation === "resume"
+            ? { resumeScanId: saved!["scanId"] as string }
+            : {
+                registeredScan: {
+                  scanId: saved!["scanId"] as string,
+                  scanDir: h.scan,
+                  threadId: "synthetic-native-owner",
+                  handoffClaimToken: "synthetic-claim",
+                },
+              }),
+        }),
+      ).rejects.toBe(failure);
+      expect(profilesAtResume).toHaveLength(1);
+      expect(profilesAtResume[0]).toHaveLength(2);
+      expect(await h.profiles()).toEqual(original);
+      const recipe = saved!["recipe"] as JsonObject;
+      expect(
+        await providerProfiles.restoreProviderProfile(
+          {},
+          recipe["providerProfile"],
+          { CODEX_SECURITY_STATE_DIR: h.state },
+        ),
+      ).toMatchObject(
+        settings === "provider"
+          ? { model_providers: replaySettings.provider.model_providers }
+          : replaySettings.shell,
+      );
+    } finally {
+      await client.close();
+    }
+  },
+);
+
+test("profile cleanup preserves the startup failure and its own diagnostic", async () => {
+  const h = await replayProfileFixture();
+  const failure = new Error("Synthetic registration failure");
+  const cleanupFailure = new Error("Synthetic profile removal failed");
+  const original = providerProfiles.createProviderProfile;
+  const created: Array<Awaited<ReturnType<typeof original>>> = [];
+  const warnings: string[] = [];
+  const profile = spyOn(
+    providerProfiles,
+    "createProviderProfile",
+  ).mockImplementation(async (...args) => {
+    const saved = await original(...args);
+    created.push(saved);
+    return {
+      ...saved,
+      cleanup: async () => {
+        throw cleanupFailure;
+      },
+    };
+  });
+  const client = new TestClient(
+    { codexOverrides: replaySettings.shell },
+    {
+      environment: { CODEX_SECURITY_STATE_DIR: h.state },
+      prepareRuntime: async () => preparedRuntime(h.home),
+      resolvePluginPython: async () => "/managed/python",
+      prepareOutputDir: async () => h.scan,
+      repositoryRevision: async () => "deadbeef",
+      runWorkbench: async () => {
+        throw failure;
+      },
+    },
+  );
+  try {
+    await expect(
+      client.run(h.repository, {
+        onWarning: (message) => warnings.push(message),
+      }),
+    ).rejects.toBe(failure);
+    expect(created).toHaveLength(1);
+    expect(
+      warnings.some((message) => message.includes(cleanupFailure.message)),
+    ).toBe(true);
+  } finally {
+    profile.mockRestore();
+    await client.close();
+    await Promise.all(created.map((saved) => saved.cleanup()));
+  }
+});

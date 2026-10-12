@@ -1290,6 +1290,7 @@ export class CodexSecurity {
     let deepProgressTracker: DeepScanProgressTracker | null = null;
     let releaseCredentialHome: (() => Promise<void>) | null = null;
     let releaseExecution: (() => void) | undefined;
+    let cleanupRecipeProfile: (() => Promise<void>) | undefined;
     let scanFailure = false;
     let customValidationComplete = false;
     let completionCost: ScanCost | null = null;
@@ -1808,7 +1809,7 @@ export class CodexSecurity {
           threadId: null,
         };
       }
-      const recipe = await prepareSavedScanRecipe({
+      const preparedRecipe = await prepareSavedScanRecipe({
         expectation,
         session,
         options,
@@ -1817,6 +1818,8 @@ export class CodexSecurity {
         scanKnowledge,
         deepScan: deepScanConfiguration?.settings,
       });
+      const { recipe } = preparedRecipe;
+      cleanupRecipeProfile = preparedRecipe.cleanup;
       let skillName = "";
       let discoveryPrompt: string | undefined;
       if (mode !== "deep") {
@@ -1841,6 +1844,8 @@ export class CodexSecurity {
         scanDir,
         workbench: (args, input) => workbench(workbenchOptions, args, input),
       });
+      // New registrations own this recipe; resumes retain the original one.
+      if (!registered.resumed) cleanupRecipeProfile = undefined;
       const {
         registration,
         scanId,
@@ -3158,6 +3163,7 @@ export class CodexSecurity {
       // throws synchronously, still cannot skip a pending startup-lock release below.
       try {
         for (const cleanup of await Promise.allSettled([
+          cleanupRecipeProfile?.(),
           this.#preparedKnowledgeBase === undefined
             ? knowledgeBase?.cleanup()
             : undefined,
@@ -4359,14 +4365,13 @@ async function prepareSavedScanRecipe({
   knowledgeBaseSha256?: string;
   scanKnowledge?: KnowledgeBaseSnapshot;
   deepScan?: Required<DeepScanOptions>;
-}): Promise<JsonObject> {
+}): Promise<{ recipe: JsonObject; cleanup?: () => Promise<void> }> {
   const { runtime, preflightConfig, approvalPolicy } = session;
   const config: JsonObject = {
     ...preflightConfig,
     approval_policy: approvalPolicy,
   };
   const replay = scanReplaySettings(session.sessionConfig);
-  let providerProfile: JsonObject | undefined;
   if (!session.source.preserveProviderEnvironment) {
     const resolved = resolveCodexProfile(session.effectiveConfig);
     const modelProvider = scanModelProvider(resolved);
@@ -4384,14 +4389,6 @@ async function prepareSavedScanRecipe({
       replay["model_providers"] = { [modelProvider]: provider as JsonObject };
     }
   }
-  if (Object.keys(replay).length > 0) {
-    // Shell policy can carry credentials, just like provider configuration.
-    const saved = await createProviderProfile(runtime.codexHome, replay);
-    providerProfile = {
-      name: saved.name,
-      home: runtime.preserveCodexHomeConfig ? "ambient" : "managed",
-    };
-  }
   const recipe = scanRecipe({
     repository: expectation.repository,
     target: expectation.target,
@@ -4406,8 +4403,6 @@ async function prepareSavedScanRecipe({
     auth: options.auth,
     cyberAccessProgram: options.cyberAccessProgram,
   });
-  if (providerProfile !== undefined)
-    recipe["providerProfile"] = providerProfile;
   recipe["scanInputs"] = scanInputIdentity(options.scanPrompt, scanKnowledge);
   if (knowledgeBaseSha256 !== undefined)
     recipe["knowledgeBaseSha256"] = knowledgeBaseSha256;
@@ -4424,7 +4419,14 @@ async function prepareSavedScanRecipe({
     recipe["postScanPrompt"] = options.postScanPrompt;
   if (options.validationPrompt !== undefined)
     recipe["validationMode"] = "custom";
-  return recipe;
+  if (Object.keys(replay).length === 0) return { recipe };
+  // Shell policy can carry credentials, just like provider configuration.
+  const saved = await createProviderProfile(runtime.codexHome, replay);
+  recipe["providerProfile"] = {
+    name: saved.name,
+    home: runtime.preserveCodexHomeConfig ? "ambient" : "managed",
+  };
+  return { recipe, cleanup: saved.cleanup };
 }
 
 function scanRecipe({
