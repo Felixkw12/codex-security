@@ -1985,6 +1985,14 @@ export async function main(
                     [
                       ...Object.keys(NESTED_PATCH_GIT_ENVIRONMENT),
                       "GIT_INDEX_FILE",
+                      ...Object.keys(parentDependencies.environment).filter(
+                        (name) =>
+                          /^GIT_CONFIG_(?:COUNT|KEY_\d+|VALUE_\d+|PARAMETERS)$/u.test(
+                            process.platform === "win32"
+                              ? name.toUpperCase()
+                              : name,
+                          ),
+                      ),
                     ].map((name) => [
                       name,
                       environmentValue(parentDependencies.environment, name),

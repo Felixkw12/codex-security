@@ -17,6 +17,7 @@ test.each([
   "stored credentials",
   "provider override",
   "Git exclusions",
+  "Git config tuple",
 ] as const)(
   "snapshots inherit the prepared native context: %s",
   async (mode) => {
@@ -38,6 +39,13 @@ test.each([
       CODEX_SECURITY_STATE_DIR: state,
       GIT_CONFIG_GLOBAL: global,
       GIT_CONFIG_NOSYSTEM: "1",
+      ...(mode === "Git config tuple"
+        ? {
+            GIT_CONFIG_COUNT: "1",
+            GIT_CONFIG_KEY_0: "core.quotePath",
+            GIT_CONFIG_VALUE_0: "false",
+          }
+        : {}),
     };
     const git = repositoryGit(repository);
     git("init", "--initial-branch=main");
@@ -49,7 +57,7 @@ test.each([
     git("commit", "-m", "Synthetic baseline");
     const index = await readFile(join(repository, ".git", "index"));
     if (mode === "stored credentials") {
-      await mkdir(prepared, { recursive: true });
+      await mkdir(prepared, { recursive: true, mode: 0o700 });
       await writeFile(
         join(prepared, "auth.json"),
         '{"auth_mode":"apikey","OPENAI_API_KEY":"sk-synthetic-local-only"}\n',
@@ -63,7 +71,10 @@ test.each([
           (mode === "provider override"
             ? 'model_provider = "synthetic"\n'
             : provider +
-              '[shell_environment_policy]\ninherit = "all"\nexclude = ["GIT_*"]\n'),
+              '[shell_environment_policy]\ninherit = "all"\n' +
+              (mode === "Git config tuple"
+                ? "ignore_default_excludes = false\n"
+                : 'exclude = ["GIT_*"]\n')),
       );
     // Use real native configuration and preflight; substitute only the model turn.
     const proxy = join(root, "native-turn.cjs"),
