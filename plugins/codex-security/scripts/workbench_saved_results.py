@@ -2192,11 +2192,9 @@ def save_scan_artifact(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         if scan["status"] != "running" or scan["seal_manifest_digest"] is not None:
             raise SystemExit("The scan stopped; its artifacts cannot be modified.")
         scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
-        manifest_path = db.artifact_path(scan_dir, "scan-manifest.json", required=False)
-        if manifest_path is not None:
-            manifest = db.read_json_object(manifest_path).get("scan", {})
-            if manifest.get("sealedAt") is not None or manifest.get("artifacts") is not None:
-                raise SystemExit("The scan is sealed; its artifacts cannot be modified.")
+        manifest = db.read_scan_manifest(scan, scan_dir).get("scan", {})
+        if manifest.get("sealedAt") is not None or manifest.get("artifacts") is not None:
+            raise SystemExit("The scan is sealed; its artifacts cannot be modified.")
         output = args.artifact_path
         key = output.lower()
         if not (

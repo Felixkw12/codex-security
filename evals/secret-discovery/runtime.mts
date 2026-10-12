@@ -37,8 +37,8 @@ new Function("require", "module", "exports", bundle.outputFiles[0].text)(
 );
 // Keep the existing managed-policy profile name while using the shared checker.
 export const EVAL_PERMISSION_PROFILE_ID = "codex_security_deep_scan_worker";
-export const {
-  createPermissionCheckedCodex,
+const {
+  createPermissionCheckedCodex: createCheckedCodex,
   executablePathForSpawn,
   inlineToml,
   bundledCodexSdkEnvironment,
@@ -48,6 +48,21 @@ export const {
   inlineToml: typeof import("../../sdk/typescript/src/config.js").inlineToml;
   bundledCodexSdkEnvironment: typeof import("../../sdk/typescript/src/codex-sdk-environment.js").bundledCodexSdkEnvironment;
 };
+
+export { executablePathForSpawn, inlineToml, bundledCodexSdkEnvironment };
+
+export function createPermissionCheckedCodex(
+  options: Parameters<typeof createCheckedCodex>[0],
+  codex?: Parameters<typeof createCheckedCodex>[1],
+) {
+  return createCheckedCodex(
+    options,
+    codex,
+    fileURLToPath(
+      new URL("../../plugins/codex-security/native/dist", import.meta.url),
+    ),
+  );
+}
 
 /** Ask native Codex about saved login state before selecting an API-key fallback. */
 export async function shouldUseOpenAiApiKey(

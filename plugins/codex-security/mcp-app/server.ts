@@ -2166,7 +2166,7 @@ async function finalizeNativeStoppedScan(
       ? await acquireScanExecution(
           await workbenchStateDirectory(),
           scan.scanDir as string,
-          PLUGIN_ROOT,
+          join(PLUGIN_ROOT, "mcp", "native"),
           true,
         )
       : undefined;

@@ -17,6 +17,8 @@ import { afterEach, expect, test } from "bun:test";
 import { acquireScanExecution } from "../src/scan-execution.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
+const nativeRoot = join(PLUGIN_ROOT, "mcp", "native");
+
 const roots: string[] = [];
 afterEach(async () => {
   await Promise.all(
@@ -50,7 +52,7 @@ test("Node and Bun serialize one parent; release and owner death permit recovery
       "--eval",
       `import {acquireScanExecution} from ${JSON.stringify(module)};
     import {createInterface} from "node:readline";
-    const acquire = () => acquireScanExecution(${JSON.stringify(state)}, ${JSON.stringify(first)}, ${JSON.stringify(PLUGIN_ROOT)});
+    const acquire = () => acquireScanExecution(${JSON.stringify(state)}, ${JSON.stringify(first)}, ${JSON.stringify(nativeRoot)});
     let release = await acquire();
     console.log("owned");
     for await (const command of createInterface({input: process.stdin})) {
@@ -77,15 +79,15 @@ test("Node and Bun serialize one parent; release and owner death permit recovery
     const [lock] = await readdir(directory);
     await link(join(directory, lock!), join(root, "backup.lock"));
     await expect(
-      acquireScanExecution(state, first, PLUGIN_ROOT),
+      acquireScanExecution(state, first, nativeRoot),
     ).rejects.toThrow("already running");
-    const releaseOther = await acquireScanExecution(state, other, PLUGIN_ROOT);
+    const releaseOther = await acquireScanExecution(state, other, nativeRoot);
     releaseOther();
     const controller = new AbortController();
     const canceled = acquireScanExecution(
       state,
       first,
-      PLUGIN_ROOT,
+      nativeRoot,
       true,
       controller.signal,
     );
@@ -93,17 +95,17 @@ test("Node and Bun serialize one parent; release and owner death permit recovery
     await Bun.sleep(100);
     controller.abort(stopped);
     await expect(canceled).rejects.toBe(stopped);
-    const waiting = acquireScanExecution(state, first, PLUGIN_ROOT, true);
+    const waiting = acquireScanExecution(state, first, nativeRoot, true);
     void waiting.catch(() => undefined);
     await expect(
-      acquireScanExecution(state, first, PLUGIN_ROOT),
+      acquireScanExecution(state, first, nativeRoot),
     ).rejects.toThrow("already running");
     child.stdin!.write("release\n");
     expect((await output.next()).value).toBe("released");
     const release = await waiting;
     try {
       await expect(
-        acquireScanExecution(state, first, PLUGIN_ROOT),
+        acquireScanExecution(state, first, nativeRoot),
       ).rejects.toThrow("already running");
       child.stdin!.write("contend\n");
       expect((await output.next()).value).toBe("contended");
@@ -112,7 +114,7 @@ test("Node and Bun serialize one parent; release and owner death permit recovery
     }
     child.stdin!.write("acquire\n");
     expect((await output.next()).value).toBe("owned");
-    const recovered = acquireScanExecution(state, first, PLUGIN_ROOT, true);
+    const recovered = acquireScanExecution(state, first, nativeRoot, true);
     child.kill();
     await exited;
     (await recovered)();
@@ -131,17 +133,17 @@ test("rejects a lock path replaced by a directory", async () => {
   const state = join(root, "state");
   const scan = join(root, "scan");
   await mkdir(scan);
-  (await acquireScanExecution(state, scan, PLUGIN_ROOT))();
+  (await acquireScanExecution(state, scan, nativeRoot))();
   const directory = join(state, "scan-execution");
   const entries = await readdir(directory);
   expect(entries).toHaveLength(1);
   const lock = join(directory, entries[0]!);
   await rm(lock);
   await mkdir(lock);
-  await expect(acquireScanExecution(state, scan, PLUGIN_ROOT)).rejects.toThrow(
+  await expect(acquireScanExecution(state, scan, nativeRoot)).rejects.toThrow(
     "ordinary file",
   );
   await expect(
-    acquireScanExecution(state, scan, PLUGIN_ROOT, true),
+    acquireScanExecution(state, scan, nativeRoot, true),
   ).rejects.toThrow("ordinary file");
 });

@@ -41,7 +41,7 @@ export class ScanPermissionError extends Error {}
 export async function acquireScanExecution(
   stateDirectory: string,
   scanDirectory: string,
-  pluginRoot: string,
+  nativeRoot: string,
   wait = false,
   signal?: AbortSignal,
 ): Promise<() => void> {
@@ -72,9 +72,7 @@ export async function acquireScanExecution(
         ? "-musl"
         : "-gnu";
   const nativeDirectory = join(
-    pluginRoot,
-    "mcp",
-    "native",
+    nativeRoot,
     `${process.platform}-${process.arch}${libc}`,
   );
   const require = createRequire(import.meta.url);

@@ -1564,7 +1564,11 @@ export class CodexSecurity {
           scanDir = requestedOutput!;
           releaseExecution ??= await (
             this.#dependencies.acquireScanExecution ?? acquireScanExecution
-          )(stateDirectory, scanDir, await bundledPluginRoot());
+          )(
+            stateDirectory,
+            scanDir,
+            join(await bundledPluginRoot(), "mcp", "native"),
+          );
           checkOpen();
           const registered = await registerScan({
             scan: options,
@@ -1725,7 +1729,11 @@ export class CodexSecurity {
         if (existingOutput)
           releaseExecution ??= await (
             this.#dependencies.acquireScanExecution ?? acquireScanExecution
-          )(stateDirectory, requestedOutput, await bundledPluginRoot());
+          )(
+            stateDirectory,
+            requestedOutput,
+            join(await bundledPluginRoot(), "mcp", "native"),
+          );
       }
       const scanOutputRoot =
         requestedOutput === null &&
@@ -1761,7 +1769,11 @@ export class CodexSecurity {
       requireModelSafeOutputDir(scanDir);
       releaseExecution ??= await (
         this.#dependencies.acquireScanExecution ?? acquireScanExecution
-      )(stateDirectory, scanDir, await bundledPluginRoot());
+      )(
+        stateDirectory,
+        scanDir,
+        join(await bundledPluginRoot(), "mcp", "native"),
+      );
       if (!options.archiveExisting) {
         notifyObserver(options, "onOutputDirReady")(scanDir);
       }

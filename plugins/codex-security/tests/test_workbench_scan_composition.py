@@ -2474,6 +2474,28 @@ def test_composed_recovery_records_child_failure_and_continues(workbench_api, mo
     assert result["complete"] is False
 
 
+@pytest.mark.parametrize("contents", ['{"scan":', '{"scan":{}}'])
+def test_recorded_seal_cannot_be_reclassified_as_an_unsealed_draft(
+    tmp_path: Path, workbench_api, contents: str
+) -> None:
+    state, target = _scan_workspace(tmp_path)
+    scan = register(state, target, tmp_path / "scan")
+    directory = Path(scan["scanDir"])
+    write_completed_contract(directory, scan["scanId"], target, relative_path="app.py")
+    run_workbench(state, "complete-scan", "--scan-id", scan["scanId"])
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute("SELECT * FROM scans WHERE id = ?", (scan["scanId"],)).fetchone()
+        assert row["seal_manifest_digest"] is not None
+        producer = workbench_api["sealed_scan_producer_version"]
+        assert isinstance(producer(row), str)
+        manifest = directory / "scan-manifest.json"
+        manifest.write_text(contents)
+        with pytest.raises(SystemExit):
+            producer(row)
+        assert manifest.read_text() == contents
+
+
 @pytest.mark.parametrize("saved_recipe", [False, True])
 @pytest.mark.parametrize("artifact_state", ["unsealed", "sealed", "tampered"])
 def test_native_legacy_registration_only_rejoins_validated_sealed_results(

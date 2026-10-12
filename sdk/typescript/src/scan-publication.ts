@@ -68,6 +68,8 @@ export async function hasSealedScanArtifacts(
       ).toString("utf8"),
     );
   } catch (error) {
+    // An interrupted draft can be repaired; recorded seals are checked by the workbench.
+    if (error instanceof SyntaxError) return false;
     if (
       error instanceof Error &&
       isRecord(error.cause) &&

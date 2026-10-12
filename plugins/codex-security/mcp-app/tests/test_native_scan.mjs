@@ -2625,11 +2625,15 @@ test("native saved scans retain settings, auth environment, permissions and iden
     const releaseOwner = await acquireScanExecution(
       root,
       ownedDirectory,
-      nativePlugin,
+      join(nativePlugin, "mcp", "native"),
     );
     let acquired = false;
     const joined = client.dependencies
-      .acquireScanExecution(root, ownedDirectory, nativePlugin)
+      .acquireScanExecution(
+        root,
+        ownedDirectory,
+        join(nativePlugin, "mcp", "native"),
+      )
       .then((release) => {
         acquired = true;
         return release;
@@ -3208,7 +3212,7 @@ test("queued native hosts reload the accepted recipe before preparing execution"
     nativeFixture.workbench = async (_options, [command]) => {
       assert.equal(command, "get-scan");
       await assert.rejects(
-        acquireScanExecution(state, scanDir, pluginRoot),
+        acquireScanExecution(state, scanDir, join(pluginRoot, "mcp", "native")),
         /already running/,
       );
       return { recipe };
@@ -3217,7 +3221,7 @@ test("queued native hosts reload the accepted recipe before preparing execution"
       const release = await client.dependencies.acquireScanExecution(
         state,
         scanDir,
-        pluginRoot,
+        join(pluginRoot, "mcp", "native"),
       );
       try {
         launches.push({ config: client.config.codexOverrides, options });
@@ -3241,11 +3245,15 @@ test("queued native hosts reload the accepted recipe before preparing execution"
         const releaseChild = await client.dependencies.acquireScanExecution(
           state,
           join(root, "child"),
-          pluginRoot,
+          join(pluginRoot, "mcp", "native"),
         );
         try {
           await assert.rejects(
-            acquireScanExecution(state, join(root, "child"), pluginRoot),
+            acquireScanExecution(
+              state,
+              join(root, "child"),
+              join(pluginRoot, "mcp", "native"),
+            ),
             /already running/,
           );
         } finally {
@@ -3288,7 +3296,13 @@ test("queued native hosts reload the accepted recipe before preparing execution"
       ],
       "deny",
     );
-    (await acquireScanExecution(state, scanDir, pluginRoot))();
+    (
+      await acquireScanExecution(
+        state,
+        scanDir,
+        join(pluginRoot, "mcp", "native"),
+      )
+    )();
   } finally {
     releaseFirst.resolve();
     await Promise.all(hosts.map((host) => host.close()));

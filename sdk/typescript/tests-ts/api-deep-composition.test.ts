@@ -8,6 +8,7 @@ import {
   cp,
   mkdir,
   readFile,
+  readdir,
   rename,
   rm,
   writeFile,
@@ -2563,6 +2564,67 @@ test("budgeted resume retries pending child retirement before rejecting unavaila
   expect(h.records.size).toBe(2);
   expect(h.commands).not.toContain("complete-budget-exhausted-scan");
 });
+
+test.each(
+  (["standard", "deep"] as const).flatMap((role) =>
+    ["missing", "valid", "truncated"].map((manifest) => ({ role, manifest })),
+  ),
+)(
+  "composed resume repairs unfinished canonical manifests: %j",
+  async ({ role, manifest }) => {
+    const h = await fixture();
+    const options = { ...h.options, knowledgeBasePaths: undefined, workers: 1 };
+    h.stopBeforeSealing(role);
+    await using first = h.makeClient();
+    await expect(first.run(h.repository, options)).rejects.toBeInstanceOf(
+      ScanTransportClosedError,
+    );
+    const [parentId] = [...h.records].find(([, row]) => row.mode === "deep")!;
+    const [scanId, record] = [...h.records].find(
+      ([, row]) => row.mode === role,
+    )!;
+    const directory = record.registration["scanDir"] as string;
+    const savedThreads = [...h.threadScans].filter(([, id]) => id === scanId);
+    expect(savedThreads).toHaveLength(1);
+    const checkpoints = join(directory, "checkpoints");
+    const retained = await Promise.all(
+      (await readdir(checkpoints))
+        .filter((name) => name.endsWith(".json"))
+        .map(async (name) => ({
+          name,
+          bytes: await readFile(join(checkpoints, name)),
+        })),
+    );
+    expect(retained.length).toBeGreaterThan(0);
+    const manifestPath = join(directory, "scan-manifest.json");
+    expect(
+      JSON.parse(await readFile(manifestPath, "utf8")).scan.sealedAt,
+    ).toBeUndefined();
+    if (manifest === "missing") await rm(manifestPath);
+    else if (manifest === "truncated")
+      await writeFile(manifestPath, '{"scan":');
+    await using resumed = h.makeClient();
+    const result = await resumed.run(h.repository, {
+      ...options,
+      signal: undefined,
+      resumeScanId: parentId,
+    });
+    expect(result.manifest.scan.id).toBe(parentId);
+    expect(result.findings.findings).toHaveLength(2);
+    expect(h.records.size).toBe(3);
+    expect([...h.threadScans].filter(([, id]) => id === scanId)).toEqual(
+      savedThreads,
+    );
+    if (role === "standard")
+      expect(
+        h.launches.filter(
+          (launch) => launch.options.env!["CODEX_SECURITY_SCAN_ID"] === scanId,
+        ),
+      ).toHaveLength(2);
+    for (const { name, bytes } of retained)
+      expect(await readFile(join(checkpoints, name))).toEqual(bytes);
+  },
+);
 
 test.each(["relative", "absolute", "profile"] as const)(
   "Deep instruction files retain their parent origin across fresh and resumed workers (%s)",

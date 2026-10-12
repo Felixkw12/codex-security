@@ -1491,27 +1491,39 @@ def complete_scan_locked(
     return context
 
 
+def read_scan_manifest(scan: sqlite3.Row, scan_dir: Path) -> dict[str, Any]:
+    """Keep recorded seals authoritative while allowing interrupted unsealed drafts."""
+    require_recorded_manifest_digest(scan, scan_dir)
+    path = artifact_path(scan_dir, ARTIFACTS["manifest"], required=False)
+    if path is None:
+        return {}
+    try:
+        return read_json_object(path)
+    except SystemExit as exc:
+        if scan["seal_manifest_digest"] is not None or not isinstance(exc.__cause__, ValueError):
+            raise
+        return {}
+
+
 def sealed_scan_producer_version(scan: sqlite3.Row) -> str | None:
     # A process can stop after sealing files but before committing completion.
     scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
-    manifest_path = artifact_path(scan_dir, ARTIFACTS["manifest"], required=False)
-    if manifest_path is not None:
-        manifest = read_json_object(manifest_path)
-        manifest_scan = manifest.get("scan")
-        if isinstance(manifest_scan, dict) and (
-            manifest_scan.get("sealedAt") is not None
-            or manifest_scan.get("artifacts") not in (None, [])
-        ):
-            try:
-                binding = workbench_completion_binding(scan, scan["started_at"], manifest)
-                _prepare_scan_finalization(
-                    scan_dir,
-                    expected_coverage_mode=binding["coverageMode"],
-                    completion_binding=binding,
-                )
-                return manifest_scan["producer"]["version"]
-            except ContractError as exc:
-                raise SystemExit(f"Cannot resume sealed scan: {exc}") from exc
+    manifest = read_scan_manifest(scan, scan_dir)
+    manifest_scan = manifest.get("scan")
+    if isinstance(manifest_scan, dict) and (
+        manifest_scan.get("sealedAt") is not None
+        or manifest_scan.get("artifacts") not in (None, [])
+    ):
+        try:
+            binding = workbench_completion_binding(scan, scan["started_at"], manifest)
+            _prepare_scan_finalization(
+                scan_dir,
+                expected_coverage_mode=binding["coverageMode"],
+                completion_binding=binding,
+            )
+            return manifest_scan["producer"]["version"]
+        except ContractError as exc:
+            raise SystemExit(f"Cannot resume sealed scan: {exc}") from exc
     return None
 
 

@@ -180,7 +180,11 @@ test("preflight waits are isolated by home and can be canceled before spawning",
   const root = await mkdtemp(join(tmpdir(), "permission-home-lock-"));
   const homes = [join(root, "first"), join(root, "second")];
   await Promise.all(homes.map((home) => mkdir(home, { mode: 0o700 })));
-  const release = await acquireScanExecution(homes[0]!, homes[0]!, PLUGIN_ROOT);
+  const release = await acquireScanExecution(
+    homes[0]!,
+    homes[0]!,
+    join(PLUGIN_ROOT, "mcp", "native"),
+  );
   const executable = join(root, "synthetic-codex.exe");
   const script = join(root, "preflight.cjs");
   await writeFile(

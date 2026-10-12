@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
+import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import {
   Codex,
@@ -24,6 +25,7 @@ import { VERSION } from "./version.js";
 export function createPermissionCheckedCodex(
   { config, configOverrides, ...options }: CodexOptions,
   suppliedCodex?: Pick<Codex, "startThread" | "resumeThread">,
+  nativeRoot?: string,
 ) {
   // Raw tables preserve literal MCP server names and filesystem selectors.
   const overrides = [
@@ -114,7 +116,7 @@ export function createPermissionCheckedCodex(
         const release = await acquireScanExecution(
           home,
           home,
-          await bundledPluginRoot(),
+          nativeRoot ?? join(await bundledPluginRoot(), "mcp", "native"),
           true,
           signal,
         );

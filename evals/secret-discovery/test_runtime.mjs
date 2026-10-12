@@ -15,6 +15,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { getEventListeners } from "node:events";
 import { syncBuiltinESMExports } from "node:module";
 import { delimiter, dirname, join, win32 } from "node:path";
@@ -429,6 +430,51 @@ if (kind === "preflight") {
 }
 `;
 }
+
+test(
+  "source-only eval setup runs without a packaged plugin",
+  unixOnly,
+  async (t) => {
+    const { directory, prepared, settings, result } = await nativeFixture(t);
+    const source = join(directory, "source-only");
+    for (const relative of [
+      "sdk/typescript/src",
+      "sdk/typescript/node_modules",
+      "plugins/codex-security/native/dist",
+    ]) {
+      const destination = join(source, relative);
+      await mkdir(dirname(destination), { recursive: true });
+      await symlink(
+        fileURLToPath(new URL("../../" + relative, import.meta.url)),
+        destination,
+        "dir",
+      );
+    }
+    const runtime = join(source, "evals/secret-discovery/runtime.mts");
+    await mkdir(dirname(runtime), { recursive: true });
+    await writeFile(
+      runtime,
+      await readFile(new URL("./runtime.mts", import.meta.url)),
+    );
+    await assert.rejects(
+      access(join(source, "sdk/typescript/_bundled_plugin")),
+      {
+        code: "ENOENT",
+      },
+    );
+    const sourceRuntime = await import(pathToFileURL(runtime).href);
+    const { report, semanticResult } = await runPreparedEval(
+      prepared,
+      sourceRuntime.createPermissionCheckedCodex(settings),
+    );
+    assert.equal(report.passed, true);
+    assert.deepEqual(semanticResult, result);
+    assert.deepEqual(
+      (await readJson(join(directory, "preflight.json"))).config,
+      (await readJson(join(directory, "exec.json"))).config,
+    );
+  },
+);
 
 test(
   "native preflight and SDK exec share effective settings and fallback auth",

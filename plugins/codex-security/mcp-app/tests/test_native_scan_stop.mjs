@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { build } from "esbuild";
@@ -74,6 +74,19 @@ const bundle = await build({
 
 function serverFor(fixture) {
   fixture.ScanPermissionError = class ScanPermissionError extends Error {};
+  const acquire = fixture.acquire;
+  fixture.acquire = (...args) => {
+    assert.equal(
+      args[2],
+      join(
+        process.env.CODEX_SECURITY_PLUGIN_ROOT ||
+          fileURLToPath(new URL("../../", import.meta.url)),
+        "mcp",
+        "native",
+      ),
+    );
+    return acquire?.apply(fixture, args) ?? Promise.resolve(() => {});
+  };
   const workbench = fixture.workbench.bind(fixture);
   fixture.workbench = (args) =>
     args[0] === "database-info"

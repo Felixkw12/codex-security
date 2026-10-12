@@ -151,7 +151,7 @@ async function prepareOwnedNativeScan(
   const release = await acquireScanExecution(
     stateDirectory,
     input.scan.scanDir,
-    input.pluginRoot,
+    join(input.pluginRoot, "mcp", "native"),
     true,
     signal,
   );
@@ -338,12 +338,12 @@ export async function prepareNativeScan(
       environment,
       inheritedPermissions,
       ambientExecution,
-      acquireScanExecution: (state, directory, plugin) =>
+      acquireScanExecution: (state, directory, nativeRoot) =>
         ownership &&
         state === ownership.stateDirectory &&
         directory === input.scan.scanDir
           ? Promise.resolve(() => {})
-          : acquireScanExecution(state, directory, plugin, true, signal),
+          : acquireScanExecution(state, directory, nativeRoot, true, signal),
     },
     { surface: "sdk" },
   );
