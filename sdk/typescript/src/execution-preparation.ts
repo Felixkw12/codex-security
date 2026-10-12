@@ -411,7 +411,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 export interface AmbientExecution {
-  readonly command: CodexCommand;
+  readonly command?: CodexCommand;
   readonly configuration: JsonObject;
   readonly environment: ProcessEnvironment;
   readonly preserveProviderEnvironment: boolean;
@@ -553,7 +553,7 @@ export async function nativeScanConfiguration(
       throw error;
     },
   );
-  const selected = environment["CODEX_SECURITY_CONFIG_PATH"]
+  const selected = environment["CODEX_SECURITY_CONFIG_PATH"]?.trim()
     ? parseToml(
         await readFile(environment["CODEX_SECURITY_CONFIG_PATH"], "utf8"),
       )

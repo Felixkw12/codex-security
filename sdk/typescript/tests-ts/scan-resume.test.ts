@@ -1727,7 +1727,6 @@ with sqlite3.connect(sys.argv[1]) as connection:
         ...(native
           ? {
               ambientExecution: {
-                command: { command: "synthetic-unused-codex" },
                 configuration: {},
                 environment: f.environment,
                 preserveProviderEnvironment: false,
@@ -1735,6 +1734,9 @@ with sqlite3.connect(sys.argv[1]) as connection:
               },
             }
           : {}),
+        resolveCodexCommand: async () => {
+          throw new Error("Saved publication must not resolve Codex.");
+        },
         prepareRuntime: async () => {
           throw new Error(
             "Saved publication must not prepare a Codex runtime.",

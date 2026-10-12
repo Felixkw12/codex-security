@@ -18,7 +18,7 @@ from report_projection import SEVERITY_ORDER
 from workbench.handoff import require_current_continuation
 from workbench_composition import CompositionView
 from workbench_constants import FINDINGS_PAGE_MAX
-from workbench_scan_start import scan_target_identity
+from workbench_scan_start import scan_target_identity, stored_scan_target_identity
 from workbench_scan_usage import stored_scan_cost_fields
 from workbench_target import git_output, require_scan_target_identity
 from workbench_validation import reject_non_finite_json, timestamp_key
@@ -81,12 +81,7 @@ def cli_scan_resume(
         raise SystemExit(
             "Cannot resume: the original checkout is missing or was replaced."
         ) from exc
-    if scan_target_identity(repository, None) != (
-        scan["target_revision"],
-        scan["target_snapshot_digest"],
-        scan["target_device"],
-        scan["target_inode"],
-    ):
+    if scan_target_identity(repository, None) != stored_scan_target_identity(scan):
         raise SystemExit("Cannot resume: the original checkout revision or contents changed.")
     recipe = parse_scan_recipe(scan["recipe_json"], repository)
     result = scan_registration(connection, scan, scan_contract)

@@ -1,3 +1,4 @@
+import { expandHomePath } from "../../../../sdk/typescript/src/codex-home.js";
 import {
   accessSync,
   constants as fsConstants,
@@ -60,7 +61,9 @@ export async function snapshotNativeEnvironment(): Promise<
     delete environment.CODEX_HOME;
   } else if (codexHome !== undefined && codexHome.length > 0) {
     // Resolve symlink/.. paths before consumers normalize them or change cwd.
-    environment.CODEX_HOME = await fs.realpath(codexHome);
+    environment.CODEX_HOME = await fs.realpath(
+      expandHomePath(codexHome, environment),
+    );
   }
   return environment;
 }

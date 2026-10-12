@@ -1,3 +1,4 @@
+import { expandHomePath } from "../../../../sdk/typescript/src/codex-home.js";
 import { hasSealedScanArtifacts } from "../../../../sdk/typescript/src/scan-publication.js";
 import { join } from "node:path";
 import { restoreScanKnowledge } from "../../../../sdk/typescript/src/scan-inputs.js";
@@ -121,20 +122,27 @@ export async function prepareNativeScan(
   input: NativeScanInput,
   signal?: AbortSignal,
 ): Promise<PreparedNativeScan> {
-  const inheritedEnvironment = await snapshotNativeEnvironment();
-  const codex = await resolveTrustedCodex(
-    inheritedEnvironment,
-    (await gitMarkerRoot(input.scan.targetPath, signal, "outermost")) ??
-      input.scan.targetPath,
-  );
-  if (codex === null) {
-    throw new CodexSecurityError(
-      `Could not resolve a Codex executable outside the scan target: ${resolveCodexPath(inheritedEnvironment)}`,
+  const environment: NodeJS.ProcessEnv = await snapshotNativeEnvironment();
+  if (input.recipe !== undefined)
+    delete environment.CODEX_SECURITY_KNOWLEDGE_BASE;
+  const originalCwd = process.cwd();
+  const resolveCommand = async () => {
+    const codex = await resolveTrustedCodex(
+      environment,
+      (await gitMarkerRoot(input.scan.targetPath, signal, "outermost")) ??
+        input.scan.targetPath,
+      process.platform,
+      originalCwd,
     );
-  }
-  const environment: NodeJS.ProcessEnv = {
-    ...codex.environment,
-    CODEX_CLI_PATH: codex.executable,
+    if (codex === null) {
+      throw new CodexSecurityError(
+        `Could not resolve a Codex executable outside the scan target: ${resolveCodexPath(environment, process.platform, originalCwd)}`,
+      );
+    }
+    Object.assign(environment, codex.environment, {
+      CODEX_CLI_PATH: codex.executable,
+    });
+    return { command: codex.executable };
   };
   if (input.stateDirectory)
     environment.CODEX_SECURITY_STATE_DIR = input.stateDirectory;
@@ -201,7 +209,7 @@ export async function prepareNativeScan(
     cyberAccessProgram: recipe.cyberAccessProgram,
     knowledgeBasePaths:
       recipe.knowledgeBasePaths ??
-      (environment.CODEX_SECURITY_KNOWLEDGE_BASE
+      (input.recipe === undefined && environment.CODEX_SECURITY_KNOWLEDGE_BASE
         ? [environment.CODEX_SECURITY_KNOWLEDGE_BASE]
         : undefined),
     maxCostUsd: recipe.maxCostUsd,
@@ -211,19 +219,23 @@ export async function prepareNativeScan(
     scanPrompt: input.scan.userContext ?? undefined,
     outputDir: input.scan.scanDir,
   });
-  const deep = await resolveDeepScanConfig(
-    options,
-    environment.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH?.trim() ||
-      join(
-        environment.CODEX_HOME || configuredCodexHome(environment),
-        "codex-security",
-        "config.toml",
-      ),
-  );
   const publicationOnly =
     input.recipe !== undefined &&
     !options.postScanPrompt?.trim() &&
     (await hasSealedScanArtifacts(input.scan.scanDir, signal));
+  const command = publicationOnly ? undefined : await resolveCommand();
+  const deep = await resolveDeepScanConfig(
+    options,
+    expandHomePath(
+      environment.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH?.trim() ||
+        join(
+          environment.CODEX_HOME || configuredCodexHome(environment),
+          "codex-security",
+          "config.toml",
+        ),
+      environment,
+    ),
+  );
   // The SDK validates the saved seal, owner and claim before publishing.
   // Read-only publication does not need the model's private configuration.
   const config = publicationOnly
@@ -245,7 +257,7 @@ export async function prepareNativeScan(
   }
   const ambientInput = {
     environment,
-    command: { command: codex.executable },
+    ...(command === undefined ? {} : { command }),
     configuration: config,
     auth: options.auth,
     pluginRoot: input.pluginRoot,
@@ -256,7 +268,10 @@ export async function prepareNativeScan(
         preserveProviderEnvironment:
           recipe.preserveProviderEnvironment === true,
       }
-    : await prepareAmbientExecution(ambientInput, signal);
+    : await prepareAmbientExecution(
+        { ...ambientInput, command: command! },
+        signal,
+      );
   options.auth = ambientExecution.auth;
   const selectedEnvironment = ambientExecution.environment;
   const configuredProvider = ambientExecution.preserveProviderEnvironment;
@@ -270,6 +285,7 @@ export async function prepareNativeScan(
       environment: selectedEnvironment,
       inheritedPermissions,
       ambientExecution,
+      resolveCodexCommand: resolveCommand,
       acquireScanExecution: (state, directory, plugin) =>
         waitForScanExecution(state, directory, plugin, signal),
     },

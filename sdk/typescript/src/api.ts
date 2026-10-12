@@ -497,7 +497,7 @@ interface ClientDependencies {
   prepareScanArtifactRestorer?: typeof prepareScanArtifactRestorer;
   acquireScanExecution?: typeof acquireScanExecution;
   repositoryRevision?: typeof repositoryRevision;
-  resolveCodexCommand?: () => CodexCommand;
+  resolveCodexCommand?: () => CodexCommand | Promise<CodexCommand>;
   probeCodexSandbox?: typeof probeCodexSandbox;
   runWorkbench?: typeof runWorkbench;
   matchFindings?: typeof matchScanFindingsInternal;
@@ -3195,7 +3195,7 @@ export class CodexSecurity {
       const source =
         this.#dependencies.preparedSource ??
         prepareExecutionSource({
-          command: this.#codexCommand(),
+          command: await this.#codexCommand(),
           configuration: resolveCommandAuthConfig(
             await mergedCodexConfig(this.config),
             configuredCodexHome(this.#dependencies.environment),
@@ -3432,7 +3432,7 @@ export class CodexSecurity {
     return handle;
   }
 
-  #codexCommand(): CodexCommand {
+  async #codexCommand(): Promise<CodexCommand> {
     return (
       this.#dependencies.ambientExecution?.command ??
       this.#dependencies.resolveCodexCommand?.() ??
@@ -3442,7 +3442,7 @@ export class CodexSecurity {
 
   async #providerPreflightCommand(config?: JsonObject): Promise<CodexCommand> {
     return await providerPreflightCommand(
-      this.#codexCommand(),
+      await this.#codexCommand(),
       config ?? (await mergedCodexConfig(this.config)),
     );
   }

@@ -196,9 +196,12 @@ def project_completed_scan(request: ProjectionRequest) -> ProjectedScan:
         raise ContractError("Only a sealed completed scan can be merged as a completed scan")
     # Use the saved receipt, not only the hashes supplied by the artifact itself.
     import workbench_db
+    from workbench_scan_start import require_deep_pass_target, stored_scan_target_identity
 
     with closing(workbench_db.connect()) as connection:
         source = workbench_db.require_scan(connection, request["sourceScanId"])
+        parent = workbench_db.require_scan(connection, request["parentScanId"])
+        require_deep_pass_target(parent, stored_scan_target_identity(source))
         workbench_db.require_recorded_manifest_digest(source, source_directory)
         workbench_db.verify_manifest_binding(source, manifest)
     expected = request["expectedParentIdentity"]

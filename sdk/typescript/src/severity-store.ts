@@ -1,8 +1,8 @@
 import { stat } from "node:fs/promises";
-import { workflowDigest } from "./finding-workflow.js";
 import { join } from "node:path";
 import {
   severityClassificationSchema,
+  severityFindingDigest,
   type SeverityAssessment,
   type SeverityClassification,
   type SeverityClassificationCheckpoint,
@@ -44,7 +44,7 @@ export class SeverityStore {
           inputs: Object.fromEntries(
             findings.map((finding) => [
               finding.findingId,
-              workflowDigest(finding),
+              severityFindingDigest(finding),
             ]),
           ),
           assessedAt: result.assessedAt,

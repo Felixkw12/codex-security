@@ -60,6 +60,24 @@ def scan_target_identity(
     )
 
 
+def stored_scan_target_identity(scan: sqlite3.Row) -> tuple[str, str | None, int | str, int | str]:
+    return (
+        scan["target_revision"],
+        scan["target_snapshot_digest"],
+        scan["target_device"],
+        scan["target_inode"],
+    )
+
+
+def require_deep_pass_target(
+    parent: sqlite3.Row, identity: tuple[str, str | None, int | str, int | str]
+) -> None:
+    if stored_scan_target_identity(parent) != identity:
+        raise SystemExit(
+            "A Deep Scan pass must retain its parent's checkout revision and contents."
+        )
+
+
 def scan_diff_identity(
     diff_target: dict[str, str] | None,
 ) -> tuple[str | None, str | None, str | None, str | None]:

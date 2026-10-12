@@ -1048,20 +1048,30 @@ export function createCodexSecurityServer(): McpServer {
         );
         return nativeScanCompletedResult(scan, "get-scan");
       } catch (error: unknown) {
-        if (error instanceof ScanPermissionError)
-          return toolErrorResult(deepScanInvocationFailureMessage(error));
         if (startedScan) {
           const current = await runWorkbench([
             "get-scan",
             "--scan-id",
             startedScan.scanId,
           ]).catch(() => undefined);
-          if (isJsonObject(current?.scan)) {
+          if (
+            isJsonObject(current?.scan) &&
+            (!(error instanceof ScanPermissionError) ||
+              (isJsonObject(current.scan.progress) &&
+                (current.scan.progress.status === "failed" ||
+                  current.scan.progress.status === "canceled")))
+          ) {
             const terminal = await nativeScanTerminalResult(
               current.scan as unknown as ScanResults,
               nativeScans,
             );
-            if (terminal) return terminal;
+            if (terminal)
+              return error instanceof ScanPermissionError
+                ? {
+                    ...terminal,
+                    ...toolErrorResult(deepScanInvocationFailureMessage(error)),
+                  }
+                : terminal;
           }
         }
         return toolErrorResult(deepScanInvocationFailureMessage(error));

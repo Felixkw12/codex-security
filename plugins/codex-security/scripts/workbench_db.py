@@ -81,6 +81,7 @@ from workbench_local_dedupe import local_dedupe
 from workbench_scan_start import (
     archive_scan,
     insert_running_scan,
+    require_deep_pass_target,
     safe_segment,
     scan_diff_identity,
     scan_target_identity,
@@ -1633,8 +1634,10 @@ def register_cli_scan(
                     raise SystemExit(
                         "A rerun must belong to the same repository as its parent scan."
                     )
-                if parent_scan_role == "deep_pass" and parent["mode"] != "deep":
-                    raise SystemExit("A Deep Scan pass must belong to a Deep Scan parent.")
+                if parent_scan_role == "deep_pass":
+                    if parent["mode"] != "deep":
+                        raise SystemExit("A Deep Scan pass must belong to a Deep Scan parent.")
+                    require_deep_pass_target(parent, target_identity)
 
             connection.execute(
                 """

@@ -49,6 +49,7 @@ from workbench_composition import (
     load_composition,
 )
 from workbench_constants import PHASES
+from workbench_scan_start import require_deep_pass_target, stored_scan_target_identity
 from workbench_scan_usage import merge_scan_cost
 from workbench_target import committed_diff_snapshot_digest
 from workbench_validation import path_within_scope
@@ -2197,6 +2198,7 @@ def save_composed_checkpoint(
         if child["id"] in merged_ids:
             continue
         try:
+            require_deep_pass_target(scan, stored_scan_target_identity(child))
             draft = _stopped_child_draft(db, db.require_scan(connection, child["id"]), scan_dir)
         except (ContractError, OSError, SystemExit, ValueError) as exc:
             recovery_errors[child["id"]] = str(exc)

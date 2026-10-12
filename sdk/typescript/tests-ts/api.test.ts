@@ -1691,11 +1691,14 @@ describe("CodexSecurity orchestration", () => {
           prepareOutputDir: async () => scanDir,
           repositoryRevision: async () => "deadbeef",
           // The injected model client needs no process; an auth probe must fail.
-          resolveCodexCommand: () => ({
+          resolveCodexCommand: async () => ({
             command: join(root, "unexpected-openai-auth.exe"),
           }),
           createCodex: (options: CodexOptions) => {
             codexOptions = options;
+            expect(options.env?.["CODEX_CLI_PATH"]).toBe(
+              join(root, "unexpected-openai-auth.exe"),
+            );
             return {
               startThread: () => ({
                 id: null,
@@ -6803,40 +6806,46 @@ describe("CodexSecurity orchestration", () => {
     }
   });
 
-  test("authenticates without initializing the plugin runtime", async () => {
-    const root = await temporaryDirectory();
-    const stateDirectory = join(root, "state");
-    const codexHome = join(stateDirectory, "codex-home");
-    const fakeCodex = join(root, "codex.mjs");
-    await writeFile(fakeCodex, "process.exitCode = 1;\n");
-    const fakeCommand = nodeCodex(fakeCodex);
-    const client = new TestClient(
-      { pluginPath: join(root, "missing-plugin") },
-      {
-        environment: {
-          CODEX_HOME: join(root, "ambient-codex-home"),
-          CODEX_SECURITY_STATE_DIR: stateDirectory,
-          ...fakeCommand.environment,
+  test.each([false, true])(
+    "authenticates without initializing the plugin runtime (async resolver: %p)",
+    async (asynchronous) => {
+      const root = await temporaryDirectory();
+      const stateDirectory = join(root, "state");
+      const codexHome = join(stateDirectory, "codex-home");
+      const fakeCodex = join(root, "codex.mjs");
+      await writeFile(fakeCodex, "process.exitCode = 1;\n");
+      const fakeCommand = nodeCodex(fakeCodex);
+      const client = new TestClient(
+        { pluginPath: join(root, "missing-plugin") },
+        {
+          environment: {
+            CODEX_HOME: join(root, "ambient-codex-home"),
+            CODEX_SECURITY_STATE_DIR: stateDirectory,
+            ...fakeCommand.environment,
+          },
+          prepareRuntime: async () => {
+            throw new Error("authentication must not initialize the plugin");
+          },
+          resolveCodexCommand: () =>
+            asynchronous
+              ? Promise.resolve(fakeCommand.command)
+              : fakeCommand.command,
         },
-        prepareRuntime: async () => {
-          throw new Error("authentication must not initialize the plugin");
-        },
-        resolveCodexCommand: () => fakeCommand.command,
-      },
-    );
+      );
 
-    try {
-      await expect(client.account()).resolves.toMatchObject({
-        authenticated: false,
-      });
-      expect(existsSync(join(codexHome, "config.toml"))).toBe(false);
-      expect(existsSync(join(codexHome, "sdk-marketplace"))).toBe(false);
-    } finally {
-      await client.close();
-    }
+      try {
+        await expect(client.account()).resolves.toMatchObject({
+          authenticated: false,
+        });
+        expect(existsSync(join(codexHome, "config.toml"))).toBe(false);
+        expect(existsSync(join(codexHome, "sdk-marketplace"))).toBe(false);
+      } finally {
+        await client.close();
+      }
 
-    expect(existsSync(codexHome)).toBe(true);
-  });
+      expect(existsSync(codexHome)).toBe(true);
+    },
+  );
 
   test("passes environment API keys transiently without native login or keyring persistence", async () => {
     const root = await temporaryDirectory();

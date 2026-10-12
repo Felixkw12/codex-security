@@ -106,6 +106,14 @@ export const severityClassificationSchema = z.strictObject({
   ),
 }) satisfies z.ZodType<SeverityClassification>;
 
+/** @internal Reusable evidence excludes only its scan-local occurrence binding. */
+export function severityFindingDigest(
+  finding: SeverityClassificationFinding,
+): string {
+  const { occurrenceId: _occurrenceId, ...evidence } = finding;
+  return workflowDigest(evidence);
+}
+
 /** Classify each supplied report independently, without scanning or writing findings. */
 export async function classifySeverity(
   findings: readonly SeverityClassificationFinding[],
@@ -153,14 +161,18 @@ export async function classifySeverityInternal(
   );
   for (const finding of findings) {
     options.signal?.throwIfAborted();
-    const inputSha256 = workflowDigest(finding);
+    const inputSha256 = severityFindingDigest(finding);
     const previous = cached.get(finding.findingId);
     if (previous?.inputSha256 === inputSha256) {
-      validateSeverityClassification({ ...result, assessments: [previous] }, [
+      const rebound = {
+        ...previous,
+        occurrenceId: finding.occurrenceId ?? null,
+      };
+      validateSeverityClassification({ ...result, assessments: [rebound] }, [
         finding,
       ]);
-      await checkpoint?.save(finding, previous, result, true);
-      result.assessments.push(previous);
+      await checkpoint?.save(finding, rebound, result, true);
+      result.assessments.push(rebound);
       continue;
     }
     let decision: z.infer<typeof decisionSchema>;
@@ -258,7 +270,8 @@ export function validateSeverityClassification(
     if (
       !finding ||
       assessment.occurrenceId !== (finding.occurrenceId ?? null) ||
-      assessment.inputSha256 !== workflowDigest(finding) ||
+      (assessment.inputSha256 !== severityFindingDigest(finding) &&
+        assessment.inputSha256 !== workflowDigest(finding)) ||
       (assessment.source === "rubric") !== (result.rubricSha256 !== null) ||
       (assessment.decision === "assessed"
         ? assessment.level === null

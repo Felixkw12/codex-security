@@ -10,7 +10,6 @@ import subprocess
 import sys
 import tempfile
 import threading
-import unittest
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -3161,10 +3160,6 @@ The extraction root is not enforced.
             FINALIZER.build_sarif(self.manifest, {"findings": findings}, source_root)
 
         self.assertEqual(line_hashes.call_count, 1)
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 CANONICAL_FILES = ("scan-manifest.json", "findings.json", "coverage.json")

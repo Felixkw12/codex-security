@@ -338,3 +338,90 @@ test("matching evidence reuses per-scan assessments without changing an acknowle
   );
   assert.deepEqual(assessments(database, ["finding"]), []);
 });
+
+test("real severity producer reuses unchanged evidence across occurrences", async (t) => {
+  const options = {
+    define: {
+      "import.meta.url": JSON.stringify(
+        new URL(
+          "../../../../sdk/typescript/src/severity-store.ts",
+          import.meta.url,
+        ).href,
+      ),
+    },
+    banner: {
+      js: `import { createRequire as severityCreateRequire } from "node:module"; const require = severityCreateRequire(${JSON.stringify(import.meta.url)});`,
+    },
+  };
+  const { SeverityStore } = await importSource(
+    "../../../sdk/typescript/src/severity-store.ts",
+    options,
+  );
+  const { classifySeverityInternal, validateSeverityClassification } =
+    await importSource(
+      "../../../sdk/typescript/src/classify-severity.ts",
+      options,
+    );
+  const database = open(t);
+  const store = new SeverityStore({}, "/unused-scan");
+  Object.assign(store, {
+    run: async (_command: string, payload: Severity.SeverityCheckpoint) =>
+      severityCheckpoint(database, payload, "2026-01-01T00:00:00Z"),
+  });
+  const finding = {
+    findingId: "finding",
+    occurrenceId: "occurrence-a",
+    title: "Synthetic finding",
+    summary: "Same evidence",
+    severity: { level: "high", rationale: "Original assessment" },
+    fingerprints: { primary: "fingerprint" },
+    ruleId: "synthetic-rule",
+    identity: { anchor: "synthetic-anchor" },
+  };
+  const first = await classifySeverityInternal(
+    [finding],
+    {},
+    "sdk",
+    store.checkpoint("scan-a", [finding.findingId], false),
+  );
+  const next = { ...finding, occurrenceId: "occurrence-b" };
+  const checkpoint = store.checkpoint("scan-b", [finding.findingId], false);
+  const cached = await checkpoint.load(first, [next]);
+  assert.equal(cached.length, 1);
+  assert.equal(cached[0].occurrenceId, "occurrence-a");
+  const second = await classifySeverityInternal([next], {}, "sdk", checkpoint);
+  assert.equal(
+    second.assessments[0].inputSha256,
+    first.assessments[0].inputSha256,
+  );
+  assert.equal(second.assessments[0].occurrenceId, "occurrence-b");
+  assert.equal(
+    assessments(database, ["finding"], "scan-a")[0].occurrenceId,
+    "occurrence-a",
+  );
+  assert.equal(
+    assessments(database, ["finding"], "scan-b")[0].occurrenceId,
+    "occurrence-b",
+  );
+  validateSeverityClassification(second, [next]);
+  assert.deepEqual(
+    await checkpoint.load(first, [{ ...next, summary: "Changed evidence" }]),
+    [],
+  );
+  assert.deepEqual(
+    await checkpoint.load({ ...first, rubricSha256: "b".repeat(64) }, [next]),
+    [],
+  );
+  assert.deepEqual(
+    await checkpoint.load({ ...first, knowledgeBaseSha256: "c".repeat(64) }, [
+      next,
+    ]),
+    [],
+  );
+  assert.deepEqual(
+    await store
+      .checkpoint("scan-c", [finding.findingId], true)
+      .load(first, [next]),
+    [],
+  );
+});

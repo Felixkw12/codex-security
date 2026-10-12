@@ -541,3 +541,73 @@ for (const [operation, mode] of ["cancel", "fail"].flatMap((operation) =>
     }
   });
 }
+
+for (const status of ["running", "failed"]) {
+  test(`native permission rejection retains ${status} scan state`, async () => {
+    const commands = [];
+    const scan = {
+      scanId: "synthetic-permission-parent",
+      scanDir: "/synthetic/permission-scan",
+      targetPath: "/synthetic/target",
+      mode: "deep",
+      handoffClaimToken: "synthetic-claim",
+      progress: { status: "running" },
+      failureMessage: "synthetic permission rejection",
+    };
+    const server = serverFor({
+      async workbench([command]) {
+        commands.push(command);
+        if (command === "resolve-scan-root")
+          return { scanRoot: "/synthetic/scans" };
+        if (command === "list-scans") return {};
+        if (["begin-deep-scan", "get-scan"].includes(command)) return { scan };
+        assert.equal(command, "preserve-scan-results");
+        return {
+          scan: { ...scan, warnings: ["Retained synthetic evidence."] },
+        };
+      },
+      async run() {
+        scan.progress.status = status;
+        throw new this.ScanPermissionError(
+          "synthetic permission rejection with full diagnostic",
+        );
+      },
+      async cancel() {},
+      async waitForScanExecution() {
+        return () => {};
+      },
+    });
+    const result = await server.tools.get("start_codex_security_deep_scan")(
+      { targetPath: scan.targetPath },
+      {
+        _meta: {
+          "openai/threadId": "synthetic-owner",
+          "codex/sandbox-state-meta": {
+            sandboxCwd: pathToFileURL(dirname(entrypoint)).href,
+            permissionProfile: {
+              type: "managed",
+              file_system: { type: "unrestricted" },
+              network: "restricted",
+            },
+          },
+        },
+      },
+    );
+    assert.equal(result.isError, true);
+    assert.match(
+      result.content[0].text,
+      /synthetic permission rejection with full diagnostic/,
+    );
+    if (status === "failed") {
+      assert.equal(result.structuredContent.scanId, scan.scanId);
+      assert.equal(result.structuredContent.status, "failed");
+      assert.deepEqual(result.structuredContent.warnings, [
+        "Retained synthetic evidence.",
+      ]);
+      assert.ok(commands.includes("preserve-scan-results"));
+    } else {
+      assert.equal(result.structuredContent, undefined);
+      assert.ok(!commands.includes("preserve-scan-results"));
+    }
+  });
+}

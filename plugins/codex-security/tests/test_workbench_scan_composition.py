@@ -2142,9 +2142,15 @@ def test_native_budget_completion_checks_claim_before_publication(tmp_path: Path
 def test_composed_recovery_records_child_failure_and_continues(workbench_api, monkeypatch) -> None:
     saved = workbench_api["saved_results"]
     root = Path("/synthetic-scan")
+    identity = {
+        "target_revision": "1" * 40,
+        "target_snapshot_digest": None,
+        "target_device": 1,
+        "target_inode": 2,
+    }
     children = [
-        {"id": "broken", "scan_dir": str(root / "broken")},
-        {"id": "retained", "scan_dir": str(root / "retained")},
+        {**identity, "id": "broken", "scan_dir": str(root / "broken")},
+        {**identity, "id": "retained", "scan_dir": str(root / "retained")},
     ]
     composition = workbench_api["load_composition"].__globals__["CompositionView"](
         None, tuple(children), (), None
@@ -2165,7 +2171,7 @@ def test_composed_recovery_records_child_failure_and_continues(workbench_api, mo
         ],
     ):
         result = saved.save_composed_checkpoint(
-            db, None, {"id": "parent", "scan_dir": str(root)}, root, composition
+            db, None, {**identity, "id": "parent", "scan_dir": str(root)}, root, composition
         )
     assert result["coverage"]["surfaces"] == retained_coverage["surfaces"]
     assert result["coverage"]["deferred"][0] == {
@@ -2647,3 +2653,146 @@ def test_terminal_composition_seals_recovered_child_context(
     run_workbench(state, "complete-scan", "--scan-id", parent["scanId"])
     assert {name: (parent_dir / name).read_bytes() for name in sealed} == sealed
     assert {path: (child_dir / path).read_bytes() for path in child_originals} == child_originals
+
+
+@pytest.mark.parametrize("accepted_first", [False, True])
+@pytest.mark.parametrize("kind", ["directory_snapshot", "git_revision", "git_worktree"])
+def test_deep_passes_retain_parent_target_identity_and_preserve_compatible_results(
+    tmp_path: Path, kind: str, accepted_first: bool
+) -> None:
+    state, target = _scan_workspace(tmp_path, "print('before')\n")
+
+    def git(*args: str) -> str:
+        return subprocess.check_output(["git", "-C", str(target), *args], text=True).strip()
+
+    if kind != "directory_snapshot":
+        git("init", "-q")
+        git("add", "app.py")
+        git(
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.test",
+            "commit",
+            "-qm",
+            "before",
+        )
+    if kind == "git_worktree":
+        (target / "app.py").write_text("print('original dirty worktree')\n")
+    parent = register(state, target, tmp_path / "scan", mode="deep")
+    parent_dir = Path(parent["scanDir"])
+    first = register(
+        state,
+        target,
+        parent_dir / "artifacts/deep-scan/passes/pass-1",
+        parent=parent["scanId"],
+        role="deep_pass",
+    )
+
+    def complete(child: dict) -> None:
+        target_contract = child["contract"]["target"]
+        write_completed_contract(
+            Path(child["scanDir"]),
+            child["scanId"],
+            target,
+            relative_path="app.py",
+            target_kind=kind,
+            target_revision=None if kind == "directory_snapshot" else child["targetRevision"],
+            snapshot_digest=target_contract.get("requiredSnapshotDigest"),
+        )
+        run_workbench(state, "complete-scan", "--scan-id", child["scanId"])
+
+    def project(child: dict) -> subprocess.CompletedProcess:
+        metadata = parent_dir.stat()
+        return subprocess.run(
+            [sys.executable, str(SCRIPT.with_name("project_scan_artifacts.py"))],
+            input=json.dumps(
+                {
+                    "parentScanId": parent["scanId"],
+                    "sourceScanId": child["scanId"],
+                    "sourceDirectory": child["scanDir"],
+                    "parentDirectory": str(parent_dir),
+                    "expectedParentIdentity": {
+                        "dev": str(metadata.st_dev),
+                        "ino": str(metadata.st_ino),
+                    },
+                }
+            ),
+            text=True,
+            capture_output=True,
+            env={**os.environ, "CODEX_SECURITY_STATE_DIR": str(state)},
+        )
+
+    complete(first)
+    first_projection = project(first)
+    assert first_projection.returncode == 0
+    (target / "app.py").write_text("print('after')\n")
+    if kind == "git_revision":
+        git("add", "app.py")
+        git(
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.test",
+            "commit",
+            "-qm",
+            "after",
+        )
+    second_dir = parent_dir / "artifacts/deep-scan/passes/pass-2"
+    second_dir.mkdir(mode=0o700)
+    rejected = run_workbench(
+        state,
+        "register-cli-scan",
+        "--repository",
+        str(target),
+        "--scan-dir",
+        str(second_dir),
+        "--parent-scan-id",
+        parent["scanId"],
+        "--registration-json-stdin",
+        input_text=json.dumps({"recipe": recipe(target), "parentScanRole": "deep_pass"}),
+        check=False,
+    )
+    assert rejected["returncode"] != 0
+    assert "parent's checkout revision and contents" in rejected["stderr"]
+    # Ordinary reruns may select a new revision. Simulate the same receipt retained
+    # by older hosts that admitted it as an independent Deep pass.
+    second = register(state, target, second_dir, parent=parent["scanId"])
+    complete(second)
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scans SET parent_scan_role = 'deep_pass' WHERE id = ?", (second["scanId"],)
+        )
+    incompatible = project(second)
+    assert incompatible.returncode != 0
+    assert "parent's checkout revision and contents" in incompatible.stderr
+    assert project(first).returncode == 0
+    saved = checkpoint(
+        state,
+        parent,
+        merged=[first["scanId"]] if accepted_first else [],
+        passes=[
+            {
+                "directory": Path(child["scanDir"]).relative_to(parent_dir).as_posix(),
+                "scanId": child["scanId"],
+            }
+            for child in (first, second)
+        ],
+    )
+    if accepted_first:
+        saved["aggregate"] = json.loads(first_projection.stdout)["draft"]
+        run_workbench(
+            state,
+            "save-scan-artifact",
+            "--scan-id",
+            parent["scanId"],
+            "--artifact-path",
+            CHECKPOINT,
+            input_text=json.dumps(saved),
+        )
+    run_workbench(state, "fail-scan", "--scan-id", parent["scanId"], "--message", "Synthetic stop.")
+    findings = json.loads((parent_dir / "findings.json").read_text())["findings"]
+    assert len(findings) == 1
+    assert findings[0]["provenance"]["sourceFindingIds"] == [f"{first['scanId']}:0"]
+    deferred = json.loads((parent_dir / "coverage.json").read_text())["deferred"]
+    assert any("parent's checkout revision and contents" in row["reason"] for row in deferred)
