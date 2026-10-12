@@ -1841,15 +1841,8 @@ def claim_deep_scan_dedup(
             ).fetchone()
             is None
         )
-        successful_reducer = connection.execute(
-            """
-            SELECT 1 FROM deep_scan_workers
-            WHERE scan_id = ? AND kind = 'dedup' AND status = 'succeeded'
-            LIMIT 1
-            """,
-            (scan_id,),
-        ).fetchone()
-        minimum_inputs = 1 if successful_reducer is not None or capped_singleton else 2
+        previous = final_deep_scan_reducer(connection, scan_id)
+        minimum_inputs = 1 if previous is not None or capped_singleton else 2
         if len(input_ids) < minimum_inputs:
             raise SystemExit(
                 "The first Deep Scan dedup requires two buffered discovery results."
@@ -1866,11 +1859,6 @@ def claim_deep_scan_dedup(
             """,
             (worker_id, scan_id, prompt_path, artifact_dir, timestamp, timestamp),
         )
-        previous = connection.execute(
-            "SELECT * FROM deep_scan_workers WHERE scan_id = ? AND kind = 'dedup' "
-            "AND status = 'succeeded' ORDER BY completed_at DESC, rowid DESC LIMIT 1",
-            (scan_id,),
-        ).fetchone()
         previous_path, previous_sha = (
             worker_result_reference(connection, scan, previous) if previous else (None, None)
         )
@@ -2417,8 +2405,8 @@ def final_deep_scan_reducer(connection: sqlite3.Connection, scan_id: str) -> sql
         "WHERE claims.previous_worker_id = workers.id AND claims.scan_id = workers.scan_id "
         "AND successor.scan_id = workers.scan_id AND successor.kind = 'dedup' "
         "AND successor.status = 'succeeded') "
-        # Legacy reducers without claims retain their previous ordering.
-        "ORDER BY workers.completed_at DESC, workers.id DESC LIMIT 1",
+        # Legacy reducers retain the producer's completion and insertion order.
+        "ORDER BY workers.completed_at DESC, workers.rowid DESC LIMIT 1",
         (scan_id,),
     ).fetchone()
 

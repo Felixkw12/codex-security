@@ -17,6 +17,7 @@ import pytest
         ("later", "running"),
         ("later", "failed"),
         ("legacy", "succeeded"),
+        ("legacy-tied", "succeeded"),
     ],
 )
 def test_final_selection_follows_committed_reducer_chain(
@@ -28,7 +29,7 @@ def test_final_selection_follows_committed_reducer_chain(
     (target / "app.py").write_text("value = 1\n")
     (home / "codex-security").mkdir(parents=True)
     (home / "codex-security/config.toml").write_text(
-        "[deep_scan]\nworkers=1\nsubagents=0\nmax_discovery_runs=3\nstop_after_no_new=5\n"
+        "[deep_scan]\nworkers=1\nsubagents=0\nmax_discovery_runs=4\nstop_after_no_new=5\n"
     )
     monkeypatch.setenv("CODEX_HOME", str(home))
     monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(tmp_path / "state"))
@@ -171,9 +172,11 @@ def test_final_selection_follows_committed_reducer_chain(
         return worker_id
 
     first = worker(1, [worker(1), worker(2)])
-    clock[0] = {"earlier": "2030-01-01T00:00:00Z", "tied": clock[0]}.get(
-        timing, "2030-01-01T00:00:02Z"
-    )
+    clock[0] = {
+        "earlier": "2030-01-01T00:00:00Z",
+        "tied": clock[0],
+        "legacy-tied": clock[0],
+    }.get(timing, "2030-01-01T00:00:02Z")
     second = worker(2, [worker(3)], successor)
     assert (
         workbench_db.execute(
@@ -181,10 +184,26 @@ def test_final_selection_follows_committed_reducer_chain(
         ).fetchone()[0]
         == first
     )
-    if timing == "legacy":
+    if timing.startswith("legacy"):
+        # Exercise the legacy no-claim fallback with controlled metadata.
         with workbench_db:
             workbench_db.execute("DELETE FROM deep_scan_merge_claims")
-    expected_worker = second if successor == "succeeded" else first
+    expected_worker = first
+    if successor == "succeeded":
+        second_reference = workbench_db.execute(
+            "SELECT accepted_result_path, accepted_result_sha256 FROM deep_scan_attempts "
+            "WHERE worker_id = ?",
+            (second,),
+        ).fetchone()
+        if timing == "later":
+            clock[0] = "2030-01-01T00:00:03Z"
+        expected_worker = worker(3, [worker(4)])
+        claim = workbench_db.execute(
+            "SELECT * FROM deep_scan_merge_claims WHERE worker_id = ?", (expected_worker,)
+        ).fetchone()
+        assert claim["previous_worker_id"] == second
+        assert claim["previous_result_path"] == second_reference["accepted_result_path"]
+        assert claim["previous_result_sha256"] == second_reference["accepted_result_sha256"]
     accepted = workbench_db.execute(
         "SELECT accepted_result_path, accepted_result_sha256 FROM deep_scan_attempts WHERE worker_id = ?",
         (expected_worker,),
@@ -222,6 +241,10 @@ def test_final_selection_follows_committed_reducer_chain(
         selection = deep.finish_deep_scan_locked(workbench_db, finish, scan_id)["deepScan"][
             "finalizationInput"
         ]
+        replay = deep.finish_deep_scan_locked(workbench_db, stale, scan_id)["deepScan"][
+            "finalizationInput"
+        ]
+        assert replay == selection
     else:
         # A pending or failed successor cannot replace the last committed input
         # selected for budget publication, which does not await model work.
