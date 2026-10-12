@@ -3,16 +3,41 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
-from finalize_scan_contract import ContractError, open_scan_local_file_descriptor
+from finalize_scan_contract import ContractError, open_scan_local_file_descriptor, path_within_scope
+
+
+def _checkpoint_head_directory(relative: str) -> Path | None:
+    path = Path(relative)
+    if path.name == "checkpoint-head.json":
+        return path.parent
+    if path.parent.name == "checkpoint-heads":
+        return path.parent.parent
+    return None
+
+
+def receipt_checkpoints(
+    relative: str,
+    worker_id: str | None,
+    known: dict[str, str | None],
+    checkpoint_paths: Callable[[str], list[str]],
+) -> dict[str, str]:
+    """Capture host checkpoints written after enumeration but before result.json."""
+    if worker_id is None or Path(relative).name != "result.json":
+        return {}
+    directory = (Path(relative).parent / "checkpoints").as_posix()
+    added = {path: worker_id for path in checkpoint_paths(directory) if path not in known}
+    known.update(added)
+    return added
 
 
 def retain_recorded_receipt_ownership(
     sources: list[tuple[str, dict[str, Any], str | None]],
     digest: Callable[[Any], str],
+    include_paths: Sequence[str],
 ) -> None:
     # Checkpoints are written by the host tool; direct result files can be authored
     # without it. Compare the entire payload within the same worker attempt.
@@ -23,7 +48,23 @@ def retain_recorded_receipt_ownership(
     for relative, draft, worker_id in sources:
         directory = Path(relative).parent
         if worker_id is not None and directory.name == "checkpoints":
-            recorded.setdefault(directory.parent, set()).add(payload_digest(draft))
+            payloads = recorded.setdefault(directory.parent, set())
+            payloads.add(payload_digest(draft))
+            if "." not in include_paths:
+                # Legacy writers saved the checkpoint before filtering inherited findings.
+                scoped = [
+                    finding
+                    for finding in draft["findings"]
+                    if isinstance(finding, dict)
+                    and isinstance(finding.get("locations"), list)
+                    and any(
+                        isinstance(location, dict)
+                        and isinstance(location.get("path"), str)
+                        and any(path_within_scope(location["path"], path) for path in include_paths)
+                        for location in finding["locations"]
+                    )
+                ]
+                payloads.add(payload_digest({**draft, "findings": scoped}))
     for relative, draft, worker_id in sources:
         directory = Path(relative).parent
         if worker_id is None or directory.name == "checkpoints":

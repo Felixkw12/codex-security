@@ -12,6 +12,7 @@ import re
 import sqlite3
 import stat
 import sys
+from collections import deque
 from collections.abc import Iterator
 from contextlib import contextmanager
 from functools import partial
@@ -44,7 +45,12 @@ from finalize_scan_contract import (
     write_threat_model_projection_if_possible,
 )
 from workbench_constants import PHASES
-from workbench_coverage_receipts import resolve_coverage_receipts, retain_recorded_receipt_ownership
+from workbench_coverage_receipts import (
+    _checkpoint_head_directory,
+    receipt_checkpoints,
+    resolve_coverage_receipts,
+    retain_recorded_receipt_ownership,
+)
 from workbench_target import committed_diff_snapshot_digest
 from workbench_validation import javascript_utf8, path_within_scope
 
@@ -214,15 +220,6 @@ def _saved_result_paths(scan_dir: Path, workers: list[Any]) -> Iterator[tuple[st
                 )
             except ValueError:
                 continue
-
-
-def _checkpoint_head_directory(relative: str) -> Path | None:
-    path = Path(relative)
-    if path.name == "checkpoint-head.json":
-        return path.parent
-    if path.parent.name == "checkpoint-heads":
-        return path.parent.parent
-    return None
 
 
 def _capture_saved_source(
@@ -1125,7 +1122,9 @@ def merge_saved_results(
         if latest_reducer not in frozen_source_digests:
             latest_reducer = None
 
-    for relative, worker_id in paths.items():
+    pending = deque(paths.items())
+    while pending:
+        relative, worker_id = pending.popleft()
         try:
             draft, digest, observed = _read_saved_result(
                 scan_dir, relative, scan_id, kind="dedup" if relative in reducer_paths else None
@@ -1141,6 +1140,12 @@ def merge_saved_results(
             # Recovery expects coverage, but reducer results only contain findings
             # and context. Add an empty value after hashing the original result.
             sources.append((relative, {"coverage": {}, **draft}, worker_id))
+            if frozen_source_digests is None:
+                pending.extend(
+                    receipt_checkpoints(
+                        relative, worker_id, paths, partial(_checkpoint_paths, scan_dir)
+                    ).items()
+                )
         except (ContractError, OSError, ValueError) as exc:
             if (scan_dir / relative).exists():
                 warnings.append(f"Preserved unreadable checkpoint {relative}: {exc}")
@@ -1181,7 +1186,7 @@ def merge_saved_results(
 
     # Keep frozen source digests over the original data, before discarding markers
     # that never passed through the worker draft writer.
-    retain_recorded_receipt_ownership(sources, _digest)
+    retain_recorded_receipt_ownership(sources, _digest, binding["scope"]["includePaths"])
     drafts_by_path = {relative: draft for relative, draft, _ in sources}
     if parent is None and frozen_source_digests is not None:
         # Older host snapshots remain evidence; only the newest is the current parent.

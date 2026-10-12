@@ -6,20 +6,28 @@ import {
   readdir,
   rename,
   rm,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { importSource } from "./import-module.ts";
+import {
+  FakeExecutor,
+  FakeStore,
+  fixtureRun,
+  runCoordinator,
+} from "./deep_scan_coordinator_fixture.ts";
 import { finding, scanId, workerDraft } from "./scan-draft-fixture.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 
 const { readDeepReductionSources } = await importSource(
   path.join(import.meta.dirname, "../src/artifact-deep-reducer.ts"),
 );
-const { recordCodexSecurityWorkerScanDraft } = await importSource(
-  path.join(import.meta.dirname, "../src/artifact-scan-draft.ts"),
-);
+const { recordCodexSecurityWorkerScanDraft, saveScanDraftCheckpoint } =
+  await importSource(
+    path.join(import.meta.dirname, "../src/artifact-scan-draft.ts"),
+  );
 
 const { archiveDirectory } = await importSource(
   path.join(import.meta.dirname, "../src/deep-scan/artifacts.ts"),
@@ -81,6 +89,8 @@ function recoverCoverage(
   f: Awaited<ReturnType<typeof fixture>>,
   complete = true,
   attempt = 1,
+  includePaths = ["."],
+  publishDuringCapture = false,
 ) {
   return JSON.parse(
     execFileSync(
@@ -94,21 +104,51 @@ from pathlib import Path
 plugin, root, active = map(Path, sys.argv[1:4])
 scan_id, complete = sys.argv[4], sys.argv[5] == "true"
 sys.path[:0] = [str(plugin / "scripts"), str(plugin / "tests")]
+import workbench_saved_results as saved
 from workbench_saved_results import merge_saved_results
 from workbench_test_support import saved_binding, saved_discovery_worker
 from finalize_scan_contract import _recover_unsealed_coverage
 worker = {**saved_discovery_worker(active, "worker-1", int(sys.argv[6])), "status": "succeeded" if complete else "running", "result_manifest_path": str(active / "result.json") if complete else None}
 binding = saved_binding("deep_repository")
 binding["target"].update(targetId="synthetic", displayName="Synthetic repository")
+binding["scope"]["includePaths"] = json.loads(sys.argv[7])
 args = (root, scan_id, binding, [worker], [])
+original_capture = saved._capture_saved_source
+published = []
+def capture(*args, **kwargs):
+    captured = original_capture(*args, **kwargs)
+    if sys.argv[8] == "true" and args[1].endswith("output/checkpoint-head.json") and not published:
+        staged = root / "publication"
+        for checkpoint in (staged / "checkpoints").iterdir():
+            destination = active / "checkpoints" / checkpoint.name
+            checkpoint.replace(destination)
+            published.append(destination.relative_to(root).as_posix())
+        for name in ("checkpoint-head.json", "result.json"):
+            (staged / name).replace(active / name)
+    return captured
+saved._capture_saved_source = capture
 merged = merge_saved_results(*args, stopped=True, reason="interrupted")
+saved._capture_saved_source = original_capture
 replay = merge_saved_results(*args, stopped=True, reason="interrupted", frozen_source_digests=merged[0]["scan"]["preservedSources"])
 assert merged[2] == replay[2]
+rejects_changed_checkpoint = None
+if published:
+    checkpoint = root / published[-1]
+    original = checkpoint.read_bytes()
+    checkpoint.write_text("{}")
+    try:
+        merge_saved_results(*args, stopped=True, reason="interrupted", frozen_source_digests=merged[0]["scan"]["preservedSources"])
+    except saved.ContractError:
+        rejects_changed_checkpoint = True
+    else:
+        rejects_changed_checkpoint = False
+    finally:
+        checkpoint.write_bytes(original)
 refs = merged[2]["surfaces"][0]["receiptRefs"]
 warnings = []
 coverage = merged[2]
 _recover_unsealed_coverage(coverage, plugin / "schemas", root, warnings, [])
-print(json.dumps({"refs": refs, "surfaces": coverage["surfaces"], "warnings": warnings}))
+print(json.dumps({"refs": refs, "surfaces": coverage["surfaces"], "warnings": warnings, "published": published, "captured": merged[0]["scan"]["preservedSources"], "rejectsChangedCheckpoint": rejects_changed_checkpoint}))
 `,
         path.resolve(import.meta.dirname, "../.."),
         f.root,
@@ -116,6 +156,8 @@ print(json.dumps({"refs": refs, "surfaces": coverage["surfaces"], "warnings": wa
         scanId,
         String(complete),
         String(attempt),
+        JSON.stringify(includePaths),
+        String(publishDuringCapture),
       ],
       { encoding: "utf8" },
     ),
@@ -292,6 +334,184 @@ for (const inScope of [false, true]) {
     });
   }
 }
+
+for (const scenario of [
+  "scoped",
+  "unscoped",
+  "wrong scope",
+  "changed finding",
+  "changed coverage",
+] as const) {
+  test(`legacy worker receipt ownership: ${scenario}`, async () => {
+    const f = await fixture();
+    try {
+      // Captured from the writer before it checkpointed the final scope filter.
+      const legacy = JSON.parse(
+        await readFile(
+          path.join(
+            import.meta.dirname,
+            "fixtures/legacy-scoped-worker-receipts.json",
+          ),
+          "utf8",
+        ),
+      );
+      const ref = "artifacts/evidence.txt";
+      await receipt(f.root, ref, "Shared evidence\n");
+      await receipt(f.workerRoot, ref, "Unrelated local evidence\n");
+      await saveScanDraftCheckpoint(f.worker, legacy.checkpoint);
+      const result =
+        scenario === "unscoped" ? legacy.checkpoint : legacy.result;
+      if (scenario === "changed finding")
+        result.findings[0].title = "Changed finding";
+      if (scenario === "changed coverage")
+        result.coverage.surfaces[0].notes = "Changed review";
+      await writeFile(
+        path.join(f.workerRoot, "result.json"),
+        JSON.stringify(result),
+      );
+      const includePaths =
+        scenario === "unscoped"
+          ? ["."]
+          : scenario === "wrong scope"
+            ? ["other"]
+            : ["src"];
+      const sources = await readDeepReductionSources({
+        ...f.reducer,
+        includePaths,
+      });
+      const recovered = recoverCoverage(f, true, 1, includePaths);
+      const expected =
+        scenario === "scoped" || scenario === "unscoped"
+          ? ref
+          : `${f.prefix}/${ref}`;
+      assert.deepEqual(
+        sources.discoveries[0].coverage.surfaces[0].receiptRefs,
+        [expected],
+      );
+      assert.deepEqual(recovered.refs, [expected]);
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const concurrent of [false, true]) {
+  test(`recovery captures the checkpoint for a host-published result (concurrent: ${concurrent})`, async () => {
+    const f = await fixture();
+    try {
+      const ref = "artifacts/evidence.txt";
+      await receipt(f.root, ref, "Shared evidence\n");
+      await recordCodexSecurityWorkerScanDraft(f.worker, draft([ref]));
+      const checkpointRoot = path.join(f.workerRoot, "checkpoints");
+      const initialCheckpoints = new Set(await readdir(checkpointRoot));
+      const initial = await Promise.all(
+        ["checkpoint-head.json", "result.json"].map(
+          async (name) =>
+            [name, await readFile(path.join(f.workerRoot, name))] as const,
+        ),
+      );
+      await receipt(f.workerRoot, ref, "Unrelated local evidence\n");
+      await recordCodexSecurityWorkerScanDraft(f.worker, {
+        ...draft([ref]),
+        scope: { summary: "Additional scope context" },
+      });
+      if (concurrent) {
+        const staged = path.join(f.root, "publication");
+        await mkdir(path.join(staged, "checkpoints"), { recursive: true });
+        for (const name of await readdir(checkpointRoot)) {
+          if (!initialCheckpoints.has(name))
+            await rename(
+              path.join(checkpointRoot, name),
+              path.join(staged, "checkpoints", name),
+            );
+        }
+        for (const [name, contents] of initial) {
+          await rename(path.join(f.workerRoot, name), path.join(staged, name));
+          await writeFile(path.join(f.workerRoot, name), contents);
+          await utimes(path.join(f.workerRoot, name), 1, 1);
+        }
+      }
+      const recovered = recoverCoverage(f, true, 1, ["."], concurrent);
+      assert.deepEqual(recovered.refs, [ref]);
+      if (concurrent) {
+        assert.ok(recovered.published.length > 0);
+        assert.ok(
+          recovered.published.every(
+            (name: string) => name in recovered.captured,
+          ),
+        );
+        assert.equal(recovered.rejectsChangedCheckpoint, true);
+      }
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
+}
+
+test("the coordinator binds the requested scope while reducing legacy receipt ownership", async () => {
+  const fixture = await fixtureRun();
+  fixture.run.scope = "src";
+  fixture.run.includePaths = ["src"];
+  const store = new FakeStore(fixture.run);
+  const executor = new FakeExecutor();
+  const run = executor.run.bind(executor);
+  const ref = "artifacts/evidence.txt";
+  executor.run = async (request) => {
+    const result = await run(request);
+    if (request.kind === "discovery") {
+      const legacy = JSON.parse(
+        await readFile(
+          path.join(
+            import.meta.dirname,
+            "fixtures/legacy-scoped-worker-receipts.json",
+          ),
+          "utf8",
+        ),
+      );
+      legacy.checkpoint.scanId = fixture.run.scanId;
+      legacy.result.scanId = fixture.run.scanId;
+      await receipt(fixture.run.scanDir, ref, "Shared evidence\n");
+      await receipt(
+        request.workingDirectory,
+        ref,
+        "Unrelated local evidence\n",
+      );
+      await saveScanDraftCheckpoint(
+        {
+          ...request.artifactContext,
+          scanId: fixture.run.scanId,
+          repoRoot: fixture.run.targetPath,
+        },
+        legacy.checkpoint,
+      );
+      await writeFile(
+        path.join(request.workingDirectory, "result.json"),
+        JSON.stringify(legacy.result),
+      );
+    }
+    return result;
+  };
+  const receiptRefs: unknown[] = [];
+  try {
+    const terminal = await runCoordinator(fixture, store, executor, {
+      onComplete: async (draft) => {
+        receiptRefs.push(
+          ...(draft.coverage.surfaces as { receiptRefs: string[] }[]).flatMap(
+            (surface) => surface.receiptRefs,
+          ),
+        );
+      },
+    });
+    assert.equal(terminal?.status, "succeeded", terminal?.error);
+    assert.equal(executor.dedupCalls, 1);
+    assert.deepEqual(receiptRefs, [ref]);
+  } finally {
+    await rm(path.dirname(fixture.run.scanDir), {
+      recursive: true,
+      force: true,
+    });
+  }
+});
 
 test("a retained surface keeps only retained shared references and resolves new receipts locally", async () => {
   const f = await fixture();

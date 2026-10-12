@@ -278,6 +278,8 @@ export class DeepScanWorkerRunner {
       repoRoot: run.targetPath,
       scanId: run.scanId,
       layout: "reducer" as const,
+      scope: run.scope,
+      includePaths: run.includePaths,
       deepReducer: {
         scanRoot: artifacts.scanDir,
         claimedWorkers: consumed.map((worker) => ({

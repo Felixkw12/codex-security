@@ -387,7 +387,31 @@ export async function hasScanDraftCheckpoint(
     scanDraftCheckpointName(input),
   ]);
   const { handoffClaimToken: _claim, ...snapshot } = input;
-  return saved?.contents === JSON.stringify(snapshot, null, 2) + "\n";
+  if (saved?.contents === JSON.stringify(snapshot, null, 2) + "\n") return true;
+  const includePaths = context.includePaths ?? [context.scope || "."];
+  if (includePaths.includes(".")) return false;
+  // Older writers checkpointed inherited findings before applying the bound scope.
+  // Compare the entire projected payload, including every receipt ownership field.
+  for (const { snapshot: recorded } of await readSavedCheckpoints(
+    context,
+    "current",
+  )) {
+    const { handoffClaimToken: _recordedClaim, ...checkpoint } = recorded;
+    if (
+      isDeepStrictEqual(
+        {
+          ...checkpoint,
+          findings: findingsWithinScope(
+            checkpoint.findings as JsonObject[],
+            includePaths,
+          ),
+        },
+        snapshot,
+      )
+    )
+      return true;
+  }
+  return false;
 }
 
 /** Direct result files do not establish the draft tool's receipt ownership. */
@@ -1351,7 +1375,7 @@ async function readSavedCheckpoints(
   context: ArtifactContext,
   kind: "current" | "archived",
   excludedCheckpoint?: string,
-): Promise<Array<SavedScanDraft & { name: string }>> {
+): Promise<Array<SavedScanDraft & { name: string; snapshot: JsonObject }>> {
   let checkpointRoot = join(context.root, "checkpoints");
   const checkpointRootMetadata = await lstatIfExists(checkpointRoot);
   if (checkpointRootMetadata === undefined) return [];
@@ -1377,7 +1401,9 @@ async function readSavedCheckpoints(
     kind === "current" ? await readCheckpointHead(context, kind) : undefined;
   const checkpointHead = head?.checkpoint;
 
-  const checkpoints: Array<SavedScanDraft & { name: string }> = [];
+  const checkpoints: Array<
+    SavedScanDraft & { name: string; snapshot: JsonObject }
+  > = [];
   const entries = (
     await fs.readdir(checkpointRoot, { withFileTypes: true })
   ).filter(
@@ -1413,6 +1439,7 @@ async function readSavedCheckpoints(
     }
     checkpoints.push({
       input,
+      snapshot: draft,
       modifiedMs:
         entry.name === checkpointHead
           ? head!.modifiedMs
