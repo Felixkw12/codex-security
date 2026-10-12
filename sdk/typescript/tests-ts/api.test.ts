@@ -8928,6 +8928,162 @@ describe("CodexSecurity orchestration", () => {
     },
   );
 
+  test.each(
+    ["replay", "all-batch"].flatMap((delivery) =>
+      [false, true].map((worker) => ({ delivery, worker })),
+    ),
+  )(
+    "keeps saved inventory behind live scope (delivery=$delivery, worker=$worker)",
+    async ({ delivery, worker }) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const parentEvents: string[] = [];
+      const replayClose = Promise.withResolvers<void>();
+      const releaseReplay = Promise.withResolvers<void>();
+      const currentRead = Promise.withResolvers<void>();
+      const pollAllowed = Promise.withResolvers<void>();
+      let holdPoll = delivery === "all-batch";
+      const originalReaddir = fsPromises.readdir;
+      const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
+        ...args: Parameters<typeof originalReaddir>
+      ) => {
+        if (holdPoll && String(args[0]) === join(codexHome, "sessions"))
+          await pollAllowed.promise;
+        return originalReaddir(...args);
+      }) as typeof originalReaddir);
+      let parentPath = "";
+      let closes = 0;
+      const originalOpen = fsPromises.open;
+      const opening = spyOn(fsPromises, "open").mockImplementation((async (
+        ...args: Parameters<typeof originalOpen>
+      ) => {
+        const handle = await originalOpen(...args);
+        if (String(args[0]) !== parentPath) return handle;
+        const close = handle.close.bind(handle);
+        handle.close = async () => {
+          if (++closes === 2 && delivery === "replay") {
+            replayClose.resolve();
+            await releaseReplay.promise;
+          }
+          return close();
+        };
+        return handle;
+      }) as typeof originalOpen);
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          parentPath = await writeUsageSession(codexHome, "thread-1", {});
+          await appendFile(
+            parentPath,
+            jsonLines([
+              nativeCommand("old", progressMarker("discovery", 0, 8), "old"),
+            ]) + "\n",
+          );
+          if (worker) {
+            const path = await writeUsageSession(
+              codexHome,
+              "worker-thread",
+              {},
+              { parent: "thread-1" },
+            );
+            await appendFile(
+              path,
+              jsonLines([
+                {
+                  type: "response_item",
+                  payload: {
+                    type: "custom_tool_call_output",
+                    call_id: "worker",
+                    output: progressMarker("discovery", 6, 8),
+                  },
+                },
+              ]) + "\n",
+            );
+          }
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            // The second real read replays the newly associated session for logs.
+            if (delivery === "replay") await replayClose.promise;
+            const inventory = progressMarker("discovery", 0, 5);
+            const review = progressMarker("reporting", 1, 5);
+            const reviewRow = nativeCommand("review", review, "review");
+            await appendFile(
+              parentPath,
+              jsonLines([
+                nativeCommand(
+                  ["printf", "sk-" + "a".repeat(32)],
+                  inventory,
+                  "current",
+                ),
+                ...(delivery === "all-batch" ? [reviewRow] : []),
+              ]) + "\n",
+            );
+            yield completedCommand(
+              "printf [REDACTED_SECRET]",
+              inventory,
+              "current",
+            ) as ThreadEvent;
+            if (delivery === "replay") {
+              releaseReplay.resolve();
+              await currentRead.promise;
+              await appendFile(parentPath, jsonLines([reviewRow]) + "\n");
+            }
+            yield completedCommand("review", review, "review") as ThreadEvent;
+            holdPoll = false;
+            pollAllowed.resolve();
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      const keepAlive = setInterval(() => {}, 1_000);
+      try {
+        await client.run(repository, {
+          onProgress: (update) => updates.push(update),
+          onSessionEvent: ({ threadId, event }) => {
+            const payload = event["payload"] as { item?: { id?: string } };
+            if (threadId === "thread-1" && payload?.item?.id !== undefined)
+              parentEvents.push(payload.item.id);
+            if (payload?.item?.id === "current") currentRead.resolve();
+          },
+        });
+        expect(updates.at(-1)).toEqual({
+          phase: "reporting",
+          filesCompleted: 1,
+          filesTotal: 5,
+        });
+        const current = updates.findIndex(
+          (update) => update.filesCompleted === 0 && update.filesTotal === 5,
+        );
+        expect(current).toBeGreaterThanOrEqual(0);
+        expect(
+          updates
+            .slice(current)
+            .every(
+              (update) => update.filesTotal === 5 && update.filesCompleted <= 5,
+            ),
+        ).toBe(true);
+        expect(parentEvents).toEqual(["old", "current", "review"]);
+      } finally {
+        clearInterval(keepAlive);
+        holdPoll = false;
+        pollAllowed.resolve();
+        releaseReplay.resolve();
+        currentRead.resolve();
+        await client.close();
+        opening.mockRestore();
+        listing.mockRestore();
+      }
+    },
+  );
+
   test("does not match a resumed live inventory to a historical truncated command", async () => {
     const { root, repository, codexHome, scanDir } = await scanDirectories();
     const updates: ScanProgress[] = [];

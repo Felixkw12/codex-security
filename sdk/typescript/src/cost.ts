@@ -678,9 +678,9 @@ export class ScanCostTracker {
       }
       if (
         (corroborated !== undefined ||
+          marker.accepted ||
           (marker === this.#parentInventory &&
-            (marker.accepted ||
-              (this.#parentProgress?.progress.filesCompleted ?? 0) === 0 ||
+            ((this.#parentProgress?.progress.filesCompleted ?? 0) === 0 ||
               this.#precedesParentReview(position, marker.index)))) &&
         progress.phase === "discovery" &&
         progress.filesCompleted === 0 &&
@@ -1180,8 +1180,8 @@ export class ScanCostTracker {
         // Replay only newly associated sessions, including their early events.
         session = createSessionUsage();
         session.events = [];
-        await readSessionUsage(path, session, repository, progressThread);
         this.#sessions.set(path, session);
+        await readSessionUsage(path, session, repository, progressThread);
       }
       let worker: number | undefined;
       if (threadId !== this.#threadId) {
@@ -1485,7 +1485,6 @@ export class ScanCostTracker {
           filesTotal: progress.filesTotal,
         };
         this.setExpectedFilesTotal(progress.filesTotal);
-        this.#reconcileParentProgress();
         continue;
       }
       // Parent markers already describe global coverage, including its workers.
@@ -1536,9 +1535,8 @@ export class ScanCostTracker {
         compareProgressOrder(provenance, displayed) < 0
           ? displayed
           : null;
-      const update = {
+      const update = newerProgress?.update ?? {
         ...progress,
-        phase: newerProgress?.update.phase ?? progress.phase,
         filesCompleted,
         filesTotal: parent
           ? progress.filesTotal

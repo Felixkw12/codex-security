@@ -468,6 +468,168 @@ test.each(
   },
 );
 
+test.each(
+  [false, true].flatMap((truncated) =>
+    ["none", "repeat", "changed", "phase"].map((rejected) => ({
+      truncated,
+      rejected,
+    })),
+  ),
+)(
+  "retains accepted inventory after an unaccepted marker (truncated=$truncated, rejected=$rejected)",
+  async ({ truncated, rejected }) => {
+    const { home, parent } = await workerSessionFixture();
+    const inventory: ScanProgress = {
+      phase: "discovery",
+      filesCompleted: 0,
+      filesTotal: 9,
+    };
+    const reviewed: ScanProgress = {
+      phase: "validation",
+      filesCompleted: 1,
+      filesTotal: 9,
+    };
+    const ignored: ScanProgress = {
+      phase: rejected === "phase" ? "threat_model" : "discovery",
+      filesCompleted: 0,
+      filesTotal: rejected === "changed" ? 10 : 9,
+    };
+    const inventoryText = progressMarker("discovery", 0, 9);
+    const reviewText = progressMarker("validation", 1, 9);
+    const ignoredText = progressMarker(ignored.phase, 0, ignored.filesTotal);
+    await appendFile(
+      parent,
+      jsonLines([
+        nativeCommand("older", progressMarker("discovery", 0, 8)),
+        nativeCommand(
+          "inventory",
+          truncated ? persistedCommandOutput : inventoryText,
+        ),
+        nativeCommand("review", reviewText),
+        ...(rejected === "none" ? [] : [nativeCommand("ignored", ignoredText)]),
+      ]) + "\n",
+    );
+    const updates: ScanProgress[] = [];
+    const tracker = costTracker(home, {
+      expectedFilesTotal: 8,
+      onProgress: (update) => updates.push(update),
+    });
+    tracker.beginParentTurn();
+    tracker.start("scan-thread");
+    try {
+      const inventoryEvent = completedCommand(
+        "inventory",
+        truncated ? commandOutput(inventoryText) : inventoryText,
+      );
+      expect(tracker.recordParentProgress(inventory, inventoryEvent)).toBe(
+        true,
+      );
+      tracker.setExpectedFilesTotal(9);
+      tracker.acceptParentProgress(inventory, inventoryEvent);
+      updates.push(inventory);
+      const reviewEvent = completedCommand("review", reviewText);
+      expect(tracker.recordParentProgress(reviewed, reviewEvent)).toBe(true);
+      tracker.acceptParentProgress(reviewed, reviewEvent);
+      updates.push(reviewed);
+      // Observing a later item is distinct from the API admitting its marker.
+      if (rejected !== "none")
+        tracker.recordParentProgress(
+          ignored,
+          completedCommand("ignored", ignoredText),
+        );
+      await tracker.stop();
+      expect(updates.at(-1)).toEqual(reviewed);
+      expect(
+        updates.slice(1).every((update) => update.filesCompleted > 0),
+      ).toBe(true);
+    } finally {
+      await tracker.stop();
+    }
+  },
+);
+
+test.each(["open", "read", "close"] as const)(
+  "retries an association replay after %s fails without losing early events",
+  async (boundary) => {
+    const home = await codexHome();
+    const parent = await writeSession(home, "scan-thread", {
+      input_tokens: 42,
+      output_tokens: 0,
+    });
+    const early = {
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "Synthetic early output." }],
+      },
+    };
+    await appendFile(parent, jsonLines([early]) + "\n");
+    const originalOpen = filesystem.open;
+    let opens = 0;
+    const opening = spyOn(filesystem, "open").mockImplementation(
+      async (...args: Parameters<typeof originalOpen>) => {
+        const replay = String(args[0]) === parent && ++opens === 2;
+        const failure = () =>
+          Object.assign(new Error("Synthetic replay read failure"), {
+            code: "EACCES",
+          });
+        if (replay && boundary === "open") throw failure();
+        const handle = await originalOpen(...args);
+        if (replay && boundary === "read") {
+          const read = handle.read.bind(handle);
+          let reads = 0;
+          handle.read = (async (
+            ...readArgs: Parameters<typeof handle.read>
+          ) => {
+            if (++reads === 2) throw failure();
+            return read(...readArgs);
+          }) as typeof handle.read;
+        }
+        if (replay && boundary === "close") {
+          const close = handle.close.bind(handle);
+          handle.close = async () => {
+            await close();
+            throw failure();
+          };
+        }
+        return handle;
+      },
+    );
+    const failed = Promise.withResolvers<void>();
+    const events: ScanSessionEvent[] = [];
+    const errors: string[] = [];
+    const tracker = costTracker(home, {
+      onSessionEvent: (event) => events.push(event),
+      onError: (error) => {
+        errors.push(String(error));
+        failed.resolve();
+      },
+    });
+    const keepAlive = setInterval(() => {}, 1_000);
+    tracker.start("scan-thread");
+    try {
+      await failed.promise;
+      await tracker.refresh();
+      const result = await tracker.stop();
+      expect(result.cost?.inputTokens).toBe(42);
+      expect(
+        events
+          .map((event) => event.event)
+          .filter((event) => event["type"] === "response_item"),
+      ).toEqual([early]);
+      expect(
+        events.filter((event) => event.event["type"] === "session_meta"),
+      ).toHaveLength(1);
+      expect(errors).toHaveLength(1);
+    } finally {
+      clearInterval(keepAlive);
+      opening.mockRestore();
+      await tracker.stop();
+    }
+  },
+);
+
 test("keeps the parent frontier ahead of duplicate saved inventory", async () => {
   const { home, parent } = await workerSessionFixture();
   const inventory = {
