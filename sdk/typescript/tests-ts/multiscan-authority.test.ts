@@ -30,13 +30,7 @@ const pluginRoot = fileURLToPath(
 const { temporaryDirectory, cleanup } = createApiTestFixtures(
   "multiscan-authority-",
 );
-const originalState = process.env["CODEX_SECURITY_STATE_DIR"];
-afterEach(async () => {
-  if (originalState === undefined)
-    delete process.env["CODEX_SECURITY_STATE_DIR"];
-  else process.env["CODEX_SECURITY_STATE_DIR"] = originalState;
-  await cleanup();
-});
+afterEach(cleanup);
 
 async function fixture(registerOnly = false) {
   const root = await temporaryDirectory();
@@ -68,8 +62,7 @@ async function fixture(registerOnly = false) {
   );
   const revision = git("rev-parse", "HEAD");
   const state = join(root, "state");
-  process.env["CODEX_SECURITY_STATE_DIR"] = state;
-  const environment = { ...process.env };
+  const environment = { ...process.env, CODEX_SECURITY_STATE_DIR: state };
   const python = await resolvePluginPython({ environment });
   const workbench = (args: string[], input?: unknown) =>
     runWorkbench(
@@ -89,6 +82,7 @@ async function fixture(registerOnly = false) {
     workers: 1,
     mode: "standard",
     maxAttempts: 1,
+    environment,
     scanPrompt: "Original requested instructions.",
     onProgress: (event) => {
       if (event.error) console.error(event.error);
@@ -201,7 +195,7 @@ async function fixture(registerOnly = false) {
         [
           "-I",
           "-c",
-          "import json,sys; print(json.dumps(json.load(sys.stdin), indent=2, sort_keys=True))",
+          "import json,sys; sys.stdout.buffer.write((json.dumps(json.load(sys.stdin), indent=2, sort_keys=True) + '\\n').encode('utf-8'))",
         ],
         { input: JSON.stringify(sealed), env: environment },
       ),
@@ -236,6 +230,36 @@ test("registered sealed campaign reuse does not need report Python", async () =>
   });
   expect(value.runs()).toBe(1);
 });
+
+test.each([false, true])(
+  "concurrent campaigns retain independent invocation authority with recovery=%s",
+  async (recovery) => {
+    const ambientState = process.env["CODEX_SECURITY_STATE_DIR"];
+    const values = await Promise.all([fixture(), fixture()]);
+    const run = () =>
+      Promise.all(values.map((value) => runMultiscan(value.options)));
+    for (const result of await run())
+      expect(result).toMatchObject({ completed: 1, skipped: 0 });
+    let recovered = 0;
+    if (recovery) {
+      for (const value of values) {
+        await writeFile(join(value.options.outputDir, "results.jsonl"), "");
+        value.options.recoverScan = async (scanDir) => {
+          recovered++;
+          return {
+            ...(await loadContract(scanDir, { pluginRoot })),
+            cost: null,
+          };
+        };
+      }
+    }
+    for (const result of await run())
+      expect(result).toMatchObject({ completed: 1, skipped: recovery ? 0 : 1 });
+    expect(recovered).toBe(recovery ? 2 : 0);
+    expect(values.map((value) => value.runs())).toEqual([1, 1]);
+    expect(process.env["CODEX_SECURITY_STATE_DIR"]).toBe(ambientState);
+  },
+);
 
 for (const registerOnly of [false, true]) {
   for (const retargeted of [false, true]) {

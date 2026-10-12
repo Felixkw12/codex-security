@@ -23,7 +23,7 @@ import type { JsonObject } from "../src/config.js";
 import { runWorkbench } from "../src/runtime.js";
 import { readKnowledgeBaseSnapshot } from "../src/knowledge-base.js";
 import { saveScanKnowledge, scanInputIdentity } from "../src/scan-inputs.js";
-import { workflowDigest } from "../src/finding-workflow.js";
+import { scanRequestDigest, workflowDigest } from "../src/finding-workflow.js";
 import { capture, dependencies } from "./cli-fixtures.js";
 import { runPython } from "./support/python-probe.js";
 import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
@@ -156,6 +156,20 @@ async function interruptedScan(
     },
     pluginVersion: "0.1.0",
     requiresScanPrompt: true,
+    ...(bulk
+      ? {
+          scanRequestDigest: scanRequestDigest(
+            { codexOverrides: {} },
+            {
+              mode,
+              outputDir: scanDir,
+              knowledgeBaseSnapshot: settings.knowledgeBasePaths?.length
+                ? await readKnowledgeBaseSnapshot(settings.knowledgeBasePaths)
+                : undefined,
+            },
+          ),
+        }
+      : {}),
     ...settings,
     ...(knowledgeSnapshot === undefined
       ? {}
@@ -725,6 +739,7 @@ test.each([
           stderr.stream,
           {
             ...dependencies({
+              environment: f.environment,
               onRun: () => fail("A sealed scan needs no Codex invocation"),
             }),
             runWorkbench: f.command,
@@ -747,7 +762,10 @@ test.each([
           ["bulk-scan", f.input, "--output-dir", f.root, "--recover", "--json"],
           nextOutput.stream,
           stderr.stream,
-          { ...dependencies(), runWorkbench: f.command },
+          {
+            ...dependencies({ environment: f.environment }),
+            runWorkbench: f.command,
+          },
         ),
       ).toBe(2);
       expect(JSON.parse(nextOutput.text())).toMatchObject({

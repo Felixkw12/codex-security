@@ -164,6 +164,8 @@ export interface MultiscanOptions extends ScanPromptSettings {
     Record<ScanMode, Omit<ScanSettings, keyof ScanPromptSettings>>
   >;
   config: CodexSecurityConfig;
+  /** @internal Environment of the invoking CLI dependency. */
+  environment?: NodeJS.ProcessEnv;
   createSecurity(
     config: CodexSecurityConfig,
   ): Pick<CodexSecurity, "run" | "close">;
@@ -307,6 +309,7 @@ async function runCampaign(
   output: string,
   resolveResumePluginRoot: () => Promise<string>,
 ): Promise<MultiscanResult> {
+  const environment = options.environment ?? process.env;
   const ledger = join(output, "results.jsonl");
   const checkoutRoot = await ensureOutputDirectory(join(output, "checkouts"));
   await ensureOutputDirectory(join(output, "artifacts"));
@@ -469,6 +472,7 @@ async function runCampaign(
             knowledgeByMode[task.mode]?.snapshot,
           ),
         ),
+        environment,
         options.signal,
         options.githubHost,
         restoreReport,
@@ -619,7 +623,7 @@ async function runCampaign(
               );
               const authority = await readRegisteredScanAuthority(
                 scanDir,
-                process.env,
+                environment,
                 options.signal,
               );
               if (authority?.recipe["scanRequestDigest"] === requestDigest) {
@@ -640,6 +644,7 @@ async function runCampaign(
                         scanDir,
                         await resolveResumePluginRoot(),
                         requestDigest,
+                        environment,
                         options.signal,
                       )
                     : undefined;
@@ -661,6 +666,7 @@ async function runCampaign(
                       scanDir,
                       await resolveResumePluginRoot(),
                       requestDigest,
+                      environment,
                       options.signal,
                     );
                     if (accepted instanceof Error) throw accepted;
@@ -1416,6 +1422,7 @@ async function loadRegisteredCampaignScan(
   path: string,
   pluginRoot: string,
   expectedRequestDigest: string,
+  environment: NodeJS.ProcessEnv,
   signal?: AbortSignal,
 ) {
   const loaded = await loadContractWithScanDirectory(path, {
@@ -1428,7 +1435,7 @@ async function loadRegisteredCampaignScan(
   if (loaded === undefined) return undefined;
   const authority = await readRegisteredScanAuthority(
     loaded.scanDirectory,
-    process.env,
+    environment,
     signal,
   );
   if (authority === undefined) return undefined;
@@ -1452,6 +1459,7 @@ async function loadResumableScan(
   checkout: string,
   configuredTarget: ScanTarget | undefined,
   expectedRequestDigest: string,
+  environment: NodeJS.ProcessEnv,
   signal: AbortSignal | undefined,
   githubHost: string | undefined,
   restoreReport: (
@@ -1477,6 +1485,7 @@ async function loadResumableScan(
     path,
     pluginRoot,
     expectedRequestDigest,
+    environment,
     signal,
   );
   if (accepted instanceof Error) {
