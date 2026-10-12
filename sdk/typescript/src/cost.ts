@@ -1073,19 +1073,28 @@ export class ScanCostTracker {
     // Treat it as a receipt; a copied truncated preview can consequently hide
     // omitted same-count phases from its earlier command. This is best effort.
     if (saved.receipt) return true;
-    // Native inventory has its own source frontier and review boundary. A later
-    // completion retains that provenance even if its total appeared live.
-    if (
-      saved.completion &&
-      saved.update.phase === "discovery" &&
-      saved.update.filesCompleted === 0
-    )
-      return true;
     const live = this.#acceptedParent;
     if (live === null) return true;
     // A later saved occurrence may legitimately repeat an earlier live tuple,
     // including progress recovered only from the original multipart response.
     if (live.position !== null) return saved.position > live.position;
+    // A positioned inventory can prove a later scope change even when the
+    // earlier live command had a different display. Unpositioned live state
+    // and review markers do not establish that an inventory copy is newer.
+    const current = this.#parentProgress;
+    if (
+      saved.completion &&
+      saved.update.phase === "discovery" &&
+      saved.update.filesCompleted === 0 &&
+      current?.position !== undefined &&
+      current.progress.phase === "discovery" &&
+      current.progress.filesCompleted === 0
+    )
+      return (
+        saved.position > current.position ||
+        (saved.position === current.position &&
+          saved.markerIndex > (current.markerIndex ?? 0))
+      );
     return !this.#liveParentProgress.has(progressKey(saved.update));
   }
 
@@ -1546,6 +1555,8 @@ export class ScanCostTracker {
           };
           if (
             this.#parentProgress === null ||
+            saved === corroborated ||
+            this.#parentProgress.progress.phase !== "discovery" ||
             compareProgressOrder(candidate, this.#parentProgress) >= 0
           )
             this.#parentProgress = candidate;
