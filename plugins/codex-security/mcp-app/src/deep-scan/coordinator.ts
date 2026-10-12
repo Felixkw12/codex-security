@@ -1052,6 +1052,8 @@ export class DeepScanCoordinator {
         repoRoot: this.state.targetPath,
         scanId: this.state.scanId,
         layout: "reducer",
+        scope: this.state.scope,
+        includePaths: this.state.includePaths,
         deepReducer: {
           scanRoot: this.artifacts.scanDir,
           claimedWorkers: accepted.map((source) => ({

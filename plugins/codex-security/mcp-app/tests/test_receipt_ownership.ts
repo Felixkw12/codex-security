@@ -13,6 +13,7 @@ import path from "node:path";
 import test from "node:test";
 import { importSource } from "./import-module.ts";
 import {
+  claimDedupInputs,
   FakeExecutor,
   FakeStore,
   fixtureRun,
@@ -491,20 +492,35 @@ test("the coordinator binds the requested scope while reducing legacy receipt ow
     }
     return result;
   };
-  const receiptRefs: unknown[] = [];
   try {
-    const terminal = await runCoordinator(fixture, store, executor, {
-      onComplete: async (draft) => {
-        receiptRefs.push(
-          ...(draft.coverage.surfaces as { receiptRefs: string[] }[]).flatMap(
-            (surface) => surface.receiptRefs,
-          ),
-        );
-      },
-    });
-    assert.equal(terminal?.status, "succeeded", terminal?.error);
-    assert.equal(executor.dedupCalls, 1);
-    assert.deepEqual(receiptRefs, [ref]);
+    for (const resume of [false, true]) {
+      if (resume) {
+        store.run = {
+          ...store.run,
+          status: "running",
+          terminalReason: undefined,
+          manifestPath: undefined,
+          persistedWorkers: structuredClone([...store.workers.values()]),
+          persistedDedupInputs: store.dedupClaims.flatMap(claimDedupInputs),
+        };
+      }
+      const activeExecutor = resume ? new FakeExecutor() : executor;
+      const receiptRefs: unknown[] = [];
+      const terminal = await runCoordinator(fixture, store, activeExecutor, {
+        run: store.run,
+        onComplete: async (draft) => {
+          receiptRefs.push(
+            ...(draft.coverage.surfaces as { receiptRefs: string[] }[]).flatMap(
+              (surface) => surface.receiptRefs,
+            ),
+          );
+        },
+      });
+      assert.equal(terminal?.status, "succeeded", terminal?.error);
+      assert.equal(activeExecutor.discoveryCalls, resume ? 0 : 1);
+      assert.equal(activeExecutor.dedupCalls, resume ? 0 : 1);
+      assert.deepEqual(receiptRefs, [ref]);
+    }
   } finally {
     await rm(path.dirname(fixture.run.scanDir), {
       recursive: true,
