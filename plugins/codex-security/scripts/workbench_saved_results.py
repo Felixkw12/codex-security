@@ -253,8 +253,8 @@ def _capture_saved_source(
     _, selected_digest, selected_time = _read_saved_result(scan_dir, selected, scan_id)
     digest = _digest(observation)
     snapshot = (directory / "checkpoint-heads" / f"{digest}.json").as_posix()
-    # Capture the selected file even if the worker created it after directory enumeration.
-    if checkpoint_heads is not None and directory != Path("."):
+    # Capture the selected file even if it was created after directory enumeration.
+    if checkpoint_heads is not None:
         checkpoint_heads[directory.as_posix()] = selected
     if write and not (scan_dir / snapshot).exists():
         try:
@@ -440,7 +440,7 @@ def _frozen_checkpoint_heads(
     ambiguous: set[str] = set()
     for relative, expected_digest in sources.items():
         directory = _checkpoint_head_directory(relative)
-        if directory is None or directory == Path("."):
+        if directory is None:
             continue
         try:
             head, digest, observed = _read_saved_result(scan_dir, relative, scan_id)
@@ -1119,9 +1119,12 @@ def merge_saved_results(
                         "checkpoint-head.json",
                         _encoded({"checkpoint": checkpoint_path.name}),
                     )
-                    os.utime(head_path, ns=(parent_modified, parent_modified))
+                    observed = max(parent_modified, checkpoint_path.lstat().st_mtime_ns)
+                    os.utime(head_path, ns=(observed, observed))
                 if frozen_source_digests is not None:
-                    captured = _capture_saved_source(scan_dir, "checkpoint-head.json", scan_id)
+                    captured = _capture_saved_source(
+                        scan_dir, "checkpoint-head.json", scan_id, checkpoint_heads=checkpoint_heads
+                    )
                     frozen_source_digests = {
                         **frozen_source_digests,
                         parent_checkpoint: parent_digest,
@@ -1289,19 +1292,16 @@ def merge_saved_results(
         selected = (directory / "checkpoints" / checkpoint).as_posix()
         if selected not in source_order:
             raise ContractError("Checkpoint head is outside the saved source set.")
+        key = directory.as_posix()
+        if key in checkpoint_heads and checkpoint_heads[key] is None:
+            continue
         observed = source_order[head][1]
-        if directory == Path("."):
-            order = (0, max(source_order[selected][1], observed))
-            parent_heads.append((observed, selected))
+        attempt = 0 if directory == Path(".") else worker_attempts[key][1]
+        order = (attempt, observed)
+        if key not in checkpoint_heads or checkpoint_heads[key] == selected:
             authoritative_heads.add(selected)
-        else:
-            key = directory.as_posix()
-            if key in checkpoint_heads and checkpoint_heads[key] is None:
-                continue
-            _, attempt = worker_attempts[key]
-            if key not in checkpoint_heads or checkpoint_heads[key] == selected:
-                authoritative_heads.add(selected)
-            order = (attempt, observed)
+            if directory == Path("."):
+                parent_heads.append((observed, selected))
         selected_observations[selected] = max(selected_observations.get(selected, order), order)
     source_order.update(selected_observations)
 
@@ -1700,7 +1700,7 @@ def merge_saved_results(
     ordered_candidates.update(
         (owner, candidate_id)
         for relative, owner, candidate_id, _ in outcomes
-        if owner is not None and relative in selected_observations
+        if relative in selected_observations
     )
     selected_head_candidates = {
         (Path(relative).parent, candidate_id)

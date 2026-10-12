@@ -318,20 +318,29 @@ def test_newer_checkpoint_disposition_precedes_older_archived_head(
 
 
 @pytest.mark.parametrize("head_change", ["replaced", "removed", "missing-checkpoint"])
+@pytest.mark.parametrize("root_head", [False, True], ids=["worker", "root"])
 def test_frozen_stopped_replay_ignores_later_worker_head_changes(
-    workbench_api, workbench_db, publication_scan, monkeypatch, head_change
+    workbench_api, workbench_db, publication_scan, monkeypatch, head_change, root_head
 ):
     import finalize_scan_contract
 
     scan = publication_scan()
     (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
-    result = add_worker(workbench_db, scan, status="canceled")
+    result = (
+        scan.scan_dir / "result.json"
+        if root_head
+        else add_worker(workbench_db, scan, status="canceled")
+    )
     previous = save_disposition(scan, result.parent, "reported")
     result.write_text(json.dumps(previous))
     save_disposition(scan, result.parent, "rejected")
     checkpoint_name = json.loads((result.parent / "checkpoint-head.json").read_text())["checkpoint"]
     directory = result.parent.relative_to(scan.scan_dir).as_posix()
-    expected_heads = {directory: f"{directory}/checkpoints/{checkpoint_name}"}
+    expected_heads = {
+        directory: (result.parent / "checkpoints" / checkpoint_name)
+        .relative_to(scan.scan_dir)
+        .as_posix()
+    }
     original_outputs = {
         name: (scan.scan_dir / name).read_bytes()
         for name in ("findings.json", "coverage.json", "scan-manifest.json")
@@ -365,6 +374,8 @@ def test_frozen_stopped_replay_ignores_later_worker_head_changes(
             ),
         )
     row = workbench_db.execute("SELECT * FROM scans WHERE id = ?", (scan.scan_id,)).fetchone()
+    root_checkpoint = json.loads((scan.scan_dir / "checkpoint-head.json").read_text())["checkpoint"]
+    expected_heads["."] = f"checkpoints/{root_checkpoint}"
     assert len(failed_writes) == 1
     assert "scanId" in failed_writes[0]
     assert row["status"] == "failed"
@@ -489,12 +500,17 @@ def test_legacy_frozen_publication_keeps_result_fallback_without_saved_heads(
 
 
 @pytest.mark.parametrize("head_time", [0, 1, -1], ids=["tie", "newer", "older"])
+@pytest.mark.parametrize("root_head", [False, True], ids=["worker", "root"])
 def test_recovery_uses_live_selection_regardless_of_head_timestamp(
-    workbench_api, workbench_db, publication_scan, head_time
+    workbench_api, workbench_db, publication_scan, head_time, root_head
 ):
     scan = publication_scan()
     (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
-    result = add_worker(workbench_db, scan, status="canceled")
+    result = (
+        scan.scan_dir / "result.json"
+        if root_head
+        else add_worker(workbench_db, scan, status="canceled")
+    )
     result.write_text(json.dumps(save_disposition(scan, result.parent, "reported")))
     save_disposition(scan, result.parent, "rejected")
     head = result.parent / "checkpoint-head.json"
@@ -517,6 +533,7 @@ def test_recovery_uses_live_selection_regardless_of_head_timestamp(
 @pytest.mark.parametrize("head_time", [100, 300], ids=["older-selection", "tied-selection"])
 @pytest.mark.parametrize("generic", [False, True], ids=["candidate", "generic-task"])
 @pytest.mark.parametrize("reverse_order", [False, True])
+@pytest.mark.parametrize("root_head", [False, True], ids=["worker", "root"])
 def test_head_reselection_preserves_equal_or_newer_pending_evidence(
     workbench_api,
     workbench_db,
@@ -526,10 +543,18 @@ def test_head_reselection_preserves_equal_or_newer_pending_evidence(
     head_time,
     generic,
     reverse_order,
+    root_head,
 ):
     scan = publication_scan()
     (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
-    result = add_worker(workbench_db, scan, status="canceled")
+    result = (
+        scan.scan_dir / "result.json"
+        if root_head
+        else add_worker(workbench_db, scan, status="canceled")
+    )
+    if root_head:
+        for name in ("findings.json", "coverage.json", "scan-manifest.json"):
+            os.utime(scan.scan_dir / name, ns=(0, 0))
     result.write_text(json.dumps(save_disposition(scan, result.parent, "reported")))
     os.utime(result, ns=(50, 50))
     head = result.parent / "checkpoint-head.json"
@@ -667,12 +692,17 @@ def test_partial_reselection_keeps_independent_accepted_dispositions(
     assert stopped["findingCount"] == 0
 
 
+@pytest.mark.parametrize("root_head", [False, True], ids=["worker", "root"])
 def test_publication_metadata_uses_the_captured_head(
-    workbench_api, workbench_db, publication_scan, monkeypatch
+    workbench_api, workbench_db, publication_scan, monkeypatch, root_head
 ):
     scan = publication_scan()
     (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
-    result = add_worker(workbench_db, scan, status="canceled")
+    result = (
+        scan.scan_dir / "result.json"
+        if root_head
+        else add_worker(workbench_db, scan, status="canceled")
+    )
     result.write_text(json.dumps(save_disposition(scan, result.parent, "reported")))
     saved = workbench_api["saved_results"]
     capture = saved._capture_saved_source
@@ -699,8 +729,10 @@ def test_publication_metadata_uses_the_captured_head(
     manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())["scan"]
     selected = json.loads((result.parent / "checkpoint-head.json").read_text())["checkpoint"]
     directory = result.parent.relative_to(scan.scan_dir).as_posix()
+    root_checkpoint = json.loads((scan.scan_dir / "checkpoint-head.json").read_text())["checkpoint"]
     assert manifest["preservedCheckpointHeads"] == {
-        directory: f"{directory}/checkpoints/{selected}"
+        ".": f"checkpoints/{root_checkpoint}",
+        directory: (result.parent / "checkpoints" / selected).relative_to(scan.scan_dir).as_posix(),
     }
     assert stopped["findingCount"] == 0
     assert (
@@ -988,12 +1020,17 @@ def test_failed_head_snapshot_does_not_claim_uncaptured_authority(
     assert replayed["findingCount"] == 0
 
 
+@pytest.mark.parametrize("root_head", [False, True], ids=["worker", "root"])
 def test_legacy_recovery_can_reselect_an_already_frozen_head(
-    workbench_api, workbench_db, publication_scan, monkeypatch
+    workbench_api, workbench_db, publication_scan, monkeypatch, root_head
 ):
     scan = publication_scan()
     (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
-    result = add_worker(workbench_db, scan, status="canceled")
+    result = (
+        scan.scan_dir / "result.json"
+        if root_head
+        else add_worker(workbench_db, scan, status="canceled")
+    )
     result.write_text(json.dumps(save_disposition(scan, result.parent, "reported")))
     head = result.parent / "checkpoint-head.json"
     original_head, original_time = head.read_bytes(), head.stat().st_mtime_ns
