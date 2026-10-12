@@ -6001,7 +6001,6 @@ export async function main(
                   environment,
                   base: patchGitBase!.tree,
                   state: patchGitBase,
-                  files,
                   configuration: options,
                   auth: options.auth,
                 },
@@ -8022,6 +8021,17 @@ async function preparePatchPublication(
   }
   const root = await patchRepositoryRoot(repository, dependencies);
   const directory = await realpath(repository);
+  if (context === undefined) {
+    context = await patchCommandContext(repository, root, dependencies);
+    dependencies = (
+      await bindPatchCommandContext(
+        context.directory,
+        root,
+        context,
+        dependencies,
+      )
+    ).dependencies;
+  }
   const paths = await patchGitRecords(
     repository,
     [
@@ -8098,8 +8108,7 @@ async function preparePatchPublication(
     ignoredDigests,
     tree,
     root,
-    context:
-      context ?? (await patchCommandContext(repository, root, dependencies)),
+    context,
   };
 }
 
@@ -9847,8 +9856,16 @@ async function snapshotPatchTree(
     (args, options) =>
       dependencies.runRepositoryCommand(
         "git",
-        args[0] === "ls-files"
-          ? ["--no-literal-pathspecs", ...args, "--", ":/"]
+        args.includes("ls-files")
+          ? [
+              ...args.map((argument) =>
+                argument === "--literal-pathspecs"
+                  ? "--no-literal-pathspecs"
+                  : argument,
+              ),
+              "--",
+              ":/",
+            ]
           : args,
         repository,
         {
