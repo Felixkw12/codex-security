@@ -1748,6 +1748,97 @@ describe("CodexSecurity finding validation", () => {
   );
 
   test.each([
+    "AGENTS.md",
+    "REVIEW.md",
+    ".codex/config.toml",
+    "unrelated.txt",
+    "unchanged",
+  ] as const)(
+    "rechecks native guidance created while cached evidence is fingerprinted: %s",
+    async (scope) => {
+      const python = await resolvePluginPython();
+      const stateRoot = await temporaryDirectory("validation-guidance-race-");
+      execFileSync("git", ["init", "-q", stateRoot]);
+      const guide = join(stateRoot, scope);
+      let fixture: Awaited<ReturnType<typeof validationClient>>;
+      let modelCalls = 0;
+      async function* events() {
+        modelCalls++;
+        await writeFile(
+          join(fixture.captured.thread!.workingDirectory!, "proof.bin"),
+          Buffer.alloc(256 * 1024, 7),
+        );
+        yield* validationEvents(
+          JSON.stringify({
+            ...assessment,
+            report: existsSync(guide)
+              ? await readFile(guide, "utf8")
+              : "Original assessment.",
+          }),
+        );
+      }
+      fixture = await validationClient(events, PLUGIN_ROOT, python, undefined, {
+        CODEX_SECURITY_STATE_DIR: join(stateRoot, "state"),
+      });
+      await using client = fixture.client;
+      client.config.codexOverrides!["project_doc_fallback_filenames"] = [
+        "REVIEW.md",
+      ];
+      let changeDuringEvidence = false;
+      let changed = false;
+      fixture.workbench.mockImplementation(async (options, args, input) => {
+        const payload =
+          args[0] === "finding-workflow" ? JSON.parse(input!) : undefined;
+        const pending = runWorkbench(options, args, input);
+        if (
+          changeDuringEvidence &&
+          !changed &&
+          payload?.action === "source" &&
+          payload.evidence === true
+        ) {
+          changed = true;
+          if (scope !== "unchanged") {
+            await mkdir(dirname(guide), { recursive: true });
+            await writeFile(
+              guide,
+              scope === ".codex/config.toml"
+                ? 'developer_instructions = "New native guidance."\n'
+                : "New native guidance.\n",
+            );
+          }
+        }
+        return await pending;
+      });
+      const workflow = new FindingWorkflow(
+        "native-guidance-during-evidence",
+        { CODEX_SECURITY_STATE_DIR: fixture.stateDirectory },
+        runWorkbench,
+        python,
+      );
+      await workflow.bind({ repositoryPath: fixture.options.repositoryPath });
+      const request = {
+        ...fixture.options,
+        outputDir: undefined,
+        workflowId: workflow.id,
+      };
+      const first = await client.validate(request);
+      expect(await client.validate(request)).toEqual(first);
+      expect(modelCalls).toBe(1);
+      changeDuringEvidence = true;
+      const second = await client.validate(request);
+      const nativeGuidance = !["unrelated.txt", "unchanged"].includes(scope);
+      expect(changed).toBe(true);
+      expect(modelCalls).toBe(nativeGuidance ? 2 : 1);
+      expect(second.report).toBe(
+        nativeGuidance ? (await readFile(guide, "utf8")).trim() : first.report,
+      );
+      const sameGuidance = await client.validate(request);
+      expect(sameGuidance.report).toBe(second.report);
+      expect(modelCalls).toBe(nativeGuidance ? 3 : 1);
+    },
+  );
+
+  test.each([
     { scope: "home", changed: true },
     { scope: "home", changed: false },
     { scope: "output worktree", changed: true },

@@ -982,8 +982,7 @@ export class CodexSecurity {
             if (
               cached.success &&
               (inputs.outputDir === null ||
-                inputs.outputDir === cached.data.assessment.outputDir) &&
-              (await canCache())
+                inputs.outputDir === cached.data.assessment.outputDir)
             ) {
               const evidence = await workflow.sourceSnapshot(
                 cached.data.assessment.outputDir,
@@ -1006,7 +1005,7 @@ export class CodexSecurity {
                   "Repository changed during validation.",
                 );
               }
-              if (reusable !== undefined) return reusable;
+              if (reusable !== undefined && (await canCache())) return reusable;
             }
           }
           checkpoint = {

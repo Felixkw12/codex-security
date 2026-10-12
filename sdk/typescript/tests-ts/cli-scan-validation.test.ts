@@ -7,7 +7,8 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { delimiter, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
+import { strToU8, zipSync } from "fflate";
 import { describe, expect, mock, spyOn, test } from "bun:test";
 import { main } from "../src/cli.js";
 import { CodexSecurity } from "../src/api.js";
@@ -558,3 +559,112 @@ test("empty scan validation preserves knowledge-base Git exclusions", async () =
     await rm(root, { recursive: true, force: true });
   }
 });
+
+for (const kind of ["directory", "zip"] as const) {
+  const name = `empty scan validation uses the selected ${kind} plugin workbench`;
+  test(name, async () => {
+    if (runTestInSubprocess(import.meta.path, name)) return;
+    const root = await temporaryDirectory("empty-custom-plugin-", true);
+    const repository = join(root, "repository");
+    const plugin = join(root, "custom-plugin");
+    const selected = kind === "zip" ? join(root, "custom-plugin.zip") : plugin;
+    const marker = join(root, "workbench-called.json");
+    const state = join(root, "custom-state");
+    const home = join(root, "home");
+    const previous = {
+      CODEX_HOME: process.env["CODEX_HOME"],
+      CODEX_SECURITY_STATE_DIR: process.env["CODEX_SECURITY_STATE_DIR"],
+    };
+    await mkdir(repository);
+    await mkdir(home, { mode: 0o700 });
+    Object.assign(process.env, {
+      CODEX_HOME: home,
+      CODEX_SECURITY_STATE_DIR: state,
+    });
+    const python = await resolvePluginPython({
+      environment: process.env,
+      protectedRoot: repository,
+    });
+    const files = {
+      ".codex-plugin/plugin.json": JSON.stringify({
+        name: "codex-security",
+        version: "0.0.0-custom",
+      }),
+      "saved-scan.json": JSON.stringify({
+        scanId: "custom-empty-scan",
+        targetPath: repository,
+      }),
+      "scripts/workbench_db.py": `import json, os, sys
+from pathlib import Path
+record=json.loads((Path(__file__).parent.parent / "saved-scan.json").read_text())
+assert sys.argv[1:] == ["get-scan", "--scan-id", record["scanId"], "--check-target"], sys.argv
+Path(${JSON.stringify(marker)}).write_text(json.dumps({"script":str(Path(__file__).resolve()),"python":sys.executable,"state":os.environ.get("CODEX_SECURITY_STATE_DIR")}))
+print(json.dumps({"scan":{"targetPath":record["targetPath"]}}))
+`,
+    };
+    for (const [name, contents] of Object.entries(files)) {
+      await mkdir(dirname(join(plugin, name)), { recursive: true });
+      await writeFile(join(plugin, name), contents);
+    }
+    if (kind === "zip")
+      await writeFile(
+        selected,
+        zipSync(
+          Object.fromEntries(
+            Object.entries(files).map(([name, text]) => [name, strToU8(text)]),
+          ),
+        ),
+      );
+    const result = fakeResult();
+    result.manifest.scan.id = "custom-empty-scan";
+    const scan = spyOn(CodexSecurity.prototype, "run").mockResolvedValue(
+      result,
+    );
+    try {
+      const cli = createCliTest(main);
+      const code = await cli.runCli(
+        [
+          "scan",
+          repository,
+          "--plugin-path",
+          selected,
+          "--python",
+          python,
+          "--validate",
+          "--json",
+        ],
+        undefined,
+      );
+      expect(code, cli.stderr.text()).toBe(0);
+      expect(JSON.parse(cli.stdout.text()).validation).toEqual({
+        status: "complete",
+        findings: 0,
+      });
+      const observed = JSON.parse(await readFile(marker, "utf8"));
+      expect(observed.state).toBe(state);
+      expect(observed.python).toBe(
+        execNodePython(
+          python,
+          ["-c", "import sys; print(sys.executable)"],
+          process.env,
+        ).trim(),
+      );
+      if (kind === "directory")
+        expect(observed.script).toBe(
+          join(plugin, "scripts", "workbench_db.py"),
+        );
+      else
+        expect(
+          await readFile(observed.script, "utf8").catch(() => null),
+        ).toBeNull();
+      expect(scan).toHaveBeenCalledTimes(1);
+    } finally {
+      scan.mockRestore();
+      for (const [name, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}

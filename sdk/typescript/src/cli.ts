@@ -198,6 +198,9 @@ import type { ScanResult } from "./result.js";
 import { importScan, type ImportScanOptions } from "./import-scan.js";
 import {
   bundledPluginRoot,
+  cleanupSdkDirectory,
+  createIsolatedHome,
+  resolvePluginPath,
   acquireCodexSecurityCredentialHomeLock,
   withCredentialHomeLock,
   requireOutputOutsideRepositories,
@@ -1187,6 +1190,7 @@ interface CliDependencies {
     pythonPath?: string,
     protectedRoot?: string,
     gitProtectedRoots?: readonly string[],
+    pluginPath?: string,
   ): Promise<JsonObject>;
   matchFindings: typeof matchScanFindings;
   checkForUpdate(signal: AbortSignal): Promise<UpdateNotice | undefined>;
@@ -1278,6 +1282,7 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
     pythonPath,
     protectedRoot,
     gitProtectedRoots = [],
+    pluginPath,
   ) => {
     let environment: NodeJS.ProcessEnv =
       protectedRoot === undefined
@@ -1304,17 +1309,37 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
       ]);
       environment = environmentWithGit(git.environment, git);
     }
-    return await runWorkbench(
-      {
-        python,
-        pluginRoot: await bundledPluginRoot(),
-        environment,
-        signal,
-        failureMessage: "Could not read Codex Security scan history",
-      },
-      args,
-      input,
-    );
+    const workspace =
+      pluginPath === undefined
+        ? undefined
+        : await createIsolatedHome(undefined, (path) =>
+            requireOutputOutsideRepositories(
+              [
+                ...(protectedRoot === undefined ? [] : [protectedRoot]),
+                ...gitProtectedRoots,
+              ],
+              path,
+              "runtime",
+            ),
+          );
+    try {
+      return await runWorkbench(
+        {
+          python,
+          pluginRoot:
+            workspace === undefined
+              ? await bundledPluginRoot()
+              : await resolvePluginPath(pluginPath, workspace, signal),
+          environment,
+          signal,
+          failureMessage: "Could not read Codex Security scan history",
+        },
+        args,
+        input,
+      );
+    } finally {
+      if (workspace !== undefined) await cleanupSdkDirectory(workspace);
+    }
   },
   matchFindings: (input, options) =>
     matchScanFindingsInternal(input, options, { surface: "cli" }),
@@ -8889,6 +8914,7 @@ async function executeScan(
               config.pythonPath,
               repository,
               options.knowledgeBaseSnapshot?.protectedRoots,
+              config.pluginPath,
             );
             const scan = context["scan"];
             if (
