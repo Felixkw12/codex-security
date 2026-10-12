@@ -30,6 +30,7 @@ import {
 } from "../src/deep-scan.js";
 import { loadDeepScanCheckpoint } from "../src/deep-scan-checkpoint.js";
 import { estimateScanCost, ScanCostTracker } from "../src/cost.js";
+import { tokenUsage } from "../src/cost-model.js";
 import { DeepScanProgressTracker } from "../src/deep-progress.js";
 import { semanticCoverage, semanticFinding } from "./helpers/semantic-scan.js";
 import { createApiTestFixtures } from "./support/api-events.js";
@@ -89,6 +90,8 @@ async function fixture(
   const commands: string[] = [];
   const parentPhases: unknown[] = [];
   let preparations = 0;
+  let reportedUsage: typeof usage & { reasoning_output_tokens?: number } =
+    usage;
   const controller = new AbortController();
   let stopAfterSealing: "deep" | "standard" | undefined;
   let stopCommand = "complete-scan";
@@ -328,15 +331,30 @@ async function fixture(
               ) {
                 const turnUsage =
                   resumed === null
-                    ? usage
+                    ? reportedUsage
                     : {
-                        input_tokens: usage.input_tokens * 2,
-                        cached_input_tokens: usage.cached_input_tokens * 2,
-                        output_tokens: usage.output_tokens * 2,
+                        ...reportedUsage,
+                        input_tokens: reportedUsage.input_tokens * 2,
+                        cached_input_tokens:
+                          reportedUsage.cached_input_tokens * 2,
+                        output_tokens: reportedUsage.output_tokens * 2,
+                        ...(reportedUsage.reasoning_output_tokens === undefined
+                          ? {}
+                          : {
+                              reasoning_output_tokens:
+                                reportedUsage.reasoning_output_tokens * 2,
+                            }),
                       };
                 const env = options.env!;
                 const scanId = env["CODEX_SECURITY_SCAN_ID"]!;
                 const record = records.get(scanId)!;
+                if (record.mode === "deep") {
+                  const saved = await runWorkbench(
+                    { ...record.options, signal: undefined },
+                    ["get-scan", "--scan-id", scanId],
+                  );
+                  parentPhases.push((saved["scan"] as JsonObject)["progress"]);
+                }
                 const knowledge = env["CODEX_SECURITY_KNOWLEDGE_BASE"];
                 const preflightConfig = parseToml(
                   await readFile(env["CODEX_SECURITY_CONFIG_PATH"]!, "utf8"),
@@ -597,6 +615,9 @@ async function fixture(
     parentPhases,
     makeClient,
     preparations: () => preparations,
+    setUsage(value: typeof reportedUsage) {
+      reportedUsage = value;
+    },
     stopAfterChildRegistration() {
       stopAfterChildRegistration = true;
     },
@@ -780,8 +801,19 @@ test("ordinary children and reducer share one immutable preparation and knowledg
   }
   expect(result.findings.findings).toHaveLength(2);
   expect(h.parentPhases).toEqual([
-    expect.objectContaining({ phase: "discovery" }),
-    expect.objectContaining({ phase: "discovery" }),
+    expect.objectContaining({
+      phase: "discovery",
+      independentReviews: expect.objectContaining({ consolidating: false }),
+    }),
+    expect.objectContaining({
+      phase: "discovery",
+      independentReviews: expect.objectContaining({ consolidating: false }),
+    }),
+    expect.objectContaining({
+      phase: "reporting",
+      status: "running",
+      independentReviews: expect.objectContaining({ consolidating: true }),
+    }),
   ]);
   expect(result.cost).not.toBeNull();
   expect(await readFile(join(h.home, "config.toml"), "utf8")).toBe(
@@ -789,6 +821,92 @@ test("ordinary children and reducer share one immutable preparation and knowledg
   );
   expect(h.commands.filter((command) => command === "list-scans")).toHaveLength(
     1,
+  );
+});
+
+test.each(
+  ["gpt-6-astra", "synthetic-unpriced-model"].flatMap((model) =>
+    [false, true].flatMap((observe) =>
+      [
+        "fresh",
+        "child",
+        "publication",
+        ...(model === "gpt-6-astra" ? ["budget"] : []),
+      ].map((stage) => ({ model, observe, stage })),
+    ),
+  ),
+)(
+  "Deep results retain measured usage independently of cost: %j",
+  async ({ model, observe, stage }) => {
+    const h = await fixture();
+    const measured = { ...usage, reasoning_output_tokens: 2 };
+    h.setUsage(measured);
+    const updates: unknown[] = [];
+    const options: ScanOptions = {
+      ...h.options,
+      knowledgeBasePaths: undefined,
+      ...(observe ? { onUsage: (snapshot) => updates.push(snapshot) } : {}),
+      ...(stage === "child" ? { workers: 1 } : {}),
+      ...(stage === "budget"
+        ? {
+            workers: 1,
+            maxDiscoveryRuns: 3,
+            maxCostUsd: estimateScanCost(model, measured)!.estimatedUsd * 1.5,
+          }
+        : {}),
+    };
+    let parentId: string | undefined;
+    if (stage === "child" || stage === "publication") {
+      if (stage === "child") h.stopBeforeSealing();
+      else h.failPublication(true);
+      await using first = h.makeClient({ model });
+      await expect(first.run(h.repository, options)).rejects.toBeInstanceOf(
+        stage === "child" ? ScanTransportClosedError : DeepScanPublicationError,
+      );
+      parentId = [...h.records].find(
+        ([, record]) => record.mode === "deep",
+      )![0];
+      h.failPublication(false);
+      updates.length = 0;
+    }
+    await using client = h.makeClient({ model });
+    const result = await client.run(h.repository, {
+      ...options,
+      signal: undefined,
+      ...(parentId === undefined ? {} : { resumeScanId: parentId }),
+    });
+    const runs = stage === "budget" ? 2 : stage === "child" ? 4 : 3;
+    const expected = tokenUsage({
+      ...measured,
+      input_tokens: measured.input_tokens * runs,
+      output_tokens: measured.output_tokens * runs,
+      reasoning_output_tokens: measured.reasoning_output_tokens * runs,
+    });
+    expect(result.turnResult.usage).toEqual(expected);
+    expect(result.cost).toEqual(estimateScanCost(model, expected));
+    expect(h.launches).toHaveLength(runs);
+    if (observe) expect(updates.at(-1)).toEqual(expected);
+    if (stage === "budget")
+      expect(result.coverage.completeness).toBe("partial");
+  },
+);
+
+test("Deep progress distinguishes discovery batches from active merge work", async () => {
+  const h = await fixture();
+  await using client = h.makeClient();
+  await client.run(h.repository, {
+    ...h.options,
+    workers: 1,
+    maxDiscoveryRuns: 3,
+  });
+  expect(h.parentPhases).toEqual(
+    [false, false, true, false, true].map((consolidating, index) =>
+      expect.objectContaining({
+        phase: index < 2 ? "discovery" : "reporting",
+        status: "running",
+        independentReviews: expect.objectContaining({ consolidating }),
+      }),
+    ),
   );
 });
 
@@ -2618,7 +2736,16 @@ test("accepted patches restore ambient providers from a produced native-preserva
   )![0];
   const parent = h.records.get(parentId)!;
   expect(parent.recipe["preserveProviderEnvironment"]).toBe(true);
-  expect(parent.recipe["providerProfile"]).toBeUndefined();
+  expect(parent.recipe["providerProfile"]).toEqual({
+    name: expect.any(String),
+    home: "ambient",
+  });
+  const replay = await restoreProviderProfile(
+    {},
+    parent.recipe["providerProfile"],
+    { CODEX_HOME: h.home },
+  );
+  expect(replay).toEqual({ analytics: { enabled: false } });
   expect(parent.recipe["config"]).not.toHaveProperty("model_providers");
   const environment: NodeJS.ProcessEnv = {
     ...parent.options.environment,

@@ -153,14 +153,16 @@ def independent_review_progress(
     children = composition.children
     if children or scan["recipe_json"] is not None or composition.saved_review_count:
         recipe = json.loads(scan["recipe_json"]) if scan["recipe_json"] else {}
+        active = sum(child["status"] == "running" for child in children)
         return {
-            "active": sum(child["status"] == "running" for child in children),
+            "active": active,
             "completed": sum(child["status"] == "complete" for child in children)
             + composition.saved_review_count,
             "maximum": recipe.get("deepScan", {}).get(
                 "maxDiscoveryRuns", composition.saved_review_maximum or len(children)
             ),
             "consolidating": scan["status"] == "running"
+            and not active
             and scan["phase"] in {"validation", "reporting"},
             "updatedAt": max([scan["updated_at"], *(child["updated_at"] for child in children)]),
         }

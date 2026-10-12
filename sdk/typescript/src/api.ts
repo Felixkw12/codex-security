@@ -1265,6 +1265,12 @@ export class CodexSecurity {
     let mergeCost: Readonly<ScanCost> | null = null;
     let scanThreadId: string | undefined;
     const passCosts = new Map<string, Readonly<ScanCost> | null>();
+    const observedUsage = new Map<string, ScanTokenUsage>();
+    const combinedUsage = (): ScanTokenUsage | null =>
+      [...observedUsage.values()].reduce<ScanTokenUsage | null>(
+        addTokenUsage,
+        null,
+      );
     const combinedCost = (
       current: Readonly<ScanCost> | null,
     ): ScanCost | null =>
@@ -1913,13 +1919,9 @@ export class CodexSecurity {
         throwIfAborted(signal, scanDir);
         return snapshot;
       };
-      const observedUsage = new Map<string, ScanTokenUsage>();
       const reportUsage = (key: string, usage: Readonly<ScanTokenUsage>) => {
         observedUsage.set(key, { ...usage });
-        let total: ScanTokenUsage | null = null;
-        for (const snapshot of observedUsage.values())
-          total = addTokenUsage(total, snapshot);
-        notifyObserver(options, "onUsage")(total!);
+        notifyObserver(options, "onUsage")(combinedUsage()!);
       };
       const historicalCost = async (
         threadId: string,
@@ -1933,7 +1935,7 @@ export class CodexSecurity {
           repository: repo,
           scanDirectory,
           onUsage:
-            options.onUsage === undefined
+            options.onUsage === undefined && mode !== "deep"
               ? undefined
               : (usage) =>
                   reportUsage(
@@ -2040,7 +2042,7 @@ export class CodexSecurity {
         maxCostUsd: options.maxCostUsd,
         workerNumber,
         onUsage:
-          options.onUsage === undefined
+          options.onUsage === undefined && mode !== "deep"
             ? undefined
             : (usage) => reportUsage("merge", usage),
         onActivity:
@@ -2469,11 +2471,7 @@ export class CodexSecurity {
             filesCompleted: progress.reviewedFileCount,
             filesTotal: progress.scopeFileCount,
           });
-        return mode === "deep"
-          ? completionCost === null
-            ? null
-            : scanCostUsage(completionCost)
-          : snapshot.usage;
+        return mode === "deep" ? combinedUsage() : snapshot.usage;
       };
       const events =
         prompt === undefined
@@ -2566,8 +2564,7 @@ export class CodexSecurity {
                   onObserverError: options.onObserverError,
                 },
                 historicalCost,
-                onUsage:
-                  options.onUsage === undefined ? undefined : reportUsage,
+                onUsage: reportUsage,
                 onCostsRecovered: restoreThreadAccounting,
                 onCost: (key, cost) => {
                   passCosts.set(key, cost);
@@ -2874,7 +2871,10 @@ export class CodexSecurity {
           ? tracked
           : {
               cost,
-              usage: passCosts.size > 0 ? scanCostUsage(cost) : tracked?.usage,
+              usage:
+                passCosts.size > 0
+                  ? (combinedUsage() ?? scanCostUsage(cost))
+                  : tracked?.usage,
             };
       let failure =
         signal.reason instanceof ScanCostLimitExceededError ||
@@ -2960,7 +2960,7 @@ export class CodexSecurity {
               turnResult: {
                 status: "completed",
                 model: budgetRecovery.model,
-                usage: scanCostUsage(finalCost),
+                usage: combinedUsage() ?? scanCostUsage(finalCost),
               },
             },
             true,

@@ -637,6 +637,13 @@ export async function runDeepScans(
               state.mergeStarted = true;
               await save();
             }
+            await workbench([
+              "update-progress",
+              "--scan-id",
+              scanId,
+              "--phase",
+              "reporting",
+            ]).catch(() => undefined);
             return input.merge(prompt, signal, outputSchema);
           },
           { contextPath, onInvalidResponse: retryMerge, validationError },
