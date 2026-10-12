@@ -1857,10 +1857,9 @@ if (process.argv.includes("app-server")) {
         { mode: 0o700 },
       );
       for (const [role, selection] of ["discovery", "merge"].flatMap((role) =>
-        ["home", "relative", "path", "relative-path"].map((selection) => [
-          role,
-          selection,
-        ]),
+        ["home", "home-parent", "relative", "path", "relative-path"].map(
+          (selection) => [role, selection],
+        ),
       )) {
         const pathRoot =
           selection === "path"
@@ -1877,9 +1876,13 @@ if (process.argv.includes("app-server")) {
           process.env.CODEX_CLI_PATH =
             selection === "relative"
               ? `${relative(process.cwd(), root)}/alias/link/../codex`
-              : role === "discovery"
-                ? "~/codex"
-                : "~\\codex";
+              : selection === "home-parent"
+                ? role === "discovery"
+                  ? "~/alias/link/../codex"
+                  : "~\\alias\\link\\..\\codex"
+                : role === "discovery"
+                  ? "~/codex"
+                  : "~\\codex";
         const cwd = join(root, `${role}-${selection}`);
         await mkdir(cwd);
         const config = scanRuntimeCodexConfig(

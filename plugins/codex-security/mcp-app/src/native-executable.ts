@@ -15,7 +15,7 @@ import {
   win32,
 } from "node:path";
 import {
-  expandHome,
+  expandHomePath,
   resolveNativeCodexHome,
 } from "../../../../sdk/typescript/src/codex-home.js";
 import {
@@ -140,7 +140,7 @@ function* codexPathCandidates(
     }
   }
   yield absoluteCodexPath(
-    expandHome(
+    expandHomePath(
       configured || (platform === "win32" ? "codex.exe" : "codex"),
       env,
     ),
