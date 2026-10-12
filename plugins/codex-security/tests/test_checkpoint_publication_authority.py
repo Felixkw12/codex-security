@@ -1710,6 +1710,177 @@ def test_registered_checkpoint_result_keeps_newer_accepted_outcome(
     )
 
 
+@pytest.mark.parametrize("registered", [False, True], ids=["head-only", "registered-result"])
+@pytest.mark.parametrize("interrupted", [False, True], ids=["published", "publication-retry"])
+def test_restored_observation_keeps_independent_registered_result(
+    workbench_api, workbench_db, publication_scan, monkeypatch, registered, interrupted
+):
+    scan = publication_scan()
+    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
+    result = add_worker(workbench_db, scan, status="succeeded")
+    reported = {
+        **save_disposition(scan, result.parent, "reported"),
+        "threatModel": {"summary": "Registered reporting model."},
+    }
+    accepted = write_checkpoint(result.parent / "checkpoints", reported)
+    os.utime(accepted, ns=(50, 50))
+    result.write_text(
+        json.dumps(
+            {
+                **save_disposition(scan, result.parent, "rejected"),
+                "threatModel": {"summary": "Stale result model."},
+            }
+        )
+    )
+    os.utime(result, ns=(200, 200))
+    head = result.parent / "checkpoint-head.json"
+    saved = workbench_api["saved_results"]
+    context = workbench_api["_WORKBENCH_DB_CONTEXT"]
+
+    def select(observed):
+        head.write_text(json.dumps({"checkpoint": accepted.name}))
+        os.utime(head, ns=(observed, observed))
+
+    select(100)
+    saved._capture_saved_source(
+        scan.scan_dir, head.relative_to(scan.scan_dir).as_posix(), scan.scan_id
+    )
+    select(300)
+    if registered:
+        with workbench_db:
+            workbench_db.execute(
+                "UPDATE deep_scan_workers SET result_manifest_path = ? WHERE id = ?",
+                (str(accepted), result.parent.name),
+            )
+    stopped = saved.fail_scan(
+        context,
+        workbench_db,
+        Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
+    )["scan"]
+    assert stopped["findingCount"] == 1
+    sources = json.loads((scan.scan_dir / "scan-manifest.json").read_text())["scan"][
+        "preservedSources"
+    ]
+    original = {path: (scan.scan_dir / path).read_bytes() for path in sources}
+    select(100)
+    assert workbench_api["scan_context"](workbench_db, scan.scan_id)["scan"][
+        "resultsRecoveryNeeded"
+    ]
+    prepared_counts = []
+    write = saved._write_prepared_scan_finalization
+
+    def publish(prepared, **kwargs):
+        prepared_counts.append(len(prepared[3]["findings"]))
+        if interrupted:
+            raise OSError("Synthetic publication interruption")
+        return write(prepared, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(saved, "_write_prepared_scan_finalization", publish)
+        if interrupted:
+            with pytest.raises(OSError, match="Synthetic publication interruption"):
+                saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))
+        else:
+            saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))
+    assert prepared_counts == [int(registered)]
+    recovered = saved.preserve_scan_results(
+        context,
+        workbench_db,
+        Namespace(
+            scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
+        ),
+    )["scan"]
+    assert recovered["findingCount"] == int(registered)
+    assert not recovered["resultsRecoveryNeeded"]
+    manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())["scan"]
+    assert manifest["preservedSources"] == sources
+    assert manifest["threatModel"]["summary"] == (
+        "Registered reporting model." if registered else "Stale result model."
+    )
+    assert all((scan.scan_dir / path).read_bytes() == content for path, content in original.items())
+
+
+@pytest.mark.parametrize("mode", ["standard", "deep"])
+@pytest.mark.parametrize("interrupted", [False, True], ids=["published", "publication-retry"])
+@pytest.mark.parametrize("model_choice", ["latest-accepted", "selected-head", "canonical-fallback"])
+def test_inherited_model_uses_same_selection_on_initial_and_frozen_publication(
+    workbench_api, workbench_db, publication_scan, monkeypatch, mode, interrupted, model_choice
+):
+    scan = publication_scan(mode=mode)
+    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
+    manifest_path = scan.scan_dir / "scan-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["scan"]["threatModel"] = {"summary": "Old canonical model."}
+    manifest_path.write_text(json.dumps(manifest))
+    for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+        os.utime(scan.scan_dir / name, ns=(150, 150))
+    draft = saved_draft(scan.scan_id, complete=True)
+    draft["coverage"] = {**scan.coverage, **draft["coverage"]}
+    if model_choice == "selected-head":
+        draft["threatModel"] = {"summary": "Selected root model."}
+    selected = write_checkpoint(scan.scan_dir / "checkpoints", draft)
+    os.utime(selected, ns=(50, 50))
+    head = scan.scan_dir / "checkpoint-head.json"
+    saved = workbench_api["saved_results"]
+    context = workbench_api["_WORKBENCH_DB_CONTEXT"]
+
+    def select(checkpoint, observed):
+        head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+        os.utime(head, ns=(observed, observed))
+
+    select(selected, 200)
+    saved._capture_saved_source(scan.scan_dir, "checkpoint-head.json", scan.scan_id)
+    if model_choice != "canonical-fallback":
+        newer = write_checkpoint(
+            scan.scan_dir / "checkpoints",
+            {**draft, "threatModel": {"summary": "Latest accepted model."}},
+        )
+        os.utime(newer, ns=(50, 50))
+        select(newer, 300)
+        saved._capture_saved_source(scan.scan_dir, "checkpoint-head.json", scan.scan_id)
+        select(selected, 200)
+    prepared_models = []
+    write = saved._write_prepared_scan_finalization
+
+    def publish(prepared, **kwargs):
+        prepared_models.append(prepared[2]["scan"]["threatModel"]["summary"])
+        if interrupted:
+            raise OSError("Synthetic publication interruption")
+        return write(prepared, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(saved, "_write_prepared_scan_finalization", publish)
+        saved.fail_scan(
+            context,
+            workbench_db,
+            Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
+        )
+    retained = workbench_db.execute(
+        "SELECT retained_source_digests_json FROM scans WHERE id = ?", (scan.scan_id,)
+    ).fetchone()[0]
+    preserved = saved.preserve_scan_results(
+        context,
+        workbench_db,
+        Namespace(
+            scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
+        ),
+    )["scan"]
+    expected = {
+        "latest-accepted": "Latest accepted model.",
+        "selected-head": "Selected root model.",
+        "canonical-fallback": "Old canonical model.",
+    }[model_choice]
+    assert prepared_models == [expected]
+    assert json.loads(manifest_path.read_text())["scan"]["threatModel"]["summary"] == expected
+    assert not preserved["resultsRecoveryNeeded"]
+    assert (
+        workbench_db.execute(
+            "SELECT retained_source_digests_json FROM scans WHERE id = ?", (scan.scan_id,)
+        ).fetchone()[0]
+        == retained
+    )
+
+
 @pytest.mark.parametrize("valid_rejection", [False, True], ids=["malformed", "valid"])
 def test_tied_rejection_requires_valid_surface_before_removing_finding(
     workbench_api, workbench_db, publication_scan, valid_rejection

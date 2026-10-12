@@ -1344,9 +1344,15 @@ def merge_saved_results(
             if directory == Path("."):
                 parent_heads.append((observed, selected))
         selected_observations[selected] = max(selected_observations.get(selected, order), order)
+    # A registered result independently retains its latest accepted observation.
+    # Restoring the head does not withdraw that result's publication authority.
+    registered_result_orders = {
+        path: order for path, order in selected_observations.items() if path in current_results
+    }
     # A restored head selects one observation, not the newest time for its payload.
     selected_observations.update(authoritative_observations)
     source_order.update(selected_observations)
+    source_order.update(registered_result_orders)
 
     drafts_by_path = {relative: draft for relative, draft, _ in sources}
     latest_reducer_key = (
@@ -1489,6 +1495,7 @@ def merge_saved_results(
     # that omit the optional marker, rather than an older canonical manifest.
     if parent is not None:
         manifest["scan"].pop("complete", None)
+        manifest["scan"].pop("threatModel", None)
         if "complete" in parent:
             manifest["scan"]["complete"] = parent["complete"]
         for key in ("scope", "threatModel"):
@@ -1919,7 +1926,7 @@ def merge_saved_results(
             and relative in selected_observations
             and draft.get("complete") is not False
         ):
-            order = source_order[relative]
+            order = selected_observations[relative]
             selected_terminal_orders[worker_id] = max(
                 selected_terminal_orders.get(worker_id, order), order
             )
