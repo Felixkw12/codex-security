@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -10,6 +12,50 @@ from test_deep_scan_successful_publication import publication_scan as publicatio
 from test_partial_coverage_projection import stop_and_recover_projection
 from test_saved_deferred_identity import recover, save_worker
 from workbench_test_support import saved_draft, write_checkpoint
+
+
+@pytest.mark.parametrize("reordered", [False, True])
+def test_unselected_pending_checkpoint_links_to_accepted_worker_surface(tmp_path: Path, reordered):
+    import workbench_saved_results as saved
+
+    surface = {
+        "id": "api",
+        "label": "API boundary",
+        "disposition": "needs_follow_up",
+        "receiptRefs": [],
+    }
+    surfaces = (
+        [{**surface, "id": "other", "label": "Other boundary"}, surface] if reordered else [surface]
+    )
+    accepted = saved_draft(
+        "identity-scan", surfaces=surfaces, complete=True, completeness="partial"
+    )
+    worker = save_worker(tmp_path, saved, "reviewer", [], accepted)
+    output = tmp_path / "reviewer"
+    result_path = output / "result.json"
+    selected = write_checkpoint(output / "checkpoints", accepted)
+    head = output / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": selected.name}))
+    for path in (selected, result_path, head):
+        os.utime(path, ns=(1_000_000_000, 1_000_000_000))
+    pending = copy.deepcopy(accepted)
+    pending["complete"] = False
+    pending["coverage"]["surfaces"].reverse()
+    pending["coverage"]["deferred"] = [
+        {"id": "task", "reason": "Check boundary", "surfaceIds": ["api"]}
+    ]
+    unselected = write_checkpoint(output / "checkpoints", pending)
+    os.utime(unselected, ns=(2_000_000_000, 2_000_000_000))
+    originals = {path: path.read_bytes() for path in output.rglob("*.json")}
+    worker.update(status="succeeded", result_manifest_path=str(result_path))
+    recovered = recover(tmp_path, saved, [worker])
+    replay = recover(tmp_path, saved, [worker], recovered[0]["scan"]["preservedSources"])
+    assert recovered[2] == replay[2]
+    coverage = recovered[2]
+    reviewed = next(row for row in coverage["surfaces"] if row["label"] == "API boundary")
+    task = next(row for row in coverage["deferred"] if row["reason"] == "Check boundary")
+    assert task["surfaceIds"] == [reviewed["id"]]
+    assert all(path.read_bytes() == contents for path, contents in originals.items())
 
 
 @pytest.mark.parametrize("recorded", [False, True])

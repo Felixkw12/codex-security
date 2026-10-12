@@ -1501,12 +1501,17 @@ def merge_saved_results(
                 ),
                 None,
             )
-            if accepted is None and not (
-                relative in selected_observations
-                and any(
-                    owner == worker_id and path in accepted_sources for path, _, owner in sources
-                )
-            ):
+            has_accepted = any(
+                owner == worker_id and path in accepted_sources for path, _, owner in sources
+            )
+            if accepted is None and (relative not in selected_observations or not has_accepted):
+                if field == "deferred" and has_accepted and "surfaceIds" in item:
+                    return {
+                        **item,
+                        "surfaceIds": project_missing_record(field, item, index, worker, source)[
+                            "surfaceIds"
+                        ],
+                    }
                 return item
             if accepted is not None:
                 _, relative, _, _, source = accepted
