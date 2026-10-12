@@ -1651,16 +1651,24 @@ def register_cli_scan(
 ) -> dict[str, Any]:
     repository = require_target(args.repository)
     require_scannable_target(repository)
-    scan_dir = require_canonical_scan_directory(Path(args.scan_dir).expanduser())
-    if scan_dir == repository or repository in scan_dir.parents or scan_dir in repository.parents:
-        raise SystemExit(
-            "The scan artifact directory must be outside and not contain the selected target."
-        )
-    if (not args.archive_existing or args.archived_scan_dir is not None) and next(
-        scan_dir.iterdir(), None
-    ) is not None:
-        raise SystemExit("The scan artifact directory must be empty before the scan starts.")
+    empty_output_required = not args.archive_existing or args.archived_scan_dir is not None
 
+    def validated_scan_directory() -> Path:
+        directory = require_canonical_scan_directory(Path(args.scan_dir).expanduser())
+        if (
+            directory == repository
+            or repository in directory.parents
+            or directory in repository.parents
+        ):
+            raise SystemExit(
+                "The scan artifact directory must be outside and not contain the selected target."
+            )
+        if empty_output_required and next(directory.iterdir(), None) is not None:
+            raise SystemExit("The scan artifact directory must be empty before the scan starts.")
+        return directory
+
+    # Automatic archiving can temporarily remove this path before writer admission.
+    scan_dir = validated_scan_directory() if empty_output_required else None
     user_context = None
     workflow_id = None
     if args.registration_json_stdin:
@@ -1711,6 +1719,8 @@ def register_cli_scan(
 
     connection.execute("BEGIN IMMEDIATE")
     try:
+        if scan_dir is None:
+            scan_dir = validated_scan_directory()
         with archive_scan(
             connection,
             args,
