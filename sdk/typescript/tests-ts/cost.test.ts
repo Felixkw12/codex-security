@@ -888,7 +888,7 @@ describe("inventory source ordering", () => {
     };
   }
 
-  test.each(["missing", "partial"])(
+  test.each(["missing", "partial", "older raw copy"])(
     "keeps live inventory while its saved row is %s",
     async (persistence) => {
       const f = await fixture();
@@ -903,6 +903,12 @@ describe("inventory source ordering", () => {
           nativeCommand("current", progressMarker("discovery", 0, 8)),
         ) + "\n";
       try {
+        if (persistence === "older raw copy")
+          await appendSessionItem(f.parent, {
+            type: "custom_tool_call_output",
+            call_id: "older-eight",
+            output: progressMarker("discovery", 0, 8),
+          });
         await appendFile(
           f.parent,
           JSON.stringify(
@@ -934,10 +940,14 @@ describe("inventory source ordering", () => {
     },
   );
 
-  test.each([false, true])(
-    "positions an inventory observed during close before workers (changed display: %p)",
-    async (changedDisplay) => {
-      const f = await fixture(true);
+  test.each(
+    [false, true].flatMap((workerFirst) =>
+      [false, true].map((changedDisplay) => ({ workerFirst, changedDisplay })),
+    ),
+  )(
+    "positions an inventory observed during close (workers first=$workerFirst, changed display=$changedDisplay)",
+    async ({ workerFirst, changedDisplay }) => {
+      const f = await fixture(workerFirst);
       const initial = {
         phase: "discovery",
         filesCompleted: 0,
@@ -1079,6 +1089,91 @@ describe("inventory source ordering", () => {
           phase: "attack_path",
           filesCompleted: 6,
           filesTotal: 9,
+        });
+      } finally {
+        await f.close();
+      }
+    },
+  );
+
+  test.each([false, true])(
+    "releases an older live inventory after a later completion anchor (workers first: %p)",
+    async (workerFirst) => {
+      const f = await fixture(workerFirst);
+      const initial = {
+        phase: "discovery",
+        filesCompleted: 0,
+        filesTotal: 9,
+      } as const;
+      const current = { ...initial, filesTotal: 8 };
+      try {
+        await appendFile(
+          f.parent,
+          jsonLines([
+            nativeCommand("original", progressMarker("discovery", 0, 9)),
+            nativeCommand("smaller", progressMarker("discovery", 0, 8)),
+            nativeCommand("anchor", "Inventory enumeration complete."),
+          ]) + "\n",
+        );
+        await appendSessionItem(f.worker, progressMessage(5, 9, "attack_path"));
+        f.beforeClose(() => {
+          expect(f.emit("changed-display", initial)).toBe(true);
+          f.tracker.recordParentItem(
+            completedCommand("anchor", "Inventory enumeration complete."),
+          );
+        });
+        await f.tracker.refresh();
+        await f.tracker.refresh();
+        await appendSessionItem(f.worker, progressMessage(6, 9, "attack_path"));
+        await f.tracker.stop();
+        expect(f.updates.at(-1)).toEqual(current);
+      } finally {
+        await f.close();
+      }
+    },
+  );
+
+  test.each([false, true])(
+    "retains proven scope when a live inventory is observed but not accepted (workers first: %p)",
+    async (workerFirst) => {
+      const f = await fixture(workerFirst);
+      const initial = {
+        phase: "discovery",
+        filesCompleted: 0,
+        filesTotal: 10,
+      } as const;
+      const current = { ...initial, filesTotal: 7 };
+      try {
+        await appendFile(
+          f.parent,
+          jsonLines([
+            nativeCommand("original", progressMarker("discovery", 0, 10)),
+            nativeCommand("smaller", progressMarker("discovery", 0, 7)),
+          ]) + "\n",
+        );
+        await appendSessionItem(f.parent, {
+          type: "custom_tool_call_output",
+          call_id: "current-seven",
+          output: progressMarker("discovery", 0, 7),
+        });
+        await appendSessionItem(f.worker, progressMessage(5, 5, "attack_path"));
+        f.beforeClose(() => {
+          expect(f.emit("changed-display", initial)).toBe(true);
+        });
+        await f.tracker.refresh();
+        expect(f.updates.at(-1)?.filesCompleted).toBe(5);
+        // The API observes source identity before rejecting a count decrease.
+        // Keep the rejected marker available for inventory reconciliation.
+        f.tracker.recordParentProgress(
+          current,
+          completedCommand("smaller", progressMarker("discovery", 0, 7)),
+        );
+        await f.tracker.refresh();
+        await f.tracker.stop();
+        expect(f.updates.at(-1)).toEqual({
+          phase: "attack_path",
+          filesCompleted: 5,
+          filesTotal: 7,
         });
       } finally {
         await f.close();

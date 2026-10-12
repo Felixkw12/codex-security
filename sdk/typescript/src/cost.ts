@@ -99,6 +99,7 @@ interface ParentProgressMarker {
   index: number;
   order: number;
   accepted: boolean;
+  corroboratedInventory?: { position: number; markerIndex: number };
 }
 
 interface ProgressOrder {
@@ -1078,22 +1079,21 @@ export class ScanCostTracker {
     // A later saved occurrence may legitimately repeat an earlier live tuple,
     // including progress recovered only from the original multipart response.
     if (live.position !== null) return saved.position > live.position;
-    // A positioned inventory can prove a later scope change even when the
-    // earlier live command had a different display. Unpositioned live state
-    // and review markers do not establish that an inventory copy is newer.
-    const current = this.#parentProgress;
+    // A corroborated native inventory locates the accepted marker even when
+    // its command display differs. A raw receipt with the same count does not.
+    const inventory = live.markers.findLast(
+      (marker) => marker.accepted,
+    )?.corroboratedInventory;
     if (
       saved.completion &&
       saved.update.phase === "discovery" &&
       saved.update.filesCompleted === 0 &&
-      current?.position !== undefined &&
-      current.progress.phase === "discovery" &&
-      current.progress.filesCompleted === 0
+      inventory !== undefined
     )
       return (
-        saved.position > current.position ||
-        (saved.position === current.position &&
-          saved.markerIndex > (current.markerIndex ?? 0))
+        saved.position > inventory.position ||
+        (saved.position === inventory.position &&
+          saved.markerIndex > inventory.markerIndex)
       );
     return !this.#liveParentProgress.has(progressKey(saved.update));
   }
@@ -1375,6 +1375,9 @@ export class ScanCostTracker {
     let missingCommandProgress = false;
     const live = this.#acceptedParent;
     const current = this.#parentProgress;
+    const releasedLive =
+      live?.position === null &&
+      this.#liveParentItems.indexOf(live) < this.#matchedParentItems;
     if (
       parent &&
       command?.live === live &&
@@ -1538,6 +1541,18 @@ export class ScanCostTracker {
         }
         continue;
       }
+      if (parentInventory && saved === corroborated) {
+        const marker = live?.markers.findLast(
+          (marker) =>
+            marker.accepted &&
+            progressKey(marker.progress) === progressKey(progress),
+        );
+        if (marker !== undefined)
+          marker.corroboratedInventory = {
+            position: saved.position,
+            markerIndex: saved.markerIndex,
+          };
+      }
       session.filesTotal = progress.filesTotal;
       session.filesCompleted = progress.filesCompleted;
       if (!parent) session.latestWorkerProgress = { progress, order };
@@ -1556,6 +1571,7 @@ export class ScanCostTracker {
           if (
             this.#parentProgress === null ||
             saved === corroborated ||
+            (releasedLive && this.#parentProgress.position === undefined) ||
             this.#parentProgress.progress.phase !== "discovery" ||
             compareProgressOrder(candidate, this.#parentProgress) >= 0
           )
@@ -1619,6 +1635,8 @@ export class ScanCostTracker {
         parent &&
         displayed !== null &&
         displayed.owner !== "worker" &&
+        saved !== corroborated &&
+        !(releasedLive && displayed.position === undefined) &&
         filesCompleted === displayed.update.filesCompleted &&
         compareProgressOrder(provenance, displayed) < 0
           ? displayed
