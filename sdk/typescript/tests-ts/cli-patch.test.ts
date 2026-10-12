@@ -6589,7 +6589,7 @@ describe("inherited patch publication context", () => {
             inputRunner = current.runRepositoryCommand;
             current.assessPatchRisk = async (request) => {
               expect(request.repository).toBe(root);
-              expect(request.files).toEqual(["package/app.ts"]);
+              expect(request.files).toBeUndefined();
               expect(
                 resolve(
                   await runGitRepositoryCommand(
