@@ -2,11 +2,7 @@
 import { listenForAbort } from "./cli-signals.js";
 import { isNonEmptyString, parseJson } from "./value.js";
 
-import {
-  execFile as execFileCallback,
-  execFileSync,
-  spawn,
-} from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
   accessSync,
@@ -48,7 +44,7 @@ import { cwd } from "node:process";
 import { createInterface } from "node:readline";
 import { Readable, Writable as NodeWritable } from "node:stream";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { promisify, stripVTControlCharacters } from "node:util";
+import { stripVTControlCharacters } from "node:util";
 import { Cli, z } from "incur";
 import { formatCliHelp } from "./cli-help.js";
 import { scanLogsJson } from "./cli-scan-logs-json.js";
@@ -196,6 +192,8 @@ import {
 import {
   checkScanPublication,
   forceTerminatePublicationProcesses as terminatePublishers,
+  signalChildProcessGroup,
+  terminateChildProcess,
   publishScan,
   type CheckScanPublicationOptions,
   type PublishScanProgress,
@@ -311,7 +309,6 @@ import {
 } from "./scan-settings.js";
 
 const PROGRESS_REFRESH_MILLISECONDS = 1_000;
-const execFile = promisify(execFileCallback);
 const WINDOWS_NETWORK_PATH = /^[\\/]{2}/u;
 const WINDOWS_LOCAL_DEVICE_ROOT =
   /^[\\/]{2}[?.][\\/](?:[A-Za-z]:|Volume\{[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\}|GLOBALROOT[\\/]Device[\\/]HarddiskVolume[0-9]+)(?=[\\/]|$)/iu;
@@ -1056,7 +1053,7 @@ interface SkillCommandOutput {
     readonly externalSandbox?: boolean;
     readonly onEvent?: (event: Readonly<Record<string, unknown>>) => void;
     readonly onPermissions?: (context: PatchSnapshotSandbox) => void;
-    readonly onBeforeTurn?: () => Promise<void>;
+    readonly onBeforeTurn?: (signal?: AbortSignal) => Promise<void>;
   };
 }
 
@@ -1101,7 +1098,7 @@ interface SkillRunOptions {
   validationPrompt?: string;
   verificationIds?: readonly string[];
   onEvent?: (event: Readonly<Record<string, unknown>>) => void;
-  onBeforeTurn?: () => Promise<void>;
+  onBeforeTurn?: (signal?: AbortSignal) => Promise<void>;
   provider?: string;
   providerConfiguration?: JsonObject;
   environment?: NodeJS.ProcessEnv;
@@ -1201,6 +1198,7 @@ interface CliDependencies {
       input?: string | Uint8Array;
       patchSnapshot?: readonly string[];
       sandbox?: PatchSnapshotSandbox;
+      signal?: AbortSignal;
     },
   ): Promise<string>;
   assessPatchRisk?: (request: PatchRiskRequest) => Promise<PatchRiskReport>;
@@ -1257,6 +1255,7 @@ export async function runRepositoryCommand(
   repository: string,
   options?: Parameters<CliDependencies["runRepositoryCommand"]>[3],
 ): Promise<string> {
+  options?.signal?.throwIfAborted();
   const sandbox = options?.sandbox;
   const executable = await resolveTrustedExecutable(
     command,
@@ -1302,7 +1301,7 @@ export async function runRepositoryCommand(
         if (name.toUpperCase() === "CODEX_HOME") delete environment[name];
       environment["CODEX_HOME"] = configuredCodexHome(sandbox.environment);
     }
-    const execution = execFile(
+    const execution = spawn(
       codex === undefined
         ? executable.executable
         : executablePathForSpawn(codex.command),
@@ -1331,40 +1330,111 @@ export async function runRepositoryCommand(
       {
         cwd: repository,
         env: environment,
-        maxBuffer: options?.maxBuffer,
-        encoding: options?.encoding === "base64" ? "buffer" : "utf8",
+        stdio: "pipe",
         windowsHide: true,
+        detached: process.platform !== "win32" && options?.signal !== undefined,
       },
     );
+    const result = new Promise<{ stdout: Buffer }>((resolve, reject) => {
+      const output = { stdout: [] as Buffer[], stderr: [] as Buffer[] };
+      let outputError: Error | undefined;
+      for (const name of ["stdout", "stderr"] as const) {
+        let bytes = 0;
+        execution[name].on("data", (chunk: Buffer) => {
+          const remaining = (options?.maxBuffer ?? Infinity) - bytes;
+          output[name].push(chunk.subarray(0, Math.max(0, remaining)));
+          bytes += chunk.length;
+          if (
+            bytes > (options?.maxBuffer ?? Infinity) &&
+            outputError === undefined
+          ) {
+            outputError = Object.assign(
+              new RangeError(`${name} maxBuffer length exceeded`),
+              { code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" },
+            );
+            execution.kill();
+          }
+        });
+      }
+      execution.once("error", reject);
+      execution.once("close", (code, signal) => {
+        const stdout = Buffer.concat(output.stdout),
+          stderr = Buffer.concat(output.stderr);
+        if (code === 0 && signal === null && outputError === undefined)
+          resolve({ stdout });
+        else
+          reject(
+            Object.assign(
+              outputError ??
+                new Error(
+                  `Command failed: ${execution.spawnargs.join(" ")}\n${stderr.toString("utf8")}`,
+                ),
+              {
+                code:
+                  outputError === undefined
+                    ? code
+                    : "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
+                signal,
+                killed: execution.killed,
+                stdout,
+                stderr,
+              },
+            ),
+          );
+      });
+    });
+    let termination: Promise<void> | undefined;
+    let forcedTermination: ReturnType<typeof setTimeout> | undefined;
+    const cancel = () => {
+      if (termination !== undefined) return;
+      termination = terminateChildProcess(execution, options?.signal);
+      forcedTermination = setTimeout(() => {
+        signalChildProcessGroup(execution, "SIGKILL");
+      }, CHILD_TERMINATION_GRACE_MS);
+      forcedTermination.unref();
+    };
+    options?.signal?.addEventListener("abort", cancel, { once: true });
+    if (options?.signal?.aborted) cancel();
     const input =
       options?.input === undefined && sandbox === undefined
         ? undefined
         : new Promise<void>((resolve, reject) => {
-            execution.child.stdin!.once("error", reject);
+            execution.stdin.once("error", reject);
             if (sandbox !== undefined)
-              execution.child.stdin!.write(
+              execution.stdin.write(
                 JSON.stringify(
                   Object.entries(sandbox.gitEnvironment ?? {}).map(
                     ([key, value]) => [key, value ?? null],
                   ),
                 ) + "\n",
               );
-            execution.child.stdin!.end(options?.input, resolve);
+            execution.stdin.end(options?.input, resolve);
           });
     const [{ stdout }, inputError] = await Promise.all([
-      execution,
+      result,
       input?.then(() => undefined).catch((error: unknown) => error),
-    ]).catch((error: unknown) => {
-      // Keep command diagnostics as text when stdout was requested as bytes.
-      if (error instanceof Error) {
-        for (const field of ["stdout", "stderr"] as const) {
-          const value = (error as Error & Record<typeof field, unknown>)[field];
-          if (Buffer.isBuffer(value))
-            Object.assign(error, { [field]: value.toString("utf8") });
+    ])
+      .catch((error: unknown) => {
+        // Keep command diagnostics as text when stdout was requested as bytes.
+        if (error instanceof Error) {
+          for (const field of ["stdout", "stderr"] as const) {
+            const value = (error as Error & Record<typeof field, unknown>)[
+              field
+            ];
+            if (Buffer.isBuffer(value))
+              Object.assign(error, { [field]: value.toString("utf8") });
+          }
         }
-      }
-      throw error;
-    });
+        throw error;
+      })
+      .finally(async () => {
+        options?.signal?.removeEventListener("abort", cancel);
+        await termination;
+        if (options?.signal?.aborted && process.platform !== "win32")
+          signalChildProcessGroup(execution, "SIGKILL");
+        clearTimeout(forcedTermination);
+      });
+    options?.signal?.throwIfAborted();
     if (inputError !== undefined) throw inputError;
     const output = Buffer.isBuffer(stdout)
       ? stdout.toString(options?.encoding ?? "utf8")
@@ -1748,6 +1818,7 @@ export async function runCodexSkillCommand(
       invocation.stdin?.on("error", () => {});
       invocation.stdin?.end(input);
     }
+    const preparation = new AbortController();
     let requestedSignal: SignalName | null = null;
     let forcedTermination: ReturnType<typeof setTimeout> | undefined;
     let forceStatusCompletion: (() => void) | null = null;
@@ -1755,6 +1826,7 @@ export async function runCodexSkillCommand(
     let invocationStatus: Promise<number> | undefined;
     const requestTermination = (signal: SignalName): void => {
       requestedSignal = signal;
+      preparation.abort(signal);
       invocation.kill(signal);
       if (forcedTermination !== undefined) return;
       forcedTermination = setTimeout(() => {
@@ -1802,6 +1874,7 @@ export async function runCodexSkillCommand(
                       externalSandbox: output.appServer.externalSandbox,
                       onEvent: output.appServer.onEvent,
                       onBeforeTurn: output.appServer.onBeforeTurn,
+                      signal: preparation.signal,
                       onPermissions: (profile, configuration) =>
                         output.appServer!.onPermissions?.({
                           profile,
@@ -1912,16 +1985,31 @@ export async function main(
   let gitEnvironment: NodeJS.ProcessEnv | undefined;
   let gitRepository: string | undefined;
   let patchSandbox: PatchSnapshotSandbox | undefined;
+  let patchPreparationSignal: AbortSignal | undefined;
   dependencies = {
     ...parentDependencies,
     runCodex(args, output, environment, input) {
-      if (output?.appServer?.permissions !== undefined) {
+      if (output?.appServer !== undefined) {
+        const appServer = output.appServer;
         output = {
           ...output,
           appServer: {
-            ...output.appServer,
-            onPermissions(context) {
-              patchSandbox = context;
+            ...appServer,
+            ...(appServer.permissions === undefined
+              ? {}
+              : {
+                  onPermissions(context: PatchSnapshotSandbox) {
+                    patchSandbox = context;
+                  },
+                }),
+            async onBeforeTurn(signal) {
+              const previous = patchPreparationSignal;
+              patchPreparationSignal = signal;
+              try {
+                await appServer.onBeforeTurn?.(signal);
+              } finally {
+                patchPreparationSignal = previous;
+              }
             },
           },
         };
@@ -1929,6 +2017,11 @@ export async function main(
       return parentDependencies.runCodex(args, output, environment, input);
     },
     async runRepositoryCommand(command, args, repository, options) {
+      options = {
+        ...options,
+        signal: options?.signal ?? patchPreparationSignal,
+      };
+      options.signal?.throwIfAborted();
       if (command === "git") {
         gitRepository ??= repository;
         gitEnvironment ??= Object.fromEntries(
@@ -1959,6 +2052,7 @@ export async function main(
                 {
                   trim: false,
                   environment: gitEnvironment,
+                  signal: options.signal,
                 },
               )
             ).replace(/\n$/u, "");
@@ -1971,6 +2065,7 @@ export async function main(
               {
                 trim: false,
                 environment: gitEnvironment,
+                signal: options.signal,
               },
             )
           ).replace(/\n$/u, "");
@@ -1991,6 +2086,9 @@ export async function main(
                       "GIT_ALTERNATE_OBJECT_DIRECTORIES",
                       "GIT_ATTR_SOURCE",
                       "HOME",
+                      "USERPROFILE",
+                      "HOMEDRIVE",
+                      "HOMEPATH",
                       "XDG_CONFIG_HOME",
                       "GIT_INDEX_FILE",
                       "GIT_CONFIG",
@@ -7382,14 +7480,18 @@ async function hashPublicationFile(
   root: string,
   pathKey: string,
 ): Promise<string | undefined> {
-  const relativePath = patchPathText(pathKey);
-  // This string-path reader cannot select a raw filename through its UTF-8 alias.
-  if (patchPathKey(relativePath) !== pathKey) return undefined;
-  const path = resolve(root, relativePath);
+  const path = patchFilePath(root, pathKey);
   const selected = await lstat(path);
   if (!selected.isFile() || selected.size === 0) return undefined;
-  const canonical = await realpath(path);
-  if (isOutsidePath(relative(await realpath(root), canonical)))
+  const canonical = await realpath(path, { encoding: "buffer" });
+  if (
+    isOutsidePath(
+      relative(
+        (await realpath(root, { encoding: "buffer" })).toString("latin1"),
+        canonical.toString("latin1"),
+      ),
+    )
+  )
     return undefined;
   const file = await open(
     canonical,
@@ -9515,7 +9617,8 @@ export async function readSkillCommandOutput(
     readonly apiKey?: string;
     readonly modelProvider?: string;
     readonly onThreadStarted?: () => Promise<void>;
-    readonly onBeforeTurn?: () => Promise<void>;
+    readonly onBeforeTurn?: (signal?: AbortSignal) => Promise<void>;
+    readonly signal?: AbortSignal;
     readonly onPermissions?: (
       profile: JsonObject,
       configuration: JsonObject,
@@ -9553,6 +9656,7 @@ export async function readSkillCommandOutput(
     appServer?.input.write(`${JSON.stringify(request)}\n`);
   };
   const startTurn = (): void => {
+    if (appServer?.signal?.aborted) return;
     send({
       id: 3,
       method: "turn/start",
@@ -9799,7 +9903,12 @@ export async function readSkillCommandOutput(
             appServer.input.end();
             continue;
           }
-          await appServer.onBeforeTurn?.();
+          try {
+            await appServer.onBeforeTurn?.(appServer.signal);
+          } catch (error) {
+            if (!appServer.signal?.aborted) throw error;
+          }
+          if (appServer.signal?.aborted) break;
           startTurn();
         } else if (value["id"] === 3) {
           turnId = (value["result"] as { turn: { id: string } }).turn.id;
@@ -10872,15 +10981,7 @@ async function executeScan(
       ),
     };
     try {
-      const publication =
-        (arguments_.createPr || patchSelection?.createPullRequest) &&
-        selected.findings.length > 0
-          ? await preparePatchPublication(
-              selected.repository,
-              selected.scanId,
-              dependencies,
-            )
-          : undefined;
+      let publication: PatchPublication | undefined;
       const patchRun = await runFindingPatches(
         selected,
         {
@@ -10900,6 +11001,17 @@ async function executeScan(
           safetyIdentifier: arguments_.safetyIdentifier,
           auth,
           findingInstructions: patchSelection?.instructions,
+          onBeforeTurn: async () => {
+            if (
+              publication === undefined &&
+              (arguments_.createPr || patchSelection?.createPullRequest)
+            )
+              publication = await preparePatchPublication(
+                selected.repository,
+                selected.scanId,
+                dependencies,
+              );
+          },
         },
         progress?.interactive === true,
       );

@@ -2,6 +2,7 @@ import { constants } from "node:fs";
 import {
   access,
   lstat,
+  mkdir,
   mkdtemp,
   readFile,
   realpath,
@@ -790,8 +791,11 @@ export async function capturePatchGitControls(
         const lfs = absolute
           ? configured
           : join(common.replace(/\n$/u, ""), configured);
-        for (const path of [join(lfs, "objects"), join(lfs, "tmp")])
-          snapshotStoragePaths.add(path);
+        for (const path of [join(lfs, "objects"), join(lfs, "tmp")]) {
+          await mkdir(path, { recursive: true });
+          await rememberControl(path);
+          snapshotStoragePaths.add(controlPaths.get(path)!.canonical);
+        }
       }
       let tracked: Buffer;
       let untracked: Buffer;

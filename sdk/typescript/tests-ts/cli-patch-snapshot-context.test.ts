@@ -1,7 +1,16 @@
 import { afterEach, expect, test } from "bun:test";
-import { execFileSync } from "node:child_process";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import {
+  lstat,
+  mkdir,
+  readFile,
+  realpath,
+  rename,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
+import { join, parse } from "node:path";
 import { stringify as stringifyToml } from "smol-toml";
 import { runCodexSkillCommand, runRepositoryCommand } from "../src/cli.js";
 import { resolveCodexCommand } from "../src/runtime.js";
@@ -14,6 +23,214 @@ const windows =
   process.platform === "win32" ? 'windows = { sandbox = "unelevated" }\n' : "";
 const provider =
   'model_provider = "synthetic"\n[model_providers.synthetic]\nname = "Synthetic"\nbase_url = "http://127.0.0.1:9/v1"\nwire_api = "responses"\n';
+
+test("native snapshots retain Windows Git home fallbacks when HOME is unset", async () => {
+  const root = await fixtures.create("patch-home-fallbacks-");
+  const repository = join(root, "repository"),
+    home = join(root, "home");
+  await Promise.all([mkdir(repository), mkdir(home)]);
+  const emptyConfig = join(root, "empty.gitconfig");
+  await writeFile(emptyConfig, "");
+  const fallback = {
+    USERPROFILE: home,
+    HOMEDRIVE: parse(home).root.slice(0, -1),
+    HOMEPATH: home.slice(parse(home).root.length - 1),
+  };
+  const environment: NodeJS.ProcessEnv = {
+    ...process.env,
+    ...fallback,
+    HOME: undefined,
+    CODEX_HOME: home,
+    GIT_CONFIG_GLOBAL:
+      process.platform === "win32" ? undefined : join(home, ".gitconfig"),
+    GIT_CONFIG_SYSTEM: emptyConfig,
+    GIT_CONFIG_NOSYSTEM: "1",
+  };
+  const clean = join(root, "clean.cjs");
+  await writeFile(
+    clean,
+    `const fs=require("node:fs"); const expected=${JSON.stringify(fallback)}; const input=fs.readFileSync(0,"utf8"); process.stdout.write(Object.entries(expected).every(([key,value])=>process.env[key]===value) ? input.toUpperCase() : input);\n`,
+  );
+  await writeFile(
+    join(home, ".gitconfig"),
+    `[filter "home-fallback"]\n clean = ${JSON.stringify(`node ${JSON.stringify(clean.replaceAll("\\", "/"))}`)}\n required = true\n`,
+  );
+  await writeFile(
+    join(home, "config.toml"),
+    windows +
+      stringifyToml({
+        shell_environment_policy: {
+          inherit: "all",
+          exclude: ["HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH"],
+          set: {
+            USERPROFILE: join(root, "policy-home"),
+            HOMEDRIVE: "Z:",
+            HOMEPATH: "\\policy-home",
+          },
+        },
+      }),
+  );
+  const git = (...args: string[]) =>
+    execFileSync("git", args, {
+      cwd: repository,
+      env: environment,
+      encoding: "utf8",
+    }).trim();
+  git("init", "--initial-branch=main");
+  git("config", "user.name", "Synthetic User");
+  git("config", "user.email", "synthetic@example.test");
+  await writeFile(
+    join(repository, ".gitattributes"),
+    "data filter=home-fallback\n",
+  );
+  await writeFile(join(repository, "data"), "lowercase source\n");
+  git("add", ".");
+  git("commit", "-m", "Synthetic home fallback baseline");
+  expect(git("show", "HEAD:data")).toBe("LOWERCASE SOURCE");
+  const trees: string[] = [];
+  const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
+    currentDirectory: repository,
+    environment,
+    manualCodexPreparation: true,
+    onCodex: async (_args, output) => {
+      output!.appServer!.onPermissions!({
+        directory: repository,
+        environment,
+        snapshotStoragePaths: output!.appServer!.snapshotStoragePaths,
+        profile: {
+          extends: ":workspace",
+          network: { enabled: false },
+          workspace_roots: {},
+          filesystem: Object.fromEntries(
+            output!.appServer!.permissions!.readOnlyPaths.map((path) => [
+              path,
+              { ".": "read" },
+            ]),
+          ),
+        },
+      });
+      await output!.appServer!.onBeforeTurn?.();
+      output!.stdout.write("Synthetic no-op turn.\n");
+      return 0;
+    },
+    onRepositoryCommand: async (command, args, cwd, options) => {
+      const result = await runRepositoryCommand(command, args, cwd, {
+        ...options,
+        environment: { ...environment, ...options?.environment },
+      });
+      if (args.includes("write-tree")) trees.push(result.trim());
+      return result;
+    },
+  });
+  expect(outcome.exitCode, outcome.stderr).toBe(2);
+  expect(trees).toEqual([
+    git("rev-parse", "HEAD^{tree}"),
+    git("rev-parse", "HEAD^{tree}"),
+  ]);
+  expect(await readFile(join(repository, "data"), "utf8")).toBe(
+    "lowercase source\n",
+  );
+}, 30_000);
+
+test
+  .skipIf(spawnSync("git", ["lfs", "version"]).status !== 0)
+  .each(["missing", "symlink", "configured-symlink"] as const)(
+  "prepares canonical LFS storage for the first filtered file: %s",
+  async (mode) => {
+    const root = await fixtures.create("patch-first-lfs-");
+    const repository = join(root, "repository"),
+      home = join(root, "home");
+    await Promise.all([mkdir(repository), mkdir(home)]);
+    await writeFile(join(home, "config.toml"), windows);
+    const git = repositoryGit(repository);
+    git("init", "--initial-branch=main");
+    git("config", "user.name", "Synthetic User");
+    git("config", "user.email", "synthetic@example.test");
+    git("lfs", "install", "--local", "--skip-repo");
+    await writeFile(
+      join(repository, ".gitattributes"),
+      "*.bin filter=lfs diff=lfs merge=lfs -text\n",
+    );
+    await writeFile(join(repository, "app.ts"), "before\n");
+    git("add", ".");
+    git("commit", "-m", "Synthetic LFS baseline");
+    let storage = join(repository, ".git", "lfs");
+    if (mode !== "missing") {
+      const target = join(root, "storage-target");
+      await mkdir(target);
+      const alias = mode === "symlink" ? storage : join(root, "storage-alias");
+      await symlink(
+        target,
+        alias,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+      if (mode === "configured-symlink") {
+        storage = join(alias, "storage");
+        git("config", "lfs.storage", storage);
+      }
+    }
+    await expect(lstat(join(storage, "objects"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    const originalConfig = await readFile(join(repository, ".git", "config"));
+    const originalIndex = await readFile(join(repository, ".git", "index"));
+    const payload = "Synthetic first LFS payload\n";
+    const environment = { ...process.env, CODEX_HOME: home };
+    const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
+      currentDirectory: repository,
+      environment,
+      manualCodexPreparation: true,
+      onCodex: async (_args, output) => {
+        output!.appServer!.onPermissions!({
+          directory: repository,
+          environment,
+          snapshotStoragePaths: output!.appServer!.snapshotStoragePaths,
+          profile: {
+            extends: ":workspace",
+            network: { enabled: false },
+            workspace_roots: {},
+            filesystem: Object.fromEntries(
+              output!.appServer!.permissions!.readOnlyPaths.map((path) => [
+                path,
+                { ".": "read" },
+              ]),
+            ),
+          },
+        });
+        await output!.appServer!.onBeforeTurn?.();
+        await writeFile(join(repository, "payload.bin"), payload);
+        output!.stdout.write("Synthetic LFS patch complete.\n");
+        return 0;
+      },
+      onRepositoryCommand: (command, args, cwd, options) =>
+        runRepositoryCommand(command, args, cwd, {
+          ...options,
+          environment: { ...environment, ...options?.environment },
+        }),
+    });
+    expect(outcome.exitCode, outcome.stdout + outcome.stderr).toBe(0);
+    const digest = createHash("sha256").update(payload).digest("hex");
+    expect(
+      await readFile(
+        join(
+          await realpath(storage),
+          "objects",
+          digest.slice(0, 2),
+          digest.slice(2, 4),
+          digest,
+        ),
+        "utf8",
+      ),
+    ).toBe(payload);
+    expect(await readFile(join(repository, ".git", "config"))).toEqual(
+      originalConfig,
+    );
+    expect(await readFile(join(repository, ".git", "index"))).toEqual(
+      originalIndex,
+    );
+  },
+  30_000,
+);
 
 test.each([
   ...[
