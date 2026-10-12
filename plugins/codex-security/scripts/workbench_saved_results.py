@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from finalize_scan_contract import (
     ContractError,
     _finding_strength,
+    _has_identity_text,
     _populate_unsealed_artifact_envelope,
     _populate_unsealed_manifest_envelope,
     _prepare_scan_finalization,
@@ -466,17 +467,6 @@ def _finding_content(finding: dict[str, Any]) -> dict[str, Any]:
         for key, value in finding.items()
         if key not in {"findingId", "occurrenceId", "fingerprints", "identity", "provenance"}
     }
-
-
-def _has_identity_text(value: Any) -> bool:
-    # Match JavaScript String.trim when selecting optional identity metadata.
-    return isinstance(value, str) and bool(
-        value.strip(
-            "\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680"
-            "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
-            "\u2028\u2029\u202f\u205f\u3000\ufeff"
-        )
-    )
 
 
 def _identity_candidate(finding: dict[str, Any]) -> str | None:

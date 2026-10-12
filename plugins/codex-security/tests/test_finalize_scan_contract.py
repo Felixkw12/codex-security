@@ -850,6 +850,25 @@ The extraction root is not enforced.
                 self.assertIn("candidate_id", reader.fieldnames or [])
                 self.assertEqual(next(reader)["candidate_id"], f"legacy-{field}")
 
+    def test_deep_csv_candidate_selection_preserves_precedence_and_unicode_whitespace(self) -> None:
+        self.coverage["mode"] = "deep_repository"
+        for provenance, candidate, report, ledger, expected in (
+            ("provenance", "candidate", "report", "ledger", "provenance"),
+            ("\ufeff", "candidate", "report", "ledger", "candidate"),
+            ("\ufeff", "\ufeff", "report", "ledger", "report"),
+            ("\ufeff", "\ufeff", "\ufeff", "ledger", "ledger"),
+            ("\ufeff", "\ufeff", "\ufeff", "\ufeff", ""),
+            ("\u0085", "candidate", "report", "ledger", "\u0085"),
+        ):
+            with self.subTest(expected=expected):
+                self.finding["provenance"]["candidateId"] = provenance
+                self.finding["extensions"] = {
+                    "candidateId": candidate,
+                    "reportId": report,
+                    "ledgerRowId": ledger,
+                }
+                self.assertEqual(next(self.export_csv())["candidate_id"], expected)
+
     def test_scoped_csv_export_does_not_classify_ordinary_ledger_ids_as_deep(self) -> None:
         self.coverage["mode"] = "scoped_path"
         self.finding["extensions"] = {"ledgerRowId": "SCAN-001-parser"}

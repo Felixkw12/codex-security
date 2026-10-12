@@ -2727,13 +2727,20 @@ def csv_cell(value: Any) -> Any:
     return value
 
 
+def _has_identity_text(value: Any) -> bool:
+    # Match JavaScript String.trim when selecting optional identity metadata.
+    return isinstance(value, str) and bool(
+        value.strip(
+            "\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680"
+            "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+            "\u2028\u2029\u202f\u205f\u3000\ufeff"
+        )
+    )
+
+
 def finding_candidate_id(finding: dict[str, Any]) -> str | None:
     provenance = finding.get("provenance")
-    if (
-        isinstance(provenance, dict)
-        and isinstance(value := provenance.get("candidateId"), str)
-        and value.strip()
-    ):
+    if isinstance(provenance, dict) and _has_identity_text(value := provenance.get("candidateId")):
         return value
     extensions = finding.get("extensions")
     if not isinstance(extensions, dict):
@@ -2742,7 +2749,7 @@ def finding_candidate_id(finding: dict[str, Any]) -> str | None:
         (
             value
             for field in ("candidateId", "reportId", "ledgerRowId")
-            if isinstance(value := extensions.get(field), str) and value.strip()
+            if _has_identity_text(value := extensions.get(field))
         ),
         None,
     )

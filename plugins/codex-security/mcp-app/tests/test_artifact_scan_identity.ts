@@ -303,6 +303,69 @@ for (const observations of [
   });
 }
 
+for (const [label, metadata, count] of [
+  ["absent", {}, 2],
+  ["ASCII blank", { provenance: { candidateId: " \t" } }, 2],
+  ["BOM provenance", { provenance: { candidateId: "\ufeff" } }, 2],
+  ["BOM extension", { extensions: { candidateId: "\ufeff" } }, 2],
+  ["BOM report", { extensions: { reportId: "\ufeff" } }, 2],
+  ["BOM ledger", { extensions: { ledgerRowId: "\ufeff" } }, 2],
+  ["candidate", { provenance: { candidateId: "candidate-1" } }, 1],
+  ["next line", { provenance: { candidateId: "\u0085" } }, 1],
+  ["separator", { provenance: { candidateId: "\u001c" } }, 1],
+  [
+    "extension fallback",
+    {
+      provenance: { candidateId: "\ufeff" },
+      extensions: { candidateId: "candidate-1" },
+    },
+    1,
+  ],
+  [
+    "report fallback",
+    { extensions: { candidateId: "\ufeff", reportId: "report-1" } },
+    1,
+  ],
+  [
+    "ledger fallback",
+    { extensions: { reportId: "\ufeff", ledgerRowId: "ledger-1" } },
+    1,
+  ],
+] as const) {
+  test(`candidate selection retains moved evidence for ${label}`, async (t) => {
+    const normal = await fixture(t, "standard"),
+      recovered = await fixture(t, "standard");
+    for (const [index, location] of [
+      "src/first.py",
+      "src/second.py",
+    ].entries()) {
+      const row = finding("Synthetic review", {
+        ...metadata,
+        summary: `Synthetic evidence at ${location}`,
+        locations: [{ path: location, startLine: 1 }],
+        provenance: {
+          source: "local_plugin",
+          ...("provenance" in metadata ? metadata.provenance : {}),
+        },
+      });
+      await normal.write({ ...normal.draft(), findings: [row] });
+      await draftApi.saveScanDraftCheckpoint(
+        recovered.context,
+        { ...recovered.draft(), findings: [row] },
+        false,
+      );
+      if (index === 0) await dateDraftFiles(recovered.root, 100);
+    }
+    const result = await recoverAndFinalize(normal, recovered, [], true, true);
+    const byLocation = (rows: RecoveredFinding[]) =>
+      new Map(rows.map((row) => [row.locations[0]!.path, row]));
+    assert.equal(result.normal.length, count);
+    assert.equal(result.recovered.length, count);
+    assert.deepEqual(byLocation(result.recovered), byLocation(result.normal));
+    assert.deepEqual(result.warnings, []);
+  });
+}
+
 for (const layout of ["standard", "diff", "deep"] as const) {
   for (const [label, candidateId] of Object.entries({
     bom: "\ufeff",
