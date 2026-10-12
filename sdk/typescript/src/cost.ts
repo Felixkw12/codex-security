@@ -472,28 +472,56 @@ export class ScanCostTracker {
       !this.#parentTurnStartKnown ||
       live?.position !== null ||
       live.item?.kind !== "command" ||
-      this.#liveParentItems.indexOf(live) < this.#matchedParentItems ||
       this.#parentProgress === null ||
       this.#parentProgress.position !== undefined
     )
       return undefined;
     const item = live.item;
-    for (
-      let index = session.completions.length - 1;
-      index >= this.#parentCompletionCursor;
-      index--
-    ) {
-      const completion = session.completions[index]!;
+    const liveIndex = this.#liveParentItems.indexOf(live);
+    const beforeIndex = this.#liveParentItems.findLastIndex(
+      (previous, index) => index < liveIndex && previous.position !== null,
+    );
+    const before = this.#liveParentItems[beforeIndex]?.position ?? 0;
+    const after =
+      this.#liveParentItems
+        .slice(liveIndex + 1)
+        .find((next) => next.position !== null)?.position ?? Infinity;
+    // A later exact anchor consumes queue prefixes, but does not locate an
+    // omitted marker inside a truncated command. Retain that command's evidence
+    // between its surrounding anchors until the progress itself is resolved.
+    const earlier = this.#liveParentItems
+      .slice(beforeIndex + 1, liveIndex)
+      .filter(
+        (previous) =>
+          previous.position === null && previous.item?.kind === "command",
+      );
+    for (const completion of session.completions) {
       if (
+        completion.position > before &&
+        completion.position < after &&
         completion.item?.kind === "command" &&
         (completion.item.outputDigest === item.outputDigest ||
           completion.item.outputDigest === item.persistedOutputDigest)
-      )
+      ) {
+        // Equal output is still occurrence-ordered when argv displays differ.
+        // Reserve each earlier saved copy for the earlier unmatched live item;
+        // a missing later copy cannot borrow its predecessor's inventory proof.
+        const preceding = earlier.findIndex(
+          (previous) =>
+            completion.item!.outputDigest === previous.item!.outputDigest ||
+            completion.item!.outputDigest ===
+              previous.item!.persistedOutputDigest,
+        );
+        if (preceding !== -1) {
+          earlier.splice(preceding, 1);
+          continue;
+        }
         return {
           live,
           completion,
           truncated: completion.item.outputDigest !== item.outputDigest,
         };
+      }
     }
     return undefined;
   }
@@ -742,8 +770,10 @@ export class ScanCostTracker {
         progress.filesCompleted === 0 &&
         (position > this.#inventoryFrontier.position ||
           (position === this.#inventoryFrontier.position &&
-            marker.index > this.#inventoryFrontier.markerIndex))
+            marker.index >= this.#inventoryFrontier.markerIndex))
       ) {
+        // A saved occurrence remains authoritative when its live copy arrives
+        // after polling consumed it, even if provisional coverage rejects it.
         // Inventory may precede already-admitted review even when its full live
         // marker arrives later. For lossy output, the real matched review marks
         // the scope-proof boundary; the missing inventory position stays unknown.
@@ -844,7 +874,13 @@ export class ScanCostTracker {
       if (
         position === null ||
         (!deferredCoverage &&
-          !this.#afterParentFrontier(position, marker.index))
+          !this.#afterParentFrontier(position, marker.index) &&
+          !(
+            inventoryChanged &&
+            marker === this.#parentInventory &&
+            position === this.#parentFrontier.position &&
+            marker.index === this.#parentFrontier.markerIndex
+          ))
       )
         continue;
       const candidate: OrderedProgress & { owner: "live" } = {
@@ -1079,11 +1115,16 @@ export class ScanCostTracker {
     // A later saved occurrence may legitimately repeat an earlier live tuple,
     // including progress recovered only from the original multipart response.
     if (live.position !== null) return saved.position > live.position;
-    // A corroborated native inventory locates the accepted marker even when
-    // its command display differs. A raw receipt with the same count does not.
-    const inventory = live.markers.findLast(
-      (marker) => marker.accepted,
-    )?.corroboratedInventory;
+    // Inventory provenance outlives a non-inventory phase on the parent display.
+    // A raw receipt with the same count does not locate a native occurrence.
+    const inventory = this.#liveParentItems
+      .flatMap((item) => item.markers)
+      .findLast(
+        (marker) =>
+          marker.accepted &&
+          marker.progress.phase === "discovery" &&
+          marker.progress.filesCompleted === 0,
+      )?.corroboratedInventory;
     if (
       saved.completion &&
       saved.update.phase === "discovery" &&
@@ -1375,12 +1416,10 @@ export class ScanCostTracker {
     let missingCommandProgress = false;
     const live = this.#acceptedParent;
     const current = this.#parentProgress;
-    const releasedLive =
-      live?.position === null &&
-      this.#liveParentItems.indexOf(live) < this.#matchedParentItems;
     if (
       parent &&
       command?.live === live &&
+      command.completion.item !== null &&
       live?.position === null &&
       current !== null &&
       current.position === undefined
@@ -1402,13 +1441,16 @@ export class ScanCostTracker {
       if (saved !== undefined && progressKey(saved.update) === key) {
         unresolvedCommandState = true;
         if (
+          (current.progress.phase === "discovery" &&
+            current.progress.filesCompleted === 0) ||
           session.progress.every(
             (row) =>
               row.position <= saved.position || progressKey(row.update) === key,
           )
         ) {
-          // The latest saved state agrees with live output even when command
-          // presentation differs. Admit the fact, without guessing live identity.
+          // A visible inventory marker proves its scope occurrence even when
+          // later inventories differ. It does not locate omitted command phases.
+          // Non-inventory phases still require the latest saved state to agree.
           corroborated = saved;
           session.progress.splice(session.progress.indexOf(saved), 1);
           session.progress.unshift(saved);
@@ -1571,7 +1613,6 @@ export class ScanCostTracker {
           if (
             this.#parentProgress === null ||
             saved === corroborated ||
-            (releasedLive && this.#parentProgress.position === undefined) ||
             this.#parentProgress.progress.phase !== "discovery" ||
             compareProgressOrder(candidate, this.#parentProgress) >= 0
           )
@@ -1636,7 +1677,6 @@ export class ScanCostTracker {
         displayed !== null &&
         displayed.owner !== "worker" &&
         saved !== corroborated &&
-        !(releasedLive && displayed.position === undefined) &&
         filesCompleted === displayed.update.filesCompleted &&
         compareProgressOrder(provenance, displayed) < 0
           ? displayed
