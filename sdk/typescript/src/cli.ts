@@ -1984,6 +1984,9 @@ export async function main(
                   ...Object.fromEntries(
                     [
                       ...Object.keys(NESTED_PATCH_GIT_ENVIRONMENT),
+                      "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                      "HOME",
+                      "XDG_CONFIG_HOME",
                       "GIT_INDEX_FILE",
                       "GIT_CONFIG",
                       "GIT_CONFIG_GLOBAL",

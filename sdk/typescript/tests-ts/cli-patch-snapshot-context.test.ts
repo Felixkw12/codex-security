@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { stringify as stringifyToml } from "smol-toml";
 import { runCodexSkillCommand, runRepositoryCommand } from "../src/cli.js";
@@ -16,17 +16,31 @@ const provider =
   'model_provider = "synthetic"\n[model_providers.synthetic]\nname = "Synthetic"\nbase_url = "http://127.0.0.1:9/v1"\nwire_api = "responses"\n';
 
 test.each([
-  ...["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM"].flatMap(
-    (selector) =>
-      ["set", "unset", "empty"].map((state) => ({
-        selector,
-        state,
-        filtered: true,
-      })),
+  ...[
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_SYSTEM",
+    "GIT_CONFIG_NOSYSTEM",
+    "HOME",
+    "XDG_CONFIG_HOME",
+  ].flatMap((selector) =>
+    ["set", "unset", "empty"].map((state) => ({
+      selector,
+      state,
+      filtered: true,
+    })),
   ),
   { selector: "GIT_CONFIG_COUNT", state: "unset", filtered: true },
   { selector: "GIT_CONFIG_PARAMETERS", state: "unset", filtered: true },
-  { selector: "GIT_CONFIG_GLOBAL", state: "set", filtered: false },
+  ...["GIT_CONFIG_GLOBAL", "HOME", "XDG_CONFIG_HOME"].map((selector) => ({
+    selector,
+    state: "set",
+    filtered: false,
+  })),
+  ...[false, true].map((filtered) => ({
+    selector: "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    state: "set",
+    filtered,
+  })),
 ])(
   "native no-op snapshots preserve coordinator Git configuration: %j",
   async ({ selector, state, filtered }) => {
@@ -60,7 +74,21 @@ test.each([
       GIT_CONFIG_NOSYSTEM: "1",
     });
     const policySet: Record<string, string> = {};
-    if (selector === "GIT_CONFIG_NOSYSTEM") {
+    if (selector === "HOME" || selector === "XDG_CONFIG_HOME") {
+      environment["GIT_CONFIG_GLOBAL"] = undefined;
+      environment[selector] =
+        state === "set" ? home : state === "empty" ? "" : undefined;
+      const policyHome = join(root, "policy-home");
+      await mkdir(policyHome, { mode: 0o700 });
+      const configHome = state === "set" ? home : policyHome;
+      const configPath =
+        selector === "HOME"
+          ? join(configHome, ".gitconfig")
+          : join(configHome, "git", "config");
+      if (selector === "XDG_CONFIG_HOME") await mkdir(join(configHome, "git"));
+      await writeFile(configPath, filterSettings);
+      policySet[selector] = policyHome;
+    } else if (selector === "GIT_CONFIG_NOSYSTEM") {
       environment["GIT_CONFIG_SYSTEM"] = filterConfig;
       environment[selector] =
         state === "set" ? "1" : state === "empty" ? "" : undefined;
@@ -77,7 +105,7 @@ test.each([
     } else if (selector === "GIT_CONFIG_PARAMETERS") {
       policySet["GIT_CONFIG_PARAMETERS"] =
         `'filter.synthetic-selector.clean=${cleanCommand.replaceAll("'", "'\\''")}'`;
-    } else {
+    } else if (selector !== "GIT_ALTERNATE_OBJECT_DIRECTORIES") {
       environment[selector] =
         state === "set" ? filterConfig : state === "empty" ? "" : undefined;
       policySet[selector] = state === "set" ? emptyConfig : filterConfig;
@@ -94,7 +122,7 @@ test.each([
         stringifyToml({
           shell_environment_policy: {
             inherit: "all",
-            exclude: filtered ? ["GIT_*"] : [],
+            exclude: filtered ? ["GIT_*", "HOME", "XDG_CONFIG_HOME"] : [],
             set: filtered ? policySet : {},
           },
         }),
@@ -116,13 +144,22 @@ test.each([
     await writeFile(join(repository, "data"), "original lowercase data\n");
     git("add", ".");
     git("commit", "-m", "Synthetic configuration baseline");
+    if (selector === "GIT_ALTERNATE_OBJECT_DIRECTORIES") {
+      const objects = join(repository, ".git", "objects");
+      const pool = join(root, "object-pool");
+      await rename(objects, pool);
+      await mkdir(objects);
+      environment[selector] = pool;
+    }
     const index = await readFile(join(repository, ".git", "index"));
     let snapshots = 0;
     const bindings: NodeJS.ProcessEnv[] = [];
+    const trees: string[] = [];
     const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
       currentDirectory: repository,
       environment,
       onCodex: async (_args, output) => {
+        expect(trees).toEqual([git("rev-parse", "HEAD^{tree}")]);
         output!.appServer!.onPermissions!({
           directory: repository,
           environment,
@@ -142,15 +179,17 @@ test.each([
         output!.stdout.write("Synthetic no-op model turn.\n");
         return 0;
       },
-      onRepositoryCommand(command, args, cwd, options) {
+      async onRepositoryCommand(command, args, cwd, options) {
         if (options?.sandbox) {
           snapshots++;
           bindings.push(options.sandbox.gitEnvironment!);
         }
-        return runRepositoryCommand(command, args, cwd, {
+        const result = await runRepositoryCommand(command, args, cwd, {
           ...options,
           environment: { ...environment, ...options?.environment },
         });
+        if (args.includes("write-tree")) trees.push(result.trim());
+        return result;
       },
     });
     expect(await readFile(join(repository, "data"), "utf8")).toBe(
@@ -161,6 +200,8 @@ test.each([
     expect(outcome.exitCode, outcome.stdout + outcome.stderr).toBe(2);
     expect(JSON.parse(outcome.stdout).error.code).toBe("NO_PATCH_APPLIED");
     expect(snapshots).toBeGreaterThan(0);
+    expect(trees).toHaveLength(2);
+    expect(trees[1]).toBe(trees[0]);
     if (filtered)
       for (const binding of bindings)
         expect(binding).toHaveProperty(selector, environment[selector]);
