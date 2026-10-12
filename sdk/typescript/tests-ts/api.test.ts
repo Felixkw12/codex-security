@@ -10174,6 +10174,271 @@ describe("CodexSecurity orchestration", () => {
     );
   });
 
+  describe("command proof and inventory admission", () => {
+    const progress = (
+      phase: ScanProgress["phase"],
+      filesCompleted: number,
+      filesTotal: number,
+    ): ScanProgress => ({ phase, filesCompleted, filesTotal });
+    const inventory = progress("discovery", 0, 8);
+    const phase = progress("threat_model", 0, 8);
+    const commandProgress = [inventory, phase]
+      .map((p) => progressMarker(p.phase, p.filesCompleted, p.filesTotal))
+      .join("\n");
+    type Step =
+      | readonly [
+          "save" | "live",
+          string,
+          ScanProgress | readonly ScanProgress[] | string,
+        ]
+      | readonly ["worker", ScanProgress]
+      | readonly ["poll"];
+    const scenarios: readonly {
+      name: string;
+      expected: ScanProgress;
+      unresolvedExpected?: ScanProgress;
+      steps: readonly Step[];
+    }[] = [
+      {
+        name: "a multi-marker command before a smaller inventory",
+        expected: progress("validation", 1, 5),
+        steps: [
+          ["live", "inventory", [inventory, phase]],
+          ["save", "inventory", [inventory, phase]],
+          ["save", "scope", progress("discovery", 0, 5)],
+          ["save", "review", progress("validation", 1, 5)],
+          ["save", "anchor", "done"],
+          ["live", "anchor", "done"],
+        ],
+      },
+      {
+        name: "a multi-marker command before an oversized worker",
+        expected: progress("validation", 1, 5),
+        steps: [
+          ["live", "inventory", [inventory, phase]],
+          ["save", "inventory", [inventory, phase]],
+          ["save", "scope", progress("discovery", 0, 5)],
+          ["save", "review", progress("validation", 1, 5)],
+          ["save", "anchor", "done"],
+          ["live", "anchor", "done"],
+          ["worker", progress("attack_path", 6, 8)],
+        ],
+      },
+      ...[5, 8].map((total) => ({
+        name: `retained inventory before reporting at ${total}`,
+        expected: progress("reporting", 3, total),
+        steps: [
+          ["live", "inventory", progress("discovery", 0, total)],
+          ["live", "report", progress("reporting", 3, total)],
+          ["save", "inventory", progress("discovery", 0, total)],
+          ["save", "validation", progress("validation", 3, total)],
+          ["poll"],
+          ["save", "report", progress("reporting", 3, total)],
+          ["save", "anchor", "done"],
+          ["live", "anchor", "done"],
+        ] as const,
+      })),
+      {
+        name: "a truncated command without its final progress projection",
+        expected: progress("validation", 1, 5),
+        unresolvedExpected: progress("validation", 1, 8),
+        steps: [
+          ["live", "inventory", commandOutput(commandProgress)],
+          ["save", "inventory", persistedCommandOutput],
+          ["save", "scope", progress("discovery", 0, 5)],
+          ["save", "review", progress("validation", 1, 5)],
+          ["save", "anchor", "done"],
+          ["live", "anchor", "done"],
+        ],
+      },
+      {
+        name: "a final zero marker below worker display coverage",
+        expected: progress("validation", 1, 5),
+        steps: [
+          ["worker", progress("attack_path", 6, 8)],
+          ["poll"],
+          ["live", "inventory", [inventory, phase]],
+          ["save", "inventory", [inventory, phase]],
+          ["save", "scope", progress("discovery", 0, 5)],
+          ["save", "review", progress("validation", 1, 5)],
+          ["save", "anchor", "done"],
+          ["live", "anchor", "done"],
+        ],
+      },
+      {
+        name: "an omitted final projection below worker coverage",
+        expected: progress("validation", 1, 5),
+        unresolvedExpected: progress("attack_path", 6, 8),
+        steps: [
+          ["worker", progress("attack_path", 6, 8)],
+          ["poll"],
+          ["live", "inventory", commandOutput(commandProgress)],
+          ["save", "inventory", persistedCommandOutput],
+          ["save", "scope", progress("discovery", 0, 5)],
+          ["save", "review", progress("validation", 1, 5)],
+          ["save", "anchor", "done"],
+          ["live", "anchor", "done"],
+        ],
+      },
+    ];
+    test.each(
+      scenarios.flatMap((scenario) =>
+        [false, true].flatMap((workerFirst) =>
+          [false, true].flatMap((stopBeforeResolution) =>
+            [false, true].map((changedDisplay) => ({
+              ...scenario,
+              workerFirst,
+              stopBeforeResolution,
+              changedDisplay,
+            })),
+          ),
+        ),
+      ),
+    )(
+      "reconciles $name (workers first=$workerFirst, stop=$stopBeforeResolution, changed=$changedDisplay)",
+      async ({
+        steps,
+        expected,
+        unresolvedExpected,
+        workerFirst,
+        stopBeforeResolution,
+        changedDisplay,
+      }) => {
+        const { root, repository, codexHome, scanDir } =
+          await scanDirectories();
+        const updates: ScanProgress[] = [];
+        let tracker: ScanCostTracker | undefined;
+        const originalStart = ScanCostTracker.prototype.start;
+        const starting = spyOn(
+          ScanCostTracker.prototype,
+          "start",
+        ).mockImplementation(function (
+          this: ScanCostTracker,
+          threadId: string,
+        ) {
+          originalStart.call(this, threadId);
+          if (threadId === "thread-1") tracker = this;
+        });
+        let parentPath = "",
+          workerPath = "";
+        const originalReaddir = fsPromises.readdir;
+        const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
+          ...args: Parameters<typeof originalReaddir>
+        ) => {
+          const entries = await originalReaddir(...args);
+          if (String(args[0]) !== dirname(parentPath)) return entries;
+          const first = basename(workerFirst ? workerPath : parentPath);
+          return entries.toSorted(
+            (left, right) =>
+              Number(String(right.name) === first) -
+              Number(String(left.name) === first),
+          );
+        }) as typeof originalReaddir);
+        const text = (
+          value: string | ScanProgress | readonly ScanProgress[],
+        ) =>
+          typeof value === "string"
+            ? value
+            : [value]
+                .flat()
+                .map((p) =>
+                  progressMarker(p.phase, p.filesCompleted, p.filesTotal),
+                )
+                .join("\n");
+        const client = TestClient.withDependencies({
+          ...scanRuntimeDependencies(codexHome, scanDir),
+          runWorkbench: async (
+            _options: unknown,
+            args: readonly string[],
+            input?: string,
+          ): Promise<JsonObject> =>
+            args[0] === "register-cli-scan"
+              ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+              : mockWorkbench(args, input),
+          createCodex: codexFactory(async () => {
+            await copyCompletedScan(root);
+            parentPath = await writeUsageSession(codexHome, "thread-1", {});
+            workerPath = await writeUsageSession(
+              codexHome,
+              "worker-thread",
+              {},
+              { parent: "thread-1" },
+            );
+            async function* events(): AsyncGenerator<ThreadEvent> {
+              expect(tracker).toBeDefined();
+              await tracker!.stop();
+              const anchor = steps.findLastIndex(
+                (step) =>
+                  (step[0] === "save" || step[0] === "live") &&
+                  step[1] === "anchor",
+              );
+              const resolution =
+                anchor === -1
+                  ? steps.findLastIndex((step) => step[0] === "save")
+                  : anchor;
+              for (const [index, step] of steps.entries()) {
+                if (stopBeforeResolution && index === resolution) {
+                  await tracker!.stop();
+                  await tracker!.refresh();
+                }
+                if (step[0] === "poll") await tracker!.refresh();
+                else if (step[0] === "live")
+                  yield completedCommand(
+                    changedDisplay && step[1] !== "anchor"
+                      ? `${step[1]} visible`
+                      : step[1],
+                    text(step[2]),
+                    `item-${index}`,
+                  );
+                else if (step[0] === "save")
+                  await appendFile(
+                    parentPath,
+                    jsonLines([
+                      nativeCommand(step[1], text(step[2]), `native-${index}`),
+                    ]) + "\n",
+                  );
+                else
+                  await appendFile(
+                    workerPath,
+                    jsonLines([
+                      {
+                        type: "response_item",
+                        payload: {
+                          type: "custom_tool_call_output",
+                          call_id: `worker-${index}`,
+                          output: text(step[1]),
+                        },
+                      },
+                    ]) + "\n",
+                  );
+              }
+              await tracker!.refresh();
+              await tracker!.refresh();
+              await tracker!.stop();
+            }
+            return { events: completedEvents("thread-1", events()) };
+          }),
+        });
+        try {
+          await client.run(repository, {
+            onProgress: (update) => updates.push(update),
+          });
+          expect(updates.at(-1)).toEqual(
+            changedDisplay ? (unresolvedExpected ?? expected) : expected,
+          );
+          const settled = [...updates];
+          await tracker!.refresh();
+          await tracker!.stop();
+          expect(updates).toEqual(settled);
+        } finally {
+          await client.close();
+          starting.mockRestore();
+          listing.mockRestore();
+        }
+      },
+    );
+  });
+
   test.each(
     [
       "drained phase",
