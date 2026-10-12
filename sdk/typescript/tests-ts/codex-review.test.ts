@@ -129,6 +129,10 @@ const failureReasons: Record<string, string> = {
   "policy-request": "Request rejected: cyber_policy.",
   "refusal-text": "I'm sorry, but I can't assist with that request.",
   "policy-prefix-text": "Safety policy: request refused.",
+  "policy-prefix-due-text":
+    "Safety policy: this request is refused due to disallowed content.",
+  "policy-prefix-under-text":
+    "Safety policy: your request was blocked under the applicable restrictions.",
   "policy-suffix-text": "Request refused: safety policy.",
   "policy-suffix-explanation-text":
     "Request refused: safety policy. I can offer a defensive alternative.",
