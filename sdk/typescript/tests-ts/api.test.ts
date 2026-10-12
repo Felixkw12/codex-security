@@ -7944,6 +7944,10 @@ describe("CodexSecurity orchestration", () => {
     [true, false, "legacy"],
     [false, true, "legacy"],
     [true, true, "legacy"],
+    [false, false, "legacy-tool"],
+    [true, false, "legacy-tool"],
+    [false, true, "legacy-tool"],
+    [true, true, "legacy-tool"],
   ] as const)(
     "keeps inventory proof across a pending session close (split: %p, review already started: %p, mode: %s)",
     async (split, reviewedEarlier, mode) => {
@@ -7978,10 +7982,10 @@ describe("CodexSecurity orchestration", () => {
       }) as typeof originalOpen);
 
       const native = (id: string, text: string) => {
-        if (mode === "legacy")
+        if (mode !== "paginated")
           return (
             JSON.stringify(
-              id.endsWith("inventory")
+              mode === "legacy-tool" || id.endsWith("inventory")
                 ? {
                     type: "response_item",
                     payload: {
@@ -8091,7 +8095,10 @@ describe("CodexSecurity orchestration", () => {
               item?: { id?: string };
             };
             if (payload?.call_id === "worker-count") workerRead.resolve();
-            if ((payload?.item?.id ?? payload?.id) === "earlier-review")
+            if (
+              (payload?.item?.id ?? payload?.id ?? payload?.call_id) ===
+              "earlier-review"
+            )
               earlierReviewRead.resolve();
           },
         });

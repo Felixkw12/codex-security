@@ -1152,6 +1152,7 @@ export class ScanCostTracker {
         this.#matchParentCompletions();
         this.#reconcileParentProgress();
       }
+      const reviewWasUnpositioned = this.#parentReviewStart === null;
       this.#reportSessionProgress(
         session,
         threadId === this.#threadId,
@@ -1161,6 +1162,10 @@ export class ScanCostTracker {
       // inventory notifications keep their order. Recover after the batch too:
       // a later accepted parent may have hidden an eligible earlier receipt.
       if (threadId === this.#threadId) {
+        // A newly admitted review locates inventories parked earlier in this
+        // batch. Reconsider them before the final refresh returns.
+        if (reviewWasUnpositioned && this.#parentReviewStart !== null)
+          this.#reportSessionProgress(session, true, unresolvedCommand);
         const inventory = this.#inventoryFrontier;
         const parent = this.#parentProgress;
         // Apply this batch's inventories before restoring their proven scope
