@@ -1,6 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { runRepositoryCommand } from "../src/cli.js";
 import {
   patchRiskAssessment,
   publicationRepository,
@@ -11,6 +13,37 @@ import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
 const fixtures = createTemporaryDirectories(true);
 afterEach(fixtures.cleanup);
+
+test("streams captured blob bytes through the selected Git context", async () => {
+  const { directory, git } = await publicationRepository(fixtures);
+  const payload = Buffer.alloc(4 * 1024 * 1024, 0xff);
+  const file = join(directory, "blob.bin");
+  await writeFile(file, payload);
+  const object = git("hash-object", "-w", file);
+  const other = await fixtures.create("patch-blob-caller-");
+  const digest = createHash("sha256");
+  let chunks = 0;
+  const output = await runRepositoryCommand(
+    "git",
+    ["cat-file", "blob", object],
+    other,
+    {
+      environment: {
+        GIT_DIR: join(directory, ".git"),
+        GIT_WORK_TREE: directory,
+      },
+      onStdout: (chunk) => {
+        chunks++;
+        digest.update(chunk);
+      },
+    },
+  );
+  expect(output.length).toBe(0);
+  expect(chunks).toBeGreaterThan(1);
+  expect(digest.digest("hex")).toBe(
+    createHash("sha256").update(payload).digest("hex"),
+  );
+});
 
 test.each(["scrubbed copy", "filtered copy", "independent"])(
   "checks ignored content in the assessed publication snapshot: %s",

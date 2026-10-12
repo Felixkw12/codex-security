@@ -168,13 +168,20 @@ export const runGitRepositoryCommand: NonNullable<
 > = (command, args, workingDirectory, options) => {
   expect(command).toBe("git");
   const result = execFileSync("git", args, {
-    encoding: options?.encoding === "base64" ? "buffer" : "utf8",
+    encoding:
+      options?.encoding === "base64" || options?.onStdout !== undefined
+        ? "buffer"
+        : "utf8",
     cwd: options?.directory ?? workingDirectory,
     env: { ...process.env, ...options?.environment },
     maxBuffer: options?.maxBuffer,
     input: options?.input,
     stdio: [options?.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
   });
+  if (options?.onStdout !== undefined) {
+    options.onStdout(Buffer.isBuffer(result) ? result : Buffer.from(result));
+    return "";
+  }
   const output = Buffer.isBuffer(result)
     ? result.toString(options?.encoding ?? "utf8")
     : result;

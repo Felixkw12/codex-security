@@ -1,6 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { runRepositoryCommand } from "../src/cli.js";
 import {
   patchRiskAssessment,
   publicationRepository,
@@ -27,7 +28,14 @@ test.each([
     await mkdir(component);
     await writeFile(join(component, "app.ts"), "original\n");
     await writeFile(join(directory, "unrelated.txt"), "unchanged\n");
-    await writeFile(join(directory, ".gitignore"), "generated.txt\n");
+    await writeFile(
+      join(directory, ".gitignore"),
+      "generated.txt\nlocal-cache.txt\n",
+    );
+    await writeFile(
+      join(directory, "local-cache.txt"),
+      "Local cached content\n",
+    );
     const support = await fixtures.create("patch-component-filter-");
     const filter = join(support, "clean.cjs");
     await writeFile(
@@ -50,6 +58,7 @@ test.each([
     const environment = literal ? { GIT_LITERAL_PATHSPECS: "1" } : {};
     let assessments = 0;
     let pushes = 0;
+    let streamedBlobs = 0;
     const expectedFiles = siblingOnly
       ? ["generated.txt"]
       : ["component/app.ts", "generated.txt"];
@@ -72,6 +81,12 @@ test.each([
           if (args[0] === "push") {
             pushes++;
             return "";
+          }
+          if (args[0] === "cat-file" && options?.onStdout !== undefined) {
+            streamedBlobs++;
+            expect(options.directory).toBe(caller);
+            expect(options.environment?.["GIT_WORK_TREE"]).toBe(directory);
+            return runRepositoryCommand(command, args, cwd, options);
           }
           return runGitRepositoryCommand(command, args, cwd, {
             ...options,
@@ -119,11 +134,15 @@ test.each([
     expect(outcome.exitCode, outcome.stderr).toBe(0);
     expect(assessments).toBe(1);
     expect(pushes).toBe(1);
+    expect(streamedBlobs).toBe(expectedFiles.length);
     expect(git("show", "HEAD:generated.txt")).toBe("generated fix");
     expect(git("show", "HEAD:component/app.ts")).toBe(
       siblingOnly ? "ORIGINAL" : "FIXED",
     );
     expect(git("show", "HEAD:unrelated.txt")).toBe("unchanged");
+    expect(await readFile(join(directory, "local-cache.txt"), "utf8")).toBe(
+      "Local cached content\n",
+    );
     expect(git("diff", "--cached", "--name-only")).toBe("");
     expect(repositoryGit(remote)("for-each-ref", "--format=%(refname)")).toBe(
       "",

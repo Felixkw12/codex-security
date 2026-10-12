@@ -789,12 +789,33 @@ export async function capturePatchGitControls(
             "--path-format=absolute",
             "--git-common-dir",
           ]),
-          runControl(
-            root,
-            checkout,
-            ["config", "--null", "--default=lfs", "--get", "lfs.storage"],
-            { environment: configurationEnvironment },
-          ),
+          // Git LFS reads the selected config with includes enabled.
+          runControl(root, checkout, [
+            "config",
+            "--includes",
+            "--null",
+            "--default=lfs",
+            "--get",
+            "lfs.storage",
+          ]).catch((error: unknown) => {
+            const failure = error as Error & {
+              code?: unknown;
+              status?: unknown;
+              signal?: unknown;
+              killed?: boolean;
+            };
+            // Git LFS discards failed config reads, including partial output,
+            // and uses the default cache after reporting its warning.
+            if (
+              error instanceof Error &&
+              failure.name !== "AbortError" &&
+              !failure.signal &&
+              !failure.killed &&
+              (failure.code === 128 || failure.status === 128)
+            )
+              return "lfs";
+            throw error;
+          }),
         ]);
         const configured = storage.replace(/\0$/u, "") || "lfs";
         const absolute =
@@ -804,17 +825,20 @@ export async function capturePatchGitControls(
           ? configured
           : join(common.replace(/\n$/u, ""), configured);
         for (const path of [join(lfs, "objects"), join(lfs, "tmp")]) {
-          await mkdir(path, { recursive: true }).catch((error: unknown) => {
-            // Git/LFS requires writable storage only if a snapshot uses it.
+          try {
+            await mkdir(path, { recursive: true });
+            await rememberControl(path);
+            snapshotStoragePaths.add(controlPaths.get(path)!.canonical);
+          } catch (error) {
+            // Unavailable optional storage gets no extra snapshot permission.
+            // Git/LFS reports the failure if a snapshot actually uses it.
             if (
               !["EACCES", "EPERM", "EROFS"].includes(
                 (error as NodeJS.ErrnoException).code ?? "",
               )
             )
               throw error;
-          });
-          await rememberControl(path);
-          snapshotStoragePaths.add(controlPaths.get(path)!.canonical);
+          }
         }
       }
       let tracked: Buffer;

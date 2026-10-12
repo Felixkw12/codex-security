@@ -1500,6 +1500,10 @@ Patching first checks that its sandbox can start. Failure reports
 `SANDBOX_UNAVAILABLE`; no file changes from the task reports `NO_PATCH_APPLIED`.
 Results list `applied`, `filesChanged`, and `files`, excluding preexisting edits.
 File changes alone do not prove a fix; saved findings require a verified result.
+Errors from interrupted patches or unfinished preparation retain completed
+finding results and known file lists. When the final inspection is incomplete,
+they omit `applied` and `filesChanged` and
+explain that limitation in the error message; local edits remain in place.
 
 For a controlled container providing its own isolation:
 

@@ -6,6 +6,7 @@ const distModules = [
   "cli",
   "cli-help",
   "cli-scan-logs-json",
+  "patch-byte-path",
   "patch-git-controls",
   "cli-signals",
   "classify-severity",
