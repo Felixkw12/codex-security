@@ -8993,27 +8993,14 @@ describe("CodexSecurity orchestration", () => {
               nativeCommand("old", progressMarker("discovery", 0, 8), "old"),
             ]) + "\n",
           );
-          if (worker) {
-            const path = await writeUsageSession(
-              codexHome,
-              "worker-thread",
-              {},
-              { parent: "thread-1" },
-            );
-            await appendFile(
-              path,
-              jsonLines([
-                {
-                  type: "response_item",
-                  payload: {
-                    type: "custom_tool_call_output",
-                    call_id: "worker",
-                    output: progressMarker("discovery", 6, 8),
-                  },
-                },
-              ]) + "\n",
-            );
-          }
+          const workerPath = worker
+            ? await writeUsageSession(
+                codexHome,
+                "worker-thread",
+                {},
+                { parent: "thread-1" },
+              )
+            : undefined;
           if (delivery !== "all-batch") {
             holdPoll = false;
             pollAllowed.resolve();
@@ -9040,6 +9027,28 @@ describe("CodexSecurity orchestration", () => {
               truncated ? commandOutput(inventory) : inventory,
               "current",
             ) as ThreadEvent;
+            // Admit the live inventory before publishing oversized worker coverage;
+            // directory enumeration must not decide this fixture's precondition.
+            expect(updates.at(-1)).toEqual({
+              phase: "discovery",
+              filesCompleted: 0,
+              filesTotal: 5,
+            });
+            if (workerPath !== undefined) {
+              await appendFile(
+                workerPath,
+                jsonLines([
+                  {
+                    type: "response_item",
+                    payload: {
+                      type: "custom_tool_call_output",
+                      call_id: "worker",
+                      output: progressMarker("discovery", 6, 8),
+                    },
+                  },
+                ]) + "\n",
+              );
+            }
             if (delivery !== "all-batch") {
               releaseReplay.resolve();
               await currentRead.promise;
