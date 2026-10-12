@@ -2313,6 +2313,292 @@ def test_selected_terminal_coverage_excludes_unselected_history(
     assert not replayed["resultsRecoveryNeeded"]
 
 
+@pytest.mark.parametrize(
+    "mode,layout", [("standard", "root"), ("deep", "root"), ("deep", "worker")]
+)
+@pytest.mark.parametrize("failure_at", [None, "restore", "modelless"])
+@pytest.mark.parametrize("modelless_time", [200, 400])
+def test_selected_model_identity_survives_restore_then_modelless_head(
+    workbench_api,
+    workbench_db,
+    publication_scan,
+    monkeypatch,
+    mode,
+    layout,
+    failure_at,
+    modelless_time,
+):
+    scan = publication_scan(mode=mode)
+    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
+    for name in ("findings.json", "coverage.json", "scan-manifest.json"):
+        os.utime(scan.scan_dir / name, ns=(0, 0))
+    directory = (
+        scan.scan_dir
+        if layout == "root"
+        else add_worker(workbench_db, scan, status="canceled").parent
+    )
+    saved = workbench_api["saved_results"]
+    context = workbench_api["_WORKBENCH_DB_CONTEXT"]
+    draft = saved_draft(scan.scan_id, complete=True)
+    draft["coverage"] = {**scan.coverage, **draft["coverage"]}
+    checkpoints = {
+        name: write_checkpoint(
+            directory / "checkpoints", {**draft, "threatModel": {"summary": name}}
+        )
+        for name in ("A", "B")
+    }
+    checkpoints["empty"] = write_checkpoint(directory / "checkpoints", draft)
+    for checkpoint in checkpoints.values():
+        os.utime(checkpoint, ns=(50, 50))
+    head = directory / "checkpoint-head.json"
+    models = []
+
+    def fail_write(*args, **kwargs):
+        raise OSError("Synthetic publication interruption")
+
+    for index, (name, observed, phase) in enumerate(
+        (
+            ("A", 100, "initial"),
+            ("B", 300, "newer"),
+            ("A", 100, "restore"),
+            ("empty", modelless_time, "modelless"),
+        )
+    ):
+        head.write_text(json.dumps({"checkpoint": checkpoints[name].name}))
+        os.utime(head, ns=(observed, observed))
+        if index == 0:
+            saved.fail_scan(
+                context,
+                workbench_db,
+                Namespace(
+                    scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."
+                ),
+            )
+        else:
+            with monkeypatch.context() as patch:
+                if phase == failure_at:
+                    patch.setattr(saved, "_write_prepared_scan_finalization", fail_write)
+                    with pytest.raises(OSError, match="Synthetic publication interruption"):
+                        saved.recover_scan_results(
+                            context, workbench_db, Namespace(scan_id=scan.scan_id)
+                        )
+                else:
+                    saved.recover_scan_results(
+                        context, workbench_db, Namespace(scan_id=scan.scan_id)
+                    )
+        replayed = saved.preserve_scan_results(
+            context,
+            workbench_db,
+            Namespace(
+                scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
+            ),
+        )["scan"]
+        models.append(
+            json.loads((scan.scan_dir / "scan-manifest.json").read_text())["scan"]["threatModel"][
+                "summary"
+            ]
+        )
+        assert not replayed["resultsRecoveryNeeded"]
+    assert models == ["A", "B", "A", "B"]
+    retained = json.loads(
+        workbench_db.execute(
+            "SELECT retained_source_digests_json FROM scans WHERE id = ?", (scan.scan_id,)
+        ).fetchone()[0]
+    )
+    assert retained["threatModelSource"] == checkpoints["B"].relative_to(scan.scan_dir).as_posix()
+
+
+@pytest.mark.parametrize(
+    "mode,layout", [("standard", "root"), ("deep", "root"), ("deep", "worker")]
+)
+@pytest.mark.parametrize("terminal", [False, True])
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_selected_terminal_coverage_has_root_worker_parity(
+    workbench_api, workbench_db, publication_scan, monkeypatch, mode, layout, terminal, interrupted
+):
+    scan = publication_scan(mode=mode)
+    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
+    coverage_path = scan.scan_dir / "coverage.json"
+    initial_coverage = json.loads(coverage_path.read_text())
+    for field in ("surfaces", "explicitExclusions", "openQuestions"):
+        initial_coverage[field] = []
+    coverage_path.write_text(json.dumps(initial_coverage))
+    for name in ("findings.json", "coverage.json", "scan-manifest.json"):
+        os.utime(scan.scan_dir / name, ns=(0, 0))
+    directory = (
+        scan.scan_dir
+        if layout == "root"
+        else add_worker(workbench_db, scan, status="canceled").parent
+    )
+    saved = workbench_api["saved_results"]
+    context = workbench_api["_WORKBENCH_DB_CONTEXT"]
+    checkpoints = {}
+    for name in ("A", "B"):
+        draft = saved_draft(scan.scan_id, complete=terminal if name == "A" else True)
+        draft["coverage"] = {**scan.coverage, **draft["coverage"]}
+        draft["coverage"].update(
+            surfaces=[
+                {
+                    "id": f"surface-{name}",
+                    "label": name,
+                    "disposition": "no_issue_found",
+                    "receiptRefs": [],
+                }
+            ],
+            explicitExclusions=[{"pattern": f"{name}/**", "reason": f"{name} exclusion"}],
+            openQuestions=[{"question": f"{name} question"}],
+        )
+        draft["threatModel"] = {"summary": f"{name} model"}
+        checkpoints[name] = write_checkpoint(directory / "checkpoints", draft)
+        os.utime(checkpoints[name], ns=(50, 50))
+    head = directory / "checkpoint-head.json"
+    for name, observed in (("A", 100), ("B", 200), ("A", 300)):
+        head.write_text(json.dumps({"checkpoint": checkpoints[name].name}))
+        os.utime(head, ns=(observed, observed))
+        saved._capture_saved_source(
+            scan.scan_dir, head.relative_to(scan.scan_dir).as_posix(), scan.scan_id
+        )
+    saved.fail_scan(
+        context,
+        workbench_db,
+        Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
+    )
+    head.write_text(json.dumps({"checkpoint": checkpoints["A"].name}))
+    os.utime(head, ns=(100, 100))
+
+    def fail_write(*args, **kwargs):
+        raise OSError("Synthetic publication interruption")
+
+    with monkeypatch.context() as patch:
+        if interrupted:
+            patch.setattr(saved, "_write_prepared_scan_finalization", fail_write)
+            with pytest.raises(OSError, match="Synthetic publication interruption"):
+                saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))
+        else:
+            saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))
+    replayed = saved.preserve_scan_results(
+        context,
+        workbench_db,
+        Namespace(
+            scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
+        ),
+    )["scan"]
+    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    expected = {"A"} if terminal else {"A", "B"}
+    assert {row["label"] for row in coverage["surfaces"]} == expected
+    assert {row["pattern"] for row in coverage["explicitExclusions"]} == {
+        f"{name}/**" for name in expected
+    }
+    assert {row["question"] for row in coverage["openQuestions"]} == {
+        f"{name} question" for name in expected
+    }
+    assert (
+        json.loads((scan.scan_dir / "scan-manifest.json").read_text())["scan"]["threatModel"][
+            "summary"
+        ]
+        == "A model"
+    )
+    assert not replayed["resultsRecoveryNeeded"]
+
+
+@pytest.mark.parametrize("archived_terminal", [False, True])
+@pytest.mark.parametrize("current_terminal", [False, True])
+@pytest.mark.parametrize("registered", [False, True])
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_terminal_coverage_replacement_does_not_cross_into_a_partial_attempt(
+    workbench_api,
+    workbench_db,
+    publication_scan,
+    monkeypatch,
+    archived_terminal,
+    current_terminal,
+    registered,
+    interrupted,
+):
+    scan = publication_scan()
+    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
+    result = add_worker(workbench_db, scan, status="canceled")
+    directory = result.parent
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_workers SET attempt = 2 WHERE scan_id = ?", (scan.scan_id,)
+        )
+    archive = directory / "attempts" / "attempt-1"
+    old = write_checkpoint(
+        archive / "checkpoints", saved_draft(scan.scan_id, complete=archived_terminal)
+    )
+    os.utime(old, ns=(50, 50))
+    (archive / "checkpoint-head.json").write_text(json.dumps({"checkpoint": old.name}))
+    os.utime(archive / "checkpoint-head.json", ns=(100, 100))
+    accepted = saved_draft(scan.scan_id, complete=True)
+    accepted["coverage"].update(
+        surfaces=[
+            {
+                "id": "accepted-surface",
+                "label": "Accepted",
+                "disposition": "no_issue_found",
+                "receiptRefs": [],
+            }
+        ],
+        explicitExclusions=[{"pattern": "accepted/**", "reason": "Accepted exclusion"}],
+        openQuestions=[{"question": "Accepted question"}],
+    )
+    accepted_path = write_checkpoint(directory / "checkpoints", accepted)
+    os.utime(accepted_path, ns=(200, 200))
+    head = directory / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": accepted_path.name}))
+    os.utime(head, ns=(200, 200))
+    if registered:
+        with workbench_db:
+            workbench_db.execute(
+                "UPDATE deep_scan_workers SET result_manifest_path = ? WHERE id = ?",
+                (str(accepted_path), directory.name),
+            )
+    saved = workbench_api["saved_results"]
+    context = workbench_api["_WORKBENCH_DB_CONTEXT"]
+    saved.fail_scan(
+        context,
+        workbench_db,
+        Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
+    )
+    current = write_checkpoint(
+        directory / "checkpoints", saved_draft(scan.scan_id, complete=current_terminal)
+    )
+    os.utime(current, ns=(300, 300))
+    head.write_text(json.dumps({"checkpoint": current.name}))
+    os.utime(head, ns=(300, 300))
+
+    def fail_write(*args, **kwargs):
+        raise OSError("Synthetic publication interruption")
+
+    with monkeypatch.context() as patch:
+        if interrupted:
+            patch.setattr(saved, "_write_prepared_scan_finalization", fail_write)
+            with pytest.raises(OSError, match="Synthetic publication interruption"):
+                saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))
+        else:
+            saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))
+    replayed = saved.preserve_scan_results(
+        context,
+        workbench_db,
+        Namespace(
+            scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
+        ),
+    )["scan"]
+    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    expected = [] if current_terminal else ["Accepted"]
+    assert [row["label"] for row in coverage["surfaces"]] == expected
+    assert [row["pattern"] for row in coverage["explicitExclusions"]] == (
+        [] if current_terminal else ["accepted/**"]
+    )
+    assert [row["question"] for row in coverage["openQuestions"]] == (
+        [] if current_terminal else ["Accepted question"]
+    )
+    if not current_terminal:
+        assert coverage["completeness"] == "partial"
+    assert not replayed["resultsRecoveryNeeded"]
+
+
 @pytest.mark.parametrize("valid_rejection", [False, True], ids=["malformed", "valid"])
 def test_tied_rejection_requires_valid_surface_before_removing_finding(
     workbench_api, workbench_db, publication_scan, valid_rejection

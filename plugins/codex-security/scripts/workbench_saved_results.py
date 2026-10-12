@@ -1107,6 +1107,7 @@ def merge_saved_results(
     parent_manifest: dict[str, Any] | None = None
     parent_is_canonical = False
     parent_modified = 0
+    parent_model_source: str | None = None
     canonical_model_order: tuple[int, int] | None = None
     canonical_model_digest: str | None = None
     if frozen_source_digests is None or allow_frozen_legacy_parent:
@@ -1153,6 +1154,7 @@ def merge_saved_results(
                 parent_checkpoint = f"checkpoints/{parent_digest}.json"
                 if isinstance(parent.get("threatModel"), dict):
                     canonical_model_source = parent_checkpoint
+                    parent_model_source = parent_checkpoint
                     canonical_model_order = (0, parent_modified)
                     canonical_model_digest = parent_digest
                 checkpoint_path = scan_dir / parent_checkpoint
@@ -1392,6 +1394,7 @@ def merge_saved_results(
             modified = source_order[parent_path][1]
             if parent is None or modified > parent_modified:
                 parent = draft
+                parent_model_source = parent_path
                 parent_modified = modified
                 parent_is_canonical = False
             elif modified == parent_modified and draft != parent:
@@ -1399,6 +1402,7 @@ def merge_saved_results(
                 parent_is_canonical = False
     if parent is None and latest_reducer is not None:
         parent = drafts_by_path[latest_reducer]
+        parent_model_source = latest_reducer
 
     all_sources = ([("parent", parent, None)] if parent else []) + sources
     # Older checkpoints can omit IDs already assigned in their published output.
@@ -1509,6 +1513,17 @@ def merge_saved_results(
         for key in ("scope", "threatModel"):
             if isinstance(parent.get(key), dict):
                 manifest["scan"][key] = copy.deepcopy(parent[key])
+        if (
+            selected_model_source is not None
+            and isinstance(parent.get("threatModel"), dict)
+            and parent_model_source in drafts_by_path
+            and (
+                parent_model_source != canonical_model_source
+                or canonical_model_digest is None
+                or source_digests[parent_model_source] == canonical_model_digest
+            )
+        ):
+            selected_model_source[:] = [parent_model_source]
         if isinstance(manifest["scan"].get("scope"), dict):
             manifest["scan"]["scope"].update(copy.deepcopy(binding["scope"]))
     if frozen_model_source is None and not isinstance((parent or {}).get("threatModel"), dict):
@@ -1991,13 +2006,9 @@ def merge_saved_results(
                 retained_surface = {**surface, "receiptRefs": surface.get("receiptRefs", [])}
                 if retained_surface not in coverage["surfaces"]:
                     coverage["surfaces"].append(copy.deepcopy(retained_surface))
-    selected_terminal_orders: dict[str, tuple[int, int]] = {}
+    selected_terminal_orders: dict[str | None, tuple[int, int]] = {}
     for relative, draft, worker_id in sources:
-        if (
-            worker_id is not None
-            and relative in authoritative_heads
-            and draft.get("complete") is not False
-        ):
+        if relative in authoritative_heads and draft.get("complete") is not False:
             order = source_order[relative]
             selected_terminal_orders[worker_id] = max(
                 selected_terminal_orders.get(worker_id, order), order
@@ -2024,6 +2035,7 @@ def merge_saved_results(
             terminal_coverage_order is not None and source_order[relative] < terminal_coverage_order
         ) or (
             selected_terminal_order is not None
+            and source_order[relative][0] == selected_terminal_order[0]
             and (
                 relative in selected_observations
                 and relative not in authoritative_heads
