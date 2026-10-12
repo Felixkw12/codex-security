@@ -11,7 +11,7 @@ import {
 import path from "node:path";
 import test from "node:test";
 import { importSource } from "./import-module.ts";
-import { scanId, workerDraft } from "./scan-draft-fixture.ts";
+import { finding, scanId, workerDraft } from "./scan-draft-fixture.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 
 const { readDeepReductionSources } = await importSource(
@@ -229,6 +229,68 @@ for (const changed of ["result provenance", "checkpoint contents"] as const) {
       await rm(f.root, { recursive: true, force: true });
     }
   });
+}
+
+for (const inScope of [false, true]) {
+  for (const complete of [false, true]) {
+    test(`scoped worker ${complete ? "publication" : "checkpoint"} retains shared receipts from a legacy draft (finding in scope: ${inScope})`, async () => {
+      const f = await fixture();
+      try {
+        const ref = "artifacts/evidence.txt";
+        await receipt(f.root, ref, "Shared evidence\n");
+        // Older workers saved progress without the requested-path binding.
+        await recordCodexSecurityWorkerScanDraft(f.worker, {
+          ...draft([ref]),
+          findings: [
+            finding("inherited", inScope ? "src/route.ts" : "other/route.ts"),
+          ],
+        });
+        await receipt(f.workerRoot, ref, "Unrelated local evidence\n");
+        await recordCodexSecurityWorkerScanDraft(
+          { ...f.worker, includePaths: ["src"] },
+          { ...workerDraft([]), complete },
+        );
+        const published = JSON.parse(
+          await readFile(path.join(f.workerRoot, "result.json"), "utf8"),
+        );
+        assert.equal(published.findings.length, inScope ? 1 : 0);
+        const sources = complete
+          ? await readDeepReductionSources(f.reducer)
+          : undefined;
+        const recovered = recoverCoverage(f, complete);
+        assert.deepEqual(
+          {
+            reduction: sources?.discoveries[0].coverage.surfaces[0].receiptRefs,
+            recovery: recovered.refs,
+          },
+          { reduction: complete ? [ref] : undefined, recovery: [ref] },
+        );
+        assert.equal(recovered.surfaces[0].disposition, "no_issue_found");
+        assert.deepEqual(recovered.warnings, []);
+        assert.equal(
+          await readFile(path.join(f.root, recovered.refs[0]), "utf8"),
+          "Shared evidence\n",
+        );
+        const head = JSON.parse(
+          await readFile(
+            path.join(f.workerRoot, "checkpoint-head.json"),
+            "utf8",
+          ),
+        );
+        assert.deepEqual(
+          JSON.parse(
+            await readFile(
+              path.join(f.workerRoot, "checkpoints", head.checkpoint),
+              "utf8",
+            ),
+          ),
+          published,
+        );
+      } finally {
+        await rm(f.root, { recursive: true, force: true });
+      }
+    });
+  }
 }
 
 test("a retained surface keeps only retained shared references and resolves new receipts locally", async () => {

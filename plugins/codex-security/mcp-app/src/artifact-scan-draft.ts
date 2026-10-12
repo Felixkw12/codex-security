@@ -305,8 +305,6 @@ export async function recordCodexSecurityWorkerScanDraft(
     findings: findingsWithinScope(parsed.findings, includePaths),
   };
   scoped = (await preserveScanDraft(context, scoped)).input;
-  // Older checkpoints predate the coordinator's requested-path binding.
-  scoped.findings = findingsWithinScope(scoped.findings, includePaths);
   const destination = await artifactDestination(
     context,
     ["result.json"],
@@ -937,6 +935,13 @@ async function preserveScanDraft(
   result.coverage.surfaces = normalizeSurfaces(
     result.coverage.surfaces as JsonObject[],
   );
+  if (context.layout === "worker") {
+    // Older checkpoints predate the coordinator's requested-path binding.
+    result.findings = findingsWithinScope(
+      result.findings,
+      context.includePaths ?? [context.scope || "."],
+    );
+  }
   if (saveCheckpoint) await saveScanDraftCheckpoint(context, result);
   return { input: result, previousDigest: previousState.digest };
 }
