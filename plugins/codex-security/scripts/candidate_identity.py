@@ -3,9 +3,40 @@
 from __future__ import annotations
 
 import copy
+import json
 from typing import Any
 
 CandidateKey = tuple[str | None, str]
+
+
+def archive_candidate_payloads(destination: dict[str, Any], rows: list[dict[str, Any]]) -> None:
+    for row in rows:
+        for field, archive in (
+            ("candidate", "originalCandidates"),
+            ("finding", "previousFindings"),
+        ):
+            values = (
+                [row[field]]
+                if field in row
+                and (
+                    field not in destination
+                    or json.dumps(row[field], sort_keys=True)
+                    != json.dumps(destination[field], sort_keys=True)
+                )
+                else []
+            )
+            if isinstance(row.get(archive), list):
+                values.extend(row[archive])
+            if not values:
+                continue
+            if not isinstance(destination.get(archive), list):
+                destination[archive] = []
+            archived = {json.dumps(value, sort_keys=True) for value in destination[archive]}
+            for value in values:
+                encoded = json.dumps(value, sort_keys=True)
+                if encoded not in archived:
+                    destination[archive].append(copy.deepcopy(value))
+                    archived.add(encoded)
 
 
 def candidate_owner(*values: Any) -> str | None:
