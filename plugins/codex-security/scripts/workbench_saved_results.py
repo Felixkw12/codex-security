@@ -1824,7 +1824,7 @@ def merge_saved_results(
     }
     ordered_outcomes: dict[tuple[str | None, str], tuple[tuple[int, int], str]] = {}
 
-    outcomes: list[tuple[str, str | None, str, str]] = []
+    outcomes: list[tuple[str, dict[str, Any], str | None, str, str]] = []
     for relative, draft, owner in current_drafts:
         for finding in draft["findings"]:
             if (
@@ -1832,7 +1832,7 @@ def merge_saved_results(
                 and valid_finding(finding)
                 and (candidate_id := finding_candidate_id(finding))
             ):
-                outcomes.append((relative, owner, candidate_id, "reported"))
+                outcomes.append((relative, draft, owner, candidate_id, "reported"))
         for field in ("surfaces", "explicitExclusions"):
             items = draft["coverage"].get(field, [])
             for item in items if isinstance(items, list) else []:
@@ -1871,20 +1871,22 @@ def merge_saved_results(
                         )
                     except ContractError:
                         continue
-                    outcomes.append((relative, owner, item["candidateId"], item["disposition"]))
+                    outcomes.append(
+                        (relative, draft, owner, item["candidateId"], item["disposition"])
+                    )
     ordered_candidates.update(
         (owner, candidate_id)
-        for relative, owner, candidate_id, _ in outcomes
+        for relative, _, owner, candidate_id, _ in outcomes
         if relative in selected_observations
     )
     selected_head_candidates = {
         (Path(relative).parent, candidate_id)
-        for relative, _, candidate_id, _ in outcomes
+        for relative, _, _, candidate_id, _ in outcomes
         if relative in authoritative_heads
     }
     other_root_order = _unselected_root_order(saved_heads, checkpoint_heads, source_order)
     # A selected partial draft can leave independent historical outcomes intact.
-    for relative, owner, candidate_id, disposition in outcomes:
+    for relative, draft, owner, candidate_id, disposition in outcomes:
         if (
             relative in selected_observations
             and relative not in authoritative_heads
@@ -2793,6 +2795,7 @@ def preserve_scan_results_locked(
                 canonical_model_source = path
                 canonical_model = canonical_draft.get("threatModel")
         except (ContractError, OSError, ValueError):
+            # This live fallback is optional.
             pass
     if recovery_source_digests is not None and not pending_recovery:
         model_source.clear()

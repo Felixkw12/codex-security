@@ -6,7 +6,7 @@ import os
 from argparse import Namespace
 
 import pytest
-from test_deep_scan_successful_publication import complete
+from test_deep_scan_successful_publication import add_worker, complete
 from test_deep_scan_successful_publication import publication_scan as publication_scan
 from workbench_test_support import saved_draft, write_checkpoint
 
@@ -225,3 +225,122 @@ def test_restored_root_observation_keeps_tied_pending_payload(
         ) is (pending_time >= 100)
     saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))
     assert json.loads((scan.scan_dir / "coverage.json").read_text()) == coverage
+
+
+@pytest.mark.parametrize(
+    "root_complete", [False, True, None], ids=["partial", "terminal", "legacy"]
+)
+@pytest.mark.parametrize(
+    "complete_worker_last", [False, True], ids=["partial-last", "complete-last"]
+)
+@pytest.mark.parametrize("disposition", ["reported", "rejected"])
+@pytest.mark.parametrize("flow", ["stop", "recover"])
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_root_outcome_uses_its_own_completion_marker(
+    workbench_api,
+    workbench_db,
+    publication_scan,
+    monkeypatch,
+    root_complete,
+    complete_worker_last,
+    disposition,
+    flow,
+    interrupted,
+):
+    scan = publication_scan()
+    saved = workbench_api["saved_results"]
+    context = workbench_api["_WORKBENCH_DB_CONTEXT"]
+    canonical_disposition(scan, disposition, True)
+    _, root_draft = saved._read_saved_parent_result(scan.scan_dir, scan.scan_id)
+    if root_complete is None:
+        root_draft.pop("complete")
+    else:
+        root_draft["complete"] = root_complete
+    for name, document in (
+        ("findings.json", {"findings": []}),
+        ("coverage.json", scan.coverage),
+    ):
+        (scan.scan_dir / name).write_text(json.dumps(document))
+    for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+        os.utime(scan.scan_dir / name, ns=(0, 0))
+
+    results = sorted(
+        [add_worker(workbench_db, scan), add_worker(workbench_db, scan)],
+        key=lambda path: path.parent.name,
+    )
+    # Registration timestamps are equal, so IDs determine both arrival orders.
+    for result, worker_complete in zip(results, [not complete_worker_last, complete_worker_last]):
+        result.write_text(
+            json.dumps(
+                saved_draft(
+                    scan.scan_id,
+                    complete=worker_complete,
+                    completeness="complete" if worker_complete else "partial",
+                )
+            )
+        )
+        os.utime(result, ns=(100, 100))
+    assert [
+        row["result_manifest_path"]
+        for row in workbench_db.execute(
+            "SELECT result_manifest_path FROM deep_scan_workers "
+            "WHERE scan_id = ? ORDER BY created_at, id",
+            (scan.scan_id,),
+        )
+    ] == [str(result) for result in results]
+    stop_args = Namespace(
+        scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."
+    )
+    if flow == "recover":
+        saved.fail_scan(context, workbench_db, stop_args)
+    selected = write_checkpoint(scan.scan_dir / "checkpoints", root_draft)
+    os.utime(selected, ns=(100, 100))
+    head = scan.scan_dir / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": selected.name}))
+    os.utime(head, ns=(200, 200))
+    pending = write_checkpoint(
+        scan.scan_dir / "checkpoints",
+        saved_draft(
+            scan.scan_id,
+            deferred=[{"candidateId": "candidate-review", "reason": "Validation is pending."}],
+        ),
+    )
+    os.utime(pending, ns=(200, 200))
+    originals = {path: path.read_bytes() for path in [selected, pending, *results]}
+    prepared_coverage = []
+    write = saved._write_prepared_scan_finalization
+
+    def publish(prepared, **kwargs):
+        prepared_coverage.append(copy.deepcopy(prepared[4]))
+        if interrupted:
+            raise OSError("Synthetic mixed-source publication interruption")
+        return write(prepared, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(saved, "_write_prepared_scan_finalization", publish)
+        if flow == "stop":
+            saved.fail_scan(context, workbench_db, stop_args)
+        elif interrupted:
+            with pytest.raises(OSError, match="Synthetic mixed-source publication interruption"):
+                saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))
+        else:
+            saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))
+    published = saved.preserve_scan_results(
+        context,
+        workbench_db,
+        Namespace(
+            scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
+        ),
+    )["scan"]
+    assert not published["resultsRecoveryNeeded"]
+    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    assert len(prepared_coverage) == 1
+    for document in [coverage, *prepared_coverage]:
+        assert any(
+            row.get("candidateId") == "candidate-review" for row in document["deferred"]
+        ) is (root_complete is False)
+    manifest = (scan.scan_dir / "scan-manifest.json").read_bytes()
+    saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))
+    assert json.loads((scan.scan_dir / "coverage.json").read_text()) == coverage
+    assert (scan.scan_dir / "scan-manifest.json").read_bytes() == manifest
+    assert all(path.read_bytes() == contents for path, contents in originals.items())
