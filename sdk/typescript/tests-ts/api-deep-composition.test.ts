@@ -1,6 +1,7 @@
 import { main } from "../src/cli.js";
 import { capture, dependencies as cliDependencies } from "./cli-fixtures.js";
 import { randomUUID } from "node:crypto";
+import { Database } from "bun:sqlite";
 import { restoreScanKnowledge } from "../src/scan-inputs.js";
 import { restoreProviderProfile } from "../src/provider-profile.js";
 import {
@@ -889,6 +890,144 @@ test.each(
     if (observe) expect(updates.at(-1)).toEqual(expected);
     if (stage === "budget")
       expect(result.coverage.completeness).toBe("partial");
+  },
+);
+
+test.each([
+  { receipt: "legacy", rollout: false, moreWork: false },
+  { receipt: "legacy", rollout: false, moreWork: true },
+  { receipt: "legacy", rollout: true, moreWork: false },
+  { receipt: "measured", rollout: false, moreWork: false },
+  { receipt: "unavailable", rollout: false, moreWork: false },
+] as const)(
+  "Deep resume retains each completed child's usage: %j",
+  async ({ receipt, rollout, moreWork }) => {
+    const h = await fixture();
+    const measured = { ...usage, reasoning_output_tokens: 2 };
+    h.setUsage(measured);
+    h.failChildProjection(true);
+    const options: ScanOptions = {
+      ...h.options,
+      knowledgeBasePaths: undefined,
+      workers: 1,
+      maxDiscoveryRuns: moreWork ? 2 : 1,
+    };
+    {
+      await using first = h.makeClient();
+      await expect(first.run(h.repository, options)).rejects.toBeInstanceOf(
+        DeepScanRecoveryError,
+      );
+    }
+    expect(h.launches).toHaveLength(1);
+    const [parentId] = [...h.records].find(
+      ([, record]) => record.mode === "deep",
+    )!;
+    const [childId, child] = [...h.records].find(
+      ([, record]) => record.mode === "standard",
+    )!;
+    const childCost = estimateScanCost("gpt-6-astra", measured)!;
+    const database = new Database(join(h.root, "state", "workbench.sqlite3"));
+    try {
+      const saved =
+        receipt === "unavailable"
+          ? null
+          : JSON.stringify(
+              receipt === "legacy"
+                ? childCost
+                : {
+                    cost: childCost,
+                    usage: {
+                      coverage: "complete",
+                      inputTokens: measured.input_tokens,
+                      cachedInputTokens: measured.cached_input_tokens,
+                      cacheWriteInputTokens: 0,
+                      outputTokens: measured.output_tokens,
+                      reasoningOutputTokens: measured.reasoning_output_tokens,
+                      totalTokens:
+                        measured.input_tokens + measured.output_tokens,
+                    },
+                  },
+            );
+      expect(
+        database
+          .query(
+            "UPDATE scans SET cost_json = ? WHERE id = ? AND status = 'complete'",
+          )
+          .run(saved, childId).changes,
+      ).toBe(1);
+    } finally {
+      database.close();
+    }
+    const saved = await runWorkbench({ ...child.options, signal: undefined }, [
+      "get-scan",
+      "--scan-id",
+      childId,
+    ]);
+    const savedChild = saved["scan"] as JsonObject;
+    expect(savedChild["progress"]).toMatchObject({ status: "complete" });
+    if (receipt === "legacy") {
+      expect<unknown>(savedChild["cost"]).toEqual(childCost);
+      expect(savedChild["usage"]).toBeUndefined();
+    }
+    if (!rollout)
+      await rm(
+        join(
+          h.home,
+          "sessions",
+          `rollout-${savedChild["continuationThreadId"]}.jsonl`,
+        ),
+      );
+    h.failChildProjection(false);
+    const subsequent = {
+      input_tokens: 5,
+      cached_input_tokens: 0,
+      output_tokens: 2,
+      reasoning_output_tokens: 1,
+    };
+    h.setUsage(subsequent);
+    const updates: unknown[] = [];
+    await using resumed = h.makeClient();
+    const result = await resumed.run(h.repository, {
+      ...options,
+      signal: undefined,
+      resumeScanId: parentId,
+      ...(moreWork ? { onUsage: (snapshot) => updates.push(snapshot) } : {}),
+    });
+    const laterTurns = moreWork ? 2 : 0;
+    const expected =
+      receipt === "unavailable"
+        ? null
+        : tokenUsage({
+            ...measured,
+            input_tokens:
+              measured.input_tokens + subsequent.input_tokens * laterTurns,
+            output_tokens:
+              measured.output_tokens + subsequent.output_tokens * laterTurns,
+            reasoning_output_tokens:
+              (receipt === "measured" || rollout
+                ? measured.reasoning_output_tokens
+                : 0) +
+              subsequent.reasoning_output_tokens * laterTurns,
+          });
+    expect(result.turnResult.usage).toEqual(expected);
+    if (receipt === "unavailable") expect(result.cost).toBeNull();
+    else {
+      expect(result.cost).toMatchObject({
+        inputTokens: expected!.input_tokens,
+        cachedInputTokens: expected!.cached_input_tokens,
+        cacheWriteInputTokens: expected!.cache_write_input_tokens,
+        cacheWriteInputTokensReported: false,
+        outputTokens: expected!.output_tokens,
+      });
+      expect(result.cost!.estimatedUsd).toBeCloseTo(
+        childCost.estimatedUsd +
+          estimateScanCost("gpt-6-astra", subsequent)!.estimatedUsd *
+            laterTurns,
+        12,
+      );
+    }
+    expect(h.launches).toHaveLength(1 + laterTurns);
+    if (moreWork) expect(updates.at(-1)).toEqual(expected);
   },
 );
 

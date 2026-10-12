@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { join, relative } from "node:path";
 import type { CodexSecurity, ScanOptions } from "./api.js";
 import type { JsonObject } from "./config.js";
-import type { ScanCost } from "./cost.js";
+import { scanCostUsage, type ScanCost } from "./cost.js";
 import {
   ScanCostLimitExceededError,
   ScanInterruptedError,
@@ -426,8 +426,9 @@ export async function runDeepScans(
       recoveredCosts.set(pass.directory, costs.get(pass.directory)!);
       input.onCost(pass.directory, null);
       const savedUsage = record["usage"];
+      let usage: ScanTokenUsage | null = null;
       if (isRecord(savedUsage)) {
-        const usage = tokenUsage({
+        usage = tokenUsage({
           input_tokens: savedUsage["inputTokens"],
           cached_input_tokens: savedUsage["cachedInputTokens"],
           cache_write_input_tokens: savedUsage["cacheWriteInputTokens"],
@@ -438,8 +439,10 @@ export async function runDeepScans(
           output_tokens: savedUsage["outputTokens"],
           reasoning_output_tokens: savedUsage["reasoningOutputTokens"],
         });
-        if (usage !== null) input.onUsage?.(pass.directory, usage);
       }
+      if (usage === null && !missingSession && record.cost != null)
+        usage = tokenUsage(scanCostUsage(record.cost));
+      if (usage !== null) input.onUsage?.(pass.directory, usage);
     }
     // Recover every receipt before budget callbacks can abort another recovery.
     for (const { record, pass } of passes) {
