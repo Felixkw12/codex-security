@@ -2596,6 +2596,7 @@ def preserve_scan_results_locked(
         completion_binding=binding,
         completion_warnings=warnings,
         draft_documents=documents,
+        finding_scope=db.requested_scan_paths(scan) if scan["mode"] == "deep" else None,
     )
     if scan["canceled_at"] is None:
         retain_sources()
