@@ -2931,6 +2931,7 @@ def _prepare_scan_finalization(
     completion_warnings: list[str] | None = None,
     draft_documents: tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None = None,
     finding_scope: list[str] | None = None,
+    require_complete: bool = False,
 ) -> PreparedScanFinalization:
     """Read, populate, and validate a scan without writing any output files."""
 
@@ -2942,6 +2943,10 @@ def _prepare_scan_finalization(
         else _read_scan_local_json(scan_dir, "scan-manifest.json", "scan-manifest.json")
     )
     scan = _require_dict(manifest, "scan", "manifest")
+    if require_complete and scan.get("complete") is False:
+        raise RecoverableContractError(
+            "The latest saved scan draft is incomplete; continue the scan before completing it."
+        )
     if scan.get("sealedAt") is None and scan.get("artifacts") == []:
         del scan["artifacts"]
     was_sealed = scan.get("sealedAt") is not None or scan.get("artifacts") is not None

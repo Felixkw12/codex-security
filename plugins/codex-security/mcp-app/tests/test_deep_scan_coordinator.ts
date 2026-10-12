@@ -3779,6 +3779,7 @@ async function testSaturationIgnoresDiscoveryCancellationWriteFailure(
     stopAfterNoNew: 2,
     maxDiscoveryRuns: 6,
   });
+  await mkdir(fixture.run.scanDir, { mode: 0o700 });
   fixture.run.workflowVersion = "deep-security-scan/v2";
   store.run.workflowVersion = "deep-security-scan/v2";
   store.selectFinalization = async (input) => {
@@ -3791,7 +3792,10 @@ async function testSaturationIgnoresDiscoveryCancellationWriteFailure(
     const bytes = await readFile(checkpoint);
     store.run.finalizationInput = {
       version: 1,
-      resultPath: path.relative(fixture.run.scanDir, checkpoint),
+      resultPath: path
+        .relative(fixture.run.scanDir, checkpoint)
+        .split(path.sep)
+        .join("/"),
       resultSha256: createHash("sha256").update(bytes).digest("hex"),
       terminalReason: input.reason,
       omittedWorkerIds: input.omittedWorkerIds ?? [],

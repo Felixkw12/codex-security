@@ -153,7 +153,10 @@ for (const terminalReason of ["capped", "saturated"]) {
       const contents = await readFile(checkpoint);
       const selection = {
         version: 1,
-        resultPath: path.relative(scanDir, checkpoint),
+        resultPath: path
+          .relative(scanDir, checkpoint)
+          .split(path.sep)
+          .join("/"),
         resultSha256: createHash("sha256").update(contents).digest("hex"),
         terminalReason,
         omittedWorkerIds: [],

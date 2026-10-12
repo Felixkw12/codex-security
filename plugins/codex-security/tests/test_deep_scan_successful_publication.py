@@ -369,6 +369,77 @@ def test_deep_prepare_and_complete_preserve_the_same_aggregate(
     assert_published_aggregate(scan)
 
 
+@pytest.mark.parametrize("prepare_only", [False, True], ids=["complete", "prepare"])
+@pytest.mark.parametrize("pending_artifact", ["writeup", "receipt"])
+def test_incomplete_deep_draft_remains_publishable_with_pending_artifacts(
+    workbench_api, workbench_db, publication_scan, prepare_only, pending_artifact
+):
+    scan = publication_scan()
+    manifest_path = scan.scan_dir / "scan-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["scan"]["complete"] = False
+    if pending_artifact == "writeup":
+        relative_path = "findings/pending/pending.md"
+        scan.findings[0]["writeup"] = {"reportPath": relative_path}
+    else:
+        relative_path = "artifacts/receipts/pending.md"
+        scan.coverage["surfaces"] = [
+            {
+                "id": "source-review",
+                "label": "Source review",
+                "disposition": "no_issue_found",
+                "receiptRefs": [relative_path],
+            }
+        ]
+    draft_dir = scan.scan_dir / "drafts"
+    draft_dir.mkdir()
+    draft_path = draft_dir / f"{uuid.uuid4()}.json"
+    documents = {
+        "manifest": manifest,
+        "findings": {"findings": scan.findings},
+        "coverage": scan.coverage,
+    }
+    args = Namespace(
+        scan_id=scan.scan_id,
+        claim_token=None,
+        draft_path=str(draft_path),
+        checkpoint_path=None,
+        expected_draft_digest=None,
+    )
+    saved_results = workbench_api["saved_results"]
+    context = workbench_api["_WORKBENCH_DB_CONTEXT"]
+    draft_path.write_text(json.dumps(documents))
+    assert saved_results.write_scan_draft(context, workbench_db, args)["status"] == "draft_written"
+    names = (
+        "scan-manifest.json",
+        "findings.json",
+        "coverage.json",
+        "checkpoint-head.json",
+        "report.md",
+    )
+    before = {name: (scan.scan_dir / name).read_bytes() for name in names}
+
+    with pytest.raises(SystemExit, match="The latest saved scan draft is incomplete"):
+        complete(workbench_api, workbench_db, scan, prepare_only=prepare_only)
+
+    assert (
+        workbench_db.execute("SELECT status FROM scans WHERE id = ?", (scan.scan_id,)).fetchone()[0]
+        == "running"
+    )
+    assert {name: (scan.scan_dir / name).read_bytes() for name in names} == before
+    assert not (scan.scan_dir / relative_path).exists()
+
+    artifact = scan.scan_dir / relative_path
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text("# Completed source review\n\nSynthetic review evidence.\n")
+    manifest["scan"]["complete"] = True
+    draft_path.write_text(json.dumps(documents))
+    assert saved_results.write_scan_draft(context, workbench_db, args)["status"] == "draft_written"
+    completed = complete(workbench_api, workbench_db, scan)
+    assert completed["progress"]["status"] == "complete"
+    assert_published_aggregate(scan)
+
+
 @pytest.mark.parametrize(
     ("source", "scope", "has_parent"),
     [

@@ -1526,6 +1526,7 @@ def complete_scan_locked(
                     completion_warnings=warnings if scan["mode"] != "deep" else None,
                     draft_documents=draft_documents,
                     finding_scope=requested_scan_paths(scan) if scan["mode"] == "deep" else None,
+                    require_complete=True,
                 )
             if prepared[2]["scan"].get("complete") is False:
                 raise RecoverableContractError(
