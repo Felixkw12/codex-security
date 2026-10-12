@@ -244,6 +244,227 @@ test.each(
   },
 );
 
+test.each(
+  [false, true].flatMap((changedDisplay) =>
+    ["none", "before-poll", "after-poll"].flatMap((anchor) =>
+      [
+        { collision: false, prefixMarker: false },
+        { collision: true, prefixMarker: false },
+        { collision: false, prefixMarker: true },
+      ].map((shape) => ({ changedDisplay, anchor, ...shape })),
+    ),
+  ),
+)(
+  "retains live progress omitted from command persistence (display=$changedDisplay, anchor=$anchor, collision=$collision, prefix=$prefixMarker)",
+  async ({ changedDisplay, anchor, collision, prefixMarker }) => {
+    const { home, parent } = await workerSessionFixture();
+    const current: ScanProgress = {
+      phase: "validation",
+      filesCompleted: 1,
+      filesTotal: 8,
+    };
+    const later: ScanProgress = { ...current, phase: "reporting" };
+    const command = ["printf", "sk-" + "a".repeat(32)];
+    const prefixProgress: ScanProgress = { ...current, phase: "discovery" };
+    const prefix = prefixMarker ? progressMarker("discovery", 1, 8) + "\n" : "";
+    const retainedHead = prefix + commandHead.slice(prefix.length);
+    const fullOutput = `${retainedHead}\n${progressMarker("validation", 1, 8)}\n${commandTail}`;
+    const savedOutput =
+      retainedHead + persistedCommandOutput.slice(commandHead.length);
+    const append = (rows: unknown[]) =>
+      appendFile(parent, jsonLines(rows) + "\n");
+    const updates: ScanProgress[] = [];
+    const tracker = costTracker(home, {
+      expectedFilesTotal: 8,
+      onProgress: (update) => updates.push(update),
+    });
+    const deliver = (
+      progress: ScanProgress,
+      event: Parameters<typeof tracker.recordParentProgress>[1],
+    ) => {
+      expect(tracker.recordParentProgress(progress, event)).toBe(true);
+      tracker.acceptParentProgress(progress, event);
+      if (JSON.stringify(updates.at(-1)) !== JSON.stringify(progress))
+        updates.push(progress);
+    };
+    const message = (text: string) => ({
+      type: "event_msg",
+      payload: {
+        type: "item_completed",
+        item: {
+          type: "AgentMessage",
+          content: [{ type: "Text", text }],
+        },
+      },
+    });
+    const completeAnchor = async () => {
+      const text = "Synthetic final response.";
+      await append([message(text)]);
+      tracker.recordParentItem({
+        type: "item.completed",
+        item: {
+          type: "agent_message",
+          id: "item_1",
+          text,
+        },
+      });
+    };
+    tracker.start("scan-thread");
+    try {
+      await tracker.refresh();
+      tracker.beginParentTurn();
+      await append(
+        collision
+          ? [
+              nativeCommand(command, savedOutput, "current"),
+              nativeCommand("later-review", progressMarker("reporting", 1, 8)),
+              // Different full middles can have the same persisted prefix and suffix.
+              nativeCommand(["different-command"], savedOutput, "other"),
+            ]
+          : [
+              nativeCommand(
+                "older-review",
+                progressMarker("attack_path", 1, 8),
+              ),
+              nativeCommand(command, savedOutput, "current"),
+            ],
+      );
+      const event = completedCommand(
+        changedDisplay ? "printf [REDACTED_SECRET]" : command.join(" "),
+        fullOutput,
+        "item_0",
+      );
+      if (prefixMarker) deliver(prefixProgress, event);
+      deliver(current, event);
+      if (anchor === "before-poll") await completeAnchor();
+      await tracker.refresh();
+      if (anchor === "after-poll") await completeAnchor();
+      await tracker.refresh();
+      // Without command identity, collision order is ambiguous even after an anchor.
+      const expected = [
+        ...(prefixMarker ? [prefixProgress] : []),
+        current,
+        ...(collision && !changedDisplay ? [later] : []),
+      ];
+      expect(updates).toEqual(expected);
+      await tracker.stop();
+      expect(updates).toEqual(expected);
+
+      const text = progressMarker("reporting", 1, 8);
+      await append([message(text)]);
+      deliver(later, {
+        type: "item.completed",
+        item: {
+          type: "agent_message",
+          id: "item_2",
+          text,
+        },
+      });
+      await tracker.refresh();
+      expect(updates.at(-1)).toEqual(later);
+      await appendSessionItem(parent, progressMessage(2, 8, "reporting"));
+      await tracker.stop();
+      expect(updates.at(-1)).toEqual({ ...later, filesCompleted: 2 });
+    } finally {
+      await tracker.stop();
+    }
+  },
+);
+
+test.each(
+  [false, true].flatMap((changedDisplay) =>
+    [false, true].flatMap((truncated) =>
+      [false, true].map((initialRead) => ({
+        changedDisplay,
+        truncated,
+        initialRead,
+      })),
+    ),
+  ),
+)(
+  "keeps live progress ahead of an already-read snapshot (display=$changedDisplay, truncated=$truncated, initial=$initialRead)",
+  async ({ changedDisplay, truncated, initialRead }) => {
+    const { home, parent } = await workerSessionFixture();
+    const current: ScanProgress = {
+      phase: "validation",
+      filesCompleted: 1,
+      filesTotal: 8,
+    };
+    const text = progressMarker("validation", 1, 8);
+    const command = ["printf", "sk-" + "a".repeat(32)];
+    const updates: ScanProgress[] = [];
+    const tracker = costTracker(home, {
+      expectedFilesTotal: 8,
+      onProgress: (update) => updates.push(update),
+    });
+    const reached = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const originalOpen = filesystem.open;
+    let held = false;
+    let reading: ReturnType<typeof tracker.refresh> | undefined;
+    const opening = spyOn(filesystem, "open").mockImplementation(
+      async (...args: Parameters<typeof originalOpen>) => {
+        const handle = await originalOpen(...args);
+        if (String(args[0]) === parent) {
+          const close = handle.close.bind(handle);
+          handle.close = async () => {
+            if (held) {
+              reached.resolve();
+              await release.promise;
+            }
+            return close();
+          };
+        }
+        return handle;
+      },
+    );
+    // Keep the synthetic close gate alive on all supported test runners.
+    const keepAlive = setInterval(() => {}, 1_000);
+    tracker.start("scan-thread");
+    try {
+      if (!initialRead) await tracker.refresh();
+      tracker.beginParentTurn();
+      await appendFile(
+        parent,
+        jsonLines([
+          nativeCommand("older-review", progressMarker("attack_path", 1, 8)),
+        ]) + "\n",
+      );
+      held = true;
+      reading = tracker.refresh();
+      await reached.promise;
+      // The reader saw old EOF, but current persistence still precedes live delivery.
+      await appendFile(
+        parent,
+        jsonLines([
+          nativeCommand(command, truncated ? persistedCommandOutput : text),
+        ]) + "\n",
+      );
+      const event = completedCommand(
+        changedDisplay ? "printf [REDACTED_SECRET]" : command.join(" "),
+        truncated ? commandOutput(text) : text,
+        "item_0",
+      );
+      expect(tracker.recordParentProgress(current, event)).toBe(true);
+      tracker.acceptParentProgress(current, event);
+      updates.push(current);
+      held = false;
+      release.resolve();
+      await reading;
+      expect(updates).toEqual([current]);
+      await tracker.stop();
+      expect(updates).toEqual([current]);
+    } finally {
+      held = false;
+      release.resolve();
+      clearInterval(keepAlive);
+      await reading?.catch(() => {});
+      opening.mockRestore();
+      await tracker.stop();
+    }
+  },
+);
+
 test("keeps the parent frontier ahead of duplicate saved inventory", async () => {
   const { home, parent } = await workerSessionFixture();
   const inventory = {
