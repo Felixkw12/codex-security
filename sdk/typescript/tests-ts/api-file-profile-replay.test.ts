@@ -148,6 +148,7 @@ test.each(["rerun", "resume"] as const)(
       const workerResult = execFileSync(
         Bun.which("node")!,
         [
+          "--experimental-strip-types",
           fileURLToPath(
             new URL("./support/replay-worker-boundary.ts", import.meta.url),
           ),

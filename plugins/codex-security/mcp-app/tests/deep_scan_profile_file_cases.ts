@@ -47,6 +47,9 @@ export async function testWorkerSelectedProfileFiles<Profile>({
 }) {
   const { mergedCodexConfig, resolveCodexProfile, writeCodexConfig } =
     await importModule({
+      alias: {
+        "smol-toml": fileURLToPath(import.meta.resolve("smol-toml")),
+      },
       entryPoints: [
         fileURLToPath(
           new URL("../../../../sdk/typescript/src/config.ts", import.meta.url),
