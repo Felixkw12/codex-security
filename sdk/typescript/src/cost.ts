@@ -56,7 +56,6 @@ interface SessionProgress {
   markerIndex: number;
   receipt: boolean;
   duplicate: boolean;
-  unresolvedProjection?: boolean;
 }
 
 interface ProgressItem {
@@ -78,12 +77,14 @@ interface NativeProgressItem extends ProgressItem {
 interface SessionCompletion {
   position: number;
   item: ProgressItem | null;
+  lastCommandProgress?: SessionProgress;
 }
 
 interface UnresolvedParentCommand {
   live: StreamedProgressItem;
-  completion: SessionCompletion;
-  truncated: boolean;
+  completion?: SessionCompletion;
+  truncated?: boolean;
+  after: number;
 }
 
 export type ParentProgressSource =
@@ -296,8 +297,10 @@ export class ScanCostTracker {
     this.#parentInventory = null;
     // Historical logs may omit projection kinds emitted by the new turn.
     this.#parentSession?.messageProjections.clear();
-    for (const completion of this.#parentSession?.completions ?? [])
+    for (const completion of this.#parentSession?.completions ?? []) {
       completion.item = null;
+      delete completion.lastCommandProgress;
+    }
     this.#readyParentMarkers.clear();
     this.#matchedParentItems = 0;
     this.#parentCompletionCursor = this.#parentSession?.completions.length ?? 0;
@@ -495,6 +498,7 @@ export class ScanCostTracker {
         (previous) =>
           previous.position === null && previous.item?.kind === "command",
       );
+    let pending: UnresolvedParentCommand | undefined;
     for (const completion of session.completions) {
       if (
         completion.position > before &&
@@ -514,16 +518,20 @@ export class ScanCostTracker {
         );
         if (preceding !== -1) {
           earlier.splice(preceding, 1);
+          pending = { live, after };
           continue;
         }
         return {
           live,
           completion,
           truncated: completion.item.outputDigest !== item.outputDigest,
+          after,
         };
       }
     }
-    return undefined;
+    // The current live occurrence is still pending after earlier copies have
+    // been reserved. Keep its authority until its own receipt or a later anchor.
+    return pending;
   }
 
   #matchParentCompletions(): void {
@@ -600,7 +608,10 @@ export class ScanCostTracker {
         const saved = completions[this.#parentCompletionCursor++]!;
         if (saved.item !== null) {
           remove(progressItemKey(saved.item), this.#parentCompletionKeys);
-          if (saved.position === live.position) saved.item = null;
+          if (saved.position === live.position) {
+            saved.item = null;
+            delete saved.lastCommandProgress;
+          }
         }
       }
       for (const key of changed) this.#queueParentMatch(key);
@@ -946,6 +957,17 @@ export class ScanCostTracker {
     }
     // Parent facts outlive display admission and queue draining. Preserve the
     // greatest eligible coverage for each original inventory, then source order.
+    const unresolvedCommand =
+      this.#parentSession === null
+        ? undefined
+        : this.#unresolvedParentCommand(this.#parentSession);
+    const projection = unresolvedCommand?.completion?.lastCommandProgress;
+    const missingProgress =
+      unresolvedCommand !== undefined &&
+      (projection === undefined ||
+        (unresolvedCommand.truncated &&
+          progressKey(projection.update) !==
+            progressKey(this.#parentProgress!.progress)));
     let eligible =
       this.#parentProgress !== null &&
       this.#parentProgress.progress.filesTotal <=
@@ -989,7 +1011,8 @@ export class ScanCostTracker {
               this.#parentSession?.progress.some(
                 (saved) =>
                   saved.order !== undefined &&
-                  !saved.unresolvedProjection &&
+                  (!missingProgress ||
+                    saved.position >= (unresolvedCommand?.after ?? Infinity)) &&
                   saved.position === candidate.position &&
                   saved.markerIndex === candidate.markerIndex,
               ))) &&
@@ -1332,8 +1355,6 @@ export class ScanCostTracker {
       let unresolvedCommand: UnresolvedParentCommand | undefined;
       if (threadId === this.#threadId) {
         this.#parentSession = session;
-        // Capture evidence before exact later anchors consume unmatched signatures.
-        unresolvedCommand = this.#unresolvedParentCommand(session);
         for (const saved of session.progress)
           if (saved.order !== undefined && !saved.duplicate)
             this.#rememberParentFact({
@@ -1344,6 +1365,7 @@ export class ScanCostTracker {
             });
         this.#matchParentCompletions();
         this.#reconcileParentProgress();
+        unresolvedCommand = this.#unresolvedParentCommand(session);
       }
       const reviewWasUnpositioned = this.#parentReviewStart === null;
       this.#reportSessionProgress(
@@ -1413,21 +1435,19 @@ export class ScanCostTracker {
     }
     let corroborated: SessionProgress | undefined;
     let unresolvedCommandState = false;
-    let missingCommandProgress = false;
     const live = this.#acceptedParent;
     const current = this.#parentProgress;
     if (
       parent &&
       command?.live === live &&
-      command.completion.item !== null &&
+      command.completion?.item !== null &&
       live?.position === null &&
       current !== null &&
       current.position === undefined
     ) {
-      const completion = command.completion;
-      const saved = session.progress.findLast(
-        (row) => row.position === completion.position,
-      );
+      // Parsed command evidence survives draining the notification queue.
+      // An absent receipt is pending; an empty projection can omit live output.
+      const saved = command.completion?.lastCommandProgress;
       const key = progressKey(current.progress);
       if (
         saved === undefined ||
@@ -1436,7 +1456,6 @@ export class ScanCostTracker {
         // Truncation may retain older markers but lose the current one. Its
         // digest cannot locate live state, even after a marker-free anchor.
         unresolvedCommandState = true;
-        missingCommandProgress = true;
       }
       if (saved !== undefined && progressKey(saved.update) === key) {
         unresolvedCommandState = true;
@@ -1452,8 +1471,23 @@ export class ScanCostTracker {
           // later inventories differ. It does not locate omitted command phases.
           // Non-inventory phases still require the latest saved state to agree.
           corroborated = saved;
-          session.progress.splice(session.progress.indexOf(saved), 1);
+          const queued = session.progress.indexOf(saved);
+          if (queued !== -1) session.progress.splice(queued, 1);
           session.progress.unshift(saved);
+          if (
+            saved.update.phase === "discovery" &&
+            saved.update.filesCompleted === 0
+          ) {
+            const marker = live.markers.findLast(
+              (marker) =>
+                marker.accepted && progressKey(marker.progress) === key,
+            );
+            if (marker !== undefined)
+              marker.corroboratedInventory = {
+                position: saved.position,
+                markerIndex: saved.markerIndex,
+              };
+          }
         }
       }
     }
@@ -1513,16 +1547,16 @@ export class ScanCostTracker {
         continue;
       }
       if (
-        ((unresolvedCommandState && corroborated === undefined) ||
-          saved.unresolvedProjection) &&
+        unresolvedCommandState &&
+        corroborated === undefined &&
         saved !== corroborated &&
+        saved.position < (command?.after ?? Infinity) &&
         this.#afterParentFrontier(saved.position, saved.markerIndex) &&
         !provenInventory &&
         progress.filesCompleted <= this.#highestFilesCompleted
       ) {
         // Keep lossy-output ambiguity across marker-free anchors; a current
         // state or greater coverage must supply the missing progress evidence.
-        if (missingCommandProgress) saved.unresolvedProjection = true;
         session.progress.push(saved);
         continue;
       }
@@ -1582,18 +1616,6 @@ export class ScanCostTracker {
             });
         }
         continue;
-      }
-      if (parentInventory && saved === corroborated) {
-        const marker = live?.markers.findLast(
-          (marker) =>
-            marker.accepted &&
-            progressKey(marker.progress) === progressKey(progress),
-        );
-        if (marker !== undefined)
-          marker.corroboratedInventory = {
-            position: saved.position,
-            markerIndex: saved.markerIndex,
-          };
       }
       session.filesTotal = progress.filesTotal;
       session.filesCompleted = progress.filesCompleted;
@@ -2000,6 +2022,7 @@ function readSessionEvent(
     const duplicateCompletion =
       item?.kind === "message" &&
       repeatedMessageProjection(session, item.outputDigest, "native");
+    let completion: SessionCompletion | undefined;
     if (
       isRecord(value) &&
       (value["type"] === "CommandExecution" ||
@@ -2017,7 +2040,11 @@ function readSessionEvent(
                 ? {}
                 : { commandDigest: item.commandDigest }),
             };
-      session.completions.push({ position, item: signature });
+      completion = {
+        position,
+        item: signature,
+      };
+      session.completions.push(completion);
     }
     if (item !== null) {
       const duplicate =
@@ -2029,14 +2056,17 @@ function readSessionEvent(
           item.updates,
         );
       for (const [markerIndex, update] of item.updates.entries()) {
-        session.progress.push({
+        const saved = {
           update,
           position,
           completion: true,
           markerIndex,
           receipt: false,
           duplicate,
-        });
+        };
+        session.progress.push(saved);
+        if (completion !== undefined && item.kind === "command")
+          completion.lastCommandProgress = saved;
       }
     }
   }

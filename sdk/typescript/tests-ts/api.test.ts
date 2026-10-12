@@ -64,7 +64,11 @@ import {
   resolveCodexProfile,
   type JsonObject,
 } from "../src/config.js";
-import { estimateScanCost, type ScanCost } from "../src/cost.js";
+import {
+  estimateScanCost,
+  ScanCostTracker,
+  type ScanCost,
+} from "../src/cost.js";
 import { resolveCodexCommand, runWorkbench } from "../src/runtime.js";
 import * as runtime from "../src/runtime.js";
 import { matchScanFindingsInternal } from "../src/scan-comparison.js";
@@ -9210,6 +9214,195 @@ describe("CodexSecurity orchestration", () => {
         savedRead.resolve();
         clearInterval(keepAlive);
         await client.close();
+        listing.mockRestore();
+      }
+    },
+  );
+
+  test.each(
+    [
+      "drained phase",
+      "drained growth",
+      "drained shrink",
+      "omitted phase",
+      "omitted growth",
+      "omitted shrink",
+      "pending inventory",
+      "pending phase",
+    ].flatMap((scenario) =>
+      [false, true].flatMap((changedDisplay) =>
+        [false, true].map((workerFirst) => ({
+          scenario,
+          changedDisplay,
+          workerFirst,
+        })),
+      ),
+    ),
+  )(
+    "orders persisted command evidence through repeated polls ($scenario, changed=$changedDisplay, workers first=$workerFirst)",
+    async ({ scenario, changedDisplay, workerFirst }) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      let tracker: ScanCostTracker | undefined;
+      const originalStart = ScanCostTracker.prototype.start;
+      const starting = spyOn(
+        ScanCostTracker.prototype,
+        "start",
+      ).mockImplementation(function (this: ScanCostTracker, threadId: string) {
+        originalStart.call(this, threadId);
+        if (threadId === "thread-1") tracker = this;
+      });
+      let parentPath = "";
+      let workerPath = "";
+      const originalReaddir = fsPromises.readdir;
+      const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
+        ...args: Parameters<typeof originalReaddir>
+      ) => {
+        const entries = await originalReaddir(...args);
+        if (String(args[0]) !== dirname(parentPath)) return entries;
+        const first = basename(workerFirst ? workerPath : parentPath);
+        return entries.toSorted(
+          (left, right) =>
+            Number(String(right.name) === first) -
+            Number(String(left.name) === first),
+        );
+      }) as typeof originalReaddir);
+      const initial: ScanProgress = scenario.endsWith("phase")
+        ? { phase: "validation", filesCompleted: 3, filesTotal: 8 }
+        : {
+            phase: "discovery",
+            filesCompleted: 0,
+            filesTotal: scenario.endsWith("shrink") ? 9 : 8,
+          };
+      const expected: ScanProgress =
+        scenario === "pending phase"
+          ? initial
+          : scenario.endsWith("phase")
+            ? { ...initial, phase: "reporting" }
+            : { ...initial, filesTotal: scenario.endsWith("growth") ? 9 : 8 };
+      const text = (progress: ScanProgress) =>
+        progressMarker(
+          progress.phase,
+          progress.filesCompleted,
+          progress.filesTotal,
+        );
+      const display = (command: string) =>
+        changedDisplay ? `${command} displayed` : command;
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> =>
+          args[0] === "register-cli-scan"
+            ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+            : mockWorkbench(args, input),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          parentPath = await writeUsageSession(codexHome, "thread-1", {});
+          workerPath = await writeUsageSession(
+            codexHome,
+            "worker-thread",
+            {},
+            { parent: "thread-1" },
+          );
+          const save = (command: string, output: string) =>
+            appendFile(
+              parentPath,
+              jsonLines([nativeCommand(command, output, command)]) + "\n",
+            );
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            expect(tracker).toBeDefined();
+            // Control polling through the real tracker while keeping the API's
+            // source, inventory, and count admission callback in the loop.
+            await tracker!.stop();
+            if (scenario.startsWith("pending")) {
+              yield completedCommand(
+                display("first"),
+                text(initial),
+                "live-first",
+              );
+              await save("first", text(initial));
+              await tracker!.refresh();
+              yield completedCommand(
+                display("last"),
+                text(initial),
+                "live-last",
+              );
+              await tracker!.refresh();
+              await save(
+                "middle",
+                scenario === "pending phase"
+                  ? progressMarker("reporting", 3, 8)
+                  : progressMarker("discovery", 0, 9),
+              );
+              await tracker!.refresh();
+              await save("last", text(initial));
+              if (scenario === "pending phase") {
+                await save("anchor", "Batch finished.");
+                yield completedCommand(
+                  "anchor",
+                  "Batch finished.",
+                  "live-anchor",
+                );
+              }
+              await tracker!.refresh();
+            } else {
+              await save(
+                "initial",
+                scenario.startsWith("omitted")
+                  ? persistedCommandOutput
+                  : text(initial),
+              );
+              await save("anchor", "Batch finished.");
+              await tracker!.refresh();
+              yield completedCommand(
+                display("initial"),
+                scenario.startsWith("omitted")
+                  ? commandOutput(text(initial))
+                  : text(initial),
+                "live-initial",
+              );
+              yield completedCommand(
+                "anchor",
+                "Batch finished.",
+                "live-anchor",
+              );
+              await save("final", text(expected));
+            }
+            if (scenario.endsWith("shrink") || scenario === "pending inventory")
+              await appendFile(
+                workerPath,
+                jsonLines([
+                  {
+                    type: "response_item",
+                    payload: {
+                      type: "custom_tool_call_output",
+                      call_id: "worker-progress",
+                      output: progressMarker("attack_path", 5, 9),
+                    },
+                  },
+                ]) + "\n",
+              );
+            await tracker!.refresh();
+            await tracker!.refresh();
+            await tracker!.stop();
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
+      try {
+        await client.run(repository, {
+          onProgress: (update) => updates.push(update),
+        });
+        expect(updates.at(-1)).toEqual(expected);
+        await tracker!.refresh();
+        await tracker!.stop();
+        expect(updates.at(-1)).toEqual(expected);
+      } finally {
+        await client.close();
+        starting.mockRestore();
         listing.mockRestore();
       }
     },
