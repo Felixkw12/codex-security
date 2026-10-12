@@ -6,6 +6,7 @@ import scanDraftSchema from "../../schemas/tools/scan-draft.schema.json";
 import type { ArtifactContext } from "./artifact-context.js";
 import type { DeepReducerPageInput } from "./artifact-deep-reducer-pages.js";
 import {
+  hasScanDraftCheckpoint,
   parsePersistedScanDraft,
   saveScanDraftCheckpoint,
 } from "./artifact-scan-draft.js";
@@ -74,8 +75,9 @@ export async function readDeepReductionSources(
           worker.resultPath,
           bound.artifacts.workersRoot,
         );
+        const stored = await readJsonObject(worker.resultPath);
         const result = parseStoredScanDraft(
-          await readJsonObject(worker.resultPath),
+          stored,
           "Accepted Standard worker " + worker.id,
           bound.scanId,
           parsePersistedScanDraft,
@@ -86,6 +88,10 @@ export async function readDeepReductionSources(
           throw new Error(
             "An assigned Standard worker wrote only a checkpoint, not a complete result.",
           );
+        const recorded = await hasScanDraftCheckpoint(
+          { ...context, root: dirname(worker.resultPath), layout: "worker" },
+          stored,
+        );
         for (const [index, finding] of result.findings.entries()) {
           const provenance = finding.provenance as Record<string, unknown>;
           provenance.sourceFindingIds = [`${worker.id}:${index}`];
@@ -104,6 +110,7 @@ export async function readDeepReductionSources(
               surface.provenance as Record<string, unknown> | undefined
             )?.scanReceiptRefs;
             if (
+              recorded &&
               Array.isArray(inheritedScanRefs) &&
               inheritedScanRefs.includes(normalized)
             ) {

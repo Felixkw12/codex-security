@@ -405,6 +405,19 @@ export async function saveScanDraftCheckpoint(
   }
 }
 
+/** Read-only workers cannot author the checkpoints written by the draft tool. */
+export async function hasScanDraftCheckpoint(
+  context: ArtifactContext,
+  input: JsonObject,
+): Promise<boolean> {
+  const saved = await readOptionalArtifactTextWithMetadata(context, [
+    "checkpoints",
+    scanDraftCheckpointName(input),
+  ]);
+  const { handoffClaimToken: _claim, ...snapshot } = input;
+  return saved?.contents === JSON.stringify(snapshot, null, 2) + "\n";
+}
+
 function sameAuthoredSurface(left: JsonObject, right: JsonObject): boolean {
   const content = (surface: JsonObject) => {
     const { provenance, receiptRefs, ...fields } = surface;
@@ -459,6 +472,22 @@ async function preserveScanDraft(
   );
   const savedSources = [...current, ...archived];
   const sources = savedSources.map(({ input }) => input);
+  const ambiguousSurfaceIds = new Set<string>();
+  for (const draft of [result, ...sources]) {
+    const seen = new Set<string>();
+    for (const surface of draft.coverage.surfaces as JsonObject[]) {
+      if (typeof surface.id !== "string") continue;
+      if (seen.has(surface.id)) ambiguousSurfaceIds.add(surface.id);
+      seen.add(surface.id);
+    }
+  }
+  // A new disposition resolves fresh evidence before closeout joins prior receipts.
+  const sameSavedSurface = (left: JsonObject, right: JsonObject) =>
+    (typeof left.id === "string" &&
+      left.id === right.id &&
+      left.disposition === right.disposition &&
+      !ambiguousSurfaceIds.has(left.id)) ||
+    sameAuthoredSurface(left, right);
   if (context.layout === "worker" && sources.length > 0) {
     // Retained observations keep saved ownership; fresh observations use this worker.
     const activePrefix = `artifacts/deep_discovery/workers/${basename(dirname(context.root))}/output/`;
@@ -466,12 +495,23 @@ async function preserveScanDraft(
       if (!Array.isArray(surface.receiptRefs)) continue;
       const previous = sources
         .flatMap((source) => source.coverage.surfaces as JsonObject[])
-        .find((saved) => sameAuthoredSurface(surface, saved));
+        .find((saved) => sameSavedSurface(surface, saved));
+      const refs = new Set(
+        surface.receiptRefs.map((ref) => posix.normalize(ref as string)),
+      );
+      const previousRefs = new Set(
+        ((previous?.receiptRefs as string[] | undefined) ?? []).map((ref) =>
+          posix.normalize(ref),
+        ),
+      );
       const shared = new Set<string>(
         isObject(previous?.provenance) &&
           Array.isArray(previous.provenance.scanReceiptRefs)
           ? previous.provenance.scanReceiptRefs.filter(
-              (ref): ref is string => typeof ref === "string",
+              (ref): ref is string =>
+                typeof ref === "string" &&
+                refs.has(ref) &&
+                previousRefs.has(ref),
             )
           : [],
       );
@@ -689,7 +729,7 @@ async function preserveScanDraft(
       const current = (result.coverage.surfaces as JsonObject[]).find(
         (surface) =>
           coverageEntryPresent([surface], previous, ambiguousDeferredIds) &&
-          (sameAuthoredSurface(surface, previous) ||
+          (sameSavedSurface(surface, previous) ||
             resolvedSurfaces.has(previous)),
       );
       if (!current || !isObject(previous.provenance)) continue;
@@ -1351,9 +1391,9 @@ async function readSavedCheckpoints(
   return checkpoints;
 }
 
-function scanDraftCheckpointName(
-  input: Omit<ScanDraftInput, "coverage">,
-): string {
+function scanDraftCheckpointName(input: {
+  handoffClaimToken?: unknown;
+}): string {
   const { handoffClaimToken: _claim, ...snapshot } = input;
   return (
     createHash("sha256").update(JSON.stringify(snapshot)).digest("hex") +
