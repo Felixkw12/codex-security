@@ -47,7 +47,6 @@ const distModules = [
   "multiscan",
   "mock-scan",
   "owner-evidence",
-  "patch-git-controls",
   "patch-tui",
   "publication",
   "publication-events",
