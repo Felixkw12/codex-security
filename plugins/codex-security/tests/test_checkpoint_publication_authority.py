@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import sqlite3
@@ -8,12 +9,27 @@ import subprocess
 import sys
 import uuid
 from argparse import Namespace
+from pathlib import Path
 
 import pytest
 from test_deep_scan_successful_publication import add_worker
 from test_deep_scan_successful_publication import publication_scan as publication_scan
 from test_workbench_standard_deep_results import deep_scan_fixture, worker_paths
 from workbench_test_support import run_workbench, write_checkpoint, write_completed_contract
+
+
+def captured_head(scan_dir, directory):
+    head = scan_dir / directory / "checkpoint-head.json"
+    observation = {
+        **json.loads(head.read_text()),
+        "observedAtNs": str(head.stat().st_mtime_ns),
+    }
+    digest = hashlib.sha256(
+        json.dumps(observation, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    relative = (Path(directory) / "checkpoint-heads" / f"{digest}.json").as_posix()
+    assert json.loads((scan_dir / relative).read_text()) == observation
+    return relative
 
 
 @pytest.mark.parametrize("source_name", ["ordinary-source.json", "sourceTimes"])
@@ -334,13 +350,9 @@ def test_frozen_stopped_replay_ignores_later_worker_head_changes(
     previous = save_disposition(scan, result.parent, "reported")
     result.write_text(json.dumps(previous))
     save_disposition(scan, result.parent, "rejected")
-    checkpoint_name = json.loads((result.parent / "checkpoint-head.json").read_text())["checkpoint"]
     directory = result.parent.relative_to(scan.scan_dir).as_posix()
-    expected_heads = {
-        directory: (result.parent / "checkpoints" / checkpoint_name)
-        .relative_to(scan.scan_dir)
-        .as_posix()
-    }
+    head = result.parent / "checkpoint-head.json"
+    original_head = (head.read_bytes(), head.stat().st_mtime_ns)
     original_outputs = {
         name: (scan.scan_dir / name).read_bytes()
         for name in ("findings.json", "coverage.json", "scan-manifest.json")
@@ -374,8 +386,9 @@ def test_frozen_stopped_replay_ignores_later_worker_head_changes(
             ),
         )
     row = workbench_db.execute("SELECT * FROM scans WHERE id = ?", (scan.scan_id,)).fetchone()
-    root_checkpoint = json.loads((scan.scan_dir / "checkpoint-head.json").read_text())["checkpoint"]
-    expected_heads["."] = f"checkpoints/{root_checkpoint}"
+    if not root_head:
+        assert (head.read_bytes(), head.stat().st_mtime_ns) == original_head
+    expected_heads = {key: captured_head(scan.scan_dir, key) for key in {directory, "."}}
     assert len(failed_writes) == 1
     assert "scanId" in failed_writes[0]
     assert row["status"] == "failed"
@@ -392,7 +405,6 @@ def test_frozen_stopped_replay_ignores_later_worker_head_changes(
             "SELECT * FROM deep_scan_runs WHERE scan_id = ?", (scan.scan_id,)
         ).fetchone()
     )
-    head = result.parent / "checkpoint-head.json"
     if head_change == "replaced":
         save_disposition(scan, result.parent, "reported")
     elif head_change == "removed":
@@ -727,12 +739,9 @@ def test_publication_metadata_uses_the_captured_head(
             ),
         )["scan"]
     manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())["scan"]
-    selected = json.loads((result.parent / "checkpoint-head.json").read_text())["checkpoint"]
     directory = result.parent.relative_to(scan.scan_dir).as_posix()
-    root_checkpoint = json.loads((scan.scan_dir / "checkpoint-head.json").read_text())["checkpoint"]
     assert manifest["preservedCheckpointHeads"] == {
-        ".": f"checkpoints/{root_checkpoint}",
-        directory: (result.parent / "checkpoints" / selected).relative_to(scan.scan_dir).as_posix(),
+        key: captured_head(scan.scan_dir, key) for key in {directory, "."}
     }
     assert stopped["findingCount"] == 0
     assert (
@@ -787,6 +796,107 @@ def test_legacy_checkpoint_selection_is_reconstructed_from_frozen_sources(
     context = workbench_api["scan_context"](workbench_db, scan.scan_id)["scan"]
     assert context["findingCount"] == 0
     assert context["resultsRecoveryNeeded"] is False
+
+
+def test_legacy_omitted_root_head_does_not_require_recovery(
+    workbench_api, workbench_db, publication_scan, monkeypatch
+):
+    scan = publication_scan()
+    result = add_worker(workbench_db, scan, status="canceled")
+    result.write_text(json.dumps(save_disposition(scan, result.parent, "reported")))
+    saved = workbench_api["saved_results"]
+    prepare = saved._prepare_scan_finalization
+
+    def legacy_documents(*args, **kwargs):
+        heads = kwargs["draft_documents"][0]["scan"]["preservedCheckpointHeads"]
+        heads.pop(".")
+        for directory, snapshot in heads.items():
+            checkpoint = json.loads((scan.scan_dir / snapshot).read_text())["checkpoint"]
+            heads[directory] = (Path(directory) / "checkpoints" / checkpoint).as_posix()
+        return prepare(*args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(saved, "_prepare_scan_finalization", legacy_documents)
+        saved.fail_scan(
+            workbench_api["_WORKBENCH_DB_CONTEXT"],
+            workbench_db,
+            Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
+        )
+    manifest_path = scan.scan_dir / "scan-manifest.json"
+    original = manifest_path.read_bytes()
+    manifest = json.loads(original)["scan"]
+    assert "." not in manifest["preservedCheckpointHeads"]
+    assert captured_head(scan.scan_dir, ".") in manifest["preservedSources"]
+    assert not workbench_api["scan_context"](workbench_db, scan.scan_id)["scan"][
+        "resultsRecoveryNeeded"
+    ]
+    preserved = saved.preserve_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"],
+        workbench_db,
+        Namespace(
+            scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
+        ),
+    )["scan"]
+    assert not preserved["resultsRecoveryNeeded"]
+    assert manifest_path.read_bytes() == original
+    head = scan.scan_dir / "checkpoint-head.json"
+    observed = head.stat().st_mtime_ns + 1_000_000
+    os.utime(head, ns=(observed, observed))
+    assert workbench_api["scan_context"](workbench_db, scan.scan_id)["scan"][
+        "resultsRecoveryNeeded"
+    ]
+    assert manifest_path.read_bytes() == original
+
+
+@pytest.mark.parametrize("change", ["new-checkpoint", "identical-result-rewrite"])
+def test_explicit_recovery_preserves_database_only_source_times(
+    workbench_api, workbench_db, publication_scan, monkeypatch, change
+):
+    scan = publication_scan()
+    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
+    result = add_worker(workbench_db, scan, status="canceled")
+    result.write_text(json.dumps(save_disposition(scan, result.parent, "reported")))
+    os.utime(result, ns=(100, 100))
+    saved = workbench_api["saved_results"]
+    write = saved.write_scan_local_bytes
+
+    def fail_source_order(root, relative, contents):
+        if relative.startswith("source-order/"):
+            raise OSError("Synthetic ordering snapshot failure")
+        return write(root, relative, contents)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(saved, "write_scan_local_bytes", fail_source_order)
+        saved.fail_scan(
+            workbench_api["_WORKBENCH_DB_CONTEXT"],
+            workbench_db,
+            Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
+        )
+    retained = json.loads(
+        workbench_db.execute(
+            "SELECT retained_source_digests_json FROM scans WHERE id = ?", (scan.scan_id,)
+        ).fetchone()[0]
+    )
+    relative_result = result.relative_to(scan.scan_dir).as_posix()
+    assert retained["sourceTimes"][relative_result] == 100
+    assert not any(path.startswith("source-order/") for path in retained["sources"])
+    if change == "new-checkpoint":
+        save_disposition(scan, result.parent, "rejected")
+    else:
+        result.write_bytes(result.read_bytes())
+        os.utime(result, ns=(300, 300))
+    recovered = saved.recover_scan_results(
+        workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
+    )["scan"]
+    assert recovered["findingCount"] == (0 if change == "new-checkpoint" else 1)
+    assert not recovered["resultsRecoveryNeeded"]
+    manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())["scan"]
+    sources = manifest["preservedSources"]
+    times = saved._frozen_source_times(scan.scan_dir, scan.scan_id, sources)
+    for relative, digest in retained["sources"].items():
+        assert sources[relative] == digest
+        assert times[relative] == retained["sourceTimes"][relative]
+    assert len(sources) > len(retained["sources"])
 
 
 @pytest.mark.parametrize("retry", ["preserve", "recover"])
@@ -935,7 +1045,8 @@ def test_unreadable_worker_head_does_not_hide_other_recoverable_evidence(
     bad = add_worker(workbench_db, scan, status="canceled")
     bad.write_text(json.dumps(save_disposition(scan, bad.parent, "reported")))
     save_disposition(scan, bad.parent, prior_disposition)
-    prior_head = json.loads((bad.parent / "checkpoint-head.json").read_text())["checkpoint"]
+    head = bad.parent / "checkpoint-head.json"
+    original_head = (head.read_bytes(), head.stat().st_mtime_ns)
     scan.findings[0]["identity"]["anchor"] = "independent-worker"
     scan.findings[0]["locations"][0]["startLine"] = 20
     scan.findings[0]["locations"][0]["endLine"] = 21
@@ -946,7 +1057,9 @@ def test_unreadable_worker_head_does_not_hide_other_recoverable_evidence(
         workbench_db,
         Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Audit stopped."),
     )
-    head = bad.parent / "checkpoint-head.json"
+    assert (head.read_bytes(), head.stat().st_mtime_ns) == original_head
+    directory = bad.parent.relative_to(scan.scan_dir).as_posix()
+    prior_head = captured_head(scan.scan_dir, directory)
     if bad_head == "missing-head":
         head.unlink()
     else:
@@ -968,10 +1081,7 @@ def test_unreadable_worker_head_does_not_hide_other_recoverable_evidence(
     assert recovered["findingCount"] == (2 if prior_disposition == "reported" else 1)
     assert recovered["resultsRecoveryNeeded"] is False
     manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())["scan"]
-    directory = bad.parent.relative_to(scan.scan_dir).as_posix()
-    assert (
-        manifest["preservedCheckpointHeads"][directory] == f"{directory}/checkpoints/{prior_head}"
-    )
+    assert manifest["preservedCheckpointHeads"][directory] == prior_head
 
 
 def test_failed_head_snapshot_does_not_claim_uncaptured_authority(
@@ -1002,7 +1112,14 @@ def test_failed_head_snapshot_does_not_claim_uncaptured_authority(
         )["scan"]
     row = workbench_db.execute("SELECT * FROM scans WHERE id = ?", (scan.scan_id,)).fetchone()
     assert row["seal_manifest_digest"] is None
-    assert row["retained_checkpoint_heads_json"] is None
+    heads = json.loads(row["retained_checkpoint_heads_json"])
+    relative_head = f"{directory}/checkpoint-head.json"
+    assert heads[directory] == relative_head
+    retained = json.loads(row["retained_source_digests_json"])
+    _, digest, observed = saved._read_saved_result(scan.scan_dir, relative_head, scan.scan_id)
+    assert retained["sources"][relative_head] == digest
+    assert retained["sourceTimes"][relative_head] == observed
+    assert not (result.parent / "checkpoint-heads").exists()
     assert stopped["resultsRecoveryNeeded"] is True
     warnings = json.loads(
         workbench_db.execute(
@@ -1620,7 +1737,19 @@ def test_snapshot_write_failure_keeps_stopped_publication_pending(
         assert row["status"] == "failed"
         if not writable:
             assert row["seal_manifest_digest"] is None
-            assert row["retained_source_digests_json"] is None
+            retained = json.loads(row["retained_source_digests_json"])
+            heads = json.loads(row["retained_checkpoint_heads_json"])
+            directory = result.parent.relative_to(scan.scan_dir).as_posix()
+            relative_head = f"{directory}/checkpoint-head.json"
+            assert heads[directory] == relative_head
+            assert set(retained["sourceTimes"]) == set(retained["sources"])
+            for relative, digest in retained["sources"].items():
+                _, expected_digest, observed = workbench_api["saved_results"]._read_saved_result(
+                    scan.scan_dir, relative, scan.scan_id
+                )
+                assert digest == expected_digest
+                assert retained["sourceTimes"][relative] == observed
+            assert not list(snapshots.iterdir())
             assert any(
                 "result publication needs follow-up" in warning
                 for warning in json.loads(row["completion_warnings_json"])

@@ -551,6 +551,13 @@ def _saved_results_changed(db: Any, connection: Any, scan: Any) -> bool:
             published_heads = _frozen_checkpoint_heads(
                 scan_dir, scan["id"], published_sources, skip_unreadable=True
             )
+        elif "." not in published_heads:
+            # Older publications recorded root observations without selecting a root head.
+            legacy_heads = _frozen_checkpoint_heads(
+                scan_dir, scan["id"], published_sources, skip_unreadable=True
+            )
+            if "." in legacy_heads:
+                published_heads = {**published_heads, ".": legacy_heads["."]}
         checkpoint_heads = dict(published_heads)
         current_sources = dict(published_sources)
         paths.update({path: None for path in published_sources if _is_source_order_snapshot(path)})
@@ -584,7 +591,10 @@ def _recovery_source_digests(
     include_parent = True
     raw_frozen_sources = scan["retained_source_digests_json"]
     if raw_frozen_sources is not None:
-        frozen_sources, _ = _retained_source_state(json.loads(raw_frozen_sources))
+        retained = json.loads(raw_frozen_sources)
+        frozen_sources, _ = _retained_source_state(retained)
+        if isinstance(retained.get("sources"), dict) and retained.get("sourceTimes") is not None:
+            _freeze_source_times(scan_dir, scan["id"], frozen_sources, retained["sourceTimes"])
         include_parent = False
     checkpoint_heads, pending_recovery = _retained_checkpoint_state(scan)
     if pending_recovery:
@@ -1747,7 +1757,9 @@ def merge_saved_results(
                 order == previous[0]
                 and previous[1] != relative
                 and previous[1] in current_results
-                and relative in authoritative_heads
+                and (
+                    relative in checkpoint_heads.values() or relative in authoritative_observations
+                )
             )
         ):
             resolved[key] = disposition
@@ -2370,7 +2382,7 @@ def preserve_scan_results_locked(
         frozen_source_digests = recovery_source_digests
         checkpoint_heads = recovery_checkpoint_heads
     scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
-    if frozen_source_times is not None:
+    if frozen_source_times is not None and recovery_source_digests is None:
         _freeze_source_times(scan_dir, scan_id, frozen_source_digests, frozen_source_times)
     deep_run = connection.execute(
         "SELECT status FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
