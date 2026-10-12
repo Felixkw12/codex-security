@@ -705,6 +705,18 @@ process.exit(0);
                     prompt !== "Post-scan instructions once."
                   ) {
                     mergeAttempts += 1;
+                    const saved = await runWorkbench(workbenches.get(id)!, [
+                      "get-scan",
+                      "--scan-id",
+                      id,
+                    ]);
+                    expect(
+                      (saved["scan"] as JsonObject)["progress"],
+                    ).toMatchObject({
+                      phase: "reporting",
+                      status: "running",
+                      independentReviews: { active: 0, consolidating: true },
+                    });
                     const mergePath = join(
                       record["scanDir"] as string,
                       "artifacts/deep-scan/merge-inputs.json",

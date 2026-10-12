@@ -379,6 +379,14 @@ export async function runDeepScans(
       state.mergeStarted = true;
       await save();
     }
+    if (!clean)
+      await workbench([
+        "update-progress",
+        "--scan-id",
+        scanId,
+        "--phase",
+        "reporting",
+      ]).catch(() => undefined);
     let merged: ReturnType<typeof validateScanMerge>;
     let validationError: unknown;
     for (;;) {

@@ -852,7 +852,9 @@ test(
       );
       Object.assign(process.env, {
         CODEX_HOME: root,
-        PATH: [repositoryBin, root, selectedTools].join(delimiter),
+        PATH: [repositoryBin, `${root}/alias/link/..`, selectedTools].join(
+          delimiter,
+        ),
       });
       delete process.env.CODEX_CLI_PATH;
       delete process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
@@ -926,7 +928,9 @@ if (process.argv.includes("app-server")) {
         );
         assert.equal(
           process.env.PATH,
-          [repositoryBin, root, selectedTools].join(delimiter),
+          [repositoryBin, `${root}/alias/link/..`, selectedTools].join(
+            delimiter,
+          ),
         );
         const gitEnvironment = {
           PATH: selectedEnvironment.PATH,
