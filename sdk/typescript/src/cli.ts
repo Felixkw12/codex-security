@@ -5789,13 +5789,15 @@ export async function main(
                 `${exitCode === 130 || exitCode === 143 ? "Patch operation was interrupted." : "Patch preparation did not complete."} File changes were not fully inspected; local edits and patches were kept.`,
               );
             }
-            const { files } =
+            const { files, state: patchHead } =
               patchBase === undefined
-                ? { files: [] }
+                ? { files: [], state: undefined }
                 : await changedPatchFiles(
                     selected.repository,
                     patchBase,
                     dependencies,
+                    undefined,
+                    patchRiskBase !== undefined,
                   );
             patchResult = {
               scanId: selected.scanId,
@@ -5844,6 +5846,7 @@ export async function main(
                   errorOutput,
                   dependencies,
                   baseline.context,
+                  patchHead!,
                 );
               }
             }
@@ -6035,10 +6038,19 @@ export async function main(
               commandDirectory = gitRepository;
             commandEnvironment = commandContext.environment;
           }
-          const { files, rootFiles: publicationFiles } =
-            patchBase === undefined
-              ? { files: [], rootFiles: [] }
-              : await changedPatchFiles(repository, patchBase, gitDependencies);
+          const {
+            files,
+            rootFiles: publicationFiles,
+            state: patchHead,
+          } = patchBase === undefined
+            ? { files: [], rootFiles: [], state: undefined }
+            : await changedPatchFiles(
+                repository,
+                patchBase,
+                gitDependencies,
+                undefined,
+                options.assessPatchRisk,
+              );
           patchResult = {
             repository,
             applied: files.length > 0,
@@ -6082,6 +6094,7 @@ export async function main(
                 errorOutput,
                 dependencies,
                 patchGitBase!.context,
+                patchHead!,
               )
             : undefined;
           if (publication) {
@@ -9008,7 +9021,8 @@ async function changedPatchFiles(
   base: GitPatchState | Map<string, string>,
   dependencies: CliDependencies,
   dirtyFiles?: Set<string>,
-): Promise<{ files: string[]; rootFiles: string[] }> {
+  retainTrees = false,
+): Promise<{ files: string[]; rootFiles: string[]; state?: GitPatchState }> {
   if (base instanceof Map) {
     const head = await snapshotPatchDirectory(repository);
     const files = [...new Set([...base.keys(), ...head.keys()])]
@@ -9024,7 +9038,12 @@ async function changedPatchFiles(
     dependencies,
   );
   dependencies = bound.dependencies;
-  const head = await snapshotGitPatchState(root, dependencies, bound.directory);
+  const head = await snapshotGitPatchState(
+    root,
+    dependencies,
+    bound.directory,
+    retainTrees,
+  );
   if (dirtyFiles?.size) {
     const renamed = Buffer.from(
       await dependencies.runRepositoryCommand(
@@ -9143,6 +9162,7 @@ async function changedPatchFiles(
   return {
     files: [...files].map(patchPathText).sort(),
     rootFiles: [...publicationFiles].map(patchPathText).sort(),
+    state: head,
   };
 }
 
@@ -9632,6 +9652,7 @@ async function runPatchRiskAssessment(
   stderr: Writable,
   dependencies: CliDependencies,
   context: GitPatchState["context"],
+  state: GitPatchState,
 ): Promise<PatchRiskAssessment> {
   const bound = await bindPatchCommandContext(
     request.directory ?? request.repository,
@@ -9667,17 +9688,7 @@ async function runPatchRiskAssessment(
   request = { ...request, directory: bound.directory, environment };
   dependencies = bound.dependencies;
   stderr.write("\nAssessing the completed patch...\n");
-  const state =
-    request.state === undefined
-      ? undefined
-      : await snapshotGitPatchState(
-          request.state.root,
-          dependencies,
-          bound.directory,
-          true,
-        );
-  const head =
-    state?.tree ?? (await snapshotPatchTree(request.repository, dependencies));
+  const head = state.tree;
   const result = await (
     dependencies.assessPatchRisk ??
     ((input) => assessPatchRisk(input, stderr, dependencies, head, state))

@@ -683,7 +683,7 @@ describe("patch change tracking", () => {
           ? "ancestor worktree"
           : sparseLink
             ? "outside the selected repository"
-            : "Git metadata is not bound to the selected checkout",
+            : "Git's worktree root does not match the selected checkout's .git marker",
       );
       expect(modelCalls).toBe(kind.endsWith("during") ? 1 : 0);
       expect(() => metadata("cat-file", "-e", blob)).toThrow();

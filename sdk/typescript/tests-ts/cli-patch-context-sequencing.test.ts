@@ -313,7 +313,7 @@ test("publication keeps mixed valid and missing selected-path errors before bran
   );
   expect(outcome.exitCode).toBe(2);
   expect(outcome.stderr).toContain(
-    "pathspec 'src/missing.ts' did not match any files",
+    `pathspec '${join("src", "missing.ts")}' did not match any files`,
   );
   expect(git("rev-parse", "HEAD")).toBe(original);
   expect(git("branch", "--show-current")).toBe("main");

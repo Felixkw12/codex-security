@@ -106,7 +106,14 @@ test.each([
               "patch-component-assessment-",
             );
             const verify = repositoryGit(verification);
-            verify("clone", "--no-hardlinks", directory, ".");
+            verify(
+              "clone",
+              "-c",
+              "core.autocrlf=false",
+              "--no-hardlinks",
+              directory,
+              ".",
+            );
             verify("apply", "--check", artifact.path);
             verify("apply", artifact.path);
             expect(
@@ -291,7 +298,14 @@ for (const raw of [false, true]) {
                 "patch-byte-assessment-",
               );
               const verify = repositoryGit(verification);
-              verify("clone", "--no-hardlinks", directory, ".");
+              verify(
+                "clone",
+                "-c",
+                "core.autocrlf=false",
+                "--no-hardlinks",
+                directory,
+                ".",
+              );
               verify("apply", "--check", artifact.path);
               verify("apply", artifact.path);
               expect(

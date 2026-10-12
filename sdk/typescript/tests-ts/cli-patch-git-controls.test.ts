@@ -776,10 +776,7 @@ lines.on("line", (line) => {
           );
           if (raw) {
             expect(outcome.exitCode, outcome.stderr).toBe(2);
-            // Bound-context preparation rejects an unreadable git-dir before the guard.
-            expect(outcome.stderr).toContain(
-              reference === "gitfile" ? "ENOENT" : "not valid UTF-8",
-            );
+            expect(outcome.stderr).toContain("not valid UTF-8");
             expect(launches).toBe(0);
             expect(await readFile(join(root, "app.txt"), "utf8")).toBe(
               "before\n",
