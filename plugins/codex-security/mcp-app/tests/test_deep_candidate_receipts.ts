@@ -80,7 +80,7 @@ async function fixture() {
 }
 
 for (const archived of [false, true]) {
-  for (const [label, refs, valid] of [
+  for (const [label, refs, valid, disposition = "rejected"] of [
     ["object", { receipt: "artifacts/review.bin" }, false],
     ["null", null, false],
     ["number", 1, false],
@@ -92,6 +92,8 @@ for (const archived of [false, true]) {
     ["valid", ["artifacts/review.bin"], true],
     ["empty", [], true],
     ["absent", undefined, true],
+    ["follow-up missing", ["artifacts/missing.bin"], false, "needs_follow_up"],
+    ["omitted malformed", null, false, null],
   ] as const) {
     test(`accepted exclusion receipt metadata recovers: ${label}, archived=${archived}`, async () => {
       const f = await fixture();
@@ -114,7 +116,7 @@ for (const archived of [false, true]) {
                 candidateId: "candidate",
                 pattern: "src/example.ts",
                 reason: "Synthetic candidate decision.",
-                disposition: "rejected",
+                ...(disposition === null ? {} : { disposition }),
                 candidate,
                 ...(refs === undefined ? {} : { receiptRefs: refs }),
               },

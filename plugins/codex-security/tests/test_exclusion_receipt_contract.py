@@ -19,7 +19,9 @@ FINALIZER = load_script("finalize_scan_contract")
 IDENTITY = load_script("candidate_identity")
 
 
-def exclusion_scan(tmp_path: Path, disposition: str, receipt: str, field="explicitExclusions"):
+def exclusion_scan(
+    tmp_path: Path, disposition: str | None, receipt: str, field="explicitExclusions"
+):
     state, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
     findings = json.loads((scan_dir / "findings.json").read_text())
@@ -48,7 +50,7 @@ def exclusion_scan(tmp_path: Path, disposition: str, receipt: str, field="explic
         "reason": "Saved terminal decision.",
         "candidateId": pending["candidateId"],
         "sourceWorkerId": pending["sourceWorkerId"],
-        "disposition": disposition,
+        **({} if disposition is None else {"disposition": disposition}),
         "receiptRefs": refs,
         "futureDecisionMetadata": {"retained": True},
     }
@@ -80,10 +82,10 @@ def publish(state: Path, scan_id: str, scan_dir: Path, entrypoint: str):
 
 
 @pytest.mark.parametrize("entrypoint", ["standalone", "workbench"])
-@pytest.mark.parametrize("disposition", ["rejected", "not_applicable"])
+@pytest.mark.parametrize("disposition", ["rejected", "not_applicable", "needs_follow_up", None])
 @pytest.mark.parametrize("receipt", ["valid", "missing", "unsafe", "malformed", "none"])
 def test_exclusion_proof_recovery_matches_public_entrypoints(
-    tmp_path: Path, entrypoint: str, disposition: str, receipt: str
+    tmp_path: Path, entrypoint: str, disposition: str | None, receipt: str
 ):
     state, scan_id, scan_dir, pending, decision = exclusion_scan(tmp_path, disposition, receipt)
     publish(state, scan_id, scan_dir, entrypoint)
@@ -94,7 +96,7 @@ def test_exclusion_proof_recovery_matches_public_entrypoints(
         coverage["explicitExclusions"][0]["futureDecisionMetadata"]
         == decision["futureDecisionMetadata"]
     )
-    assert coverage["explicitExclusions"][0]["disposition"] == (
+    assert coverage["explicitExclusions"][0].get("disposition") == (
         "needs_follow_up" if reopened else disposition
     )
     report = (scan_dir / "report.md").read_text()
@@ -231,3 +233,40 @@ def test_legacy_sealed_exclusion_extensions_remain_opaque(tmp_path: Path, receip
         )
         assert exported.returncode == 0, exported.stderr
     assert all((scan_dir / name).read_bytes() == value for name, value in original.items())
+
+
+@pytest.mark.parametrize("version", ["legacy", "current", "draft", "no-manifest"])
+def test_saved_candidate_count_respects_actual_seal(tmp_path: Path, version: str):
+    state, scan_id, scan_dir, pending, _ = exclusion_scan(tmp_path, "rejected", "valid")
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage["deferred"] = [pending]
+    coverage_path.write_text(json.dumps(coverage))
+    manifest_path = scan_dir / "scan-manifest.json"
+    if version in {"legacy", "current"}:
+        publish(state, scan_id, scan_dir, "standalone")
+    if version == "legacy":
+        coverage = json.loads(coverage_path.read_text())
+        coverage.pop("receiptSealVersion")
+        coverage_path.write_text(json.dumps(coverage))
+        manifest = json.loads(manifest_path.read_text())
+        manifest["scan"]["artifacts"] = [
+            item for item in manifest["scan"]["artifacts"] if item["path"] != "artifacts/review.bin"
+        ]
+        for item in manifest["scan"]["artifacts"]:
+            if item["path"] == "coverage.json":
+                item["sha256"] = hashlib.sha256(coverage_path.read_bytes()).hexdigest()
+        manifest_path.write_text(json.dumps(manifest))
+    elif version == "no-manifest":
+        manifest_path.unlink()
+    original = {
+        path.name: path.read_bytes()
+        for path in (coverage_path, manifest_path, scan_dir / "findings.json")
+        if path.exists()
+    }
+    scan = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]
+    assert scan["progress"]["candidates"]["unresolved"] == int(version == "legacy")
+    if version in {"legacy", "current"}:
+        FINALIZER.finalize_scan(scan_dir)
+        assert (pending["reason"] in (scan_dir / "report.md").read_text()) == (version == "legacy")
+    assert all((scan_dir / name).read_bytes() == contents for name, contents in original.items())

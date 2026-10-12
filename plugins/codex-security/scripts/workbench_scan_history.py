@@ -29,13 +29,21 @@ def saved_unresolved_candidate_count(scan: sqlite3.Row) -> int:
     scan_dir = Path(scan["scan_dir"])
     try:
         coverage = _read_scan_local_json(scan_dir, "coverage.json", "Saved coverage")
-        if not unresolved_candidates(coverage):
+        sealed = False
+        if coverage.get("explicitExclusions") and coverage.get("receiptSealVersion") != 1:
+            try:
+                manifest = _read_scan_local_json(scan_dir, "scan-manifest.json", "Saved manifest")
+            except (ContractError, OSError, ValueError):
+                manifest = {}  # Draft progress does not require a readable manifest yet.
+            manifest_scan = manifest.get("scan")
+            sealed = isinstance(manifest_scan, dict) and manifest_scan.get("sealedAt") is not None
+        if not unresolved_candidates(coverage, sealed=sealed):
             return 0
         findings = _read_scan_local_json(scan_dir, "findings.json", "Saved findings")
     except (ContractError, OSError, ValueError):
         # Running and removed scans may have no readable canonical artifacts yet.
         return 0
-    return len(unresolved_candidates(coverage, findings.get("findings", [])))
+    return len(unresolved_candidates(coverage, findings.get("findings", []), sealed=sealed))
 
 
 def rename_scan(connection: sqlite3.Connection, scan: sqlite3.Row, name: str) -> dict[str, Any]:

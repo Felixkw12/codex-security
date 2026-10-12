@@ -403,7 +403,10 @@ def test_scan_detail_skips_findings_artifacts_without_unresolved_candidates(
     scan = connection.execute("SELECT * FROM scans WHERE id = ?", (SCAN_IDS[0],)).fetchone()
 
     assert history.saved_unresolved_candidate_count(scan) == 0
-    assert reads == [(SCAN_IDS[0], "coverage.json")]
+    assert reads == [
+        (SCAN_IDS[0], "coverage.json"),
+        *([(SCAN_IDS[0], "scan-manifest.json")] if coverage.get("explicitExclusions") else []),
+    ]
 
 
 def test_scan_detail_reads_findings_to_resolve_saved_candidates(

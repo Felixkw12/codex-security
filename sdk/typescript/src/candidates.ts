@@ -42,6 +42,7 @@ export function candidateIdentity(
 export function unresolvedCandidates(
   coverage: CoverageDocument,
   findings: readonly Finding[],
+  sealed = false,
 ): DeferredCoverage[] {
   const resolved = new Set<string>();
   for (const finding of findings) {
@@ -56,7 +57,9 @@ export function unresolvedCandidates(
   // A reported surface can cover multiple candidates; findings confirm identities.
   for (const surface of [
     ...coverage.surfaces,
-    ...coverage.explicitExclusions,
+    ...(!sealed || coverage.receiptSealVersion === 1
+      ? coverage.explicitExclusions
+      : []),
   ]) {
     const owner = surface["sourceWorkerId"];
     if (

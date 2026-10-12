@@ -811,12 +811,11 @@ def build_report_markdown(
             + ", ".join(duplicate_writeup_paths)
         )
     deep_presentation = uses_deep_presentation(coverage, findings)
-    candidate_coverage = coverage
-    if scan.get("sealedAt") is not None and coverage.get("receiptSealVersion") != 1:
-        # Legacy sealed exclusions did not verify candidate receipts or close saved proof gaps.
-        candidate_coverage = {**coverage, "explicitExclusions": []}
-    pending_candidates = unresolved_candidates(candidate_coverage, findings_document["findings"])
-    pending_rows = unresolved_candidate_rows(candidate_coverage, findings_document["findings"])
+    sealed = scan.get("sealedAt") is not None
+    pending_candidates = unresolved_candidates(
+        coverage, findings_document["findings"], sealed=sealed
+    )
+    pending_rows = unresolved_candidate_rows(coverage, findings_document["findings"], sealed=sealed)
     deep_finding_groups = _deep_finding_groups(findings, writeup_paths) if deep_presentation else []
     hardening_portfolio_path = _hardening_portfolio_path(scan)
     include_paths = _strings(coverage.get("includePaths", scope.get("includePaths", [])))

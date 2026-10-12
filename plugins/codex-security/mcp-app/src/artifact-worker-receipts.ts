@@ -25,6 +25,10 @@ export async function recoverWorkerCandidateReceipts(
     if (
       !isTerminalCandidateDecision(surface) &&
       !(
+        (coverage.explicitExclusions as JsonObject[]).includes(surface) &&
+        surface.receiptRefs !== undefined
+      ) &&
+      !(
         retainIn !== undefined &&
         surface.disposition === "needs_follow_up" &&
         typeof surface.candidateId === "string"

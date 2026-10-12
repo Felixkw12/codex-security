@@ -148,17 +148,17 @@ def _saved_row_key(value: Any) -> Any:
 
 
 def unresolved_candidates(
-    coverage: dict[str, Any], findings: list[dict[str, Any]] | None = None
+    coverage: dict[str, Any], findings: list[dict[str, Any]] | None = None, *, sealed: bool = False
 ) -> list[dict[str, Any]]:
     """Select saved candidate identities without a finding or terminal disposition."""
     candidates: dict[CandidateKey, dict[str, Any]] = {}
-    for item in unresolved_candidate_rows(coverage, findings):
+    for item in unresolved_candidate_rows(coverage, findings, sealed=sealed):
         candidates.setdefault(coverage_candidate_key(item), item)
     return list(candidates.values())
 
 
 def unresolved_candidate_rows(
-    coverage: dict[str, Any], findings: list[dict[str, Any]] | None = None
+    coverage: dict[str, Any], findings: list[dict[str, Any]] | None = None, *, sealed: bool = False
 ) -> list[dict[str, Any]]:
     """Keep each distinct saved proof gap while applying candidate resolutions."""
 
@@ -175,7 +175,12 @@ def unresolved_candidate_rows(
         )
         and (key := finding_candidate_key(finding)) is not None
     }
-    for field in ("surfaces", "explicitExclusions"):
+    # Legacy sealed exclusions were opaque metadata; active drafts retain their decisions.
+    for field in (
+        ("surfaces",)
+        if sealed and coverage.get("receiptSealVersion") != 1
+        else ("surfaces", "explicitExclusions")
+    ):
         resolved.update(
             key
             for item in objects(coverage.get(field))

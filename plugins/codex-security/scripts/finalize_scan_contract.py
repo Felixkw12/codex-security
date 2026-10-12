@@ -1224,7 +1224,10 @@ def _recover_candidate_receipts(
         for field in sections
         if any(
             isinstance(row, dict)
-            and row.get("disposition") in ("rejected", "not_applicable")
+            and (
+                field == "explicitExclusions"
+                or row.get("disposition") in ("rejected", "not_applicable")
+            )
             and (
                 (
                     field == "surfaces"
@@ -1263,9 +1266,8 @@ def _recover_candidate_receipts(
             if source is not None or section == "explicitExclusions"
             for index, row in enumerate(coverage[section])
         ):
-            if not isinstance(row, dict) or row.get("disposition") not in (
-                "rejected",
-                "not_applicable",
+            if not isinstance(row, dict) or (
+                field == "surfaces" and row.get("disposition") not in ("rejected", "not_applicable")
             ):
                 continue
             refs = row.get("receiptRefs", [])
