@@ -83,7 +83,11 @@ export interface DeepScanComposition {
   ): Promise<ScanMergeInput>;
   publish(draft: SemanticScan): Promise<void>;
   onCost(key: string, cost: Readonly<ScanCost> | null): void;
-  onUsage?(key: string, usage: Readonly<ScanTokenUsage>): void;
+  onUsage?(
+    key: string,
+    usage: Readonly<ScanTokenUsage>,
+    source?: "receipt",
+  ): void;
   /** Restore parent accounting after every saved child receipt is reported. */
   onCostsRecovered?(): Promise<void>;
   historicalCost?(
@@ -792,6 +796,14 @@ export async function runDeepScans(
       }
       childCompleted = true;
       state.consecutiveErrors = 0;
+      if (input.onUsage !== undefined) {
+        const usage =
+          tokenUsage(result.turnResult.usage) ??
+          (result.cost === null
+            ? null
+            : tokenUsage(scanCostUsage(result.cost)));
+        if (usage !== null) input.onUsage(pass.directory, usage, "receipt");
+      }
       completed.set(
         result.manifest.scan.id,
         await projectChild(result.manifest.scan.id, result.scanDir),

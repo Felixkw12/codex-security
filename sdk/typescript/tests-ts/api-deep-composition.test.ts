@@ -87,7 +87,8 @@ async function fixture(
     preflightConfig: JsonObject;
   }> = [];
   const threadScans = new Map<string, string>();
-  const observedSubagents: Array<{ id: string; mode: string }> = [];
+  const observedSubagents: Array<{ id: string; mode: string; path: string }> =
+    [];
   const completedPrompts: string[] = [];
   const commands: string[] = [];
   const parentPhases: unknown[] = [];
@@ -395,7 +396,7 @@ async function fixture(
                   );
                   if (observeSubagents) {
                     const subagentId = randomUUID();
-                    await writeSession(
+                    const path = await writeSession(
                       home,
                       subagentId,
                       {},
@@ -407,6 +408,7 @@ async function fixture(
                     observedSubagents.push({
                       id: subagentId,
                       mode: record.mode,
+                      path,
                     });
                   }
                   yield { type: "thread.started", thread_id: thread.id };
@@ -890,6 +892,160 @@ test.each(
     if (observe) expect(updates.at(-1)).toEqual(expected);
     if (stage === "budget")
       expect(result.coverage.completeness).toBe("partial");
+  },
+);
+
+test.each([
+  { failure: "all", passes: 1, model: "gpt-6-astra", required: false },
+  { failure: "all", passes: 2, model: "gpt-6-astra", required: false },
+  { failure: "first", passes: 2, model: "gpt-6-astra", required: false },
+  { failure: "none", passes: 2, model: "gpt-6-astra", required: false },
+  { failure: "late", passes: 1, model: "gpt-6-astra", required: false },
+  {
+    failure: "all",
+    passes: 1,
+    model: "synthetic-unpriced-model",
+    required: false,
+  },
+  { failure: "all", passes: 1, model: "gpt-6-astra", required: true },
+] as const)(
+  "Deep final receipts retain usage when child tracking fails: %j",
+  async ({ failure, passes, model, required }) => {
+    const h = await fixture(undefined, false, failure === "late");
+    const measured = { ...usage, reasoning_output_tokens: 2 };
+    const worker = {
+      input_tokens: 5,
+      output_tokens: 2,
+      reasoning_output_tokens: 1,
+    };
+    h.setUsage(measured);
+    const updates: Readonly<ScanTokenUsage>[] = [];
+    const warnings: string[] = [];
+    const threads = new WeakMap<ScanCostTracker, string>();
+    const stopping = new WeakSet<ScanCostTracker>();
+    const failed = new Set<string>();
+    const writtenWorkers = new Set<string>();
+    const start = ScanCostTracker.prototype.start;
+    const refresh = ScanCostTracker.prototype.refresh;
+    const stop = ScanCostTracker.prototype.stop;
+    const childThread = (tracker: ScanCostTracker) => {
+      const thread = threads.get(tracker);
+      const scan = thread === undefined ? undefined : h.threadScans.get(thread);
+      return scan !== undefined && h.records.get(scan)?.mode === "standard"
+        ? thread
+        : undefined;
+    };
+    const startSpy = spyOn(
+      ScanCostTracker.prototype,
+      "start",
+    ).mockImplementation(function (this: ScanCostTracker, thread) {
+      threads.set(this, thread);
+      return start.call(this, thread);
+    });
+    const refreshSpy = spyOn(
+      ScanCostTracker.prototype,
+      "refresh",
+    ).mockImplementation(async function (this: ScanCostTracker) {
+      const thread = childThread(this);
+      if (thread !== undefined) {
+        const first = [...h.records].find(
+          ([, record]) => record.mode === "standard",
+        )![0];
+        if (
+          failure === "all" ||
+          (failure === "first" && h.threadScans.get(thread) === first) ||
+          (failure === "late" && stopping.has(this))
+        ) {
+          failed.add(thread);
+          throw Object.assign(
+            new Error("Synthetic child rollout read denied"),
+            {
+              code: "EACCES",
+              syscall: "open",
+              path: join(h.home, "sessions", `rollout-${thread}.jsonl`),
+            },
+          );
+        }
+        if (failure === "late") {
+          for (const { id, mode, path } of h.observedSubagents) {
+            if (mode !== "standard" || writtenWorkers.has(id)) continue;
+            writtenWorkers.add(id);
+            await appendFile(
+              path,
+              JSON.stringify(tokenUsageEvent(worker)) + "\n",
+            );
+          }
+        }
+      }
+      return refresh.call(this);
+    });
+    const stopSpy = spyOn(ScanCostTracker.prototype, "stop").mockImplementation(
+      async function (this: ScanCostTracker, fallback) {
+        if (failure === "late" && childThread(this) !== undefined) {
+          // Observe both root and worker counters before the final log read fails.
+          await this.refresh();
+          stopping.add(this);
+        }
+        return stop.call(this, fallback);
+      },
+    );
+    try {
+      await using client = h.makeClient({ model });
+      const result = client.run(h.repository, {
+        ...h.options,
+        knowledgeBasePaths: undefined,
+        workers: 1,
+        maxDiscoveryRuns: passes,
+        requireCost: required,
+        onUsage: (snapshot) => updates.push(snapshot),
+        onWarning: (warning) => warnings.push(warning),
+      });
+      if (required) {
+        await expect(result).rejects.toBeInstanceOf(ScanCostTrackingError);
+        await expect(result).rejects.toThrow(
+          "Synthetic child rollout read denied",
+        );
+        expect(h.launches).toHaveLength(1);
+        return;
+      }
+      const completed = await result;
+      const turns = passes === 1 ? 1 : 3;
+      const expected = tokenUsage({
+        ...measured,
+        input_tokens:
+          measured.input_tokens * turns +
+          (failure === "late" ? worker.input_tokens : 0),
+        output_tokens:
+          measured.output_tokens * turns +
+          (failure === "late" ? worker.output_tokens : 0),
+        reasoning_output_tokens:
+          measured.reasoning_output_tokens * turns +
+          (failure === "late" ? worker.reasoning_output_tokens : 0),
+      });
+      expect(completed.turnResult.usage).toEqual(expected);
+      expect(updates.at(-1)).toEqual(expected!);
+      expect(h.launches).toHaveLength(turns);
+      if (failure !== "late")
+        expect(completed.cost).toEqual(estimateScanCost(model, expected));
+      expect(failed.size).toBe(
+        failure === "none" ? 0 : failure === "first" ? 1 : passes,
+      );
+      if (failure !== "none") {
+        expect(warnings).toContain(
+          "Could not track scan activity: Synthetic child rollout read denied",
+        );
+      } else {
+        expect(
+          warnings.some((warning) =>
+            warning.includes("Synthetic child rollout read denied"),
+          ),
+        ).toBe(false);
+      }
+    } finally {
+      stopSpy.mockRestore();
+      refreshSpy.mockRestore();
+      startSpy.mockRestore();
+    }
   },
 );
 

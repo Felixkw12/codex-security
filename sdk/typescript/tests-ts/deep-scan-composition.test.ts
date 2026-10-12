@@ -109,7 +109,14 @@ async function fixture(
           threadId: "session",
           scanDir: options.outputDir!,
         });
-        await execute(options);
+        let usage = tokenUsage({ input_tokens: 10, output_tokens: 3 })!;
+        await execute({
+          ...options,
+          onUsage: (snapshot) => {
+            usage = { ...snapshot };
+            options.onUsage?.(snapshot);
+          },
+        });
         const finding = semanticFinding({
           provenance: {
             source: "local_plugin",
@@ -122,16 +129,14 @@ async function fixture(
           sourceFindings: [finding],
           draft: { scanId, findings: [finding], coverage: semanticCoverage() },
         });
-        const cost = estimateScanCost("gpt-6-astra", {
-          input_tokens: 10,
-          output_tokens: 3,
-        });
+        const cost = estimateScanCost("gpt-6-astra", usage);
         records.get(childId)!.progress.status = "complete";
         records.get(childId)!.cost = cost;
         records.get(childId)!.completedAt = new Date().toISOString();
         return {
           manifest: { scan: { id: childId } },
           scanDir: options.outputDir!,
+          turnResult: { usage },
           cost,
         } as ScanResult;
       },
@@ -210,7 +215,7 @@ test("discovery usage retains pass keys across saved unpriced receipts", async (
   const keys = [...new Set(observed.map(([key]) => key))];
   expect(keys).toHaveLength(2);
   expect(observed.map(([, usage]) => usage.input_tokens)).toEqual([
-    7, 11, 7, 11,
+    7, 11, 11, 7, 11, 11,
   ]);
   for (const record of h.records.values()) {
     Object.assign(record, {

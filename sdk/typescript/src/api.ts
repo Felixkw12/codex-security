@@ -1931,7 +1931,18 @@ export class CodexSecurity {
         throwIfAborted(signal, scanDir);
         return snapshot;
       };
-      const reportUsage = (key: string, usage: Readonly<ScanTokenUsage>) => {
+      const reportUsage = (
+        key: string,
+        usage: Readonly<ScanTokenUsage>,
+        source?: "receipt",
+      ) => {
+        // A final fallback can contain only the root turn, while callbacks
+        // already reported the child's workers. Keep the fuller observation.
+        if (
+          source === "receipt" &&
+          usage.total_tokens <= (observedUsage.get(key)?.total_tokens ?? -1)
+        )
+          return;
         observedUsage.set(key, { ...usage });
         notifyObserver(options, "onUsage")(combinedUsage()!);
       };
