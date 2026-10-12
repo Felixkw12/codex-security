@@ -308,6 +308,63 @@ reason = "Synthetic"
   expect(result.payload!.status).toBe("error");
 });
 
+const longContent = "x".repeat(150_000) + "🙂";
+const longDigits = "1".repeat(150_000);
+test.each([
+  ["basic string", `"${longContent}"`],
+  ["literal string", `'${longContent}'`],
+  ["multiline basic string", `"""${longContent}"""`],
+  ["multiline literal string", `'''${longContent}'''`],
+  ["positive integer", longDigits],
+  ["negative integer", `-${longDigits}`],
+  ["hex integer", `0x${longDigits}`],
+  ["octal integer", `0o${longDigits}`],
+  ["binary integer", `0b${longDigits}`],
+  ["fraction", `-0.${longDigits}`],
+  ["exponent", `-0.${longDigits}e1`],
+])(
+  "large TOML %s preserves calendar validation in config and registries",
+  async (_name, value) => {
+    const root = await temporaryDirectory();
+    const registry = join(root, "registry.toml"),
+      config = join(root, "config.toml");
+    for (const location of ["registry", "config"])
+      for (const valid of [true, false]) {
+        const large = `unused = ${value}\ncalendar = ${valid ? "2000-02-29" : "2020-02-30"}\n`;
+        await writeFile(
+          registry,
+          `\uFEFFversion = 1
+[capabilities]
+[profiles.custom]
+description = "Synthetic"
+requirements = []
+${location === "registry" ? large : ""}`,
+        );
+        await writeFile(config, `\uFEFF${location === "config" ? large : ""}`);
+        const result = await run([
+          "--registry",
+          registry,
+          "--profile",
+          "custom",
+          "--config",
+          config,
+        ]);
+        expect(result.status).toBe(valid ? 0 : 2);
+        expect(result.payload!.status).toBe(valid ? "ready" : "error");
+      }
+  },
+);
+
+test("large TOML string comparison preserves the full value", async () => {
+  const result = await customCapability(
+    { kind: "config", path: "synthetic", op: "==", value: longContent },
+    `synthetic = ${JSON.stringify(longContent)}\n`,
+  );
+  expect(result.status).toBe(0);
+  expect(result.payload!.results[0]!.status).toBe("pass");
+  expect(result.payload!.results[0]!.actual).toBe(longContent);
+});
+
 test.each(["", "."])(
   "manual config path %j cannot skip a directory",
   async (file) => {

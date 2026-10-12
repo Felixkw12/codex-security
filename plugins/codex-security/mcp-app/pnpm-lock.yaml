@@ -4,6 +4,9 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  toml-eslint-parser@1.0.3: fbbec33030a8c86c3423b5ec6c3818af17b91dd3d61e520aac865df2aefb5771
+
 importers:
 
   .:
@@ -22,7 +25,7 @@ importers:
         version: 1.9.0
       toml-eslint-parser:
         specifier: 1.0.3
-        version: 1.0.3
+        version: 1.0.3(patch_hash=fbbec33030a8c86c3423b5ec6c3818af17b91dd3d61e520aac865df2aefb5771)
       zod:
         specifier: ^4.6.5
         version: 4.6.5
@@ -1353,7 +1356,7 @@ snapshots:
 
   toidentifier@1.0.1: {}
 
-  toml-eslint-parser@1.0.3:
+  toml-eslint-parser@1.0.3(patch_hash=fbbec33030a8c86c3423b5ec6c3818af17b91dd3d61e520aac865df2aefb5771):
     dependencies:
       eslint-visitor-keys: 5.0.1
 
