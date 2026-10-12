@@ -685,7 +685,7 @@ describe("npm package tar listings", () => {
       ).toBe(compatible);
       if (overwrite)
         expect(readFileSync(installedLogo).equals(stored)).toBe(true);
-      const checked = spawnSync(
+      const checked = await runCommand(
         commandPath("node"),
         [
           fileURLToPath(
@@ -697,7 +697,6 @@ describe("npm package tar listings", () => {
         {
           cwd: root,
           env: environment,
-          encoding: "utf8",
           timeout: 30_000,
           windowsHide: true,
         },
@@ -847,7 +846,7 @@ describe("npm package tar listings", () => {
       );
       const contractPath = join(root, "contract.json");
       writeFileSync(contractPath, JSON.stringify(pluginContract));
-      const checked = spawnSync(
+      const checked = await runCommand(
         commandPath("node"),
         [
           fileURLToPath(
@@ -859,7 +858,6 @@ describe("npm package tar listings", () => {
         {
           cwd: root,
           env: environment,
-          encoding: "utf8",
           timeout: 30_000,
           windowsHide: true,
         },
