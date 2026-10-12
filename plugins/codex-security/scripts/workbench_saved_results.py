@@ -44,9 +44,11 @@ from finalize_scan_contract import (
 from workbench.saved_sources import (
     _checkpoint_head_directory,
     _digest,
+    _encode_retained_sources,
     _encoded,
     _is_source_order_snapshot,
     _latest_successful_reducer,
+    _unselected_root_order,
 )
 from workbench.saved_sources import _children as _children
 from workbench_constants import PHASES
@@ -397,21 +399,6 @@ def _retained_source_state(value: Any) -> tuple[dict[str, str], str | None]:
             raise ContractError("Saved stopped-scan model source is outside its checkpoint set.")
         return sources, model_source
     return _source_digests(value, "Saved stopped-scan source digests are malformed."), None
-
-
-def _encode_retained_sources(
-    sources: dict[str, str],
-    model_source: list[str],
-    source_times: dict[str, int] | None = None,
-) -> str:
-    state: dict[str, Any] = sources
-    if model_source or source_times is not None:
-        state = {"sources": sources}
-        if model_source:
-            state["threatModelSource"] = model_source[0]
-        if source_times is not None:
-            state["sourceTimes"] = source_times
-    return json.dumps(state, sort_keys=True)
 
 
 def _frozen_checkpoint_heads(
@@ -1895,6 +1882,7 @@ def merge_saved_results(
         for relative, _, candidate_id, _ in outcomes
         if relative in authoritative_heads
     }
+    other_root_order = _unselected_root_order(saved_heads, checkpoint_heads, source_order)
     # A selected partial draft can leave independent historical outcomes intact.
     for relative, owner, candidate_id, disposition in outcomes:
         if (
@@ -1914,7 +1902,16 @@ def merge_saved_results(
             saved_owner == owner
             and _deferred_candidate_id(row, owner, ambiguous_deferred) == candidate_id
             and modified >= order
-            for (saved_owner, _), (modified, row, _) in active_deferred.items()
+            # Tied legacy payloads cannot reopen an accepted root resolution.
+            and (
+                modified > order
+                or owner is not None
+                or source in selected_observations
+                or draft.get("complete") is False
+                or (relative != "parent" and relative not in authoritative_heads)
+                or other_root_order >= order
+            )
+            for (saved_owner, _), (modified, row, source) in active_deferred.items()
         ):
             continue
         previous = ordered_outcomes.get(key)
