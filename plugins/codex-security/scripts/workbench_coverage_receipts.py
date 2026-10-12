@@ -3,10 +3,37 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from finalize_scan_contract import ContractError, open_scan_local_file_descriptor
+
+
+def retain_recorded_receipt_ownership(
+    sources: list[tuple[str, dict[str, Any], str | None]],
+    digest: Callable[[Any], str],
+) -> None:
+    # Checkpoints are written by the host tool; direct result files can be authored
+    # without it. Compare the entire payload within the same worker attempt.
+    def payload_digest(draft: dict[str, Any]) -> str:
+        return digest({key: value for key, value in draft.items() if key != "handoffClaimToken"})
+
+    recorded: dict[Path, set[str]] = {}
+    for relative, draft, worker_id in sources:
+        directory = Path(relative).parent
+        if worker_id is not None and directory.name == "checkpoints":
+            recorded.setdefault(directory.parent, set()).add(payload_digest(draft))
+    for relative, draft, worker_id in sources:
+        directory = Path(relative).parent
+        if worker_id is None or directory.name == "checkpoints":
+            continue
+        if payload_digest(draft) in recorded.get(directory, set()):
+            continue
+        surfaces = draft["coverage"].get("surfaces", [])
+        for surface in surfaces if isinstance(surfaces, list) else []:
+            if isinstance(surface, dict) and isinstance(surface.get("provenance"), dict):
+                surface["provenance"].pop("scanReceiptRefs", None)
 
 
 def resolve_coverage_receipts(

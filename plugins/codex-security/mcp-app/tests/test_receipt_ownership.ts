@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { importSource } from "./import-module.ts";
@@ -228,6 +235,65 @@ test("ambiguous saved surface IDs do not transfer shared ownership to an edited 
       (surface: { notes?: string }) => surface.notes === "Updated review.",
     );
     assert.deepEqual(edited.receiptRefs, [`${f.prefix}/${ref}`]);
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+for (const archived of [false, true]) {
+  test(`an unrecorded ${archived ? "archived" : "current"} result cannot transfer shared ownership through a later draft`, async () => {
+    const f = await fixture();
+    try {
+      const ref = "artifacts/evidence.txt";
+      await receipt(f.root, ref, "Unrelated shared evidence\n");
+      await receipt(f.workerRoot, ref, "Local evidence\n");
+      await writeFile(
+        path.join(f.workerRoot, "result.json"),
+        JSON.stringify(
+          draft([ref], { provenance: { scanReceiptRefs: [ref] } }),
+        ),
+      );
+      let prefix = f.prefix;
+      if (archived) {
+        const archive = path.join(
+          path.dirname(f.workerRoot),
+          "attempts/attempt-01",
+        );
+        await mkdir(path.dirname(archive), { recursive: true });
+        await rename(f.workerRoot, archive);
+        await mkdir(f.workerRoot);
+        prefix = path.relative(f.root, archive).split(path.sep).join("/");
+      }
+      await recordCodexSecurityWorkerScanDraft(
+        f.worker,
+        archived ? workerDraft([]) : draft([ref], { notes: "Updated review." }),
+      );
+      const sources = await readDeepReductionSources(f.reducer);
+      const [surface] = sources.discoveries[0].coverage.surfaces;
+      assert.deepEqual(surface.receiptRefs, [`${prefix}/${ref}`]);
+      assert.equal(
+        await readFile(path.join(f.root, surface.receiptRefs[0]), "utf8"),
+        "Local evidence\n",
+      );
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
+}
+
+test("newly resolved shared receipts survive a later local collision alongside inherited receipts", async () => {
+  const f = await fixture();
+  try {
+    const refs = ["artifacts/first.txt", "artifacts/second.txt"];
+    for (const ref of refs) await receipt(f.root, ref, "Shared evidence\n");
+    await recordCodexSecurityWorkerScanDraft(f.worker, draft([refs[0]!]));
+    await recordCodexSecurityWorkerScanDraft(f.worker, draft(refs));
+    await receipt(f.workerRoot, refs[1]!, "Unrelated local evidence\n");
+    const sources = await readDeepReductionSources(f.reducer);
+    assert.deepEqual(
+      sources.discoveries[0].coverage.surfaces[0].receiptRefs,
+      refs,
+    );
   } finally {
     await rm(f.root, { recursive: true, force: true });
   }

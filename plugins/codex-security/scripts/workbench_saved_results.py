@@ -44,9 +44,9 @@ from finalize_scan_contract import (
     write_threat_model_projection_if_possible,
 )
 from workbench_constants import PHASES
-from workbench_coverage_receipts import resolve_coverage_receipts
+from workbench_coverage_receipts import resolve_coverage_receipts, retain_recorded_receipt_ownership
 from workbench_target import committed_diff_snapshot_digest
-from workbench_validation import path_within_scope
+from workbench_validation import javascript_utf8, path_within_scope
 
 _PUBLISHED_OUTPUTS = (
     "findings.json",
@@ -1179,6 +1179,9 @@ def merge_saved_results(
         selected_observations[selected] = max(selected_observations.get(selected, order), order)
     source_order.update(selected_observations)
 
+    # Keep frozen source digests over the original data, before discarding markers
+    # that never passed through the worker draft writer.
+    retain_recorded_receipt_ownership(sources, _digest)
     drafts_by_path = {relative: draft for relative, draft, _ in sources}
     if parent is None and frozen_source_digests is not None:
         # Older host snapshots remain evidence; only the newest is the current parent.
@@ -1295,7 +1298,7 @@ def merge_saved_results(
             if key in item:
                 result["provenance"][name] = item[key]
         if isinstance(item.get("candidateId"), str):
-            candidate_digest = hashlib.sha256(item["candidateId"].encode()).hexdigest()
+            candidate_digest = hashlib.sha256(javascript_utf8(item["candidateId"])).hexdigest()
             result["candidateId"] = f"{prefix}-candidate-{candidate_digest}"
         if field == "surfaces":
             original = source_rows[index - 1] if isinstance(source_rows, list) else item

@@ -418,6 +418,20 @@ export async function hasScanDraftCheckpoint(
   return saved?.contents === JSON.stringify(snapshot, null, 2) + "\n";
 }
 
+/** Direct result files do not establish the draft tool's receipt ownership. */
+export async function retainRecordedReceiptOwnership(
+  context: ArtifactContext,
+  input: JsonObject,
+): Promise<void> {
+  if (await hasScanDraftCheckpoint(context, input)) return;
+  const coverage = input.coverage;
+  if (!isObject(coverage) || !Array.isArray(coverage.surfaces)) return;
+  for (const surface of coverage.surfaces) {
+    if (isObject(surface) && isObject(surface.provenance))
+      delete surface.provenance.scanReceiptRefs;
+  }
+}
+
 function sameAuthoredSurface(left: JsonObject, right: JsonObject): boolean {
   const content = (surface: JsonObject) => {
     const { provenance, receiptRefs, ...fields } = surface;
@@ -515,6 +529,13 @@ async function preserveScanDraft(
             )
           : [],
       );
+      if (
+        isObject(surface.provenance) &&
+        Array.isArray(surface.provenance.scanReceiptRefs)
+      ) {
+        for (const ref of surface.provenance.scanReceiptRefs)
+          if (typeof ref === "string" && refs.has(ref)) shared.add(ref);
+      }
       if (shared.size > 0) {
         surface.provenance = {
           ...(isObject(surface.provenance) ? surface.provenance : {}),
@@ -1408,13 +1429,14 @@ async function readPreviousScanDraft(
     const saved = await readOptionalArtifactTextWithMetadata(context, [
       "result.json",
     ]);
+    let input: ScanDraftInput | undefined;
+    if (saved !== undefined) {
+      const stored = parseJsonObject(saved.contents, "previous scan draft");
+      await retainRecordedReceiptOwnership(context, stored);
+      input = parsePersistedScanDraft(stored);
+    }
     return {
-      input:
-        saved === undefined
-          ? undefined
-          : parsePersistedScanDraft(
-              parseJsonObject(saved.contents, "previous scan draft"),
-            ),
+      input,
       digest: draftDigest([["result.json", saved?.contents]]),
       modifiedMs: saved?.modifiedMs ?? 0,
     };
@@ -1572,9 +1594,9 @@ async function readArchivedWorkerCheckpoints(
       );
       let result: ScanDraftInput | undefined;
       try {
-        result = parsePersistedScanDraft(
-          parseJsonObject(saved.contents, "archived scan result"),
-        );
+        const stored = parseJsonObject(saved.contents, "archived scan result");
+        await retainRecordedReceiptOwnership(attemptContext, stored);
+        result = parsePersistedScanDraft(stored);
       } catch {
         // A failed attempt may leave an invalid replaceable result after valid checkpoints.
       }
