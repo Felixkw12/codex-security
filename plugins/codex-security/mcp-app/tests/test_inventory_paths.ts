@@ -1,11 +1,96 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import fs from "node:fs";
+import childProcess from "node:child_process";
 import { createRequire, syncBuiltinESMExports } from "node:module";
-import { tmpdir } from "node:os";
+import { constants, tmpdir } from "node:os";
 import { join } from "node:path";
 import { importSource } from "./import-module.ts";
 import type { WindowsBinding } from "../../native/windows-binding.mjs";
+
+for (const [name, details] of [
+  ["named", { code: "ENOEXEC" }],
+  [
+    "numeric",
+    { code: "Unknown system error -8", errno: -constants.errno.ENOEXEC },
+  ],
+] as const)
+  test(
+    `POSIX tools run executable text after a ${name} exec-format launch error`,
+    { skip: process.platform === "win32" },
+    async () => {
+      const { runTool } = await importSource("src/helpers/inventory-git.ts", {
+        define: {
+          "import.meta.url": JSON.stringify(
+            new URL(
+              "../../../../sdk/typescript/_bundled_plugin/mcp/helpers.mjs",
+              import.meta.url,
+            ).href,
+          ),
+        },
+      });
+      const root = fs.mkdtempSync(join(tmpdir(), "inventory-exec-format-"));
+      const tool = join(root, "plain tool");
+      const diagnostic =
+        "synthetic tool failure\n\u000000000000-0000-4000-8000-000000000000\u0000127\u0000\n";
+      fs.writeFileSync(
+        tool,
+        `printf '%s' "$1"
+/bin/cat <&"$2"
+printf 'synthetic tool failure\\n\\00000000000-0000-4000-8000-000000000000\\000127\\000\\n' >&2
+if [ "$3" = signal ]; then kill -TERM $$; fi
+exit "$3"
+`,
+        { mode: 0o700 },
+      );
+      const original = childProcess.spawn;
+      let failure: NodeJS.ErrnoException = Object.assign(
+        new Error("spawn " + details.code),
+        details,
+      );
+      let attempts = 0;
+      childProcess.spawn = ((
+        ...args: Parameters<typeof childProcess.spawn>
+      ) => {
+        if (args[0] === tool) {
+          attempts++;
+          throw failure;
+        }
+        return original(...args);
+      }) as typeof childProcess.spawn;
+      syncBuiltinESMExports();
+      try {
+        const argument = "spaces 'quoted' $literal\n";
+        const input = Buffer.from([0, 128, 255, 10]);
+        for (const inputFd of [0, 3])
+          for (const status of [0, 126, 127, "signal"]) {
+            const result = await runTool(
+              tool,
+              [argument, String(inputFd), String(status)],
+              root,
+              input,
+              inputFd,
+            );
+            assert.equal(result.status, status === "signal" ? null : status);
+            assert.equal(result.signal, status === "signal" ? "SIGTERM" : null);
+            assert.deepEqual(
+              result.stdout,
+              Buffer.concat([Buffer.from(argument), input]),
+            );
+            assert.equal(result.stderr, diagnostic);
+          }
+        assert.equal(attempts, 8);
+        failure = Object.assign(new Error("unrelated launch failure"), {
+          code: "EACCES",
+        });
+        await assert.rejects(runTool(tool, []), (error) => error === failure);
+      } finally {
+        childProcess.spawn = original;
+        syncBuiltinESMExports();
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
 
 test(
   "POSIX tools keep helper input separate from stdin and startup status",
@@ -24,6 +109,12 @@ test(
     const root = fs.mkdtempSync(join(tmpdir(), "inventory-input-fds-"));
     const denied = join(root, "not-executable");
     fs.writeFileSync(denied, "#!/bin/sh\n", { mode: 0o600 });
+    const unavailableInterpreter = join(root, "unavailable-interpreter");
+    fs.writeFileSync(
+      unavailableInterpreter,
+      "#!/missing-codex-test-interpreter\n",
+      { mode: 0o700 },
+    );
     try {
       for (const argument of ["ordinary", "raw-\udcff"])
         for (const inputFd of [0, 3]) {
@@ -46,6 +137,7 @@ ${inputFd === 3 ? "fs.writeFileSync(2, String(fs.readFileSync(0).length));" : ""
           assert.equal(result.stderr, inputFd === 3 ? "0" : "");
           for (const [command, code] of [
             [join(root, "missing"), "ENOENT"],
+            [unavailableInterpreter, "ENOENT"],
             [denied, "EACCES"],
           ])
             await assert.rejects(

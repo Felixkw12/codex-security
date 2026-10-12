@@ -18,6 +18,7 @@ import {
   sep,
 } from "node:path";
 import { createRequire } from "node:module";
+import { constants } from "node:os";
 import { spawnWindowsProcess } from "../../../native/windows-process.mjs";
 import { nativeTarget } from "../../../native/platform.mjs";
 import { decodePosixBytes, encodePosixPath } from "./posix-path";
@@ -190,11 +191,23 @@ function spawnTool(
     ...(typeof options.cwd === "string" ? [options.cwd] : []),
     ...Object.values(environment),
   ];
-  if (!values.some(rawToolValue))
-    return {
-      child: spawn(command, args, { ...options, stdio }),
-      failureMarker: undefined,
-    };
+  if (!values.some(rawToolValue)) {
+    try {
+      return {
+        child: spawn(command, args, { ...options, stdio }),
+        failureMarker: undefined,
+      };
+    } catch (error) {
+      const failure = error as NodeJS.ErrnoException;
+      // macOS Node exposes ENOEXEC numerically; use the shell's text-file fallback.
+      if (
+        windows ||
+        (failure.code !== "ENOEXEC" &&
+          failure.errno !== -constants.errno.ENOEXEC)
+      )
+        throw error;
+    }
+  }
   if (windows) {
     const binary = createRequire(import.meta.url).resolve(
       `./native/${nativeTarget}/windows.node`,
@@ -244,7 +257,9 @@ function spawnTool(
   // startup, and macOS system shells also strip ordinary DYLD_* values.
   const env = { ...(options.env ?? process.env) };
   for (const name of Object.keys(environment)) delete env[name];
-  const child = spawn("/bin/sh", ["-c", script], {
+  // macOS ships dash; unlike its Bash 3.2 sh, failed exec retains ENOENT's 127.
+  const shell = process.platform === "darwin" ? "/bin/dash" : "/bin/sh";
+  const child = spawn(shell, ["-c", script], {
     ...options,
     env,
     cwd: undefined,

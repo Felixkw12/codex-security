@@ -1814,23 +1814,31 @@ test("diff inventory expands a home-relative repository scope", () => {
   expect(readFileSync(f.out, "utf8")).toBe("source.py\n");
 });
 
-test.skipIf(process.platform === "win32")(
-  "inventory falls back to ripgrep when selected Git's interpreter is missing",
-  () => {
-    const f = fixture();
-    f.write("source.py");
-    const selectedGit = join(f.root, "git");
-    writeFileSync(selectedGit, `#!${join(f.root, "missing-interpreter")}\n`, {
-      mode: 0o700,
-    });
-    const result = f.run("make-repo-rank-input", [], {
-      ...f.toolEnvironment,
-      CODEX_SECURITY_GIT: selectedGit,
-    });
-    expect(result.status, result.stderr).toBe(0);
-    expect(JSON.parse(readFileSync(f.out, "utf8")).path).toBe("source.py");
-  },
-);
+for (const rawHome of [false, true])
+  test.skipIf(process.platform === "win32")(
+    `inventory falls back to ripgrep when selected Git's interpreter is missing${rawHome ? " with raw HOME" : ""}`,
+    () => {
+      const f = fixture();
+      f.write("scope/source.py");
+      const selectedGit = join(f.root, "git");
+      writeFileSync(selectedGit, `#!${join(f.root, "missing-interpreter")}\n`, {
+        mode: 0o700,
+      });
+      const result = runPathInventory(
+        f,
+        "make-repo-rank-input",
+        {
+          ...f.toolEnvironment,
+          CODEX_SECURITY_GIT: selectedGit,
+        },
+        rawHome,
+      );
+      expect(result.status, result.stderr).toBe(0);
+      expect(JSON.parse(readFileSync(f.out, "utf8")).path).toBe(
+        "scope/source.py",
+      );
+    },
+  );
 
 test("inventory preserves scoped names beneath dotted-I repository names", () => {
   const f = fixture();
