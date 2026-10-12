@@ -464,8 +464,19 @@ def test_receipt_io_failure_preserves_successful_publication(
 
 
 @pytest.mark.parametrize("workflow", ["deep-scan-mcp/v1", "deep-security-scan/v1"])
-@pytest.mark.parametrize("operation", ["lstat", "resolve"])
-@pytest.mark.parametrize("failure", ["io", "missing", "not-directory", "loop"])
+@pytest.mark.parametrize(
+    ("operation", "failure"),
+    [
+        (operation, failure)
+        for operation in ("lstat", "resolve", "locked-lstat")
+        for failure in ("io", "handles", "denied", "missing", "not-directory", "loop")
+    ]
+    + [
+        (operation, failure)
+        for operation in ("ancestor-open", "root-open")
+        for failure in ("io", "handles", "denied", "missing", "missing-parent", "not-directory")
+    ],
+)
 def test_windows_receipt_root_probe_classifies_storage_and_path_failures(
     workbench_api,
     workbench_db,
@@ -519,13 +530,21 @@ def test_windows_receipt_root_probe_classifies_storage_and_path_failures(
         with monkeypatch.context() as patch:
             backend = emulate_windows_atomic_write(patch, finalizer)
             original_probe = backend._canonical_scan_directory
-            original_operation = getattr(Path, operation)
+            path_operation = "lstat" if operation == "locked-lstat" else operation
+            original_operation = getattr(Path, path_operation, None)
+            original_create = backend._create_file
+            original_directory = backend._open_directory
 
             def fail_root(path, *args, **kwargs):
                 if path == scan_dir:
                     probes.append(operation)
-                    if failure == "io":
-                        raise OSError(errno.EIO, "Synthetic receipt root I/O failure", str(path))
+                    if operation == "locked-lstat":
+                        patch.setattr(Path, "lstat", original_operation)
+                    if failure in {"io", "handles", "denied"}:
+                        code = {"io": errno.EIO, "handles": errno.EMFILE, "denied": errno.EACCES}[
+                            failure
+                        ]
+                        raise OSError(code, "Synthetic receipt root I/O failure", str(path))
                     # Exercise actual missing, non-directory, and loop errors without
                     # changing the already accepted canonical artifacts.
                     return original_operation(bad_root, *args, **kwargs)
@@ -538,11 +557,39 @@ def test_windows_receipt_root_probe_classifies_storage_and_path_failures(
                     probe_patch.setattr(Path, operation, fail_root)
                     return original_probe(path)
 
-            patch.setattr(backend, "_canonical_scan_directory", probe_root)
+            def open_directory(path, **kwargs):
+                selected = scan_dir.parent if operation == "ancestor-open" else scan_dir
+                if path == selected and kwargs["disposition"] == backend._OPEN_EXISTING:
+                    probes.append(operation)
+                    code = {
+                        "io": 1117,
+                        "handles": 4,
+                        "denied": 5,
+                        "missing": 2,
+                        "missing-parent": 3,
+                        "not-directory": 267,
+                    }[failure]
+                    raise backend.WindowsScanLocalFileError(
+                        code, "Synthetic late directory failure", str(path)
+                    )
+                return original_create(path, **kwargs)
+
+            def open_root_before_stat(path, **kwargs):
+                handle = original_directory(path, **kwargs)
+                if path == scan_dir:
+                    patch.setattr(Path, "lstat", fail_root)
+                return handle
+
+            if operation == "locked-lstat":
+                patch.setattr(backend, "_open_directory", open_root_before_stat)
+            elif operation.endswith("-open"):
+                patch.setattr(backend, "_create_file", open_directory)
+            else:
+                patch.setattr(backend, "_canonical_scan_directory", probe_root)
             return original_write(scan_dir, filename, contents)
 
     monkeypatch.setattr(saved, "write_scan_local_bytes", write_file)
-    if failure == "io":
+    if failure in {"io", "handles", "denied"}:
         assert saved.write_scan_draft(
             workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, args
         ) == {"scanId": scan.scan_id, "status": "draft_written"}
@@ -553,8 +600,11 @@ def test_windows_receipt_root_probe_classifies_storage_and_path_failures(
             if failure == "loop" and operation == "resolve"
             else finalizer.ContractError
         )
-        with pytest.raises(expected_errors, match="existing scan directory|Symlink loop"):
+        with pytest.raises(expected_errors) as rejected:
             saved.write_scan_draft(workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, args)
+        assert not isinstance(rejected.value, finalizer.ScanLocalIOError)
+        if operation.endswith("-open"):
+            assert "Synthetic late directory failure" in str(rejected.value)
     assert probes == [operation]
     assert published
     assert {path: path.read_bytes() for path in published} == published

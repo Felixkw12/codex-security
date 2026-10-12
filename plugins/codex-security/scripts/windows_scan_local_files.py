@@ -76,6 +76,7 @@ _ERROR_SHARING_VIOLATION = 32
 _ERROR_LOCK_VIOLATION = 33
 _ERROR_FILE_EXISTS = 80
 _ERROR_ALREADY_EXISTS = 183
+_ERROR_DIRECTORY = 267
 _MISSING_ERRORS = {_ERROR_FILE_NOT_FOUND, _ERROR_PATH_NOT_FOUND}
 _COLLISION_ERRORS = {_ERROR_FILE_EXISTS, _ERROR_ALREADY_EXISTS}
 _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
@@ -421,14 +422,19 @@ def _canonical_scan_directory(scan_dir: Path) -> tuple[Path, tuple[int, int]]:
 
 
 def _open_directory(path: Path, *, missing_ok: bool = False) -> _OwnedHandle | None:
-    handle = _create_file(
-        path,
-        access=_FILE_READ_ATTRIBUTES,
-        share=_FILE_SHARE_READ | _FILE_SHARE_WRITE,
-        disposition=_OPEN_EXISTING,
-        flags=_FILE_FLAG_BACKUP_SEMANTICS | _FILE_FLAG_OPEN_REPARSE_POINT,
-        missing_ok=missing_ok,
-    )
+    try:
+        handle = _create_file(
+            path,
+            access=_FILE_READ_ATTRIBUTES,
+            share=_FILE_SHARE_READ | _FILE_SHARE_WRITE,
+            disposition=_OPEN_EXISTING,
+            flags=_FILE_FLAG_BACKUP_SEMANTICS | _FILE_FLAG_OPEN_REPARSE_POINT,
+            missing_ok=missing_ok,
+        )
+    except WindowsScanLocalFileError as exc:
+        if exc.errno not in {*_MISSING_ERRORS, _ERROR_DIRECTORY}:
+            raise
+        raise _invalid_path(path, f"could not open scan-local directory: {exc}") from exc
     if handle is not None:
         try:
             assert handle.value is not None
@@ -471,7 +477,14 @@ def _locked_parent(
             directory_handle = _open_directory(directory_path)
             assert directory_handle is not None
             handles.append(directory_handle)
-        current_root = root_path.lstat()
+        try:
+            current_root = root_path.lstat()
+        except OSError as exc:
+            if exc.errno not in {errno.ENOENT, errno.ENOTDIR, errno.ELOOP}:
+                raise
+            raise _invalid_path(
+                scan_dir, f"scan directory changed while it was being opened: {exc}"
+            ) from exc
         current_root_identity = (current_root.st_dev, current_root.st_ino)
         if current_root_identity != observed_root_identity or (
             expected_root_identity is not None and current_root_identity != expected_root_identity
