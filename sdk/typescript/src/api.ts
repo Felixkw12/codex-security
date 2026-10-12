@@ -1836,6 +1836,21 @@ export class CodexSecurity {
         session.sessionConfig = skill.config;
       }
       checkOpen();
+      if (preparedRecipe.cleanup !== undefined) {
+        const cleanup = preparedRecipe.cleanup;
+        cleanupRecipeProfile = async () => {
+          // Registration can commit before its response reaches this process.
+          if (
+            !(await scanOwnsRecipeProfile(
+              (args) =>
+                workbench({ ...workbenchOptions, signal: undefined }, args),
+              scanDir,
+              recipe["providerProfile"] as JsonObject,
+            ))
+          )
+            await cleanup();
+        };
+      }
       const registered = await registerScan({
         scan: options,
         parentScanRole: this.#parentScanRole,
@@ -1845,7 +1860,9 @@ export class CodexSecurity {
         workbench: (args, input) => workbench(workbenchOptions, args, input),
       });
       // New registrations own this recipe; resumes retain the original one.
-      if (!registered.resumed) cleanupRecipeProfile = undefined;
+      cleanupRecipeProfile = registered.resumed
+        ? preparedRecipe.cleanup
+        : undefined;
       const {
         registration,
         scanId,
@@ -3151,6 +3168,12 @@ export class CodexSecurity {
     } finally {
       budgetAbortController.abort();
       deepProgressTracker?.stop();
+      // Keep registration ownership stable until profile reconciliation finishes.
+      try {
+        await cleanupRecipeProfile?.();
+      } catch (error) {
+        warnCleanupFailed(options, error);
+      }
       try {
         releaseExecution?.();
       } catch (error) {
@@ -3163,7 +3186,6 @@ export class CodexSecurity {
       // throws synchronously, still cannot skip a pending startup-lock release below.
       try {
         for (const cleanup of await Promise.allSettled([
-          cleanupRecipeProfile?.(),
           this.#preparedKnowledgeBase === undefined
             ? knowledgeBase?.cleanup()
             : undefined,
@@ -4336,6 +4358,30 @@ async function removeTargetPathsFile(path: string | null): Promise<void> {
     await chmod(path, 0o600);
     await rm(path, { force: true });
   }
+}
+
+async function scanOwnsRecipeProfile(
+  workbench: (args: readonly string[]) => Promise<JsonObject>,
+  scanDir: string,
+  profile: JsonObject,
+): Promise<boolean> {
+  const saved = await workbench(["list-scans", "--scan-root", scanDir]);
+  for (const scan of saved["scans"] as JsonObject[]) {
+    if (scan["recipeAvailable"] === false) continue;
+    const savedRecipe = await workbench([
+      "get-scan-recipe",
+      "--scan-id",
+      scan["scanId"] as string,
+    ]);
+    const recipe = savedRecipe["recipe"] as JsonObject;
+    const owner = recipe["providerProfile"] as JsonObject | undefined;
+    if (
+      owner?.["name"] === profile["name"] &&
+      owner?.["home"] === profile["home"]
+    )
+      return true;
+  }
+  return false;
 }
 
 /** Save the configuration and instructions needed to resume the same execution. */

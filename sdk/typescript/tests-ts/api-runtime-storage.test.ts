@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, stat } from "node:fs/promises";
+import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { afterEach, expect, spyOn, test } from "bun:test";
@@ -10,6 +10,8 @@ import { PLUGIN_ROOT } from "./plugin-root.js";
 import { preparedRuntime } from "./support/api-events.js";
 import * as providerProfiles from "../src/provider-profile.js";
 import type { JsonObject } from "../src/config.js";
+import { CodexSecurity, type ScanOptions } from "../src/api.js";
+import { acquireScanExecution } from "../src/scan-execution.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
@@ -214,6 +216,7 @@ async function replayProfileFixture() {
     ),
   );
   return {
+    root,
     repository,
     scan,
     state,
@@ -264,6 +267,7 @@ test.each([
             if (stage === "registration") throw failure;
           }
           if (args[0] === "get-scan-feedback") throw failure;
+          if (args[0] === "list-scans") return { scans: [] };
           return mockWorkbench(args, input);
         },
       },
@@ -435,7 +439,8 @@ test("profile cleanup preserves the startup failure and its own diagnostic", asy
       resolvePluginPython: async () => "/managed/python",
       prepareOutputDir: async () => h.scan,
       repositoryRevision: async () => "deadbeef",
-      runWorkbench: async () => {
+      runWorkbench: async (_options, args) => {
+        if (args[0] === "list-scans") return { scans: [] };
         throw failure;
       },
     },
@@ -456,3 +461,227 @@ test("profile cleanup preserves the startup failure and its own diagnostic", asy
     await Promise.all(created.map((saved) => saved.cleanup()));
   }
 });
+
+test.each([
+  ...(["standard", "deep"] as const).flatMap((mode) =>
+    (["fresh", "native"] as const).flatMap((kind) =>
+      (["before", "after"] as const).map((stage) => ({
+        mode,
+        kind,
+        stage,
+        queryFailure: "",
+      })),
+    ),
+  ),
+  { mode: "deep", kind: "fresh", stage: "before", queryFailure: "list-scans" },
+  {
+    mode: "deep",
+    kind: "fresh",
+    stage: "after",
+    queryFailure: "get-scan-recipe",
+  },
+  { mode: "standard", kind: "child", stage: "before", queryFailure: "" },
+  { mode: "standard", kind: "child", stage: "after", queryFailure: "" },
+] as const)(
+  "registration interruption preserves durable profile ownership: %j",
+  async ({ mode, kind, stage, queryFailure }) => {
+    const h = await replayProfileFixture();
+    await writeFile(
+      join(h.repository, "source.ts"),
+      "export const value = 1;\n",
+    );
+    const python = Bun.which("python3")!;
+    const environment = {
+      ...process.env,
+      OPENAI_API_KEY: "synthetic-test-key",
+      CODEX_API_KEY: "synthetic-test-key",
+      CODEX_HOME: h.home,
+      CODEX_SECURITY_STATE_DIR: h.state,
+    };
+    const workbenchOptions = { python, pluginRoot: PLUGIN_ROOT, environment };
+    const interruptedPlugin = join(h.root, "interrupted-plugin");
+    await mkdir(join(interruptedPlugin, "scripts"), { recursive: true });
+    await writeFile(
+      join(interruptedPlugin, "scripts", "workbench_db.py"),
+      `
+import signal, sys
+sys.path.insert(0, ${JSON.stringify(join(PLUGIN_ROOT, "scripts"))})
+import workbench_db as wb
+original = wb.register_cli_scan
+def interrupted_registration(*args, **kwargs):
+    if ${JSON.stringify(stage)} == "before":
+        signal.raise_signal(signal.SIGINT)
+    result = original(*args, **kwargs)
+    if ${JSON.stringify(stage)} == "after":
+        signal.raise_signal(signal.SIGINT)
+    return result
+wb.register_cli_scan = interrupted_registration
+if __name__ == "__main__":
+    wb.main()
+`,
+    );
+    let scanDir = h.scan;
+    let registeredScan: ScanOptions["registeredScan"];
+    let parentScanId: string | undefined;
+    if (kind !== "fresh") {
+      const started = await runtime.runWorkbench(workbenchOptions, [
+        kind === "child" || mode === "deep"
+          ? "begin-deep-scan"
+          : "start-headless-standard-scan",
+        "--thread-id",
+        "synthetic-native-owner",
+        "--target-path",
+        h.repository,
+        "--scope",
+        ".",
+        "--scan-root",
+        join(h.root, "native-scans"),
+      ]);
+      const scan = started["scan"] as JsonObject;
+      if (kind === "child") parentScanId = scan["scanId"] as string;
+      else {
+        scanDir = scan["scanDir"] as string;
+        registeredScan = {
+          scanId: scan["scanId"] as string,
+          scanDir,
+          threadId: "synthetic-native-owner",
+          handoffClaimToken: scan["handoffClaimToken"] as string,
+        };
+      }
+    }
+    const queryError = new Error(
+      "Synthetic registration ownership query failed",
+    );
+    const queries: string[] = [];
+    const warnings: string[] = [];
+    let locked = false;
+    let interrupted: unknown;
+    const client = new CodexSecurity(
+      { codexOverrides: replaySettings.shell },
+      {
+        environment,
+        prepareRuntime: async () => preparedRuntime(h.home),
+        resolvePluginPython: async () => python,
+        prepareOutputDir: async () => scanDir,
+        repositoryRevision: async () => null,
+        probeCodexSandbox: async () => {},
+        createCodex: () => {
+          throw new Error(
+            "Execution must not start after interrupted registration",
+          );
+        },
+        acquireScanExecution: async (...args) => {
+          const release = await acquireScanExecution(...args);
+          locked = true;
+          return () => {
+            locked = false;
+            release();
+          };
+        },
+        runWorkbench: async (options, args, input) => {
+          if (args[0] === "list-scans" || args[0] === "get-scan-recipe") {
+            expect(locked).toBe(true);
+            expect(options.signal).toBeUndefined();
+            queries.push(args[0]);
+            if (args[0] === queryFailure) throw queryError;
+          }
+          try {
+            return await runtime.runWorkbench(
+              {
+                ...options,
+                ...(args[0] === "register-cli-scan"
+                  ? { pluginRoot: interruptedPlugin }
+                  : {}),
+              },
+              args,
+              input,
+            );
+          } catch (error) {
+            if (args[0] === "register-cli-scan") interrupted = error;
+            throw error;
+          }
+        },
+      },
+      {
+        surface: "sdk",
+        ...(kind === "child" ? { parentScanRole: "deep_pass" } : {}),
+      },
+    );
+    const runOptions: ScanOptions = {
+      mode,
+      outputDir: scanDir,
+      registeredScan,
+      parentScanId,
+      deepScanPass: kind === "child",
+      onWarning: (warning) => warnings.push(warning),
+    };
+    try {
+      const failure = await client
+        .run(h.repository, runOptions)
+        .catch((error: unknown) => error);
+      expect(interrupted).toBeInstanceOf(Error);
+      expect(failure).toBe(interrupted);
+      expect((interrupted as Error).message).toContain("KeyboardInterrupt");
+      expect(locked).toBe(false);
+      const rows = (
+        await runtime.runWorkbench(workbenchOptions, [
+          "list-scans",
+          "--scan-root",
+          scanDir,
+        ])
+      )["scans"] as JsonObject[];
+      const saved = rows.filter((scan) => scan["recipeAvailable"] === true);
+      expect(saved).toHaveLength(stage === "after" ? 1 : 0);
+      const profiles = await h.profiles();
+      expect(profiles).toHaveLength(stage === "after" || queryFailure ? 1 : 0);
+      if (queryFailure) {
+        expect(queries).toContain(queryFailure);
+        expect(
+          warnings.some((warning) => warning.includes(queryError.message)),
+        ).toBe(true);
+      } else expect(warnings).toEqual([]);
+      if (stage === "after") {
+        const row = saved[0]!;
+        if (kind === "child") expect(row["parentScanRole"]).toBe("deep_pass");
+        const recipe = (
+          await runtime.runWorkbench(workbenchOptions, [
+            "get-scan-recipe",
+            "--scan-id",
+            row["scanId"] as string,
+          ])
+        )["recipe"] as JsonObject;
+        expect(
+          await providerProfiles.restoreProviderProfile(
+            {},
+            recipe["providerProfile"],
+            environment,
+          ),
+        ).toMatchObject(replaySettings.shell);
+        if (!queryFailure && kind === "native") {
+          // A queued native retry keeps the persisted recipe, even when its
+          // acknowledgement is interrupted again after returning that recipe.
+          const retryFailure = await client
+            .run(h.repository, runOptions)
+            .catch((error: unknown) => error);
+          expect(retryFailure).toBe(interrupted);
+          expect(await h.profiles()).toEqual(profiles);
+        } else if (!queryFailure && kind === "fresh" && mode === "deep") {
+          const stop = new Error("Synthetic stop after resume registration");
+          await expect(
+            client.run(h.repository, {
+              mode,
+              outputDir: scanDir,
+              resumeScanId: row["scanId"] as string,
+              onRegisteredScan: async () => {
+                throw stop;
+              },
+            }),
+          ).rejects.toBe(stop);
+          expect(await h.profiles()).toEqual(profiles);
+        }
+      }
+    } finally {
+      await client.close();
+    }
+  },
+);
