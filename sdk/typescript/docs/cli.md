@@ -1493,6 +1493,9 @@ selected path is no longer a directory or points to a different location after
 patching; local edits remain for review.
 The assessment does not change the patch or merge state.
 
+Post-patch Git snapshots, including initialized submodules, use the patch's
+workspace permissions and configured Git filters.
+
 Patching first checks that its sandbox can start. Failure reports
 `SANDBOX_UNAVAILABLE`; no file changes from the task reports `NO_PATCH_APPLIED`.
 Results list `applied`, `filesChanged`, and `files`, excluding preexisting edits.
@@ -1537,11 +1540,12 @@ nonempty, ignored regular files enumerated by Git before patching. An exact
 content match is refused, including a move or copy into a new publishable path;
 the edits remain available for manual review and publication. This can also
 refuse independently generated content identical to an ignored template or build
-output. Empty files, files the current user cannot read, and external link targets
-are not fingerprinted. File permissions are left unchanged. This adds reads
-proportional to the ignored data and does not detect arbitrary transformed or
-partial copies. Existing tracked edits are protected by path overlap and
-Git's rename/copy recognition.
+output. Empty files and external link targets are not fingerprinted. Files that
+disappear during preflight (`ENOENT`) are skipped. Other read errors for eligible
+ignored files stop the command before patching and report the original error.
+File permissions are left unchanged. This adds reads proportional to the ignored
+data and does not detect arbitrary transformed or partial copies. Existing tracked
+edits are protected by path overlap and Git's rename/copy recognition.
 
 All configured push destinations are checked for existing branch namespace
 collisions before patching. Separate remote servers cannot be updated atomically:
