@@ -1646,6 +1646,7 @@ describe("multiscan", () => {
       ];
       const clientDependencies = dependencies({
         currentDirectory: paths.root,
+        environment: { CODEX_SECURITY_STATE_DIR: fixtureState },
         result,
         onRun,
       });
