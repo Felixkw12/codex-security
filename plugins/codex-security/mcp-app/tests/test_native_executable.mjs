@@ -136,7 +136,7 @@ async function testWindowsPackageExecutables(installation) {
       path.join(platformRoot, "package.json"),
       JSON.stringify({ name: `@openai/codex-win32-${architecture}` }),
     );
-    await copyFile(process.execPath, binary);
+    await writeNodeExecutable(binary);
     const environment = { Path: [shims, external].join(path.delimiter) };
     if (installation === "managed") {
       environment.codex_managed_package_root = path.relative(root, packageRoot);
@@ -230,7 +230,7 @@ async function testWindowsAppsRelocatedExecutable() {
   );
   await mkdir(repository);
   await mkdir(path.dirname(binary), { recursive: true });
-  await copyFile(process.execPath, binary);
+  await writeNodeExecutable(binary);
   const environment = {
     Path: "",
     localappdata: localAppData,
@@ -258,6 +258,19 @@ async function testWindowsAppsRelocatedExecutable() {
     await resolveTrustedCodex(environment, localAppData, "win32", root),
     null,
   );
+}
+
+async function writeNodeExecutable(binary) {
+  if (process.platform === "win32") {
+    await copyFile(process.execPath, binary);
+  } else {
+    // Keep dynamically linked Node installations in their original location.
+    await writeFile(
+      binary,
+      `#!/bin/sh\nexec '${process.execPath.replaceAll("'", "'\\''")}' "$@"\n`,
+      { mode: 0o700 },
+    );
+  }
 }
 
 async function testCodexHomePathsStayBoundToOriginalDirectory() {

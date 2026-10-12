@@ -1,7 +1,16 @@
+import { captureEnvironment } from "../../../../sdk/typescript/tests-support/process-environment.mjs";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
@@ -23,7 +32,9 @@ const bundle = await build({
       name: "native-stop-boundaries",
       setup(build) {
         const modules = {
-          "../../../sdk/typescript/src/runtime.js": `export function codexSecurityStateDirectory() { return fixture.stateDirectory ?? "/synthetic/state"; }`,
+          "../../../sdk/typescript/src/runtime.js": `
+          import { codexSecurityStateDirectory as stateDirectory } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/runtime.ts", import.meta.url)))};
+          export function codexSecurityStateDirectory(environment) { return fixture.stateDirectory ?? stateDirectory(environment); }`,
           "@modelcontextprotocol/sdk/server/mcp.js": `
           export class McpServer {
             server = {};
@@ -47,6 +58,7 @@ const bundle = await build({
           export async function waitForScanExecution(...args) { return fixture.waitForScanExecution ? fixture.waitForScanExecution(...args) : () => {}; }`,
           "node:child_process": `
           import { PassThrough } from "node:stream";
+          export function spawn() { throw new Error("unexpected runtime child invocation"); }
           export function execFile() {}
           execFile[Symbol.for("nodejs.util.promisify.custom")] = () => {
             const stdin = new PassThrough();
@@ -71,6 +83,7 @@ const bundle = await build({
         );
         build.onLoad({ filter: /.*/, namespace: "fixture" }, ({ path }) => ({
           contents: modules[path],
+          resolveDir: dirname(entrypoint),
         }));
       },
     },
@@ -301,6 +314,94 @@ const nativeMeta = {
     },
   },
 };
+
+for (const operation of ["cancel", "fail", "canceled", "failed"]) {
+  test(`native ${operation} uses the worker's canonical state directory`, async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "native-stop-home-")),
+    );
+    const restore = captureEnvironment([
+      "CODEX_HOME",
+      "CODEX_SECURITY_STATE_DIR",
+    ]);
+    try {
+      await mkdir(join(root, "physical", "nested"), { recursive: true });
+      await symlink(
+        join(root, "physical", "nested"),
+        join(root, "link"),
+        process.platform === "win32" ? "junction" : "dir",
+      );
+      const configuredHome = `${join(root, "link")}/..`;
+      const canonicalHome = await realpath(configuredHome);
+      process.env.CODEX_HOME = configuredHome;
+      for (const override of [undefined, join(root, "selected-state")]) {
+        if (override === undefined) delete process.env.CODEX_SECURITY_STATE_DIR;
+        else process.env.CODEX_SECURITY_STATE_DIR = override;
+        const rejoin = operation === "canceled" || operation === "failed";
+        const scan = {
+          scanId: "synthetic-parent",
+          scanDir: join(root, "scan"),
+          mode: "deep",
+          handoffClaimToken: "synthetic-claim",
+          progress: { status: rejoin ? operation : "running" },
+        };
+        let preserved = false;
+        let released = false;
+        const server = serverFor({
+          async cancel() {},
+          async waitForScanExecution(state, directory) {
+            assert.equal(
+              state,
+              override ??
+                join(canonicalHome, "state", "plugins", "codex-security"),
+            );
+            assert.equal(directory, scan.scanDir);
+            return () => {
+              released = true;
+            };
+          },
+          async workbench([command]) {
+            if (command === "list-scans") return {};
+            if (command === "resolve-scan-root") return { scanRoot: root };
+            if (command === "preserve-scan-results") preserved = true;
+            else
+              assert.ok(
+                [
+                  "cancel-scan",
+                  "fail-scan",
+                  "begin-deep-scan",
+                  "get-scan",
+                ].includes(command),
+              );
+            return {
+              scan,
+              workspace: { setup: { submitted: true }, results: scan },
+            };
+          },
+        });
+        const result = await server.tools.get(
+          rejoin
+            ? "start_codex_security_deep_scan"
+            : `${operation}_codex_security_scan`,
+        )(
+          {
+            scanId: scan.scanId,
+            handoffClaimToken: scan.handoffClaimToken,
+            message: "Synthetic stop.",
+          },
+          nativeMeta,
+        );
+        assert.equal(preserved, true, JSON.stringify(result));
+        assert.equal(released, true);
+        assert.equal(process.env.CODEX_HOME, configuredHome);
+        assert.equal(process.env.CODEX_SECURITY_STATE_DIR, override);
+      }
+    } finally {
+      restore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
 
 for (const status of ["canceled", "failed"]) {
   test(`rejoining a ${status} scan finishes interrupted stop publication`, async () => {

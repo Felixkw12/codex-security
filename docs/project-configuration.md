@@ -355,6 +355,8 @@ Changing the explicit request still requires a different workflow ID.
 
 Native plugin sessions use `CODEX_CLI_PATH` when supplied, or a real `codex`
 executable on `PATH` (`codex.exe` on Windows). The selected executable must be
-outside the scan target. Windows npm shims, managed-package directories and
-desktop cache directories are no longer searched; set `CODEX_CLI_PATH` to the
-installed executable when it is not directly on `PATH`.
+outside the scan target. On Windows, native sessions also discover the executable
+in a managed Codex package, a global npm installation on `PATH`, or the Codex
+desktop cache. npm shims and WindowsApps aliases are not executed directly;
+selection resolves their installed native executable. Set `CODEX_CLI_PATH` to an
+installed executable to select it explicitly.

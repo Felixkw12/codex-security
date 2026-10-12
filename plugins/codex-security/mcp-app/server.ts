@@ -19,6 +19,7 @@ import {
 } from "./src/server/handoff-tools.js";
 import { registerCompactArtifactTools } from "./src/server/compact-artifact-tools.js";
 import { NativeScanHost, type NativeScanInput } from "./src/native-scan.js";
+import { snapshotNativeEnvironment } from "./src/native-executable.js";
 import {
   ScanPermissionError,
   waitForScanExecution,
@@ -2158,7 +2159,7 @@ async function finalizeNativeStoppedScan(
   const release =
     scan.mode === "deep"
       ? await waitForScanExecution(
-          codexSecurityStateDirectory(),
+          codexSecurityStateDirectory(await snapshotNativeEnvironment()),
           scan.scanDir,
           PLUGIN_ROOT,
         )

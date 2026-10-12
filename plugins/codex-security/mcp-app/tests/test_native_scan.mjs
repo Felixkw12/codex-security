@@ -1655,6 +1655,7 @@ for (const scenario of [
   "saved-absent-knowledge",
   "saved-present-knowledge",
   "tilde-home-and-selected-config",
+  "explicit-state-directory",
 ]) {
   test(
     `native merged settings reach every worker: ${scenario}`,
@@ -1683,6 +1684,7 @@ for (const scenario of [
         "OPENAI_API_KEY",
         "CODEX_SECURITY_CONFIG_PATH",
         "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+        "CODEX_SECURITY_STATE_DIR",
       ]);
       try {
         await mkdir(home);
@@ -1699,7 +1701,7 @@ const fs = require("node:fs");
 ${syntheticPermissionAppServer()}
 if (process.argv.includes("app-server")) servePermissionProfiles();
 else {
-  fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify({ argv: process.argv.slice(2), codex: process.env.CODEX_API_KEY, openai: process.env.OPENAI_API_KEY, home: process.env.CODEX_HOME, executable: process.argv[1], knowledge: process.env.CODEX_SECURITY_KNOWLEDGE_BASE }));
+  fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify({ argv: process.argv.slice(2), codex: process.env.CODEX_API_KEY, openai: process.env.OPENAI_API_KEY, home: process.env.CODEX_HOME, state: process.env.CODEX_SECURITY_STATE_DIR, executable: process.argv[1], knowledge: process.env.CODEX_SECURITY_KNOWLEDGE_BASE }));
   console.log(JSON.stringify({ type: "thread.started", thread_id: "synthetic-merged-worker" }));
   console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0 } }));
 }
@@ -1715,6 +1717,9 @@ else {
         delete process.env.CODEX_SECURITY_KNOWLEDGE_BASE;
         delete process.env.CODEX_SECURITY_CONFIG_PATH;
         delete process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
+        delete process.env.CODEX_SECURITY_STATE_DIR;
+        if (scenario === "explicit-state-directory")
+          process.env.CODEX_SECURITY_STATE_DIR = join(root, "ambient-state");
         const configuration = {
           model: "ambient-model",
           model_provider: "openai",
@@ -1773,6 +1778,7 @@ else {
             "CODEX_SECURITY_KNOWLEDGE_BASE",
             "CODEX_SECURITY_CONFIG_PATH",
             "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+            "CODEX_SECURITY_STATE_DIR",
           ].map((name) => [name, process.env[name]]),
         );
         const samePath = [
@@ -1820,6 +1826,9 @@ else {
           const request = {
             ...input(),
             pluginRoot,
+            ...(scenario === "explicit-state-directory"
+              ? { stateDirectory: join(root, "selected-state") }
+              : {}),
             scan: {
               ...input().scan,
               targetPath: repository,
@@ -1938,6 +1947,11 @@ else {
               const config = Object.assign({}, ...fragments);
               assert.equal(observed.argv.includes("resume"), resumed);
               assert.equal(observed.home, home);
+              assert.equal(
+                observed.state,
+                request.stateDirectory ??
+                  join(home, "state", "plugins", "codex-security"),
+              );
               assert.equal(observed.executable, executable);
               assert.equal(observed.openai, "synthetic-selected-key");
               assert.equal(observed.codex, undefined);
@@ -2092,8 +2106,12 @@ test("native selected configuration preserves home traversal and blank selectors
     "CODEX_CLI_PATH",
     "CODEX_SECURITY_CONFIG_PATH",
     "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+    "CODEX_API_KEY",
+    "OPENAI_API_KEY",
   ]);
   try {
+    delete process.env.CODEX_API_KEY;
+    delete process.env.OPENAI_API_KEY;
     await mkdir(join(root, "target", "nested"), { recursive: true });
     await symlink(
       join(root, "target", "nested"),
@@ -2145,8 +2163,12 @@ test("native resume preserves absent knowledge instead of importing ambient cont
     "CODEX_SECURITY_KNOWLEDGE_BASE",
     "CODEX_SECURITY_CONFIG_PATH",
     "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+    "CODEX_API_KEY",
+    "OPENAI_API_KEY",
   ]);
   try {
+    delete process.env.CODEX_API_KEY;
+    delete process.env.OPENAI_API_KEY;
     const document = join(root, "late.txt");
     await writeFile(document, "Late synthetic context.");
     Object.assign(process.env, {
