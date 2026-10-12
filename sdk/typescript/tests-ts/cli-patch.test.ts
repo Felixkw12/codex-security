@@ -293,7 +293,16 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
           [
             process.execPath,
             "-e",
-            `import { main } from ${JSON.stringify(new URL("../src/cli.ts", import.meta.url).href)}; process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"]);`,
+            `
+import { main, runRepositoryCommand } from ${JSON.stringify(new URL("../src/cli.ts", import.meta.url).href)};
+import { dependencies } from ${JSON.stringify(new URL("./cli-fixtures.ts", import.meta.url).href)};
+process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], process.stdout, process.stderr, dependencies({
+  currentDirectory: process.cwd(),
+  environment: process.env,
+  onRepositoryCommand: runRepositoryCommand,
+  onCodex: () => { throw new Error("Provider preflight must fail before a model turn"); },
+}));
+`,
           ],
           {
             cwd: component,
@@ -3704,7 +3713,16 @@ if (["pr", "mr"].includes(basename(process.argv[1] ?? ""))) {
           [
             process.execPath,
             "-e",
-            `import { main } from ${JSON.stringify(new URL("../src/cli.ts", import.meta.url).href)}; process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"]);`,
+            `
+import { main, runRepositoryCommand } from ${JSON.stringify(new URL("../src/cli.ts", import.meta.url).href)};
+import { dependencies } from ${JSON.stringify(new URL("./cli-fixtures.ts", import.meta.url).href)};
+process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], process.stdout, process.stderr, dependencies({
+  currentDirectory: process.cwd(),
+  environment: process.env,
+  onRepositoryCommand: runRepositoryCommand,
+  onCodex: () => { throw new Error("Provider preflight must fail before a model turn"); },
+}));
+`,
           ],
           {
             cwd: component,
@@ -4310,9 +4328,7 @@ describe("patch publication integrity", () => {
     expect(await readFile(join(directory, "src/finding-1.ts"), "utf8")).toBe(
       "fixed\n",
     );
-    expect(git("diff", "--cached", "--name-only")).toBe(
-      failure === "checkout staged" ? "other.ts\nsrc/finding-1.ts" : "other.ts",
-    );
+    expect(git("diff", "--cached", "--name-only")).toBe("other.ts");
     if (
       failure === "commit" ||
       (failure.startsWith("checkout") && failure !== "checkout commit")
@@ -4323,8 +4339,9 @@ describe("patch publication integrity", () => {
       expect(git("rev-parse", "HEAD")).toBe(base);
       if (failure === "checkout staged") {
         expect(git("show", ":other.ts")).toBe("staged work");
-        expect(git("show", ":src/finding-1.ts")).toBe("fixed");
-      } else expect(git("write-tree")).toBe(index);
+        expect(git("show", ":src/finding-1.ts")).toBe("unsafe");
+      }
+      expect(git("write-tree")).toBe(index);
       expect(outcome.stderr).not.toContain("Could not restore");
       expect(
         git(
@@ -7485,7 +7502,13 @@ describe("patch change tracking", () => {
                 options,
               );
               if (args.includes("--find-copies-harder"))
-                publicationDiff = output.split("\0").filter(Boolean);
+                publicationDiff = Buffer.from(
+                  output,
+                  options?.encoding ?? "utf8",
+                )
+                  .toString("latin1")
+                  .split("\0")
+                  .filter(Boolean);
               return output;
             }
             if (args[1] === "list") return "[]";
@@ -10240,7 +10263,7 @@ describe("patch Git metadata identity", () => {
         );
         if (kind === "retargeted")
           expect(outcome.stderr).toContain(
-            "Git configuration or hooks changed location during the patch",
+            "The patch Git directory changed during patching",
           );
         else
           expect(JSON.parse(outcome.stdout)).toMatchObject({
