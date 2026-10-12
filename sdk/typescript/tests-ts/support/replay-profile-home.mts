@@ -45,7 +45,7 @@ for (const [spelling, requestedHome, expectedHome] of [
     `${relative(process.cwd(), alias)}${sep}link${sep}..${sep}home`,
     traversedHome,
   ],
-  ["home-relative", `~${sep}alias${sep}link${sep}..${sep}home`, aliasHome],
+  ["home-relative", `~${sep}alias${sep}link${sep}..${sep}home`, traversedHome],
   [
     "missing-parent",
     `${root}${sep}missing${sep}..${sep}physical${sep}home`,

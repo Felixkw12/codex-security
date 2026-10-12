@@ -44,7 +44,10 @@ const bundle = await build({
   },
   define: {
     "import.meta.url": JSON.stringify(
-      new URL("../src/native-scan.ts", import.meta.url).href,
+      new URL(
+        "../../../../sdk/typescript/_bundled_plugin/mcp/server.mjs",
+        import.meta.url,
+      ).href,
     ),
   },
   format: "cjs",
@@ -1808,7 +1811,17 @@ test(
         mkdir(repositoryBin),
         mkdir(join(repository, ".git")),
         mkdir(selectedTools),
+        mkdir(join(root, "alias")),
+        mkdir(join(root, "real-child")),
       ]);
+      await symlink(join(root, "real-child"), join(root, "alias", "link"));
+      await writeFile(
+        join(root, "alias", "codex"),
+        "inert lexical-path decoy",
+        {
+          mode: 0o700,
+        },
+      );
       await writeFile(
         join(repositoryBin, "codex"),
         "inert executable fixture",
@@ -1843,10 +1856,31 @@ if (process.argv.includes("app-server")) {
 `,
         { mode: 0o700 },
       );
-      for (const role of ["discovery", "merge"]) {
-        process.env.CODEX_CLI_PATH =
-          role === "discovery" ? "~/codex" : "~\\codex";
-        const cwd = join(root, role);
+      for (const [role, selection] of ["discovery", "merge"].flatMap((role) =>
+        ["home", "relative", "path", "relative-path"].map((selection) => [
+          role,
+          selection,
+        ]),
+      )) {
+        const pathRoot =
+          selection === "path"
+            ? `${root}/alias/link/..`
+            : selection === "relative-path"
+              ? `${relative(process.cwd(), root)}/alias/link/..`
+              : root;
+        process.env.PATH = [repositoryBin, pathRoot, selectedTools].join(
+          delimiter,
+        );
+        if (selection === "path" || selection === "relative-path")
+          delete process.env.CODEX_CLI_PATH;
+        else
+          process.env.CODEX_CLI_PATH =
+            selection === "relative"
+              ? `${relative(process.cwd(), root)}/alias/link/../codex`
+              : role === "discovery"
+                ? "~/codex"
+                : "~\\codex";
+        const cwd = join(root, `${role}-${selection}`);
         await mkdir(cwd);
         const config = scanRuntimeCodexConfig(
           { approval_policy: "on-request", forced_login_method: "api" },
@@ -1900,7 +1934,7 @@ if (process.argv.includes("app-server")) {
           );
           assert.equal(
             process.env.PATH,
-            [repositoryBin, root, selectedTools].join(delimiter),
+            [repositoryBin, pathRoot, selectedTools].join(delimiter),
           );
           const gitEnvironment = {
             PATH: selectedEnvironment.PATH,

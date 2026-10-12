@@ -18,6 +18,7 @@ import { CodexSecurity, type ScanOptions } from "../src/api.js";
 import { main } from "../src/cli.js";
 import {
   codexConfigOverrides,
+  deepMerge,
   writeCodexConfig,
   type JsonObject,
 } from "../src/config.js";
@@ -70,10 +71,11 @@ test.each([
     await writeFile(
       preload,
       `
-import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 appendFileSync(${JSON.stringify(captures)}, JSON.stringify({
   args: process.argv.slice(1),
+  homeConfig: ${native} ? readFileSync(join(process.env.CODEX_HOME, "config.toml"), "utf8") : "",
   selected: process.env.SYNTHETIC_SCAN_SETTING,
   safetyIdentifier: process.env.CODEX_SAFETY_IDENTIFIER,
   providerKey: process.env.SYNTHETIC_PROVIDER_KEY,
@@ -105,17 +107,17 @@ await new Promise(() => {});
     };
     let registration: JsonObject | undefined;
     let workbenchOptions: Parameters<typeof runWorkbench>[0] | undefined;
-    const makeClient = (native: boolean, config: JsonObject) =>
+    const makeClient = (inheritPermissions: boolean, config: JsonObject) =>
       new CodexSecurity(
         { pluginPath: pluginRoot, codexOverrides: config },
         {
           environment,
-          ...(native ? { inheritedPermissions } : {}),
+          ...(inheritPermissions ? { inheritedPermissions } : {}),
           prepareRuntime: async () => ({
             codexHome,
             environment,
             credentialsAvailable: true,
-            persistentCredentialHome: true,
+            preserveCodexHomeConfig: native,
             plugin: {
               pluginRoot,
               installedRoot: pluginRoot,
@@ -232,8 +234,9 @@ await new Promise(() => {});
       model_reasoning_effort: savedSettings.model_reasoning_effort,
     });
     expect(recipe["config"]).not.toHaveProperty("model_providers");
-    if (!native)
-      expect(recipe["providerProfile"]).toMatchObject({ home: "managed" });
+    expect(recipe["providerProfile"]).toMatchObject({
+      home: native ? "ambient" : "managed",
+    });
     expect(JSON.stringify(recipe)).not.toContain("saved-provider-header");
     expect(JSON.stringify(recipe)).not.toContain("synthetic-provider-key");
     expect(recipe["config"]).not.toHaveProperty("plugins");
@@ -260,6 +263,7 @@ await new Promise(() => {});
             },
           }),
         ),
+        stderr.text(),
       ).toBe(0);
       expect(resumedConfig).toMatchObject(expectedSettings);
     }
@@ -289,6 +293,7 @@ await new Promise(() => {});
         (line) =>
           JSON.parse(line) as {
             args: string[];
+            homeConfig: string;
             selected: string;
             safetyIdentifier: string;
             providerKey: string;
@@ -319,7 +324,9 @@ await new Promise(() => {});
       if (native)
         expect(launch.safetyIdentifier).toBe("synthetic-saved-identifier");
       expect(launch.providerKey).toBe("synthetic-provider-key");
-      expect(config).toMatchObject(expectedSettings);
+      expect(
+        deepMerge(parseToml(launch.homeConfig) as JsonObject, config),
+      ).toMatchObject(expectedSettings);
     }
     expect(launches[1]!.args).toContain("resume");
     expect(launches[1]!.args).toContain(threadId);

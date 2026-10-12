@@ -181,10 +181,7 @@ function* resolveFromSearchPath(
   originalCwd: string,
 ): Generator<string> {
   for (const directory of searchPath?.split(delimiter) ?? []) {
-    const candidate = join(
-      absoluteSearchDirectory(directory, originalCwd),
-      executableName,
-    );
+    const candidate = `${absoluteCodexPath(directory || ".", process.platform, originalCwd)}/${executableName}`;
     if (isExecutableFile(candidate)) yield candidate;
   }
 }
@@ -292,13 +289,6 @@ function isExecutableFile(value: string): boolean {
   }
 }
 
-function absoluteSearchDirectory(
-  directory: string,
-  originalCwd: string,
-): string {
-  return resolve(originalCwd, directory || ".");
-}
-
 function absoluteWindowsSearchDirectory(
   directory: string,
   originalCwd: string,
@@ -306,7 +296,7 @@ function absoluteWindowsSearchDirectory(
   if (directory.startsWith('"') && directory.endsWith('"')) {
     directory = directory.slice(1, -1);
   }
-  return absoluteSearchDirectory(directory, originalCwd);
+  return resolve(originalCwd, directory || ".");
 }
 
 function absoluteCodexPath(
@@ -321,7 +311,9 @@ function absoluteCodexPath(
   if (isAbsolute(value) || (platform === "win32" && win32.isAbsolute(value))) {
     return value;
   }
-  return resolve(originalCwd, value);
+  return platform === "win32"
+    ? resolve(originalCwd, value)
+    : `${originalCwd}/${value}`;
 }
 
 function isNativeWindowsRootRelativePath(value: string): boolean {
