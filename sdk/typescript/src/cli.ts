@@ -62,6 +62,7 @@ export { exportEnvironment } from "./artifact-export.js";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import {
   classifyConnectionFailure,
+  isTomlParserError,
   CodexSecurity,
   environmentValue,
   formatEnvironmentVariableRemovalGuidance,
@@ -8090,7 +8091,8 @@ export function skillCommandFailure(
   authentication: ScanAuthentication | null = null,
 ): string {
   // Numeric statuses need an HTTP/status label; the original diagnostic is retained below.
-  const classificationDetail = detail.replace(
+  const adviceDetail = isTomlParserError(detail) ? "" : detail;
+  const classificationDetail = adviceDetail.replace(
     /\b(?:(?:http(?:\/\d+(?:\.\d+)?)?(?:[ \t]*(?:error(?:[ \t]+code)?|status(?:[ _-]?code)?|code))?|status(?:[ _-]?code)?)(?:["']?[ \t]*[:=][ \t]*|[ \t]+)["']?(401|403|429)|(401|403|429))\b/giu,
     (match, status: string | undefined) => (status ? match : ""),
   );
@@ -8099,14 +8101,14 @@ export function skillCommandFailure(
   if (
     classification === "unauthorized" ||
     /\b(?:authorizationrequired|invalid[._ -]api[._ -]key|token[._ -]expired)\b/iu.test(
-      detail,
+      adviceDetail,
     )
   ) {
     advice = authenticationFailureMessage(authentication);
   } else if (
-    /\bpermissions? to use (?:this |the )?model\b/iu.test(detail) ||
+    /\bpermissions? to use (?:this |the )?model\b/iu.test(adviceDetail) ||
     /\b(?:model[._ -]not[._ -]found|model[._ -]?access[._ -]?denied|access[._ -]?(?:denied[._ -]?to[._ -]?model|to[._ -]?model[._ -]?denied))\b/iu.test(
-      detail,
+      adviceDetail,
     ) ||
     (classification === "forbidden" &&
       /\b403\b|\bforbidden\b|\bmodel[ ._-]?(?:not[ ._-]?found|access)\b|\baccess.*model\b/iu.test(
@@ -8117,12 +8119,14 @@ export function skillCommandFailure(
   } else if (
     classification === "rate_limited" ||
     /\b(?:rate[._ -]limit(?:ed|[._ -]exceeded)?|tokens[._ -]per[._ -]minute)\b/iu.test(
-      detail,
+      adviceDetail,
     )
   ) {
     advice = "The request was rate limited. Wait and retry.";
   } else if (
-    /models?.cache|cache.*schema|supports_reasoning_summaries/iu.test(detail)
+    /models?.cache|cache.*schema|supports_reasoning_summaries/iu.test(
+      adviceDetail,
+    )
   ) {
     advice =
       "Codex could not load its model metadata. Update Codex or refresh its model cache.";
@@ -8130,7 +8134,7 @@ export function skillCommandFailure(
     classification === "network_error" ||
     classification === "timeout" ||
     /\b(?:ECONNABORTED|timed[._ -]out|network[._ -]?error|(?:(?:network|request)[._ -]?)?timeout(?:[._ -]?error)?)\b/iu.test(
-      detail,
+      adviceDetail,
     )
   ) {
     advice =

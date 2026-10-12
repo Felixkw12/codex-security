@@ -4688,6 +4688,10 @@ function turnFailureMessage(error: unknown): string {
   return "The Codex Security scan turn failed without a readable error message.";
 }
 
+export function isTomlParserError(message: string): boolean {
+  return /\.toml:\d+:\d+:/iu.test(message);
+}
+
 export function classifyConnectionFailure(
   error: unknown,
 ):
@@ -4698,7 +4702,10 @@ export function classifyConnectionFailure(
   | "timeout"
   | "unknown" {
   const message = error instanceof Error ? error.message : String(error);
-  if (/\b(?:sqlite3?|database|workbench)\b|\.toml:\d+:\d+:/iu.test(message)) {
+  if (
+    /\b(?:sqlite3?|database|workbench)\b/iu.test(message) ||
+    isTomlParserError(message)
+  ) {
     return "unknown";
   }
   if (

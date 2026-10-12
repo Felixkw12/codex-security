@@ -51,6 +51,15 @@ const turnFailures = {
     message: "HTTP request blocked: safety policy service unavailable",
     codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
   },
+  "prefix-network-error": {
+    message:
+      "Failed to contact safety policy: request refused by upstream with 503",
+    codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
+  },
+  "prefix-service-error": {
+    message: "Safety policy: request refused: service unavailable",
+    codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
+  },
   "connection-error": {
     message: "Provider stream disconnected",
     codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: null } },
