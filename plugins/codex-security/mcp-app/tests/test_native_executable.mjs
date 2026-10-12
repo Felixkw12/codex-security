@@ -46,10 +46,10 @@ try {
     resolveCodexPath({ codex_cli_path: "C:\\Tools\\codex.exe" }, "win32"),
     "C:\\Tools\\codex.exe",
   );
-  const originalCwd = path.join(process.cwd(), "fixture-root");
+  const originalCwd = "/fixture-root";
   assert.equal(
     resolveCodexPath({ CODEX_CLI_PATH: "fixture/codex" }, "linux", originalCwd),
-    path.join(originalCwd, "fixture/codex"),
+    "/fixture-root/fixture/codex",
   );
 } finally {
   await Promise.all(

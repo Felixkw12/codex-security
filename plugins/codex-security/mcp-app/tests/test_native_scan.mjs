@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
   chmod,
+  cp,
   mkdir,
   mkdtemp,
   readFile,
@@ -17,7 +18,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join, sep, relative } from "node:path";
 import { after, test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { build } from "esbuild";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 
@@ -27,6 +28,36 @@ const pluginVersion = JSON.parse(
     "utf8",
   ),
 ).version;
+
+const fixtureNativeRoot = await realpath(
+  new URL("../../native/dist/", import.meta.url),
+).catch((error) => {
+  if (error.code !== "ENOENT") throw error;
+  return realpath(new URL("../../native/prebuilt/", import.meta.url));
+});
+const fixturePluginRoot = await realpath(
+  await mkdtemp(join(tmpdir(), "native-scan-plugin-")),
+);
+after(() => rm(fixturePluginRoot, { recursive: true, force: true }));
+// Both standalone host builds and universal artifacts provide real primitives.
+await Promise.all([
+  cp(
+    new URL("../../.codex-plugin/", import.meta.url),
+    join(fixturePluginRoot, ".codex-plugin"),
+    { recursive: true },
+  ),
+  cp(
+    new URL("../../scripts/", import.meta.url),
+    join(fixturePluginRoot, "scripts"),
+    { recursive: true },
+  ),
+  mkdir(join(fixturePluginRoot, "mcp")),
+]);
+await symlink(
+  fixtureNativeRoot,
+  join(fixturePluginRoot, "mcp", "native"),
+  process.platform === "win32" ? "junction" : "dir",
+);
 
 const nativeFixture = {};
 const bundle = await build({
@@ -44,10 +75,7 @@ const bundle = await build({
   },
   define: {
     "import.meta.url": JSON.stringify(
-      new URL(
-        "../../../../sdk/typescript/_bundled_plugin/mcp/server.mjs",
-        import.meta.url,
-      ).href,
+      pathToFileURL(join(fixturePluginRoot, "mcp", "server.mjs")).href,
     ),
   },
   format: "cjs",
@@ -837,6 +865,8 @@ test("native preparation excludes scan output and knowledge sources from executa
   const name = process.platform === "win32" ? "codex.exe" : "codex";
   const restoreEnvironment = captureEnvironment([
     "CODEX_HOME",
+    "CODEX_API_KEY",
+    "OPENAI_API_KEY",
     "CODEX_CLI_PATH",
     "PATH",
     "CODEX_SECURITY_KNOWLEDGE_BASE",
@@ -860,6 +890,8 @@ test("native preparation excludes scan output and knowledge sources from executa
       await chmod(join(directory, name), 0o700);
     }
     process.env.CODEX_HOME = root;
+    delete process.env.CODEX_API_KEY;
+    delete process.env.OPENAI_API_KEY;
     delete process.env.CODEX_SECURITY_CONFIG_PATH;
     delete process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
     for (const saved of [false, true]) {
@@ -2608,17 +2640,8 @@ test("native saved scans retain settings, auth environment, permissions and iden
     await mkdir(ownedDirectory, { mode: 0o700 });
     const nativePlugin = join(root, "native-plugin");
     await mkdir(join(nativePlugin, "mcp"), { recursive: true });
-    const nativeDirectory = await realpath(
-      new URL(
-        "../../../../sdk/typescript/_bundled_plugin/mcp/native/",
-        import.meta.url,
-      ),
-    ).catch((error) => {
-      if (error.code !== "ENOENT") throw error;
-      return fileURLToPath(new URL("../../native/dist/", import.meta.url));
-    });
     await symlink(
-      nativeDirectory,
+      fixtureNativeRoot,
       join(nativePlugin, "mcp", "native"),
       process.platform === "win32" ? "junction" : "dir",
     );
@@ -3176,9 +3199,7 @@ test("queued native hosts reload the accepted recipe before preparing execution"
   const repository = join(root, "repository");
   const scanDir = join(root, "scan");
   const state = join(root, "state");
-  const pluginRoot = fileURLToPath(
-    new URL("../../../../sdk/typescript/_bundled_plugin/", import.meta.url),
-  );
+  const pluginRoot = fixturePluginRoot;
   const restore = captureEnvironment([
     "CODEX_HOME",
     "CODEX_CLI_PATH",
