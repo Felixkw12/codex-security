@@ -470,14 +470,17 @@ test.each(
 
 test.each(
   [false, true].flatMap((truncated) =>
-    ["none", "repeat", "changed", "phase"].map((rejected) => ({
-      truncated,
-      rejected,
-    })),
+    [false, true].flatMap((changedDisplay) =>
+      ["none", "repeat", "changed", "phase", "anchor"].map((rejected) => ({
+        truncated,
+        changedDisplay,
+        rejected,
+      })),
+    ),
   ),
 )(
-  "retains accepted inventory after an unaccepted marker (truncated=$truncated, rejected=$rejected)",
-  async ({ truncated, rejected }) => {
+  "retains accepted inventory across later notifications (truncated=$truncated, changedDisplay=$changedDisplay, rejected=$rejected)",
+  async ({ truncated, changedDisplay, rejected }) => {
     const { home, parent } = await workerSessionFixture();
     const inventory: ScanProgress = {
       phase: "discovery",
@@ -495,18 +498,23 @@ test.each(
       filesTotal: rejected === "changed" ? 10 : 9,
     };
     const inventoryText = progressMarker("discovery", 0, 9);
-    const reviewText = progressMarker("validation", 1, 9);
+    const reviewText =
+      rejected === "anchor"
+        ? "Synthetic completion."
+        : progressMarker("validation", 1, 9);
     const ignoredText = progressMarker(ignored.phase, 0, ignored.filesTotal);
     await appendFile(
       parent,
       jsonLines([
         nativeCommand("older", progressMarker("discovery", 0, 8)),
         nativeCommand(
-          "inventory",
+          changedDisplay ? ["printf", "sk-" + "a".repeat(32)] : "inventory",
           truncated ? persistedCommandOutput : inventoryText,
         ),
         nativeCommand("review", reviewText),
-        ...(rejected === "none" ? [] : [nativeCommand("ignored", ignoredText)]),
+        ...(["none", "anchor"].includes(rejected)
+          ? []
+          : [nativeCommand("ignored", ignoredText)]),
       ]) + "\n",
     );
     const updates: ScanProgress[] = [];
@@ -517,8 +525,15 @@ test.each(
     tracker.beginParentTurn();
     tracker.start("scan-thread");
     try {
+      const older = { ...inventory, filesTotal: 8 };
+      const olderEvent = completedCommand(
+        "older",
+        progressMarker("discovery", 0, 8),
+      );
+      expect(tracker.recordParentProgress(older, olderEvent)).toBe(true);
+      tracker.acceptParentProgress(older, olderEvent);
       const inventoryEvent = completedCommand(
-        "inventory",
+        changedDisplay ? "printf [REDACTED_SECRET]" : "inventory",
         truncated ? commandOutput(inventoryText) : inventoryText,
       );
       expect(tracker.recordParentProgress(inventory, inventoryEvent)).toBe(
@@ -528,21 +543,185 @@ test.each(
       tracker.acceptParentProgress(inventory, inventoryEvent);
       updates.push(inventory);
       const reviewEvent = completedCommand("review", reviewText);
-      expect(tracker.recordParentProgress(reviewed, reviewEvent)).toBe(true);
-      tracker.acceptParentProgress(reviewed, reviewEvent);
-      updates.push(reviewed);
+      tracker.recordParentItem(reviewEvent);
+      if (rejected !== "anchor") {
+        expect(tracker.recordParentProgress(reviewed, reviewEvent)).toBe(true);
+        tracker.acceptParentProgress(reviewed, reviewEvent);
+        updates.push(reviewed);
+      }
       // Observing a later item is distinct from the API admitting its marker.
-      if (rejected !== "none")
+      if (!["none", "anchor"].includes(rejected))
         tracker.recordParentProgress(
           ignored,
           completedCommand("ignored", ignoredText),
         );
       await tracker.stop();
-      expect(updates.at(-1)).toEqual(reviewed);
-      expect(
-        updates.slice(1).every((update) => update.filesCompleted > 0),
-      ).toBe(true);
+      expect(updates.at(-1)).toEqual(
+        rejected === "anchor" ? inventory : reviewed,
+      );
+      expect(updates.every((update) => update.filesTotal === 9)).toBe(true);
+      if (rejected !== "anchor")
+        expect(
+          updates.slice(1).every((update) => update.filesCompleted > 0),
+        ).toBe(true);
     } finally {
+      await tracker.stop();
+    }
+  },
+);
+
+test("does not multiply pending inventory work across idle refreshes", async () => {
+  const { home, parent, worker } = await workerSessionFixture();
+  await appendSessionItem(worker, progressMessage(3));
+  const updates: ScanProgress[] = [];
+  const tracker = costTracker(home, {
+    expectedFilesTotal: 8,
+    onProgress: (update) => updates.push(update),
+  });
+  tracker.start("scan-thread");
+  // Drain the initial worker receipt and use explicit refreshes without a timer.
+  await tracker.stop();
+  expect(updates.at(-1)?.filesCompleted).toBe(3);
+  tracker.beginParentTurn();
+  let inventoryReads = 0;
+  const inventory: ScanProgress = {
+    phase: "discovery",
+    filesCompleted: 0,
+    get filesTotal() {
+      inventoryReads++;
+      return 8;
+    },
+  };
+  const reviewed: ScanProgress = {
+    phase: "validation",
+    filesCompleted: 3,
+    filesTotal: 8,
+  };
+  const inventoryText = progressMarker("discovery", 0, 8);
+  const reviewText = progressMarker("validation", 3, 8);
+  await appendFile(
+    parent,
+    jsonLines([
+      nativeCommand("inventory", inventoryText),
+      nativeCommand(["review", "sk-" + "a".repeat(32)], persistedCommandOutput),
+    ]) + "\n",
+  );
+  tracker.recordParentProgress(
+    inventory,
+    completedCommand("inventory", inventoryText),
+  );
+  const event = completedCommand(
+    "review [REDACTED_SECRET]",
+    commandOutput(reviewText),
+  );
+  expect(tracker.recordParentProgress(reviewed, event)).toBe(true);
+  tracker.acceptParentProgress(reviewed, event);
+  await tracker.refresh();
+  const work: number[] = [];
+  for (let poll = 0; poll < 6; poll++) {
+    inventoryReads = 0;
+    await tracker.refresh();
+    work.push(inventoryReads);
+  }
+  // Count actual accesses to the supplied marker, not a private queue shape or
+  // wall-clock duration. Rechecking one unchanged receipt must stay constant.
+  expect(work[0]).toBeGreaterThan(0);
+  expect(work.every((reads) => reads <= work[0]!)).toBe(true);
+  await tracker.stop();
+});
+
+test.each(["missing", "short", "append", "split-utf8"] as const)(
+  "keeps authoritative state while replaying %s event history",
+  async (scenario) => {
+    const home = await codexHome();
+    const parent = await writeSession(home, "scan-thread", {
+      input_tokens: 42,
+      output_tokens: 0,
+    });
+    const early = {
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "Early Ω😀 output." }],
+      },
+    };
+    const late = {
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "Later output." }],
+      },
+    };
+    const laterUsage = {
+      type: "event_msg",
+      payload: {
+        type: "token_count",
+        info: { total_token_usage: { input_tokens: 84, output_tokens: 0 } },
+      },
+    };
+    const full = Buffer.concat([
+      await filesystem.readFile(parent),
+      Buffer.from(jsonLines([early]) + "\n"),
+    ]);
+    const split =
+      scenario === "split-utf8"
+        ? full.indexOf(Buffer.from("😀")) + 2
+        : full.length;
+    await writeFile(parent, full.subarray(0, split));
+    const hidden = join(home, "saved-history.jsonl");
+    const originalOpen = filesystem.open;
+    let opens = 0;
+    const opening = spyOn(filesystem, "open").mockImplementation(
+      async (...args: Parameters<typeof originalOpen>) => {
+        const replay = String(args[0]) === parent ? ++opens : 0;
+        if (replay === 2) {
+          if (scenario === "append")
+            await appendFile(parent, jsonLines([late, laterUsage]) + "\n");
+          if (scenario === "split-utf8")
+            await appendFile(parent, full.subarray(split));
+        }
+        const handle = await originalOpen(...args);
+        if (replay === 1 && (scenario === "missing" || scenario === "short")) {
+          const close = handle.close.bind(handle);
+          handle.close = async () => {
+            await close();
+            if (scenario === "missing") await filesystem.rename(parent, hidden);
+            else
+              await writeFile(parent, full.subarray(0, full.indexOf(10) + 1));
+          };
+        }
+        return handle;
+      },
+    );
+    const events: ScanSessionEvent[] = [];
+    const costs: number[] = [];
+    const tracker = costTracker(home, {
+      onSessionEvent: (event) => events.push(event),
+      onCost: (cost) => costs.push(cost.inputTokens),
+    });
+    try {
+      tracker.start("scan-thread");
+      const first = await tracker.refresh();
+      expect(costs[0]).toBe(42);
+      if (scenario === "missing" || scenario === "short") {
+        expect(first.cost?.inputTokens).toBe(42);
+        expect(events).toEqual([]);
+        if (scenario === "missing") await filesystem.rename(hidden, parent);
+        else await writeFile(parent, full);
+      }
+      const result = await tracker.stop();
+      expect(result.cost?.inputTokens).toBe(scenario === "append" ? 84 : 42);
+      const expected = full
+        .toString("utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      if (scenario === "append") expected.push(late, laterUsage);
+      expect(events.map((event) => event.event)).toEqual(expected);
+    } finally {
+      opening.mockRestore();
       await tracker.stop();
     }
   },
@@ -577,13 +756,8 @@ test.each(["open", "read", "close"] as const)(
         if (replay && boundary === "open") throw failure();
         const handle = await originalOpen(...args);
         if (replay && boundary === "read") {
-          const read = handle.read.bind(handle);
-          let reads = 0;
-          handle.read = (async (
-            ...readArgs: Parameters<typeof handle.read>
-          ) => {
-            if (++reads === 2) throw failure();
-            return read(...readArgs);
+          handle.read = (async () => {
+            throw failure();
           }) as typeof handle.read;
         }
         if (replay && boundary === "close") {

@@ -233,10 +233,10 @@ export class ScanCostTracker {
   readonly #parentFacts = new Map<number, OrderedProgress>();
   #parentInventory: ParentProgressMarker | null = null;
   #parentReviewStart: { position: number; markerIndex: number } | null = null;
-  readonly #readyParentMarkers: Array<{
-    live: StreamedProgressItem;
-    marker: ParentProgressMarker;
-  }> = [];
+  readonly #readyParentMarkers = new Map<
+    ParentProgressMarker,
+    StreamedProgressItem
+  >();
   #inventoryFrontier = {
     position: 0,
     markerIndex: -1,
@@ -297,7 +297,7 @@ export class ScanCostTracker {
     this.#parentSession?.messageProjections.clear();
     for (const completion of this.#parentSession?.completions ?? [])
       completion.item = null;
-    this.#readyParentMarkers.length = 0;
+    this.#readyParentMarkers.clear();
     this.#matchedParentItems = 0;
     this.#parentCompletionCursor = this.#parentSession?.completions.length ?? 0;
     this.#indexedParentCompletions = this.#parentCompletionCursor;
@@ -353,7 +353,7 @@ export class ScanCostTracker {
     live.markers.push(marker);
     if (progress.phase === "discovery" && progress.filesCompleted === 0)
       this.#parentInventory = marker;
-    if (live.position !== null) this.#readyParentMarkers.push({ live, marker });
+    if (live.position !== null) this.#readyParentMarkers.set(marker, live);
     return (
       live.position === null ||
       this.#afterParentFrontier(live.position, marker.index) ||
@@ -543,7 +543,7 @@ export class ScanCostTracker {
       if (matched === undefined) continue;
       live.position = completions[matched]!.position;
       for (const marker of live.markers)
-        this.#readyParentMarkers.push({ live, marker });
+        this.#readyParentMarkers.set(marker, live);
       const changed = new Set<string>();
       const remove = (key: string, queues: ProgressOccurrenceQueues) => {
         const queue = queues.get(key)!;
@@ -586,57 +586,84 @@ export class ScanCostTracker {
     live: StreamedProgressItem,
     marker: ParentProgressMarker,
   ): ParentProgressMarker | undefined {
-    const inventory = this.#parentInventory;
     if (
       !this.#parentTurnStartKnown ||
-      inventory === null ||
-      inventory.accepted ||
       marker.progress.filesCompleted === 0 ||
-      marker.progress.filesTotal !== inventory.progress.filesTotal ||
       live.position === null
     )
       return undefined;
-    const pending = this.#liveParentItems.find((item) =>
-      item.markers.includes(inventory),
-    );
-    const item = pending?.item;
-    if (
-      pending?.position !== null ||
-      item?.kind !== "command" ||
-      item.outputDigest === item.persistedOutputDigest ||
-      this.#liveParentItems.indexOf(pending) >=
-        this.#liveParentItems.indexOf(live)
-    )
-      return undefined;
-    let source: SessionCompletion | undefined;
-    for (const completion of this.#parentSession?.completions ?? []) {
-      if (
-        completion.item?.kind !== "command" ||
-        completion.item.outputDigest !== item.persistedOutputDigest
-      )
-        continue;
-      if (source !== undefined) return undefined;
-      source = completion;
+    let inventory: ParentProgressMarker | undefined;
+    let pending: StreamedProgressItem | undefined;
+    for (
+      let index = this.#liveParentItems.indexOf(live) - 1;
+      index >= 0;
+      index--
+    ) {
+      const candidate = this.#liveParentItems[index]!;
+      inventory = candidate.markers.findLast(
+        (observed) =>
+          (observed.accepted || observed === this.#parentInventory) &&
+          observed.progress.phase === "discovery" &&
+          observed.progress.filesCompleted === 0 &&
+          observed.progress.filesTotal === marker.progress.filesTotal,
+      );
+      if (inventory !== undefined) {
+        pending = candidate;
+        break;
+      }
     }
-    // Corroborate scope without assigning the lost command an occurrence.
-    // A consumed unmatched prefix remains relevant to collision ambiguity.
-    return source !== undefined &&
-      source.position > this.#inventoryFrontier.position &&
-      source.position < live.position &&
+    if (inventory === undefined || pending === undefined) return undefined;
+    let position = pending.position;
+    if (position === null) {
+      const item = pending.item;
+      if (
+        item?.kind !== "command" ||
+        (!inventory.accepted &&
+          item.outputDigest === item.persistedOutputDigest)
+      )
+        return undefined;
+      for (const completion of this.#parentSession?.completions ?? []) {
+        if (
+          completion.item?.kind !== "command" ||
+          completion.item.outputDigest !== item.persistedOutputDigest
+        )
+          continue;
+        if (position !== null) return undefined;
+        position = completion.position;
+      }
+    }
+    // A matched review can corroborate an accepted inventory or admit a lost
+    // inventory without assigning its command a guessed occurrence. A later
+    // inventory still wins, and duplicate lossy output remains ambiguous.
+    return position !== null &&
+      (position > this.#inventoryFrontier.position ||
+        (pending.position !== null &&
+          position === this.#inventoryFrontier.position &&
+          inventory.index >= this.#inventoryFrontier.markerIndex)) &&
+      (position < live.position ||
+        (pending.position !== null &&
+          position === live.position &&
+          inventory.index < marker.index)) &&
       !this.#parentSession?.progress.some(
         (saved) =>
           saved.update.phase === "discovery" &&
           saved.update.filesCompleted === 0 &&
-          saved.position > source.position &&
-          saved.position < live.position!,
+          (saved.position > position ||
+            (pending.position !== null &&
+              saved.position === position &&
+              saved.markerIndex > inventory.index)) &&
+          (saved.position < live.position! ||
+            (saved.position === live.position &&
+              saved.markerIndex < marker.index)),
       )
       ? inventory
       : undefined;
   }
 
   #reconcileParentProgress(): void {
-    const ready = this.#readyParentMarkers.splice(0);
-    for (const { live, marker } of ready) {
+    const ready = [...this.#readyParentMarkers];
+    this.#readyParentMarkers.clear();
+    for (const [marker, live] of ready) {
       if (live.position !== null)
         this.#rememberParentFact({
           progress: marker.progress,
@@ -656,10 +683,33 @@ export class ScanCostTracker {
           Object.assign(this.#displayedProgress, source);
       }
     }
+    let acceptedInventory:
+      (ProgressOrder & { marker: ParentProgressMarker }) | undefined;
+    for (const live of this.#liveParentItems) {
+      for (const marker of live.markers) {
+        if (
+          !marker.accepted ||
+          marker.progress.phase !== "discovery" ||
+          marker.progress.filesCompleted !== 0
+        )
+          continue;
+        const candidate = {
+          marker,
+          position: live.position ?? undefined,
+          markerIndex: marker.index,
+          order: marker.order,
+        };
+        if (
+          acceptedInventory === undefined ||
+          compareProgressOrder(candidate, acceptedInventory) > 0
+        )
+          acceptedInventory = candidate;
+      }
+    }
     let corrected:
       (OrderedProgress & { owner: "worker" | "live" | "parent" }) | null = null;
     const previousParent = this.#parentProgress;
-    for (const { live, marker } of ready) {
+    for (const [marker, live] of ready) {
       const position = live.position;
       if (position === null) continue;
       const corroborated = this.#corroboratedInventory(live, marker);
@@ -673,12 +723,12 @@ export class ScanCostTracker {
         // A read can reach EOF before the next completion is appended, then
         // receive both live items while file.close is pending. Keep the compact
         // inventory proof until the admitted review's source position resolves.
-        this.#readyParentMarkers.push({ live, marker });
+        this.#readyParentMarkers.set(marker, live);
         continue;
       }
       if (
         (corroborated !== undefined ||
-          marker.accepted ||
+          marker === acceptedInventory?.marker ||
           (marker === this.#parentInventory &&
             ((this.#parentProgress?.progress.filesCompleted ?? 0) === 0 ||
               this.#precedesParentReview(position, marker.index)))) &&
@@ -779,7 +829,7 @@ export class ScanCostTracker {
       this.#expectedFilesTotal ?? Number.MAX_SAFE_INTEGER,
       this.#workerProgress.values().reduce((sum, count) => sum + count, 0),
     );
-    for (const { live, marker } of ready) {
+    for (const [marker, live] of ready) {
       const position = live.position;
       const progress = marker.progress;
       const deferredCoverage =
@@ -817,7 +867,7 @@ export class ScanCostTracker {
         ) {
           // Saved inventory can admit the live receipt or invalidate provisional
           // worker coverage. Keep only the parsed fact until it is eligible.
-          this.#readyParentMarkers.push({ live, marker });
+          this.#readyParentMarkers.set(marker, live);
           continue;
         }
         marker.accepted = true;
@@ -1169,19 +1219,25 @@ export class ScanCostTracker {
     }
 
     const usages = new Map(this.#receipts);
-    for (const [path, tracked] of this.#sessions) {
-      const threadId = tracked.threadId;
+    for (const [path, session] of this.#sessions) {
+      const threadId = session.threadId;
       if (threadId === null || !included.has(threadId)) continue;
-      let session = tracked;
       if (
         this.#options.onSessionEvent !== undefined &&
         session.events === undefined
       ) {
-        // Replay only newly associated sessions, including their early events.
-        session = createSessionUsage();
-        session.events = [];
-        this.#sessions.set(path, session);
-        await readSessionUsage(path, session, repository, progressThread);
+        // Replay event history through the already-read snapshot without
+        // replacing its authoritative progress, usage, or partial-line decoder.
+        const replay = createSessionUsage();
+        replay.events = [];
+        await readSessionUsage(
+          path,
+          replay,
+          undefined,
+          undefined,
+          session.offset,
+        );
+        if (replay.offset === session.offset) session.events = replay.events;
       }
       let worker: number | undefined;
       if (threadId !== this.#threadId) {
@@ -1630,6 +1686,7 @@ async function readSessionUsage(
   session: SessionUsage,
   repository?: string,
   progressThread?: string,
+  throughOffset?: number,
 ): Promise<void> {
   if (session.unreadable) return;
   let file;
@@ -1642,11 +1699,13 @@ async function readSessionUsage(
   }
   try {
     const buffer = Buffer.alloc(SESSION_READ_SIZE);
-    while (true) {
+    while (throughOffset === undefined || session.offset < throughOffset) {
       const { bytesRead } = await file.read(
         buffer,
         0,
-        buffer.length,
+        throughOffset === undefined
+          ? buffer.length
+          : Math.min(buffer.length, throughOffset - session.offset),
         session.offset,
       );
       if (bytesRead === 0) return;

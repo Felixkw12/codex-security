@@ -8929,12 +8929,14 @@ describe("CodexSecurity orchestration", () => {
   );
 
   test.each(
-    ["replay", "all-batch"].flatMap((delivery) =>
-      [false, true].map((worker) => ({ delivery, worker })),
+    ["initial-read", "replay", "all-batch"].flatMap((delivery) =>
+      [false, true].flatMap((truncated) =>
+        [false, true].map((worker) => ({ delivery, truncated, worker })),
+      ),
     ),
   )(
-    "keeps saved inventory behind live scope (delivery=$delivery, worker=$worker)",
-    async ({ delivery, worker }) => {
+    "keeps saved inventory behind live scope (delivery=$delivery, truncated=$truncated, worker=$worker)",
+    async ({ delivery, truncated, worker }) => {
       const { root, repository, codexHome, scanDir } = await scanDirectories();
       const updates: ScanProgress[] = [];
       const parentEvents: string[] = [];
@@ -8942,7 +8944,7 @@ describe("CodexSecurity orchestration", () => {
       const releaseReplay = Promise.withResolvers<void>();
       const currentRead = Promise.withResolvers<void>();
       const pollAllowed = Promise.withResolvers<void>();
-      let holdPoll = delivery === "all-batch";
+      let holdPoll = true;
       const originalReaddir = fsPromises.readdir;
       const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
         ...args: Parameters<typeof originalReaddir>
@@ -8961,7 +8963,10 @@ describe("CodexSecurity orchestration", () => {
         if (String(args[0]) !== parentPath) return handle;
         const close = handle.close.bind(handle);
         handle.close = async () => {
-          if (++closes === 2 && delivery === "replay") {
+          if (
+            ++closes === (delivery === "initial-read" ? 1 : 2) &&
+            delivery !== "all-batch"
+          ) {
             replayClose.resolve();
             await releaseReplay.promise;
           }
@@ -9009,9 +9014,13 @@ describe("CodexSecurity orchestration", () => {
               ]) + "\n",
             );
           }
+          if (delivery !== "all-batch") {
+            holdPoll = false;
+            pollAllowed.resolve();
+          }
           async function* events(): AsyncGenerator<ThreadEvent> {
-            // The second real read replays the newly associated session for logs.
-            if (delivery === "replay") await replayClose.promise;
+            // Hold either the original read or the event-history replay after old EOF.
+            if (delivery !== "all-batch") await replayClose.promise;
             const inventory = progressMarker("discovery", 0, 5);
             const review = progressMarker("reporting", 1, 5);
             const reviewRow = nativeCommand("review", review, "review");
@@ -9020,7 +9029,7 @@ describe("CodexSecurity orchestration", () => {
               jsonLines([
                 nativeCommand(
                   ["printf", "sk-" + "a".repeat(32)],
-                  inventory,
+                  truncated ? persistedCommandOutput : inventory,
                   "current",
                 ),
                 ...(delivery === "all-batch" ? [reviewRow] : []),
@@ -9028,10 +9037,10 @@ describe("CodexSecurity orchestration", () => {
             );
             yield completedCommand(
               "printf [REDACTED_SECRET]",
-              inventory,
+              truncated ? commandOutput(inventory) : inventory,
               "current",
             ) as ThreadEvent;
-            if (delivery === "replay") {
+            if (delivery !== "all-batch") {
               releaseReplay.resolve();
               await currentRead.promise;
               await appendFile(parentPath, jsonLines([reviewRow]) + "\n");
