@@ -183,9 +183,19 @@ test.each([false, true])(
 
 test
   .skipIf(process.platform === "win32")
-  .each(["supplied SIGTERM", "saved SIGTERM", "app-server exit"] as const)(
+  .each([
+    "supplied SIGTERM",
+    "saved SIGTERM",
+    "app-server exit",
+    "supplied preflight exit",
+    "saved pre-turn exit",
+  ] as const)(
   "cancels an active pre-turn Git snapshot without restarting: %s",
   async (mode) => {
+    const saved = mode.startsWith("saved");
+    const preflight = mode === "supplied preflight exit";
+    const nativeExit = mode.endsWith("exit");
+    const snapshotCount = saved || preflight ? 2 : 1;
     const root = await fixtures.create("patch-preparation-cancel-");
     const repository = join(root, "repository"),
       home = join(root, "home");
@@ -198,6 +208,12 @@ test
     await writeFile(join(repository, "app.ts"), "original\n");
     git("add", ".");
     git("commit", "-m", "Synthetic cancellation baseline");
+    if (preflight) {
+      const remote = join(root, "remote");
+      await mkdir(remote);
+      git("init", "--bare", remote);
+      git("remote", "add", "origin", remote);
+    }
     const fifo = join(root, "slow-input"),
       ready = join(root, "ready"),
       serverPid = join(root, "server-pid"),
@@ -230,12 +246,13 @@ import { writeFileSync } from "node:fs";
 import { runWorkflow, savedScan, resultWithFindings } from ${JSON.stringify(new URL("./cli-patch-fixtures.ts", import.meta.url).href)};
 import { runCodexSkillCommand, runRepositoryCommand } from ${JSON.stringify(new URL("../src/cli.ts", import.meta.url).href)};
 let snapshots = 0;
-const outcome = await runWorkflow(${JSON.stringify(mode === "saved SIGTERM" ? ["patch", "--scan", "scan-1", "--json"] : ["patch", "Synthetic issue", "--json"])}, {
+const outcome = await runWorkflow(${JSON.stringify(saved ? ["patch", "--scan", "scan-1", "--json"] : ["patch", "Synthetic issue", ...(preflight ? ["--create-pr"] : []), "--json"])}, {
   currentDirectory: ${JSON.stringify(repository)}, environment: { ...process.env, CODEX_HOME: ${JSON.stringify(home)} }, manualCodexPreparation: true,
   onWorkbench: () => savedScan(resultWithFindings(["high"]), "scan-1", ${JSON.stringify(repository)}),
   onCodex: (args, output, environment) => runCodexSkillCommand([${JSON.stringify(server)}], { ...output, auth: undefined }, { command: process.execPath }, environment),
   onRepositoryCommand: (command, args, cwd, options) => {
-    if (options?.patchSnapshot && args.includes("write-tree") && ++snapshots === ${mode === "saved SIGTERM" ? 2 : 1}) {
+    if (command !== "git") return "[]";
+    if (options?.patchSnapshot && args.includes("write-tree") && ++snapshots === ${snapshotCount}) {
       writeFileSync(${JSON.stringify(ready)}, "ready");
       return runRepositoryCommand("git", ["hash-object", ${JSON.stringify(fifo)}], cwd, options);
     }
@@ -278,7 +295,7 @@ process.exitCode = outcome.exitCode;
           await delay(25);
         }
       }
-      if (mode === "app-server exit") {
+      if (nativeExit) {
         process.kill(Number(await readFile(serverPid, "utf8")), "SIGUSR1");
       } else {
         invocation.kill("SIGTERM");
@@ -292,11 +309,9 @@ process.exitCode = outcome.exitCode;
         }),
       ]);
       expect(status, output + diagnostic).toBe(
-        mode === "app-server exit" ? 7 : 143,
+        nativeExit ? (saved ? 2 : 7) : 143,
       );
-      expect(JSON.parse(output.trim()).snapshots).toBe(
-        mode === "saved SIGTERM" ? 2 : 1,
-      );
+      expect(JSON.parse(output.trim()).snapshots).toBe(snapshotCount);
       if (mode !== "app-server exit") {
         const response = JSON.parse(JSON.parse(output.trim()).stdout);
         expect(response).not.toHaveProperty("applied");

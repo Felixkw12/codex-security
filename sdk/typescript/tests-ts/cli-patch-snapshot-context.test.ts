@@ -34,6 +34,7 @@ test
   .each([
     "configured",
     "git-dir",
+    "inaccessible",
     ...(spawnSync("git", ["lfs", "version"]).status === 0 ? ["used"] : []),
   ])(
   "patches non-LFS files without requiring unused writable LFS storage: %s",
@@ -66,7 +67,7 @@ test
     const index = await readFile(join(repository, ".git", "index"));
     const head = git("rev-parse", "HEAD");
     let patched = false;
-    await chmod(readOnly, 0o555);
+    await chmod(readOnly, mode === "inaccessible" ? 0 : 0o555);
     try {
       const outcome = await runWorkflow(
         ["patch", "Synthetic issue", "--json"],

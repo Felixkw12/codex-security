@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { listenForAbort } from "./cli-signals.js";
+import { relativePatchPath } from "./patch-byte-path.js";
 import { isNonEmptyString, parseJson } from "./value.js";
 
 import { execFileSync, spawn } from "node:child_process";
@@ -5788,7 +5789,11 @@ export async function main(
             );
             const { patches } = patchRun;
             exitCode = patchRun.exitCode;
-            if (exitCode === 130 || exitCode === 143) {
+            if (
+              exitCode === 130 ||
+              exitCode === 143 ||
+              !patchRun.preparationCompleted
+            ) {
               patchResult = {
                 scanId: selected.scanId,
                 repository: selected.repository,
@@ -5797,7 +5802,7 @@ export async function main(
               };
               throw new PatchCommandError(
                 "PATCH_FAILED",
-                "Patch operation was interrupted. File changes were not fully inspected; local edits and patches were kept.",
+                `${exitCode === 130 || exitCode === 143 ? "Patch operation was interrupted." : "Patch preparation did not complete."} File changes were not fully inspected; local edits and patches were kept.`,
               );
             }
             const files =
@@ -5907,8 +5912,10 @@ export async function main(
           let patchBase:
             GitPatchState | Map<string, string> | string | undefined;
           let publication: PatchPublication | undefined;
+          let preparationCompleted = false;
           const identifier = directPatchIdentifier(positionals, imports);
           const preparePatch = async (signal?: AbortSignal) => {
+            preparationCompleted = false;
             patchRiskState = options.assessPatchRisk
               ? await snapshotGitPatchState(
                   gitRepository,
@@ -5939,6 +5946,8 @@ export async function main(
                 signal,
               );
             }
+            signal?.throwIfAborted();
+            preparationCompleted = true;
           };
           const report = captureOutput();
           exitCode = await runSkill(
@@ -5957,11 +5966,11 @@ export async function main(
             },
           );
           if (!jsonOutput) output.write(report.text());
-          if (exitCode === 130 || exitCode === 143) {
+          if (exitCode === 130 || exitCode === 143 || !preparationCompleted) {
             patchResult = { repository, files: [] };
             throw new PatchCommandError(
               "PATCH_FAILED",
-              "Patch operation was interrupted. File changes were not fully inspected; local edits and patches were kept.",
+              `${exitCode === 130 || exitCode === 143 ? "Patch operation was interrupted." : "Patch preparation did not complete."} File changes were not fully inspected; local edits and patches were kept.`,
             );
           }
           const files =
@@ -7563,7 +7572,7 @@ async function hashPublicationFile(
   const canonical = await realpath(path, { encoding: "buffer" });
   if (
     isOutsidePath(
-      relative(
+      relativePatchPath(
         (await realpath(root, { encoding: "buffer" })).toString("latin1"),
         canonical.toString("latin1"),
       ),
@@ -7694,7 +7703,10 @@ async function preparePatchPublication(
     dependencies,
   );
   const localPath = (path: string) =>
-    relative(patchPathKey(repository), resolve(patchPathKey(root), path));
+    relativePatchPath(
+      patchPathKey(repository),
+      resolve(patchPathKey(root), path),
+    );
   const ignoredFiles = new Set<string>();
   const dirtyFiles = new Set(worktreeChanges.filter(Boolean).map(localPath));
   for (let index = 0; index < paths.length; index += 1) {
@@ -8044,7 +8056,10 @@ function patchChangeSources(
   const selections = files.map(patchPathKey);
   const selected = new Set(selections);
   const localPath = (path: string) =>
-    relative(patchPathKey(repository), resolve(patchPathKey(root), path));
+    relativePatchPath(
+      patchPathKey(repository),
+      resolve(patchPathKey(root), path),
+    );
   const transferred = new Set<string>();
   const deleted = new Set<string>();
   for (let index = 0; index < changes.length - 1;) {
@@ -8053,7 +8068,9 @@ function patchChangeSources(
     if (!/^[RC]/u.test(status)) continue;
     const destination = localPath(changes[index++]!);
     if (
-      selections.some((file) => !isOutsidePath(relative(file, destination)))
+      selections.some(
+        (file) => !isOutsidePath(relativePatchPath(file, destination)),
+      )
     ) {
       transferred.add(source);
       if (status.startsWith("R")) {
@@ -8062,7 +8079,9 @@ function patchChangeSources(
             "Patch files must remain inside the scanned repository.",
           );
         if (
-          ![...selected].some((file) => !isOutsidePath(relative(source, file)))
+          ![...selected].some(
+            (file) => !isOutsidePath(relativePatchPath(source, file)),
+          )
         ) {
           selected.add(source);
         }
@@ -8115,7 +8134,10 @@ async function createPatchPullRequest(
     );
     const publishable = new Set(
       included.map((file) =>
-        relative(patchPathKey(repository), resolve(patchPathKey(root), file)),
+        relativePatchPath(
+          patchPathKey(repository),
+          resolve(patchPathKey(root), file),
+        ),
       ),
     );
     for (const file of ignoredFiles) {
@@ -8162,11 +8184,16 @@ async function createPatchPullRequest(
           }
         })
         .map((file) =>
-          relative(patchPathKey(repository), resolve(patchPathKey(root), file)),
+          relativePatchPath(
+            patchPathKey(repository),
+            resolve(patchPathKey(root), file),
+          ),
         ),
     ]),
   ].filter((file) =>
-    [...dirtyFiles].some((dirty) => !isOutsidePath(relative(file, dirty))),
+    [...dirtyFiles].some(
+      (dirty) => !isOutsidePath(relativePatchPath(file, dirty)),
+    ),
   );
   if (dirty.length > 0) {
     throw new CodexSecurityError(
@@ -8190,11 +8217,15 @@ async function createPatchPullRequest(
     );
     for (let index = 0; index + 1 < changed.length; index += 2) {
       const path = changed[index + 1]!;
-      const local = relative(
+      const local = relativePatchPath(
         patchPathKey(repository),
         resolve(patchPathKey(root), path),
       );
-      if (!selectedFiles.some((file) => !isOutsidePath(relative(file, local))))
+      if (
+        !selectedFiles.some(
+          (file) => !isOutsidePath(relativePatchPath(file, local)),
+        )
+      )
         continue;
       const digest = await hashPublicationFile(root, path);
       const [, mode, , object] = changed[index]!.split(" ");
@@ -8230,9 +8261,13 @@ async function createPatchPullRequest(
     options?: Parameters<CliDependencies["runRepositoryCommand"]>[3],
   ) => dependencies.runRepositoryCommand("git", args, repository, options);
   const isDeleted = (file: string) =>
-    [...sources.deleted].some((source) => relative(source, file) === "") &&
+    [...sources.deleted].some(
+      (source) => relativePatchPath(source, file) === "",
+    ) &&
     !(
-      reportedFiles.some((selected) => relative(selected, file) === "") &&
+      reportedFiles.some(
+        (selected) => relativePatchPath(selected, file) === "",
+      ) &&
       existsSync(patchFilePath(repository, file)) &&
       lstatSync(patchFilePath(repository, file), {
         throwIfNoEntry: false,
@@ -8243,7 +8278,7 @@ async function createPatchPullRequest(
       (file) =>
         !isDeleted(file) &&
         !selectedFiles.some((parent) => {
-          const descendant = relative(parent, file);
+          const descendant = relativePatchPath(parent, file);
           return (
             descendant !== "" &&
             !isDeleted(parent) &&
@@ -9027,11 +9062,15 @@ async function assessPatchRisk(
       const repositoryKey = patchPathKey(request.repository);
       const files = selected?.some(
         (file) =>
-          !isOutsidePath(relative(resolve(repositoryKey, file), checkoutKey)),
+          !isOutsidePath(
+            relativePatchPath(resolve(repositoryKey, file), checkoutKey),
+          ),
       )
         ? undefined
         : selected
-            ?.map((file) => relative(checkoutKey, resolve(repositoryKey, file)))
+            ?.map((file) =>
+              relativePatchPath(checkoutKey, resolve(repositoryKey, file)),
+            )
             .filter((file) => !isOutsidePath(file))
             .map(patchPathText);
       if (files?.length === 0) continue;
@@ -9052,13 +9091,13 @@ async function assessPatchRisk(
         const selectedFiles = request.files!.map(patchPathKey);
         const deletedFiles = sources.deleted;
         for (const path of new Set([...before!.keys(), ...after!.keys()])) {
-          const file = relative(
+          const file = relativePatchPath(
             patchPathKey(request.repository),
             resolve(patchPathKey(checkout), path),
           );
           if (
             selectedFiles.some(
-              (selected) => !isOutsidePath(relative(selected, file)),
+              (selected) => !isOutsidePath(relativePatchPath(selected, file)),
             )
           ) {
             const entry = after!.get(path);
@@ -9231,10 +9270,15 @@ async function runFindingPatches(
   dependencies: CliDependencies,
   options: Omit<SkillRunOptions, "directory" | "findings"> = {},
   interactive = true,
-): Promise<{ patches: FindingPatch[]; exitCode: number; files: string[] }> {
+): Promise<{
+  patches: FindingPatch[];
+  exitCode: number;
+  files: string[];
+  preparationCompleted: boolean;
+}> {
   if (selected.findings.length === 0) {
     stderr.write("No matching open findings to patch.\n");
-    return { patches: [], exitCode: 0, files: [] };
+    return { patches: [], exitCode: 0, files: [], preparationCompleted: true };
   }
 
   stderr.write(
@@ -9261,6 +9305,7 @@ async function runFindingPatches(
     });
     let status: number;
     let changedFiles: string[];
+    let preparationCompleted = false;
     try {
       let base: GitPatchState | Map<string, string> | undefined;
       status = await runSkill(
@@ -9273,12 +9318,15 @@ async function runFindingPatches(
         {
           ...options,
           onBeforeTurn: async (signal) => {
+            preparationCompleted = false;
             await options.onBeforeTurn?.(signal);
             base = await snapshotPatchState(
               selected.repository,
               dependencies,
               signal,
             );
+            signal?.throwIfAborted();
+            preparationCompleted = true;
           },
           directory: selected.repository,
           findings: [finding],
@@ -9289,7 +9337,10 @@ async function runFindingPatches(
         },
       );
       changedFiles =
-        base === undefined || status === 130 || status === 143
+        base === undefined ||
+        status === 130 ||
+        status === 143 ||
+        !preparationCompleted
           ? []
           : await changedPatchFiles(selected.repository, base, dependencies);
     } finally {
@@ -9302,14 +9353,19 @@ async function runFindingPatches(
       files,
       reason,
     });
-    if (status === 130 || status === 143) {
-      patches.push(
-        failed(
-          "Patch operation was interrupted; file changes were not inspected.",
-        ),
-      );
-      stderr.write("codex-security: Patch operation was interrupted.\n");
-      return { patches, exitCode: status, files: [...knownFiles].sort() };
+    if (status === 130 || status === 143 || !preparationCompleted) {
+      const interrupted = status === 130 || status === 143;
+      const reason = interrupted
+        ? "Patch operation was interrupted; file changes were not inspected."
+        : `Patch command exited with status ${status} before preparation completed; file changes were not inspected.`;
+      patches.push(failed(reason));
+      stderr.write(`codex-security: ${reason}\n`);
+      return {
+        patches,
+        exitCode: interrupted ? status : patchExitCode(patches),
+        files: [...knownFiles].sort(),
+        preparationCompleted,
+      };
     }
     for (const file of changedFiles) knownFiles.add(file);
     let patch: FindingPatch;
@@ -9369,6 +9425,7 @@ async function runFindingPatches(
     patches,
     exitCode: patchExitCode(patches),
     files: [...knownFiles].sort(),
+    preparationCompleted: true,
   };
 }
 
