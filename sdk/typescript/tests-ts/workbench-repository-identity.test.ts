@@ -251,21 +251,12 @@ if scenario == "identity":
         windows_legacy_birth_time = _repository_birth_time_ns(common, legacy_metadata)
         windows_modern_birth_time = _repository_birth_time_ns(common, modern_metadata)
     linux_birth_times = {}
-    with patch.object(sys, "platform", "linux"), patch.object(os, "name", "posix"), \
-         patch("workbench_target_state._linux_repository_birth_time_ns", return_value=None):
-        for label, output, status in (
-            ("valid", "42.000000123\n", 0),
-            ("unavailable", "0.000000000\n", 0),
-            ("malformed", "42.123\n", 0),
-            ("failed", "42.000000123\n", 1),
-        ):
-            with patch("workbench_target_state.subprocess.run") as stat_command:
-                stat_command.return_value = SimpleNamespace(stdout=output, returncode=status)
+    with patch.object(sys, "platform", "linux"), patch.object(os, "name", "posix"):
+        for label, value in (("native", 42_000_000_123), ("unavailable", None)):
+            with patch("workbench_target_state._linux_repository_birth_time_ns", return_value=value), \
+                 patch("subprocess.run") as command:
                 linux_birth_times[label] = _repository_birth_time_ns(common, legacy_metadata)
-                if label == "valid":
-                    linux_locale = stat_command.call_args.kwargs["env"]["LC_ALL"]
-        with patch("workbench_target_state.subprocess.run", side_effect=OSError("missing stat")):
-            linux_birth_times["missing"] = _repository_birth_time_ns(common, legacy_metadata)
+                assert not command.called
     print(json.dumps({
         "identities": identities,
         "forgedIdentity": forged_identity,
@@ -281,7 +272,6 @@ if scenario == "identity":
         "windowsLegacyBirthTime": windows_legacy_birth_time,
         "windowsModernBirthTime": windows_modern_birth_time,
         "linuxBirthTimes": linux_birth_times,
-        "linuxLocale": linux_locale,
         "targetIdsPreserved": all(
             target_ids[name] == stable_target_id(target)
             for name, target in targets.items()
@@ -292,6 +282,45 @@ if scenario == "identity":
                 "SELECT current_path, repository_identity FROM security_targets"
             )
         },
+    }))
+
+elif scenario == "native-unavailable":
+    import ctypes
+    import workbench_target_state as target_state
+
+    targets = (repository, worktree)
+    for name, target in zip(("primary", "linked"), targets):
+        add_scan(name, target)
+    before = [listed(target) for target in targets]
+    stored = list(connection.execute("SELECT * FROM security_targets"))
+    marker = root / "repository-stat-ran"
+    observations = []
+    for target in targets:
+        tools = target / "tools"
+        tools.mkdir()
+        executable = tools / "stat"
+        executable.write_text(
+            '#!/bin/sh\nprintf invoked > "$SYNTHETIC_STAT_MARKER"\n'
+            'printf "42.000000123\\n"\n'
+        )
+        executable.chmod(0o755)
+        with patch.dict(os.environ, {
+            "PATH": str(tools) + os.pathsep + os.environ["PATH"],
+            "SYNTHETIC_STAT_MARKER": str(marker),
+        }), patch.object(ctypes, "CDLL", side_effect=OSError("unavailable native library")):
+            cached = target_state.RepositoryIdentityCache(connection).for_path(str(target))
+            observations.append({
+                "executed": marker.exists(),
+                "identity": cached.live_identity,
+                "ownerMatches": cached.ownership_matches,
+                "visible": listed(target),
+            })
+        marker.unlink(missing_ok=True)
+    print(json.dumps({
+        "before": before,
+        "unavailable": observations,
+        "restored": [listed(target) for target in targets],
+        "storedUnchanged": list(connection.execute("SELECT * FROM security_targets")) == stored,
     }))
 
 elif scenario == "history":
@@ -752,18 +781,33 @@ describe("durable workbench repository identities", () => {
     expect(result["windowsLegacyBirthTime"]).toBe(41);
     expect(result["windowsModernBirthTime"]).toBe(43);
     expect(result["linuxBirthTimes"]).toEqual({
-      valid: 42_000_000_123,
+      native: 42_000_000_123,
       unavailable: null,
-      malformed: null,
-      failed: null,
-      missing: null,
     });
-    expect(result["linuxLocale"]).toBe("C");
     expect(result["targetIdsPreserved"]).toBe(true);
     expect(JSON.stringify(result["stored"])).not.toContain(
       "SYNTHETIC_PASSWORD",
     );
   }, 30_000);
+
+  test.skipIf(process.platform !== "linux")(
+    "unavailable native identity does not execute checkout tools or reuse saved aliases",
+    () => {
+      const result = runProbe("native-unavailable", fixture());
+      const history = [
+        ["linked", "primary"],
+        ["linked", "primary"],
+      ];
+      expect(result["before"]).toEqual(history);
+      expect(result["unavailable"]).toEqual([
+        { executed: false, identity: null, ownerMatches: false, visible: [] },
+        { executed: false, identity: null, ownerMatches: false, visible: [] },
+      ]);
+      expect(result["restored"]).toEqual(history);
+      expect(result["storedUnchanged"]).toBe(true);
+    },
+    30_000,
+  );
 
   test("retains removed worktrees while excluding spoofed origins and unrelated scopes", () => {
     const result = runProbe("history", fixture());

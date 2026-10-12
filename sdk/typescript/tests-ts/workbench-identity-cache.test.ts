@@ -1,7 +1,7 @@
-import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { runCommand } from "./support/shell.js";
 
 const probe = String.raw`
 import argparse
@@ -705,19 +705,16 @@ with ExitStack() as stack:
             assert not library.called
         with patch.object(sys, "platform", "linux"), patch.object(os, "name", "posix"), \
              patch.object(state, "_linux_repository_birth_time_ns", return_value=42_000_000_123), \
-             patch.object(state.subprocess, "run") as command:
+             patch("subprocess.run") as command:
             native = state._repository_birth_time_ns(path, SimpleNamespace(st_ctime_ns=41))
             assert not command.called
         with patch.object(sys, "platform", "linux"), patch.object(os, "name", "posix"), \
              patch.object(state, "_linux_repository_birth_time_ns", return_value=None), \
-             patch.object(state.subprocess, "run", return_value=SimpleNamespace(
-                 stdout="42.000000123\n", returncode=0
-             )) as command:
-            fallback = state._repository_birth_time_ns(path, SimpleNamespace(st_ctime_ns=41))
-            assert command.call_args.args[0] == ["stat", "--format=%.9W", "--", path]
-            assert command.call_args.kwargs["env"]["LC_ALL"] == "C"
+             patch("subprocess.run") as command:
+            unavailable = state._repository_birth_time_ns(path, SimpleNamespace(st_ctime_ns=41))
+            assert not command.called
         print(json.dumps({
-            "cases": cases, "native": native, "fallback": fallback,
+            "cases": cases, "native": native, "unavailable": unavailable,
             "layout": [real_sizeof(state._LinuxStatxTimestamp),
                        state._LinuxStatx.birth_time.offset, real_sizeof(state._LinuxStatx)],
         }))
@@ -1550,16 +1547,16 @@ with ExitStack() as stack:
         }))
 `;
 
-function run(
+async function run(
   scenario: string,
   ...scenarioArgs: string[]
-): Record<string, unknown> {
+): Promise<Record<string, unknown>> {
   const python = (Bun.which("python3") ?? Bun.which("python"))!;
   // Keep the Python fixture off the Windows command line.
-  const execution = spawnSync(
+  const execution = await runCommand(
     python,
     ["-I", "-B", "-", join(PLUGIN_ROOT, "scripts"), scenario, ...scenarioArgs],
-    { input: probe, encoding: "utf8", timeout: 10_000 },
+    { input: probe, timeout: 10_000 },
   );
   expect(execution.status, execution.error?.message ?? execution.stderr).toBe(
     0,
@@ -1567,8 +1564,8 @@ function run(
   return JSON.parse(execution.stdout) as Record<string, unknown>;
 }
 
-test("uses registered old-Git paths and stable object-directory generation evidence", () => {
-  expect(run("generation-metadata")).toEqual({
+test("uses registered old-Git paths and stable object-directory generation evidence", async () => {
+  expect(await run("generation-metadata")).toEqual({
     oldMain: true,
     oldLinkedMatches: true,
     nulMatches: true,
@@ -1594,8 +1591,8 @@ test("uses registered old-Git paths and stable object-directory generation evide
   });
 });
 
-test("keeps automatic history bounded by saved scan generation", () => {
-  const result = run("scan-generation");
+test("keeps automatic history bounded by saved scan generation", async () => {
+  const result = await run("scan-generation");
   expect(result["selected"]).toEqual([
     "alias-proved",
     "requested-legacy",
@@ -1618,8 +1615,8 @@ test("keeps automatic history bounded by saved scan generation", () => {
   expect(result["absentExactCounts"]).toEqual([1, 1]);
 });
 
-test("counts findings in each selected repository scope and preserves absent decisions", () => {
-  const result = run("repository-counts");
+test("counts findings in each selected repository scope and preserves absent decisions", async () => {
+  const result = await run("repository-counts");
   const all = result["all"] as {
     counts: Record<string, number>;
     ids: string[];
@@ -1724,8 +1721,8 @@ test("counts findings in each selected repository scope and preserves absent dec
   expect(openPastEnd.nextOffset).toBeNull();
 });
 
-test("records generation explicitly in both transactional parent scan writers", () => {
-  const result = run("scan-writers");
+test("records generation explicitly in both transactional parent scan writers", async () => {
+  const result = await run("scan-writers");
   expect(result["generations"]).toEqual({
     "current-writer": "generation-writer",
     "old-writer": null,
@@ -1735,13 +1732,13 @@ test("records generation explicitly in both transactional parent scan writers", 
   expect(result["generationIndex"]).toBe(true);
 });
 
-test("reads precise Linux birth time through supported native interfaces", () => {
-  const result = run("birth-time");
+test("reads precise Linux birth time through supported native interfaces", async () => {
+  const result = await run("birth-time");
   const cases = result["cases"] as Record<string, unknown>;
 
   expect(result["layout"]).toEqual([16, 80, 256]);
   expect(result["native"]).toBe(42_000_000_123);
-  expect(result["fallback"]).toBe(result["native"]);
+  expect(result["unavailable"]).toBeNull();
   expect(cases["wrapper"]).toEqual({
     value: 42_000_000_123,
     calls: [null],
@@ -1774,8 +1771,8 @@ test("reads precise Linux birth time through supported native interfaces", () =>
   }
 });
 
-test("reuses established aliases and probes each saved target once per request", () => {
-  const result = run("cache");
+test("reuses established aliases and probes each saved target once per request", async () => {
+  const result = await run("cache");
 
   expect(result["scans"]).toEqual([
     "legacy-scan",
@@ -1816,8 +1813,8 @@ test("reuses established aliases and probes each saved target once per request",
 
 test.each(["tied", "precise"])(
   "orders completed history by database visibility across legacy and current writers (%s)",
-  (precision) => {
-    const result = run("completion-order", precision);
+  async (precision) => {
+    const result = await run("completion-order", precision);
     const precise = precision === "precise";
 
     expect(result["legacy"]).toEqual({
@@ -1858,8 +1855,8 @@ test.each(["tied", "precise"])(
   },
 );
 
-test("confirms findings against the latest selected scan without merging legacy groups", () => {
-  expect(run("selected-latest")).toEqual({
+test("confirms findings against the latest selected scan without merging legacy groups", async () => {
+  expect(await run("selected-latest")).toEqual({
     selected: {
       "legacy:legacy-only": [false, "open", 1],
       "legacy:same-key": [false, "closed", 1],
@@ -1876,8 +1873,8 @@ test("confirms findings against the latest selected scan without merging legacy 
   });
 });
 
-test("restores only an unclaimed empty scan output under the workbench writer lock", () => {
-  const result = run("archive-recovery");
+test("restores only an unclaimed empty scan output under the workbench writer lock", async () => {
+  const result = await run("archive-recovery");
   const cases = result["cases"] as Record<string, Record<string, unknown>>;
   expect(result["parserAccepts"]).toEqual([true, true, false, false]);
   for (const name of ["recorded", "unrecorded", "missingOriginal"]) {
@@ -1922,8 +1919,8 @@ test("restores only an unclaimed empty scan output under the workbench writer lo
   }
 });
 
-test("rechecks scan output inside registration after owner and parent validation", () => {
-  const result = run("archive-registration") as Record<
+test("rechecks scan output inside registration after owner and parent validation", async () => {
+  const result = (await run("archive-registration")) as Record<
     string,
     {
       accepted: boolean;
@@ -1958,8 +1955,8 @@ test("rechecks scan output inside registration after owner and parent validation
   }
 });
 
-test("keeps authenticated historical aliases visible without trusting a replacement checkout", () => {
-  const result = run("persisted-alias");
+test("keeps authenticated historical aliases visible without trusting a replacement checkout", async () => {
+  const result = await run("persisted-alias");
 
   expect(result["scans"]).toEqual([
     "legacy-scan",
@@ -1991,8 +1988,8 @@ test("keeps authenticated historical aliases visible without trusting a replacem
 
 test.each(["migration", "migration-recorded31"])(
   "upgrades only independently verified pre-release repository hashes (%s)",
-  (scenario) => {
-    const result = run(scenario);
+  async (scenario) => {
+    const result = await run(scenario);
 
     expect(result["identities"]).toEqual(result["expected"]);
     expect(result["startingVersion"]).toBe(
@@ -2013,8 +2010,8 @@ test.each(["migration", "migration-recorded31"])(
   },
 );
 
-test("keeps unproved legacy history unbound and rejects newer or indeterminate owners", () => {
-  const result = run("null-history");
+test("keeps unproved legacy history unbound and rejects newer or indeterminate owners", async () => {
+  const result = await run("null-history");
 
   expect(result["sameCheckoutMetadata"]).toBe(true);
   expect(result["stored"]).toEqual({
@@ -2028,8 +2025,8 @@ test("keeps unproved legacy history unbound and rejects newer or indeterminate o
   expect(result["scans"]).toEqual(["replacement-alias-scan"]);
 });
 
-test("binds late NULL identities only when the selected target is registered", () => {
-  const result = run("late-null");
+test("binds late NULL identities only when the selected target is registered", async () => {
+  const result = await run("late-null");
 
   expect(result["stored"]).toEqual({
     requested: "repository-current",
@@ -2058,8 +2055,8 @@ test("binds late NULL identities only when the selected target is registered", (
   expect(result["feedback"]).toEqual([]);
 });
 
-test("guards identity binding at the database write and rechecks lost bindings", () => {
-  const result = run("binding");
+test("guards identity binding at the database write and rechecks lost bindings", async () => {
+  const result = await run("binding");
 
   expect(result["guarded"]).toEqual({
     idHistory: false,
@@ -2094,8 +2091,8 @@ test("guards identity binding at the database write and rechecks lost bindings",
   });
 });
 
-test("compares sealed history from persisted evidence without weakening automatic requesters", () => {
-  const result = run("sealed-comparison");
+test("compares sealed history from persisted evidence without weakening automatic requesters", async () => {
+  const result = await run("sealed-comparison");
 
   expect(result["accepted"]).toEqual([true, true]);
   expect(result["conflictingIdentitiesAccepted"]).toBe(false);
@@ -2105,8 +2102,8 @@ test("compares sealed history from persisted evidence without weakening automati
   expect(result["unregisteredAutomaticRequesterRejected"]).toBe(true);
 });
 
-test("admits rerun lineage only through the verified repository and exact scope", () => {
-  const result = run("lineage");
+test("admits rerun lineage only through the verified repository and exact scope", async () => {
+  const result = await run("lineage");
 
   expect(result["accepted"]).toEqual({
     requested: true,
@@ -2120,8 +2117,8 @@ test("admits rerun lineage only through the verified repository and exact scope"
   expect(result["scanCount"]).toBe(7);
 });
 
-test("revalidates saved workspace identity inside the scan-start transaction", () => {
-  const result = run("saved-start");
+test("revalidates saved workspace identity inside the scan-start transaction", async () => {
+  const result = await run("saved-start");
 
   expect(result["accepted"]).toEqual({
     valid: true,
@@ -2133,8 +2130,8 @@ test("revalidates saved workspace identity inside the scan-start transaction", (
   expect(result["stored"]).toBe("repository-current");
 });
 
-test("checks current ownership before rejoining saved scan tasks", () => {
-  const result = run("scan-reuse");
+test("checks current ownership before rejoining saved scan tasks", async () => {
+  const result = await run("scan-reuse");
 
   expect(result["owners"]).toEqual({
     current: true,
@@ -2166,8 +2163,8 @@ test("checks current ownership before rejoining saved scan tasks", () => {
   expect(result["legacyGeneration"]).toBeNull();
 });
 
-test("quarantines unproved public-v30 bindings without discarding historical records", () => {
-  const result = run("v30-current");
+test("quarantines unproved public-v30 bindings without discarding historical records", async () => {
+  const result = await run("v30-current");
 
   expect(result["stored"]).toEqual({
     "current-owner": "current-generation",

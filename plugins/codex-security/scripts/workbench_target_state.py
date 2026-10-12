@@ -10,7 +10,6 @@ import platform
 import re
 import sqlite3
 import stat
-import subprocess
 import sys
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -201,30 +200,7 @@ def _repository_birth_time_ns(path: str, metadata: os.stat_result) -> int | None
         return int(birth_time * 1_000_000_000) if birth_time > 0 else None
     if not sys.platform.startswith("linux"):
         return None
-    birth_time_ns = _linux_repository_birth_time_ns(path)
-    if birth_time_ns is not None:
-        return birth_time_ns
-    try:
-        result = subprocess.run(
-            ["stat", "--format=%.9W", "--", path],
-            check=False,
-            capture_output=True,
-            text=True,
-            env={**os.environ, "LC_ALL": "C"},
-        )
-    except OSError:
-        return None
-    seconds, separator, nanoseconds = result.stdout.strip().partition(".")
-    if (
-        result.returncode != 0
-        or separator != "."
-        or not seconds.isdecimal()
-        or len(nanoseconds) != 9
-        or not nanoseconds.isdecimal()
-    ):
-        return None
-    birth_time_ns = int(seconds) * 1_000_000_000 + int(nanoseconds)
-    return birth_time_ns if birth_time_ns > 0 else None
+    return _linux_repository_birth_time_ns(path)
 
 
 @dataclass(frozen=True)
