@@ -178,7 +178,7 @@ def assert_published_aggregate(scan):
     coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
     for field in ("documentType", "schemaVersion", "scanId"):
         coverage.pop(field)
-    assert coverage == scan.coverage
+    assert coverage == {**scan.coverage, "receiptSealVersion": 1}
     assert (scan.scan_dir / "report.md").is_file()
 
 
@@ -248,7 +248,7 @@ def test_publication_renders_each_source_remediation(
         coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
         for field in ("documentType", "schemaVersion", "scanId"):
             coverage.pop(field)
-        assert coverage == scan.coverage
+        assert coverage == {**scan.coverage, "receiptSealVersion": 1}
     else:
         assert_published_aggregate(scan)
     report = (scan.scan_dir / "report.md").read_text()
