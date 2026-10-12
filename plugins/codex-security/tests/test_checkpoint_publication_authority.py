@@ -15,7 +15,12 @@ import pytest
 from test_deep_scan_successful_publication import add_worker
 from test_deep_scan_successful_publication import publication_scan as publication_scan
 from test_workbench_standard_deep_results import deep_scan_fixture, worker_paths
-from workbench_test_support import run_workbench, write_checkpoint, write_completed_contract
+from workbench_test_support import (
+    run_workbench,
+    saved_draft,
+    write_checkpoint,
+    write_completed_contract,
+)
 
 
 def captured_head(scan_dir, directory):
@@ -1463,6 +1468,103 @@ def test_model_less_selected_head_keeps_latest_accepted_model(
         == expected
     )
     assert all(path.read_bytes() == contents for path, contents in originals.items())
+
+
+@pytest.mark.parametrize(
+    ("mode", "root_head"), [("standard", True), ("deep", True), ("deep", False)]
+)
+@pytest.mark.parametrize("newer_sorts_first", [False, True])
+@pytest.mark.parametrize("restore_model", [False, True], ids=["model-less", "modeled"])
+def test_restored_head_keeps_latest_model_fallback(
+    workbench_api, workbench_db, publication_scan, mode, root_head, newer_sorts_first, restore_model
+):
+    scan = publication_scan(mode=mode)
+    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
+    for name in ("findings.json", "coverage.json", "scan-manifest.json"):
+        os.utime(scan.scan_dir / name, ns=(0, 0))
+    draft = saved_draft(scan.scan_id, complete=True)
+    draft["coverage"] = {**scan.coverage, **draft["coverage"]}
+    if root_head:
+        directory = scan.scan_dir
+    else:
+        result = add_worker(workbench_db, scan, status="canceled")
+        result.write_text(json.dumps(draft))
+        os.utime(result, ns=(0, 0))
+        directory = result.parent
+    head = directory / "checkpoint-head.json"
+    saved = workbench_api["saved_results"]
+    context = workbench_api["_WORKBENCH_DB_CONTEXT"]
+
+    def select(checkpoint, observed):
+        head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+        os.utime(head, ns=(observed, observed))
+        return head.read_bytes(), observed
+
+    def model():
+        return json.loads((scan.scan_dir / "scan-manifest.json").read_text())["scan"][
+            "threatModel"
+        ]["summary"]
+
+    empty = write_checkpoint(directory / "checkpoints", draft)
+    os.utime(empty, ns=(50, 50))
+    unmodeled_head = select(empty, 100)
+    saved._capture_saved_source(
+        scan.scan_dir, head.relative_to(scan.scan_dir).as_posix(), scan.scan_id
+    )
+    models = {
+        write_checkpoint(
+            directory / "checkpoints", {**draft, "threatModel": {"summary": text}}
+        ): text
+        for text in ("Synthetic model A.", "Synthetic model B.")
+    }
+    for checkpoint in models:
+        os.utime(checkpoint, ns=(50, 50))
+    older, newer = sorted(models, reverse=newer_sorts_first)
+    modeled_head = select(older, 200)
+    saved.fail_scan(
+        context,
+        workbench_db,
+        Namespace(
+            scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Synthetic stop."
+        ),
+    )
+    assert model() == models[older]
+    select(newer, 300)
+    saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))
+    assert model() == models[newer]
+    originals = {
+        filename: (filename.read_bytes(), filename.stat().st_mtime_ns)
+        for subdirectory in ("checkpoints", "checkpoint-heads")
+        for filename in (directory / subdirectory).glob("*.json")
+    }
+    restored_contents, restored_time = modeled_head if restore_model else unmodeled_head
+    head.write_bytes(restored_contents)
+    os.utime(head, ns=(restored_time, restored_time))
+    recovered = saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))[
+        "scan"
+    ]
+    assert model() == models[older if restore_model else newer]
+    assert not recovered["resultsRecoveryNeeded"]
+    published = {
+        name: (scan.scan_dir / name).read_bytes()
+        for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
+    }
+    replayed = saved.preserve_scan_results(
+        context,
+        workbench_db,
+        Namespace(
+            scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
+        ),
+    )["scan"]
+    assert not replayed["resultsRecoveryNeeded"]
+    assert all(
+        (scan.scan_dir / name).read_bytes() == contents for name, contents in published.items()
+    )
+    assert (head.read_bytes(), head.stat().st_mtime_ns) == (restored_contents, restored_time)
+    assert all(
+        (filename.read_bytes(), filename.stat().st_mtime_ns) == contents
+        for filename, contents in originals.items()
+    )
 
 
 @pytest.mark.parametrize(

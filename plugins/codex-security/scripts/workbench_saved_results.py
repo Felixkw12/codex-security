@@ -1975,10 +1975,12 @@ def merge_saved_results(
             model = draft["threatModel"]
             model_path = relative
             checkpoint_dir = Path(relative).parent
-            prefer_worker_head = worker_id is not None and (
-                checkpoint_dir.name == "checkpoints" or draft.get("complete") is False
+            root_checkpoint = checkpoint_dir == Path("checkpoints")
+            prefer_checkpoint_head = root_checkpoint or (
+                worker_id is not None
+                and (checkpoint_dir.name == "checkpoints" or draft.get("complete") is False)
             )
-            if worker_id is not None:
+            if worker_id is not None or root_checkpoint:
                 if checkpoint_dir.name != "checkpoints":
                     checkpoint_dir /= "checkpoints"
                 selected_models = [
@@ -2015,9 +2017,9 @@ def merge_saved_results(
                     current = drafts_by_path[head_path]
                     # A terminal checkpoint is committed before result.json is replaced.
                     # Use the admitted observation, including its frozen ordering on retries.
-                    if not prefer_worker_head and current.get("complete") is not False:
-                        prefer_worker_head = source_order[head_path] >= source_order[relative]
-                    if prefer_worker_head:
+                    if not prefer_checkpoint_head and current.get("complete") is not False:
+                        prefer_checkpoint_head = source_order[head_path] >= source_order[relative]
+                    if prefer_checkpoint_head:
                         model = current["threatModel"]
                         model_path = head_path
             manifest["scan"]["threatModel"] = copy.deepcopy(model)
