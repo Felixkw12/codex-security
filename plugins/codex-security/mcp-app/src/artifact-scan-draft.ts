@@ -296,34 +296,8 @@ export async function recordCodexSecurityWorkerScanDraft(
     );
   }
 
-  // Record host-resolved shared ownership in the first immutable checkpoint.
-  const activePrefix = `artifacts/deep_discovery/workers/${basename(dirname(context.root))}/output/`;
-  const scanRoot = dirname(dirname(dirname(dirname(dirname(context.root)))));
   for (const surface of parsed.coverage.surfaces as JsonObject[]) {
     if (isObject(surface.provenance)) delete surface.provenance.scanReceiptRefs;
-    const shared: string[] = [];
-    for (const value of (surface.receiptRefs as string[] | undefined) ?? []) {
-      const ref = posix.normalize(value);
-      if (ref.startsWith(activePrefix)) continue;
-      try {
-        await requireRegularFile(join(context.root, ref), context.root, true);
-        continue;
-      } catch {
-        // Shared receipts are resolved only when no worker-local receipt exists.
-      }
-      try {
-        await requireRegularFile(join(scanRoot, ref), scanRoot, true);
-        shared.push(ref);
-      } catch {
-        // Unavailable references retain the existing draft validation behavior.
-      }
-    }
-    if (shared.length > 0) {
-      surface.provenance = {
-        ...(isObject(surface.provenance) ? surface.provenance : {}),
-        scanReceiptRefs: exactUnion(shared),
-      };
-    }
   }
   const includePaths = context.includePaths ?? [context.scope || "."];
   let scoped = {
@@ -451,31 +425,76 @@ function sameAuthoredSurface(left: JsonObject, right: JsonObject): boolean {
   return isDeepStrictEqual(content(left), content(right));
 }
 
-async function qualifyWorkerLocalReceipts(
+async function qualifyWorkerReceipts(
   context: ArtifactContext,
   input: ScanDraftInput,
+  retainedSurface?: (surface: JsonObject) => JsonObject | undefined,
 ): Promise<void> {
-  const activePrefix = `artifacts/deep_discovery/workers/${basename(dirname(context.root))}/output/`;
+  const workerPrefix = `artifacts/deep_discovery/workers/${basename(dirname(context.root))}/`;
+  const activePrefix = `${workerPrefix}output/`;
+  const archivePrefix = `${workerPrefix}attempts/`;
+  const scanRoot = dirname(dirname(dirname(dirname(dirname(context.root)))));
   for (const surface of input.coverage.surfaces as JsonObject[]) {
     if (!Array.isArray(surface.receiptRefs)) continue;
-    const shared =
-      isObject(surface.provenance) &&
-      Array.isArray(surface.provenance.scanReceiptRefs)
-        ? surface.provenance.scanReceiptRefs
+    const previous = retainedSurface?.(surface);
+    const previousRefs = (
+      (previous?.receiptRefs as string[] | undefined) ?? []
+    ).map((ref) => posix.normalize(ref));
+    const previousShared =
+      isObject(previous?.provenance) &&
+      Array.isArray(previous.provenance.scanReceiptRefs)
+        ? previous.provenance.scanReceiptRefs
         : [];
+    const shared = new Set<string>();
     surface.receiptRefs = await Promise.all(
       (surface.receiptRefs as string[]).map(async (value) => {
         const ref = posix.normalize(value);
-        if (shared.includes(ref)) return ref;
-        try {
-          await requireRegularFile(join(context.root, ref), context.root, true);
-          return `${activePrefix}${ref}`;
-        } catch {
-          // Archived and shared references retain their resolved source context.
+        if (previousRefs.includes(ref) && previousShared.includes(ref)) {
+          shared.add(ref);
           return ref;
         }
+        if (ref.startsWith(archivePrefix)) return ref;
+        const localRef = ref.startsWith(activePrefix)
+          ? ref.slice(activePrefix.length)
+          : ref;
+        try {
+          await requireRegularFile(
+            join(context.root, localRef),
+            context.root,
+            true,
+          );
+          return `${activePrefix}${localRef}`;
+        } catch {
+          // A newly written local receipt wins; otherwise retain its saved owner.
+        }
+        const retained = previousRefs.find((saved) => {
+          if (previousShared.includes(saved)) return false;
+          if (saved.startsWith(activePrefix))
+            return saved.slice(activePrefix.length) === localRef;
+          if (!saved.startsWith(archivePrefix)) return false;
+          const archived = saved.slice(archivePrefix.length);
+          return archived.slice(archived.indexOf("/") + 1) === localRef;
+        });
+        if (retained !== undefined) return retained;
+        if (ref.startsWith(activePrefix)) return ref;
+        try {
+          await requireRegularFile(join(scanRoot, ref), scanRoot, true);
+          shared.add(ref);
+        } catch {
+          // Unrecorded references retain the existing local-first fallback.
+        }
+        return ref;
       }),
     );
+    if (isObject(surface.provenance)) delete surface.provenance.scanReceiptRefs;
+    if (shared.size > 0) {
+      surface.provenance = {
+        ...(isObject(surface.provenance) ? surface.provenance : {}),
+        scanReceiptRefs: exactUnion(
+          (surface.receiptRefs as string[]).filter((ref) => shared.has(ref)),
+        ),
+      };
+    }
   }
 }
 
@@ -511,7 +530,7 @@ async function preserveScanDraft(
   } catch (error) {
     // Failed source reads must still preserve valid submitted progress.
     if (saveObservation && context.layout === "worker") {
-      await qualifyWorkerLocalReceipts(context, input);
+      await qualifyWorkerReceipts(context, input);
       await saveScanDraftCheckpoint(context, input, false);
     }
     throw error;
@@ -545,45 +564,11 @@ async function preserveScanDraft(
     sameAuthoredSurface(left, right);
   if (context.layout === "worker") {
     // Retained observations keep saved ownership; fresh observations use this worker.
-    for (const surface of result.coverage.surfaces as JsonObject[]) {
-      if (!Array.isArray(surface.receiptRefs)) continue;
-      const previous = sources
+    await qualifyWorkerReceipts(context, result, (surface) =>
+      sources
         .flatMap((source) => source.coverage.surfaces as JsonObject[])
-        .find((saved) => sameSavedSurface(surface, saved));
-      const refs = new Set(
-        surface.receiptRefs.map((ref) => posix.normalize(ref as string)),
-      );
-      const previousRefs = new Set(
-        ((previous?.receiptRefs as string[] | undefined) ?? []).map((ref) =>
-          posix.normalize(ref),
-        ),
-      );
-      const shared = new Set<string>(
-        isObject(previous?.provenance) &&
-          Array.isArray(previous.provenance.scanReceiptRefs)
-          ? previous.provenance.scanReceiptRefs.filter(
-              (ref): ref is string =>
-                typeof ref === "string" &&
-                refs.has(ref) &&
-                previousRefs.has(ref),
-            )
-          : [],
-      );
-      if (
-        isObject(surface.provenance) &&
-        Array.isArray(surface.provenance.scanReceiptRefs)
-      ) {
-        for (const ref of surface.provenance.scanReceiptRefs)
-          if (typeof ref === "string" && refs.has(ref)) shared.add(ref);
-      }
-      if (shared.size > 0) {
-        surface.provenance = {
-          ...(isObject(surface.provenance) ? surface.provenance : {}),
-          scanReceiptRefs: [...shared],
-        };
-      }
-    }
-    await qualifyWorkerLocalReceipts(context, result);
+        .find((saved) => sameSavedSurface(surface, saved)),
+    );
     // Persist the resolved ownership in the observation as well as its result.
     input = structuredClone(result);
     if (saveObservation) await saveScanDraftCheckpoint(context, input, false);
