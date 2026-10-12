@@ -1909,7 +1909,11 @@ def merge_saved_results(
                 pending_terminals.add(relative)
             else:
                 unordered_terminals.add(relative)
-    terminal_cutoffs = {committed_path} if committed_path in terminal_sources else terminal_sources
+    terminal_cutoffs = (
+        {committed_path}
+        if committed_path in terminal_sources
+        else terminal_sources - superseded_terminals
+    )
     terminal_parent_time = max(
         (source_order[relative][1] for relative in pending_terminals or terminal_cutoffs),
         default=None,
