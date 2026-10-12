@@ -355,6 +355,10 @@ export interface CoverageDocument {
     followUpPrompt?: string;
     [k: string]: unknown;
   }[];
+  /**
+   * Sealed receipt contract, including exclusion proof. Absent on legacy coverage, whose exclusion receipt metadata remains opaque.
+   */
+  receiptSealVersion?: 1;
   [k: string]: unknown;
 }
 

@@ -1310,10 +1310,17 @@ def _recover_candidate_receipts(
                         None,
                     )
                     if pending is None:
+                        identity = row.get("id")
+                        if not isinstance(identity, str) or not identity.strip():
+                            identity = None
                         pending = {
                             "candidateId": row["candidateId"],
                             "reason": "\n".join(warnings[warning_start:]),
-                            **({"surfaceIds": [row["id"]]} if "id" in row else {}),
+                            **(
+                                {"surfaceIds": [identity]}
+                                if field == "surfaces" and identity is not None
+                                else {}
+                            ),
                             **{
                                 field: copy.deepcopy(row[field])
                                 for field in ("sourceWorkerId", "candidate", "finding")
@@ -1326,7 +1333,7 @@ def _recover_candidate_receipts(
                                 for item in [*coverage["deferred"], *closures]
                                 if isinstance(item, dict) and isinstance(item.get("id"), str)
                             }
-                            base = row.get("id") or row["candidateId"]
+                            base = identity or row["candidateId"]
                             identity, suffix = base, 2
                             while identity in used_ids:
                                 identity, suffix = f"{base}-{suffix}", suffix + 1
@@ -1922,7 +1929,12 @@ def _validate_coverage(manifest: dict[str, Any], coverage: dict[str, Any], scan_
     for field in ("explicitExclusions", "deferred"):
         if not isinstance(coverage.get(field, []), list):
             raise ContractError(f"coverage.{field}: expected an array")
-    for field in ("surfaces", "explicitExclusions"):
+    receipt_fields = (
+        ("surfaces", "explicitExclusions")
+        if coverage.get("receiptSealVersion") == 1
+        else ("surfaces",)
+    )
+    for field in receipt_fields:
         for index, item in enumerate(coverage.get(field, [])):
             if not isinstance(item, dict):
                 continue  # The canonical schema reports malformed rows.
@@ -2801,7 +2813,11 @@ def _artifact_record(
 def _supplementary_artifact_refs(scan: dict[str, Any], coverage: dict[str, Any]) -> dict[str, str]:
     refs = {
         ref: "coverage receipt"
-        for field in ("surfaces", "explicitExclusions")
+        for field in (
+            ("surfaces", "explicitExclusions")
+            if coverage.get("receiptSealVersion") == 1
+            else ("surfaces",)
+        )
         for row in coverage.get(field, [])
         for ref in row.get("receiptRefs", [])
     }
@@ -3216,6 +3232,8 @@ def _prepare_scan_finalization(
         )
         assert recovered is not None
         coverage = recovered["coverage"]
+        # Coverage is hash-bound; older seals treated exclusion receipts as opaque metadata.
+        coverage["receiptSealVersion"] = 1
     _validate_findings(manifest, findings_for_validation)
     if was_sealed:
         _validate_derived_finding_identities(manifest, findings)

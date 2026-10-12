@@ -124,7 +124,11 @@ export class ScanResult {
 
   /** Saved unresolved candidates, distinct within each logical worker. */
   public get unresolvedCandidates(): readonly DeferredCoverage[] {
-    return unresolvedCandidates(this.coverage, this.findings.findings);
+    const coverage =
+      this.coverage.receiptSealVersion === 1
+        ? this.coverage
+        : { ...this.coverage, explicitExclusions: [] };
+    return unresolvedCandidates(coverage, this.findings.findings);
   }
 
   public get unresolvedCandidateCount(): number {

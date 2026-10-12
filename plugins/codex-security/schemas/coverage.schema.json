@@ -193,6 +193,11 @@
           }
         }
       }
+    },
+    "receiptSealVersion": {
+      "type": "integer",
+      "const": 1,
+      "description": "Sealed receipt contract, including exclusion proof. Absent on legacy coverage, whose exclusion receipt metadata remains opaque."
     }
   },
   "allOf": [

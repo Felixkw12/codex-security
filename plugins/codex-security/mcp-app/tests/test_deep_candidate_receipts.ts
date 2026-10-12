@@ -857,3 +857,50 @@ for (const outcome of [
     }
   });
 }
+
+for (const id of [7, { opaque: [1, null] }, "", " ", "metadata-id"]) {
+  test(
+    "exclusion IDs remain metadata during worker receipt recovery: " +
+      JSON.stringify(id),
+    async () => {
+      const f = await fixture();
+      try {
+        const draft = workerDraft([], {
+          complete: true,
+          coverage: {
+            completeness: "partial",
+            surfaces: [],
+            deferred: [],
+            explicitExclusions: [
+              {
+                id,
+                pattern: "app.py",
+                reason: "Synthetic decision.",
+                candidateId: "candidate",
+                disposition: "rejected",
+                receiptRefs: ["artifacts/missing.bin"],
+              },
+            ],
+          },
+        });
+        await recordCodexSecurityWorkerScanDraft(f.worker, draft);
+        const original = await readFile(path.join(f.output, "result.json"));
+        assert.deepEqual(
+          JSON.parse(original.toString()).coverage.explicitExclusions[0].id,
+          id,
+        );
+        const inputs = await getCodexSecurityDeepReducerInputs(f.reducer);
+        const pending = inputs.discoveries[0].result.unresolvedCandidates;
+        assert.equal(pending.length, 1);
+        assert.equal(pending[0].candidateId, "candidate");
+        assert.equal(pending[0].surfaceIds, undefined);
+        assert.deepEqual(
+          await readFile(path.join(f.output, "result.json")),
+          original,
+        );
+      } finally {
+        await rm(f.root, { recursive: true, force: true });
+      }
+    },
+  );
+}

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -152,3 +154,80 @@ def test_sealed_exclusion_cannot_reference_proof_outside_its_artifact_inventory(
     path.write_text(json.dumps(manifest))
     with pytest.raises(FINALIZER.ContractError, match="missing from sealed artifacts"):
         FINALIZER.finalize_scan(scan_dir)
+
+
+@pytest.mark.parametrize("entrypoint", ["standalone", "workbench"])
+@pytest.mark.parametrize("identity", [7, {"opaque": [1, None]}, "", " ", "authored-task"])
+def test_exclusion_metadata_does_not_become_task_or_surface_identity(
+    tmp_path: Path, entrypoint: str, identity
+):
+    state, scan_id, scan_dir, _, _ = exclusion_scan(tmp_path, "rejected", "missing")
+    path = scan_dir / "coverage.json"
+    coverage = json.loads(path.read_text())
+    coverage["deferred"] = []
+    coverage["explicitExclusions"][0]["id"] = identity
+    path.write_text(json.dumps(coverage))
+    publish(state, scan_id, scan_dir, entrypoint)
+    coverage = json.loads(path.read_text())
+    assert coverage["explicitExclusions"][0]["id"] == identity
+    pending = IDENTITY.unresolved_candidates(coverage, [])
+    assert len(pending) == 1
+    assert pending[0]["id"] == (
+        identity if isinstance(identity, str) and identity.strip() else "candidate-é"
+    )
+    assert "surfaceIds" not in pending[0]
+    assert FINALIZER.finalize_scan(scan_dir)[2] == coverage
+
+
+@pytest.mark.parametrize(
+    "receipt_refs",
+    [["artifacts/proof.bin"], ["artifacts/missing.bin"], {"opaque": True}, [7, {"opaque": True}]],
+)
+def test_legacy_sealed_exclusion_extensions_remain_opaque(tmp_path: Path, receipt_refs):
+    # Legacy coverage was hashed, but exclusion receipts were not inventoried.
+    scan_dir = tmp_path / "legacy"
+    shutil.copytree(Path(__file__).resolve().parents[1] / "examples" / "completed-scan", scan_dir)
+    scan_dir.chmod(0o700)
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage.pop("receiptSealVersion", None)
+    reason = "Legacy candidate proof gap remains unanswered."
+    coverage.update(
+        surfaces=[],
+        completeness="partial",
+        deferred=[{"id": "legacy-gap", "candidateId": "legacy-candidate", "reason": reason}],
+        explicitExclusions=[
+            {
+                "pattern": "src/extract.py",
+                "reason": "Opaque historical decision.",
+                "id": {"opaque": 7},
+                "candidateId": "legacy-candidate",
+                "disposition": "rejected",
+                "receiptRefs": receipt_refs,
+            }
+        ],
+    )
+    coverage_path.write_text(json.dumps(coverage))
+    receipt = scan_dir / "artifacts" / "proof.bin"
+    receipt.parent.mkdir(exist_ok=True)
+    receipt.write_bytes(b"Synthetic legacy proof")
+    manifest_path = scan_dir / "scan-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    for artifact in manifest["scan"]["artifacts"]:
+        if artifact["path"] == "coverage.json":
+            artifact["sha256"] = hashlib.sha256(coverage_path.read_bytes()).hexdigest()
+    manifest_path.write_text(json.dumps(manifest))
+    original = {
+        name: (scan_dir / name).read_bytes()
+        for name in ("scan-manifest.json", "coverage.json", "findings.json")
+    }
+    assert FINALIZER.finalize_scan(scan_dir)[2] == coverage
+    assert reason in (scan_dir / "report.md").read_text()
+    for arguments in (["--sarif-only"], ["--export-format", "json"]):
+        exported = subprocess.run(
+            [sys.executable, FINALIZER.__file__, "--scan-dir", str(scan_dir), *arguments],
+            capture_output=True,
+            text=True,
+        )
+        assert exported.returncode == 0, exported.stderr
+    assert all((scan_dir / name).read_bytes() == value for name, value in original.items())

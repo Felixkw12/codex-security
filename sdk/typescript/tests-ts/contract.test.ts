@@ -1690,3 +1690,139 @@ for (const candidateId of [
     expect(await readFile(join(scanDir, "coverage.json"))).toEqual(original);
   });
 }
+
+for (const receiptRefs of [
+  ["artifacts/proof.bin"],
+  ["artifacts/missing.bin"],
+  { opaque: true },
+  [7, { opaque: true }],
+]) {
+  test(
+    "preserves legacy exclusion metadata across sealed readers: " +
+      JSON.stringify(receiptRefs),
+    async () => {
+      const scanDir = await copyExample();
+      const coverage = await readJson(join(scanDir, "coverage.json"));
+      delete coverage["receiptSealVersion"];
+      const reason = "Legacy candidate proof gap remains unanswered.";
+      coverage["surfaces"] = [];
+      coverage["completeness"] = "partial";
+      coverage["deferred"] = [
+        { id: "legacy-gap", candidateId: "legacy-candidate", reason },
+      ];
+      coverage["explicitExclusions"] = [
+        {
+          pattern: "src/extract.py",
+          reason: "Opaque historical decision.",
+          id: { opaque: 7 },
+          candidateId: "legacy-candidate",
+          disposition: "rejected",
+          receiptRefs,
+        },
+      ];
+      await writeJson(join(scanDir, "coverage.json"), coverage);
+      await mkdir(join(scanDir, "artifacts"), { recursive: true });
+      await writeFile(
+        join(scanDir, "artifacts/proof.bin"),
+        "Synthetic legacy proof",
+      );
+      await reseal(scanDir);
+      const names = ["scan-manifest.json", "coverage.json", "findings.json"];
+      const original = await Promise.all(
+        names.map((name) => readFile(join(scanDir, name))),
+      );
+      const loaded = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+      const result = new ScanResult({
+        ...loaded,
+        scanDir,
+        threadId: "saved-thread",
+        turnResult: {},
+      });
+      expect(result.unresolvedCandidates).toEqual(loaded.coverage.deferred);
+      const replay = runPython(
+        process.env["PYTHON"] ?? Bun.which("python3") ?? "python",
+        [
+          join(PLUGIN_ROOT, "scripts", "finalize_scan_contract.py"),
+          "--scan-dir",
+          scanDir,
+        ],
+      );
+      expect(replay.exitCode, new TextDecoder().decode(replay.stderr)).toBe(0);
+      expect(await readFile(join(scanDir, "report.md"), "utf8")).toContain(
+        reason,
+      );
+      expect(pythonExport(scanDir).exitCode).toBe(0);
+      expect(
+        await Promise.all(names.map((name) => readFile(join(scanDir, name)))),
+      ).toEqual(original);
+    },
+  );
+}
+
+for (const change of ["inventory", "bytes"]) {
+  test(
+    "new exclusion receipts remain sealed across readers after " +
+      change +
+      " changes",
+    async () => {
+      const scanDir = await copyExample();
+      const manifest = await readJson(join(scanDir, "scan-manifest.json"));
+      delete manifest["scan"]["sealedAt"];
+      delete manifest["scan"]["artifacts"];
+      await writeJson(join(scanDir, "scan-manifest.json"), manifest);
+      const coverage = await readJson(join(scanDir, "coverage.json"));
+      coverage["surfaces"] = [];
+      coverage["completeness"] = "partial";
+      coverage["deferred"] = [
+        { id: "gap", candidateId: "reviewed", reason: "Saved proof gap." },
+      ];
+      coverage["explicitExclusions"] = [
+        {
+          pattern: "src/extract.py",
+          reason: "Reviewed candidate.",
+          candidateId: "reviewed",
+          disposition: "rejected",
+          receiptRefs: ["artifacts/proof.bin"],
+        },
+      ];
+      await writeJson(join(scanDir, "coverage.json"), coverage);
+      await mkdir(join(scanDir, "artifacts"), { recursive: true });
+      await writeFile(
+        join(scanDir, "artifacts/proof.bin"),
+        Buffer.from([0, 255, 128]),
+      );
+      const sealed = runPython(
+        process.env["PYTHON"] ?? Bun.which("python3") ?? "python",
+        [
+          join(PLUGIN_ROOT, "scripts", "finalize_scan_contract.py"),
+          "--scan-dir",
+          scanDir,
+        ],
+      );
+      expect(sealed.exitCode, new TextDecoder().decode(sealed.stderr)).toBe(0);
+      const loaded = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+      expect(loaded.coverage.receiptSealVersion).toBe(1);
+      const result = new ScanResult({
+        ...loaded,
+        scanDir,
+        threadId: "saved-thread",
+        turnResult: {},
+      });
+      expect(result.unresolvedCandidates).toEqual([]);
+      if (change === "inventory") {
+        const changed = await readJson(join(scanDir, "scan-manifest.json"));
+        changed["scan"]["artifacts"] = changed["scan"]["artifacts"].filter(
+          (artifact: { path: string }) =>
+            artifact.path !== "artifacts/proof.bin",
+        );
+        await writeJson(join(scanDir, "scan-manifest.json"), changed);
+      } else {
+        await writeFile(join(scanDir, "artifacts/proof.bin"), "Changed proof");
+      }
+      await expect(
+        loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+      ).rejects.toThrow();
+      expect(pythonExport(scanDir).exitCode).not.toBe(0);
+    },
+  );
+}

@@ -65,7 +65,9 @@ export async function recoverWorkerCandidateReceipts(
           pending = {
             ...(candidateId === undefined ? {} : { candidateId }),
             reason: error instanceof Error ? error.message : String(error),
-            ...(typeof surface.id === "string"
+            ...(typeof surface.id === "string" &&
+            surface.id.trim() &&
+            (coverage.surfaces as JsonObject[]).includes(surface)
               ? { surfaceIds: [surface.id] }
               : {}),
           };
