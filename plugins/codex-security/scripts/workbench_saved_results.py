@@ -255,11 +255,13 @@ def _capture_saved_source(
     snapshot = (directory / "checkpoint-heads" / f"{digest}.json").as_posix()
     # Capture the selected file even if it was created after directory enumeration.
     if checkpoint_heads is not None:
-        checkpoint_heads[directory.as_posix()] = selected
+        checkpoint_heads[directory.as_posix()] = snapshot
     if write and not (scan_dir / snapshot).exists():
         try:
             write_scan_local_bytes(scan_dir, snapshot, _encoded(observation))
         except (ContractError, OSError) as exc:
+            if checkpoint_heads is not None:
+                checkpoint_heads[directory.as_posix()] = relative
             raise _CheckpointSnapshotError(
                 str(exc),
                 {relative: (head_digest, observed), selected: (selected_digest, selected_time)},
@@ -564,6 +566,9 @@ def _saved_results_changed(db: Any, connection: Any, scan: Any) -> bool:
                     checkpoint_heads=checkpoint_heads,
                 )
                 current_sources.update({path: value[0] for path, value in captured.items()})
+                directory = Path(path).parent.as_posix()
+                if published_heads.get(directory) in captured:
+                    checkpoint_heads[directory] = published_heads[directory]
             except (ContractError, OSError, ValueError):
                 _restore_checkpoint_head(checkpoint_heads, published_heads, published_sources, path)
         return current_sources != published_sources or checkpoint_heads != published_heads
@@ -1286,6 +1291,7 @@ def merge_saved_results(
         source_order[relative] = (attempt, source_order[relative][1])
     selected_observations: dict[str, tuple[int, int]] = {}
     authoritative_heads: set[str] = set()
+    authoritative_observations: dict[str, tuple[int, int]] = {}
     parent_heads: list[tuple[int, str]] = []
     for head, checkpoint in saved_heads.items():
         directory = _checkpoint_head_directory(head)
@@ -1298,11 +1304,15 @@ def merge_saved_results(
         observed = source_order[head][1]
         attempt = 0 if directory == Path(".") else worker_attempts[key][1]
         order = (attempt, observed)
-        if key not in checkpoint_heads or checkpoint_heads[key] == selected:
+        if key not in checkpoint_heads or checkpoint_heads[key] in (head, selected):
             authoritative_heads.add(selected)
+            if checkpoint_heads.get(key) == head:
+                authoritative_observations[selected] = order
             if directory == Path("."):
                 parent_heads.append((observed, selected))
         selected_observations[selected] = max(selected_observations.get(selected, order), order)
+    # A restored head selects one observation, not the newest time for its payload.
+    selected_observations.update(authoritative_observations)
     source_order.update(selected_observations)
 
     drafts_by_path = {relative: draft for relative, draft, _ in sources}
@@ -1737,7 +1747,7 @@ def merge_saved_results(
                 order == previous[0]
                 and previous[1] != relative
                 and previous[1] in current_results
-                and relative in checkpoint_heads.values()
+                and relative in authoritative_heads
             )
         ):
             resolved[key] = disposition
@@ -2512,8 +2522,8 @@ def preserve_scan_results_locked(
             ),
         )
     except _CheckpointSnapshotError as exc:
-        if scan["canceled_at"] is not None and frozen_source_digests is None:
-            # Cancellation has already committed. Keep the source set and times in
+        if frozen_source_digests is None:
+            # The stop has already committed. Keep the source set and times in
             # the database even when auxiliary snapshot files cannot be written.
             # Changed raw heads remain rejected on retry.
             captured = dict(exc.captured)
@@ -2588,7 +2598,8 @@ def preserve_scan_results_locked(
                     retained_state,
                 )
 
-    if scan["canceled_at"] is not None:
+    first_preservation = recovery_source_digests is None and not pending_recovery
+    if first_preservation:
         retain_sources()
     prepared = _prepare_scan_finalization(
         scan_dir,
@@ -2598,7 +2609,7 @@ def preserve_scan_results_locked(
         draft_documents=documents,
         finding_scope=db.requested_scan_paths(scan) if scan["mode"] == "deep" else None,
     )
-    if scan["canceled_at"] is None:
+    if not first_preservation:
         retain_sources()
     snapshots = _snapshot_published_outputs(scan_dir)
     try:
