@@ -36,6 +36,13 @@ test.each([
     state: "set",
     filtered: false,
   })),
+  ...["set", "unset"].flatMap((state) =>
+    [false, true].map((filtered) => ({
+      selector: "GIT_ATTR_SOURCE",
+      state,
+      filtered,
+    })),
+  ),
   ...[false, true].map((filtered) => ({
     selector: "GIT_ALTERNATE_OBJECT_DIRECTORIES",
     state: "set",
@@ -105,6 +112,9 @@ test.each([
     } else if (selector === "GIT_CONFIG_PARAMETERS") {
       policySet["GIT_CONFIG_PARAMETERS"] =
         `'filter.synthetic-selector.clean=${cleanCommand.replaceAll("'", "'\\''")}'`;
+    } else if (selector === "GIT_ATTR_SOURCE") {
+      environment[selector] = undefined;
+      policySet[selector] = state === "set" ? "HEAD" : "synthetic-attributes";
     } else if (selector !== "GIT_ALTERNATE_OBJECT_DIRECTORIES") {
       environment[selector] =
         state === "set" ? filterConfig : state === "empty" ? "" : undefined;
@@ -137,6 +147,8 @@ test.each([
     git("init", "--initial-branch=main");
     git("config", "user.name", "Synthetic User");
     git("config", "user.email", "synthetic@example.test");
+    if (selector === "GIT_ATTR_SOURCE")
+      git("config", "filter.synthetic-selector.clean", cleanCommand);
     await writeFile(
       join(repository, ".gitattributes"),
       "data filter=synthetic-selector\n",
@@ -144,6 +156,14 @@ test.each([
     await writeFile(join(repository, "data"), "original lowercase data\n");
     git("add", ".");
     git("commit", "-m", "Synthetic configuration baseline");
+    if (selector === "GIT_ATTR_SOURCE") {
+      git("tag", "synthetic-attributes");
+      git("rm", ".gitattributes");
+      environment[selector] =
+        state === "set" ? "synthetic-attributes" : undefined;
+      git("add", "--renormalize", "data");
+      git("commit", "-m", "Synthetic worktree without attributes");
+    }
     if (selector === "GIT_ALTERNATE_OBJECT_DIRECTORIES") {
       const objects = join(repository, ".git", "objects");
       const pool = join(root, "object-pool");

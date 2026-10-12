@@ -1985,6 +1985,7 @@ export async function main(
                     [
                       ...Object.keys(NESTED_PATCH_GIT_ENVIRONMENT),
                       "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                      "GIT_ATTR_SOURCE",
                       "HOME",
                       "XDG_CONFIG_HOME",
                       "GIT_INDEX_FILE",
@@ -7421,7 +7422,7 @@ async function preparePatchPublication(
           "git",
           ["config", "--null", "--get-regexp", "^remote\\.origin\\."],
           repository,
-          { trim: false },
+          { trim: false, environment: { GIT_CONFIG: undefined } },
         )
       )
         .split("\0")

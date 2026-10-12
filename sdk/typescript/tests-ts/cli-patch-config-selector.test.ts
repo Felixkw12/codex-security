@@ -178,3 +178,56 @@ test.each([
     expect(await readFile(join(root, ".git", "config"))).toEqual(localConfig);
   },
 );
+
+test.each(["unset", "missing", "unrelated", "decoy remote"] as const)(
+  "publication preflight reads effective Git configuration with selector: %s",
+  async (mode) => {
+    const { publicationRepository } = await import("./cli-patch-fixtures.js");
+    const { directory, git } = await publicationRepository(fixtures);
+    const support = await fixtures.create("patch-publication-selector-");
+    const selector = join(support, "selected-config");
+    if (mode === "unrelated")
+      await writeFile(selector, "[synthetic]\n value = fixture\n");
+    if (mode === "decoy remote") {
+      const decoy = join(support, "decoy.git");
+      git("init", "--bare", decoy);
+      git("push", decoy, "HEAD:refs/heads/codex-security/patch-scan-1");
+      await writeFile(
+        selector,
+        `[remote "origin"]\nurl = ${JSON.stringify(decoy.replaceAll("\\", "/"))}\n`,
+      );
+    }
+    const environment = { GIT_CONFIG: mode === "unset" ? undefined : selector };
+    const head = git("rev-parse", "HEAD");
+    const index = await readFile(join(directory, ".git", "index"));
+    let launches = 0;
+    const outcome = await runWorkflow(
+      ["patch", "Synthetic issue", "--create-pr", "--json"],
+      {
+        currentDirectory: directory,
+        environment,
+        onRepositoryCommand: (command, args, cwd, options) =>
+          command === "git"
+            ? runGitRepositoryCommand(command, args, cwd, {
+                ...options,
+                environment: { ...environment, ...options?.environment },
+              })
+            : "[]",
+        onCodex: (_args, output, childEnvironment) => {
+          launches++;
+          expect(childEnvironment?.["GIT_CONFIG"]).toBe(environment.GIT_CONFIG);
+          output?.stdout.write("Synthetic no-op turn.\n");
+          return 0;
+        },
+      },
+    );
+    expect(launches, outcome.stderr).toBe(1);
+    expect(outcome.exitCode, outcome.stdout + outcome.stderr).toBe(2);
+    expect(JSON.parse(outcome.stdout).error.code).toBe("NO_PATCH_APPLIED");
+    expect(git("rev-parse", "HEAD")).toBe(head);
+    expect(await readFile(join(directory, ".git", "index"))).toEqual(index);
+    expect(environment.GIT_CONFIG).toBe(
+      mode === "unset" ? undefined : selector,
+    );
+  },
+);
