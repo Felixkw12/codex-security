@@ -42,7 +42,12 @@ import {
 } from "node:path";
 import { cwd } from "node:process";
 import { createInterface } from "node:readline";
-import { Readable, Writable as NodeWritable } from "node:stream";
+import {
+  addAbortSignal,
+  Readable,
+  Writable as NodeWritable,
+} from "node:stream";
+import { finished } from "node:stream/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import { Cli, z } from "incur";
@@ -1199,6 +1204,7 @@ interface CliDependencies {
       patchSnapshot?: readonly string[];
       sandbox?: PatchSnapshotSandbox;
       signal?: AbortSignal;
+      onStdout?: (chunk: Buffer) => void;
     },
   ): Promise<string>;
   assessPatchRisk?: (request: PatchRiskRequest) => Promise<PatchRiskReport>;
@@ -1341,6 +1347,16 @@ export async function runRepositoryCommand(
       for (const name of ["stdout", "stderr"] as const) {
         let bytes = 0;
         execution[name].on("data", (chunk: Buffer) => {
+          if (name === "stdout" && options?.onStdout !== undefined) {
+            try {
+              options.onStdout(chunk);
+            } catch (error) {
+              outputError =
+                error instanceof Error ? error : new Error(String(error));
+              execution.kill();
+            }
+            return;
+          }
           const remaining = (options?.maxBuffer ?? Infinity) - bytes;
           output[name].push(chunk.subarray(0, Math.max(0, remaining)));
           bytes += chunk.length;
@@ -1373,7 +1389,7 @@ export async function runRepositoryCommand(
                 code:
                   outputError === undefined
                     ? code
-                    : "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
+                    : ((outputError as NodeJS.ErrnoException).code ?? code),
                 signal,
                 killed: execution.killed,
                 stdout,
@@ -1825,6 +1841,7 @@ export async function runCodexSkillCommand(
     let forceStatusCompletion: (() => void) | null = null;
     let forceCaptureCompletion: (() => void) | null = null;
     let invocationStatus: Promise<number> | undefined;
+    let pendingPreparation: Promise<void> | undefined;
     const requestTermination = (signal: SignalName): void => {
       requestedSignal = signal;
       preparation.abort(signal);
@@ -1874,7 +1891,12 @@ export async function runCodexSkillCommand(
                       permissions: output.appServer.permissions,
                       externalSandbox: output.appServer.externalSandbox,
                       onEvent: output.appServer.onEvent,
-                      onBeforeTurn: output.appServer.onBeforeTurn,
+                      onBeforeTurn(signal) {
+                        pendingPreparation = Promise.resolve(
+                          output.appServer!.onBeforeTurn?.(signal),
+                        );
+                        return pendingPreparation;
+                      },
                       signal: preparation.signal,
                       onPermissions: (profile, configuration) =>
                         output.appServer!.onPermissions?.({
@@ -1968,6 +1990,7 @@ export async function runCodexSkillCommand(
       await invocationStatus?.catch(() => undefined);
       throw error;
     } finally {
+      await pendingPreparation?.catch(() => undefined);
       if (forcedTermination !== undefined) clearTimeout(forcedTermination);
       forceStatusCompletion = null;
       forceCaptureCompletion = null;
@@ -5722,13 +5745,14 @@ export async function main(
             let publication: PatchPublication | undefined;
             let patchRiskState: GitPatchState | undefined;
             let patchBase: GitPatchState | Map<string, string> | undefined;
-            const preparePatch = async () => {
+            const preparePatch = async (signal?: AbortSignal) => {
               if (patchBase !== undefined) return;
               publication = options.createPr
                 ? await preparePatchPublication(
                     selected.repository,
                     selected.scanId,
                     dependencies,
+                    signal,
                   )
                 : undefined;
               patchRiskState = options.assessPatchRisk
@@ -5739,11 +5763,16 @@ export async function main(
                     ),
                     dependencies,
                     true,
+                    signal,
                   )
                 : undefined;
               patchBase =
                 patchRiskState ??
-                (await snapshotPatchState(selected.repository, dependencies));
+                (await snapshotPatchState(
+                  selected.repository,
+                  dependencies,
+                  signal,
+                ));
             };
             const patchRun = await runFindingPatches(
               selected,
@@ -5759,8 +5788,20 @@ export async function main(
             );
             const { patches } = patchRun;
             exitCode = patchRun.exitCode;
+            if (exitCode === 130 || exitCode === 143) {
+              patchResult = {
+                scanId: selected.scanId,
+                repository: selected.repository,
+                patches,
+                files: patchRun.files,
+              };
+              throw new PatchCommandError(
+                "PATCH_FAILED",
+                "Patch operation was interrupted. File changes were not fully inspected; local edits and patches were kept.",
+              );
+            }
             const files =
-              patchBase === undefined || exitCode === 130 || exitCode === 143
+              patchBase === undefined
                 ? []
                 : await changedPatchFiles(
                     selected.repository,
@@ -5867,9 +5908,14 @@ export async function main(
             GitPatchState | Map<string, string> | string | undefined;
           let publication: PatchPublication | undefined;
           const identifier = directPatchIdentifier(positionals, imports);
-          const preparePatch = async () => {
+          const preparePatch = async (signal?: AbortSignal) => {
             patchRiskState = options.assessPatchRisk
-              ? await snapshotGitPatchState(gitRepository, dependencies, true)
+              ? await snapshotGitPatchState(
+                  gitRepository,
+                  dependencies,
+                  true,
+                  signal,
+                )
               : undefined;
             patchGitBase =
               patchRiskState?.tree ??
@@ -5879,7 +5925,7 @@ export async function main(
             patchBase =
               patchRiskState ??
               patchGitBase ??
-              (await snapshotPatchState(repository, dependencies));
+              (await snapshotPatchState(repository, dependencies, signal));
             if (options.createPr) {
               await requireCleanPatchPullRequestBase(
                 gitRepository,
@@ -5890,6 +5936,7 @@ export async function main(
                 gitRepository,
                 identifier ?? directPatchDigest(positionals, imports),
                 dependencies,
+                signal,
               );
             }
           };
@@ -5910,8 +5957,15 @@ export async function main(
             },
           );
           if (!jsonOutput) output.write(report.text());
+          if (exitCode === 130 || exitCode === 143) {
+            patchResult = { repository, files: [] };
+            throw new PatchCommandError(
+              "PATCH_FAILED",
+              "Patch operation was interrupted. File changes were not fully inspected; local edits and patches were kept.",
+            );
+          }
           const files =
-            patchBase === undefined || exitCode === 130 || exitCode === 143
+            patchBase === undefined
               ? []
               : await changedPatchFiles(gitRepository, patchBase, dependencies);
           patchResult = {
@@ -7480,10 +7534,29 @@ async function patchRepositoryRoot(
   return resolve(output.replace(/\n$/u, ""));
 }
 
+async function hashPatchFile(
+  stream: Readable,
+  signal?: AbortSignal,
+): Promise<string> {
+  const closed = finished(stream).catch(() => undefined);
+  try {
+    if (signal !== undefined) addAbortSignal(signal, stream);
+    const digest = createHash("sha256");
+    for await (const chunk of stream) digest.update(chunk);
+    signal?.throwIfAborted();
+    return digest.digest("hex");
+  } finally {
+    stream.destroy();
+    await closed;
+  }
+}
+
 async function hashPublicationFile(
   root: string,
   pathKey: string,
+  signal?: AbortSignal,
 ): Promise<string | undefined> {
+  signal?.throwIfAborted();
   const path = patchFilePath(root, pathKey);
   const selected = await lstat(path);
   if (!selected.isFile() || selected.size === 0) return undefined;
@@ -7504,6 +7577,7 @@ async function hashPublicationFile(
       (constants.O_NONBLOCK ?? 0),
   );
   try {
+    signal?.throwIfAborted();
     const opened = await file.stat();
     if (
       !opened.isFile() ||
@@ -7512,10 +7586,11 @@ async function hashPublicationFile(
       throw new CodexSecurityError(
         "Patch publication content must remain the selected regular file.",
       );
-    const digest = createHash("sha256");
-    for await (const chunk of file.createReadStream({ autoClose: false }))
-      digest.update(chunk);
-    return digest.digest("hex");
+    signal?.throwIfAborted();
+    return await hashPatchFile(
+      file.createReadStream({ autoClose: false }),
+      signal,
+    );
   } finally {
     await file.close();
   }
@@ -7525,7 +7600,9 @@ async function preparePatchPublication(
   repository: string,
   patchId: string,
   dependencies: CliDependencies,
+  signal?: AbortSignal,
 ): Promise<PatchPublication> {
+  signal?.throwIfAborted();
   const branch = `codex-security/patch-${patchId.replaceAll(/[^a-z\d._-]/giu, "-")}`;
   const ref = `refs/heads/${branch}`;
   const conflicts = (candidate: string) =>
@@ -7637,7 +7714,8 @@ async function preparePatchPublication(
       dependencies,
     );
     for (const path of ignored.filter(Boolean)) {
-      const digest = await hashPublicationFile(root, path).catch(
+      signal?.throwIfAborted();
+      const digest = await hashPublicationFile(root, path, signal).catch(
         (error: unknown) => {
           if (isJsonObject(error) && error["code"] === "ENOENT")
             return undefined;
@@ -8121,22 +8199,21 @@ async function createPatchPullRequest(
       const digest = await hashPublicationFile(root, path);
       const [, mode, , object] = changed[index]!.split(" ");
       // Publication reuses captured blobs, even if assessment changed live files.
-      const capturedDigest =
-        mode === "100644" || mode === "100755"
-          ? createHash("sha256")
-              .update(
-                Buffer.from(
-                  await dependencies.runRepositoryCommand(
-                    "git",
-                    ["cat-file", "blob", object!],
-                    root,
-                    { encoding: "base64" },
-                  ),
-                  "base64",
-                ),
-              )
-              .digest("hex")
-          : undefined;
+      let capturedDigest: string | undefined;
+      if (mode === "100644" || mode === "100755") {
+        const captured = createHash("sha256");
+        await dependencies.runRepositoryCommand(
+          "git",
+          ["cat-file", "blob", object!],
+          root,
+          {
+            onStdout: (chunk) => {
+              captured.update(chunk);
+            },
+          },
+        );
+        capturedDigest = captured.digest("hex");
+      }
       if (
         (digest !== undefined && publication.ignoredDigests.has(digest)) ||
         (capturedDigest !== undefined &&
@@ -8437,6 +8514,7 @@ async function changedPatchFiles(
 async function snapshotPatchState(
   repository: string,
   dependencies: CliDependencies,
+  signal?: AbortSignal,
 ): Promise<GitPatchState | Map<string, string>> {
   let root: string;
   try {
@@ -8453,9 +8531,14 @@ async function snapshotPatchState(
       message !== "git is not available on a trusted PATH."
     )
       throw error;
-    return snapshotPatchDirectory(repository);
+    return snapshotPatchDirectory(repository, signal);
   }
-  return snapshotGitPatchState(resolve(root.replace(/\n$/u, "")), dependencies);
+  return snapshotGitPatchState(
+    resolve(root.replace(/\n$/u, "")),
+    dependencies,
+    false,
+    signal,
+  );
 }
 
 async function patchTreeEntries(
@@ -8584,7 +8667,9 @@ async function snapshotGitPatchState(
   repository: string,
   dependencies: CliDependencies,
   retainTrees = false,
+  signal?: AbortSignal,
 ): Promise<GitPatchState> {
+  signal?.throwIfAborted();
   const tree = await snapshotPatchTree(repository, dependencies);
   const files = new Map<string, string>();
   const gitlinks: GitPatchState["gitlinks"] = new Map();
@@ -8595,6 +8680,7 @@ async function snapshotGitPatchState(
     snapshot: string,
     ancestors: string[],
   ): Promise<void> => {
+    signal?.throwIfAborted();
     const checkout = join(repository, patchPathText(directory));
     trees.set(directory, snapshot);
     if (retainTrees && directory)
@@ -8611,6 +8697,7 @@ async function snapshotGitPatchState(
       dependencies,
     );
     for (const [path, entry] of entries) {
+      signal?.throwIfAborted();
       const nestedPath = directory ? `${directory}/${path}` : path;
       if (directory) files.set(nestedPath, entry);
       if (entry.startsWith("160000 ")) {
@@ -8692,12 +8779,15 @@ async function snapshotGitPatchState(
 // Literal patch inputs also work in directories without Git metadata.
 async function snapshotPatchDirectory(
   repository: string,
+  signal?: AbortSignal,
 ): Promise<Map<string, string>> {
   const files = new Map<string, string>();
   const visit = async (directory: string): Promise<void> => {
+    signal?.throwIfAborted();
     for (const entry of await readdir(join(repository, directory), {
       withFileTypes: true,
     })) {
+      signal?.throwIfAborted();
       if (entry.name === ".git") continue;
       const path = directory ? `${directory}/${entry.name}` : entry.name;
       const absolute = join(repository, path);
@@ -8706,17 +8796,14 @@ async function snapshotPatchDirectory(
       } else if (entry.isSymbolicLink()) {
         files.set(path, `link:${await readlink(absolute)}`);
       } else if (entry.isFile()) {
-        const hash = createHash("sha256");
-        for await (const chunk of createReadStream(absolute))
-          hash.update(chunk);
-        files.set(
-          path,
-          `${(await lstat(absolute)).mode & 0o111}:${hash.digest("hex")}`,
-        );
+        const digest = await hashPatchFile(createReadStream(absolute), signal);
+        signal?.throwIfAborted();
+        files.set(path, `${(await lstat(absolute)).mode & 0o111}:${digest}`);
       }
     }
   };
   await visit("");
+  signal?.throwIfAborted();
   return files;
 }
 
@@ -9144,16 +9231,17 @@ async function runFindingPatches(
   dependencies: CliDependencies,
   options: Omit<SkillRunOptions, "directory" | "findings"> = {},
   interactive = true,
-): Promise<{ patches: FindingPatch[]; exitCode: number }> {
+): Promise<{ patches: FindingPatch[]; exitCode: number; files: string[] }> {
   if (selected.findings.length === 0) {
     stderr.write("No matching open findings to patch.\n");
-    return { patches: [], exitCode: 0 };
+    return { patches: [], exitCode: 0, files: [] };
   }
 
   stderr.write(
     `\nPatching ${selected.findings.length} confirmed finding${selected.findings.length === 1 ? "" : "s"}...\n`,
   );
   const patches: FindingPatch[] = [];
+  const knownFiles = new Set<string>();
   for (const finding of selected.findings) {
     const response = captureOutput();
     const instruction = options.findingInstructions?.[finding.occurrenceId];
@@ -9184,9 +9272,13 @@ async function runFindingPatches(
         dependencies,
         {
           ...options,
-          onBeforeTurn: async () => {
-            await options.onBeforeTurn?.();
-            base = await snapshotPatchState(selected.repository, dependencies);
+          onBeforeTurn: async (signal) => {
+            await options.onBeforeTurn?.(signal);
+            base = await snapshotPatchState(
+              selected.repository,
+              dependencies,
+              signal,
+            );
           },
           directory: selected.repository,
           findings: [finding],
@@ -9211,10 +9303,15 @@ async function runFindingPatches(
       reason,
     });
     if (status === 130 || status === 143) {
-      patches.push(failed("Patch operation was interrupted.", changedFiles));
+      patches.push(
+        failed(
+          "Patch operation was interrupted; file changes were not inspected.",
+        ),
+      );
       stderr.write("codex-security: Patch operation was interrupted.\n");
-      return { patches, exitCode: status };
+      return { patches, exitCode: status, files: [...knownFiles].sort() };
     }
+    for (const file of changedFiles) knownFiles.add(file);
     let patch: FindingPatch;
     if (status !== 0) {
       patch = failed(
@@ -9268,7 +9365,11 @@ async function runFindingPatches(
     );
     patches.push(patch);
   }
-  return { patches, exitCode: patchExitCode(patches) };
+  return {
+    patches,
+    exitCode: patchExitCode(patches),
+    files: [...knownFiles].sort(),
+  };
 }
 
 function captureOutput() {
@@ -11029,7 +11130,7 @@ async function executeScan(
           safetyIdentifier: arguments_.safetyIdentifier,
           auth,
           findingInstructions: patchSelection?.instructions,
-          onBeforeTurn: async () => {
+          onBeforeTurn: async (signal) => {
             if (
               publication === undefined &&
               (arguments_.createPr || patchSelection?.createPullRequest)
@@ -11038,6 +11139,7 @@ async function executeScan(
                 selected.repository,
                 selected.scanId,
                 dependencies,
+                signal,
               );
           },
         },

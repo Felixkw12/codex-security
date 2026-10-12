@@ -78,7 +78,8 @@ test.each(["saved", "supplied"])(
         currentDirectory: repository,
         onWorkbench: () =>
           savedScan(resultWithFindings(["high"]), "scan-1", repository),
-        onCodex: () => {
+        onCodex: async () => {
+          await writeFile(join(repository, "app.ts"), "partial edit\n");
           interrupted = true;
           return 143;
         },
@@ -91,6 +92,92 @@ test.each(["saved", "supplied"])(
     expect(outcome.exitCode, outcome.stderr).toBe(143);
     expect(interrupted).toBe(true);
     expect(snapshots).toEqual([]);
+    const response = JSON.parse(outcome.stdout);
+    expect(response).not.toHaveProperty("applied");
+    expect(response).not.toHaveProperty("filesChanged");
+    expect(response.error.message).toContain("not fully inspected");
+    expect(await readFile(join(repository, "app.ts"), "utf8")).toBe(
+      "partial edit\n",
+    );
+  },
+);
+
+test.each([false, true])(
+  "retains completed batch changes when the next patch is interrupted (Git: %p)",
+  async (useGit) => {
+    const repository = await fixtures.create("patch-interrupted-batch-");
+    await mkdir(join(repository, "src"));
+    for (const name of ["src/finding-1.ts", "src/finding-2.ts", "local.txt"])
+      await writeFile(join(repository, name), "original\n");
+    if (useGit) {
+      const git = repositoryGit(repository);
+      git("init", "--initial-branch=main");
+      git("config", "user.name", "Synthetic User");
+      git("config", "user.email", "synthetic@example.test");
+      git("add", ".");
+      git("commit", "-m", "Synthetic batch baseline");
+    }
+    await writeFile(join(repository, "local.txt"), "pre-existing edit\n");
+    let calls = 0;
+    let interrupted = false;
+    const snapshots: string[][] = [];
+    const outcome = await runWorkflow(["patch", "--scan", "scan-1", "--json"], {
+      currentDirectory: repository,
+      onWorkbench: () =>
+        savedScan(resultWithFindings(["high", "high"]), "scan-1", repository),
+      onRepositoryCommand: (command, args, cwd, options) => {
+        if (interrupted && options?.patchSnapshot) snapshots.push([...args]);
+        if (!useGit) throw new Error("fatal: not a git repository");
+        return runGitRepositoryCommand(command, args, cwd, options);
+      },
+      onCodex: async (_args, output) => {
+        calls++;
+        await writeFile(
+          join(repository, `src/finding-${calls}.ts`),
+          "partial edit\n",
+        );
+        if (calls === 2) {
+          interrupted = true;
+          return 143;
+        }
+        output!.stdout.write(
+          JSON.stringify({
+            patches: [
+              {
+                occurrenceId: "occ_1",
+                status: "verified",
+                files: ["src/finding-1.ts"],
+                verification: "Synthetic check.",
+              },
+            ],
+          }),
+        );
+        return 0;
+      },
+    });
+    expect(outcome.exitCode, outcome.stderr).toBe(143);
+    expect(calls).toBe(2);
+    expect(snapshots).toEqual([]);
+    const response = JSON.parse(outcome.stdout);
+    expect(response.files).toEqual(["src/finding-1.ts"]);
+    expect(response).not.toHaveProperty("applied");
+    expect(response).not.toHaveProperty("filesChanged");
+    expect(response.error.message).toContain("not fully inspected");
+    expect(response.patches[0]).toMatchObject({
+      status: "verified",
+      files: ["src/finding-1.ts"],
+    });
+    expect(response.patches[1]).toMatchObject({
+      status: "failed",
+      reason: expect.stringContaining("not inspected"),
+    });
+    for (const name of ["src/finding-1.ts", "src/finding-2.ts"])
+      expect(await readFile(join(repository, name), "utf8")).toBe(
+        "partial edit\n",
+      );
+    expect(await readFile(join(repository, "local.txt"), "utf8")).toBe(
+      "pre-existing edit\n",
+    );
   },
 );
 
@@ -210,6 +297,12 @@ process.exitCode = outcome.exitCode;
       expect(JSON.parse(output.trim()).snapshots).toBe(
         mode === "saved SIGTERM" ? 2 : 1,
       );
+      if (mode !== "app-server exit") {
+        const response = JSON.parse(JSON.parse(output.trim()).stdout);
+        expect(response).not.toHaveProperty("applied");
+        expect(response).not.toHaveProperty("filesChanged");
+        expect(response.error.message).toContain("not fully inspected");
+      }
       let readerError: unknown;
       try {
         writeSync(writer!, "probe");
