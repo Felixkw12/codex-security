@@ -46,7 +46,7 @@ async function fixture(registerOnly = false) {
   await writeFile(join(source, "src/app.ts"), "export const value = 1;\n");
   await writeFile(
     join(source, ".gitattributes"),
-    "src/*.ts filter=codexCampaignFixture\n",
+    "src/*.ts text eol=lf filter=codexCampaignFixture\n",
   );
   git("add", ".");
   git(
