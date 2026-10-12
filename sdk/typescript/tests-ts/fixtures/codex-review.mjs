@@ -7,6 +7,8 @@ const [scenario, transcript, checkout, stage = "pair-review"] =
 const refusalMessages = {
   "refusal-text": "I'm sorry, but I can't assist with that request.",
   "policy-prefix-text": "Safety policy: request refused.",
+  "policy-intro-text":
+    "Review cannot proceed. Safety policy: this request is refused.",
   "policy-prefix-due-text":
     "Safety policy: this request is refused due to disallowed content.",
   "policy-prefix-under-text":
@@ -61,6 +63,16 @@ const turnFailures = {
   "prefix-network-error": {
     message:
       "Failed to contact safety policy: request refused by upstream with 503",
+    codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
+  },
+  "prefix-because-error": {
+    message:
+      "Safety policy: request refused because the upstream service is unavailable.",
+    codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
+  },
+  "prefix-as-error": {
+    message:
+      "Safety policy: request refused as the upstream service is unavailable.",
     codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
   },
   "prefix-service-error": {

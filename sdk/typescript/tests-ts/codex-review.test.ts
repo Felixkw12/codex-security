@@ -129,6 +129,8 @@ const failureReasons: Record<string, string> = {
   "policy-request": "Request rejected: cyber_policy.",
   "refusal-text": "I'm sorry, but I can't assist with that request.",
   "policy-prefix-text": "Safety policy: request refused.",
+  "policy-intro-text":
+    "Review cannot proceed. Safety policy: this request is refused.",
   "policy-prefix-due-text":
     "Safety policy: this request is refused due to disallowed content.",
   "policy-prefix-under-text":
@@ -156,6 +158,10 @@ const failureReasons: Record<string, string> = {
   "prefix-network-error":
     "Failed to contact safety policy: request refused by upstream with 503",
   "prefix-service-error": "Safety policy: request refused: service unavailable",
+  "prefix-because-error":
+    "Safety policy: request refused because the upstream service is unavailable.",
+  "prefix-as-error":
+    "Safety policy: request refused as the upstream service is unavailable.",
   "prefix-upstream-error":
     "Safety policy: request refused by upstream with 503",
   "connection-error": "Provider stream disconnected",
@@ -198,6 +204,8 @@ const retriedFailures = new Set([
   "prefix-network-error",
   "prefix-service-error",
   "prefix-upstream-error",
+  "prefix-because-error",
+  "prefix-as-error",
   "connection-error",
   "invalid-json",
   "invalid-submission",
@@ -213,6 +221,8 @@ const recoveredScenarios: Record<string, string> = {
   "recover-prefix-network-error": "prefix-network-error",
   "recover-prefix-service-error": "prefix-service-error",
   "recover-prefix-upstream-error": "prefix-upstream-error",
+  "recover-prefix-because-error": "prefix-because-error",
+  "recover-prefix-as-error": "prefix-as-error",
   "recover-connection-error": "connection-error",
   "recover-process-exit": "exit",
   "recover-invalid-json": "invalid-json",
@@ -232,6 +242,8 @@ const modelFailures = new Set([
   "prefix-network-error",
   "prefix-service-error",
   "prefix-upstream-error",
+  "prefix-because-error",
+  "prefix-as-error",
   "connection-error",
   "unauthorized-turn",
   "bad-request-turn",
@@ -906,6 +918,8 @@ test.each(["capture", "throw", "reject", "pending"])(
 
 test.each([
   "cyber_policy",
+  "Review cannot proceed. Safety policy: this request is refused.",
+  "Error: Safety policy: this request is refused.",
   "Request blocked by a safety policy violation.",
   "This request was blocked by the content policy.",
   "The review has been blocked under the safety policy.",
@@ -969,6 +983,8 @@ test.each([
   "HTTP request blocked: safety policy service unavailable",
   "Request refused: safety policy service unavailable",
   "Safety policy: request refused: service unavailable",
+  "Safety policy: request refused because the upstream service is unavailable.",
+  "Safety policy: request refused as the upstream service is unavailable.",
   "Safety policy: request refused by upstream with 503",
   "Failed to contact safety policy: request refused by upstream with 503",
   "Ordinary safety policy documentation",
