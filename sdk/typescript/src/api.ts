@@ -1728,21 +1728,13 @@ export class CodexSecurity {
         // Reload inherited file settings, retaining explicit provider refinements
         // separately from the readable recipe.
         delete recipeConfig["model_providers"];
-        const provider = scanModelProvider(preflightConfig);
         const explicitProviders =
           this.config.codexOverrides?.["model_providers"];
-        if (
-          options.resumeScanId === undefined &&
-          typeof provider === "string" &&
-          isRecord(explicitProviders) &&
-          isRecord(explicitProviders[provider])
-        ) {
+        if (options.resumeScanId === undefined && isRecord(explicitProviders)) {
           savedProviderProfile = await createProviderProfile(
             codexSecurityCredentialHome(this.#dependencies.environment),
             {
-              model_providers: {
-                [provider]: explicitProviders[provider] as JsonObject,
-              },
+              model_providers: explicitProviders as JsonObject,
             },
           );
         }

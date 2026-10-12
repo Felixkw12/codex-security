@@ -15,6 +15,7 @@ import type { CodexOptions } from "@openai/codex-sdk";
 import { afterEach, describe, expect, test, mock } from "bun:test";
 import { parse as parseToml, stringify } from "smol-toml";
 import { initialCredentialsAvailable } from "../src/api.js";
+import { restoreProviderProfile } from "../src/provider-profile.js";
 import { AuthenticationRequiredError } from "../src/errors.js";
 import { setCodexSecurityCredentialLogout } from "../src/runtime.js";
 import { copyCompletedScan, PLUGIN_ROOT } from "./plugin-root.js";
@@ -985,6 +986,11 @@ process.exit(process.exitCode ?? 0);
         }),
       );
       let savedRecipe: JsonObject | undefined;
+      const environment = {
+        CODEX_HOME: home,
+        CODEX_SECURITY_STATE_DIR: join(root, "state"),
+        [EXTERNAL_CODEX_PROVIDERS[provider].env_key]: "synthetic-provider-key",
+      };
       const client = new TestClient(
         {
           pluginPath: PLUGIN_ROOT,
@@ -999,11 +1005,7 @@ process.exit(process.exitCode ?? 0);
           },
         },
         {
-          environment: {
-            CODEX_HOME: home,
-            [EXTERNAL_CODEX_PROVIDERS[provider].env_key]:
-              "synthetic-provider-key",
-          },
+          environment,
           resolvePluginPython: async () => "/managed/python",
           prepareRuntime: async () => preparedRuntime(runtimeHome),
           prepareOutputDir: async () => scanDir,
@@ -1047,14 +1049,23 @@ process.exit(process.exitCode ?? 0);
           "synthetic-caller-header",
         );
         const replay = resolveCodexProfile(
-          await mergedCodexConfig({ codexOverrides: config }, home),
+          await mergedCodexConfig(
+            {
+              codexOverrides: await restoreProviderProfile(
+                config,
+                savedRecipe!["providerProfile"],
+                environment,
+              ),
+            },
+            home,
+          ),
         );
         expect(replay["model_provider"]).toBe(provider);
         expect(replay["model_providers"]).toEqual({
           [provider]:
             selection === "generated"
               ? EXTERNAL_CODEX_PROVIDERS[provider]
-              : fileProvider,
+              : { ...fileProvider, ...explicitProvider },
         });
       } finally {
         await client.close();

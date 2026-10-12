@@ -165,10 +165,20 @@ test.each(
       base_url: customEndpoint,
       http_headers: { "X-Synthetic-Credential": header },
     };
+    const alternateProvider = {
+      name: "Synthetic agent provider",
+      base_url: "https://agent.example.invalid/v1",
+      env_key: "SYNTHETIC_AGENT_KEY",
+      wire_api: "responses",
+    };
+    const explicitProviders = {
+      [provider]: explicitProvider,
+      agent: alternateProvider,
+    };
     const overrides = {
       profile: "review",
       model_provider: provider,
-      model_providers: { [provider]: explicitProvider },
+      model_providers: explicitProviders,
     };
     let providerProfilePath: string | undefined;
     const client = new TestClient(
@@ -197,6 +207,7 @@ test.each(
               [provider]: {
                 http_headers: { "X-Synthetic-Credential": header },
               },
+              agent: alternateProvider,
             },
           });
           throw new Error("Synthetic stop after registration");
@@ -228,7 +239,7 @@ test.each(
         expect((await stat(savedProfilePath)).mode & 0o777).toBe(0o600);
       await client.close();
       expect(parseToml(await readFile(savedProfilePath, "utf8"))).toEqual({
-        model_providers: { [provider]: explicitProvider },
+        model_providers: explicitProviders,
       });
       const initial = await mergedCodexConfig(
         { codexOverrides: overrides },
@@ -275,6 +286,7 @@ test.each(
         ],
       ).toEqual({
         [provider]: { ...explicitProvider, request_max_retries: 8 },
+        agent: alternateProvider,
       });
       expect(JSON.stringify(recipe)).not.toContain(header);
       expect(JSON.stringify(recipe)).not.toContain(customEndpoint);
