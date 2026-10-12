@@ -31,15 +31,25 @@ const pluginVersion = JSON.parse(
 
 const fixtureNativeRoot = await realpath(
   new URL("../../native/dist/", import.meta.url),
-).catch((error) => {
-  if (error.code !== "ENOENT") throw error;
-  return realpath(new URL("../../native/prebuilt/", import.meta.url));
-});
+)
+  .catch((error) => {
+    if (error.code !== "ENOENT") throw error;
+    return realpath(new URL("../../native/prebuilt/", import.meta.url));
+  })
+  .catch((error) => {
+    if (error.code !== "ENOENT") throw error;
+    return realpath(
+      new URL(
+        "../../../../sdk/typescript/_bundled_plugin/mcp/native/",
+        import.meta.url,
+      ),
+    );
+  });
 const fixturePluginRoot = await realpath(
   await mkdtemp(join(tmpdir(), "native-scan-plugin-")),
 );
 after(() => rm(fixturePluginRoot, { recursive: true, force: true }));
-// Both standalone host builds and universal artifacts provide real primitives.
+// Host builds, universal artifacts and restored packages provide real primitives.
 await Promise.all([
   cp(
     new URL("../../.codex-plugin/", import.meta.url),
