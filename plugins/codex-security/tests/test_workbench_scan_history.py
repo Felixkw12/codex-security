@@ -1034,8 +1034,14 @@ def test_equivalent_locations_preserve_confirmed_groups(
     assert compare_scan_pair(state_dir, before, after) == compared
 
 
-@pytest.mark.parametrize("alias_shape", ["none", "endpoints", "chain"])
-def test_equivalent_locations_preserve_related_findings(tmp_path: Path, alias_shape: str) -> None:
+@pytest.mark.parametrize(
+    ("alias_shape", "history"),
+    [("none", None), ("endpoints", None), ("chain", None)]
+    + [(shape, direction) for shape in ("none", "chain") for direction in ("forward", "reverse")],
+)
+def test_equivalent_locations_preserve_related_findings(
+    tmp_path: Path, alias_shape: str, history: str | None
+) -> None:
     state_dir = tmp_path / "state"
     root = tmp_path / "results"
     repository = tmp_path / "repository"
@@ -1069,6 +1075,17 @@ def test_equivalent_locations_preserve_related_findings(tmp_path: Path, alias_sh
     before_specs.append(("independent-before", "src/independent.py"))
     after_specs.append(("independent-after", "src/independent.py"))
     before = create_scan_with_finding_locations(state_dir, root, repository, before_specs)
+    related_scan = (
+        create_cli_scan(
+            state_dir,
+            root,
+            repository,
+            identity_anchor="historical-distinct-root",
+            relative_path="src/related-history.py",
+        )
+        if history
+        else None
+    )
     after = create_scan_with_finding_locations(state_dir, root, repository, after_specs)
     inputs = compare_scan_pair(state_dir, before, after, "--include-matching-inputs")[
         "matchingInputs"
@@ -1101,7 +1118,46 @@ def test_equivalent_locations_preserve_related_findings(tmp_path: Path, alias_sh
         "afterOccurrenceId": by_anchor[related_anchors[1]],
         "reason": "Member-name validation and existing-symlink traversal need different fixes.",
     }
-    compared = save_scan_matches(state_dir, before, after, related=(related,))
+    if related_scan is None:
+        compared = save_scan_matches(state_dir, before, after, related=(related,))
+    else:
+        historical_id = compare_scan_pair(
+            state_dir, before, related_scan, "--include-matching-inputs"
+        )["matchingInputs"]["after"][0]["occurrenceId"]
+        if history == "reverse":
+            save_scan_matches(
+                state_dir,
+                related_scan,
+                before,
+                related=(
+                    {
+                        **related,
+                        "beforeOccurrenceId": historical_id,
+                        "afterOccurrenceId": related["beforeOccurrenceId"],
+                    },
+                ),
+            )
+        else:
+            save_scan_matches(
+                state_dir,
+                before,
+                related_scan,
+                related=(
+                    {
+                        **related,
+                        "afterOccurrenceId": historical_id,
+                    },
+                ),
+            )
+        save_scan_matches(
+            state_dir,
+            related_scan,
+            after,
+            confirmed_match(historical_id, related["afterOccurrenceId"]),
+        )
+        if history == "reverse":
+            before, after = after, before
+        compared = compare_scan_pair(state_dir, before, after)
     assert compared["summary"] == {
         "new": 2 if alias_shape == "chain" else 1,
         "persisting": 1,
@@ -1110,10 +1166,16 @@ def test_equivalent_locations_preserve_related_findings(tmp_path: Path, alias_sh
         "unknown": 0,
     }
     persisting = next(item for item in compared["findings"] if item["status"] == "persisting")
-    assert persisting["beforeOccurrenceId"] == by_anchor["independent-before"]
-    assert persisting["afterOccurrenceId"] == by_anchor["independent-after"]
-    assert len(compared["related"]) == 1
-    assert all(compared["related"][0][key] == value for key, value in related.items())
+    independent = [by_anchor["independent-before"], by_anchor["independent-after"]]
+    if history == "reverse":
+        independent.reverse()
+    assert persisting["beforeOccurrenceId"] == independent[0]
+    assert persisting["afterOccurrenceId"] == independent[1]
+    if history is None:
+        assert len(compared["related"]) == 1
+        assert all(compared["related"][0][key] == value for key, value in related.items())
+    else:
+        assert "related" not in compared
     assert compare_scan_pair(state_dir, before, after) == compared
 
 

@@ -7,7 +7,7 @@ import os
 import sqlite3
 import sys
 from collections.abc import Iterable, Iterator
-from itertools import chain
+from itertools import chain, groupby
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 from urllib.parse import urlsplit
@@ -619,19 +619,6 @@ def compare_scans(
     aliases = _confirmed_finding_aliases(connection, occurrences)
     before_identities = {aliases.get(finding_id, finding_id) for finding_id in before_findings}
     after_identities = {aliases.get(finding_id, finding_id) for finding_id in after_findings}
-    related_identities = (
-        {
-            tuple(
-                aliases.get(
-                    occurrences[pair[key]]["finding_id"], occurrences[pair[key]]["finding_id"]
-                )
-                for key in ("beforeOccurrenceId", "afterOccurrenceId")
-            )
-            for pair in matches.get("related", [])
-        }
-        if matches is not None
-        else set()
-    )
     # Deterministic links must preserve confirmed groups and explicit root-cause distinctions.
     equivalent = [
         (previous, current)
@@ -643,13 +630,27 @@ def compare_scans(
         if aliases.get(previous, previous) not in after_identities
         and aliases.get(current, current) not in before_identities
     ]
-    if equivalent and related_identities:
+    if equivalent:
         combined = _finding_aliases(chain(aliases.items(), equivalent))
-        conflicts = {
-            combined.get(previous, previous)
-            for previous, current in related_identities
-            if combined.get(previous, previous) == combined.get(current, current)
-        }
+        conflicts = set()
+        linked_occurrences = _rows_for_ids(
+            connection,
+            "SELECT id, finding_id, scan_id FROM finding_occurrences "
+            "WHERE finding_id IN (SELECT value FROM json_each(?)) ORDER BY scan_id",
+            chain(before_findings, after_findings, aliases),
+        )
+        for scan_id, rows in groupby(linked_occurrences, lambda row: row["scan_id"]):
+            finding_ids = {row["id"]: row["finding_id"] for row in rows}
+            for occurrence_id, relations in finding_relations(
+                connection, scan_id, finding_ids, aliases=aliases
+            ).items():
+                finding_id = finding_ids[occurrence_id]
+                identity = combined.get(finding_id, finding_id)
+                if any(
+                    identity == combined.get(pair["findingId"], pair["findingId"])
+                    for pair in relations
+                ):
+                    conflicts.add(identity)
         equivalent = [
             (previous, current)
             for previous, current in equivalent
@@ -1013,7 +1014,11 @@ def _separate_finding_pairs(
 
 
 def finding_relations(
-    connection: sqlite3.Connection, scan_id: str, occurrence_ids: Iterable[str]
+    connection: sqlite3.Connection,
+    scan_id: str,
+    occurrence_ids: Iterable[str],
+    *,
+    aliases: dict[str, str] | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     selected = set(occurrence_ids)
     if not selected:
@@ -1055,7 +1060,10 @@ def finding_relations(
         and occurrences[pair["afterOccurrenceId"]]["scan_id"] == pair["afterScanId"]
     ]
     result: dict[str, list[dict[str, Any]]] = {}
-    aliases = _confirmed_finding_aliases(connection, (pair["beforeOccurrenceId"] for pair in pairs))
+    if aliases is None:
+        aliases = _confirmed_finding_aliases(
+            connection, (pair["beforeOccurrenceId"] for pair in pairs)
+        )
     for pair in _separate_finding_pairs(pairs, occurrences, aliases):
         finding = occurrences[pair["afterOccurrenceId"]]
         result.setdefault(pair["beforeOccurrenceId"], []).append(
