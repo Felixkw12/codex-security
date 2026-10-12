@@ -234,7 +234,11 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
     );
     signal?.throwIfAborted();
     // Deep results replace findings and coverage while retaining an omitted model.
-    const preserved = finalDeepDraft
+    const preserved: {
+      input: ScanDraftInput;
+      previousDigest?: string;
+      mergedCandidateKeys?: ReadonlySet<string>;
+    } = finalDeepDraft
       ? await preserveDeepThreatModel(context, checkpoint)
       : await preserveScanDraft(
           context,
@@ -248,6 +252,7 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
       preserved.input,
       candidates,
       submitted,
+      preserved.mergedCandidateKeys,
     );
     const contract = requireObject(
       context.targetContract,
@@ -489,7 +494,11 @@ async function preserveScanDraft(
   currentCheckpointName = scanDraftCheckpointName(input),
   diffCandidates?: DiffCandidates,
   currentFindings = input.findings,
-): Promise<{ input: ScanDraftInput; previousDigest: string }> {
+): Promise<{
+  input: ScanDraftInput;
+  previousDigest: string;
+  mergedCandidateKeys: Set<string>;
+}> {
   const requiresClosureValidation = resolvedDeferred(input.coverage).length > 0;
   if (saveCheckpoint && !requiresClosureValidation)
     await saveScanDraftCheckpoint(context, input, false);
@@ -798,6 +807,7 @@ async function preserveScanDraft(
     currentFindings,
   );
   const resolvedCandidateKeys = collectResolvedCandidateKeys(result, owner);
+  const mergedCandidateKeys = new Set<string>();
   const resolvedSurfaceIds = new Set<string>();
   const pendingSurfaceCandidates = new Map<string, Set<string | undefined>>();
   const pendingCandidateKeys = new Set<string>();
@@ -965,10 +975,12 @@ async function preserveScanDraft(
         preserveFindingDetails(matches[0]!, finding);
         if (
           candidateId !== undefined &&
+          !reopenedCandidates.has(candidateId) &&
           isCurrentCandidateFinding(finding) &&
           isCurrentCandidateFinding(matches[0]!)
         ) {
           resolvedCandidateKeys.add(candidateId);
+          mergedCandidateKeys.add(candidateId);
           if (findingKey(matches[0]!) !== candidateId)
             for (const pending of candidateHistory)
               if (coverageKey(pending) === candidateId)
@@ -1112,7 +1124,11 @@ async function preserveScanDraft(
     normalizeSurfaces(result.coverage.surfaces as JsonObject[]),
   );
   if (saveCheckpoint) await saveScanDraftCheckpoint(context, result);
-  return { input: result, previousDigest: previousState.digest };
+  return {
+    input: result,
+    previousDigest: previousState.digest,
+    mergedCandidateKeys,
+  };
 }
 
 function completedCandidateIds(

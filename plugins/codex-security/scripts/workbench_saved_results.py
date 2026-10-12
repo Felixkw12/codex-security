@@ -58,7 +58,10 @@ from workbench_budget_candidates import (
     _diff_candidate_decision,
     _diff_candidate_phase_snapshot,
     _diff_candidate_reason,
+    _encode_retained_sources,
     _generated_diff_candidate_decision,
+    _retained_source_state,
+    _source_digests,
     archive_candidate_payloads,
     archive_resolved_deferred_payloads,
     archive_resolved_diff_payloads,
@@ -324,13 +327,20 @@ def _read_saved_result(
     return draft, _digest(draft), metadata.st_mtime_ns
 
 
-def _frozen_source_times(scan_dir: Path, scan_id: str, sources: dict[str, str]) -> dict[str, int]:
+def _frozen_source_times(
+    scan_dir: Path,
+    scan_id: str,
+    sources: dict[str, str],
+    receipt_states: dict[str, Any] | None = None,
+) -> dict[str, int]:
     times: dict[str, int] = {}
     snapshots = [path for path in sources if _is_source_order_snapshot(path)]
     for path in snapshots:
         record, digest, _ = _read_saved_result(scan_dir, path, scan_id)
         if digest != sources[path] or not isinstance(record.get("sources"), dict):
             raise ContractError("saved source ordering changed after the scan stopped")
+        if receipt_states is not None:
+            receipt_states.update(copy.deepcopy(record.get("receiptRecovery", {})))
         for relative, observation in record["sources"].items():
             if (
                 not isinstance(observation, dict)
@@ -350,7 +360,11 @@ def _frozen_source_times(scan_dir: Path, scan_id: str, sources: dict[str, str]) 
 
 
 def _freeze_source_times(
-    scan_dir: Path, scan_id: str, sources: dict[str, str], times: dict[str, int]
+    scan_dir: Path,
+    scan_id: str,
+    sources: dict[str, str],
+    times: dict[str, int],
+    receipt_states: dict[str, Any] | None = None,
 ) -> None:
     # Identical result rewrites must not change the order of frozen review evidence.
     observations = {
@@ -361,6 +375,8 @@ def _freeze_source_times(
     if not observations:
         return
     record = {"scanId": scan_id, "sources": observations}
+    if recovered := {key: state for key, state in (receipt_states or {}).items() if state}:
+        record["receiptRecovery"] = recovered
     digest = _digest(record)
     path = f"source-order/{digest}.json"
     if not (scan_dir / path).exists():
@@ -407,31 +423,6 @@ def _read_saved_parent_result(
     ):
         raise ContractError("Saved parent documents belong to a different scan")
     return manifest, _parent_scan_draft(scan_id, parent_scan, findings, coverage)
-
-
-def _source_digests(value: Any, error: str) -> dict[str, str]:
-    if not isinstance(value, dict) or not all(
-        isinstance(relative, str) and isinstance(digest, str) for relative, digest in value.items()
-    ):
-        raise ContractError(error)
-    return value
-
-
-def _retained_source_state(value: Any) -> tuple[dict[str, str], str | None]:
-    if isinstance(value, dict) and isinstance(value.get("sources"), dict):
-        sources = _source_digests(
-            value["sources"], "Saved stopped-scan source digests are malformed."
-        )
-        model_source = value.get("threatModelSource")
-        if not isinstance(model_source, str) or model_source not in sources:
-            raise ContractError("Saved stopped-scan model source is outside its checkpoint set.")
-        return sources, model_source
-    return _source_digests(value, "Saved stopped-scan source digests are malformed."), None
-
-
-def _encode_retained_sources(sources: dict[str, str], model_source: list[str]) -> str:
-    state = {"sources": sources, "threatModelSource": model_source[0]} if model_source else sources
-    return json.dumps(state, sort_keys=True)
 
 
 def _saved_results_changed(db: Any, connection: Any, scan: Any) -> bool:
@@ -1329,8 +1320,12 @@ def merge_saved_results(
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None:
     """Merge bound results, persisting parent and stopped-decision checkpoints for replay."""
     initial_warnings = set(warnings)
+    receipt_states: dict[str, Any] = {}
+    receipt_reopened: set[tuple[str | None, str]] = set()
     try:
-        source_times = _frozen_source_times(scan_dir, scan_id, frozen_source_digests or {})
+        source_times = _frozen_source_times(
+            scan_dir, scan_id, frozen_source_digests or {}, receipt_states
+        )
     except (ContractError, OSError, ValueError) as exc:
         raise ContractError("Frozen stopped-scan checkpoint set is incomplete.") from exc
     parent: dict[str, Any] | None = None
@@ -1418,7 +1413,9 @@ def merge_saved_results(
             parent_preserved_sources = recorded
             source_digests.update(parent_preserved_sources)
             if frozen_source_digests is None:
-                source_times.update(_frozen_source_times(scan_dir, scan_id, recorded))
+                source_times.update(
+                    _frozen_source_times(scan_dir, scan_id, recorded, receipt_states)
+                )
     paths: dict[str, str | None] = {}
     reducer_paths: set[str] = set()
     current_results: set[str] = set()
@@ -1531,7 +1528,15 @@ def merge_saved_results(
                 )
             if worker_id is not None:
                 projected = recover_candidate_receipts(
-                    projected, scan_dir, warnings, relative, owner=worker_id
+                    projected,
+                    scan_dir,
+                    warnings,
+                    relative,
+                    owner=worker_id,
+                    reopened=receipt_reopened,
+                    receipt_state=receipt_states.setdefault(
+                        _digest([relative, worker_id, projected]), {}
+                    ),
                 )
             sources.append((relative, projected, worker_id))
         except (ContractError, OSError, ValueError) as exc:
@@ -1612,8 +1617,13 @@ def merge_saved_results(
                 parent = _merge_tied_parent_observations(parent, draft)
                 parent_is_canonical = False
 
-    receipt_reopened: set[tuple[str | None, str]] = set()
-    parent = recover_candidate_receipts(parent, scan_dir, warnings, reopened=receipt_reopened)
+    parent = recover_candidate_receipts(
+        parent,
+        scan_dir,
+        warnings,
+        reopened=receipt_reopened,
+        receipt_state=receipt_states.setdefault(_digest(["parent", parent]), {}),
+    )
 
     decision_drafts = [
         draft
@@ -1747,8 +1757,9 @@ def merge_saved_results(
         frozen_source_digests is None
         or any(_is_source_order_snapshot(path) for path in source_digests)
         or allow_frozen_legacy_parent
+        or any(receipt_states.values())
     ):
-        _freeze_source_times(scan_dir, scan_id, source_digests, source_times)
+        _freeze_source_times(scan_dir, scan_id, source_digests, source_times, receipt_states)
 
     target_kind = binding["allowedTargetKinds"][0]
     if (
@@ -2641,6 +2652,7 @@ def merge_saved_results(
         ]
 
     reopened_candidates = {key for _, key in inactive_outcomes if key not in resolved}
+    reopened_candidates.update(key for key in receipt_reopened if key not in resolved)
     reopened_candidates.update(
         key
         for relative, draft, owner in all_sources
@@ -2652,13 +2664,15 @@ def merge_saved_results(
     )
     identities: dict[str, str] = {}
     for finding in findings:
-        if not valid_finding(finding):
+        if not isinstance(finding, dict) or not isinstance(finding.get("provenance"), dict):
             continue
         candidate = finding_candidate_key(finding)
         if candidate in reopened_candidates:
             finding["provenance"]["candidateReopened"] = True
         elif resolved.get(candidate) == "reported":
             finding["provenance"].pop("candidateReopened", None)
+        if not valid_finding(finding):
+            continue
         identity = finding.get("identity")
         if not isinstance(identity, dict):
             continue
@@ -2932,7 +2946,7 @@ def preserve_scan_results_locked(
                     (json.dumps(unpublished_warnings), db.now(), scan_id),
                 )
         return False
-    if frozen_source_digests is None or (
+    if frozen_source_digests != documents[0]["scan"]["preservedSources"] or (
         recovery_source_digests is None and saved_model_source is None and model_source
     ):
         retained_sources = _source_digests(

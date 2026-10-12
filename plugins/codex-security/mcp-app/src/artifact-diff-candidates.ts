@@ -49,6 +49,18 @@ export async function readCandidateLedger(
 
 export type DiffCandidates = Awaited<ReturnType<typeof readDiffCandidates>>;
 
+function* currentFindingHistory(finding: JsonObject): Generator<JsonObject> {
+  if (!isCurrentCandidateFinding(finding)) return;
+  yield finding;
+  const provenance = object(finding.provenance);
+  for (const previous of Array.isArray(provenance?.previousFindings)
+    ? provenance.previousFindings
+    : []) {
+    const retained = object(previous);
+    if (retained) yield* currentFindingHistory(retained);
+  }
+}
+
 function candidateHistory(
   sources: ScanDraftInput[],
   ledger: ReadonlyMap<string, NonNullable<DiffCandidates>[number]>,
@@ -58,9 +70,20 @@ function candidateHistory(
   const authoredResolutions = new Set<string>();
   const pendingDecisions = new Set<string>();
   for (const source of sources) {
+    const pendingKeys = new Set(
+      (source.coverage.deferred as JsonObject[]).map((item) =>
+        coverageCandidateKey(item),
+      ),
+    );
     const authored = [
       ...source.findings
-        .filter(isCurrentCandidateFinding)
+        .flatMap((finding) =>
+          [...currentFindingHistory(finding)].filter(
+            (retained) =>
+              retained === finding ||
+              !pendingKeys.has(findingCandidateKey(retained)),
+          ),
+        )
         .filter((finding) => {
           const candidate = ledger.get(findingCandidateKey(finding) ?? "");
           return !candidate || !changedFindingDecision(finding, candidate);
@@ -500,15 +523,24 @@ export function preserveUnresolvedDiffCandidates(
   input: ScanDraftInput,
   candidates: DiffCandidates,
   submitted = input,
+  mergedResolutions: ReadonlySet<string> = new Set(),
 ): ScanDraftInput {
   if (candidates === undefined) return input;
   input = structuredClone(input);
-  const resolvedKeys = resolvedCandidateKeys(input);
+  const resolvedKeys = new Set([
+    ...resolvedCandidateKeys(input),
+    ...mergedResolutions,
+  ]);
   const confirmed = new Map(
     input.findings
       .filter(isCurrentCandidateFinding)
       .map((finding) => [findingCandidateKey(finding), finding]),
   );
+  for (const finding of input.findings.filter(isCurrentCandidateFinding))
+    for (const retained of currentFindingHistory(finding)) {
+      const key = findingCandidateKey(retained);
+      if (key && mergedResolutions.has(key)) confirmed.set(key, finding);
+    }
   const inputSurfaces = input.coverage.surfaces as JsonObject[];
   const decisions = new Map(
     [...inputSurfaces, ...(input.coverage.explicitExclusions as JsonObject[])]

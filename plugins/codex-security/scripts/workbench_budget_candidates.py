@@ -29,6 +29,31 @@ from finalize_scan_contract import (
 )
 
 
+def _source_digests(value: Any, error: str) -> dict[str, str]:
+    if not isinstance(value, dict) or not all(
+        isinstance(relative, str) and isinstance(digest, str) for relative, digest in value.items()
+    ):
+        raise ContractError(error)
+    return value
+
+
+def _retained_source_state(value: Any) -> tuple[dict[str, str], str | None]:
+    if isinstance(value, dict) and isinstance(value.get("sources"), dict):
+        sources = _source_digests(
+            value["sources"], "Saved stopped-scan source digests are malformed."
+        )
+        model_source = value.get("threatModelSource")
+        if not isinstance(model_source, str) or model_source not in sources:
+            raise ContractError("Saved stopped-scan model source is outside its checkpoint set.")
+        return sources, model_source
+    return _source_digests(value, "Saved stopped-scan source digests are malformed."), None
+
+
+def _encode_retained_sources(sources: dict[str, str], model_source: list[str]) -> str:
+    state = {"sources": sources, "threatModelSource": model_source[0]} if model_source else sources
+    return json.dumps(state, sort_keys=True)
+
+
 def resolved_deferred_rows(draft: dict[str, Any], schema: dict[str, Any]) -> list[dict[str, Any]]:
     if draft.get("complete") is False:
         return []
@@ -54,30 +79,70 @@ def recover_candidate_receipts(
     *,
     owner: str | None = None,
     reopened: set[tuple[str | None, str]] | None = None,
+    receipt_state: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     if parent is None:
-        return parent
-    surfaces = parent["coverage"].get("surfaces")
-    if not isinstance(surfaces, list) or not any(
-        isinstance(row, dict)
-        and row.get("disposition") in ("rejected", "not_applicable")
-        and (
-            not isinstance(row.get("label"), str)
-            or not row["label"].strip()
-            or row.get("receiptRefs")
-            or ("receiptRefs" in row and not isinstance(row["receiptRefs"], list))
+        return None
+    if receipt_state and "coverage" in receipt_state:
+        warnings.extend(receipt_state["warnings"])
+        if reopened is not None:
+            reopened.update(tuple(key) for key in receipt_state["reopened"])
+        return {**parent, "coverage": copy.deepcopy(receipt_state["coverage"])}
+    recovered_keys: set[tuple[str | None, str]] = set()
+    warning_start = len(warnings)
+    result = _recover_candidate_receipts(
+        parent, scan_dir, warnings, source, owner=owner, reopened=recovered_keys
+    )
+    if receipt_state is not None and result is not parent:
+        receipt_state.update(
+            coverage=copy.deepcopy(result["coverage"]),
+            warnings=warnings[warning_start:],
+            reopened=sorted(recovered_keys, key=repr),
         )
-        for row in surfaces
-    ):
+    if reopened is not None:
+        reopened.update(recovered_keys)
+    return result
+
+
+def _recover_candidate_receipts(
+    parent: dict[str, Any],
+    scan_dir: Path,
+    warnings: list[str],
+    source: str | None = None,
+    *,
+    owner: str | None = None,
+    reopened: set[tuple[str | None, str]],
+) -> dict[str, Any] | None:
+    surfaces = parent["coverage"].get("surfaces")
+    fields = [
+        field
+        for field in ("surfaces", "explicitExclusions")
+        if any(
+            isinstance(row, dict)
+            and row.get("disposition") in ("rejected", "not_applicable")
+            and (
+                (
+                    field == "surfaces"
+                    and (not isinstance(row.get("label"), str) or not row["label"].strip())
+                )
+                or row.get("receiptRefs")
+                or ("receiptRefs" in row and not isinstance(row["receiptRefs"], list))
+            )
+            for rows in [parent["coverage"].get(field)]
+            for row in (rows if isinstance(rows, list) else [])
+        )
+    ]
+    if not fields:
         return parent
     # Receipt recovery must precede resolution of the candidate's saved proof gaps.
+    directory = Path(".")
     if source is not None:
         directory = Path(source).parent
         if directory.name == "checkpoints":
             directory = directory.parent
         scan_dir = scan_dir / directory
     parent = copy.deepcopy(parent)
-    if source is not None:
+    if source is not None or "explicitExclusions" in fields:
         coverage = parent["coverage"]
         closures = []
         if coverage.get("resolvedDeferred"):
@@ -87,14 +152,21 @@ def recover_candidate_receipts(
             closures = resolved_deferred_rows(parent, schema)
         if not isinstance(coverage.get("deferred"), list):
             coverage["deferred"] = []
-        for index, row in enumerate(coverage["surfaces"]):
+        for field, index, row in (
+            (section, index, row)
+            for section in fields
+            if source is not None or section == "explicitExclusions"
+            for index, row in enumerate(coverage[section])
+        ):
             if not isinstance(row, dict) or row.get("disposition") not in (
                 "rejected",
                 "not_applicable",
             ):
                 continue
             refs = row.get("receiptRefs", [])
-            invalid = not isinstance(row.get("label"), str) or not row["label"].strip()
+            invalid = field == "surfaces" and (
+                not isinstance(row.get("label"), str) or not row["label"].strip()
+            )
             recovered = []
             warning_start = len(warnings)
             if invalid:
@@ -107,7 +179,7 @@ def recover_candidate_receipts(
                 )
                 invalid = True
             for position, ref in enumerate(refs if isinstance(refs, list) else []):
-                context = f"coverage.surfaces[{index}].receiptRefs[{position}]"
+                context = f"coverage.{field}[{index}].receiptRefs[{position}]"
                 try:
                     if not isinstance(ref, str):
                         raise ContractError(f"{context}: expected a string")
@@ -128,6 +200,7 @@ def recover_candidate_receipts(
                 row["disposition"] = "needs_follow_up"
                 coverage["completeness"] = "partial"
                 if (key := coverage_candidate_key(row, owner)) is not None:
+                    reopened.add(key)
                     pending = next(
                         (
                             item
@@ -147,6 +220,17 @@ def recover_candidate_receipts(
                                 if field in row
                             },
                         }
+                        if source is None:
+                            used_ids = {
+                                item.get("id")
+                                for item in [*coverage["deferred"], *closures]
+                                if isinstance(item, dict) and isinstance(item.get("id"), str)
+                            }
+                            base = row.get("id") or row["candidateId"]
+                            identity, suffix = base, 2
+                            while identity in used_ids:
+                                identity, suffix = f"{base}-{suffix}", suffix + 1
+                            pending["id"] = identity
                         coverage["deferred"].append(pending)
                     archive_candidate_payloads(pending, [row])
         if closures:
@@ -157,6 +241,9 @@ def recover_candidate_receipts(
                 if isinstance(row, dict) and isinstance(row.get("id"), str)
             }
             coverage["resolvedDeferred"] = [row for row in closures if row["id"] not in active]
+        if source is not None:
+            return parent
+    if "surfaces" not in fields:
         return parent
     terminal = {
         coverage_candidate_key(row)
@@ -170,14 +257,13 @@ def recover_candidate_receipts(
         warnings,
         [],
     )
-    if reopened is not None:
-        reopened.update(
-            key
-            for row in parent["coverage"]["surfaces"]
-            if row.get("disposition") == "needs_follow_up"
-            and (key := coverage_candidate_key(row)) is not None
-            and key in terminal
-        )
+    reopened.update(
+        key
+        for row in parent["coverage"]["surfaces"]
+        if row.get("disposition") == "needs_follow_up"
+        and (key := coverage_candidate_key(row)) is not None
+        and key in terminal
+    )
     return parent
 
 

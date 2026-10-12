@@ -26,6 +26,7 @@ from workbench_test_support import (
     preserve_scan_results,
     replay_saved_results,
     run_workbench,
+    saved_binding,
     saved_discovery_worker,
     write_checkpoint,
     write_completed_contract,
@@ -849,10 +850,16 @@ def test_newer_outcome_archives_owned_gap(
 
 
 @pytest.mark.parametrize("receipt", ["none", "valid", "missing", "unsafe", "null"])
+@pytest.mark.parametrize("field", ["surfaces", "explicitExclusions"])
 @pytest.mark.parametrize("checkpoint", [False, True])
 @pytest.mark.parametrize("worker_deferred", [[], None, 1, {}, "malformed"])
 def test_worker_decision_recovers_receipts_before_consuming_saved_proof(
-    tmp_path: Path, generic_review_recovery, receipt: str, checkpoint: bool, worker_deferred
+    tmp_path: Path,
+    generic_review_recovery,
+    receipt: str,
+    field: str,
+    checkpoint: bool,
+    worker_deferred,
 ) -> None:
     module, pending, terminal, binding = generic_review_recovery
     original = pending["coverage"]["deferred"][0]
@@ -872,11 +879,13 @@ def test_worker_decision_recovers_receipts_before_consuming_saved_proof(
         "unsafe": ["../outside.txt"],
         "null": None,
     }[receipt]
-    terminal["coverage"]["surfaces"] = [
+    terminal["coverage"][field] = [
         {
             "id": "decision",
             "candidateId": "review",
             "label": "API",
+            "pattern": "app.py",
+            "reason": "Synthetic terminal review.",
             "disposition": "rejected",
             "receiptRefs": refs,
         }
@@ -909,6 +918,165 @@ def test_worker_decision_recovers_receipts_before_consuming_saved_proof(
     assert replay is not None
     assert (original in replay[2]["deferred"]) is unresolved
     assert all(path.read_bytes() == data for path, data in source_bytes.items())
+
+
+@pytest.mark.parametrize("field", ["surfaces", "explicitExclusions"])
+@pytest.mark.parametrize(
+    ("source", "historical_finding"), [("worker", False), ("worker", True), ("parent", False)]
+)
+@pytest.mark.parametrize("legacy_binding", [False, True])
+def test_receipt_reopened_worker_state_is_frozen_before_publication(
+    tmp_path: Path,
+    generic_review_recovery,
+    field: str,
+    source: str,
+    historical_finding: bool,
+    legacy_binding: bool,
+) -> None:
+    module, _, terminal, binding = generic_review_recovery
+    if legacy_binding:
+        binding = saved_binding()
+    output = tmp_path / "worker" if source == "worker" else tmp_path
+    output.mkdir(exist_ok=True)
+    if historical_finding:
+        contract = tmp_path / "contract"
+        contract.mkdir()
+        write_completed_contract(contract, terminal["scanId"], tmp_path, relative_path="app.py")
+        finding = json.loads((contract / "findings.json").read_text())["findings"][0]
+        finding["provenance"]["candidateId"] = "review"
+        old = copy.deepcopy(terminal)
+        old.update(complete=False, findings=[finding])
+        old["coverage"].pop("resolvedDeferred")
+        prior = write_checkpoint(output / "checkpoints", old)
+        os.utime(prior, ns=(100, 100))
+    terminal["coverage"].pop("resolvedDeferred")
+    terminal["coverage"][field] = [
+        {
+            "id": "decision",
+            "candidateId": "review",
+            "label": "Reviewed candidate",
+            "pattern": "app.py",
+            "reason": "Synthetic terminal decision.",
+            "disposition": "rejected",
+            "receiptRefs": ["artifacts/review.txt"],
+        }
+    ]
+    if source == "worker":
+        result_path = output / "result.json"
+        result_path.write_text(json.dumps(terminal))
+        os.utime(result_path, ns=(200, 200))
+    else:
+        write_saved_parent(tmp_path, terminal, 200)
+    workers = [saved_discovery_worker(output, "worker", 1)] if source == "worker" else []
+    first = module.merge_saved_results(
+        tmp_path, terminal["scanId"], binding, workers, [], stopped=True, reason="interrupted"
+    )
+    assert first is not None
+    assert len(module.unresolved_candidates(first[2], first[1]["findings"])) == 1
+    if historical_finding:
+        assert len(first[1]["findings"]) == 1
+        assert first[1]["findings"][0]["provenance"]["candidateReopened"] is True
+    (output / "artifacts").mkdir()
+    (output / "artifacts/review.txt").write_text("Synthetic evidence created after the stop.\n")
+    replay = replay_saved_results(module, first, tmp_path, terminal["scanId"], binding, workers)
+    assert replay is not None
+    assert replay[0]["scan"]["preservedSources"] == first[0]["scan"]["preservedSources"]
+    assert replay[2][field] == first[2][field]
+    assert module.unresolved_candidates(
+        replay[2], replay[1]["findings"]
+    ) == module.unresolved_candidates(first[2], first[1]["findings"])
+    if source == "worker":
+        assert replay == first
+
+
+@pytest.mark.parametrize("field", ["surfaces", "explicitExclusions"])
+@pytest.mark.parametrize("legacy_freeze", ["current", "ordering-only", "no-ordering"])
+def test_failed_receipt_publication_retries_its_frozen_decision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str, legacy_freeze: str
+) -> None:
+    from test_workbench_saved_source_order import call_workbench, saved
+
+    state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    _, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    draft = json.loads(result.read_text())
+    draft["coverage"][field] = [
+        {
+            "id": "decision",
+            "candidateId": "review",
+            "label": "Reviewed candidate",
+            "pattern": "app.py",
+            "reason": "Synthetic terminal review.",
+            "disposition": "rejected",
+            "receiptRefs": ["artifacts/review.txt"],
+        }
+    ]
+    result.write_text(json.dumps(draft))
+    attempts = []
+
+    def fail_publication(prepared, *, projection_warnings=None):
+        attempts.append(copy.deepcopy(prepared[4]))
+        raise OSError("Synthetic receipt publication failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(saved, "_write_prepared_scan_finalization", fail_publication)
+        call_workbench(patch, state, codex_home, "cancel-scan", "--scan-id", scan_id)
+    if legacy_freeze != "current":
+        with sqlite3.connect(state / "workbench.sqlite3") as connection:
+            frozen, model_source = saved._retained_source_state(
+                json.loads(
+                    connection.execute(
+                        "SELECT retained_source_digests_json FROM scans WHERE id = ?", (scan_id,)
+                    ).fetchone()[0]
+                )
+            )
+            for relative in list(frozen):
+                if not saved._is_source_order_snapshot(relative):
+                    continue
+                if legacy_freeze == "no-ordering":
+                    del frozen[relative]
+                    continue
+                record = json.loads((scan_dir / relative).read_text())
+                record.pop("receiptRecovery", None)
+                digest = saved._digest(record)
+                legacy_path = f"source-order/{digest}.json"
+                (scan_dir / legacy_path).write_bytes(saved._encoded(record))
+                del frozen[relative]
+                frozen[legacy_path] = digest
+            connection.execute(
+                "UPDATE scans SET retained_source_digests_json = ? WHERE id = ?",
+                (
+                    saved._encode_retained_sources(frozen, [model_source] if model_source else []),
+                    scan_id,
+                ),
+            )
+        with monkeypatch.context() as patch:
+            patch.setattr(saved, "_write_prepared_scan_finalization", fail_publication)
+            with pytest.raises(OSError, match="Synthetic receipt publication failure"):
+                call_workbench(
+                    patch,
+                    state,
+                    codex_home,
+                    "preserve-scan-results",
+                    "--scan-id",
+                    scan_id,
+                    "--thread-id",
+                    "standard-worker-thread",
+                )
+    (result.parent / "artifacts").mkdir(exist_ok=True)
+    (result.parent / "artifacts/review.txt").write_text("Synthetic late receipt.\n")
+    call_workbench(
+        monkeypatch,
+        state,
+        codex_home,
+        "preserve-scan-results",
+        "--scan-id",
+        scan_id,
+        "--thread-id",
+        "standard-worker-thread",
+    )
+    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    assert coverage == attempts[-1]
+    assert get_scan(state, scan_id)["scan"]["progress"]["candidates"]["unresolved"] == 1
 
 
 @pytest.mark.parametrize("deferred_id", [False, True])

@@ -496,8 +496,9 @@ def test_stopped_diff_freezes_current_candidate_state_over_history(
     assert all(path.read_bytes() == content for path, content in frozen_sources.items())
 
 
+@pytest.mark.parametrize("terminal_time", [100, 200, 300])
 def test_stopped_diff_does_not_infer_reopening_from_unordered_history(
-    tmp_path: Path, workbench_api
+    tmp_path: Path, workbench_api, terminal_time: int
 ) -> None:
     state_dir, scan_dir, scan_id, ledger, checkpoint = saved_diff_candidate(tmp_path)
     candidate = json.loads(ledger.read_text())
@@ -506,22 +507,35 @@ def test_stopped_diff_does_not_infer_reopening_from_unordered_history(
     terminal["coverage"].update(
         surfaces=[workbench_api["saved_results"]._diff_candidate_decision(candidate)], deferred=[]
     )
-    write_checkpoint(scan_dir / "checkpoints", terminal)
-    # Neither the current empty draft nor a missing ledger establishes which of
-    # these historical candidate checkpoints was saved most recently.
+    closed = write_checkpoint(scan_dir / "checkpoints", terminal)
+    # No accepted head or live ledger orders these historical decisions. An
+    # accepted pending head would instead preserve that pending review, even if
+    # only coverage.json had been overwritten during interrupted publication.
+    (scan_dir / "checkpoint-head.json").unlink()
+    for path in (scan_dir / "checkpoints").glob("*.json"):
+        modified = terminal_time if path == closed else 200
+        os.utime(path, ns=(modified, modified))
+    originals = {path: path.read_bytes() for path in (scan_dir / "checkpoints").glob("*.json")}
     coverage_path = scan_dir / "coverage.json"
     coverage = json.loads(coverage_path.read_text())
     coverage.update(surfaces=[], deferred=[])
     coverage_path.write_text(json.dumps(coverage))
     ledger.unlink()
     run_workbench(state_dir, "fail-scan", "--scan-id", scan_id, "--message", "Stopped.")
-    scan = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
-    assert scan["findingCount"] == 0
-    assert scan["progress"]["candidates"]["unresolved"] == 0
-    assert any(
-        item.get("disposition") == "rejected"
-        for item in json.loads(coverage_path.read_text())["surfaces"]
-    )
+
+    def assert_retained() -> None:
+        scan = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+        assert scan["findingCount"] == 0
+        assert scan["progress"]["candidates"]["unresolved"] == 0
+        assert any(
+            item.get("disposition") == "rejected"
+            for item in json.loads(coverage_path.read_text())["surfaces"]
+        )
+        assert all(path.read_bytes() == content for path, content in originals.items())
+
+    assert_retained()
+    run_workbench(state_dir, "preserve-scan-results", "--scan-id", scan_id)
+    assert_retained()
 
 
 @pytest.mark.parametrize("termination", ["fail-scan", "cancel-scan"])
@@ -1637,12 +1651,13 @@ def test_stopped_diff_preserves_shared_follow_up_evidence(
     assert_retained()
 
 
+@pytest.mark.parametrize("authored_id", [None, "authored-exclusion"])
 @pytest.mark.parametrize("termination", ["fail-scan", "cancel-scan"])
 @pytest.mark.parametrize(
     "disposition", [{"status": "synthetic-review"}, ["synthetic-review"], "rejected"]
 )
 def test_stopped_diff_retains_generic_exclusion_extensions(
-    tmp_path: Path, termination: str, disposition: object
+    tmp_path: Path, termination: str, disposition: object, authored_id: str | None
 ) -> None:
     state_dir, scan_dir, scan_id, _, _ = saved_diff_candidate(tmp_path)
     exclusion = {
@@ -1651,6 +1666,8 @@ def test_stopped_diff_retains_generic_exclusion_extensions(
         "disposition": disposition,
         "annotation": "Keep the authored extension unchanged.",
     }
+    if authored_id is not None:
+        exclusion["id"] = authored_id
     coverage_path = scan_dir / "coverage.json"
     coverage = json.loads(coverage_path.read_text())
     coverage["explicitExclusions"].append(exclusion)
@@ -1660,7 +1677,16 @@ def test_stopped_diff_retains_generic_exclusion_extensions(
     stopped = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
     assert stopped["progress"]["status"] == ("failed" if termination == "fail-scan" else "canceled")
     assert stopped["progress"]["candidates"]["unresolved"] == 1
-    assert exclusion in json.loads(coverage_path.read_text())["explicitExclusions"]
+    retained = json.loads(coverage_path.read_text())["explicitExclusions"]
+    assert len(retained) == 1
+    # Recovery may assign an ID to an imported row, but every authored field
+    # (including extension values and an explicit ID) must remain unchanged.
+    assert {key: retained[0][key] for key in exclusion} == exclusion
+    assert set(retained[0]) - set(exclusion) <= {"id"}
+    if "id" in retained[0]:
+        assert isinstance(retained[0]["id"], str) and retained[0]["id"]
+    run_workbench(state_dir, "preserve-scan-results", "--scan-id", scan_id)
+    assert json.loads(coverage_path.read_text())["explicitExclusions"] == retained
     assert (scan_dir / "report.md").is_file()
     assert not any("publication needs follow-up" in warning for warning in stopped["warnings"])
 

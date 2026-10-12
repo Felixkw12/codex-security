@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdir, readFile, readdir, utimes, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
@@ -27,6 +28,138 @@ const savedOwners = [
   " ",
   "legacy-worker",
 ];
+
+test("Diff ledger retains verified merged candidate resolutions on later saves", async (t) => {
+  const f = await fixture(t, "diff");
+  const ledger = path.join(
+    f.root,
+    "artifacts/02_discovery/candidate_ledger.jsonl",
+  );
+  await mkdir(path.dirname(ledger), { recursive: true });
+  const candidates = ["first", "second"].map((id) => ({
+    candidate_id: id,
+    summary: `Synthetic candidate ${id}`,
+    evidence: "Synthetic source evidence.",
+    cwe_ids: [],
+    locations: [
+      { path: "src/example.ts", start_line: 1, end_line: 2, role: "evidence" },
+    ],
+    validation: { disposition: "reportable" },
+    attack_path: { decision: "reportable" },
+  }));
+  for (const [index, candidate] of candidates.entries()) {
+    await writeFile(
+      ledger,
+      candidates
+        .slice(0, index + 1)
+        .map((row) => JSON.stringify(row))
+        .join("\n") + "\n",
+    );
+    await f.write({
+      ...f.draft({}, true),
+      findings: [
+        {
+          ...finding("same-issue", "src/example.ts"),
+          provenance: {
+            source: "local_plugin",
+            candidateId: candidate.candidate_id,
+          },
+        },
+      ],
+    });
+    const coverage = await f.read();
+    assert.equal(coverage.completeness, "complete");
+    assert.deepEqual(coverage.deferred, []);
+  }
+  await f.write(f.draft({}, true));
+  const coverage = await f.read();
+  assert.deepEqual(coverage.deferred, []);
+  assert.equal(coverage.completeness, "complete");
+  const saved = JSON.parse(
+    await readFile(path.join(f.root, "findings.json"), "utf8"),
+  );
+  assert.equal(saved.findings.length, 1);
+  assert.ok(
+    saved.findings[0].provenance.previousFindings.some(
+      (row: any) => row.provenance.candidateId === "first",
+    ),
+  );
+  await f.write(
+    f.draft(
+      {
+        deferred: [{ candidateId: "first", reason: "New explicit proof gap." }],
+      },
+      true,
+    ),
+  );
+  await f.write(f.draft({}, true));
+  const reopened = await f.read();
+  assert.equal(reopened.completeness, "partial");
+  assert.deepEqual(
+    reopened.deferred.map((row: any) => row.candidateId),
+    ["first"],
+  );
+});
+
+for (const field of ["surfaces", "explicitExclusions"]) {
+  test(`Python frozen ${field} receipt recovery survives TypeScript continuation`, async (t) => {
+    const f = await fixture(t, "standard");
+    await f.write(f.draft());
+    const source = finding("saved-review", "src/example.ts");
+    execFileSync(process.env.PYTHON?.trim() || "python3", [
+      "-c",
+      `
+import copy,json,os,sys
+from pathlib import Path
+sys.path.insert(0,sys.argv[1])
+from workbench_saved_results import merge_saved_results
+from candidate_identity import unresolved_candidates
+root=Path(sys.argv[2]); scan_id=sys.argv[3]; field=sys.argv[4]
+manifest=json.loads((root/'scan-manifest.json').read_text()); coverage=json.loads((root/'coverage.json').read_text())
+binding={'status':'failed','allowedTargetKinds':[manifest['scan']['target']['kind']],'target':manifest['scan']['target'],'scope':manifest['scan']['scope'],'coverageMode':coverage['mode']}
+for path in root.rglob('*'):
+ if path.is_file(): os.utime(path,ns=(100,100))
+output=root/'worker';(output/'checkpoints').mkdir(parents=True)
+finding=json.loads(sys.argv[5]);finding['provenance']['candidateId']='review'
+draft={'scanId':scan_id,'complete':False,'findings':[finding],'coverage':{'completeness':'partial','surfaces':[],'explicitExclusions':[],'deferred':[]}}
+old=output/'checkpoints'/('a'*64+'.json');old.write_text(json.dumps(draft));os.utime(old,ns=(200,200))
+draft['complete']=True;draft['findings']=[];draft['coverage'][field]=[{'id':'decision','candidateId':'review','label':'Reviewed candidate','pattern':'src/example.ts','reason':'Synthetic decision.','disposition':'rejected','receiptRefs':['artifacts/review.txt']}]
+result=output/'result.json';result.write_text(json.dumps(draft));os.utime(result,ns=(300,300))
+workers=[{'id':'worker','kind':'discovery','artifact_dir':str(output),'result_manifest_path':str(result),'attempt':1}]
+first=merge_saved_results(root,scan_id,binding,workers,[],stopped=True,reason='interrupted')
+assert len(unresolved_candidates(first[2],first[1]['findings']))==1
+(output/'artifacts').mkdir();(output/'artifacts/review.txt').write_text('Synthetic late receipt.')
+replay=merge_saved_results(root,scan_id,binding,workers,[],stopped=True,reason='interrupted',frozen_source_digests=first[0]['scan']['preservedSources'])
+assert replay==first
+for name,document in zip(['scan-manifest.json','findings.json','coverage.json'],replay):
+ (root/name).write_text(json.dumps(document))
+`,
+      path.join(import.meta.dirname, "../../scripts"),
+      f.root,
+      f.context.scanId!,
+      field,
+      JSON.stringify(source),
+    ]);
+    await f.write(f.draft({}, true));
+    const coverage = await f.read();
+    assert.ok(
+      coverage.deferred.some(
+        (row: any) =>
+          row.candidateId === "review" && row.sourceWorkerId === "worker",
+      ),
+    );
+    const saved = JSON.parse(
+      await readFile(path.join(f.root, "findings.json"), "utf8"),
+    );
+    assert.equal(saved.findings.length, 1);
+    assert.equal(saved.findings[0].provenance.candidateReopened, true);
+    assert.equal(
+      coverage[field].find((row: any) => row.candidateId === "review")
+        .disposition,
+      "needs_follow_up",
+    );
+  });
+}
 
 for (const mode of ["standard", "diff", "worker"] as const) {
   for (const source of ["published", "checkpoint"] as const) {
