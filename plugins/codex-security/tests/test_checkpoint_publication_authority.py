@@ -12,7 +12,7 @@ from argparse import Namespace
 from pathlib import Path
 
 import pytest
-from test_deep_scan_successful_publication import add_worker
+from test_deep_scan_successful_publication import add_worker, complete
 from test_deep_scan_successful_publication import publication_scan as publication_scan
 from test_workbench_standard_deep_results import deep_scan_fixture, worker_paths
 from workbench_test_support import (
@@ -1722,16 +1722,25 @@ def test_restored_observation_keeps_independent_registered_result(
         **save_disposition(scan, result.parent, "reported"),
         "threatModel": {"summary": "Registered reporting model."},
     }
+    surface = {
+        "id": "registered-surface",
+        "label": "Synthetic reviewed surface",
+        "disposition": "no_issue_found",
+        "receiptRefs": [],
+    }
+    reported["coverage"]["surfaces"].append(surface)
     accepted = write_checkpoint(result.parent / "checkpoints", reported)
     os.utime(accepted, ns=(50, 50))
-    result.write_text(
-        json.dumps(
-            {
-                **save_disposition(scan, result.parent, "rejected"),
-                "threatModel": {"summary": "Stale result model."},
-            }
-        )
-    )
+    stale = {
+        **save_disposition(scan, result.parent, "rejected"),
+        "threatModel": {"summary": "Stale result model."},
+    }
+    stale["coverage"]["surfaces"].append({**surface, "disposition": "needs_follow_up"})
+    stale["coverage"]["openQuestions"] = [{"question": "Obsolete synthetic question."}]
+    stale["coverage"]["explicitExclusions"] = [
+        {"pattern": "old-scope/**", "reason": "Obsolete synthetic exclusion."}
+    ]
+    result.write_text(json.dumps(stale))
     os.utime(result, ns=(200, 200))
     head = result.parent / "checkpoint-head.json"
     saved = workbench_api["saved_results"]
@@ -1761,6 +1770,9 @@ def test_restored_observation_keeps_independent_registered_result(
     sources = json.loads((scan.scan_dir / "scan-manifest.json").read_text())["scan"][
         "preservedSources"
     ]
+    prior_coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    assert not prior_coverage.get("openQuestions")
+    assert not prior_coverage["explicitExclusions"]
     original = {path: (scan.scan_dir / path).read_bytes() for path in sources}
     select(100)
     assert workbench_api["scan_context"](workbench_db, scan.scan_id)["scan"][
@@ -1797,14 +1809,31 @@ def test_restored_observation_keeps_independent_registered_result(
     assert manifest["threatModel"]["summary"] == (
         "Registered reporting model." if registered else "Stale result model."
     )
+    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    if registered:
+        for field in ("surfaces", "openQuestions", "explicitExclusions"):
+            assert coverage.get(field) == prior_coverage.get(field)
+    else:
+        assert coverage["openQuestions"] == stale["coverage"]["openQuestions"]
+        assert any(row["pattern"] == "old-scope/**" for row in coverage["explicitExclusions"])
     assert all((scan.scan_dir / path).read_bytes() == content for path, content in original.items())
 
 
 @pytest.mark.parametrize("mode", ["standard", "deep"])
 @pytest.mark.parametrize("interrupted", [False, True], ids=["published", "publication-retry"])
-@pytest.mark.parametrize("model_choice", ["latest-accepted", "selected-head", "canonical-fallback"])
+@pytest.mark.parametrize(
+    "model_choice", ["latest-accepted", "selected-head", "canonical-fallback", "older-accepted"]
+)
+@pytest.mark.parametrize("legacy_format", [False, True], ids=["current-format", "legacy-format"])
 def test_inherited_model_uses_same_selection_on_initial_and_frozen_publication(
-    workbench_api, workbench_db, publication_scan, monkeypatch, mode, interrupted, model_choice
+    workbench_api,
+    workbench_db,
+    publication_scan,
+    monkeypatch,
+    mode,
+    interrupted,
+    model_choice,
+    legacy_format,
 ):
     scan = publication_scan(mode=mode)
     (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
@@ -1824,6 +1853,21 @@ def test_inherited_model_uses_same_selection_on_initial_and_frozen_publication(
     saved = workbench_api["saved_results"]
     context = workbench_api["_WORKBENCH_DB_CONTEXT"]
 
+    if model_choice in {"canonical-fallback", "older-accepted"}:
+        unselected = write_checkpoint(
+            scan.scan_dir / "checkpoints",
+            {**draft, "threatModel": {"summary": "Unaccepted model."}},
+        )
+        os.utime(unselected, ns=(50, 50))
+        children = saved._children
+        monkeypatch.setattr(
+            saved,
+            "_children",
+            lambda root, relative: sorted(
+                children(root, relative), key=lambda name: name != unselected.name
+            ),
+        )
+
     def select(checkpoint, observed):
         head.write_text(json.dumps({"checkpoint": checkpoint.name}))
         os.utime(head, ns=(observed, observed))
@@ -1831,12 +1875,12 @@ def test_inherited_model_uses_same_selection_on_initial_and_frozen_publication(
     select(selected, 200)
     saved._capture_saved_source(scan.scan_dir, "checkpoint-head.json", scan.scan_id)
     if model_choice != "canonical-fallback":
-        newer = write_checkpoint(
+        other_model = write_checkpoint(
             scan.scan_dir / "checkpoints",
             {**draft, "threatModel": {"summary": "Latest accepted model."}},
         )
-        os.utime(newer, ns=(50, 50))
-        select(newer, 300)
+        os.utime(other_model, ns=(50, 50))
+        select(other_model, 100 if model_choice == "older-accepted" else 300)
         saved._capture_saved_source(scan.scan_dir, "checkpoint-head.json", scan.scan_id)
         select(selected, 200)
     prepared_models = []
@@ -1848,8 +1892,22 @@ def test_inherited_model_uses_same_selection_on_initial_and_frozen_publication(
             raise OSError("Synthetic publication interruption")
         return write(prepared, **kwargs)
 
+    encode = saved._encode_retained_sources
+    prepare = saved._prepare_scan_finalization
+
+    def legacy_documents(*args, **kwargs):
+        kwargs["draft_documents"][0]["scan"]["preservedCheckpointHeads"].pop(".", None)
+        return prepare(*args, **kwargs)
+
     with monkeypatch.context() as patch:
         patch.setattr(saved, "_write_prepared_scan_finalization", publish)
+        if legacy_format:
+            patch.setattr(saved, "_prepare_scan_finalization", legacy_documents)
+            patch.setattr(
+                saved,
+                "_encode_retained_sources",
+                lambda sources, model_source, source_times=None: encode(sources, [], source_times),
+            )
         saved.fail_scan(
             context,
             workbench_db,
@@ -1858,6 +1916,8 @@ def test_inherited_model_uses_same_selection_on_initial_and_frozen_publication(
     retained = workbench_db.execute(
         "SELECT retained_source_digests_json FROM scans WHERE id = ?", (scan.scan_id,)
     ).fetchone()[0]
+    if legacy_format:
+        saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))
     preserved = saved.preserve_scan_results(
         context,
         workbench_db,
@@ -1869,15 +1929,100 @@ def test_inherited_model_uses_same_selection_on_initial_and_frozen_publication(
         "latest-accepted": "Latest accepted model.",
         "selected-head": "Selected root model.",
         "canonical-fallback": "Old canonical model.",
+        "older-accepted": "Old canonical model.",
     }[model_choice]
     assert prepared_models == [expected]
     assert json.loads(manifest_path.read_text())["scan"]["threatModel"]["summary"] == expected
     assert not preserved["resultsRecoveryNeeded"]
+    replayed = workbench_db.execute(
+        "SELECT retained_source_digests_json FROM scans WHERE id = ?", (scan.scan_id,)
+    ).fetchone()[0]
     assert (
-        workbench_db.execute(
-            "SELECT retained_source_digests_json FROM scans WHERE id = ?", (scan.scan_id,)
-        ).fetchone()[0]
-        == retained
+        saved._retained_source_state(json.loads(replayed))[0]
+        == saved._retained_source_state(json.loads(retained))[0]
+    )
+    if legacy_format and model_choice != "selected-head":
+        model_source = saved._retained_source_state(json.loads(replayed))[1]
+        assert model_source is not None
+        assert (
+            json.loads((scan.scan_dir / model_source).read_text())["threatModel"]["summary"]
+            == expected
+        )
+    elif not legacy_format:
+        assert replayed == retained
+
+
+@pytest.mark.parametrize("prepare_only", [False, True], ids=["complete", "prepare"])
+@pytest.mark.parametrize(
+    "model_choice", ["canonical-fallback", "latest-accepted", "selected-head", "older-accepted"]
+)
+def test_successful_completion_keeps_accepted_root_model_fallback(
+    workbench_api, workbench_db, publication_scan, monkeypatch, prepare_only, model_choice
+):
+    scan = publication_scan(mode="standard")
+    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
+    manifest_path = scan.scan_dir / "scan-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["scan"]["threatModel"] = {"summary": "Old canonical model."}
+    manifest_path.write_text(json.dumps(manifest))
+    for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+        os.utime(scan.scan_dir / name, ns=(150, 150))
+    draft = saved_draft(scan.scan_id, complete=True)
+    draft["coverage"] = {**scan.coverage, **draft["coverage"]}
+    if model_choice == "selected-head":
+        draft["threatModel"] = {"summary": "Selected root model."}
+    selected = write_checkpoint(scan.scan_dir / "checkpoints", draft)
+    os.utime(selected, ns=(50, 50))
+    head = scan.scan_dir / "checkpoint-head.json"
+    saved = workbench_api["saved_results"]
+
+    def select(checkpoint, observed):
+        head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+        os.utime(head, ns=(observed, observed))
+
+    select(selected, 200)
+    saved._capture_saved_source(scan.scan_dir, "checkpoint-head.json", scan.scan_id)
+    unaccepted = write_checkpoint(
+        scan.scan_dir / "checkpoints",
+        {**draft, "threatModel": {"summary": "Unaccepted model."}},
+    )
+    os.utime(unaccepted, ns=(50, 50))
+    children = saved._children
+    monkeypatch.setattr(
+        saved,
+        "_children",
+        lambda root, relative: sorted(
+            children(root, relative), key=lambda name: name != unaccepted.name
+        ),
+    )
+    if model_choice != "canonical-fallback":
+        modeled = write_checkpoint(
+            scan.scan_dir / "checkpoints",
+            {**draft, "threatModel": {"summary": "Latest accepted model."}},
+        )
+        os.utime(modeled, ns=(50, 50))
+        select(modeled, 100 if model_choice == "older-accepted" else 300)
+        saved._capture_saved_source(scan.scan_dir, "checkpoint-head.json", scan.scan_id)
+        select(selected, 200)
+    original = {
+        path: (path.read_bytes(), path.stat().st_mtime_ns)
+        for directory in ("checkpoints", "checkpoint-heads")
+        for path in (scan.scan_dir / directory).glob("*.json")
+    }
+    completed = complete(workbench_api, workbench_db, scan, prepare_only=prepare_only)
+    expected = {
+        "canonical-fallback": "Old canonical model.",
+        "latest-accepted": "Latest accepted model.",
+        "selected-head": "Selected root model.",
+        "older-accepted": "Old canonical model.",
+    }[model_choice]
+    published = json.loads(manifest_path.read_text())["scan"]
+    assert published["threatModel"]["summary"] == expected
+    assert published["sealedAt"]
+    assert completed["threatModelAvailable"]
+    assert completed["progress"]["status"] == ("running" if prepare_only else "complete")
+    assert all(
+        (path.read_bytes(), path.stat().st_mtime_ns) == value for path, value in original.items()
     )
 
 
