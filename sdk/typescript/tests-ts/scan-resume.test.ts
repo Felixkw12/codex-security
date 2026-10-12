@@ -1,3 +1,4 @@
+import zlib from "node:zlib";
 import { execFileSync } from "node:child_process";
 import { createCliTest } from "./support/cli-run.js";
 import { workbenchCommand } from "./support/workbench-command.js";
@@ -1515,6 +1516,9 @@ with sqlite3.connect(sys.argv[1]) as connection:
 test.each([
   ["dedicated", true],
   ["archived", true],
+  ...(typeof zlib.zstdCompressSync === "function"
+    ? [["archived-compressed", true] as const]
+    : []),
   ["archived-copy", true],
   ["archived-prefix", true],
   ["live-prefix", true],
@@ -1571,10 +1575,20 @@ test.each([
       const contents = await readFile(f.sessionPath, "utf8");
       const metadata = contents.split("\n")[0] + "\n";
       await writeFile(
-        join(archived, "saved-session.jsonl"),
-        origin === "archived-prefix" ? metadata : contents,
+        join(
+          archived,
+          origin === "archived-compressed"
+            ? "saved-session.jsonl.zst"
+            : "saved-session.jsonl",
+        ),
+        origin === "archived-compressed"
+          ? zlib.zstdCompressSync(Buffer.from(contents))
+          : origin === "archived-prefix"
+            ? metadata
+            : contents,
       );
-      if (origin === "archived") await rm(f.sessionPath);
+      if (origin === "archived" || origin === "archived-compressed")
+        await rm(f.sessionPath);
       if (origin === "live-prefix") await writeFile(f.sessionPath, metadata);
     }
     await writeDraft(f.command, f.registration, "standard", {
@@ -1650,6 +1664,7 @@ test.each([
     const ownsSession = [
       "dedicated",
       "archived",
+      "archived-compressed",
       "archived-copy",
       "archived-prefix",
       "live-prefix",

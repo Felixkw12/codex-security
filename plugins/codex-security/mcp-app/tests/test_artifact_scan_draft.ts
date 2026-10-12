@@ -1553,7 +1553,12 @@ test("terminal Deep publication retains an omitted model and forwards projection
   assert.deepEqual(result.warnings, ["Synthetic optional projection warning."]);
 });
 
-for (const scenario of ["retry", "explicit", "different owner", "ambiguous"])
+for (const scenario of [
+  "explicit retry",
+  "explicit",
+  "different owner",
+  "ambiguous",
+])
   test(`implicit finding identities preserve independent findings (${scenario})`, async (t) => {
     const f = await fixture(t);
     const implicit = (sourceScanId = "owner-a") =>
@@ -1576,25 +1581,64 @@ for (const scenario of ["retry", "explicit", "different owner", "ambiguous"])
     await f.save(
       draft({
         findings: [
-          scenario === "explicit"
-            ? finding("explicit-second", {
-                provenance: {
-                  source: "local_plugin",
-                  candidateId: "candidate-a",
-                  sourceScanId: "owner-a",
-                },
-              })
-            : implicit(scenario === "different owner" ? "owner-b" : "owner-a"),
+          scenario === "explicit retry"
+            ? { ...implicit(), identity: { anchor: firstAnchor } }
+            : scenario === "explicit"
+              ? finding("explicit-second", {
+                  provenance: {
+                    source: "local_plugin",
+                    candidateId: "candidate-a",
+                    sourceScanId: "owner-a",
+                  },
+                })
+              : implicit(
+                  scenario === "different owner" ? "owner-b" : "owner-a",
+                ),
         ],
       }),
     );
     assert.equal(
       f.documents.findings.findings.length,
-      scenario === "retry" ? 1 : scenario === "ambiguous" ? 3 : 2,
+      scenario === "explicit retry" ? 1 : scenario === "ambiguous" ? 3 : 2,
     );
-    if (scenario === "retry")
+    if (scenario === "explicit retry")
       assert.equal(
         f.documents.findings.findings[0].identity.anchor,
         firstAnchor,
       );
   });
+
+for (const changed of [false, true]) {
+  test(`omitted finding identity creates a new row despite matching candidate: ${changed}`, async (t) => {
+    const f = await fixture(t);
+    const first = finding("shared-candidate");
+    await f.save(draft({ findings: [first] }));
+    const next = structuredClone(first);
+    delete next.identity;
+    if (changed) next.summary = "A separate observation shares the candidate.";
+    await f.save(draft({ findings: [next] }));
+    assert.equal(f.documents.findings.findings.length, 2);
+    const fresh = f.documents.findings.findings.find(
+      (row) => row.identity!.anchor !== first.identity!.anchor,
+    )!;
+    assert.ok(fresh);
+    await f.save(
+      draft({
+        findings: [
+          {
+            ...next,
+            identity: fresh.identity,
+            remediation: "Updated explicit row.",
+          },
+        ],
+      }),
+    );
+    assert.equal(f.documents.findings.findings.length, 2);
+    assert.equal(
+      f.documents.findings.findings.find(
+        (row) => row.identity!.anchor === fresh.identity!.anchor,
+      )!.remediation,
+      "Updated explicit row.",
+    );
+  });
+}

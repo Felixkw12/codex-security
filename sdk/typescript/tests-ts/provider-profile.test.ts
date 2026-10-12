@@ -74,8 +74,15 @@ test("saved provider profiles keep concurrent replay credentials private and sep
     },
   }));
   const profiles = await Promise.all(
-    providers.map((model_providers) =>
-      createProviderProfile(home, { model_providers }),
+    providers.map((model_providers, index) =>
+      createProviderProfile(home, {
+        model_providers,
+        analytics: { enabled: index === 0 },
+        shell_environment_policy: {
+          set: { SYNTHETIC_SETTING: `synthetic-${index}-value` },
+        },
+        model_instructions_file: join(home, `instructions-${index}.md`),
+      }),
     ),
   );
   expect(profiles[0]!.name).not.toBe(profiles[1]!.name);
@@ -89,7 +96,14 @@ test("saved provider profiles keep concurrent replay credentials private and sep
     ),
   );
   for (const [index, profile] of profiles.entries()) {
-    expect(restored[index]!["model_providers"]).toEqual(providers[index]);
+    expect(restored[index]!).toMatchObject({
+      model_providers: providers[index],
+      analytics: { enabled: index === 0 },
+      shell_environment_policy: {
+        set: { SYNTHETIC_SETTING: `synthetic-${index}-value` },
+      },
+      model_instructions_file: join(home, `instructions-${index}.md`),
+    });
     if (process.platform !== "win32")
       expect((await stat(profile.path)).mode & 0o777).toBe(0o600);
   }
@@ -622,3 +636,18 @@ test.each([
     }
   },
 );
+
+test("execution-only replay profiles preserve configured provider defaults", async () => {
+  const home = await temporaryDirectory();
+  const settings = {
+    analytics: { enabled: false },
+    shell_environment_policy: { inherit: "all" },
+  };
+  const profile = await createProviderProfile(home, settings);
+  const restored = await restoreProviderProfile(
+    config,
+    { name: profile.name, home: "ambient" },
+    { CODEX_HOME: home },
+  );
+  expect(restored).toEqual({ ...config, ...settings });
+});

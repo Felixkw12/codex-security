@@ -1,3 +1,4 @@
+import { createProviderProfile } from "../src/provider-profile.js";
 import { CODEX_EXECUTABLE_VERSION } from "../src/version.js";
 import * as childProcess from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -168,15 +169,25 @@ test.each(["home", "selected", "selected-profile", "recipe"] as const)(
       const control = startup(cwd);
       expect(control.status, control.stderr || control.error?.message).toBe(0);
     }
+    const replaySettings = {
+      analytics: { enabled: false },
+      shell_environment_policy: {
+        inherit: "all",
+        set: { SYNTHETIC_REPLAY_SETTING: "selected" },
+      },
+      model_instructions_file: "caller-instructions.md",
+      model_catalog_json: "caller-models.json",
+    };
+    const savedProfile = explicit
+      ? await createProviderProfile(home, replaySettings)
+      : undefined;
     const configuration = await nativeScanConfiguration(
       environment,
       explicit
         ? {
             recipe: {
-              config: {
-                model_catalog_json: "caller-models.json",
-                model_instructions_file: "caller-instructions.md",
-              },
+              config: {},
+              providerProfile: { name: savedProfile!.name, home: "ambient" },
             },
           }
         : {},
@@ -192,7 +203,7 @@ const args = process.argv.slice(2), config = parse(fs.readFileSync(path.join(pro
 const merge=(target,value)=>{for(const [key,child] of Object.entries(value))target[key]=child&&typeof child==="object"&&!Array.isArray(child)?merge(target[key]??{},child):child;return target;};
 if(args.includes("--profile"))merge(config,parse(fs.readFileSync(path.join(process.env.CODEX_HOME,args[args.indexOf("--profile")+1]+".config.toml"),"utf8")));
 for(let i=0;i<args.length;i++)if(["-c","--config"].includes(args[i]))merge(config,parse(args[++i]));
-fs.appendFileSync(${JSON.stringify(capture)},JSON.stringify({args,catalog:config.model_catalog_json,instructions:config.model_instructions_file})+"\\n");
+fs.appendFileSync(${JSON.stringify(capture)},JSON.stringify({args,catalog:config.model_catalog_json,instructions:config.model_instructions_file,analytics:config.analytics,shellPolicy:config.shell_environment_policy})+"\\n");
 if(args.includes("app-server"))require("node:readline").createInterface({input:process.stdin}).on("line",line=>{const request=JSON.parse(line);if(request.id===undefined)return;const result=request.method==="initialize"?{}:request.method==="config/read"?{config}:{data:[{id:config.default_permissions,allowed:true}],nextCursor:null};console.log(JSON.stringify({id:request.id,result}));});
 else {process.stdin.resume();process.stdin.on("end",()=>{console.log(JSON.stringify({type:"thread.started",thread_id:"00000000-0000-4000-8000-000000000001"}));console.log(JSON.stringify({type:"turn.completed",usage:{input_tokens:0,cached_input_tokens:0,output_tokens:0}}));});}
 `,
@@ -274,6 +285,12 @@ else {process.stdin.resume();process.stdin.on("end",()=>{console.log(JSON.string
         expect(result.status, result.stderr).toBe(0);
       expect(rows).toHaveLength(8);
       for (const row of rows) {
+        if (explicit) {
+          expect(row.analytics).toEqual(replaySettings.analytics);
+          expect(row.shellPolicy).toEqual(
+            replaySettings.shell_environment_policy,
+          );
+        }
         expect(row.catalog).toBe(
           explicit
             ? "caller-models.json"

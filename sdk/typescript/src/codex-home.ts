@@ -90,14 +90,20 @@ export async function resolveNativeCodexHome(
   value: string,
   environment: ProcessEnvironment,
 ): Promise<string> {
-  const home = expandHome(value, environment);
+  const home = expandHomePath(value, environment);
   return await realpath(home).catch((error: NodeJS.ErrnoException) => {
     const windowsRootRelative =
       process.platform === "win32" &&
       (win32.parse(home).root === "\\" || win32.parse(home).root === "/");
-    // Runtime preparation creates an explicitly selected absolute home.
-    if (error.code === "ENOENT" && isAbsolute(home) && !windowsRootRelative)
-      return resolveMissingNativeHome(home);
+    // Anchor missing homes before workers change cwd, preserving symlink/.. traversal.
+    if (error.code === "ENOENT") {
+      const root = parse(home).root;
+      return resolveMissingNativeHome(
+        isAbsolute(home) && !windowsRootRelative
+          ? home
+          : `${resolve(root || ".")}${sep}${home.slice(root.length)}`,
+      );
+    }
     throw error;
   });
 }

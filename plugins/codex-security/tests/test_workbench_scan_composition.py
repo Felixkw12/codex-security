@@ -1113,8 +1113,8 @@ def test_parent_reads_completed_child_after_registration_checkpoint_crash(tmp_pa
     context = run_workbench(state, "get-scan", "--scan-id", parent["scanId"])
     assert context["scan"]["progress"]["status"] == "complete"
     assert context["scan"]["findingCount"] == 1
-    # Terminal polls retain consolidation progress until the scan result is delivered.
-    assert context["scan"]["progress"]["independentReviews"]["consolidating"] is True
+    # History reports terminal state; the CLI retains its display phase until delivery.
+    assert context["scan"]["progress"]["independentReviews"]["consolidating"] is False
     assert json.loads((parent_dir / "coverage.json").read_text())["completeness"] == "complete"
     assert json.loads((parent_dir / CHECKPOINT).read_text()) == {
         key: value for key, value in saved.items() if key != "aggregate"

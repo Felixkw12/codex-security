@@ -1063,7 +1063,6 @@ export function createCodexSecurityServer(): McpServer {
       "--defer-publication",
       ...optionalArg("--thread-id", threadId),
     ];
-    let persistenceError: unknown;
     let workspace: JsonObject;
     try {
       workspace = await runWorkbench(args);
@@ -1074,7 +1073,6 @@ export function createCodexSecurityServer(): McpServer {
       } catch {
         throw error;
       }
-      persistenceError = error;
     }
     const result = isJsonObject(workspace.results)
       ? workspace.results
@@ -1083,7 +1081,6 @@ export function createCodexSecurityServer(): McpServer {
       result && isJsonObject(result.progress) ? result.progress : undefined;
     if (progress?.status === "complete") {
       await nativeScans.wait(scanId);
-      if (persistenceError !== undefined) throw persistenceError;
       const current = await runWorkbench(["get-scan", "--scan-id", scanId]);
       return workspaceResult(current.workspace as unknown as WorkspaceState);
     }
@@ -1095,18 +1092,7 @@ export function createCodexSecurityServer(): McpServer {
       }).finally(() => stoppingScans.delete(scanId));
       stoppingScans.set(scanId, pending);
     }
-    let retained: JsonObject;
-    try {
-      retained = await pending;
-    } catch (error) {
-      if (persistenceError !== undefined)
-        throw new AggregateError(
-          [persistenceError, error],
-          `Canceling the scan failed: ${deepScanInvocationFailureMessage(persistenceError)}. Preserving its results also failed: ${deepScanInvocationFailureMessage(error)}`,
-        );
-      throw error;
-    }
-    if (persistenceError !== undefined) throw persistenceError;
+    const retained = await pending;
     return workspaceResult(retained.workspace as unknown as WorkspaceState);
   };
 

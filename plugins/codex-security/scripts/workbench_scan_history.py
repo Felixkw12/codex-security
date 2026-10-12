@@ -160,8 +160,8 @@ def independent_review_progress(
             "maximum": recipe.get("deepScan", {}).get(
                 "maxDiscoveryRuns", composition.saved_review_maximum or len(children)
             ),
-            "consolidating": scan["status"] != "running"
-            or scan["phase"] in {"validation", "reporting"},
+            "consolidating": scan["status"] == "running"
+            and scan["phase"] in {"validation", "reporting"},
             "updatedAt": max([scan["updated_at"], *(child["updated_at"] for child in children)]),
         }
     return None

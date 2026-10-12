@@ -1344,7 +1344,7 @@ def test_acknowledging_staged_checkpoint_retains_surface_history(
     assert not marker.exists()
     assert checkpoint.read_bytes() == contents
     plugin = Path(__file__).resolve().parents[1]
-    sdk = plugin.parents[1] / "sdk/typescript"
+    mcp = plugin / "mcp-app"
     context = {
         "root": str(scan_dir),
         "repoRoot": str(target),
@@ -1370,9 +1370,9 @@ def test_acknowledging_staged_checkpoint_retains_surface_history(
                 "const result=await api.recordCodexSecurityScanDraft(JSON.parse(process.argv[4]),JSON.parse(process.argv[5]),async()=>{}); "
                 "console.log(JSON.stringify(result.coverage));"
             ),
-            str(sdk / "package.json"),
-            str(plugin / "mcp-app/src/artifact-scan-draft.ts"),
-            str(sdk / "node_modules"),
+            str(mcp / "package.json"),
+            str(mcp / "src/artifact-scan-draft.ts"),
+            str(mcp / "node_modules"),
             json.dumps(context),
             json.dumps(saved_draft(scan["scanId"], deferred=[task])),
         ],

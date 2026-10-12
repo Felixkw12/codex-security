@@ -16,6 +16,8 @@ import {
 } from "./scan-activity.js";
 import {
   isScanArtifactDirectory,
+  readsCompressedSessions,
+  sessionEvents,
   sessionOwnsTurn,
   sessionParentThreadId,
   sessionStartedAt,
@@ -438,9 +440,15 @@ export class ScanCostTracker {
   }
 
   async *#sessionFiles(): AsyncGenerator<string> {
-    yield* sessionFiles(join(this.#options.codexHome, "sessions"));
+    yield* sessionFiles(
+      join(this.#options.codexHome, "sessions"),
+      readsCompressedSessions,
+    );
     if (this.#options.includeArchivedSessions)
-      yield* sessionFiles(join(this.#options.codexHome, "archived_sessions"));
+      yield* sessionFiles(
+        join(this.#options.codexHome, "archived_sessions"),
+        readsCompressedSessions,
+      );
   }
 
   #reportWorkerProgress(session: SessionUsage): void {
@@ -556,9 +564,23 @@ async function readSessionUsage(
     return;
   // Invalidate before opening; failed reads or closes must be retried.
   session.fileVersion = undefined;
+  if (path.endsWith(".zst")) {
+    const replay = createSessionUsage();
+    replay.tracked = session.tracked;
+    if (session.events !== undefined) replay.events = [];
+    if (session.progress !== undefined) replay.progress = [];
+    for await (const event of sessionEvents(path)) {
+      readSessionEvent(event, replay, repository, metadataOnly);
+      if (metadataOnly && replay.threadId !== null) break;
+    }
+    Object.assign(session, replay, {
+      offset: metadata.size,
+      fileVersion: metadata,
+    });
+    return;
+  }
   let file;
   try {
-    if ((await stat(path)).size === session.offset) return;
     file = await open(path, "r");
   } catch (error) {
     if (isMissingFile(error)) return;
@@ -616,7 +638,7 @@ function readSessionChunk(
 
     if (session.pendingLine.length === 0) {
       readSessionEvent(
-        fragment.toString("utf8"),
+        parseJson(() => fragment.toString("utf8")),
         session,
         repository,
         metadataOnly,
@@ -624,7 +646,7 @@ function readSessionChunk(
     } else {
       if (fragment.length > 0) session.pendingLine.push(Buffer.from(fragment));
       readSessionEvent(
-        Buffer.concat(session.pendingLine).toString("utf8"),
+        parseJson(() => Buffer.concat(session.pendingLine).toString("utf8")),
         session,
         repository,
         metadataOnly,
@@ -637,13 +659,11 @@ function readSessionChunk(
 }
 
 function readSessionEvent(
-  line: string,
+  event: unknown,
   session: SessionUsage,
   repository?: string,
   metadataOnly = false,
 ): void {
-  if (line.length === 0) return;
-  const event = parseJson(() => line);
   if (!isRecord(event) || !isRecord(event["payload"])) return;
   const payload = event["payload"];
   if (event["type"] === "session_meta") {

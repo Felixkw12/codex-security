@@ -65,13 +65,28 @@ export async function providerPreflightCommand(
   };
 }
 
-/** Provider definitions use a native file layer, never process arguments. */
+/** Execution settings that must survive a saved scan's continuation. */
+export function scanReplaySettings(config: JsonObject): JsonObject {
+  return Object.fromEntries(
+    [
+      "analytics",
+      "shell_environment_policy",
+      "model_instructions_file",
+      "model_catalog_json",
+    ]
+      .filter((key) => config[key] !== undefined)
+      .map((key) => [key, config[key]!]),
+  );
+}
+
+/** Provider definitions and saved execution settings use a private native file layer. */
 export async function createProviderProfile(
   codexHome: string,
   config: JsonObject,
   options: Parameters<typeof requirePrivateCredentialHome>[2] = {},
 ): Promise<ProviderProfile> {
-  const providers = resolveCodexProfile(config)["model_providers"];
+  const resolved = resolveCodexProfile(config);
+  const providers = resolved["model_providers"];
   const name = `codex_security_${randomUUID()}`;
   const path = join(codexHome, `${name}.config.toml`);
   if ((options.platform ?? process.platform) === "win32") {
@@ -84,6 +99,7 @@ export async function createProviderProfile(
   }
   await writeCodexConfig(path, {
     model_providers: isRecord(providers) ? providers : {},
+    ...scanReplaySettings(resolved),
   });
   return { name, path, cleanup: () => rm(path, { force: true }) };
 }
@@ -129,7 +145,13 @@ export async function restoreProviderProfile(
       "The saved provider profile contains no provider configuration.",
     );
   }
-  return { ...config, model_providers: saved["model_providers"] as JsonObject };
+  return {
+    ...config,
+    ...scanReplaySettings(saved as JsonObject),
+    ...(Object.keys(saved["model_providers"]).length === 0
+      ? {}
+      : { model_providers: saved["model_providers"] as JsonObject }),
+  };
 }
 
 /** The pinned SDK lacks the native CLI's private profile-file option. */

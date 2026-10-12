@@ -543,12 +543,11 @@ for (const lostAcknowledgment of [false, true]) {
     assert.equal(firstSettled, false);
     release.resolve();
     const [firstResult, secondResult] = await Promise.all([first, second]);
-    if (lostAcknowledgment) assert.equal(firstResult.error, responseLost);
-    else
-      assert.deepEqual(
-        firstResult.value.structuredContent.workspace,
-        workspace(),
-      );
+    assert.equal(firstResult.error, undefined);
+    assert.deepEqual(
+      firstResult.value.structuredContent.workspace,
+      workspace(),
+    );
     assert.deepEqual(secondResult.structuredContent.workspace, workspace());
     assert.equal(published, 1);
     assert.equal(cancelWrites, lostAcknowledgment ? 3 : 2);
@@ -642,5 +641,60 @@ for (const mode of ["standard", "diff"]) {
     });
     assert.equal(result.structuredContent.scan.progress.status, "failed");
     assert.equal(published, true);
+  });
+}
+
+for (const outcome of [
+  "recovered",
+  "completed",
+  "retry-fails",
+  "publication-fails",
+]) {
+  test(`native cancellation response recovery: ${outcome}`, async () => {
+    let cancellations = 0;
+    let drains = 0;
+    const original = new Error("Synthetic lost cancellation response.");
+    const scan = {
+      scanId: "synthetic-parent",
+      scanDir: "/synthetic/scan",
+      mode: "deep",
+      handoffClaimToken: "synthetic-claim",
+      progress: { status: outcome === "completed" ? "complete" : "canceled" },
+    };
+    const workspace = { setup: { submitted: true }, results: scan };
+    const server = serverFor({
+      async workbench([command]) {
+        if (command === "list-scans") return {};
+        if (command === "cancel-scan") {
+          if (++cancellations === 1) throw original;
+          if (outcome === "retry-fails")
+            throw new Error("Synthetic retry failed.");
+          return workspace;
+        }
+        if (command === "get-scan") return { scan, workspace };
+        assert.equal(command, "preserve-scan-results");
+        if (outcome === "publication-fails")
+          throw new Error("Synthetic publication failed.");
+        return { scan, workspace };
+      },
+      async cancel() {
+        drains++;
+      },
+      async wait() {
+        drains++;
+      },
+    });
+    const call = server.tools.get("cancel_codex_security_scan")(
+      { scanId: scan.scanId },
+      { _meta: { "openai/threadId": "synthetic-owner" } },
+    );
+    if (outcome === "retry-fails")
+      await assert.rejects(call, (error) => error === original);
+    else if (outcome === "publication-fails")
+      await assert.rejects(call, /Synthetic publication failed/);
+    else
+      assert.deepEqual((await call).structuredContent.workspace.results, scan);
+    assert.equal(cancellations, 2);
+    assert.equal(drains, outcome === "retry-fails" ? 0 : 1);
   });
 }

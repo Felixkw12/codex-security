@@ -869,8 +869,22 @@ test.each([
         refresh_interval_ms: 1000,
       },
     };
+    const replaySettings = {
+      analytics: { enabled: false },
+      shell_environment_policy: {
+        inherit: "all",
+        set: { SYNTHETIC_SETTING: "synthetic-private-shell-value" },
+      },
+      model_instructions_file: join(h.root, "instructions.md"),
+    };
+    await writeFile(
+      replaySettings.model_instructions_file,
+      "Synthetic replay instructions.",
+    );
     h.stopBeforeSealing();
     await using first = h.makeClient({
+      ...replaySettings,
+      model_instructions_file: "../instructions.md",
       profile: "selected",
       service_tier: global,
       model_context_window: 128_000,
@@ -927,6 +941,7 @@ test.each([
         http_headers: { Authorization: "Bearer synthetic-private-header" },
       },
     });
+    expect(restored).toMatchObject(replaySettings);
     expect(config["service_tier"]).toBe(expected);
     const contextLimits = {
       model_context_window: 128_000,
@@ -964,6 +979,7 @@ test.each([
         model_provider: "synthetic",
         model_providers: { synthetic: transportProvider },
         service_tier: expected,
+        ...replaySettings,
         ...contextLimits,
       });
       expect(launch.preflightConfig).not.toHaveProperty("model_providers");

@@ -15,7 +15,7 @@ import {
 } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { delimiter, dirname, join, sep } from "node:path";
+import { delimiter, dirname, join, sep, relative } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
@@ -28,6 +28,7 @@ const pluginVersion = JSON.parse(
   ),
 ).version;
 
+const nativeFixture = {};
 const bundle = await build({
   bundle: true,
   stdin: {
@@ -53,6 +54,17 @@ const bundle = await build({
     {
       name: "capture-ordinary-client",
       setup(build) {
+        build.onResolve(
+          {
+            filter:
+              /^\.\.\/\.\.\/\.\.\/\.\.\/sdk\/typescript\/src\/runtime\.js$/,
+          },
+          () => ({ path: "runtime", namespace: "native-runtime" }),
+        );
+        build.onLoad({ filter: /.*/, namespace: "native-runtime" }, () => ({
+          resolveDir: fileURLToPath(new URL("../src/", import.meta.url)),
+          contents: `export { codexSecurityStateDirectory } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/runtime.ts", import.meta.url)))}; export const runWorkbench = (...args) => nativeFixture.workbench(...args);`,
+        }));
         build.onResolve({ filter: /sdk\/typescript\/src\/api\.js$/ }, () => ({
           path: "client",
           namespace: "fixture",
@@ -60,18 +72,20 @@ const bundle = await build({
         build.onLoad({ filter: /.*/, namespace: "fixture" }, () => ({
           resolveDir: fileURLToPath(new URL("../src/", import.meta.url)),
           contents: `export { selectedScanEnvironment } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/api.ts", import.meta.url)))};
-             export class CodexSecurity { constructor(config, dependencies) { this.config = config; this.dependencies = dependencies; } }`,
+             export class CodexSecurity { constructor(config, dependencies) { this.config = config; this.dependencies = dependencies; } run(target, options) { return nativeFixture.run(this, target, options); } async close() {} }`,
         }));
       },
     },
   ],
 });
 const module = { exports: {} };
-new Function("require", "module", "exports", bundle.outputFiles[0].text)(
-  createRequire(import.meta.url),
-  module,
-  module.exports,
-);
+new Function(
+  "require",
+  "module",
+  "exports",
+  "nativeFixture",
+  bundle.outputFiles[0].text,
+)(createRequire(import.meta.url), module, module.exports, nativeFixture);
 const {
   NativeScanHost,
   saveScanKnowledge,
@@ -1359,14 +1373,20 @@ if (process.argv.includes("app-server")) {
         "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
       ])
         delete process.env[key];
-      for (const resumed of [false, true]) {
-        const base = join(root, resumed ? "resumed" : "fresh", "base");
-        const target = join(root, resumed ? "resumed" : "fresh", "target");
+      for (const [resumed, relativeHome] of [
+        [false, false],
+        [true, false],
+        [false, true],
+        [true, true],
+      ]) {
+        const prefix = `${resumed ? "resumed" : "fresh"}-${relativeHome ? "relative" : "absolute"}`;
+        const base = join(root, prefix, "base");
+        const target = join(root, prefix, "target");
         const decoy = join(base, "missing", "home");
         await mkdir(join(target, "nested"), { recursive: true });
         await mkdir(join(decoy, "codex-security"), { recursive: true });
         await symlink(join(target, "nested"), join(base, "link"), "dir");
-        const home = `${base}${sep}link${sep}..${sep}missing${sep}home`;
+        const home = `${relativeHome ? relative(process.cwd(), base) : base}${sep}link${sep}..${sep}missing${sep}home`;
         const expectedHome = join(target, "missing", "home");
         await writeFile(
           join(decoy, "config.toml"),
@@ -3105,6 +3125,139 @@ test("native rejoin restores bound knowledge without overwriting its snapshot", 
     );
   } finally {
     restoreEnvironment();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("queued native hosts reload the accepted recipe before preparing execution", async () => {
+  const root = await mkdtemp(join(tmpdir(), "native-queued-recipe-"));
+  const home = join(root, "home");
+  const repository = join(root, "repository");
+  const scanDir = join(root, "scan");
+  const state = join(root, "state");
+  const pluginRoot = fileURLToPath(
+    new URL("../../../../sdk/typescript/_bundled_plugin/", import.meta.url),
+  );
+  const restore = captureEnvironment([
+    "CODEX_HOME",
+    "CODEX_CLI_PATH",
+    "CODEX_SECURITY_CONFIG_PATH",
+    "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+    "CODEX_SECURITY_KNOWLEDGE_BASE",
+  ]);
+  const firstStarted = Promise.withResolvers();
+  const releaseFirst = Promise.withResolvers();
+  const hosts = [new NativeScanHost(), new NativeScanHost()];
+  let recipe;
+  const launches = [];
+  try {
+    await Promise.all([
+      mkdir(home, { mode: 0o700 }),
+      mkdir(repository),
+      mkdir(scanDir, { mode: 0o700 }),
+      mkdir(join(root, "child"), { mode: 0o700 }),
+    ]);
+    await writeFile(join(home, "config.toml"), 'model = "ambient-model"\n');
+    Object.assign(process.env, {
+      CODEX_HOME: home,
+      CODEX_CLI_PATH: process.execPath,
+    });
+    for (const key of [
+      "CODEX_SECURITY_CONFIG_PATH",
+      "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+      "CODEX_SECURITY_KNOWLEDGE_BASE",
+    ])
+      delete process.env[key];
+    nativeFixture.workbench = async (_options, [command]) => {
+      assert.equal(command, "get-scan");
+      await assert.rejects(
+        acquireScanExecution(state, scanDir, pluginRoot),
+        /already running/,
+      );
+      return { recipe };
+    };
+    nativeFixture.run = async (client, _target, options) => {
+      const release = await client.dependencies.acquireScanExecution(
+        state,
+        scanDir,
+        pluginRoot,
+      );
+      try {
+        launches.push({ config: client.config.codexOverrides, options });
+        if (launches.length === 1) {
+          recipe = {
+            config: {
+              model: client.config.codexOverrides.model,
+              analytics: { enabled: false },
+              shell_environment_policy: { inherit: "all" },
+            },
+            auth: "api-key",
+            deepScan: { workers: 2, subagents: 1 },
+            inheritedPermissions: {
+              filesystem: { [join(root, "saved-denial")]: "deny" },
+              network: { enabled: false },
+            },
+          };
+          firstStarted.resolve();
+          await releaseFirst.promise;
+        }
+        const releaseChild = await client.dependencies.acquireScanExecution(
+          state,
+          join(root, "child"),
+          pluginRoot,
+        );
+        try {
+          await assert.rejects(
+            acquireScanExecution(state, join(root, "child"), pluginRoot),
+            /already running/,
+          );
+        } finally {
+          releaseChild();
+        }
+        return {};
+      } finally {
+        release();
+      }
+    };
+    const request = {
+      ...input("queued-parent"),
+      scan: { ...input("queued-parent").scan, targetPath: repository, scanDir },
+      stateDirectory: state,
+      pluginRoot,
+    };
+    const first = hosts[0].run({ ...request, model: "first-model" });
+    void first.catch(firstStarted.reject);
+    await firstStarted.promise;
+    const second = hosts[1].run({
+      ...request,
+      model: "stale-model",
+      recipe: undefined,
+    });
+    await new Promise(setImmediate);
+    releaseFirst.resolve();
+    await Promise.all([first, second]);
+    assert.equal(launches.length, 2);
+    assert.equal(launches[1].config.model, "first-model");
+    assert.deepEqual({ ...launches[1].config.analytics }, { enabled: false });
+    assert.deepEqual(
+      { ...launches[1].config.shell_environment_policy },
+      { inherit: "all" },
+    );
+    assert.equal(launches[1].options.auth, "api-key");
+    assert.equal(launches[1].options.workers, 2);
+    assert.equal(
+      launches[1].options.inheritedPermissions.filesystem[
+        join(root, "saved-denial")
+      ],
+      "deny",
+    );
+    (await acquireScanExecution(state, scanDir, pluginRoot))();
+  } finally {
+    releaseFirst.resolve();
+    await Promise.all(hosts.map((host) => host.close()));
+    delete nativeFixture.run;
+    delete nativeFixture.workbench;
+    restore();
     await rm(root, { recursive: true, force: true });
   }
 });

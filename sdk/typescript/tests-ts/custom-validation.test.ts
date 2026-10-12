@@ -200,124 +200,140 @@ async function* responseEvents(
 }
 
 describe("custom validation", () => {
-  test("applies dispositions and assessments without changing source identity", async () => {
-    const f = await fixture(4);
-    const output = result(
-      "reportable",
-      "suppressed",
-      "not_applicable",
-      "deferred",
-    );
-    const counterEvidence =
-      "The protected caller checks a separate precondition.";
-    const limitations = "The alternate configuration was not exercised.";
-    output.validations[0]!.validation.counterevidence_or_proof_gap =
-      counterEvidence;
-    output.validations[0]!.validation.remaining_uncertainty = limitations;
-    output.validations[0]!.severity = {
-      level: "medium",
-      rationale: "Requires an uncommon configuration.",
-    };
-    output.validations[0]!.impact = {
-      level: "high",
-      rationale: "Can modify protected files.",
-    };
-    output.validations[0]!.validation.artifact_paths = [
-      "artifacts/custom-validation/proof.txt",
-    ];
-    await runCustomValidation({
-      ...f,
-      run: async (prompt, schema) => {
-        expect(prompt).toContain(JSON.stringify(f.target));
-        await writeFile(
-          join(f.scanDir, "artifacts/custom-validation/proof.txt"),
-          "Synthetic proof.\n",
-        );
-        expect(prompt).toContain(f.prompt);
-        // Structured outputs cannot resolve plugin URIs or use regex lookaround.
-        expect(JSON.stringify(schema)).not.toContain("codex-security://");
-        expect(JSON.stringify(schema)).not.toMatch(/\(\?[=!<]/);
-        const common = await json<object>(
-          join(PLUGIN_ROOT, "schemas/definitions/artifact-common.schema.json"),
-        );
-        const existing = await json<object>(
-          join(PLUGIN_ROOT, "schemas/tools/candidate-validations.schema.json"),
-        );
-        const ajv = new Ajv2020({ strict: false, validateFormats: false });
-        ajv.addSchema(common);
-        expect(
-          ajv.validate(existing, {
-            scanId: f.scanId,
-            validations: output.validations.map(
-              ({ candidateId, validation }) => ({ candidateId, validation }),
+  test.each([false, true])(
+    "applies dispositions without changing source identity or completion: %p",
+    async (complete) => {
+      const f = await fixture(4);
+      const sourceManifest = await json<ScanManifest>(
+        join(f.scanDir, "scan-manifest.json"),
+      );
+      sourceManifest.scan["complete"] = complete;
+      await save(join(f.scanDir, "scan-manifest.json"), sourceManifest);
+      const output = result(
+        "reportable",
+        "suppressed",
+        "not_applicable",
+        "deferred",
+      );
+      const counterEvidence =
+        "The protected caller checks a separate precondition.";
+      const limitations = "The alternate configuration was not exercised.";
+      output.validations[0]!.validation.counterevidence_or_proof_gap =
+        counterEvidence;
+      output.validations[0]!.validation.remaining_uncertainty = limitations;
+      output.validations[0]!.severity = {
+        level: "medium",
+        rationale: "Requires an uncommon configuration.",
+      };
+      output.validations[0]!.impact = {
+        level: "high",
+        rationale: "Can modify protected files.",
+      };
+      output.validations[0]!.validation.artifact_paths = [
+        "artifacts/custom-validation/proof.txt",
+      ];
+      await runCustomValidation({
+        ...f,
+        run: async (prompt, schema) => {
+          expect(prompt).toContain(JSON.stringify(f.target));
+          await writeFile(
+            join(f.scanDir, "artifacts/custom-validation/proof.txt"),
+            "Synthetic proof.\n",
+          );
+          expect(prompt).toContain(f.prompt);
+          // Structured outputs cannot resolve plugin URIs or use regex lookaround.
+          expect(JSON.stringify(schema)).not.toContain("codex-security://");
+          expect(JSON.stringify(schema)).not.toMatch(/\(\?[=!<]/);
+          const common = await json<object>(
+            join(
+              PLUGIN_ROOT,
+              "schemas/definitions/artifact-common.schema.json",
             ),
-          }),
-        ).toBe(true);
-        return JSON.stringify(output);
-      },
-    });
-    const findings = await json<FindingsDocument>(
-      join(f.scanDir, "findings.json"),
-    );
-    expect(findings.findings).toHaveLength(1);
-    expect(findings.findings[0]).toMatchObject({
-      identity: f.findings.findings[0]!.identity,
-      locations: f.findings.findings[0]!.locations,
-      severity: output.validations[0]!.severity,
-      confidence: { level: "medium" },
-      attackPath: { impact: output.validations[0]!.impact },
-      validation: {
-        disposition: "reportable",
-        counterEvidence: [counterEvidence],
-        limitations: [limitations],
-      },
-    });
-    const coverage = await json<CoverageDocument>(
-      join(f.scanDir, "coverage.json"),
-    );
-    expect(coverage.surfaces.map((surface) => surface.disposition)).toEqual([
-      "reported",
-      "rejected",
-      "not_applicable",
-      "needs_follow_up",
-    ]);
-    expect(coverage.completeness).toBe("partial");
-    expect(coverage.surfaces[0]!.receiptRefs).toContain(
-      "artifacts/custom-validation/proof.txt",
-    );
-    expect(coverage.deferred).toHaveLength(1);
-    expect(
-      await json<{
-        manifest: ScanManifest;
-        findings: FindingsDocument;
-        coverage: CoverageDocument;
-      }>(join(f.scanDir, "artifacts/scan-draft.json")),
-    ).toMatchObject({
-      manifest: await json<ScanManifest>(join(f.scanDir, "scan-manifest.json")),
-      findings,
-      coverage,
-    });
-    expect(
-      (await json<ScanManifest>(join(f.scanDir, "scan-manifest.json"))).scan[
-        "complete"
-      ],
-    ).not.toBe(false);
-    expect(await json(join(f.scanDir, resultName))).toMatchObject({
-      scanId: f.scanId,
-      ...output,
-    });
-    expect(
-      await json(
-        join(f.scanDir, "artifacts/custom-validation/candidates.json"),
-      ),
-    ).toMatchObject({
-      target: f.target,
-      candidates: f.findings.findings.map((finding, index) => ({
-        candidateId: `candidate-${index + 1}`,
-        finding,
-      })),
-    });
-  });
+          );
+          const existing = await json<object>(
+            join(
+              PLUGIN_ROOT,
+              "schemas/tools/candidate-validations.schema.json",
+            ),
+          );
+          const ajv = new Ajv2020({ strict: false, validateFormats: false });
+          ajv.addSchema(common);
+          expect(
+            ajv.validate(existing, {
+              scanId: f.scanId,
+              validations: output.validations.map(
+                ({ candidateId, validation }) => ({ candidateId, validation }),
+              ),
+            }),
+          ).toBe(true);
+          return JSON.stringify(output);
+        },
+      });
+      const findings = await json<FindingsDocument>(
+        join(f.scanDir, "findings.json"),
+      );
+      expect(findings.findings).toHaveLength(1);
+      expect(findings.findings[0]).toMatchObject({
+        identity: f.findings.findings[0]!.identity,
+        locations: f.findings.findings[0]!.locations,
+        severity: output.validations[0]!.severity,
+        confidence: { level: "medium" },
+        attackPath: { impact: output.validations[0]!.impact },
+        validation: {
+          disposition: "reportable",
+          counterEvidence: [counterEvidence],
+          limitations: [limitations],
+        },
+      });
+      const coverage = await json<CoverageDocument>(
+        join(f.scanDir, "coverage.json"),
+      );
+      expect(coverage.surfaces.map((surface) => surface.disposition)).toEqual([
+        "reported",
+        "rejected",
+        "not_applicable",
+        "needs_follow_up",
+      ]);
+      expect(coverage.completeness).toBe("partial");
+      expect(coverage.surfaces[0]!.receiptRefs).toContain(
+        "artifacts/custom-validation/proof.txt",
+      );
+      expect(coverage.deferred).toHaveLength(1);
+      expect(
+        await json<{
+          manifest: ScanManifest;
+          findings: FindingsDocument;
+          coverage: CoverageDocument;
+        }>(join(f.scanDir, "artifacts/scan-draft.json")),
+      ).toMatchObject({
+        manifest: await json<ScanManifest>(
+          join(f.scanDir, "scan-manifest.json"),
+        ),
+        findings,
+        coverage,
+      });
+      expect(
+        (await json<ScanManifest>(join(f.scanDir, "scan-manifest.json"))).scan[
+          "complete"
+        ],
+      ).toBe(complete);
+      expect(await json(join(f.scanDir, resultName))).toMatchObject({
+        scanId: f.scanId,
+        ...output,
+      });
+      expect(
+        await json(
+          join(f.scanDir, "artifacts/custom-validation/candidates.json"),
+        ),
+      ).toMatchObject({
+        target: f.target,
+        candidates: f.findings.findings.map((finding, index) => ({
+          candidateId: `candidate-${index + 1}`,
+          finding,
+        })),
+      });
+    },
+  );
 
   test("publishes captured validation through the legacy file protocol while retiring accepted checkpoints", async () => {
     const f = await fixture();
@@ -800,7 +816,7 @@ describe("custom validation", () => {
                       "custom_pending",
                     );
                     expect(pendingManifest.scan["complete"]).toBe(
-                      diff ? undefined : false,
+                      scenario !== "unfinished-source",
                     );
                     expect(pendingManifest.scan).not.toHaveProperty("sealedAt");
                     expect(pendingManifest.scan).not.toHaveProperty(

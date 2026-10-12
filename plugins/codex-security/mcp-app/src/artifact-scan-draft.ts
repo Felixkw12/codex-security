@@ -300,7 +300,6 @@ async function preserveScanDraft(
   assignDraftIds(
     input,
     previous.flatMap((draft) => draft.coverage.deferred),
-    previous.flatMap((draft) => draft.findings),
   );
   let result = semanticDraft(context, prepareSemanticScanDraft(context, input));
   requireDraftIdentities(result);
@@ -594,36 +593,9 @@ function semanticDraft(
 function assignDraftIds(
   input: ScanDraftInput,
   previousDeferred: ScanDraftInput["coverage"]["deferred"],
-  previousFindings: SemanticFinding[],
 ): void {
-  for (const finding of input.findings) {
-    if (finding.identity !== undefined) continue;
-    const candidateId = findingCandidateId(finding);
-    const sameCandidate = (other: SemanticFinding) =>
-      candidateId !== undefined &&
-      findingCandidateId(other) === candidateId &&
-      other.ruleId === finding.ruleId &&
-      ["source", "sourceScanId", "sourceWorkerId"].every(
-        (key) => other.provenance[key] === finding.provenance[key],
-      );
-    const identities = new Map(
-      previousFindings
-        .filter((other) => other.identity !== undefined && sameCandidate(other))
-        .map((other) => [
-          JSON.stringify([
-            other.identity!.anchor,
-            other.identity!.instance ?? null,
-          ]),
-          other.identity!,
-        ]),
-    );
-    const [saved] = identities.values();
-    finding.identity =
-      identities.size === 1 &&
-      !input.findings.some((other) => other !== finding && sameCandidate(other))
-        ? saved!
-        : { anchor: randomUUID() };
-  }
+  for (const finding of input.findings)
+    finding.identity ??= { anchor: randomUUID() };
   for (const surface of input.coverage.surfaces) surface.id ??= randomUUID();
   for (const row of input.coverage.deferred) {
     if (row.id !== undefined) continue;

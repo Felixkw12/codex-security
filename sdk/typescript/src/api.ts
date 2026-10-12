@@ -109,6 +109,7 @@ import { readThreatModelPath } from "./artifact-export.js";
 import { isRecord } from "./record.js";
 import {
   createProviderProfile,
+  scanReplaySettings,
   providerPreflightCommand,
 } from "./provider-profile.js";
 
@@ -4333,6 +4334,7 @@ async function prepareSavedScanRecipe({
     ...preflightConfig,
     approval_policy: approvalPolicy,
   };
+  const replay = scanReplaySettings(session.sessionConfig);
   let providerProfile: JsonObject | undefined;
   if (!session.source.preserveProviderEnvironment) {
     const resolved = resolveCodexProfile(session.effectiveConfig);
@@ -4348,16 +4350,16 @@ async function prepareSavedScanRecipe({
       modelProvider !== "amazon-bedrock" &&
       isRecord(provider)
     ) {
-      // Recipes are readable scan history. Keep replay credentials in the same
-      // denied home as live provider profiles, and retain this profile for replay.
-      const saved = await createProviderProfile(runtime.codexHome, {
-        model_providers: { [modelProvider]: provider as JsonObject },
-      });
-      providerProfile = {
-        name: saved.name,
-        home: runtime.preserveCodexHomeConfig ? "ambient" : "managed",
-      };
+      replay["model_providers"] = { [modelProvider]: provider as JsonObject };
     }
+  }
+  if (Object.keys(replay).length > 0) {
+    // Shell policy can carry credentials, just like provider configuration.
+    const saved = await createProviderProfile(runtime.codexHome, replay);
+    providerProfile = {
+      name: saved.name,
+      home: runtime.preserveCodexHomeConfig ? "ambient" : "managed",
+    };
   }
   const recipe = scanRecipe({
     repository: expectation.repository,

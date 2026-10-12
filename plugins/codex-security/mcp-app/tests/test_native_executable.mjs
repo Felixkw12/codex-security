@@ -352,6 +352,22 @@ async function testCodexHomePathsStayBoundToOriginalDirectory() {
     const canonicalRoot = await realpath(root);
     for (const [home, expectedHome] of [
       [
+        path.relative(process.cwd(), path.join(root, "missing", "home")),
+        path.join(canonicalRoot, "missing", "home"),
+      ],
+      [
+        `${path.relative(process.cwd(), root)}${path.sep}link${path.sep}..${path.sep}relative-home`,
+        path.join(canonicalRoot, "target", "relative-home"),
+      ],
+      ...(process.platform === "win32"
+        ? [
+            [
+              `\\${path.relative(path.parse(root).root, root)}\\missing\\home`,
+              path.join(canonicalRoot, "missing", "home"),
+            ],
+          ]
+        : []),
+      [
         path.join(root, "missing", "home"),
         path.join(canonicalRoot, "missing", "home"),
       ],
@@ -379,10 +395,6 @@ async function testCodexHomePathsStayBoundToOriginalDirectory() {
     for (const home of [
       `${dangling}${path.sep}..${path.sep}new-home`,
       `${dangling}${path.sep}`,
-      path.relative(process.cwd(), path.join(root, "missing", "home")),
-      ...(process.platform === "win32"
-        ? [`\\${path.relative(path.parse(root).root, root)}\\missing\\home`]
-        : []),
     ]) {
       process.env.CODEX_HOME = home;
       await assert.rejects(snapshotNativeEnvironment(), { code: "ENOENT" });

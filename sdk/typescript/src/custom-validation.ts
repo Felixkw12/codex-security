@@ -455,7 +455,6 @@ export async function runCustomValidation(options: {
   ];
   findingsDocument.findings = reported;
   manifest.scan.scope.validationMode = "custom";
-  delete manifest.scan.complete;
   // Rewrite the captured draft, not any canonical-file edits made during validation.
   try {
     await writePreparedScanDraft(

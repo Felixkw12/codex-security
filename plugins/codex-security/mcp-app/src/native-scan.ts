@@ -1,4 +1,8 @@
 import { join } from "node:path";
+import {
+  codexSecurityStateDirectory,
+  runWorkbench,
+} from "../../../../sdk/typescript/src/runtime.js";
 import { hasSealedScanArtifacts } from "../../../../sdk/typescript/src/scan-publication.js";
 import { restoreScanKnowledge } from "../../../../sdk/typescript/src/scan-inputs.js";
 import { isRecord } from "./record.js";
@@ -46,7 +50,17 @@ export interface NativeScanInput {
 }
 
 type NativeClient = Pick<CodexSecurity, "run" | "close">;
-type PreparedNativeScan = { client: NativeClient; options: ScanOptions };
+type PreparedNativeScan = {
+  client: NativeClient;
+  options: ScanOptions;
+  releaseExecution?: () => void;
+};
+
+interface NativeScanOwnership {
+  environment: Record<string, string>;
+  stateDirectory: string;
+  release(): void;
+}
 
 /** Native tools join the same ordinary scan operation until it finishes. */
 export class NativeScanHost {
@@ -59,7 +73,7 @@ export class NativeScanHost {
     }
   >();
 
-  constructor(private readonly prepare = prepareNativeScan) {}
+  constructor(private readonly prepare = prepareOwnedNativeScan) {}
 
   run(input: NativeScanInput, waiterSignal?: AbortSignal): Promise<ScanResult> {
     if (this.closed)
@@ -71,7 +85,7 @@ export class NativeScanHost {
       const controller = new AbortController();
       const promise = Promise.resolve()
         .then(async () => {
-          const { client, options } = await this.prepare(
+          const { client, options, releaseExecution } = await this.prepare(
             input,
             controller.signal,
           );
@@ -89,6 +103,7 @@ export class NativeScanHost {
                 console.warn("Could not clean up the native scan:", error);
               } catch {}
             }
+            releaseExecution?.();
           }
         })
         .finally(() => this.active.delete(input.scan.scanId));
@@ -121,11 +136,61 @@ export class NativeScanHost {
   }
 }
 
-export async function prepareNativeScan(
+async function prepareOwnedNativeScan(
   input: NativeScanInput,
   signal?: AbortSignal,
 ): Promise<PreparedNativeScan> {
-  const inheritedEnvironment = await snapshotNativeEnvironment();
+  const environment = await snapshotNativeEnvironment();
+  const stateDirectory = codexSecurityStateDirectory({
+    ...environment,
+    ...(input.stateDirectory === undefined
+      ? {}
+      : { CODEX_SECURITY_STATE_DIR: input.stateDirectory }),
+  });
+  environment.CODEX_SECURITY_STATE_DIR = stateDirectory;
+  const release = await acquireScanExecution(
+    stateDirectory,
+    input.scan.scanDir,
+    input.pluginRoot,
+    true,
+    signal,
+  );
+  try {
+    // A queued host may have joined before the first host saved its recipe.
+    const current = await runWorkbench(
+      {
+        python: input.pythonPath,
+        pluginRoot: input.pluginRoot,
+        environment,
+        signal,
+        protectedRoot: [input.scan.targetPath, input.scan.scanDir],
+      },
+      ["get-scan", "--scan-id", input.scan.scanId],
+    );
+    return await prepareNativeScan(
+      {
+        ...input,
+        stateDirectory,
+        recipe: isRecord(current["recipe"])
+          ? (current["recipe"] as unknown as SavedScanRecipe)
+          : undefined,
+      },
+      signal,
+      { environment, stateDirectory, release },
+    );
+  } catch (error) {
+    release();
+    throw error;
+  }
+}
+
+export async function prepareNativeScan(
+  input: NativeScanInput,
+  signal?: AbortSignal,
+  ownership?: NativeScanOwnership,
+): Promise<PreparedNativeScan> {
+  const inheritedEnvironment =
+    ownership?.environment ?? (await snapshotNativeEnvironment());
   const recipe = input.recipe;
   const options = ScanSettingsSchema.parse({
     ...input.savedDeepScanSettings,
@@ -274,12 +339,17 @@ export async function prepareNativeScan(
       inheritedPermissions,
       ambientExecution,
       acquireScanExecution: (state, directory, plugin) =>
-        acquireScanExecution(state, directory, plugin, true, signal),
+        ownership &&
+        state === ownership.stateDirectory &&
+        directory === input.scan.scanDir
+          ? Promise.resolve(() => {})
+          : acquireScanExecution(state, directory, plugin, true, signal),
     },
     { surface: "sdk" },
   );
   return {
     client,
+    ...(ownership === undefined ? {} : { releaseExecution: ownership.release }),
     options: {
       ...options,
       ...deep.settings,
