@@ -1904,10 +1904,11 @@ def merge_saved_results(
             saved_owner == owner
             and _deferred_candidate_id(row, owner, ambiguous_deferred) == candidate_id
             and modified >= order
-            # Tied legacy payloads cannot reopen an accepted root resolution.
+            # Preserve accepted ties.
             and (
                 modified > order
                 or owner is not None
+                or source == "parent"
                 or source in selected_observations
                 or draft.get("complete") is False
                 or (relative != "parent" and relative not in authoritative_heads)

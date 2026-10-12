@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 from argparse import Namespace
@@ -344,3 +345,168 @@ def test_root_outcome_uses_its_own_completion_marker(
     assert json.loads((scan.scan_dir / "coverage.json").read_text()) == coverage
     assert (scan.scan_dir / "scan-manifest.json").read_bytes() == manifest
     assert all(path.read_bytes() == contents for path, contents in originals.items())
+
+
+@pytest.mark.parametrize("mode", ["standard", "deep"])
+@pytest.mark.parametrize("wrapped", [False, True], ids=["flat", "wrapped"])
+@pytest.mark.parametrize(
+    "recorded_heads", [False, True], ids=["absent-selection", "empty-selection"]
+)
+@pytest.mark.parametrize("reverse_roots", [False, True])
+@pytest.mark.parametrize("reverse_listing", [False, True])
+@pytest.mark.parametrize("interrupted", [False, True])
+@pytest.mark.parametrize("later_selection", ["rejected", "pending"])
+def test_legacy_tied_root_parent_preserves_accepted_pending_evidence(
+    workbench_api,
+    workbench_db,
+    publication_scan,
+    monkeypatch,
+    mode,
+    wrapped,
+    recorded_heads,
+    reverse_roots,
+    reverse_listing,
+    interrupted,
+    later_selection,
+):
+    scan = publication_scan(mode=mode)
+    saved = workbench_api["saved_results"]
+    context = workbench_api["_WORKBENCH_DB_CONTEXT"]
+    finding = copy.deepcopy(scan.findings[0])
+    finding["extensions"] = {"candidateId": "candidate-review"}
+    reported = saved_draft(scan.scan_id, complete=True, findings=[finding])
+    rejected = saved_draft(
+        scan.scan_id,
+        complete=True,
+        surfaces=[
+            {
+                "id": "reviewed-surface",
+                "candidateId": "candidate-review",
+                "label": "Reviewed surface",
+                "disposition": "rejected",
+                "receiptRefs": [],
+            }
+        ],
+    )
+    pending = saved_draft(
+        scan.scan_id,
+        complete=True,
+        deferred=[{"candidateId": "candidate-review", "reason": "Validation remains pending."}],
+    )
+    roots = [("rejected", rejected), ("pending", pending)]
+    if reverse_roots:
+        roots.reverse()
+    captures = {}
+    checkpoints = {}
+    head = scan.scan_dir / "checkpoint-head.json"
+    for name, draft in [("reported", reported), *roots]:
+        draft["coverage"] = {**scan.coverage, **draft["coverage"]}
+        checkpoint = write_checkpoint(scan.scan_dir / "checkpoints", draft)
+        observed = 100 if name == "reported" else 500
+        os.utime(checkpoint, ns=(observed, observed))
+        head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+        os.utime(head, ns=(observed, observed))
+        captures.update(
+            saved._capture_saved_source(scan.scan_dir, "checkpoint-head.json", scan.scan_id)
+        )
+        checkpoints[name] = checkpoint
+    head.unlink()
+    frozen = {path: digest for path, (digest, _) in captures.items()}
+    retained = (
+        {
+            "sources": frozen,
+            "sourceTimes": {path: observed for path, (_, observed) in captures.items()},
+        }
+        if wrapped
+        else frozen
+    )
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE scans SET status = 'failed', completed_at = ?, retained_source_digests_json = ?, "
+            "retained_checkpoint_heads_json = ? WHERE id = ?",
+            (scan.timestamp, json.dumps(retained), "{}" if recorded_heads else None, scan.scan_id),
+        )
+    originals = {path: (scan.scan_dir / path).read_bytes() for path in frozen}
+    children = saved._children
+    monkeypatch.setattr(
+        saved,
+        "_children",
+        lambda root, relative: sorted(children(root, relative), reverse=reverse_listing),
+    )
+    prepared_documents = []
+    write = saved._write_prepared_scan_finalization
+
+    def publish(prepared, **kwargs):
+        prepared_documents.append(copy.deepcopy((prepared[3], prepared[4])))
+        if interrupted:
+            raise OSError("Synthetic legacy-root publication interruption")
+        return write(prepared, **kwargs)
+
+    preserve_args = Namespace(
+        scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
+    )
+    with monkeypatch.context() as patch:
+        patch.setattr(saved, "_write_prepared_scan_finalization", publish)
+        if interrupted:
+            with pytest.raises(OSError, match="Synthetic legacy-root publication interruption"):
+                saved.preserve_scan_results(context, workbench_db, preserve_args)
+        else:
+            saved.preserve_scan_results(context, workbench_db, preserve_args)
+    published = saved.preserve_scan_results(context, workbench_db, preserve_args)["scan"]
+    assert published["findingCount"] == 1
+    assert not published["resultsRecoveryNeeded"]
+    manifest_path = scan.scan_dir / "scan-manifest.json"
+    manifest = manifest_path.read_bytes()
+    assert json.loads(manifest)["scan"]["preservedCheckpointHeads"] == {}
+    findings = json.loads((scan.scan_dir / "findings.json").read_text())
+    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    assert len(prepared_documents) == 1
+    for current_findings, current_coverage in [(findings, coverage), *prepared_documents]:
+        assert len(current_findings["findings"]) == 1
+        assert any(
+            row.get("candidateId") == "candidate-review" for row in current_coverage["deferred"]
+        )
+    replayed = saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))[
+        "scan"
+    ]
+    assert replayed["findingCount"] == 1
+    assert not replayed["resultsRecoveryNeeded"]
+    before_sources = json.loads(manifest)["scan"]["preservedSources"]
+    after_sources = json.loads(manifest_path.read_text())["scan"]["preservedSources"]
+    assert before_sources.items() <= after_sources.items()
+    added = after_sources.keys() - before_sources.keys()
+    # Explicit recovery records ordering missing from flat legacy captures.
+    assert len(added) == (0 if wrapped else 1)
+    for relative in added:
+        assert relative.startswith("source-order/")
+        payload = (scan.scan_dir / relative).read_bytes()
+        assert hashlib.sha256(payload).hexdigest() == after_sources[relative]
+        assert json.loads(payload) == {
+            "scanId": scan.scan_id,
+            "sources": {
+                path: {"digest": digest, "observedAtNs": str(observed)}
+                for path, (digest, observed) in captures.items()
+            },
+        }
+    assert json.loads((scan.scan_dir / "findings.json").read_text()) == findings
+    assert json.loads((scan.scan_dir / "coverage.json").read_text()) == coverage
+    if wrapped:
+        assert manifest_path.read_bytes() == manifest
+    manifest = manifest_path.read_bytes()
+    saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))
+    assert manifest_path.read_bytes() == manifest
+
+    head.write_text(json.dumps({"checkpoint": checkpoints[later_selection].name}))
+    os.utime(head, ns=(600, 600))
+    recovered = saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))[
+        "scan"
+    ]
+    assert recovered["findingCount"] == (0 if later_selection == "rejected" else 1)
+    assert not recovered["resultsRecoveryNeeded"]
+    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    assert any(row.get("candidateId") == "candidate-review" for row in coverage["deferred"]) is (
+        later_selection == "pending"
+    )
+    assert all(
+        (scan.scan_dir / path).read_bytes() == contents for path, contents in originals.items()
+    )
