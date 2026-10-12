@@ -19,6 +19,7 @@ import {
 } from "./scan-merge.js";
 import type { ScanArtifactRestorer } from "./runtime.js";
 import type { SemanticScan } from "./scan-semantics.js";
+import type { ScanResult } from "./result.js";
 import {
   ScanPermissionError,
   ScanTransportClosedError,
@@ -427,8 +428,10 @@ export async function runDeepScans(
   ): Promise<void> => {
     const client = input.createClient();
     let latestCost: Readonly<ScanCost> | undefined;
+    // Publication retries reuse the child already accepted by its own workbench.
+    let acceptedResult: ScanResult | undefined;
     const failPass = async (error: unknown): Promise<void> => {
-      if (pass.scanId === undefined) return;
+      if (pass.scanId === undefined || acceptedResult !== undefined) return;
       await workbench([
         "fail-scan",
         "--scan-id",
@@ -445,7 +448,7 @@ export async function runDeepScans(
         discoverySignal.throwIfAborted();
         try {
           const resuming = pass.scanId !== undefined;
-          const result = await client.run(input.repository, {
+          acceptedResult ??= await client.run(input.repository, {
             ...input.scanOptions,
             scanPrompt: state.discoveryUserContext ?? undefined,
             mode: "standard",
@@ -472,6 +475,7 @@ export async function runDeepScans(
               input.onCost(pass.directory, cost);
             },
           });
+          const result = acceptedResult;
           const projected = await input.projectChild(
             result.manifest.scan.id,
             result.scanDir,
@@ -493,6 +497,7 @@ export async function runDeepScans(
             externalStop.abort(error);
           if (discoverySignal.aborted) throw error;
           if (attempt >= retries.length) {
+            if (acceptedResult !== undefined) throw error;
             await failPass(error);
             if (
               exhaustPassRetries(

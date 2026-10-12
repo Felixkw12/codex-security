@@ -1122,3 +1122,22 @@ for (const layout of ["standard", "diff"] as const) {
     }
   }
 }
+
+for (const layout of ["standard", "diff"] as const) {
+  test(`${layout}: accepted checkpoint outranks canonical files interrupted before their manifest`, async (t) => {
+    const f = await fixture(t, layout);
+    await f.write({ ...f.draft(), threatModel: { summary: "Old model" } });
+    const old = new Date(Date.now() - 10_000);
+    for (const name of ["scan-manifest.json", "findings.json", "coverage.json"])
+      await utimes(path.join(f.root, name), old, old);
+    await interruptDraftWrite(path.join(f.root, "scan-manifest.json"), () =>
+      f.write({
+        ...f.draft(),
+        threatModel: { summary: "Updated accepted model" },
+      }),
+    );
+    await f.write(f.draft());
+    const manifest = await readJson(f.root, "scan-manifest.json");
+    assert.equal(manifest.scan.threatModel.summary, "Updated accepted model");
+  });
+}

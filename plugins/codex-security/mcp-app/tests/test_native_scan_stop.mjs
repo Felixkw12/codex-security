@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { spawn } from "node:child_process";
+import { createInterface } from "node:readline";
+import { once } from "node:events";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { build } from "esbuild";
@@ -18,6 +23,7 @@ const bundle = await build({
       name: "native-stop-boundaries",
       setup(build) {
         const modules = {
+          "../../../sdk/typescript/src/runtime.js": `export function codexSecurityStateDirectory() { return fixture.stateDirectory ?? "/synthetic/state"; }`,
           "@modelcontextprotocol/sdk/server/mcp.js": `
           export class McpServer {
             server = {};
@@ -37,7 +43,8 @@ const bundle = await build({
           export async function runPythonWithInput() { throw new Error("unexpected artifact Python invocation"); }
           export function workbenchCommandTimeout() { return 30000; }`,
           "../../../sdk/typescript/src/scan-execution.js": `
-          export const ScanPermissionError = fixture.ScanPermissionError;`,
+          export const ScanPermissionError = fixture.ScanPermissionError;
+          export async function waitForScanExecution(...args) { return fixture.waitForScanExecution ? fixture.waitForScanExecution(...args) : () => {}; }`,
           "node:child_process": `
           import { PassThrough } from "node:stream";
           export function execFile() {}
@@ -181,6 +188,7 @@ for (const operation of ["cancel", "fail"]) {
     let active = true;
     const scan = () => ({
       scanId,
+      scanDir: "/synthetic/scan",
       handoffClaimToken: claimToken,
       findings: [...lateFindings],
     });
@@ -401,5 +409,123 @@ for (const completed of [false, true]) {
         ? ["begin-deep-scan", "complete-scan"]
         : ["begin-deep-scan", "complete-scan", "get-scan"],
     );
+  });
+}
+
+for (const operation of ["cancel", "fail"]) {
+  test(`native ${operation} waits for a remote owner's execution lock before sealing`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "native-remote-stop-"));
+    const scanDir = join(root, "scan");
+    await mkdir(scanDir);
+    const source = fileURLToPath(
+      new URL(
+        "../../../../sdk/typescript/src/scan-execution.ts",
+        import.meta.url,
+      ),
+    );
+    const built = await build({
+      entryPoints: [source],
+      format: "esm",
+      platform: "node",
+      write: false,
+    });
+    const modulePath = join(root, "scan-execution.mjs");
+    await writeFile(modulePath, built.outputFiles[0].text);
+    const { acquireScanExecution, waitForScanExecution } = await import(
+      pathToFileURL(modulePath)
+    );
+    const plugin = fileURLToPath(
+      new URL("../../../../sdk/typescript/_bundled_plugin", import.meta.url),
+    );
+    const receipt = join(scanDir, "evidence.txt");
+    await writeFile(receipt, "Before drain");
+    const child = spawn(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        `
+      import { acquireScanExecution } from ${JSON.stringify(pathToFileURL(modulePath).href)};
+      import { writeFile } from "node:fs/promises";
+      import { createInterface } from "node:readline";
+      const release = await acquireScanExecution(${JSON.stringify(root)}, ${JSON.stringify(scanDir)}, ${JSON.stringify(plugin)});
+      console.log("owned");
+      for await (const line of createInterface({ input: process.stdin })) {
+        if (line === "drain") { await writeFile(${JSON.stringify(receipt)}, "Accepted late evidence"); release(); console.log("drained"); break; }
+      }
+    `,
+      ],
+      { stdio: ["pipe", "pipe", "pipe"] },
+    );
+    const exited = once(child, "exit");
+    const lines = createInterface({ input: child.stdout });
+    const output = lines[Symbol.asyncIterator]();
+    let pending;
+    try {
+      assert.equal((await output.next()).value, "owned");
+      const barrier = Promise.withResolvers();
+      let preserved = false;
+      const scan = {
+        scanId: "synthetic-parent",
+        scanDir,
+        handoffClaimToken: "synthetic-claim",
+      };
+      const fixture = {
+        stateDirectory: root,
+        async cancel() {}, // This process owns no active scan.
+        async waitForScanExecution(state, directory) {
+          assert.equal(state, root);
+          assert.equal(directory, scanDir);
+          barrier.resolve();
+          return waitForScanExecution(state, directory, plugin);
+        },
+        async workbench([command]) {
+          const workspace = { setup: { submitted: true }, results: scan };
+          if (command === operation + "-scan" || command === "get-scan")
+            return { scan, workspace };
+          assert.equal(command, "preserve-scan-results");
+          assert.equal(
+            await readFile(receipt, "utf8"),
+            "Accepted late evidence",
+          );
+          await assert.rejects(
+            acquireScanExecution(root, scanDir, plugin),
+            /already running/,
+          );
+          preserved = true;
+          return { scan, workspace };
+        },
+      };
+      pending = serverFor(fixture).tools.get(
+        operation + "_codex_security_scan",
+      )(
+        {
+          scanId: scan.scanId,
+          message: "Synthetic terminal failure.",
+          handoffClaimToken: scan.handoffClaimToken,
+        },
+        { _meta: { "openai/threadId": "synthetic-owner" } },
+      );
+      const early = await Promise.race([
+        barrier.promise.then(() => "waiting"),
+        pending.then(
+          () => "returned",
+          (error) => error,
+        ),
+      ]);
+      assert.equal(early, "waiting");
+      assert.equal(preserved, false);
+      child.stdin.end("drain\n");
+      await pending;
+      assert.equal(preserved, true);
+      assert.equal((await output.next()).value, "drained");
+      (await acquireScanExecution(root, scanDir, plugin))();
+    } finally {
+      child.kill("SIGKILL");
+      await exited;
+      await pending?.catch(() => {});
+      lines.close();
+      await rm(root, { recursive: true, force: true });
+    }
   });
 }

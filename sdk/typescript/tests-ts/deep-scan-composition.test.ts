@@ -2481,3 +2481,72 @@ test("persists a completed child while its sibling is running before the first m
   expect(h.mergeInputs).toEqual([]);
   expect(h.metrics()).toEqual({ closed: 2, maximumActive: 2 });
 });
+
+for (const boundary of ["projection", "checkpoint"] as const) {
+  for (const persistent of [false, true]) {
+    test(`accepted child ${boundary} failure retries publication only (persistent: ${persistent})`, async () => {
+      retryDelay = spyOn(timers, "setTimeout").mockImplementation(
+        async <T>(_delay?: number, value?: T): Promise<T> => value as T,
+      );
+      const h = await harness({ stopAfterNoNew: 1 });
+      const failure = new Error(`Synthetic ${boundary} unavailable.`);
+      const create = h.input.createClient;
+      let resumeAttempts = 0;
+      h.input.createClient = () => {
+        const client = create();
+        return {
+          ...client,
+          async run(repository, options = {}) {
+            if (
+              options.resumeScanId &&
+              h.records.get(options.resumeScanId)?.progress.status ===
+                "complete"
+            ) {
+              resumeAttempts++;
+              throw new Error("Only a running scan can be resumed.");
+            }
+            return client.run(repository, options);
+          },
+        };
+      };
+      let failures = 0;
+      const fail = () => {
+        if (persistent || failures++ === 0) throw failure;
+      };
+      const project = h.input.projectChild;
+      h.input.projectChild = async (...args) => {
+        if (boundary === "projection") fail();
+        return project(...args);
+      };
+      const workbench = h.input.workbench;
+      h.input.workbench = async (args, input) => {
+        if (
+          args[0] === "fail-scan" &&
+          h.records.get(args[2]!)?.progress.status === "complete"
+        )
+          throw new Error("A completed scan cannot be marked failed.");
+        if (
+          boundary === "checkpoint" &&
+          args[0] === "save-scan-artifact" &&
+          JSON.parse(input!).passes.some(
+            (pass: { completed?: boolean }) => pass.completed,
+          )
+        )
+          fail();
+        return workbench(args, input);
+      };
+      if (persistent) await expect(runDeepScans(h.input)).rejects.toBe(failure);
+      else {
+        const state = await runDeepScans(h.input);
+        expect(state.terminalReason).toBe("saturated");
+        expect(state.mergedScanIds).toHaveLength(1);
+      }
+      expect(h.calls).toHaveLength(1);
+      expect(resumeAttempts).toBe(0);
+      expect(
+        [...h.records.values()].map((record) => record.progress.status),
+      ).toEqual(["complete"]);
+      expect(h.metrics().closed).toBe(1);
+    });
+  }
+}

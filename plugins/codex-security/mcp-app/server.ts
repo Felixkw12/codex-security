@@ -19,7 +19,11 @@ import {
 } from "./src/server/handoff-tools.js";
 import { registerCompactArtifactTools } from "./src/server/compact-artifact-tools.js";
 import { NativeScanHost, type NativeScanInput } from "./src/native-scan.js";
-import { ScanPermissionError } from "../../../sdk/typescript/src/scan-execution.js";
+import {
+  ScanPermissionError,
+  waitForScanExecution,
+} from "../../../sdk/typescript/src/scan-execution.js";
+import { codexSecurityStateDirectory } from "../../../sdk/typescript/src/runtime.js";
 import {
   CODEX_SANDBOX_STATE_META_CAPABILITY,
   resolveNativeParentSandbox,
@@ -2137,19 +2141,31 @@ async function finalizeNativeStoppedScan(
   await nativeScans.cancel(scanId, message);
   const current = await runWorkbench(["get-scan", "--scan-id", scanId]);
   const scan = isJsonObject(current.scan) ? current.scan : undefined;
-  return runWorkbench([
-    "preserve-scan-results",
-    "--scan-id",
-    scanId,
-    "--after-stop",
-    ...optionalArg("--thread-id", threadId),
-    ...optionalArg(
-      "--claim-token",
-      typeof scan?.handoffClaimToken === "string"
-        ? scan.handoffClaimToken
-        : undefined,
-    ),
-  ]);
+  if (typeof scan?.scanDir !== "string")
+    throw new Error("The workbench returned no scan directory.");
+  // Another host may own the scan. Its lock remains held until all children drain.
+  const release = await waitForScanExecution(
+    codexSecurityStateDirectory(),
+    scan.scanDir,
+    PLUGIN_ROOT,
+  );
+  try {
+    return await runWorkbench([
+      "preserve-scan-results",
+      "--scan-id",
+      scanId,
+      "--after-stop",
+      ...optionalArg("--thread-id", threadId),
+      ...optionalArg(
+        "--claim-token",
+        typeof scan.handoffClaimToken === "string"
+          ? scan.handoffClaimToken
+          : undefined,
+      ),
+    ]);
+  } finally {
+    release();
+  }
 }
 
 async function nativeScanTerminalResult(

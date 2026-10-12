@@ -679,9 +679,10 @@ async function readPreviousScanDraft(
     "findings.json",
     "coverage.json",
   ] as const;
-  const contents = await Promise.all(
-    names.map((name) => readOptionalArtifactText(context, [name])),
+  const saved = await Promise.all(
+    names.map((name) => readOptionalArtifactTextWithMetadata(context, [name])),
   );
+  const contents = saved.map((value) => value?.contents);
   const digest = draftDigest(
     names.map((name, index) => [name, contents[index]]),
   );
@@ -704,13 +705,12 @@ async function readPreviousScanDraft(
   const scan = requireObject(manifest.scan, "previous scan draft.scan");
   return {
     digest,
-    modifiedMs: (
-      await readArtifactTextWithMetadata(
-        context,
-        ["coverage.json"],
-        "previous scan draft",
-      )
-    ).modifiedMs,
+    // Tool publication writes the manifest last; a torn canonical set must not
+    // outrank its accepted checkpoint. File-authored coverage has no head.
+    modifiedMs:
+      (await readCheckpointHead(context, "current")) === undefined
+        ? saved[2]!.modifiedMs
+        : Math.min(...saved.map((value) => value!.modifiedMs)),
     input: parsePersistedScanDraft(
       semanticScanDraft(
         context.scanId!,

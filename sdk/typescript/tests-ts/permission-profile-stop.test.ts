@@ -230,9 +230,10 @@ test.each([false, true])(
       );
       expect(failure).toBeInstanceOf(Error);
       expect(failure).not.toBeInstanceOf(ScanPermissionError);
-      expect(failure).toMatchObject({
-        message: "Codex permission preflight ended before its response.",
-      });
+      const message = (failure as Error).message;
+      expect(message).toContain("ended before its response");
+      expect(message).toContain("exited with code 1");
+      expect(message).toContain(`descendant:${descendantPid}`);
       expect(child!.exitCode).toBe(1);
       expect(child!.stdout!.destroyed).toBe(true);
       expect(descendantPid).toBeDefined();
@@ -253,4 +254,60 @@ test.each([false, true])(
     }
   },
   10000,
+);
+
+test.each(["exit", "rpc"] as const)(
+  "preflight preserves upstream %s diagnostics",
+  async (failure) => {
+    const root = await mkdtemp(join(tmpdir(), "permission-diagnostic-"));
+    const executable = join(root, "synthetic-codex.exe");
+    const script = join(root, "preflight.cjs");
+    const diagnostic =
+      "Synthetic configuration failure: provider endpoint is unavailable.";
+    const rpcError = {
+      code: -32001,
+      message: diagnostic,
+      data: { detail: "Keep upstream details" },
+    };
+    await writeFile(
+      script,
+      failure === "exit"
+        ? `process.stderr.write(${JSON.stringify(diagnostic)}, () => process.exit(23));`
+        : `require("node:readline").createInterface({ input: process.stdin }).on("line", line => { const request = JSON.parse(line); if (request.id !== undefined) console.log(JSON.stringify({ id: request.id, error: ${JSON.stringify(rpcError)} })); });`,
+    );
+    const spawning = spyOn(childProcess, "spawn").mockImplementation(
+      fixtureSpawn(executable, script, () => {}),
+    );
+    try {
+      const codex = createPermissionCheckedCodex({
+        codexPathOverride: executable,
+        env: { PATH: process.env["PATH"] ?? "" },
+        config: {
+          default_permissions: "fixture",
+          permissions: {
+            fixture: {
+              filesystem: { "/": "read" },
+              network: { enabled: false },
+            },
+          },
+        },
+      });
+      const error = await codex
+        .startThread({ workingDirectory: root })
+        .runStreamed("inert fixture")
+        .then(
+          () => null,
+          (error) => error,
+        );
+      expect(error).toBeInstanceOf(Error);
+      expect(error.message).toContain(diagnostic);
+      if (failure === "rpc") {
+        expect(error.message).toContain("-32001");
+        expect(error.message).toContain(rpcError.data.detail);
+      } else expect(error.message).toContain("23");
+    } finally {
+      spawning.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  },
 );

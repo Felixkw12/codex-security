@@ -194,7 +194,10 @@ async function verifyPermissionProfile(options: {
       ),
     );
   });
-  child.stderr.resume();
+  let stderr = "";
+  child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
+    stderr += chunk;
+  });
   const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
   const iterator = lines[Symbol.asyncIterator]();
   let nextId = 0;
@@ -218,11 +221,14 @@ async function verifyPermissionProfile(options: {
         message["error"] !== undefined ||
         !record(message["result"])
       ) {
-        throw new Error(`Codex permission preflight failed for ${method}.`);
+        throw new Error(
+          `Codex permission preflight failed for ${method}${message["error"] === undefined ? "." : `: ${JSON.stringify(message["error"])}`}`,
+        );
       }
       return message["result"] as Record<string, unknown>;
     }
   };
+  let failure: unknown;
   try {
     await request("initialize", {
       clientInfo: {
@@ -285,6 +291,7 @@ async function verifyPermissionProfile(options: {
   } catch (error) {
     options.signal.throwIfAborted();
     // A failed transport does not establish a permission incompatibility.
+    failure = error;
     throw error;
   } finally {
     lines.close();
@@ -301,6 +308,11 @@ async function verifyPermissionProfile(options: {
       await closed;
     } finally {
       clearTimeout(forcedTermination);
+      if (failure instanceof Error) {
+        if (child.exitCode !== null)
+          failure.message += `\nCodex permission preflight exited with code ${child.exitCode}.`;
+        if (stderr) failure.message += `\n${stderr}`;
+      }
     }
   }
 }
