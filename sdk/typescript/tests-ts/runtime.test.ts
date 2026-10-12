@@ -6,7 +6,6 @@ import { execFile, spawnSync } from "node:child_process";
 import { Codex } from "@openai/codex-sdk";
 import * as childProcess from "node:child_process";
 import { EventEmitter, once } from "node:events";
-import { brotliDecompressSync } from "node:zlib";
 import { existsSync, renameSync, symlinkSync } from "node:fs";
 import {
   chmod,
@@ -389,12 +388,7 @@ describe("plugin runtime preparation", () => {
   });
 
   test("disambiguates duplicate coverage surface identities without losing evidence", async () => {
-    const parts = await Promise.all(
-      ["000", "001"].map((part) =>
-        readFile(join(PLUGIN_ROOT, "mcp", `server.mjs.br.part-${part}`)),
-      ),
-    );
-    const runtime = brotliDecompressSync(Buffer.concat(parts)).toString("utf8");
+    const runtime = await loadBundledRuntime();
     const source = [
       "candidateOwner",
       "candidateKey",

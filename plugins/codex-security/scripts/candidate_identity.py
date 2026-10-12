@@ -71,19 +71,13 @@ def _deferred_owner(row: dict[str, Any], owner: str | None) -> str | None:
     return candidate_owner(owner, row.get("sourceWorkerId")) if is_candidate_row(row) else owner
 
 
-def _deferred_candidate_id(
-    row: dict[str, Any],
-    owner: str | None,
-    ambiguous_deferred: set[tuple[str | None, str]],
-) -> str | None:
+def _deferred_candidate_id(row: dict[str, Any]) -> str | None:
+    if not is_candidate_row(row):
+        return None
     identity = row.get("candidateId")
     if not isinstance(identity, str) or not identity:
         identity = row.get("id")
-    if not isinstance(identity, str):
-        return None
-    if (owner, identity) in ambiguous_deferred and not is_candidate_row(row):
-        return None
-    return identity
+    return identity if isinstance(identity, str) else None
 
 
 def surface_reference_key(

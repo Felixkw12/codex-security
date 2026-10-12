@@ -560,7 +560,7 @@ export async function runCustomValidation(options: {
       const previous = uniqueIdentity
         ? previousDeferred.get(key)?.[0]
         : undefined;
-      if (history.length > 0 || uniqueIdentity) {
+      if (key !== undefined) {
         const baseId = `custom-validation-${candidate.candidateId}`;
         let id = baseId;
         let suffix = 2;
@@ -658,6 +658,18 @@ export async function runCustomValidation(options: {
     ];
   }
   coverage.surfaces.push(...independentDecisions);
+  const priorCompleteness = coverage["completenessBeforeCandidates"];
+  if (
+    (priorCompleteness === "complete" || priorCompleteness === "unknown") &&
+    coverage.completeness === "partial" &&
+    coverage.deferred.length === 0 &&
+    !coverage.surfaces.some(
+      (surface) => surface.disposition === "needs_follow_up",
+    )
+  ) {
+    coverage.completeness = priorCompleteness;
+    delete coverage["completenessBeforeCandidates"];
+  }
   if (coverage.surfaces.length === 0) {
     coverage.surfaces.push({
       id: "custom-validation",

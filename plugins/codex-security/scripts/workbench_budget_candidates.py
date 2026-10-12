@@ -63,7 +63,7 @@ def recover_candidate_receipts(
         and row.get("disposition") in ("rejected", "not_applicable")
         and (
             not isinstance(row.get("label"), str)
-            or not row["label"]
+            or not row["label"].strip()
             or row.get("receiptRefs")
             or ("receiptRefs" in row and not isinstance(row["receiptRefs"], list))
         )
@@ -94,9 +94,13 @@ def recover_candidate_receipts(
             ):
                 continue
             refs = row.get("receiptRefs", [])
-            invalid = not isinstance(row.get("label"), str) or not row["label"]
+            invalid = not isinstance(row.get("label"), str) or not row["label"].strip()
             recovered = []
             warning_start = len(warnings)
+            if invalid:
+                warnings.append(
+                    f"Skipped malformed coverage surface {index + 1}: expected a nonempty label."
+                )
             if not isinstance(refs, list):
                 warnings.append(
                     f"Skipped malformed receipt references for coverage surface {index + 1}: expected an array."

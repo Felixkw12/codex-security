@@ -18,7 +18,10 @@ export async function recoverWorkerCandidateReceipts(
 ): Promise<Set<string>> {
   const reopened = new Set<string>();
   const deferred = coverage.deferred as JsonObject[];
-  for (const surface of coverage.surfaces as JsonObject[]) {
+  for (const surface of [
+    ...(coverage.surfaces as JsonObject[]),
+    ...(coverage.explicitExclusions as JsonObject[]),
+  ]) {
     if (
       !isTerminalCandidateDecision(surface) &&
       !(

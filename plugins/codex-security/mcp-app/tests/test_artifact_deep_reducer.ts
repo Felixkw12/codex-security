@@ -726,8 +726,13 @@ for (const receipt of [
   "none",
   "other-worker",
 ] as const) {
-  for (const savedGap of [false, true]) {
-    test(`worker terminal candidate receipt ${receipt}, saved gap=${savedGap}`, async () => {
+  for (const [section, disposition, savedGap] of [
+    ["surfaces", "rejected", false],
+    ["surfaces", "rejected", true],
+    ["explicitExclusions", "rejected", false],
+    ["explicitExclusions", "not_applicable", true],
+  ] as const) {
+    test(`worker terminal candidate receipt ${receipt}, ${section}/${disposition}, saved gap=${savedGap}`, async () => {
       const root = await temporaryDirectory(
         "deep-worker-candidate-receipt-",
         true,
@@ -753,13 +758,17 @@ for (const receipt of [
             coverage: {
               completeness: "partial",
               explicitExclusions: [],
-              surfaces: [
+              surfaces: [],
+              [section]: [
                 {
                   id: "decision",
                   label: "Synthetic review",
                   candidateId,
                   candidate: pending.candidate,
-                  disposition: "rejected",
+                  disposition,
+                  ...(section === "explicitExclusions"
+                    ? { pattern: "src/**", reason: "Synthetic exclusion." }
+                    : {}),
                   receiptRefs:
                     receipt === "none" ? [] : ["artifacts/review.txt"],
                 },

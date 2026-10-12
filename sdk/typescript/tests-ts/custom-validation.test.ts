@@ -496,6 +496,95 @@ describe("custom validation", () => {
     },
   );
 
+  test.each(["suppressed", "not_applicable"] as const)(
+    "retains terminal sibling evidence without saved candidate history: %s",
+    async (disposition) => {
+      const f = await fixture(2);
+      for (const finding of f.findings.findings) {
+        finding.provenance["candidateId"] = "shared-candidate";
+        finding.provenance["sourceWorkerId"] = "worker-current";
+      }
+      await save(join(f.scanDir, "findings.json"), f.findings);
+      await runCustomValidation({
+        ...f,
+        run: async () => JSON.stringify(result(disposition, disposition)),
+      });
+      const saved = await loadResult(f.scanDir);
+      const decisions = saved.coverage.surfaces.filter(
+        (row) => row.candidateId,
+      );
+      expect(decisions).toHaveLength(2);
+      expect(new Set(decisions.map((row) => row.candidateId)).size).toBe(2);
+      for (const [index, finding] of f.findings.findings.entries())
+        expect(decisions[index]).toMatchObject({
+          finding,
+          sourceWorkerId: "worker-current",
+          disposition:
+            disposition === "suppressed" ? "rejected" : "not_applicable",
+          receiptRefs: [resultName],
+        });
+    },
+  );
+
+  for (const disposition of [
+    "reportable",
+    "suppressed",
+    "not_applicable",
+  ] as const) {
+    test.each(["none", "deferred", "surface", "authored-partial"] as const)(
+      `restores candidate-only completeness after ${disposition}: %s`,
+      async (remaining) => {
+        const f = await fixture();
+        const finding = f.findings.findings[0]!;
+        finding.provenance["candidateId"] = "reopened-candidate";
+        finding.provenance["candidateReopened"] = true;
+        await save(join(f.scanDir, "findings.json"), f.findings);
+        const coverage = await json<CoverageDocument>(
+          join(f.scanDir, "coverage.json"),
+        );
+        coverage.completeness = "partial";
+        if (remaining !== "authored-partial")
+          coverage["completenessBeforeCandidates"] = "complete";
+        coverage.deferred = [
+          {
+            id: "candidate-gap",
+            candidateId: "reopened-candidate",
+            reason: "Reopened candidate evidence needs validation.",
+            surfaceIds: ["surface-0"],
+          },
+        ];
+        coverage.surfaces[0]!.disposition = "needs_follow_up";
+        if (remaining === "deferred")
+          coverage.deferred.push({
+            id: "other-review",
+            reason: "Other review remains.",
+          });
+        if (remaining === "surface")
+          coverage.surfaces.push({
+            id: "other-review",
+            label: "Other review",
+            disposition: "needs_follow_up",
+            receiptRefs: [],
+          });
+        await save(join(f.scanDir, "coverage.json"), coverage);
+        await runCustomValidation({
+          ...f,
+          run: async () => JSON.stringify(result(disposition)),
+        });
+        const saved = await loadResult(f.scanDir);
+        expect(saved.unresolvedCandidateCount).toBe(0);
+        expect(saved.coverage.completeness).toBe(
+          remaining === "none" ? "complete" : "partial",
+        );
+        expect(saved.coverage["completenessBeforeCandidates"]).toBe(
+          remaining === "none" || remaining === "authored-partial"
+            ? undefined
+            : "complete",
+        );
+      },
+    );
+  }
+
   test("retains a deferred candidate when another finding reports their shared surface", async () => {
     const f = await fixture(2);
     for (const [index, finding] of f.findings.findings.entries()) {

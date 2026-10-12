@@ -1122,7 +1122,7 @@ function completedCandidateIds(
   const completed = new Set<string>();
   const observed = new Set<string>();
   for (const source of [result, ...sources]) {
-    for (const finding of source.findings) {
+    for (const finding of source.findings.filter(isCurrentCandidateFinding)) {
       const id = findingCandidateId(finding);
       if (id !== undefined) completed.add(id);
     }

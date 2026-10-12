@@ -186,7 +186,12 @@ export function refreshDiffCandidateHistory(
         if (!candidate || (!isGeneratedDecision(surface) && !generatedFollowUp))
           return surface;
         const disposition = dispositionFor(candidate);
-        if (generatedFollowUp && disposition === undefined) return surface;
+        if (
+          generatedFollowUp &&
+          disposition === undefined &&
+          surface.disposition === "needs_follow_up"
+        )
+          return surface;
         if (disposition === undefined && authoredResolutions.has(key))
           return surface;
         if (disposition === undefined) {
@@ -285,11 +290,15 @@ function isGeneratedFollowUp(
   surfaces: JsonObject[],
 ): boolean {
   const candidate = object(surface.candidate ?? pending?.candidate);
+  const finding = object(pending?.finding ?? surface.finding);
   return (
     candidate !== undefined &&
-    surface.disposition === "needs_follow_up" &&
     surface.label === candidate.summary &&
-    surface.notes === (pending?.reason ?? candidateReason(candidate)) &&
+    ((surface.disposition === "needs_follow_up" &&
+      surface.notes === (pending?.reason ?? candidateReason(candidate))) ||
+      (surface.disposition === "reported" &&
+        typeof finding?.summary === "string" &&
+        surface.notes === finding.summary)) &&
     !deferred.some(
       (other) =>
         coverageCandidateKey(other) !== coverageCandidateKey(surface) &&

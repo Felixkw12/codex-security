@@ -1241,7 +1241,7 @@ def _generic_surface_updates(
                 saved_owner == owner
                 and (owner, deferred_id) not in closed_deferred
                 and (
-                    (candidate_id := _deferred_candidate_id(row, owner, ambiguous_deferred)) is None
+                    (candidate_id := _deferred_candidate_id(row)) is None
                     or (owner, candidate_id) not in resolved_candidates
                 )
                 and linked(row, identity)
@@ -1984,7 +1984,7 @@ def merge_saved_results(
     ordered_candidates = {
         (owner, identity)
         for owner, row in reopened_rows
-        if (identity := _deferred_candidate_id(row, owner, ambiguous_deferred)) is not None
+        if (identity := _deferred_candidate_id(row)) is not None
         and (owner, identity) in candidate_ids
     }
     ordered_candidates.update(
@@ -1992,7 +1992,7 @@ def merge_saved_results(
         for (owner, _), (_, row, relative) in active_deferred.items()
         if relative == "parent"
         and owner is not None
-        and (identity := _deferred_candidate_id(row, owner, ambiguous_deferred)) is not None
+        and (identity := _deferred_candidate_id(row)) is not None
         and (owner, identity) in candidate_ids
     )
     ordered_outcomes = {}
@@ -2036,7 +2036,7 @@ def merge_saved_results(
         order = source_order[relative]
         if any(
             saved_owner == owner
-            and _deferred_candidate_id(row, owner, ambiguous_deferred) == candidate_id
+            and _deferred_candidate_id(row) == candidate_id
             and not (
                 owner is not None
                 and paths.get(relative) == paths.get(saved_relative) == owner
@@ -2103,8 +2103,7 @@ def merge_saved_results(
                             )
                             if not any(
                                 saved_owner == worker_candidate[0]
-                                and _deferred_candidate_id(row, saved_owner, ambiguous_deferred)
-                                == worker_candidate[1]
+                                and _deferred_candidate_id(row) == worker_candidate[1]
                                 and modified[1] >= source_order["parent"][1]
                                 for (saved_owner, _), (modified, row, _) in active_deferred.items()
                             ):
@@ -2163,7 +2162,7 @@ def merge_saved_results(
     # Reopened work survives a superseded checkpoint, but current candidate
     # outcomes still apply. Parent closures cannot remove another worker's row.
     for owner, item in reopened_rows:
-        if (identity := _deferred_candidate_id(item, owner, ambiguous_deferred)) is not None and (
+        if (identity := _deferred_candidate_id(item)) is not None and (
             owner,
             identity,
         ) in resolved:
@@ -2569,24 +2568,16 @@ def merge_saved_results(
                             for previous in history
                         ):
                             history.append(copy.deepcopy(finding))
-                if (
-                    isinstance(item, dict)
-                    and isinstance(
-                        identity := _deferred_candidate_id(item, worker_id, ambiguous_deferred)
-                        if field == "deferred"
-                        else item.get("candidateId"),
-                        str,
+                if isinstance(item, dict) and (
+                    (
+                        field == "deferred"
+                        and not isinstance(item.get("candidateId"), str)
+                        and (worker_id, _deferred_candidate_id(item)) in resolved
                     )
-                    and (
-                        coverage_candidate_key(item, worker_id) in pending_resolved
-                        or (worker_id, identity) in resolved
-                    )
-                    and (
-                        (field == "deferred" and not isinstance(item.get("candidateId"), str))
-                        or (
-                            item.get("disposition") == "needs_follow_up"
-                            and coverage_candidate_key(item, worker_id) not in diff_resolved
-                        )
+                    or (
+                        item.get("disposition") == "needs_follow_up"
+                        and (key := coverage_candidate_key(item, worker_id)) in resolved
+                        and key not in diff_resolved
                     )
                 ):
                     continue

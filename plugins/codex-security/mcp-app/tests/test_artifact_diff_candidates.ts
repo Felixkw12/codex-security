@@ -31,6 +31,7 @@ const loadModule = (file: string) =>
 const {
   preserveDiffCandidateDecisions,
   preserveUnresolvedDiffCandidates,
+  refreshDiffCandidateHistory,
   readDiffCandidates,
 } = await loadModule("artifact-diff-candidates.ts");
 import { recordCodexSecurityScanDraft } from "./scan-draft-recovery-fixture.ts";
@@ -4027,4 +4028,155 @@ test("authored Diff proof gap keeps its original phase through a publication con
   assert.equal(attempts, 2);
   assert.equal(result.coverage.deferred.length, 0);
   assert.equal(input.coverage.deferred[0].candidate, undefined);
+});
+
+for (const variant of ["generated", "authored", "shared"] as const) {
+  test(`reopening an accepted candidate refreshes its ${variant} reported surface`, async (t) => {
+    const original = candidate("reopened-report");
+    const context = await fixture(t, [original]);
+    await recordCodexSecurityScanDraft(context, { ...draft(), complete: true });
+    const accepted = candidate(
+      original.candidate_id,
+      "reportable",
+      "reportable",
+    );
+    await writeLedger(context, [accepted]);
+    const report = finding(original.candidate_id);
+    const {
+      surfaces,
+      deferred,
+      explicitExclusions,
+      completeness,
+      completenessBeforeCandidates,
+    } = await readCoverage(context);
+    await recordCodexSecurityScanDraft(context, {
+      ...draft(),
+      complete: true,
+      findings: [report],
+      coverage: {
+        surfaces,
+        deferred,
+        explicitExclusions,
+        completeness,
+        completenessBeforeCandidates,
+      },
+    });
+    const published = await readCoverage(context);
+    const surface = published.surfaces.find(
+      (row: FixtureObject) => row.candidateId === original.candidate_id,
+    );
+    assert.equal(surface.disposition, "reported");
+    if (variant !== "generated") {
+      const current = {
+        ...draft(),
+        complete: true,
+        findings: [report],
+        coverage: {
+          ...draft().coverage,
+          completeness: "partial",
+          surfaces: published.surfaces,
+          deferred: published.deferred,
+        },
+      };
+      if (variant === "authored")
+        surface.notes = "Authored reviewed surface evidence.";
+      else
+        current.coverage.deferred.push({
+          id: "independent",
+          reason: "Independent review remains.",
+          surfaceIds: [surface.id],
+        });
+      await recordCodexSecurityScanDraft(context, current);
+    }
+    await writeLedger(context, [
+      {
+        ...accepted,
+        validation: {
+          disposition: "deferred",
+          counterevidence_or_proof_gap: "Reopened proof gap.",
+        },
+      },
+    ]);
+    for (let replay = 0; replay < 2; replay++) {
+      await recordCodexSecurityScanDraft(context, {
+        ...draft(),
+        complete: true,
+      });
+      const saved = await readCoverage(context);
+      assert.equal(saved.completeness, "partial");
+      assert.equal(
+        saved.surfaces.find(
+          (row: FixtureObject) => row.candidateId === original.candidate_id,
+        ).disposition,
+        variant === "generated" ? "needs_follow_up" : "reported",
+      );
+      assert.ok(
+        saved.deferred.some(
+          (row: FixtureObject) => row.candidateId === original.candidate_id,
+        ),
+      );
+      if (variant === "authored")
+        assert.equal(
+          saved.surfaces.find((row: FixtureObject) => row.id === surface.id)
+            .notes,
+          surface.notes,
+        );
+    }
+  });
+}
+
+test("a resumed checkpoint updates a retained reopened candidate", async (t) => {
+  const context = await fixture(t);
+  const historical = finding("reopened-review");
+  historical.provenance.candidateReopened = true;
+  const prior = draft([
+    {
+      id: "reopened-gap",
+      candidateId: "reopened-review",
+      reason: "Old proof gap.",
+      finding: historical,
+    },
+  ]);
+  prior.complete = true;
+  prior.coverage.completeness = "partial";
+  prior.findings = [historical];
+  await recordCodexSecurityScanDraft(context, prior);
+  const next = draft([
+    {
+      id: "reopened-gap",
+      candidateId: "reopened-review",
+      reason: "New proof gap.",
+      evidence: "New checkpoint evidence.",
+    },
+  ]);
+  next.complete = false;
+  next.coverage.completeness = "partial";
+  for (let replay = 0; replay < 2; replay++) {
+    await recordCodexSecurityScanDraft(context, next);
+    const saved = await readCoverage(context);
+    assert.ok(
+      saved.deferred.some(
+        (row: FixtureObject) =>
+          row.reason === "New proof gap." &&
+          row.evidence === "New checkpoint evidence.",
+      ),
+    );
+  }
+});
+
+test("reported surface without a saved finding keeps its authored disposition", () => {
+  const reviewed = candidate("authored-report", "reportable", "reportable");
+  const input = draft();
+  const surface = {
+    candidateId: reviewed.candidate_id,
+    candidate: reviewed,
+    label: reviewed.summary,
+    disposition: "reported",
+  };
+  input.coverage.surfaces = [surface];
+  const [refreshed] = refreshDiffCandidateHistory(
+    [input],
+    [candidate(reviewed.candidate_id, "suppressed")],
+  );
+  assert.deepEqual(refreshed.coverage.surfaces, [surface]);
 });
