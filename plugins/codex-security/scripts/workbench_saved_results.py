@@ -47,6 +47,8 @@ from finalize_scan_contract import (
 from workbench_constants import PHASES
 from workbench_coverage_receipts import (
     _checkpoint_head_directory,
+    _is_source_order_snapshot,
+    capture_receipt_checkpoints,
     receipt_checkpoints,
     resolve_coverage_receipts,
     retain_recorded_receipt_ownership,
@@ -233,7 +235,13 @@ def _capture_saved_source(
 ) -> dict[str, tuple[str, int]]:
     if not snapshot_head or Path(relative).name != "checkpoint-head.json":
         _, digest, observed = _read_saved_result(scan_dir, relative, scan_id, kind=kind)
-        return {relative: (digest, observed)}
+        return capture_receipt_checkpoints(
+            relative,
+            kind,
+            {relative: (digest, observed)},
+            partial(_checkpoint_paths, scan_dir),
+            partial(_read_saved_result, scan_dir, scan_id=scan_id),
+        )
     head, _, observed = _read_saved_result(scan_dir, relative, scan_id)
     observation = {"checkpoint": head["checkpoint"], "observedAtNs": str(observed)}
     directory = Path(relative).parent
@@ -248,13 +256,6 @@ def _capture_saved_source(
         snapshot: (digest, int(observation["observedAtNs"])),
         selected: (selected_digest, selected_time),
     }
-
-
-def _is_source_order_snapshot(relative: str) -> bool:
-    path = Path(relative)
-    return path.parent == Path("source-order") and bool(
-        re.fullmatch(r"[0-9a-f]{64}\.json", path.name)
-    )
 
 
 def _read_saved_result(
@@ -1153,7 +1154,7 @@ def merge_saved_results(
         if frozen_source_digests.keys() - source_digests.keys():
             raise ContractError("Frozen stopped-scan checkpoint set is incomplete.")
 
-    # Frozen observations retain checkpoint selection even if a worker moves its head.
+    # Frozen observations keep checkpoint selection after a worker moves its head.
     headed_workers = {
         worker_attempts[_checkpoint_head_directory(head).as_posix()][0]
         for head in saved_heads

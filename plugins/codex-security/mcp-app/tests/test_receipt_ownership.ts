@@ -92,6 +92,7 @@ function recoverCoverage(
   attempt = 1,
   includePaths = ["."],
   publishDuringCapture = false,
+  explicitRecovery = false,
 ) {
   return JSON.parse(
     execFileSync(
@@ -101,6 +102,7 @@ function recoverCoverage(
         "-c",
         `
 import json, sys
+from types import SimpleNamespace
 from pathlib import Path
 plugin, root, active = map(Path, sys.argv[1:4])
 scan_id, complete = sys.argv[4], sys.argv[5] == "true"
@@ -128,7 +130,13 @@ def capture(*args, **kwargs):
             (staged / name).replace(active / name)
     return captured
 saved._capture_saved_source = capture
-merged = merge_saved_results(*args, stopped=True, reason="interrupted")
+frozen = None
+if sys.argv[9] == "true":
+    db = SimpleNamespace(require_canonical_scan_directory=lambda path: path, artifact_path=lambda *args, **kwargs: None, ARTIFACTS={"manifest": "scan-manifest.json"})
+    connection = SimpleNamespace(execute=lambda *args: SimpleNamespace(fetchall=lambda: [worker]))
+    scan = {"scan_dir": str(root), "id": scan_id, "retained_source_digests_json": None, "seal_manifest_digest": None}
+    frozen, _ = saved._recovery_source_digests(db, connection, scan)
+merged = merge_saved_results(*args, stopped=True, reason="interrupted", frozen_source_digests=frozen)
 saved._capture_saved_source = original_capture
 replay = merge_saved_results(*args, stopped=True, reason="interrupted", frozen_source_digests=merged[0]["scan"]["preservedSources"])
 assert merged[2] == replay[2]
@@ -159,8 +167,14 @@ print(json.dumps({"refs": refs, "surfaces": coverage["surfaces"], "warnings": wa
         String(attempt),
         JSON.stringify(includePaths),
         String(publishDuringCapture),
+        String(explicitRecovery),
       ],
-      { encoding: "utf8" },
+      {
+        encoding: "utf8",
+        ...(explicitRecovery
+          ? { env: { ...process.env, PYTHONHASHSEED: "0" } }
+          : {}),
+      },
     ),
   );
 }
@@ -396,57 +410,69 @@ for (const scenario of [
   });
 }
 
-for (const concurrent of [false, true]) {
-  test(`recovery captures the checkpoint for a host-published result (concurrent: ${concurrent})`, async () => {
-    const f = await fixture();
-    try {
-      const ref = "artifacts/evidence.txt";
-      await receipt(f.root, ref, "Shared evidence\n");
-      await recordCodexSecurityWorkerScanDraft(f.worker, draft([ref]));
-      const checkpointRoot = path.join(f.workerRoot, "checkpoints");
-      const initialCheckpoints = new Set(await readdir(checkpointRoot));
-      const initial = await Promise.all(
-        ["checkpoint-head.json", "result.json"].map(
-          async (name) =>
-            [name, await readFile(path.join(f.workerRoot, name))] as const,
-        ),
-      );
-      await receipt(f.workerRoot, ref, "Unrelated local evidence\n");
-      await recordCodexSecurityWorkerScanDraft(f.worker, {
-        ...draft([ref]),
-        scope: { summary: "Additional scope context" },
-      });
-      if (concurrent) {
-        const staged = path.join(f.root, "publication");
-        await mkdir(path.join(staged, "checkpoints"), { recursive: true });
-        for (const name of await readdir(checkpointRoot)) {
-          if (!initialCheckpoints.has(name))
-            await rename(
-              path.join(checkpointRoot, name),
-              path.join(staged, "checkpoints", name),
-            );
-        }
-        for (const [name, contents] of initial) {
-          await rename(path.join(f.workerRoot, name), path.join(staged, name));
-          await writeFile(path.join(f.workerRoot, name), contents);
-          await utimes(path.join(f.workerRoot, name), 1, 1);
-        }
-      }
-      const recovered = recoverCoverage(f, true, 1, ["."], concurrent);
-      assert.deepEqual(recovered.refs, [ref]);
-      if (concurrent) {
-        assert.ok(recovered.published.length > 0);
-        assert.ok(
-          recovered.published.every(
-            (name: string) => name in recovered.captured,
+for (const explicit of [false, true]) {
+  for (const concurrent of [false, true]) {
+    test(`${explicit ? "explicit recovery" : "cancellation"} captures the checkpoint for a host-published result (concurrent: ${concurrent})`, async () => {
+      const f = await fixture();
+      try {
+        const ref = "artifacts/evidence.txt";
+        await receipt(f.root, ref, "Shared evidence\n");
+        await recordCodexSecurityWorkerScanDraft(f.worker, draft([ref]));
+        const checkpointRoot = path.join(f.workerRoot, "checkpoints");
+        const initialCheckpoints = new Set(await readdir(checkpointRoot));
+        const initial = await Promise.all(
+          ["checkpoint-head.json", "result.json"].map(
+            async (name) =>
+              [name, await readFile(path.join(f.workerRoot, name))] as const,
           ),
         );
-        assert.equal(recovered.rejectsChangedCheckpoint, true);
+        await receipt(f.workerRoot, ref, "Unrelated local evidence\n");
+        await recordCodexSecurityWorkerScanDraft(f.worker, {
+          ...draft([ref]),
+          scope: { summary: "Additional scope context" },
+        });
+        if (concurrent) {
+          const staged = path.join(f.root, "publication");
+          await mkdir(path.join(staged, "checkpoints"), { recursive: true });
+          for (const name of await readdir(checkpointRoot)) {
+            if (!initialCheckpoints.has(name))
+              await rename(
+                path.join(checkpointRoot, name),
+                path.join(staged, "checkpoints", name),
+              );
+          }
+          for (const [name, contents] of initial) {
+            await rename(
+              path.join(f.workerRoot, name),
+              path.join(staged, name),
+            );
+            await writeFile(path.join(f.workerRoot, name), contents);
+            await utimes(path.join(f.workerRoot, name), 1, 1);
+          }
+        }
+        const recovered = recoverCoverage(
+          f,
+          true,
+          1,
+          ["."],
+          concurrent,
+          explicit,
+        );
+        assert.deepEqual(recovered.refs, [ref]);
+        if (concurrent) {
+          assert.ok(recovered.published.length > 0);
+          assert.ok(
+            recovered.published.every(
+              (name: string) => name in recovered.captured,
+            ),
+          );
+          assert.equal(recovered.rejectsChangedCheckpoint, true);
+        }
+      } finally {
+        await rm(f.root, { recursive: true, force: true });
       }
-    } finally {
-      await rm(f.root, { recursive: true, force: true });
-    }
-  });
+    });
+  }
 }
 
 test("the coordinator binds the requested scope while reducing legacy receipt ownership", async () => {

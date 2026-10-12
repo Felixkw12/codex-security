@@ -69,6 +69,7 @@ interface SavedScanDraft {
 }
 
 const schemaDocuments = [commonSchema, scanDraftDocument] as SchemaDocument[];
+const pendingWorkerDrafts = new Map<string, Promise<void>>();
 
 export const scanDraftInputSchema = loadArtifactZodSchema(
   schemaDocuments,
@@ -299,18 +300,36 @@ export async function recordCodexSecurityWorkerScanDraft(
   for (const surface of parsed.coverage.surfaces as JsonObject[]) {
     if (isObject(surface.provenance)) delete surface.provenance.scanReceiptRefs;
   }
-  const includePaths = context.includePaths ?? [context.scope || "."];
-  let scoped = {
-    ...parsed,
-    findings: findingsWithinScope(parsed.findings, includePaths),
-  };
-  scoped = (await preserveScanDraft(context, scoped)).input;
-  const destination = await artifactDestination(
-    context,
-    ["result.json"],
-    "worker scan draft",
+  const previous = pendingWorkerDrafts.get(context.root) ?? Promise.resolve();
+  const operation = previous.then(async () => {
+    const includePaths = context.includePaths ?? [context.scope || "."];
+    const scoped = (
+      await preserveScanDraft(context, {
+        ...parsed,
+        findings: findingsWithinScope(parsed.findings, includePaths),
+      })
+    ).input;
+    const destination = await artifactDestination(
+      context,
+      ["result.json"],
+      "worker scan draft",
+    );
+    await replaceArtifactJson(destination, scoped);
+    return scoped;
+  });
+  const pending = operation.then(
+    () => undefined,
+    () => undefined,
   );
-  await replaceArtifactJson(destination, scoped);
+  pendingWorkerDrafts.set(context.root, pending);
+  let scoped: ScanDraftInput;
+  try {
+    scoped = await operation;
+  } finally {
+    if (pendingWorkerDrafts.get(context.root) === pending)
+      pendingWorkerDrafts.delete(context.root);
+  }
+  // Convenience rendering must not delay the next worker checkpoint.
   const documentWarning = await saveThreatModelDocument(
     context,
     scoped.threatModel,
