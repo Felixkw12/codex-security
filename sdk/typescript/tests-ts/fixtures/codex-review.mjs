@@ -8,6 +8,8 @@ const refusalMessages = {
   "refusal-text": "I'm sorry, but I can't assist with that request.",
   "policy-prefix-text": "Safety policy: request refused.",
   "policy-suffix-text": "Request refused: safety policy.",
+  "policy-suffix-explanation-text":
+    "Request refused: safety policy. I can offer a defensive alternative.",
   "policy-causal-refusal-text":
     "This request was refused because it violates the safety policy.",
   "policy-refusal-text":
@@ -59,6 +61,10 @@ const turnFailures = {
   },
   "prefix-service-error": {
     message: "Safety policy: request refused: service unavailable",
+    codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
+  },
+  "prefix-upstream-error": {
+    message: "Safety policy: request refused by upstream with 503",
     codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
   },
   "connection-error": {

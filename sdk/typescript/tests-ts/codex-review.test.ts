@@ -130,6 +130,8 @@ const failureReasons: Record<string, string> = {
   "refusal-text": "I'm sorry, but I can't assist with that request.",
   "policy-prefix-text": "Safety policy: request refused.",
   "policy-suffix-text": "Request refused: safety policy.",
+  "policy-suffix-explanation-text":
+    "Request refused: safety policy. I can offer a defensive alternative.",
   "policy-causal-refusal-text":
     "This request was refused because it violates the safety policy.",
   "policy-refusal-text":
@@ -150,6 +152,8 @@ const failureReasons: Record<string, string> = {
   "prefix-network-error":
     "Failed to contact safety policy: request refused by upstream with 503",
   "prefix-service-error": "Safety policy: request refused: service unavailable",
+  "prefix-upstream-error":
+    "Safety policy: request refused by upstream with 503",
   "connection-error": "Provider stream disconnected",
   "unauthorized-turn": "Authentication required",
   "bad-request-turn": "Invalid model configuration",
@@ -189,6 +193,7 @@ const retriedFailures = new Set([
   "http-request-error",
   "prefix-network-error",
   "prefix-service-error",
+  "prefix-upstream-error",
   "connection-error",
   "invalid-json",
   "invalid-submission",
@@ -203,6 +208,7 @@ const recoveredScenarios: Record<string, string> = {
   "recover-http-request-error": "http-request-error",
   "recover-prefix-network-error": "prefix-network-error",
   "recover-prefix-service-error": "prefix-service-error",
+  "recover-prefix-upstream-error": "prefix-upstream-error",
   "recover-connection-error": "connection-error",
   "recover-process-exit": "exit",
   "recover-invalid-json": "invalid-json",
@@ -221,6 +227,7 @@ const modelFailures = new Set([
   "http-request-error",
   "prefix-network-error",
   "prefix-service-error",
+  "prefix-upstream-error",
   "connection-error",
   "unauthorized-turn",
   "bad-request-turn",
@@ -909,6 +916,8 @@ test.each([
   "Request refusal due to the safety policy.",
   "Request was refused because of the safety policy.",
   "Request was refused: safety policy.",
+  "Request refused: safety policy. I can offer a defensive alternative.",
+  "Request refused: safety policy! Please ask for defensive guidance instead.",
   "Safety policy: request was refused.",
   "Safety policy: request refused.",
   "Review refusal due to the content policy.",
@@ -956,6 +965,7 @@ test.each([
   "HTTP request blocked: safety policy service unavailable",
   "Request refused: safety policy service unavailable",
   "Safety policy: request refused: service unavailable",
+  "Safety policy: request refused by upstream with 503",
   "Failed to contact safety policy: request refused by upstream with 503",
   "Ordinary safety policy documentation",
   "Network request failed due to connectivity policy.",
