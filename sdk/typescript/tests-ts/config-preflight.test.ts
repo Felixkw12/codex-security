@@ -216,7 +216,7 @@ for (const option of ["profile", "config", "cwd"] as const)
     },
   );
 
-test.each([
+const dateCases = [
   ["2020-02-30", false],
   ["2021-02-29", false],
   ["1900-02-29", false],
@@ -240,16 +240,22 @@ test.each([
   ['"""2020-02-30"""', true],
   ["'''2020-02-30'''", true],
   ["true # 2020-02-30", true],
-] as const)(
-  "TOML date syntax %s is accepted=%j in registries and config",
-  async (value, valid) => {
+] as const;
+test.each(
+  dateCases.flatMap(([value, valid]) =>
+    [false, true].map((bom) => [value, valid, bom] as const),
+  ),
+)(
+  "TOML date syntax %s is accepted=%j in registries and config (UTF-8 BOM: %j)",
+  async (value, valid, bom) => {
+    const prefix = bom ? "\uFEFF" : "";
     const root = await temporaryDirectory();
     const registry = join(root, "registry.toml"),
       config = join(root, "config.toml");
     for (const location of ["registry", "config"]) {
       await writeFile(
         registry,
-        `version = 1
+        `${location === "registry" ? prefix : ""}version = 1
 [capabilities]
 [profiles.custom]
 description = "Synthetic"
@@ -259,7 +265,7 @@ unused = ${location === "registry" ? value : "true"}
       );
       await writeFile(
         config,
-        `unused = ${location === "config" ? value : "true"}\n`,
+        `${location === "config" ? prefix : ""}unused = ${location === "config" ? value : "true"}\n`,
       );
       const result = await run([
         "--registry",
@@ -429,6 +435,8 @@ test.each([
     "unknown",
   ],
   ["TOML float", "[agents]\nmax_threads=8.0\n", v1, "v1", 8, "fail"],
+  ["BOM integer", "\uFEFF[agents]\nmax_threads=8\n", v1, "v1", 8, "pass"],
+  ["BOM float", "\uFEFF[agents]\nmax_threads=8.0\n", v1, "v1", 8, "fail"],
   ["TOML exponent", "[agents]\nmax_threads=8e0\n", v1, "v1", 8, "fail"],
   ["TOML boolean", "[agents]\nmax_threads=true\n", v1, "v1", true, "fail"],
   [

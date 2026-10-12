@@ -188,7 +188,7 @@ function readToml(path: string, required = false): Table {
     const source = decodeUtf8(readFile(path));
     const result = parseToml(source, { integersAsBigInt: true });
     // Check calendar syntax without changing smol-toml's value types or precision.
-    for (const token of parseTOML(source).tokens)
+    for (const token of parseTOML(source.replace(/^\uFEFF/, "")).tokens)
       if (
         (token.type === "LocalDate" ||
           token.type === "LocalDateTime" ||
