@@ -400,24 +400,42 @@ test.skipIf(process.platform !== "linux").each([false, true])(
       raw,
       sameContents ? content : "Synthetic ignored content\n",
     );
+    const original = git("rev-parse", "HEAD");
+    const index = await readFile(join(directory, ".git", "index"));
+    let modelStarted = false;
     const outcome = await runWorkflow(
       ["patch", "Synthetic issue", "--create-pr", "--json"],
       {
         currentDirectory: directory,
         onRepositoryCommand: runCommand,
         onCodex: async (_args, output) => {
+          modelStarted = true;
           await writeFile(join(directory, "new.ts"), await readFile(alias));
           output?.stdout.write("Synthetic patch complete.\n");
           return 0;
         },
       },
     );
-    expect(outcome.exitCode, outcome.stderr).toBe(0);
-    const branch = git("branch", "--show-current");
-    expect(repositoryGit(remote)("show", `refs/heads/${branch}:new.ts`)).toBe(
-      content.trim(),
+    expect(modelStarted).toBe(true);
+    expect(outcome.exitCode, outcome.stderr).toBe(sameContents ? 2 : 0);
+    if (sameContents) {
+      expect(outcome.stderr).toContain("matches pre-existing ignored content");
+      expect(git("rev-parse", "HEAD")).toBe(original);
+      expect(await readFile(join(directory, ".git", "index"))).toEqual(index);
+      expect(repositoryGit(remote)("for-each-ref", "--format=%(refname)")).toBe(
+        "",
+      );
+    } else {
+      const branch = git("branch", "--show-current");
+      expect(repositoryGit(remote)("show", `refs/heads/${branch}:new.ts`)).toBe(
+        content.trim(),
+      );
+      expect(git("diff", "--name-only", "HEAD^", "HEAD")).toBe("new.ts");
+    }
+    expect(await readFile(alias, "utf8")).toBe(content);
+    expect(await readFile(raw, "utf8")).toBe(
+      sameContents ? content : "Synthetic ignored content\n",
     );
-    expect(git("diff", "--name-only", "HEAD^", "HEAD")).toBe("new.ts");
   },
 );
 

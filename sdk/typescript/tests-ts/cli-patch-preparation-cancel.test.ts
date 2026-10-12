@@ -225,6 +225,18 @@ test
       `
 import { createInterface } from "node:readline";
 import { writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+if (process.argv[2] === "sandbox") {
+  const separator = process.argv.indexOf("--");
+  if (separator < 0) throw new Error("Synthetic executor did not receive a command.");
+  const [command, ...args] = process.argv.slice(separator + 1);
+  const child = spawn(command, args, { stdio: "inherit" });
+  child.once("error", (error) => { console.error(error); process.exitCode = 1; });
+  child.once("exit", (code, signal) => {
+    if (signal) process.kill(process.pid, signal);
+    else process.exitCode = code ?? 1;
+  });
+} else {
 writeFileSync(${JSON.stringify(serverPid)}, String(process.pid));
 process.on("SIGUSR1", () => process.exit(7));
 const send = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
@@ -236,8 +248,18 @@ for await (const line of createInterface({ input: process.stdin })) {
   else if (request.method === "turn/start") writeFileSync(${JSON.stringify(lateTurn)}, "unexpected");
   else if (request.id !== undefined) send({ id: request.id, result: {} });
 }
+}
 `,
     );
+    // This fixture exercises cancellation through its synthetic executor.
+    // Native permission enforcement has separate integration coverage.
+    const executor = join(root, "executor");
+    const quoted = [process.execPath, server]
+      .map((value) => `'${value.replaceAll("'", "'\\''")}'`)
+      .join(" ");
+    await writeFile(executor, `#!/bin/sh\nexec ${quoted} "$@"\n`, {
+      mode: 0o755,
+    });
     const wrapper = join(root, "wrapper.mts");
     await writeFile(
       wrapper,
@@ -247,11 +269,13 @@ import { runWorkflow, savedScan, resultWithFindings } from ${JSON.stringify(new 
 import { runCodexSkillCommand, runRepositoryCommand } from ${JSON.stringify(new URL("../src/cli.ts", import.meta.url).href)};
 let snapshots = 0;
 const outcome = await runWorkflow(${JSON.stringify(saved ? ["patch", "--scan", "scan-1", "--json"] : ["patch", "Synthetic issue", ...(preflight ? ["--create-pr"] : []), "--json"])}, {
-  currentDirectory: ${JSON.stringify(repository)}, environment: { ...process.env, CODEX_HOME: ${JSON.stringify(home)} }, manualCodexPreparation: true,
+  currentDirectory: ${JSON.stringify(repository)}, environment: { ...process.env, CODEX_HOME: ${JSON.stringify(home)}, CODEX_CLI_PATH: ${JSON.stringify(executor)} }, manualCodexPreparation: true,
   onWorkbench: () => savedScan(resultWithFindings(["high"]), "scan-1", ${JSON.stringify(repository)}),
   onCodex: (args, output, environment) => runCodexSkillCommand([${JSON.stringify(server)}], { ...output, auth: undefined }, { command: process.execPath }, environment),
   onRepositoryCommand: (command, args, cwd, options) => {
     if (command !== "git") return "[]";
+    if (options?.sandbox && options.sandbox.environment.CODEX_CLI_PATH !== ${JSON.stringify(executor)})
+      throw new Error("Cancellation fixture lost its synthetic executor.");
     if (options?.patchSnapshot && args.includes("write-tree") && ++snapshots === ${snapshotCount}) {
       writeFileSync(${JSON.stringify(ready)}, "ready");
       return runRepositoryCommand("git", ["hash-object", ${JSON.stringify(fifo)}], cwd, options);

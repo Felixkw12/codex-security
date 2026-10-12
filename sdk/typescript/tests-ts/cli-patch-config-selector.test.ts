@@ -130,9 +130,16 @@ test.each([
     expect(inventory.some(({ args }) => args.includes("--type=path"))).toBe(
       true,
     );
+    const lfsLookups = inventory.filter(
+      ({ args }) => args.at(-1) === "lfs.storage",
+    );
+    expect(lfsLookups.length).toBeGreaterThan(0);
+    for (const { args } of lfsLookups) expect(args).toContain("--includes");
     for (const call of calls) {
       expect(call.environment["GIT_CONFIG"]).toBe(
-        call.args.includes("config") ? undefined : selector,
+        call.args.includes("config") && call.args.at(-1) !== "lfs.storage"
+          ? undefined
+          : selector,
       );
       expect(call.environment["GIT_CONFIG_GLOBAL"]).toBe(globalConfig);
       expect(call.environment["GIT_CONFIG_NOSYSTEM"]).toBe("1");
