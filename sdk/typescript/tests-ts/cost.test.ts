@@ -420,17 +420,20 @@ test.each(
     );
     // Keep the synthetic close gate alive on all supported test runners.
     const keepAlive = setInterval(() => {}, 1_000);
-    tracker.start("scan-thread");
     try {
-      if (!initialRead) await tracker.refresh();
+      if (!initialRead) {
+        tracker.start("scan-thread");
+        await tracker.refresh();
+      }
       tracker.beginParentTurn();
+      held = true;
       await appendFile(
         parent,
         jsonLines([
           nativeCommand("older-review", progressMarker("attack_path", 1, 8)),
         ]) + "\n",
       );
-      held = true;
+      if (initialRead) tracker.start("scan-thread");
       reading = tracker.refresh();
       await reached.promise;
       // The reader saw old EOF, but current persistence still precedes live delivery.
