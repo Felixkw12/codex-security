@@ -1819,6 +1819,7 @@ export async function runCodexSkillCommand(
       invocation.stdin?.end(input);
     }
     const preparation = new AbortController();
+    invocation.once("exit", () => preparation.abort());
     let requestedSignal: SignalName | null = null;
     let forcedTermination: ReturnType<typeof setTimeout> | undefined;
     let forceStatusCompletion: (() => void) | null = null;
@@ -1916,7 +1917,10 @@ export async function runCodexSkillCommand(
           );
         };
         forceStatusCompletion = () => complete(null, null);
-        invocation.once("error", reject);
+        invocation.once("error", (error) => {
+          preparation.abort(error);
+          reject(error);
+        });
         invocation.once(output === undefined ? "exit" : "close", complete);
       });
       let [status, events] = await Promise.all([invocationStatus, captured]);
@@ -5756,7 +5760,7 @@ export async function main(
             const { patches } = patchRun;
             exitCode = patchRun.exitCode;
             const files =
-              patchBase === undefined
+              patchBase === undefined || exitCode === 130 || exitCode === 143
                 ? []
                 : await changedPatchFiles(
                     selected.repository,
@@ -5907,7 +5911,7 @@ export async function main(
           );
           if (!jsonOutput) output.write(report.text());
           const files =
-            patchBase === undefined
+            patchBase === undefined || exitCode === 130 || exitCode === 143
               ? []
               : await changedPatchFiles(gitRepository, patchBase, dependencies);
           patchResult = {
@@ -8096,7 +8100,8 @@ async function createPatchPullRequest(
       root,
       [
         "diff",
-        "--name-only",
+        "--raw",
+        "--no-abbrev",
         "--no-renames",
         "--diff-filter=AMT",
         "-z",
@@ -8105,7 +8110,8 @@ async function createPatchPullRequest(
       ],
       dependencies,
     );
-    for (const path of changed.filter(Boolean)) {
+    for (let index = 0; index + 1 < changed.length; index += 2) {
+      const path = changed[index + 1]!;
       const local = relative(
         patchPathKey(repository),
         resolve(patchPathKey(root), path),
@@ -8113,7 +8119,29 @@ async function createPatchPullRequest(
       if (!selectedFiles.some((file) => !isOutsidePath(relative(file, local))))
         continue;
       const digest = await hashPublicationFile(root, path);
-      if (digest !== undefined && publication.ignoredDigests.has(digest))
+      const [, mode, , object] = changed[index]!.split(" ");
+      // Publication reuses captured blobs, even if assessment changed live files.
+      const capturedDigest =
+        mode === "100644" || mode === "100755"
+          ? createHash("sha256")
+              .update(
+                Buffer.from(
+                  await dependencies.runRepositoryCommand(
+                    "git",
+                    ["cat-file", "blob", object!],
+                    root,
+                    { encoding: "base64" },
+                  ),
+                  "base64",
+                ),
+              )
+              .digest("hex")
+          : undefined;
+      if (
+        (digest !== undefined && publication.ignoredDigests.has(digest)) ||
+        (capturedDigest !== undefined &&
+          publication.ignoredDigests.has(capturedDigest))
+      )
         throw new CodexSecurityError(
           `Cannot automatically publish ${patchPathText(local)}: it matches pre-existing ignored content. Local edits and patches were kept; review and publish them separately.`,
         );
@@ -9169,7 +9197,7 @@ async function runFindingPatches(
         },
       );
       changedFiles =
-        base === undefined
+        base === undefined || status === 130 || status === 143
           ? []
           : await changedPatchFiles(selected.repository, base, dependencies);
     } finally {

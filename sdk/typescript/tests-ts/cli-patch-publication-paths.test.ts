@@ -103,7 +103,7 @@ test.skipIf(process.platform !== "linux").each([false, true])(
   },
 );
 
-test.skipIf(process.platform === "win32")(
+test.skipIf(process.platform !== "linux")(
   "assesses and publishes the exact raw rename source without deleting its Unicode alias",
   async () => {
     const { directory, git, remote } = await publicationRepository(fixtures);
@@ -204,7 +204,7 @@ test.skipIf(process.platform === "win32")(
   },
 );
 
-test.skipIf(process.platform === "win32").each(["root", "src"])(
+test.skipIf(process.platform !== "linux").each(["root", "src"])(
   "publishes a selected directory without importing a replacement-decoded index path from %s",
   async (scope) => {
     const { directory, git, remote } = await publicationRepository(fixtures);
@@ -280,7 +280,7 @@ test.skipIf(process.platform === "win32").each(["root", "src"])(
   },
 );
 
-test.skipIf(process.platform === "win32").each([false, true])(
+test.skipIf(process.platform !== "linux").each([false, true])(
   "checks the actual registration for a deinitialized raw gitlink beside a Unicode alias (published: %p)",
   async (published) => {
     const { directory, git, remote } = await publicationRepository(fixtures);
@@ -381,7 +381,7 @@ test.skipIf(process.platform === "win32").each([false, true])(
   },
 );
 
-test.skipIf(process.platform === "win32").each([false, true])(
+test.skipIf(process.platform !== "linux").each([false, true])(
   "keeps ignored byte paths distinct from clean tracked Unicode paths (same contents: %p)",
   async (sameContents) => {
     const { directory, git, remote } = await publicationRepository(fixtures);

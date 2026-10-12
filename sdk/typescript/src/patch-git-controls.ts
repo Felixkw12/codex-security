@@ -792,7 +792,15 @@ export async function capturePatchGitControls(
           ? configured
           : join(common.replace(/\n$/u, ""), configured);
         for (const path of [join(lfs, "objects"), join(lfs, "tmp")]) {
-          await mkdir(path, { recursive: true });
+          await mkdir(path, { recursive: true }).catch((error: unknown) => {
+            // Git/LFS requires writable storage only if a snapshot uses it.
+            if (
+              !["EACCES", "EPERM", "EROFS"].includes(
+                (error as NodeJS.ErrnoException).code ?? "",
+              )
+            )
+              throw error;
+          });
           await rememberControl(path);
           snapshotStoragePaths.add(controlPaths.get(path)!.canonical);
         }

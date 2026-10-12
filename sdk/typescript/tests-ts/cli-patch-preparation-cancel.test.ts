@@ -6,7 +6,13 @@ import { join } from "node:path";
 import { Writable } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
 import { readSkillCommandOutput } from "../src/cli.js";
-import { repositoryGit } from "./cli-patch-fixtures.js";
+import {
+  repositoryGit,
+  resultWithFindings,
+  runGitRepositoryCommand,
+  runWorkflow,
+  savedScan,
+} from "./cli-patch-fixtures.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
 const fixtures = createTemporaryDirectories(true);
@@ -51,9 +57,48 @@ test("cancelling patch preparation prevents a late turn/start", async () => {
   expect(receivedSignal).toBe(controller.signal);
 });
 
-test.skipIf(process.platform === "win32")(
-  "SIGTERM cancels an active pre-turn Git snapshot and lets the CLI exit",
-  async () => {
+test.each(["saved", "supplied"])(
+  "does not snapshot after an interrupted %s patch turn",
+  async (source) => {
+    const repository = await fixtures.create("patch-interrupted-turn-");
+    const git = repositoryGit(repository);
+    git("init", "--initial-branch=main");
+    git("config", "user.name", "Synthetic User");
+    git("config", "user.email", "synthetic@example.test");
+    await writeFile(join(repository, "app.ts"), "original\n");
+    git("add", ".");
+    git("commit", "-m", "Synthetic interruption baseline");
+    let interrupted = false;
+    const snapshots: string[][] = [];
+    const outcome = await runWorkflow(
+      source === "saved"
+        ? ["patch", "--scan", "scan-1", "--json"]
+        : ["patch", "Synthetic issue", "--json"],
+      {
+        currentDirectory: repository,
+        onWorkbench: () =>
+          savedScan(resultWithFindings(["high"]), "scan-1", repository),
+        onCodex: () => {
+          interrupted = true;
+          return 143;
+        },
+        onRepositoryCommand: (command, args, cwd, options) => {
+          if (interrupted && options?.patchSnapshot) snapshots.push([...args]);
+          return runGitRepositoryCommand(command, args, cwd, options);
+        },
+      },
+    );
+    expect(outcome.exitCode, outcome.stderr).toBe(143);
+    expect(interrupted).toBe(true);
+    expect(snapshots).toEqual([]);
+  },
+);
+
+test
+  .skipIf(process.platform === "win32")
+  .each(["supplied SIGTERM", "saved SIGTERM", "app-server exit"] as const)(
+  "cancels an active pre-turn Git snapshot without restarting: %s",
+  async (mode) => {
     const root = await fixtures.create("patch-preparation-cancel-");
     const repository = join(root, "repository"),
       home = join(root, "home");
@@ -68,6 +113,7 @@ test.skipIf(process.platform === "win32")(
     git("commit", "-m", "Synthetic cancellation baseline");
     const fifo = join(root, "slow-input"),
       ready = join(root, "ready"),
+      serverPid = join(root, "server-pid"),
       lateTurn = join(root, "late-turn");
     execFileSync("mkfifo", [fifo]);
     const server = join(root, "app-server.mjs");
@@ -76,6 +122,8 @@ test.skipIf(process.platform === "win32")(
       `
 import { createInterface } from "node:readline";
 import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(serverPid)}, String(process.pid));
+process.on("SIGUSR1", () => process.exit(7));
 const send = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
 for await (const line of createInterface({ input: process.stdin })) {
   const request = JSON.parse(line);
@@ -92,22 +140,22 @@ for await (const line of createInterface({ input: process.stdin })) {
       wrapper,
       `
 import { writeFileSync } from "node:fs";
-import { runWorkflow } from ${JSON.stringify(new URL("./cli-patch-fixtures.ts", import.meta.url).href)};
+import { runWorkflow, savedScan, resultWithFindings } from ${JSON.stringify(new URL("./cli-patch-fixtures.ts", import.meta.url).href)};
 import { runCodexSkillCommand, runRepositoryCommand } from ${JSON.stringify(new URL("../src/cli.ts", import.meta.url).href)};
-let blocked = false;
-const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
+let snapshots = 0;
+const outcome = await runWorkflow(${JSON.stringify(mode === "saved SIGTERM" ? ["patch", "--scan", "scan-1", "--json"] : ["patch", "Synthetic issue", "--json"])}, {
   currentDirectory: ${JSON.stringify(repository)}, environment: { ...process.env, CODEX_HOME: ${JSON.stringify(home)} }, manualCodexPreparation: true,
+  onWorkbench: () => savedScan(resultWithFindings(["high"]), "scan-1", ${JSON.stringify(repository)}),
   onCodex: (args, output, environment) => runCodexSkillCommand([${JSON.stringify(server)}], { ...output, auth: undefined }, { command: process.execPath }, environment),
   onRepositoryCommand: (command, args, cwd, options) => {
-    if (!blocked && options?.patchSnapshot && args.includes("write-tree")) {
-      blocked = true;
+    if (options?.patchSnapshot && args.includes("write-tree") && ++snapshots === ${mode === "saved SIGTERM" ? 2 : 1}) {
       writeFileSync(${JSON.stringify(ready)}, "ready");
       return runRepositoryCommand("git", ["hash-object", ${JSON.stringify(fifo)}], cwd, options);
     }
     return runRepositoryCommand(command, args, cwd, options);
   },
 });
-process.stdout.write(JSON.stringify(outcome) + "\\n");
+process.stdout.write(JSON.stringify({ ...outcome, snapshots }) + "\\n");
 process.exitCode = outcome.exitCode;
 `,
     );
@@ -143,7 +191,11 @@ process.exitCode = outcome.exitCode;
           await delay(25);
         }
       }
-      invocation.kill("SIGTERM");
+      if (mode === "app-server exit") {
+        process.kill(Number(await readFile(serverPid, "utf8")), "SIGUSR1");
+      } else {
+        invocation.kill("SIGTERM");
+      }
       const status = await Promise.race([
         closed,
         delay(5_000).then(() => {
@@ -152,7 +204,12 @@ process.exitCode = outcome.exitCode;
           );
         }),
       ]);
-      expect(status, output + diagnostic).toBe(143);
+      expect(status, output + diagnostic).toBe(
+        mode === "app-server exit" ? 7 : 143,
+      );
+      expect(JSON.parse(output.trim()).snapshots).toBe(
+        mode === "saved SIGTERM" ? 2 : 1,
+      );
       let readerError: unknown;
       try {
         writeSync(writer!, "probe");

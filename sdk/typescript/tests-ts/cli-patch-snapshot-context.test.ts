@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  chmod,
   lstat,
   mkdir,
   readFile,
@@ -14,7 +15,11 @@ import { join, parse } from "node:path";
 import { stringify as stringifyToml } from "smol-toml";
 import { runCodexSkillCommand, runRepositoryCommand } from "../src/cli.js";
 import { resolveCodexCommand } from "../src/runtime.js";
-import { repositoryGit, runWorkflow } from "./cli-patch-fixtures.js";
+import {
+  repositoryGit,
+  runGitRepositoryCommand,
+  runWorkflow,
+} from "./cli-patch-fixtures.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
 const fixtures = createTemporaryDirectories(true);
@@ -23,6 +28,78 @@ const windows =
   process.platform === "win32" ? 'windows = { sandbox = "unelevated" }\n' : "";
 const provider =
   'model_provider = "synthetic"\n[model_providers.synthetic]\nname = "Synthetic"\nbase_url = "http://127.0.0.1:9/v1"\nwire_api = "responses"\n';
+
+test
+  .skipIf(process.platform === "win32")
+  .each([
+    "configured",
+    "git-dir",
+    ...(spawnSync("git", ["lfs", "version"]).status === 0 ? ["used"] : []),
+  ])(
+  "patches non-LFS files without requiring unused writable LFS storage: %s",
+  async (mode) => {
+    const root = await fixtures.create("patch-unused-lfs-");
+    const repository = join(root, "repository");
+    await mkdir(repository);
+    const git = repositoryGit(repository);
+    git("init", "--initial-branch=main");
+    git("config", "user.name", "Synthetic User");
+    git("config", "user.email", "synthetic@example.test");
+    await writeFile(join(repository, "app.ts"), "original\n");
+    git("add", ".");
+    git("commit", "-m", "Synthetic unused LFS baseline");
+    if (mode === "used") {
+      git("lfs", "install", "--local", "--skip-repo");
+      await writeFile(
+        join(repository, ".gitattributes"),
+        "*.bin filter=lfs diff=lfs merge=lfs -text\n",
+      );
+      git("add", ".gitattributes");
+      git("commit", "-m", "Synthetic LFS attributes");
+    }
+    const readOnly =
+      mode === "git-dir" ? join(repository, ".git") : join(root, "cache");
+    if (mode !== "git-dir") {
+      await mkdir(readOnly);
+      git("config", "lfs.storage", readOnly);
+    }
+    const index = await readFile(join(repository, ".git", "index"));
+    const head = git("rev-parse", "HEAD");
+    let patched = false;
+    await chmod(readOnly, 0o555);
+    try {
+      const outcome = await runWorkflow(
+        ["patch", "Synthetic issue", "--json"],
+        {
+          currentDirectory: repository,
+          onRepositoryCommand: runGitRepositoryCommand,
+          onCodex: async (_args, output) => {
+            patched = true;
+            if (mode === "used")
+              await writeFile(
+                join(repository, "payload.bin"),
+                "Synthetic LFS payload\n",
+              );
+            await writeFile(join(repository, "app.ts"), "fixed\n");
+            output!.stdout.write("Synthetic patch complete.\n");
+            return 0;
+          },
+        },
+      );
+      expect(patched).toBe(true);
+      expect(outcome.exitCode, outcome.stderr).toBe(mode === "used" ? 2 : 0);
+      if (mode === "used")
+        expect(outcome.stderr).toContain("clean filter 'lfs' failed");
+      expect(await readFile(join(repository, "app.ts"), "utf8")).toBe(
+        "fixed\n",
+      );
+      expect(git("rev-parse", "HEAD")).toBe(head);
+      expect(await readFile(join(repository, ".git", "index"))).toEqual(index);
+    } finally {
+      await chmod(readOnly, 0o755);
+    }
+  },
+);
 
 test("native snapshots retain Windows Git home fallbacks when HOME is unset", async () => {
   const root = await fixtures.create("patch-home-fallbacks-");
