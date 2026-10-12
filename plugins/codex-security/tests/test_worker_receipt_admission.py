@@ -15,7 +15,10 @@ from workbench_test_support import saved_draft, write_checkpoint
 
 
 @pytest.mark.parametrize("reordered", [False, True])
-def test_unselected_pending_checkpoint_links_to_accepted_worker_surface(tmp_path: Path, reordered):
+@pytest.mark.parametrize("changed_notes", [False, True])
+def test_unselected_pending_checkpoint_links_to_accepted_worker_surface(
+    tmp_path: Path, reordered, changed_notes
+):
     import workbench_saved_results as saved
 
     surface = {
@@ -41,6 +44,9 @@ def test_unselected_pending_checkpoint_links_to_accepted_worker_surface(tmp_path
     pending = copy.deepcopy(accepted)
     pending["complete"] = False
     pending["coverage"]["surfaces"].reverse()
+    if changed_notes:
+        for row in pending["coverage"]["surfaces"]:
+            row["notes"] = "Additional review context"
     pending["coverage"]["deferred"] = [
         {"id": "task", "reason": "Check boundary", "surfaceIds": ["api"]}
     ]

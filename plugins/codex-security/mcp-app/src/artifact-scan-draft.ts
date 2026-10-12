@@ -451,6 +451,34 @@ function sameAuthoredSurface(left: JsonObject, right: JsonObject): boolean {
   return isDeepStrictEqual(content(left), content(right));
 }
 
+async function qualifyWorkerLocalReceipts(
+  context: ArtifactContext,
+  input: ScanDraftInput,
+): Promise<void> {
+  const activePrefix = `artifacts/deep_discovery/workers/${basename(dirname(context.root))}/output/`;
+  for (const surface of input.coverage.surfaces as JsonObject[]) {
+    if (!Array.isArray(surface.receiptRefs)) continue;
+    const shared =
+      isObject(surface.provenance) &&
+      Array.isArray(surface.provenance.scanReceiptRefs)
+        ? surface.provenance.scanReceiptRefs
+        : [];
+    surface.receiptRefs = await Promise.all(
+      (surface.receiptRefs as string[]).map(async (value) => {
+        const ref = posix.normalize(value);
+        if (shared.includes(ref)) return ref;
+        try {
+          await requireRegularFile(join(context.root, ref), context.root, true);
+          return `${activePrefix}${ref}`;
+        } catch {
+          // Archived and shared references retain their resolved source context.
+          return ref;
+        }
+      }),
+    );
+  }
+}
+
 async function preserveScanDraft(
   context: ArtifactContext,
   input: ScanDraftInput,
@@ -458,24 +486,37 @@ async function preserveScanDraft(
 ): Promise<{ input: ScanDraftInput; previousDigest: string }> {
   const currentCheckpointName = scanDraftCheckpointName(input);
   const requiresClosureValidation = resolvedDeferred(input.coverage).length > 0;
-  if (saveCheckpoint && !requiresClosureValidation)
+  const saveObservation = saveCheckpoint && !requiresClosureValidation;
+  if (saveObservation && context.layout !== "worker")
     await saveScanDraftCheckpoint(context, input, false);
   let result = structuredClone(input);
-  const previousState = await readPreviousScanDraft(context);
-  const previous = previousState.input;
-  if (previous && previous.scanId !== input.scanId)
-    throw new Error(
-      "scan checkpoint: saved result belongs to a different scan.",
+  let previousState: Awaited<ReturnType<typeof readPreviousScanDraft>>;
+  let current: SavedScanDraft[];
+  let archived: SavedScanDraft[];
+  try {
+    previousState = await readPreviousScanDraft(context);
+    if (previousState.input && previousState.input.scanId !== input.scanId)
+      throw new Error(
+        "scan checkpoint: saved result belongs to a different scan.",
+      );
+    current = await readSavedCheckpoints(
+      context,
+      "current",
+      currentCheckpointName,
     );
-  const current: SavedScanDraft[] = await readSavedCheckpoints(
-    context,
-    "current",
-    currentCheckpointName,
-  );
-  const archived =
-    context.layout === "worker"
-      ? await readArchivedWorkerCheckpoints(context)
-      : [];
+    archived =
+      context.layout === "worker"
+        ? await readArchivedWorkerCheckpoints(context)
+        : [];
+  } catch (error) {
+    // Failed source reads must still preserve valid submitted progress.
+    if (saveObservation && context.layout === "worker") {
+      await qualifyWorkerLocalReceipts(context, input);
+      await saveScanDraftCheckpoint(context, input, false);
+    }
+    throw error;
+  }
+  const previous = previousState.input;
   if (previous) {
     current.unshift({ input: previous, modifiedMs: previousState.modifiedMs });
   }
@@ -502,9 +543,8 @@ async function preserveScanDraft(
       left.disposition === right.disposition &&
       !ambiguousSurfaceIds.has(left.id)) ||
     sameAuthoredSurface(left, right);
-  if (context.layout === "worker" && sources.length > 0) {
+  if (context.layout === "worker") {
     // Retained observations keep saved ownership; fresh observations use this worker.
-    const activePrefix = `artifacts/deep_discovery/workers/${basename(dirname(context.root))}/output/`;
     for (const surface of result.coverage.surfaces as JsonObject[]) {
       if (!Array.isArray(surface.receiptRefs)) continue;
       const previous = sources
@@ -542,24 +582,11 @@ async function preserveScanDraft(
           scanReceiptRefs: [...shared],
         };
       }
-      surface.receiptRefs = await Promise.all(
-        (surface.receiptRefs as string[]).map(async (value) => {
-          const ref = posix.normalize(value);
-          if (shared.has(ref)) return ref;
-          try {
-            await requireRegularFile(
-              join(context.root, ref),
-              context.root,
-              true,
-            );
-            return `${activePrefix}${ref}`;
-          } catch {
-            // Archived and shared references retain their resolved source context.
-            return ref;
-          }
-        }),
-      );
     }
+    await qualifyWorkerLocalReceipts(context, result);
+    // Persist the resolved ownership in the observation as well as its result.
+    input = structuredClone(result);
+    if (saveObservation) await saveScanDraftCheckpoint(context, input, false);
   }
   // Older checkpoints can omit IDs already assigned in their published output.
   const savedDeferred = sources.flatMap(

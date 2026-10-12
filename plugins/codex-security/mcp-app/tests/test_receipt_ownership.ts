@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import {
   mkdir,
   readFile,
@@ -294,6 +295,121 @@ test("newly resolved shared receipts survive a later local collision alongside i
       sources.discoveries[0].coverage.surfaces[0].receiptRefs,
       refs,
     );
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+for (const complete of [false, true]) {
+  for (const archived of [false, true]) {
+    for (const lost of [false, true]) {
+      test(`first saved local receipt in a ${complete ? "result" : "checkpoint"} stays owned after ${archived ? "archiving" : "acceptance"} (${lost ? "lost" : "present"})`, async () => {
+        const f = await fixture();
+        try {
+          const ref = "artifacts/evidence.txt";
+          await receipt(f.workerRoot, ref, "Local evidence\n");
+          await receipt(f.root, ref, "Unrelated shared evidence\n");
+          await recordCodexSecurityWorkerScanDraft(f.worker, {
+            ...draft([ref]),
+            complete,
+          });
+          let output = f.workerRoot;
+          if (archived) {
+            output = path.join(
+              path.dirname(f.workerRoot),
+              "attempts/attempt-01",
+            );
+            await mkdir(path.dirname(output), { recursive: true });
+            await rename(f.workerRoot, output);
+          }
+          if (lost) await rm(path.join(output, ref));
+          if (archived) {
+            await mkdir(f.workerRoot);
+            await recordCodexSecurityWorkerScanDraft(f.worker, workerDraft([]));
+          }
+          const expected = `${path.relative(f.root, output).split(path.sep).join("/")}/${ref}`;
+          if (complete) {
+            const sources = await readDeepReductionSources(f.reducer);
+            assert.deepEqual(
+              sources.discoveries[0].coverage.surfaces[0].receiptRefs,
+              [expected],
+            );
+          }
+          const recovered = JSON.parse(
+            execFileSync(
+              process.env.PYTHON || "python3",
+              [
+                "-B",
+                "-c",
+                `
+import json, sys
+from pathlib import Path
+plugin, root, active = map(Path, sys.argv[1:4])
+scan_id, complete = sys.argv[4], sys.argv[5] == "true"
+sys.path[:0] = [str(plugin / "scripts"), str(plugin / "tests")]
+from workbench_saved_results import merge_saved_results
+from workbench_test_support import saved_binding, saved_discovery_worker
+from finalize_scan_contract import _recover_unsealed_coverage
+worker = {**saved_discovery_worker(active, "worker-1", 1), "status": "succeeded" if complete else "running", "result_manifest_path": str(active / "result.json") if complete else None}
+binding = saved_binding("deep_repository")
+binding["target"].update(targetId="synthetic", displayName="Synthetic repository")
+args = (root, scan_id, binding, [worker], [])
+merged = merge_saved_results(*args, stopped=True, reason="interrupted")
+replay = merge_saved_results(*args, stopped=True, reason="interrupted", frozen_source_digests=merged[0]["scan"]["preservedSources"])
+assert merged[2] == replay[2]
+refs = merged[2]["surfaces"][0]["receiptRefs"]
+warnings = []
+coverage = merged[2]
+_recover_unsealed_coverage(coverage, plugin / "schemas", root, warnings, [])
+print(json.dumps({"refs": refs, "surfaces": coverage["surfaces"], "warnings": warnings}))
+`,
+                path.resolve(import.meta.dirname, "../.."),
+                f.root,
+                f.workerRoot,
+                scanId,
+                String(complete),
+              ],
+              { encoding: "utf8" },
+            ),
+          );
+          assert.deepEqual(recovered.refs, [expected]);
+          assert.equal(
+            recovered.surfaces[0].disposition,
+            lost ? "needs_follow_up" : "no_issue_found",
+          );
+          assert.equal(
+            recovered.warnings.some((warning: string) =>
+              warning.includes("coverage receipt"),
+            ),
+            lost,
+          );
+        } finally {
+          await rm(f.root, { recursive: true, force: true });
+        }
+      });
+    }
+  }
+}
+
+test("a draft preserved after a malformed result keeps its local receipt after loss", async () => {
+  const f = await fixture();
+  try {
+    const ref = "artifacts/evidence.txt";
+    await receipt(f.workerRoot, ref, "Local evidence\n");
+    await receipt(f.root, ref, "Unrelated shared evidence\n");
+    const resultPath = path.join(f.workerRoot, "result.json");
+    await writeFile(resultPath, "{broken");
+    await assert.rejects(
+      recordCodexSecurityWorkerScanDraft(f.worker, draft([ref])),
+      /stored JSON is malformed/,
+    );
+    await rm(resultPath);
+    await rm(path.join(f.workerRoot, ref));
+    await recordCodexSecurityWorkerScanDraft(f.worker, workerDraft([]));
+    const sources = await readDeepReductionSources(f.reducer);
+    assert.deepEqual(sources.discoveries[0].coverage.surfaces[0].receiptRefs, [
+      `${f.prefix}/${ref}`,
+    ]);
   } finally {
     await rm(f.root, { recursive: true, force: true });
   }

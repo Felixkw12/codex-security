@@ -1488,33 +1488,27 @@ def merge_saved_results(
                 worker["attempt"],
             ):
                 return item
-            # A selected checkpoint reproducing the accepted output has the same
-            # source identity; keep its reconciled row in that output namespace.
+            # Reproduced outputs and links from omitted checkpoints use the
+            # accepted worker's surface namespace.
             accepted = next(
                 (
-                    entry
-                    for entry in projection_origins.values()
-                    if entry[0] == worker_id
-                    and entry[1] in accepted_sources
-                    and entry[2] == field
-                    and source == entry[4]
+                    (path, draft["coverage"])
+                    for path, draft, owner in sources
+                    if owner == worker_id and path in accepted_sources
                 ),
                 None,
             )
-            has_accepted = any(
-                owner == worker_id and path in accepted_sources for path, _, owner in sources
-            )
-            if accepted is None and (relative not in selected_observations or not has_accepted):
-                if field == "deferred" and has_accepted and "surfaceIds" in item:
+            if accepted is not None and source == accepted[1]:
+                relative, source = accepted
+            elif relative not in selected_observations or accepted is None:
+                if field == "deferred" and accepted is not None and "surfaceIds" in item:
                     return {
                         **item,
-                        "surfaceIds": project_missing_record(field, item, index, worker, source)[
-                            "surfaceIds"
-                        ],
+                        "surfaceIds": project_missing_record(
+                            field, item, index, worker, accepted[1]
+                        )["surfaceIds"],
                     }
                 return item
-            if accepted is not None:
-                _, relative, _, _, source = accepted
         worker = workers_by_id[worker_id]
         result = project_missing_record(
             field, item, index, worker, source, receipts_resolved=receipts_resolved
