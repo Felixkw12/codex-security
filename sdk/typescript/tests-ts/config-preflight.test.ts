@@ -170,6 +170,138 @@ test("option prefixes retain ambiguity and the option terminator", async () => {
   expect(literal.payload!.config_paths).toEqual(["--prof"]);
 });
 
+for (const option of ["profile", "config", "cwd"] as const)
+  test.each(["-1", "-.5", "-1.5", "-١"])(
+    `negative-looking --${option} string value %s retains argparse behavior`,
+    async (value) => {
+      const root = await temporaryDirectory();
+      const profile = option === "profile" ? value : "custom";
+      const config = option === "config" ? value : "config.toml";
+      const registry = join(root, "registry.toml");
+      await writeFile(join(root, config), "");
+      await mkdir(join(root, "home"));
+      if (option === "cwd") await mkdir(join(root, value));
+      await writeFile(
+        registry,
+        stringifyToml({
+          version: 1,
+          capabilities: {},
+          profiles: {
+            [profile]: { description: "Synthetic", requirements: [] },
+          },
+        }),
+      );
+      for (const abbreviated of [false, true]) {
+        const result = await run(
+          [
+            "--registry",
+            registry,
+            abbreviated ? "--prof" : "--profile",
+            profile,
+            ...(option === "cwd"
+              ? ["--cwd", value]
+              : [abbreviated ? "--conf" : "--config", config]),
+          ],
+          { CODEX_HOME: join(root, "home") },
+          root,
+        );
+        expect(result.status).toBe(0);
+        expect(result.payload!.profile).toBe(profile);
+        if (option === "cwd")
+          expect(result.payload!.config_discovery!["cwd"]).toBe(
+            join(root, value),
+          );
+        else expect(result.payload!.config_paths).toEqual([config]);
+      }
+    },
+  );
+
+test.each([
+  ["2020-02-30", false],
+  ["2021-02-29", false],
+  ["1900-02-29", false],
+  ["2020-04-31", false],
+  ["0000-01-01", false],
+  ["0000-01-01T00:00:00", false],
+  ["0000-01-01T00:00:00Z", false],
+  ["2020-02-30T01:02:03", false],
+  ["2020-02-30T01:02:03+02:30", false],
+  ["23:59:60", false],
+  ["2020-01-01T23:59:60Z", false],
+  ["2000-02-29", true],
+  ["2020-02-29", true],
+  ["0001-01-01", true],
+  ["9999-12-31", true],
+  ["2020-02-29T01:02:03.123456789", true],
+  ["2020-02-29t01:02:03.123456789-02:30", true],
+  ["23:59:59.123456789", true],
+  ['"2020-02-30"', true],
+  ["'2020-02-30'", true],
+  ['"""2020-02-30"""', true],
+  ["'''2020-02-30'''", true],
+  ["true # 2020-02-30", true],
+] as const)(
+  "TOML date syntax %s is accepted=%j in registries and config",
+  async (value, valid) => {
+    const root = await temporaryDirectory();
+    const registry = join(root, "registry.toml"),
+      config = join(root, "config.toml");
+    for (const location of ["registry", "config"]) {
+      await writeFile(
+        registry,
+        `version = 1
+[capabilities]
+[profiles.custom]
+description = "Synthetic"
+requirements = []
+unused = ${location === "registry" ? value : "true"}
+`,
+      );
+      await writeFile(
+        config,
+        `unused = ${location === "config" ? value : "true"}\n`,
+      );
+      const result = await run([
+        "--registry",
+        registry,
+        "--profile",
+        "custom",
+        "--config",
+        config,
+      ]);
+      expect(result.status).toBe(valid ? 0 : 2);
+      expect(result.payload!.status).toBe(valid ? "ready" : "error");
+    }
+  },
+);
+
+test("an invalid date cannot satisfy a blocking requirement by normalization", async () => {
+  const registry = join(await temporaryDirectory(), "registry.toml");
+  await writeFile(
+    registry,
+    `version = 1
+[capabilities.check]
+kind = "config"
+path = "synthetic"
+op = "=="
+value = 2020-02-30
+[profiles.custom]
+description = "Synthetic"
+[[profiles.custom.requirements]]
+capability = "check"
+severity = "block"
+reason = "Synthetic"
+`,
+  );
+  const result = await configured(
+    "synthetic = 2020-03-01\n",
+    ["--registry", registry],
+    "custom",
+  );
+  expect(result.status).toBe(2);
+  expect(result.payload!.status).toBe("error");
+});
+
 test.each(["", "."])(
   "manual config path %j cannot skip a directory",
   async (file) => {
