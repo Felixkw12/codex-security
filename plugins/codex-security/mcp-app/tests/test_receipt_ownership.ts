@@ -357,57 +357,83 @@ for (const scenario of [
   "changed finding",
   "changed coverage",
 ] as const) {
-  test(`legacy worker receipt ownership: ${scenario}`, async () => {
-    const f = await fixture();
-    try {
-      // Captured from the writer before it checkpointed the final scope filter.
-      const legacy = JSON.parse(
-        await readFile(
-          path.join(
-            import.meta.dirname,
-            "fixtures/legacy-scoped-worker-receipts.json",
+  for (const resultIsNewer of [true, false]) {
+    test(`legacy worker receipt ownership: ${scenario} (${resultIsNewer ? "newer result" : "tied observations"})`, async () => {
+      const f = await fixture();
+      try {
+        // Captured from the writer before it checkpointed the final scope filter.
+        const legacy = JSON.parse(
+          await readFile(
+            path.join(
+              import.meta.dirname,
+              "fixtures/legacy-scoped-worker-receipts.json",
+            ),
+            "utf8",
           ),
-          "utf8",
-        ),
-      );
-      const ref = "artifacts/evidence.txt";
-      await receipt(f.root, ref, "Shared evidence\n");
-      await receipt(f.workerRoot, ref, "Unrelated local evidence\n");
-      await saveScanDraftCheckpoint(f.worker, legacy.checkpoint);
-      const result =
-        scenario === "unscoped" ? legacy.checkpoint : legacy.result;
-      if (scenario === "changed finding")
-        result.findings[0].title = "Changed finding";
-      if (scenario === "changed coverage")
-        result.coverage.surfaces[0].notes = "Changed review";
-      await writeFile(
-        path.join(f.workerRoot, "result.json"),
-        JSON.stringify(result),
-      );
-      const includePaths =
-        scenario === "unscoped"
-          ? ["."]
-          : scenario === "wrong scope"
-            ? ["other"]
-            : ["src"];
-      const sources = await readDeepReductionSources({
-        ...f.reducer,
-        includePaths,
-      });
-      const recovered = recoverCoverage(f, true, 1, includePaths);
-      const expected =
-        scenario === "scoped" || scenario === "unscoped"
-          ? ref
-          : `${f.prefix}/${ref}`;
-      assert.deepEqual(
-        sources.discoveries[0].coverage.surfaces[0].receiptRefs,
-        [expected],
-      );
-      assert.deepEqual(recovered.refs, [expected]);
-    } finally {
-      await rm(f.root, { recursive: true, force: true });
-    }
-  });
+        );
+        const ref = "artifacts/evidence.txt";
+        await receipt(f.root, ref, "Shared evidence\n");
+        await receipt(f.workerRoot, ref, "Unrelated local evidence\n");
+        await saveScanDraftCheckpoint(f.worker, legacy.checkpoint);
+        const result =
+          scenario === "unscoped" ? legacy.checkpoint : legacy.result;
+        if (scenario === "changed finding")
+          result.findings[0].title = "Changed finding";
+        if (scenario === "changed coverage")
+          result.coverage.surfaces[0].notes = "Changed review";
+        await writeFile(
+          path.join(f.workerRoot, "result.json"),
+          JSON.stringify(result),
+        );
+        const head = JSON.parse(
+          await readFile(
+            path.join(f.workerRoot, "checkpoint-head.json"),
+            "utf8",
+          ),
+        );
+        // Filesystems can give sequential writes equal mtimes. Bind the intended
+        // observation order explicitly instead of depending on clock resolution.
+        await Promise.all([
+          utimes(path.join(f.workerRoot, "checkpoints", head.checkpoint), 1, 1),
+          utimes(path.join(f.workerRoot, "checkpoint-head.json"), 1, 1),
+          utimes(
+            path.join(f.workerRoot, "result.json"),
+            resultIsNewer ? 2 : 1,
+            resultIsNewer ? 2 : 1,
+          ),
+        ]);
+        const includePaths =
+          scenario === "unscoped"
+            ? ["."]
+            : scenario === "wrong scope"
+              ? ["other"]
+              : ["src"];
+        const sources = await readDeepReductionSources({
+          ...f.reducer,
+          includePaths,
+        });
+        const recovered = recoverCoverage(f, true, 1, includePaths);
+        const expected =
+          scenario === "scoped" || scenario === "unscoped"
+            ? ref
+            : `${f.prefix}/${ref}`;
+        assert.deepEqual(
+          sources.discoveries[0].coverage.surfaces[0].receiptRefs,
+          [expected],
+        );
+        if (resultIsNewer) {
+          assert.deepEqual(recovered.refs, [expected]);
+        } else {
+          // Recovery keeps the separate trusted checkpoint when observations tie;
+          // direct reducer admission still rejects the unrecorded result above.
+          assert.deepEqual(recovered.refs, [ref]);
+          assert.equal(recovered.surfaces[0].notes, undefined);
+        }
+      } finally {
+        await rm(f.root, { recursive: true, force: true });
+      }
+    });
+  }
 }
 
 for (const explicit of [false, true]) {
