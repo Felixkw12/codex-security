@@ -98,10 +98,7 @@ async function executeWorkbench(
       windowsHide: true,
       env: process.env,
       encoding: "utf8" as const,
-      // Local artifacts and accepted finding pages can exceed a fixed byte buffer.
-      maxBuffer: ["read-artifact", "list-findings"].includes(args[0] ?? "")
-        ? Infinity
-        : 4 * 1024 * 1024,
+      maxBuffer: Infinity,
       timeout,
     },
   );
