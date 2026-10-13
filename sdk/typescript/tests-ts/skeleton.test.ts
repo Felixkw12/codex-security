@@ -131,7 +131,7 @@ describe("TypeScript package skeleton", () => {
     const { jobs } = await workflow("node-ci.yml");
     expect(jobs["test"]?.strategy?.matrix).toEqual({
       os: ["ubuntu-latest", "macos-latest"],
-      shard: [1, 2, 3, 4, 5],
+      shard: [1, 2, 3, 4, 5, 6, 7],
     });
     expect(jobs["compatibility"]?.strategy?.matrix).toEqual({
       os: ["ubuntu-latest"],
