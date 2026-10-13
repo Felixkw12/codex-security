@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 
 const source = await readFile(
@@ -59,45 +60,50 @@ for (const platform of ["win32", "linux"] as const) {
         ...entries,
         ...nativeGrants.map((value) => ["safe.directory", value]),
       ]);
-      let receive: (chunk: Buffer) => void = () => {
-        throw new Error("Snapshot input handler was not installed.");
-      };
-      const sent: Buffer[] = [];
+      const header = Buffer.from(JSON.stringify(Object.entries(original)));
+      const input = Buffer.from([0, 255, 10, 13]);
+      const frame = Buffer.concat([header, input]);
+      let consumed = 0;
       const invocations: {
         command: string;
         args: string[];
         environment: object;
       }[] = [];
-      const child = {
-        on() {},
-        stdin: {
-          on() {},
-          write(chunk: Buffer) {
-            sent.push(chunk);
-          },
-        },
-      };
+      const child = { on() {} };
       const process = {
         platform,
-        argv: ["node", "git", "-C", "C:/synthetic/repository", "status"],
+        argv: [
+          "node",
+          String(header.length),
+          "git",
+          "-C",
+          "C:/synthetic/repository",
+          "status",
+        ],
         env: filtered,
-        stdin: {
-          on(event: string, listener: typeof receive) {
-            expect(event).toBe("data");
-            receive = listener;
-          },
-          off() {},
-          pipe(target: unknown) {
-            expect(target).toBe(child.stdin);
-          },
-        },
       };
       // Exercise the exact argument construction without starting a child.
       new Function("require", "process", "Buffer", runner)(
         (module: string) => {
+          if (module === "node:fs")
+            return {
+              readSync(
+                fd: number,
+                buffer: Buffer,
+                offset: number,
+                length: number,
+              ) {
+                expect(fd).toBe(0);
+                const bytes = Math.min(length, 7, frame.length - consumed);
+                frame.copy(buffer, offset, consumed, consumed + bytes);
+                consumed += bytes;
+                return bytes;
+              },
+            };
           expect(module).toBe("node:child_process");
           return {
-            spawn(command: string, args: string[]) {
+            spawn(command: string, args: string[], options: object) {
+              expect(options).toEqual({ stdio: "inherit" });
               invocations.push({
                 command,
                 args,
@@ -109,13 +115,6 @@ for (const platform of ["win32", "linux"] as const) {
         },
         process,
         Buffer,
-      );
-      const input = Buffer.from([0, 255, 10, 13]);
-      receive(
-        Buffer.concat([
-          Buffer.from(JSON.stringify(Object.entries(original)) + "\n"),
-          input,
-        ]),
       );
       expect(invocations).toHaveLength(1);
       expect(invocations[0]!.command).toBe("git");
@@ -131,7 +130,34 @@ for (const platform of ["win32", "linux"] as const) {
         "status",
       ]);
       expect(invocations[0]!.environment).toMatchObject(original);
-      expect(Buffer.concat(sent)).toEqual(input);
+      expect(frame.subarray(consumed)).toEqual(input);
     });
   }
 }
+
+test("snapshot Git reports an incomplete binding frame before starting the command", async () => {
+  const child = spawn(
+    process.execPath,
+    ["-e", runner, "--", "64", "synthetic-unreachable-command"],
+    { stdio: "pipe" },
+  );
+  let stderr = "";
+  let stdout = "";
+  child.stderr.setEncoding("utf8").on("data", (chunk) => {
+    stderr += chunk;
+  });
+  child.stdout.setEncoding("utf8").on("data", (chunk) => {
+    stdout += chunk;
+  });
+  const closed = new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (code, signal) => resolve({ code, signal }));
+  });
+  child.stdin.end("[");
+  expect(await closed).toEqual({ code: 1, signal: null });
+  expect(stdout).toBe("");
+  expect(stderr).toContain(
+    "Snapshot Git bindings ended before the complete frame.",
+  );
+  expect(stderr).not.toContain("ENOENT");
+});
