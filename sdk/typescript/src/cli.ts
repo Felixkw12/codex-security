@@ -2,7 +2,7 @@
 import { workbenchArgs } from "./workbench-arguments.js";
 import { listenForAbort } from "./cli-signals.js";
 import { relativePatchPath } from "./patch-byte-path.js";
-import { isNonEmptyString, parseJson } from "./value.js";
+import { isNonEmptyString, notify, parseJson } from "./value.js";
 
 import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
@@ -212,7 +212,8 @@ import {
   bundledPluginRoot,
   acquireCodexSecurityCredentialHomeLock,
   withCredentialHomeLock,
-  requirePrivateCredentialHome,
+  requirePrivateSnapshotProfileHome,
+  requirePrivateSnapshotProfileFile,
   requireOutputOutsideRepositories,
   canonicalizeModelSafePath,
   codexSecurityCredentialHome,
@@ -1210,6 +1211,7 @@ interface CliDependencies {
       sandbox?: PatchSnapshotSandbox;
       signal?: AbortSignal;
       onStdout?: (chunk: Buffer) => void;
+      onStderr?: (chunk: Buffer) => void;
     },
   ): Promise<string>;
   assessPatchRisk?: (request: PatchRiskRequest) => Promise<PatchRiskReport>;
@@ -1302,13 +1304,14 @@ export async function runRepositoryCommand(
       const home = configuredCodexHome(sandbox.environment);
       if (process.platform === "win32") {
         await mkdir(home, { recursive: true, mode: 0o700 });
-        await requirePrivateCredentialHome(await lstat(home), home);
+        await requirePrivateSnapshotProfileHome(home);
       }
       const path = join(home, `${profile}.config.toml`);
       const file = await open(path, "wx", 0o600);
       profileFile = path;
       try {
         await file.chmod(0o600);
+        await requirePrivateSnapshotProfileFile(path);
         await file.writeFile(
           Object.entries({
             ...sandbox.configuration,
@@ -1403,6 +1406,9 @@ export async function runRepositoryCommand(
             );
             execution.kill();
           }
+          const onStderr = options?.onStderr;
+          if (name === "stderr" && onStderr !== undefined)
+            notify(() => onStderr(chunk));
         });
       }
       execution.once("error", reject);

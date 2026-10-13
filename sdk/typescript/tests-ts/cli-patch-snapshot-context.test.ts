@@ -896,6 +896,7 @@ if(process.argv.includes("fail")){process.stderr.write("Synthetic Git failure de
     `alias.inspect=!node ${JSON.stringify(script.replaceAll("\\", "/"))}`,
     "inspect",
   ];
+  let capturedStderr = "";
   const bytes = Buffer.from(
     await runRepositoryCommand("git", args, repository, {
       sandbox,
@@ -903,10 +904,14 @@ if(process.argv.includes("fail")){process.stderr.write("Synthetic Git failure de
       encoding: "base64",
       trim: false,
       maxBuffer: Infinity,
+      onStderr(chunk) {
+        capturedStderr += chunk.toString();
+      },
     }),
     "base64",
   );
   const end = bytes.indexOf(10);
+  expect(bytes.subarray(0, end).toString(), capturedStderr).not.toBe("");
   expect(JSON.parse(bytes.subarray(0, end).toString())).toEqual({
     index,
     dir: null,

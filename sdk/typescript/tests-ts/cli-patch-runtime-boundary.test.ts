@@ -13,6 +13,56 @@ import { runTestInSubprocess } from "./support/test-subprocess.js";
 const fixtures = createTemporaryDirectories(true);
 afterEach(fixtures.cleanup);
 
+test("snapshot stderr observers retain diagnostics and buffering limits", async () => {
+  const name =
+    "snapshot stderr observers retain diagnostics and buffering limits";
+  if (runTestInSubprocess(fileURLToPath(import.meta.url), name)) return;
+  const root = await fixtures.create("patch-stderr-observer-");
+  const home = join(root, "home");
+  await mkdir(home);
+  const native = join(root, "native.cjs");
+  await writeFile(
+    native,
+    `process.stdin.resume();process.stdin.on("end",()=>{process.stderr.write("Synthetic native detail.\\n");process.stdout.write("ok");process.exitCode=process.argv.includes("fail")?17:0;});\n`,
+  );
+  const command = spyOn(runtime, "resolveCodexCommand").mockReturnValue({
+    command: process.execPath,
+    args: [native],
+  });
+  try {
+    const observed: Buffer[] = [];
+    const options = {
+      sandbox: {
+        directory: root,
+        environment: { ...process.env, CODEX_HOME: home },
+        profile: { extends: ":workspace", filesystem: {} },
+      },
+      onStderr(chunk: Buffer) {
+        observed.push(chunk);
+        throw new Error("Synthetic observer failure must not interrupt Git");
+      },
+    };
+    expect(await runRepositoryCommand("git", [], root, options)).toBe("ok");
+    expect(Buffer.concat(observed).toString()).toBe(
+      "Synthetic native detail.\n",
+    );
+    await expect(
+      runRepositoryCommand("git", ["fail"], root, options),
+    ).rejects.toMatchObject({
+      code: 17,
+      stderr: "Synthetic native detail.\n",
+    });
+    await expect(
+      runRepositoryCommand("git", [], root, { ...options, maxBuffer: 4 }),
+    ).rejects.toMatchObject({
+      code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
+      stderr: "Synt",
+    });
+  } finally {
+    command.mockRestore();
+  }
+});
+
 test("snapshot bridge failures after stdin closes retain their diagnostics", async () => {
   const name =
     "snapshot bridge failures after stdin closes retain their diagnostics";
@@ -217,7 +267,7 @@ child.on("exit",code=>process.exitCode=code??1);
   }
 }
 
-for (const denied of [false, true]) {
+for (const denied of ["none", "home", "file"] as const) {
   const name = `snapshot provider credentials require private Windows storage (ACL denied: ${denied})`;
   test(name, async () => {
     if (runTestInSubprocess(fileURLToPath(import.meta.url), name)) return;
@@ -239,23 +289,28 @@ process.stdin.resume();process.stdin.on("end",()=>process.stdout.write(JSON.stri
       process,
       "platform",
     )!;
-    const originalGuard = runtime.requirePrivateCredentialHome;
     let protectedHome = false;
+    let protectedFile = false;
     let serialized = false;
     const guard = spyOn(
       runtime,
-      "requirePrivateCredentialHome",
-    ).mockImplementation(async (metadata, path) => {
-      await originalGuard(metadata, path, {
-        platform: "win32",
-        secureWindowsHome: async (directory) => {
-          expect(directory).toBe(home);
-          expect(await readdir(home)).toEqual([]);
-          expect(serialized).toBe(false);
-          if (denied) throw new Error("Synthetic ACL denial");
-          protectedHome = true;
-        },
-      });
+      "requirePrivateSnapshotProfileHome",
+    ).mockImplementation(async (directory) => {
+      expect(directory).toBe(home);
+      expect(await readdir(home)).toEqual([]);
+      expect(serialized).toBe(false);
+      if (denied === "home") throw new Error("Synthetic home ACL denial");
+      protectedHome = true;
+    });
+    const fileGuard = spyOn(
+      runtime,
+      "requirePrivateSnapshotProfileFile",
+    ).mockImplementation(async (path) => {
+      expect(protectedHome).toBe(true);
+      expect(await readFile(path)).toHaveLength(0);
+      expect(serialized).toBe(false);
+      if (denied === "file") throw new Error("Synthetic file ACL denial");
+      protectedFile = true;
     });
     const command = spyOn(runtime, "resolveCodexCommand").mockReturnValue({
       command: process.execPath,
@@ -289,8 +344,8 @@ process.stdin.resume();process.stdin.on("end",()=>process.stdout.write(JSON.stri
           },
         },
       });
-      if (denied) {
-        await expect(result).rejects.toThrow("Synthetic ACL denial");
+      if (denied !== "none") {
+        await expect(result).rejects.toThrow(`Synthetic ${denied} ACL denial`);
         expect(serialized).toBe(false);
         await expect(readFile(marker)).rejects.toMatchObject({
           code: "ENOENT",
@@ -298,6 +353,7 @@ process.stdin.resume();process.stdin.on("end",()=>process.stdout.write(JSON.stri
       } else {
         const observed = JSON.parse(await result);
         expect(protectedHome).toBe(true);
+        expect(protectedFile).toBe(true);
         expect(serialized).toBe(true);
         expect(observed.text).toContain("synthetic-bearer");
         expect(observed.text).toContain("synthetic-header");
@@ -310,6 +366,7 @@ process.stdin.resume();process.stdin.on("end",()=>process.stdout.write(JSON.stri
       trusted.mockRestore();
       command.mockRestore();
       guard.mockRestore();
+      fileGuard.mockRestore();
     }
   });
 }
