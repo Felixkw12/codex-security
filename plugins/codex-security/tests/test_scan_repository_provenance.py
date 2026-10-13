@@ -64,6 +64,11 @@ def test_sealed_manifest_must_match_saved_repository_provenance(
         scan_dir, scan_id, target, target_kind="git_revision", target_revision=revision
     )
     run_workbench(state, "complete-scan", "--scan-id", scan_id)
+    stored = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]
+    assert stored["repositoryProvenance"] == {
+        "repositoryPath": ".",
+        **({"remote": "https://github.com/example/original.git"} if has_remote else {}),
+    }
     manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
     assert manifest["scan"]["sealedAt"]
     namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")

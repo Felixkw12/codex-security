@@ -932,11 +932,20 @@ codex-security publish scan /path/to/completed-scan --to cloud --cloud-environme
 ```
 
 Find saved IDs with `scans list --json`. Select by full ID, a unique prefix of at
-least eight characters, or `latest` for the current repository. The scan's sealed
+least eight characters, or `latest` for the current repository. A saved scan's sealed
 provenance determines its destination repository even when publishing from
-another directory. A unique matching environment is selected automatically;
+another directory. Saved scans are checked against the completed workbench record,
+canonical artifact directory, and repository provenance captured at scan start.
+A unique matching environment for a verified saved scan is selected automatically;
 ambiguity requires `--cloud-environment` or an interactive choice. Publication
 does not create environments.
+
+For an external scan directory, choose the repository and environment independently
+of its manifest. In a terminal, the CLI offers authorized repository/environment
+pairs. Outside a terminal, `--cloud-environment ENV_ID` is sufficient only when
+that environment has one authorized repository; a multi-repository environment
+requires interactive selection. The manifest must match the chosen repository.
+A directory cannot claim trusted saved-scan status by copying a scan identifier.
 
 Without a scan selector, choose an environment first, then select matching local
 scans. Press Space to select scans and Enter to submit. Noninteractive publication

@@ -79,6 +79,7 @@ describe("native Cloud publication", () => {
     const { scan, environment } = await fixture();
     const cloud = server();
     const result = await publishScanToCloud(scan, {
+      cloudEnvironment: "env-1",
       environment,
       fetch: cloud.fetch,
     });
@@ -122,7 +123,11 @@ describe("native Cloud publication", () => {
     ]);
     await writeFile(path, bytes);
     const cloud = server();
-    await publishScanToCloud(scan, { environment, fetch: cloud.fetch });
+    await publishScanToCloud(scan, {
+      cloudEnvironment: "env-1",
+      environment,
+      fetch: cloud.fetch,
+    });
     expect(
       Buffer.from(
         cloud.calls.find(
@@ -136,7 +141,11 @@ describe("native Cloud publication", () => {
     const { scan, environment } = await fixture();
     await rm(join(scan, "report.md"));
     const cloud = server();
-    await publishScanToCloud(scan, { environment, fetch: cloud.fetch });
+    await publishScanToCloud(scan, {
+      cloudEnvironment: "env-1",
+      environment,
+      fetch: cloud.fetch,
+    });
     expect(cloud.calls.filter((item) => item.method === "PUT")).toHaveLength(3);
   });
   test.skipIf(process.platform === "win32")(
@@ -147,7 +156,11 @@ describe("native Cloud publication", () => {
       await symlink(join(scan, "findings.json"), join(scan, "report.md"));
       const cloud = server();
       await expect(
-        publishScanToCloud(scan, { environment, fetch: cloud.fetch }),
+        publishScanToCloud(scan, {
+          cloudEnvironment: "env-1",
+          environment,
+          fetch: cloud.fetch,
+        }),
       ).rejects.toThrow();
       expect(cloud.calls).toHaveLength(0);
     },
@@ -156,9 +169,14 @@ describe("native Cloud publication", () => {
     const { scan, environment } = await fixture();
     const cloud = server({ rejectPutOnce: true });
     await expect(
-      publishScanToCloud(scan, { environment, fetch: cloud.fetch }),
+      publishScanToCloud(scan, {
+        cloudEnvironment: "env-1",
+        environment,
+        fetch: cloud.fetch,
+      }),
     ).rejects.toThrow("resume");
     const result = await publishScanToCloud(scan, {
+      cloudEnvironment: "env-1",
       environment,
       fetch: cloud.fetch,
     });
@@ -173,13 +191,18 @@ describe("native Cloud publication", () => {
   test("republication of accepted content does not reupload or reset processing", async () => {
     const { scan, environment } = await fixture();
     const cloud = server({ accepted: true });
-    await publishScanToCloud(scan, { environment, fetch: cloud.fetch });
+    await publishScanToCloud(scan, {
+      cloudEnvironment: "env-1",
+      environment,
+      fetch: cloud.fetch,
+    });
     expect(cloud.calls.map((item) => item.method)).toEqual(["GET", "POST"]);
   });
   test("reports asynchronous finalization without claiming acceptance", async () => {
     const { scan, environment } = await fixture();
     const cloud = server({ finalizeStatus: "finalizing" });
     const result = await publishScanToCloud(scan, {
+      cloudEnvironment: "env-1",
       environment,
       fetch: cloud.fetch,
     });
@@ -190,6 +213,7 @@ describe("native Cloud publication", () => {
     const { scan, environment } = await fixture();
     const cloud = server({ finalizing: true });
     const result = await publishScanToCloud(scan, {
+      cloudEnvironment: "env-1",
       environment,
       fetch: cloud.fetch,
     });
@@ -203,6 +227,7 @@ describe("native Cloud publication", () => {
       finalizeStatus: "finalizing",
     });
     const result = await publishScanToCloud(scan, {
+      cloudEnvironment: "env-1",
       environment,
       fetch: cloud.fetch,
     });
@@ -214,7 +239,11 @@ describe("native Cloud publication", () => {
   test("failed parsing retries from retained artifacts", async () => {
     const { scan, environment } = await fixture();
     const cloud = server({ accepted: true, failed: true });
-    await publishScanToCloud(scan, { environment, fetch: cloud.fetch });
+    await publishScanToCloud(scan, {
+      cloudEnvironment: "env-1",
+      environment,
+      fetch: cloud.fetch,
+    });
     expect(cloud.calls.at(-1)?.url).toEndWith("/retry");
     expect(cloud.calls.some((item) => item.method === "PUT")).toBe(false);
   });
@@ -235,7 +264,11 @@ describe("native Cloud publication", () => {
       .update(await readFile(path))
       .digest("hex");
     await writeFile(manifestPath, JSON.stringify(manifest));
-    await publishScanToCloud(scan, { environment, fetch: cloud.fetch });
+    await publishScanToCloud(scan, {
+      cloudEnvironment: "env-1",
+      environment,
+      fetch: cloud.fetch,
+    });
     const uploaded = cloud.calls.find(
       (item) => item.method === "PUT" && item.url.endsWith("findings.json"),
     )!;
@@ -250,6 +283,7 @@ describe("native Cloud publication", () => {
     const { scan, environment } = await fixture();
     await expect(
       publishScanToCloud(scan, {
+        cloudEnvironment: "env-1",
         environment,
         fetch: async (url) =>
           url.includes("destinations")
@@ -281,15 +315,24 @@ describe("native Cloud publication", () => {
       .digest("hex");
     await writeFile(manifestPath, JSON.stringify(manifest));
     expect(
-      (await publishScanToCloud(scan, { environment, fetch: cloud.fetch }))
-        .findingCount,
+      (
+        await publishScanToCloud(scan, {
+          cloudEnvironment: "env-1",
+          environment,
+          fetch: cloud.fetch,
+        })
+      ).findingCount,
     ).toBe(0);
   });
   test("no matching environment fails before creating an upload", async () => {
     const { scan, environment } = await fixture();
     const cloud = server({ destinations: [] });
     await expect(
-      publishScanToCloud(scan, { environment, fetch: cloud.fetch }),
+      publishScanToCloud(scan, {
+        cloudEnvironment: "env-1",
+        environment,
+        fetch: cloud.fetch,
+      }),
     ).rejects.toThrow("No existing authorized");
     expect(cloud.calls).toHaveLength(1);
   });
@@ -298,6 +341,7 @@ describe("native Cloud publication", () => {
     let calls = 0;
     await expect(
       publishScanToCloud(scan, {
+        cloudEnvironment: "env-1",
         environment,
         fetch: async () => {
           calls++;
@@ -315,6 +359,7 @@ describe("native Cloud publication", () => {
   test("dry-run requires eligible provenance but neither credentials nor network", async () => {
     const { scan } = await fixture();
     const result = await publishScanToCloud(scan, {
+      cloudEnvironment: "env-1",
       dryRun: true,
       environment: {},
       fetch: async () => {
@@ -330,6 +375,7 @@ describe("native Cloud publication", () => {
       await truncate(join(scan, "report.md"), 64 * 1024 * 1024 + 1);
       await expect(
         publishScanToCloud(scan, {
+          cloudEnvironment: "env-1",
           dryRun,
           environment: {},
           fetch: async () => {
@@ -349,6 +395,7 @@ describe("native Cloud publication", () => {
       await writeFile(path, JSON.stringify(manifest));
       await expect(
         publishScanToCloud(scan, {
+          cloudEnvironment: "env-1",
           dryRun,
           environment: {},
           fetch: async () => {
@@ -368,6 +415,7 @@ describe("native Cloud publication", () => {
       );
       await expect(
         publishScanToCloud(scan, {
+          cloudEnvironment: "env-1",
           environment,
           fetch: async () => {
             throw new Error("unexpected network");
@@ -402,11 +450,19 @@ describe("native Cloud publication", () => {
       );
       return cloud.fetch(url, options);
     };
-    await publishScanToCloud(scan, { environment, fetch });
+    await publishScanToCloud(scan, {
+      cloudEnvironment: "env-1",
+      environment,
+      fetch,
+    });
     const before = cloud.calls.length;
     await setCodexSecurityCredentialLogout(home, true);
     await expect(
-      publishScanToCloud(scan, { environment, fetch }),
+      publishScanToCloud(scan, {
+        cloudEnvironment: "env-1",
+        environment,
+        fetch,
+      }),
     ).rejects.toThrow("ChatGPT login");
     expect(cloud.calls.length).toBe(before);
   });
@@ -417,6 +473,7 @@ describe("native Cloud publication", () => {
     await cp(join(home, "config.toml"), join(home, ".codex", "config.toml"));
     const cloud = server();
     await publishScanToCloud(scan, {
+      cloudEnvironment: "env-1",
       environment: {
         ...environment,
         CODEX_HOME: "",
@@ -434,7 +491,11 @@ describe("native Cloud publication", () => {
     };
     await rm(join(home, "config.toml"));
     await expect(
-      publishScanToCloud(scan, { environment, fetch }),
+      publishScanToCloud(scan, {
+        cloudEnvironment: "env-1",
+        environment,
+        fetch,
+      }),
     ).rejects.toThrow("ChatGPT login");
     await writeFile(
       join(home, "config.toml"),
@@ -442,7 +503,11 @@ describe("native Cloud publication", () => {
     );
     await writeFile(join(home, "auth.json"), "malformed");
     await expect(
-      publishScanToCloud(scan, { environment, fetch }),
+      publishScanToCloud(scan, {
+        cloudEnvironment: "env-1",
+        environment,
+        fetch,
+      }),
     ).rejects.toThrow("ChatGPT login");
   });
   test("allows artifact transfers beyond the metadata request deadline", async () => {
@@ -459,6 +524,7 @@ describe("native Cloud publication", () => {
     );
     try {
       const result = await publishScanToCloud(scan, {
+        cloudEnvironment: "env-1",
         environment,
         fetch: async (url, options) => {
           // A supported 64 MiB artifact takes about 54 seconds at 10 Mbps.
@@ -487,6 +553,7 @@ describe("native Cloud publication", () => {
     const cloud = server();
     await expect(
       publishScanToCloud(scan, {
+        cloudEnvironment: "env-1",
         environment,
         signal: controller.signal,
         fetch: async (url, options) => {
@@ -506,6 +573,7 @@ describe("native Cloud publication", () => {
     await writeFile(path, JSON.stringify(manifest));
     await expect(
       publishScanToCloud(scan, {
+        cloudEnvironment: "env-1",
         environment,
         fetch: async () => {
           throw new Error("unexpected network");
@@ -521,6 +589,7 @@ describe("native Cloud publication", () => {
     await writeFile(path, JSON.stringify(manifest));
     await expect(
       publishScanToCloud(scan, {
+        cloudEnvironment: "env-1",
         environment,
         fetch: async () => {
           throw new Error("unexpected network");
@@ -559,6 +628,7 @@ describe("native Cloud preflight and diagnostics", () => {
       for (const dryRun of [true, false]) {
         await expect(
           publishScanToCloud(scan, {
+            cloudEnvironment: "env-1",
             dryRun,
             environment: {},
             fetch: async () => {
@@ -579,6 +649,7 @@ describe("native Cloud preflight and diagnostics", () => {
       let caught: unknown;
       try {
         await publishScanToCloud(scan, {
+          cloudEnvironment: "env-1",
           environment,
           fetch: async (url, request) => {
             if (request.method === "GET") return cloud.fetch(url, request);
@@ -618,6 +689,7 @@ describe("native Cloud preflight and diagnostics", () => {
       const cancellation = new Error("synthetic cancellation reason");
       await expect(
         publishScanToCloud(scan, {
+          cloudEnvironment: "env-1",
           environment,
           signal: controller.signal,
           fetch: async (url, request) => {
@@ -658,11 +730,19 @@ describe("native Cloud preflight and diagnostics", () => {
       return response;
     };
     await expect(
-      publishScanToCloud(scan, { environment, fetch }),
+      publishScanToCloud(scan, {
+        cloudEnvironment: "env-1",
+        environment,
+        fetch,
+      }),
     ).rejects.toThrow("resume its immutable upload session");
     expect(cloud.calls.filter((call) => call.method === "PUT")).toHaveLength(4);
     const before = cloud.calls.length;
-    const replay = await publishScanToCloud(scan, { environment, fetch });
+    const replay = await publishScanToCloud(scan, {
+      cloudEnvironment: "env-1",
+      environment,
+      fetch,
+    });
     expect(replay.publication?.upload_status).toBe("accepted");
     expect(cloud.calls.slice(before).map((call) => call.method)).toEqual([
       "GET",
@@ -676,6 +756,7 @@ describe("native Cloud preflight and diagnostics", () => {
     const calls: string[] = [];
     await expect(
       publishScanToCloud(scan, {
+        cloudEnvironment: "env-1",
         environment,
         fetch: async (url, request) => {
           calls.push(request.method!);
@@ -719,6 +800,7 @@ describe("native Cloud preflight and diagnostics", () => {
     for (const dryRun of [true, false]) {
       await expect(
         publishScanToCloud(scan, {
+          cloudEnvironment: "env-1",
           dryRun,
           environment: {},
           fetch: async () => {
@@ -752,6 +834,7 @@ describe("native Cloud preflight and diagnostics", () => {
       );
       const cloud = server();
       const result = await publishScanToCloud(scan, {
+        cloudEnvironment: "env-1",
         environment,
         fetch: cloud.fetch,
       });
@@ -764,6 +847,7 @@ describe("native Cloud preflight and diagnostics", () => {
     const cloud = server();
     const base = "http://127.0.0.1:12345/imported-scans/v1";
     await publishScanToCloud(scan, {
+      cloudEnvironment: "env-1",
       environment: { ...environment, CODEX_SECURITY_CLOUD_PUBLISH_URL: base },
       fetch: async (url, request) => {
         expect(url.startsWith(base)).toBe(true);
@@ -791,6 +875,7 @@ describe("native Cloud preflight and diagnostics", () => {
       });
       await expect(
         publishScanToCloud(scan, {
+          cloudEnvironment: "env-1",
           environment,
           fetch: async () => {
             throw new Error("unexpected network");
@@ -805,6 +890,7 @@ describe("native Cloud preflight and diagnostics", () => {
     await writeFile(join(scan, "findings.json"), "{}");
     await expect(
       publishScanToCloud(scan, {
+        cloudEnvironment: "env-1",
         environment: {},
         fetch: async () => {
           throw new Error("unexpected network");
@@ -819,6 +905,7 @@ describe("native Cloud preflight and diagnostics", () => {
     const cancellation = new Error("response canceled");
     await expect(
       publishScanToCloud(scan, {
+        cloudEnvironment: "env-1",
         environment,
         signal: controller.signal,
         fetch: async () => {
@@ -832,6 +919,129 @@ describe("native Cloud preflight and diagnostics", () => {
       }),
     ).rejects.toBe(cancellation);
   });
+});
+
+describe("independent Cloud destination authorization", () => {
+  async function savedRecord(scan: string) {
+    const manifest = JSON.parse(
+      await readFile(join(scan, "scan-manifest.json"), "utf8"),
+    );
+    return {
+      scanId: manifest.scan.id as string,
+      scanDir: scan,
+      progress: { status: "complete" },
+      repositoryProvenance: {
+        remote: "https://github.com/example/repo",
+        repositoryPath: ".",
+      },
+    };
+  }
+
+  test("an unregistered manifest cannot silently select even one authorized destination", async () => {
+    const { scan, environment } = await fixture();
+    const cloud = server();
+    await expect(
+      publishScanToCloud(scan, { environment, fetch: cloud.fetch }),
+    ).rejects.toThrow("independently selected Cloud repository");
+    expect(cloud.calls.map((item) => item.method)).toEqual(["GET"]);
+    expect(cloud.calls[0]!.url).toEndWith("/destinations");
+  });
+
+  test("an explicit multi-repository environment does not authorize manifest-selected routing", async () => {
+    const { scan, environment } = await fixture();
+    const other = {
+      ...destination,
+      repository_id: "repo-2",
+      repository_full_name: "example/other",
+      repository_remote: "https://github.com/example/other",
+    };
+    const cloud = server();
+    const fetch = async (url: string, request: RequestInit) =>
+      url.endsWith("/destinations")
+        ? Response.json({
+            protocol_version: 1,
+            destinations: [destination, other],
+          })
+        : cloud.fetch(url, request);
+    await expect(
+      publishScanToCloud(scan, {
+        environment,
+        cloudEnvironment: "env-1",
+        fetch,
+      }),
+    ).rejects.toThrow("independently selected Cloud repository");
+    expect(cloud.calls).toHaveLength(0);
+  });
+
+  test("external artifacts cannot change an independently chosen repository", async () => {
+    const { scan, environment } = await fixture();
+    const path = join(scan, "scan-manifest.json");
+    const manifest = JSON.parse(await readFile(path, "utf8"));
+    manifest.scan.target.remote = "https://github.com/example/other";
+    await writeFile(path, JSON.stringify(manifest));
+    const cloud = server();
+    await expect(
+      publishScanToCloud(scan, {
+        environment,
+        cloudEnvironment: "env-1",
+        fetch: cloud.fetch,
+      }),
+    ).rejects.toThrow("does not match the independently selected");
+    expect(cloud.calls.map((item) => item.method)).toEqual(["GET"]);
+  });
+
+  test("interactive external publication uses an explicit repository choice", async () => {
+    const { scan, environment } = await fixture();
+    const cloud = server();
+    let prompted = false;
+    await publishScanToCloud(scan, {
+      environment,
+      fetch: cloud.fetch,
+      selectDestination: async (choices) => {
+        prompted = true;
+        return choices[0]!;
+      },
+    });
+    expect(prompted).toBe(true);
+    expect(cloud.create?.repository_id).toBe(destination.repository_id);
+  });
+
+  test("a completed workbench record retains automatic matching", async () => {
+    const { scan, environment } = await fixture();
+    const cloud = server();
+    await publishScanToCloud(scan, {
+      environment,
+      fetch: cloud.fetch,
+      savedScan: await savedRecord(scan),
+    });
+    expect(cloud.create?.repository_id).toBe(destination.repository_id);
+  });
+
+  test.each(["directory", "remote", "repositoryPath", "status"])(
+    "rejects a saved-scan %s mismatch before network",
+    async (field) => {
+      const { scan, environment } = await fixture();
+      const savedScan = await savedRecord(scan);
+      if (field === "directory") {
+        const other = join(await temporaryDirectory(), "claimed-existing-id");
+        await cp(scan, other, { recursive: true });
+        savedScan.scanDir = other;
+      } else if (field === "status") savedScan.progress.status = "running";
+      else if (field === "remote")
+        savedScan.repositoryProvenance.remote =
+          "https://github.com/example/other";
+      else savedScan.repositoryProvenance.repositoryPath = "nested";
+      const cloud = server();
+      await expect(
+        publishScanToCloud(scan, {
+          environment,
+          fetch: cloud.fetch,
+          savedScan,
+        }),
+      ).rejects.toThrow("saved repository provenance");
+      expect(cloud.calls).toHaveLength(0);
+    },
+  );
 });
 
 describe("Cloud environment selection", () => {

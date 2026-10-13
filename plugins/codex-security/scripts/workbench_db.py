@@ -2844,6 +2844,7 @@ def scan_result(
         "scope": scan["scope"],
         "targetPath": scan["target_path"],
         "targetRevision": scan["target_revision"],
+        "repositoryProvenance": saved_repository_provenance(scan),
         "targetSummary": scan["target_summary"],
         "updatedAt": max(
             scan["updated_at"],

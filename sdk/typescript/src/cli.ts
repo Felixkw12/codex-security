@@ -2603,7 +2603,7 @@ export async function main(
       cloudEnvironment: optionValue("--cloud-environment")
         .optional()
         .describe(
-          "Existing authorized Cloud environment ID; required when selection is ambiguous without a terminal.",
+          "Existing authorized Cloud environment ID; external scans require a single-repository environment or interactive selection.",
         ),
       workflowId: optionValue("--workflow-id")
         .optional()
@@ -2756,6 +2756,27 @@ export async function main(
                 controller.signal,
               )
           : undefined;
+        const selectDestination = prompt.isInteractive()
+          ? async (destinations: CloudDestination[]) => {
+              const selected = await prompt.select(
+                "Which Cloud repository would you like to publish to?",
+                destinations.map((item, index) => ({
+                  label: safePatchText(
+                    `${item.repository_full_name} · ${item.environment_name} · ${item.environment_id}`,
+                  ),
+                  value: String(index),
+                })),
+                undefined,
+                controller.signal,
+              );
+              const destination = destinations[Number(selected)];
+              if (destination === undefined)
+                throw new CodexSecurityError(
+                  "No Cloud repository was selected.",
+                );
+              return destination;
+            }
+          : undefined;
         let cloudEnvironment = options.cloudEnvironment;
         let selectedCloudDestinations: CloudDestination[] | undefined;
         if (options.findingId.length > 0 && options.to !== "linear") {
@@ -2854,8 +2875,11 @@ export async function main(
           runWorkbench: (args, input) =>
             dependencies.runWorkbench(args, input, controller.signal),
         };
-        const selectedScans: { scanDir: string; scanId?: string }[] =
-          directories.map((scanDir) => ({ scanDir }));
+        const selectedScans: {
+          scanDir: string;
+          scanId?: string;
+          savedScan?: Awaited<ReturnType<typeof resolveCompletedScan>>;
+        }[] = directories.map((scanDir) => ({ scanDir }));
         for (const requestedId of new Set(options.scan)) {
           controller.signal.throwIfAborted();
           const scan = await resolveCompletedScan(
@@ -2863,7 +2887,7 @@ export async function main(
             scanDependencies,
           );
           if (!selectedScans.some(({ scanId }) => scanId === scan.scanId)) {
-            selectedScans.push(scan);
+            selectedScans.push({ ...scan, savedScan: scan });
           }
         }
         if (options.workflowId !== undefined && selectedScans.length === 0) {
@@ -3073,9 +3097,23 @@ export async function main(
               controller.signal,
             );
             controller.signal.throwIfAborted();
-            selectedScans.push(
-              ...selected.map((scanId) => scansById.get(scanId)!),
-            );
+            for (const scanId of selected) {
+              const listed = scansById.get(scanId);
+              if (listed === undefined)
+                throw new CodexSecurityError("No completed scan was selected.");
+              const saved = await resolveCompletedScan(
+                scanId,
+                scanDependencies,
+              );
+              if (
+                (await realpath(saved.scanDir)) !==
+                (await realpath(listed.scanDir))
+              )
+                throw new CodexSecurityError(
+                  "The selected saved scan directory changed. Select the scan again.",
+                );
+              selectedScans.push({ ...saved, savedScan: saved });
+            }
             scanDir = selectedScans[0]!.scanDir;
           } else {
             controller.signal.throwIfAborted();
@@ -3123,7 +3161,11 @@ export async function main(
               ),
             };
             // Each scan has its own idempotent publication and processing receipt.
-            for (const { scanDir: directory, scanId } of selectedScans) {
+            for (const {
+              scanDir: directory,
+              scanId,
+              savedScan,
+            } of selectedScans) {
               if (controller.signal.aborted) {
                 finishCancellation();
                 break;
@@ -3139,6 +3181,8 @@ export async function main(
                   signal: controller.signal,
                   cloudEnvironment,
                   selectEnvironment,
+                  selectDestination,
+                  savedScan,
                   fetch: cloudFetch,
                   ...(scanId === undefined ? {} : { expectedScanId: scanId }),
                 });
@@ -3167,6 +3211,8 @@ export async function main(
             signal: controller.signal,
             cloudEnvironment,
             selectEnvironment,
+            selectDestination,
+            savedScan: selectedScans[0]?.savedScan,
             fetch: cloudFetch,
             ...(selectedScans[0]?.scanId === undefined
               ? {}

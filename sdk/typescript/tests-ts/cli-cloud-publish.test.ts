@@ -118,6 +118,74 @@ async function savedScansFixture() {
 }
 
 describe("publish scan to Cloud", () => {
+  test("an external directory cannot choose a repository inside a multi-repository environment", async () => {
+    const root = await temporaryDirectory();
+    const scanDir = join(root, "external-scan");
+    await populateScan(scanDir);
+    const credentialHome = join(root, "credentials");
+    await mkdir(credentialHome, { mode: 0o700 });
+    await writeFile(
+      join(credentialHome, "auth.json"),
+      JSON.stringify({
+        auth_mode: "chatgpt",
+        tokens: {
+          access_token: "synthetic-access-token",
+          account_id: "synthetic-account",
+        },
+      }),
+      { mode: 0o600 },
+    );
+    await writeFile(
+      join(credentialHome, "config.toml"),
+      'cli_auth_credentials_store = "file"\n',
+    );
+    const cloud = nativeCloudServer({
+      destinations: [
+        cloudDestination,
+        {
+          ...cloudDestination,
+          repository_id: "other-repo",
+          repository_remote: "https://github.com/example/other",
+          repository_full_name: "example/other",
+        },
+      ],
+    });
+    const deps = dependencies({
+      currentDirectory: root,
+      environment: {
+        CODEX_HOME: credentialHome,
+        CODEX_SECURITY_STATE_DIR: join(root, "state"),
+      },
+      onWorkbench: throwing(
+        "external manifest IDs must not authorize a workbench lookup",
+      ),
+    });
+    deps.publishPrompt = {
+      isInteractive: () => false,
+      select: unexpectedSingleSelect,
+    };
+    deps.cloudFetch = cloud.fetch;
+    const { stderr, runCli } = createCliTest(main);
+    expect(
+      await runCli(
+        [
+          "publish",
+          "scan",
+          "--scan-dir",
+          scanDir,
+          "--to",
+          "cloud",
+          "--cloud-environment",
+          "env-1",
+        ],
+        deps,
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain("independently selected Cloud repository");
+    expect(cloud.calls.map((call) => call.method)).toEqual(["GET"]);
+    expect(cloud.calls[0]!.url).toEndWith("/destinations");
+  });
+
   test("documents the findings CSV option", async () => {
     const stdout = captureCli(main, "stdout");
     expect(
@@ -799,6 +867,8 @@ describe("publish scan to Cloud", () => {
               ...directories.flatMap((directory) => ["--scan-dir", directory]),
               "--to",
               "cloud",
+              "--cloud-environment",
+              "env-1",
               "--json",
             ],
             deps,
@@ -925,6 +995,8 @@ describe("publish scan to Cloud", () => {
               ...directories.flatMap((directory) => ["--scan-dir", directory]),
               "--to",
               "cloud",
+              "--cloud-environment",
+              "env-1",
               "--json",
             ],
             stdout.stream,
@@ -1162,7 +1234,15 @@ describe("publish scan to Cloud", () => {
     try {
       await populateScan(scanDir);
       const deps = dependencies({
-        onWorkbench: (args) => {
+        onWorkbench: (args): JsonObject => {
+          if (args[0] === "get-scan")
+            return {
+              scan: {
+                scanId: "scan-1",
+                scanDir,
+                progress: { status: "complete" },
+              },
+            };
           expect(args).toEqual(["list-scans", "--status", "complete"]);
           return {
             scans: [
