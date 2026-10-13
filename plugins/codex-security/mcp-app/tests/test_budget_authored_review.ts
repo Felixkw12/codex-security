@@ -29,7 +29,7 @@ async function budgetFixture(t: TestContext, modern: boolean) {
       [
         "-c",
         `
-import json, sqlite3, sys
+import json, sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
 from workbench_test_support import begin_deep_scan, get_scan, run_workbench
@@ -55,14 +55,10 @@ discovery.mkdir(parents=True, exist_ok=True)
 manifest = directory / "artifacts/deep_discovery/coordinator-manifest.json"
 manifest.parent.mkdir(parents=True, exist_ok=True)
 manifest.write_text('{"status":"succeeded"}')
-with sqlite3.connect(state / "workbench.sqlite3") as connection:
-    connection.execute("UPDATE deep_scan_runs SET status = 'succeeded', phase = 'terminal', terminal_reason = 'saturated', manifest_path = ?, completed_at = updated_at WHERE scan_id = ?",
-        (str(directory / "scan-manifest.json" if sys.argv[3] == "true" else manifest), scan_id))
 print(json.dumps(get_scan(state, scan_id)["scan"]))
 `,
         path.join(pluginRoot, "tests"),
         root,
-        String(modern),
       ],
       { encoding: "utf8" },
     ),
@@ -79,7 +75,33 @@ print(json.dumps(get_scan(state, scan_id)["scan"]))
     mode: scan.mode,
   };
 
-  return { root, scan, context };
+  const finishDeepRun = () => {
+    execFileSync(
+      python,
+      [
+        "-c",
+        `
+import sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as connection:
+    connection.execute("UPDATE deep_scan_runs SET status = 'succeeded', phase = 'terminal', terminal_reason = 'saturated', manifest_path = ?, completed_at = updated_at WHERE scan_id = ?",
+        (sys.argv[2], sys.argv[3]))
+`,
+        path.join(root, "state", "workbench.sqlite3"),
+        path.join(
+          scan.scanDir,
+          modern
+            ? "scan-manifest.json"
+            : "artifacts/deep_discovery/coordinator-manifest.json",
+        ),
+        scan.scanId,
+      ],
+      { encoding: "utf8" },
+    );
+  };
+  // Legacy discovery-only runs hand publication back to the parent.
+  if (!modern) finishDeepRun();
+
+  return { root, scan, context, finishDeepRun };
 }
 
 for (const withSnapshot of [true, false]) {
@@ -89,7 +111,10 @@ for (const withSnapshot of [true, false]) {
       : ["pending", "new-phase", "finding", "terminal"]) {
       for (const interrupted of [false, true]) {
         test(`budget completion preserves authored review: ${modern ? "modern" : "legacy"}, ${resolution}, interrupted=${interrupted}, snapshot=${withSnapshot}`, async (t) => {
-          const { root, scan, context } = await budgetFixture(t, modern);
+          const { root, scan, context, finishDeepRun } = await budgetFixture(
+            t,
+            modern,
+          );
           const ledger = path.join(
             scan.scanDir,
             "artifacts/02_discovery/candidate_ledger.jsonl",
@@ -152,6 +177,8 @@ for (const withSnapshot of [true, false]) {
                     ),
                 );
           await writeDraft(draft);
+          // Modern completion selects an already accepted parent draft.
+          if (modern) finishDeepRun();
           const checkpoints = path.join(scan.scanDir, "checkpoints");
           const saved = new Map(
             await Promise.all(
