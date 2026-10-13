@@ -7691,6 +7691,7 @@ async function patchPublicationDestination(
           ]);
           const options = {
             environment: {
+              GIT_CONFIG: undefined,
               GIT_CONFIG_PARAMETERS: [
                 dependencies.environment["GIT_CONFIG_PARAMETERS"],
                 config,
