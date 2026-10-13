@@ -1,3 +1,4 @@
+import { workbenchArgs } from "./workbench-arguments.js";
 import type { ScanOptions } from "./api.js";
 import type { ScanExpectation } from "./contract.js";
 import type { JsonObject } from "./config.js";
@@ -56,23 +57,14 @@ export async function registerScan(options: {
           scanOptions.resumeScanId,
         ])
       : await workbench(
-          [
-            "register-cli-scan",
-            "--repository",
-            repo,
-            "--scan-dir",
+          workbenchArgs("register-cli-scan", {
+            repository: repo,
             scanDir,
-            "--registration-json-stdin",
-            ...(scanOptions.archiveExisting === true
-              ? ["--archive-existing"]
-              : []),
-            ...(archivedScanDir === null
-              ? []
-              : ["--archived-scan-dir", archivedScanDir]),
-            ...(scanOptions.parentScanId === undefined
-              ? []
-              : ["--parent-scan-id", scanOptions.parentScanId]),
-          ],
+            registrationJsonStdin: true,
+            archiveExisting: scanOptions.archiveExisting === true,
+            archivedScanDir: archivedScanDir ?? undefined,
+            parentScanId: scanOptions.parentScanId,
+          }),
           JSON.stringify({
             recipe,
             ...(options.parentScanRole === undefined

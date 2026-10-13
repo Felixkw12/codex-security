@@ -12,6 +12,7 @@ import {
 } from "./cost-model.js";
 import {
   scanActivityFromSessionEvent,
+  sessionContentText,
   type ScanActivity,
 } from "./scan-activity.js";
 import {
@@ -41,39 +42,17 @@ export interface ScanSessionEvent {
   event: Record<string, unknown>;
 }
 
-interface SessionReasoning {
-  id: string;
-  text: string;
-  raw: boolean;
-  activity: ScanActivity | null;
+type SessionReasoning = ReturnType<typeof createSessionReasoning>;
+
+function createSessionReasoning(id: string, text = "") {
+  return { id, text, raw: false, activity: null as ScanActivity | null };
 }
 
-interface SessionUsage {
-  tracked: boolean;
-  offset: number;
+type SessionUsage = ReturnType<typeof createSessionUsage> & {
   fileVersion?: Stats;
-  pendingLine: Buffer[];
-  pendingLineBytes: number;
-  unreadable: boolean;
-  threadId: string | null;
-  parentThreadId: string | null;
-  workingDirectory: string | null;
-  startedAt: number | null;
-  inheritedUsage: ScanTokenUsage | null;
-  replaying: boolean;
-  usage: ScanTokenUsage | null;
-  responseUsage: ScanTokenUsage | null;
-  responseIds: Set<string>;
-  calls: Map<string, ScanActivity>;
-  activities: ScanActivity[];
   progress?: ScanProgress[];
-  filesCompleted: number;
-  filesTotal: number | null;
-  prose: Set<string>;
-  reasoning: SessionReasoning | null;
-  reasoningCount: number;
   events?: Record<string, unknown>[];
-}
+};
 
 interface ScanCostTrackerOptions {
   codexHome: string;
@@ -100,28 +79,28 @@ interface ScanCostSnapshot {
 const COST_POLL_INTERVAL_MS = 100;
 const SESSION_READ_SIZE = 64 * 1_024;
 
-function createSessionUsage(): SessionUsage {
+function createSessionUsage() {
   return {
     tracked: false,
     offset: 0,
-    pendingLine: [],
+    pendingLine: [] as Buffer[],
     pendingLineBytes: 0,
     unreadable: false,
-    threadId: null,
-    parentThreadId: null,
-    workingDirectory: null,
-    startedAt: null,
-    inheritedUsage: null,
+    threadId: null as string | null,
+    parentThreadId: null as string | null,
+    workingDirectory: null as string | null,
+    startedAt: null as number | null,
+    inheritedUsage: null as ScanTokenUsage | null,
     replaying: false,
-    usage: null,
-    responseUsage: null,
-    responseIds: new Set(),
-    calls: new Map(),
-    activities: [],
+    usage: null as ScanTokenUsage | null,
+    responseUsage: null as ScanTokenUsage | null,
+    responseIds: new Set<string>(),
+    calls: new Map<string, ScanActivity>(),
+    activities: [] as ScanActivity[],
     filesCompleted: 0,
-    filesTotal: null,
-    prose: new Set(),
-    reasoning: null,
+    filesTotal: null as number | null,
+    prose: new Set<string>(),
+    reasoning: null as SessionReasoning | null,
     reasoningCount: 0,
   };
 }
@@ -695,12 +674,10 @@ function readSessionEvent(
         if (activity === null || session.prose.has(proseKey(activity))) {
           continue;
         }
-        session.reasoning = {
-          id: activity.id,
-          text: activity.description,
-          raw: false,
-          activity: null,
-        };
+        session.reasoning = createSessionReasoning(
+          activity.id,
+          activity.description,
+        );
         recordReasoningActivity(session, activity);
       }
       return;
@@ -708,12 +685,10 @@ function readSessionEvent(
     const activity = scanActivityFromSessionEvent(event, repository);
     if (activity !== null) {
       if (activity.kind === "reasoning") {
-        const reasoning = (session.reasoning ??= {
-          id: activity.id,
-          text: activity.description,
-          raw: false,
-          activity: null,
-        });
+        const reasoning = (session.reasoning ??= createSessionReasoning(
+          activity.id,
+          activity.description,
+        ));
         recordReasoningActivity(session, {
           ...activity,
           id: reasoning.id,
@@ -836,12 +811,9 @@ function readSessionReasoning(
   ) {
     session.reasoning = null;
   }
-  const reasoning = (session.reasoning ??= {
-    id: `reasoning-${++session.reasoningCount}`,
-    text: "",
-    raw: false,
-    activity: null,
-  });
+  const reasoning = (session.reasoning ??= createSessionReasoning(
+    `reasoning-${++session.reasoningCount}`,
+  ));
   if (reasoning.raw && !raw) return;
   if (raw && !reasoning.raw) {
     reasoning.text = "";
@@ -894,9 +866,7 @@ function sessionProgressUpdates(
   payload: Readonly<Record<string, unknown>>,
 ): ScanProgress[] {
   if (payload["type"] === "message" && payload["role"] === "assistant") {
-    const content = payload["content"];
-    if (!Array.isArray(content)) return [];
-    return scanProgressUpdatesFromText(sessionContentText(content, false));
+    return scanProgressUpdatesFromText(sessionContentText(payload["content"]));
   }
   if (
     payload["type"] !== "function_call_output" &&
@@ -909,29 +879,11 @@ function sessionProgressUpdates(
   const output =
     typeof value === "string"
       ? value
-      : Array.isArray(value)
-        ? sessionContentText(value, true)
-        : null;
-  if (payload["status"] === "failed" || output === null) {
+      : sessionContentText(value, ["output_text", "input_text"]);
+  if (payload["status"] === "failed") {
     return [];
   }
   return scanProgressUpdatesFromText(output);
-}
-
-function sessionContentText(
-  content: readonly unknown[],
-  includeInputText: boolean,
-): string {
-  return content
-    .filter(
-      (item): item is Record<string, unknown> & { text: string } =>
-        isRecord(item) &&
-        (item["type"] === "output_text" ||
-          (includeInputText && item["type"] === "input_text")) &&
-        typeof item["text"] === "string",
-    )
-    .map((item) => item.text)
-    .join("\n");
 }
 
 export function addTokenUsage(

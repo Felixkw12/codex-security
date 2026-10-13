@@ -1,3 +1,5 @@
+import { workbenchArgs } from "./workbench-arguments.js";
+import { scanSkillConfig } from "./scan-skill-paths.js";
 import type { TurnOptions } from "@openai/codex-sdk";
 import { isSafeNonNegativeInteger as safeInteger } from "./value.js";
 /// <reference lib="esnext.disposable" preserve="true" />
@@ -1737,13 +1739,10 @@ export class CodexSecurity {
         persistenceSignal: AbortSignal | undefined,
       ): Promise<void> => {
         try {
-          await workbench({ ...workbenchOptions, signal: persistenceSignal }, [
-            "set-scan-thread",
-            "--scan-id",
-            scanId,
-            "--thread-id",
-            threadId,
-          ]);
+          await workbench(
+            { ...workbenchOptions, signal: persistenceSignal },
+            workbenchArgs("set-scan-thread", { scanId, threadId }),
+          );
         } catch (error) {
           notifyObserver(
             "onWarning",
@@ -3090,10 +3089,7 @@ export class CodexSecurity {
     await this.close();
   }
 
-  async #authentication(): Promise<{
-    codexHome: string;
-    environment: Record<string, string>;
-  }> {
+  async #authentication() {
     this.#requireOpen();
     const environment = selectedScanEnvironment(
       this.#runtime?.environment ?? this.#dependencies.environment,
@@ -3236,9 +3232,13 @@ export class CodexSecurity {
         await this.#refreshPersistentRuntime(runtime, source, signal);
       }
       const environment = { ...runtime.environment };
-      const effectiveConfig = scanCyberAccessConfig(
-        structuredClone(runtime.effectiveConfig ?? source.configuration),
-        options.cyberAccessProgram,
+      const effectiveConfig = await scanSkillConfig(
+        scanCyberAccessConfig(
+          structuredClone(runtime.effectiveConfig ?? source.configuration),
+          options.cyberAccessProgram,
+        ),
+        runtime.plugin,
+        runtime.codexHome,
       );
       const approvalPolicy = scanApprovalPolicy(effectiveConfig);
       const preflightConfig = scanPreflightCodexConfig(effectiveConfig);
@@ -3600,18 +3600,13 @@ export class CodexSecurity {
       throwIfAborted(signal, scanDir);
       const registration = await workbench(
         workbenchOptions,
-        [
-          "register-cli-scan",
-          "--repository",
-          local.repository,
-          "--scan-dir",
+        workbenchArgs("register-cli-scan", {
+          repository: local.repository,
           scanDir,
-          "--registration-json-stdin",
-          ...(options.archiveExisting ? ["--archive-existing"] : []),
-          ...(options.parentScanId === undefined
-            ? []
-            : ["--parent-scan-id", options.parentScanId]),
-        ],
+          registrationJsonStdin: true,
+          archiveExisting: Boolean(options.archiveExisting),
+          parentScanId: options.parentScanId,
+        }),
         JSON.stringify({
           recipe: {
             ...scanRecipe({
@@ -3692,11 +3687,10 @@ export class CodexSecurity {
         output_tokens: 0,
       };
       const cost = estimateScanCost(model, usage);
-      await workbench(workbenchOptions, [
-        "prepare-scan-completion",
-        "--scan-id",
-        scanId,
-      ]);
+      await workbench(
+        workbenchOptions,
+        workbenchArgs("prepare-scan-completion", { scanId }),
+      );
       const completion = await workbench(workbenchOptions, [
         "complete-scan",
         "--scan-id",
@@ -4522,6 +4516,18 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
     }
     const features = capabilityFeatures(source["features"]);
     if (Object.keys(features).length > 0) result["features"] = features;
+    const skills = source["skills"];
+    if (isRecord(skills) && Array.isArray(skills["config"])) {
+      result["skills"] = {
+        config: skills["config"].flatMap((entry) =>
+          isRecord(entry) &&
+          safeString(entry["path"]) &&
+          typeof entry["enabled"] === "boolean"
+            ? [{ path: entry["path"], enabled: entry["enabled"] }]
+            : [],
+        ),
+      };
+    }
     const agents = source["agents"];
     if (isRecord(agents)) {
       const sanitized: JsonObject = {};

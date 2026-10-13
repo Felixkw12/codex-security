@@ -25,8 +25,6 @@ import { writePreparedScanDraft } from "../../../../sdk/typescript/src/scan-draf
 import { promises as fs } from "node:fs";
 import { join, sep } from "node:path";
 import type * as z from "zod/v4";
-import commonSchema from "../../schemas/definitions/artifact-common.schema.json";
-import scanDraftDocument from "../../schemas/tools/scan-draft.schema.json";
 import type { ArtifactContext } from "./artifact-context.js";
 import type { RunArtifactWorkbench } from "./artifact-context.js";
 import {
@@ -36,10 +34,8 @@ import {
   readArtifactTextWithMetadata,
   replaceArtifactText,
 } from "./artifact-io.js";
-import {
-  loadArtifactZodSchema,
-  type SchemaDocument,
-} from "./artifact-schema-loader.js";
+import { projectArtifactToolSchema } from "./artifact-schema-loader.js";
+import { artifactSchemaDocuments } from "./artifact-contracts.js";
 
 type JsonObject = Record<string, unknown>;
 
@@ -80,24 +76,16 @@ type PublishScanDraft = (
   reconciledCheckpointIds: readonly string[],
 ) => Promise<string[] | void>;
 
-const schemaDocuments = [commonSchema, scanDraftDocument] as SchemaDocument[];
-
-export const scanDraftInputSchema = loadArtifactZodSchema(
-  schemaDocuments,
-  scanDraftDocument.$id,
-  "scanDraftInput",
-) as z.ZodType<ScanDraftInput>;
-
-export const completedScanInputSchema = loadArtifactZodSchema(
-  schemaDocuments,
-  scanDraftDocument.$id,
-  "completedScanInput",
-) as z.ZodType<CompletedScanInput>;
+const draftDefinitions = artifactSchemaDocuments["tools/scan-draft"].$defs;
+export const scanDraftInputSchema = projectArtifactToolSchema(
+  draftDefinitions.scanDraftInput,
+);
+export const completedScanInputSchema = draftDefinitions.completedScanInput;
 
 /** Replace the three existing final-input documents without completing or sealing a scan. */
 export async function recordCodexSecurityScanDraft(
   context: ArtifactContext,
-  input: ScanDraftInput,
+  input: unknown,
   publishDraft: PublishScanDraft,
   signal?: AbortSignal,
 ): Promise<ScanDraftResult> {
@@ -154,7 +142,7 @@ export async function recordCodexSecurityScanDraft(
 /** Stage a parent draft, then publish it under the workbench completion lock. */
 export async function recordCodexSecurityScanDraftViaWorkbench(
   context: ArtifactContext,
-  input: ScanDraftInput,
+  input: unknown,
   runWorkbench: RunArtifactWorkbench,
   signal?: AbortSignal,
 ): Promise<ScanDraftResult> {

@@ -109,6 +109,16 @@ export const claimToken = "19bfba38-0913-4bd7-86ef-134e9a4d9a42";
 
 type Layout = "standard" | "diff" | "deep";
 
+// Fixtures also exercise malformed and legacy inputs before runtime validation.
+type DraftFixture = Omit<
+  ScanDraftInput,
+  "findings" | "coverage" | "threatModel"
+> & {
+  findings: Record<string, unknown>[];
+  coverage: Record<string, unknown>;
+  threatModel?: Record<string, unknown>;
+};
+
 export function draftFixture(root: string, layout: Layout) {
   const context: ArtifactContext = {
     root,
@@ -141,7 +151,7 @@ export function draftFixture(root: string, layout: Layout) {
   const draft = (
     coverage: { deferred?: unknown[]; [key: string]: unknown } = {},
     complete = false,
-  ): ScanDraftInput => ({
+  ): DraftFixture => ({
     scanId,
     ...{ handoffClaimToken: claimToken },
     complete,
@@ -159,8 +169,7 @@ export function draftFixture(root: string, layout: Layout) {
     root,
     context,
     draft,
-    write: (input: ScanDraftInput) =>
-      recordCodexSecurityScanDraft(context, input),
+    write: (input: unknown) => recordCodexSecurityScanDraft(context, input),
     read: async () => await readJson(root, "coverage.json"),
   };
 }

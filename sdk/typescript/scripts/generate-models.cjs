@@ -113,10 +113,12 @@ async function generateSemanticModels() {
   // Resolve the plugin's URI references locally, using the same source schema as
   // runtime draft validation. Common definitions contain no further references.
   const input = JSON.parse(
-    JSON.stringify(schema).replaceAll(
-      "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/",
-      "#/$defs/common/$defs/",
-    ),
+    JSON.stringify(schema)
+      .replaceAll(`${schema.$id}#/$defs/`, "#/$defs/")
+      .replaceAll(
+        "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/",
+        "#/$defs/common/$defs/",
+      ),
   );
   input.$defs.common = common;
   const model = await compileModel(input, "SemanticScan");
@@ -136,17 +138,19 @@ async function generateSemanticModels() {
 Promise.all([
   generate().then((document) => ["models.ts", document]),
   generateSemanticModels().then((document) => ["semantic-models.ts", document]),
-  Promise.resolve([
-    "finding-normalization.ts",
-    "/* Generated from plugin finding-normalization.ts. Run `pnpm generate:models`. */\n" +
-      readFileSync(
-        join(
-          packageRoot,
-          "../../plugins/codex-security/mcp-app/src/finding-normalization.ts",
+  ...["finding-normalization", "workbench-arguments"].map((name) =>
+    Promise.resolve([
+      `${name}.ts`,
+      `/* Generated from plugin ${name}.ts. Run \`pnpm generate:models\`. */\n` +
+        readFileSync(
+          join(
+            packageRoot,
+            `../../plugins/codex-security/mcp-app/src/${name}.ts`,
+          ),
+          "utf8",
         ),
-        "utf8",
-      ),
-  ]),
+    ]),
+  ),
 ]).then((documents) => {
   for (const [filename, models] of documents) {
     const output = join(packageRoot, "src", filename);

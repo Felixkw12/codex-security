@@ -44,12 +44,9 @@ export async function readCodexHomeConfig(
   }
 }
 
-export interface LoginResult {
-  success: boolean;
-  exitCode: number | null;
-  stdout: string;
-  stderr: string;
-}
+export interface LoginResult extends Awaited<
+  ReturnType<typeof runCodexCommand>
+> {}
 
 export interface AccountStatus {
   authenticated: boolean;

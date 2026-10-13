@@ -28,7 +28,13 @@ const canonicalScanDraftInputSchema = loadArtifactZodSchema(
         ...scanManifestDocument.$defs,
         ...findingsDocument.$defs,
         ...scanDraftDocument.$defs,
-        scanId: scanManifestDocument.properties.scan.properties.id,
+        scanDraftInput: {
+          ...scanDraftDocument.$defs.scanDraftInput,
+          properties: {
+            ...scanDraftDocument.$defs.scanDraftInput.properties,
+            scanId: scanManifestDocument.properties.scan.properties.id,
+          },
+        },
         scope: {
           ...scanDraftDocument.$defs.scope,
           properties:

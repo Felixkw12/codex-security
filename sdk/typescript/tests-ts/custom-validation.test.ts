@@ -333,6 +333,25 @@ describe("custom validation", () => {
     ).rejects.toThrow("unsealed custom-validation draft");
   });
 
+  test.each([
+    "findings/check/details.md",
+    "findings/child-scan/check/details.md",
+  ])(
+    "retains nested report paths through custom validation: %s",
+    async (reportPath) => {
+      const f = await fixture();
+      f.findings.findings[0]!.writeup = { reportPath };
+      await save(join(f.scanDir, "findings.json"), f.findings);
+      const run = mock(async () => JSON.stringify(result("reportable")));
+      await runCustomValidation({ ...f, run });
+      expect(run).toHaveBeenCalledTimes(1);
+      const saved = await json<FindingsDocument>(
+        join(f.scanDir, "findings.json"),
+      );
+      expect(saved.findings[0]!.writeup?.reportPath).toBe(reportPath);
+    },
+  );
+
   test("validates persisted findings with empty optional dataflow details", async () => {
     const f = await fixture(3);
     for (const [index, finding] of f.findings.findings.entries()) {

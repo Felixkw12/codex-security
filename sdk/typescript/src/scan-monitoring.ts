@@ -1,3 +1,4 @@
+import { workbenchArgs } from "./workbench-arguments.js";
 import type { ScanOptions } from "./api.js";
 import type { ScanMode } from "./targets.js";
 import type { ScanCost, ScanCostTracker } from "./cost.js";
@@ -81,13 +82,13 @@ export function createScanCostReporter({
             "The new cost limit must exceed the current limit and estimated cost.",
           );
         }
-        await workbench({ ...activeScan.options, signal: budgetSignal }, [
-          "set-scan-cost-limit",
-          "--scan-id",
-          activeScan.id,
-          "--max-cost-usd",
-          String(next),
-        ]);
+        await workbench(
+          { ...activeScan.options, signal: budgetSignal },
+          workbenchArgs("set-scan-cost-limit", {
+            scanId: activeScan.id,
+            maxCostUsd: String(next),
+          }),
+        );
         if (budgetSignal.aborted) return;
         maxCostUsd = next;
         notifyObserver(

@@ -1,37 +1,32 @@
-import type { z } from "zod";
-import definitions from "../../schemas/definitions/discovery-candidate.schema.json";
-import type {
-  RawDiscoveryCandidate,
-  RawDiscoveryLocation,
-} from "./artifact-discovery.js";
-import { loadArtifactZodSchema } from "./artifact-schema-loader.js";
+import { z } from "zod";
+import { discoveryLocationRoles } from "./discovery-location-roles.js";
 
-type CandidateShape = {
-  [K in keyof RawDiscoveryCandidate]-?: K extends "locations"
-    ? z.ZodArray<z.ZodType<Required<RawDiscoveryLocation>>>
-    : z.ZodType<RawDiscoveryCandidate[K]>;
-} & { candidate_id: z.ZodString };
-
-const candidate = loadArtifactZodSchema(
-  [definitions],
-  definitions.$id,
-  "discoveryCandidate",
-) as z.ZodObject<CandidateShape>;
+const nonEmptyString = z
+  .string()
+  .min(1)
+  .regex(/\S/u, "Must contain non-whitespace text");
+const candidateLocationSchemaV1 = z
+  .strictObject({
+    path: nonEmptyString,
+    start_line: z.number().int().positive(),
+    end_line: z.number().int().positive(),
+    role: z.enum(discoveryLocationRoles),
+  })
+  .refine((location) => location.end_line >= location.start_line, {
+    message: "end_line must be greater than or equal to start_line",
+    path: ["end_line"],
+  });
 
 /** Exact discovery rows emitted by the shared candidate normalizer. */
-export const candidateSchemaV1 = candidate
-  .strict()
-  .extend({
-    candidate_id: candidate.shape.candidate_id
-      .min(1)
-      .regex(/\S/u, "Must contain non-whitespace text"),
-    locations: candidate.shape.locations.element
-      .refine((location) => location.end_line >= location.start_line, {
-        message: "end_line must be greater than or equal to start_line",
-        path: ["end_line"],
-      })
-      .array()
-      .min(1),
+export const candidateSchemaV1 = z
+  .strictObject({
+    candidate_id: nonEmptyString.regex(/^(?!\.{1,2}$)[^/\\]+$/u),
+    cwe_ids: z.array(z.string().regex(/^CWE-[1-9]\d*$/u)),
+    locations: z.array(candidateLocationSchemaV1).min(1),
+    summary: nonEmptyString,
+    evidence: nonEmptyString,
+    context: nonEmptyString.optional(),
+    instance: nonEmptyString.optional(),
   })
   .meta({
     id: "codex-security-standard-scan-candidate-v1",
