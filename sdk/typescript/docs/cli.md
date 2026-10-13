@@ -1607,6 +1607,10 @@ then uses `triage-finding` to assess matched advisories. Install
 OSV-Scanner v2.6.0 (the tested contract) or a compatible executable on PATH. It
 is not installed by the SDK. Files are discovered in nested projects too.
 
+The file matrix describes supported inventory inputs. It does not establish
+per-language accuracy of the model's static applicability assessments or
+function-level reachability coverage.
+
 | Language                | Dependency files                                                                                                            |
 | ----------------------- | --------------------------------------------------------------------------------------------------------------------------- |
 | JavaScript / TypeScript | `package-lock.json` / `npm-shrinkwrap.json` v2/v3, `pnpm-lock.yaml` v9                                                      |
@@ -1667,7 +1671,9 @@ field.
 Retained triage ranks apply within each single-match result; they do not form a
 priority queue across the scan. The recorded skill digest includes the triage
 skill, output schema, and required local assessment references.
-The cost limit applies to the total across assessment turns. If source files
+The cost limit applies to the estimated total across assessment turns. It is an
+interruption threshold, not a pre-request billing ceiling; in-flight work can
+exceed it. If source files
 change, assessment stops; earlier results describe the original source and the
 run is partial.
 Invalid arguments, cancellation, and exceeded budgets use the existing SDK
@@ -1686,6 +1692,12 @@ or automatically changes merge policy.
 `needs_review` is a completed uncertain assessment; `failed` means an assessment
 was unavailable. The run's coverage status describes advisory matching, while
 its overall status also accounts for assessment execution.
+The report summarizes assessment execution and model cost before listing
+components, with diagnostics near the top. A zero-match result with incomplete
+coverage does not establish a clean repository; model assessment does not run
+when there are no retained matches. A null model cost means cost was not
+reported, not a measured zero-dollar run. The example runner's exit code describes
+overall execution separately from OSV's retained process exit codes.
 
 OSV sends package identities to its advisory service, not repository source.
 The assessment uses the existing Codex provider/model/authentication settings

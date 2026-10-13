@@ -806,6 +806,46 @@ describe("SCA OSV normalization", () => {
       });
     },
   );
+  test.each(["2.0", null])(
+    "merges duplicate match metadata in either order with initial severity %p",
+    (severity) => {
+      const first = advisory("A", ["B"]);
+      const second = advisory("B", ["A"]);
+      second.modified = "2026-02-01T00:00:00Z";
+      second.affected[0]!.ranges[0]!.events.push({ fixed: "1.4.0" });
+      const packages = [first, second].map((vulnerability, index) => ({
+        ...rawOutput("package-lock.json", [vulnerability]).results[0]!
+          .packages[0]!,
+        groups:
+          index === 0 && severity === null
+            ? []
+            : [
+                {
+                  ids: [vulnerability.id],
+                  max_severity: index === 0 ? severity : "9.8",
+                },
+              ],
+      }));
+      for (const ordered of [packages, [...packages].reverse()]) {
+        const raw = rawOutput("package-lock.json");
+        raw.results[0]!.packages = ordered;
+        const normalized = normalizeOsvOutput(raw, {
+          repositoryPath: "/repo",
+          inputs: [input()],
+        });
+        expect(normalized.components).toHaveLength(1);
+        expect(normalized.matches).toHaveLength(1);
+        expect(normalized.matches[0]).toMatchObject({
+          advisoryIds: ["A", "B"],
+          aliases: ["A", "B"],
+          severity: "9.8",
+          fixedVersions: ["1.3.0", "1.4.0"],
+          advisoryModifiedAt: ["2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z"],
+          sourceAdvisories: ordered.flatMap((item) => item.vulnerabilities),
+        });
+      }
+    },
+  );
   test("uses scanner group aliases and severity and keeps unavailable fixes empty", () => {
     const raw = rawOutput("package-lock.json", [
       { id: "A" },

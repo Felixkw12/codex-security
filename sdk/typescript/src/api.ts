@@ -5261,12 +5261,39 @@ function dependencyPermissions(
       join(home, ".m2", "settings.xml"),
       join(home, ".m2", "settings-security.xml"),
       join(home, ".aws"),
+      join(home, ".netrc"),
+      join(home, "_netrc"),
+      join(home, ".gem", "credentials"),
+      join(home, ".local", "share", "gem", "credentials"),
+      join(home, ".composer", "auth.json"),
+      join(home, ".config", "composer", "auth.json"),
+      join(home, ".gradle", "gradle.properties"),
+      join(home, ".nuget", "NuGet", "NuGet.Config"),
+      join(home, ".config", "NuGet", "NuGet.Config"),
     ]),
     ...[process.env, environment].flatMap((source) => {
       const xdg = environmentEntry(source, "XDG_CONFIG_HOME");
+      const dataHome = environmentEntry(source, "XDG_DATA_HOME");
+      const composerHome = environmentEntry(source, "COMPOSER_HOME");
+      const gradleHome = environmentEntry(source, "GRADLE_USER_HOME");
+      const appData = environmentEntry(source, "AppData");
       return [
-        ...(xdg ? [join(xdg, "git", "credentials")] : []),
-        ...["AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE"].flatMap(
+        ...(xdg
+          ? [
+              join(xdg, "git", "credentials"),
+              join(xdg, "composer", "auth.json"),
+            ]
+          : []),
+        ...(dataHome ? [join(dataHome, "gem", "credentials")] : []),
+        ...(composerHome ? [join(composerHome, "auth.json")] : []),
+        ...(gradleHome ? [join(gradleHome, "gradle.properties")] : []),
+        ...(process.platform === "win32" && appData
+          ? [
+              join(appData, "Composer", "auth.json"),
+              join(appData, "NuGet", "NuGet.Config"),
+            ]
+          : []),
+        ...["AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE", "NETRC"].flatMap(
           (name) => {
             const file = environmentEntry(source, name);
             return file ? [file] : [];

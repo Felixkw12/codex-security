@@ -7,7 +7,12 @@ performs static application assessment, and produces a report, conservative
 base/head comparison, and developer-selected update handoff.
 See [the runnable examples](../examples/sca/README.md).
 
-## Verification
+## Historical verification
+
+These dated checks describe their recorded revisions. They are not totals for
+the current branch; final-branch validation belongs in the pull request's test
+record. A passing suite also does not establish that a native sandbox assertion
+ran on a platform where that test was skipped or sandbox startup failed.
 
 Focused checks rerun on Linux on October 2, 2026:
 
@@ -50,6 +55,12 @@ The separate pinned OSV tests exercised the real scanner against a fictional
 offline database. These verify distinct parts of the pipeline and are not a
 public-advisory accuracy study. See [evaluation QA](../evals/triage-finding/sca/QA.md)
 for the six-call smoke measurements and its citation failure.
+
+A real-project scan through the actual scanner, public advisory matching, and
+model assessment is separate evidence. Inventory retained after an advisory
+connection failure validates recovery, not successful matching or assessment.
+For that outcome, record matching as incomplete, assessment as not run, and null
+model cost as unreported. Keep this distinction when recording future live runs.
 
 The live SDK smoke identified two integration requirements now covered by
 regressions: Codex structured output needs explicit types and required object

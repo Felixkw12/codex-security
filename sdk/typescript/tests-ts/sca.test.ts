@@ -936,6 +936,11 @@ process.exit(0);
       join(dirname(f.repository), "registry-config", "git", "credentials"),
       join(dirname(f.repository), "cloud-credentials"),
       join(dirname(f.repository), "cloud-config"),
+      join(dirname(f.repository), "custom-netrc"),
+      join(dirname(f.repository), "gem-data", "gem", "credentials"),
+      join(dirname(f.repository), "composer-home", "auth.json"),
+      join(dirname(f.repository), "gradle-home", "gradle.properties"),
+      join(dirname(f.repository), "registry-config", "composer", "auth.json"),
     ];
     Object.assign(f.environment, {
       NPM_CONFIG_USERCONFIG: npmFiles[1],
@@ -943,13 +948,17 @@ process.exit(0);
       XDG_CONFIG_HOME: dirname(dirname(configuredStores[0]!)),
       AWS_SHARED_CREDENTIALS_FILE: configuredStores[1],
       AWS_CONFIG_FILE: configuredStores[2],
+      NETRC: configuredStores[3],
+      XDG_DATA_HOME: dirname(dirname(configuredStores[4]!)),
+      COMPOSER_HOME: dirname(configuredStores[5]!),
+      GRADLE_USER_HOME: dirname(configuredStores[6]!),
     });
     await using security = f.client;
     const result = await security.scanDependencies({
       repositoryPath: f.repository,
       outputDir: f.outputDir,
     });
-    expect(result.status).toBe("completed");
+    expect(result.status, result.diagnostics.join("\n")).toBe("completed");
     const options = f.captured.codex!;
     const launcher = f.environment.CODEX_CLI_PATH!;
     const native = resolveCodexCommand({}).command;
@@ -973,6 +982,15 @@ process.exit(0);
         ".m2/settings-security.xml",
         ".aws/credentials",
         ".aws/config",
+        ".netrc",
+        "_netrc",
+        ".gem/credentials",
+        ".local/share/gem/credentials",
+        ".composer/auth.json",
+        ".config/composer/auth.json",
+        ".gradle/gradle.properties",
+        ".nuget/NuGet/NuGet.Config",
+        ".config/NuGet/NuGet.Config",
       ].map((relative) => join(f.selectedUserHome, relative)),
       join(f.ambientHome, "sessions", "synthetic-session.jsonl"),
       join(f.ambientHome, "archived_sessions", "synthetic-session.jsonl"),
@@ -1031,6 +1049,15 @@ process.exit(0);
       join(homedir(), ".m2", "settings.xml"),
       join(homedir(), ".m2", "settings-security.xml"),
       join(homedir(), ".aws"),
+      join(homedir(), ".netrc"),
+      join(homedir(), "_netrc"),
+      join(homedir(), ".gem", "credentials"),
+      join(homedir(), ".local", "share", "gem", "credentials"),
+      join(homedir(), ".composer", "auth.json"),
+      join(homedir(), ".config", "composer", "auth.json"),
+      join(homedir(), ".gradle", "gradle.properties"),
+      join(homedir(), ".nuget", "NuGet", "NuGet.Config"),
+      join(homedir(), ".config", "NuGet", "NuGet.Config"),
       join(homedir(), ".codex", "auth.json"),
       join(homedir(), ".codex", ".credentials.json"),
       join(homedir(), ".codex", "config.toml"),
@@ -1062,7 +1089,7 @@ process.exit(0);
         f.outputDir,
         "/bin/sh",
         "-c",
-        'set -eu; cat "$1" >/dev/null; "$2" --version; if printf changed >"$3" 2>/dev/null; then exit 1; fi; shift 3; for private in "$@"; do if cat "$private" >/dev/null 2>&1; then exit 1; fi; done',
+        'set -eu; cat "$1" >/dev/null; "$2" --version; if printf changed >"$3" 2>/dev/null; then exit 1; fi; shift 3; failed=0; for private in "$@"; do if cat "$private" >/dev/null 2>&1; then printf "readable private fixture: %s\\n" "$private" >&2; failed=1; fi; done; exit "$failed"',
         "sca-permissions",
         join(f.outputDir, "sca-result.json"),
         native,
@@ -1074,22 +1101,101 @@ process.exit(0);
     if (
       !probe.success &&
       process.platform === "linux" &&
-      probe.stderr.includes(
-        "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted",
+      /bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted|app-server socket directory must be a user-owned directory with mode 0700/u.test(
+        probe.stderr,
       )
     ) {
-      const configProbe = await runCodexCommand(
-        { command: launcher },
-        [...configArgs, "features", "list"],
-        options.env!,
+      throw new Error(
+        `Native credential-read enforcement was not exercised: ${probe.stderr}`,
       );
-      expect(configProbe.success, configProbe.stderr).toBe(true);
-      return;
     }
     expect(probe.success, probe.stderr).toBe(true);
     expect(probe.stdout).toContain("codex-cli");
     expect(await readFile(source, "utf8")).toBe(
       "synthetic initial source context",
+    );
+  },
+);
+
+test.each(["absolute", "relative"] as const)(
+  "dependency triage isolates %s credential-store overrides across concurrent scans",
+  async (pathKind) => {
+    const fixtures = await Promise.all([
+      fixture({ homeVariable: "HOME" }),
+      fixture({ homeVariable: "USERPROFILE" }),
+    ]);
+    const expected = fixtures.map((f) => {
+      const base =
+        pathKind === "relative"
+          ? "../private-stores"
+          : join(dirname(f.repository), "private-stores");
+      const overrides = {
+        NETRC: join(base, "netrc"),
+        XDG_CONFIG_HOME: join(base, "config"),
+        XDG_DATA_HOME: join(base, "data"),
+        COMPOSER_HOME: join(base, "composer"),
+        GRADLE_USER_HOME: join(base, "gradle"),
+        AppData: join(base, "appdata"),
+      };
+      Object.assign(
+        f.environment,
+        Object.fromEntries(
+          Object.entries(overrides).map(([name, value]) => [
+            process.platform === "win32" ? name.toLowerCase() : name,
+            value,
+          ]),
+        ),
+      );
+      return [
+        overrides.NETRC,
+        join(overrides.XDG_CONFIG_HOME, "composer", "auth.json"),
+        join(overrides.XDG_DATA_HOME, "gem", "credentials"),
+        join(overrides.COMPOSER_HOME, "auth.json"),
+        join(overrides.GRADLE_USER_HOME, "gradle.properties"),
+        ...(process.platform === "win32"
+          ? [
+              join(overrides.AppData, "Composer", "auth.json"),
+              join(overrides.AppData, "NuGet", "NuGet.Config"),
+            ]
+          : []),
+      ].map((path) => resolve(f.outputDir, path));
+    });
+    await Promise.all(
+      fixtures.map(async (f, index) => {
+        await using security = f.client;
+        const result = await security.scanDependencies({
+          repositoryPath: f.repository,
+          outputDir: f.outputDir,
+        });
+        expect(result.status, result.diagnostics.join("\n")).toBe("completed");
+        const permissions = parseToml(
+          f.captured.codex!.configOverrides!.find((value) =>
+            value.startsWith("permissions.codex_security_dependencies="),
+          )!,
+        )["permissions"] as Record<string, JsonObject>;
+        const filesystem = permissions["codex_security_dependencies"]![
+          "filesystem"
+        ] as JsonObject;
+        for (const path of expected[index]!)
+          expect(filesystem[path]).toEqual({ ".": "deny" });
+        for (const path of expected[1 - index]!)
+          expect(filesystem[path]).toBeUndefined();
+        for (const path of [
+          ".netrc",
+          "_netrc",
+          ".gem/credentials",
+          ".local/share/gem/credentials",
+          ".composer/auth.json",
+          ".config/composer/auth.json",
+          ".gradle/gradle.properties",
+          ".nuget/NuGet/NuGet.Config",
+          ".config/NuGet/NuGet.Config",
+        ]) {
+          expect(filesystem[join(f.selectedUserHome, path)]).toEqual({
+            ".": "deny",
+          });
+        }
+      }),
     );
   },
 );

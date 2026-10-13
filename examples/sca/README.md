@@ -28,12 +28,23 @@ projects are never built to discover dependencies. OSV configuration exclusions
 remain in effect and are described in the report. The scanner does not provide
 a full dependency graph or package introduction chain.
 
+Supported file formats describe inventory coverage, not demonstrated model
+accuracy for each language. Applicability assessments are static reviews, not
+verified function-call graphs.
+
 Read `report.md` and `sca-result.json`. Raw scanner stdout and diagnostics are
 `osv-output.json` and `osv-stderr.log`. Every advisory match remains visible,
 including assessments marked `not_actionable`, unavailable, or cancelled.
 `needs_review` is a completed uncertain assessment; `failed` means no valid
 assessment was available. Static assessment neither reproduces vulnerabilities
 nor changes dependencies.
+
+Start with the report's run, matching-coverage, and assessment summaries and its
+diagnostics. Zero matches with incomplete coverage do not establish a clean
+repository. Assessment does not run when no matches were retained, and an
+unreported model cost is not a measured zero-dollar result. The existing
+`maxCostUsd` option interrupts on estimated assessment cost across turns; it is
+not a hard billing ceiling.
 
 The runner returns 0 for complete execution, including advisory matches, and 2
 for partial/failed execution. [ci.yml](ci.yml) shows artifact-only CI steps;

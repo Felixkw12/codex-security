@@ -990,7 +990,27 @@ export function normalizeOsvOutput(
         };
         const existing = matches.find((candidate) => candidate.id === match.id);
         if (existing === undefined) matches.push(match);
-        else existing.sourceAdvisories.push(...match.sourceAdvisories);
+        else {
+          existing.sourceAdvisories.push(...match.sourceAdvisories);
+          existing.advisoryIds = unique([
+            ...existing.advisoryIds,
+            ...match.advisoryIds,
+          ]);
+          existing.fixedVersions = unique([
+            ...existing.fixedVersions,
+            ...match.fixedVersions,
+          ]);
+          existing.advisoryModifiedAt = unique([
+            ...existing.advisoryModifiedAt,
+            ...match.advisoryModifiedAt,
+          ]);
+          if (
+            match.severity !== null &&
+            (existing.severity === null ||
+              Number(match.severity) > Number(existing.severity))
+          )
+            existing.severity = match.severity;
+        }
       }
     }
   }

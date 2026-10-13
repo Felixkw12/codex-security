@@ -78,10 +78,22 @@ export function renderScaReport(result: ScaResult): string {
   const assessments = new Map(
     result.assessments.map((item) => [item.matchId, item]),
   );
+  const assessmentCounts = {
+    completed: 0,
+    failed: 0,
+    cancelled: 0,
+    not_started: 0,
+  };
+  for (const match of result.matches)
+    assessmentCounts[assessments.get(match.id)?.status ?? "not_started"]++;
   const sections = [
     "# Dependency assessment",
     `Run: **${result.status}**. Matching coverage: **${result.coverage.status}**.`,
     `Observed components: **${result.components.length}**. Advisory matches: **${result.matches.length}**. Unresolved packages: **${result.coverage.unresolvedPackages}**.`,
+    result.matches.length === 0
+      ? "Model assessment: **not run** (no advisory matches to assess)."
+      : `Model assessments: **${assessmentCounts.completed} completed**, **${assessmentCounts.failed} failed**, **${assessmentCounts.cancelled} cancelled**, **${assessmentCounts.not_started} not started**.`,
+    `Model cost (USD): **${result.model.costUsd ?? "unavailable"}**.`,
     `Repository: ${code(result.repository.path)}. Revision: ${code(result.repository.revision ?? "unknown")}. Working tree: ${result.repository.dirty === null ? "unknown" : result.repository.dirty ? "modified" : "clean"}.`,
     `Scanner: ${code(result.scanner.name)} ${code(result.scanner.version ?? "unknown")}. Advisory mode: ${result.scanner.advisoryMode}. Completed: ${result.scanner.completedAt || "not completed"}.`,
     "## Coverage",
@@ -113,6 +125,8 @@ export function renderScaReport(result: ScaResult): string {
         : "No advisory matches were reported, but matching coverage is incomplete.",
     );
   }
+  if (result.diagnostics.length)
+    sections.push("## Diagnostics", bullets(result.diagnostics, ""));
   sections.push(
     "## Observed components",
     bullets(
@@ -157,8 +171,6 @@ export function renderScaReport(result: ScaResult): string {
         "Next action: review the retained advisory match and unavailable assessment before deciding on an update.",
       );
   }
-  if (result.diagnostics.length)
-    sections.push("## Diagnostics", bullets(result.diagnostics, ""));
   sections.push(
     "## Retained evidence",
     `Scanner JSON: ${code(result.scanner.rawOutputPath)}. Scanner diagnostics: ${code(result.scanner.stderrPath)}.`,

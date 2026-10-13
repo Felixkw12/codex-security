@@ -233,20 +233,65 @@ describe("SCA report", () => {
       ...result.diagnostics,
     ])
       expect(report).toContain(value);
-  });
-
-  test("does not describe a zero-match incomplete run as clean", () => {
-    const result = fixture();
-    result.matches = [];
-    result.coverage.status = "failed";
-    result.coverage.inputs = [];
-    const report = renderScaReport(result);
-    expect(report).toContain("matching coverage is incomplete");
-    expect(report).toContain("No lockfile inputs were evaluated");
-    expect(report).not.toContain(
-      "No advisory matches were reported within the effective evaluated scope",
+    expect(report.indexOf(result.diagnostics[0]!)).toBeLessThan(
+      report.indexOf("synthetic-unmatched-package"),
     );
   });
+
+  test.each(["partial", "failed"] as const)(
+    "distinguishes a zero-match %s run from model assessment",
+    (status) => {
+      const result = fixture();
+      result.matches = [];
+      result.status = status;
+      result.coverage.status = status;
+      if (status === "failed") result.coverage.inputs = [];
+      const report = renderScaReport(result);
+      expect(report).toContain("matching coverage is incomplete");
+      expect(report).toContain("Model assessment: **not run**");
+      if (status === "failed")
+        expect(report).toContain("No lockfile inputs were evaluated");
+      expect(report).not.toContain(
+        "No advisory matches were reported within the effective evaluated scope",
+      );
+    },
+  );
+
+  test("summarizes assessment outcomes without losing unassessed matches", () => {
+    const result = fixture();
+    for (const id of ["failed", "cancelled", "pending"])
+      addMatch(result, id, "1.0.0");
+    result.assessments = [
+      {
+        matchId: "match-1",
+        status: "completed",
+        verdict: "needs_review",
+        triage: triage("needs_review"),
+        error: null,
+      },
+      ...(["failed", "cancelled"] as const).map((status) => ({
+        matchId: status,
+        status,
+        verdict: null,
+        triage: null,
+        error: "Assessment unavailable",
+      })),
+    ];
+    const report = renderScaReport(result);
+    for (const outcome of ["completed", "failed", "cancelled", "not started"])
+      expect(report).toContain(`1 ${outcome}`);
+  });
+
+  test.each([null, 0, 0.12])(
+    "reports model cost %p without assuming zero",
+    (cost) => {
+      const result = fixture();
+      result.model.costUsd = cost;
+      expect(renderScaReport(result)).toContain(
+        `Model cost (USD): **${cost === null ? "unavailable" : cost}**`,
+      );
+    },
+  );
 
   test("renders package names containing Markdown delimiters without losing their identity", () => {
     const result = fixture();
