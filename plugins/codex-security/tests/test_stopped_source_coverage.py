@@ -179,6 +179,12 @@ def test_stopped_recovery_preserves_accepted_coverage_without_worker_id_collisio
         for filename in ("scan-manifest.json", "findings.json", "coverage.json"):
             (scan.scan_dir / filename).unlink()
     if parent_draft == "interrupted":
+        with workbench_db:
+            workbench_db.execute(
+                "UPDATE deep_scan_runs SET status = 'running', coordinator_generation = 2, "
+                "terminal_reason = NULL, completed_at = NULL WHERE scan_id = ?",
+                (scan.scan_id,),
+            )
         for filename in ("scan-manifest.json", "findings.json", "coverage.json"):
             os.utime(scan.scan_dir / filename, ns=(100, 100))
         coverage_path = scan.scan_dir / "coverage.json"
@@ -188,6 +194,7 @@ def test_stopped_recovery_preserves_accepted_coverage_without_worker_id_collisio
         staged.write_text(
             json.dumps(
                 {
+                    "deepScanPublication": {"coordinatorGeneration": 2, "resultPath": str(reducer)},
                     "manifest": json.loads((scan.scan_dir / "scan-manifest.json").read_text()),
                     "findings": {"findings": aggregate_findings},
                     "coverage": {**scan.coverage, **source_coverage},
@@ -770,7 +777,14 @@ def test_deep_recovery_reconciles_recognized_projected_candidates(
             }
         )
     )
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET status = 'running', coordinator_generation = 2, "
+            "terminal_reason = NULL, completed_at = NULL WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
     documents = {
+        "deepScanPublication": {"coordinatorGeneration": 2, "resultPath": None},
         "manifest": json.loads(manifest_path.read_text()),
         "findings": {"findings": []},
         "coverage": json.loads((scan.scan_dir / "coverage.json").read_text()),

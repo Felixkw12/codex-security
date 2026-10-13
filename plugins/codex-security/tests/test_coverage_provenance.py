@@ -477,7 +477,14 @@ def test_selected_parent_checkpoint_supplies_review_projection(
         "surfaceIds": [projected_surface["id"]],
         "provenance": {"workerId": worker_id, "attempt": 1, "sourceId": "gap"},
     }
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET status = 'running', coordinator_generation = 2, "
+            "terminal_reason = NULL, completed_at = NULL WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
     documents = {
+        "deepScanPublication": {"coordinatorGeneration": 2, "resultPath": None},
         "manifest": json.loads((scan.scan_dir / "scan-manifest.json").read_text()),
         "findings": {"findings": []},
         "coverage": {
@@ -574,7 +581,14 @@ def test_retained_worker_string_question_is_not_duplicated(
 def publish_review_projection(
     workbench_api, connection, scan, coverage, *, findings=None, complete=None
 ):
+    with connection:
+        connection.execute(
+            "UPDATE deep_scan_runs SET status = 'running', coordinator_generation = 2, "
+            "terminal_reason = NULL, completed_at = NULL WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
     documents = {
+        "deepScanPublication": {"coordinatorGeneration": 2, "resultPath": None},
         "manifest": json.loads((scan.scan_dir / "scan-manifest.json").read_text()),
         "findings": {"findings": [] if findings is None else findings},
         "coverage": coverage,

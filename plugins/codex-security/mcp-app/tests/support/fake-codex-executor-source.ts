@@ -42,12 +42,11 @@ ${jsonLineInputSource(`      if (message.method === 'initialized') continue;
 } else {
 const stdin = (await process.stdin.toArray()).join('');
 let scopeInput;
-if (stdin.includes('CAPTURE_SCOPE_INPUT')) {
+{
   const { parse } = await import(${JSON.stringify(import.meta.resolve("smol-toml"))});
   const configuration = process.argv.flatMap((arg, index) => arg === '--config' || arg === '-c' ? [parse(process.argv[index + 1])] : []).findLast(value => value.mcp_servers?.cs_artifacts);
-  const environment = configuration.mcp_servers.cs_artifacts.env;
-  const file = environment.CODEX_SECURITY_INCLUDE_PATHS_FILE;
-  scopeInput = { file, paths: JSON.parse(file ? readFileSync(file, 'utf8') : environment.CODEX_SECURITY_INCLUDE_PATHS_JSON) };
+  const file = configuration?.mcp_servers.cs_artifacts.env.CODEX_SECURITY_INCLUDE_PATHS_FILE;
+  if (file) scopeInput = { file, ...JSON.parse(readFileSync(file, 'utf8')) };
 }
 
 const profileIndex = process.argv.indexOf('--profile');

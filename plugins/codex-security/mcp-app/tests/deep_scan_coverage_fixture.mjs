@@ -677,17 +677,15 @@ export async function publishCoverageFixture(
     });
     run = await store.get(run.scanId, threadId);
   }
-  if (workflowVersion) {
-    run = await store.get(run.scanId, threadId);
-    assert.equal(run.workflowVersion, workflowVersion);
-    const claim = await store.claimCoordinator({
-      scanId: run.scanId,
-      threadId,
-    });
-    assert.equal(claim.acquired, true);
-    run = claim.run;
-    assert.equal(run.workflowVersion, workflowVersion);
-  }
+  run = await store.get(run.scanId, threadId);
+  if (workflowVersion) assert.equal(run.workflowVersion, workflowVersion);
+  const claim = await store.claimCoordinator({
+    scanId: run.scanId,
+    threadId,
+  });
+  assert.equal(claim.acquired, true);
+  run = claim.run;
+  if (workflowVersion) assert.equal(run.workflowVersion, workflowVersion);
   let discoveryCalls = 0;
   let interruptedDiscovery;
   const executor = {
@@ -765,7 +763,7 @@ export async function publishCoverageFixture(
     executor,
     pluginRoot,
     retryDelaysMs: [1],
-    onComplete: async (draft, signal) => {
+    onComplete: async (draft, signal, publication) => {
       if (missingProjection || descriptiveVariants) {
         expectedCoverage = structuredClone(draft.coverage);
         draft = structuredClone(draft);
@@ -788,6 +786,7 @@ export async function publishCoverageFixture(
         draft,
         runWorkbench,
         signal,
+        publication,
         draft.coverage.resolvedDeferred,
       );
     },
