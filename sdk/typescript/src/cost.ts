@@ -1483,15 +1483,24 @@ export class ScanCostTracker {
         position = completion.position;
       }
     }
+    // A retained source row may have supplied scope before its lossy live copy
+    // arrived. Reusing that receipt does not locate the live command.
+    const source = this.#inventoryFrontier.source;
+    const admittedSource =
+      source?.inventoryAdmitted === true &&
+      source.position === position &&
+      source.markerIndex === inventory.index &&
+      progressKey(source.update) === progressKey(inventory.progress);
     // A matched review can corroborate an accepted inventory or admit a lost
     // inventory without assigning its command a guessed occurrence. A later
     // inventory still wins, and duplicate lossy output remains ambiguous.
     const bounded =
       position !== null &&
       (position > this.#inventoryFrontier.position ||
-        (pending.position !== null &&
-          position === this.#inventoryFrontier.position &&
-          inventory.index >= this.#inventoryFrontier.markerIndex)) &&
+        (position === this.#inventoryFrontier.position &&
+          ((pending.position !== null &&
+            inventory.index >= this.#inventoryFrontier.markerIndex) ||
+            admittedSource))) &&
       (position < live.position ||
         (pending.position !== null &&
           position === live.position &&

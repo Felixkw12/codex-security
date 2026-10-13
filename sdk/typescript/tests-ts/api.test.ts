@@ -10439,6 +10439,383 @@ describe("CodexSecurity orchestration", () => {
     );
   });
 
+  describe("admitted inventory across truncated live copies", () => {
+    const progress = (
+      phase: ScanProgress["phase"],
+      filesCompleted: number,
+      filesTotal: number,
+    ): ScanProgress => ({ phase, filesCompleted, filesTotal });
+    const inventory = (total: number) => progress("discovery", 0, total);
+    type Value = string | ScanProgress | readonly ScanProgress[];
+    type Step =
+      | readonly [
+          (
+            | "save"
+            | "save-quiet"
+            | "live"
+            | "save-message"
+            | "live-message"
+            | "save-response"
+            | "live-changed"
+          ),
+          string,
+          Value,
+        ]
+      | readonly [
+          "worker" | "additional-worker" | "check" | "scope" | "receipt",
+          ScanProgress,
+        ]
+      | readonly ["poll"]
+      | readonly ["boundary"]
+      | readonly ["resolve"]
+      | readonly ["begin"];
+    type Scenario = {
+      name: string;
+      initialScope: number | null;
+      partitions?: readonly ("batch" | "each")[];
+      expected: ScanProgress;
+      steps: readonly Step[];
+      stopBeforeResolution?: boolean;
+    };
+    const text = (value: Value) =>
+      typeof value === "string"
+        ? value
+        : [value]
+            .flat()
+            .map((p) => progressMarker(p.phase, p.filesCompleted, p.filesTotal))
+            .join("\n");
+    const outputs = (values: readonly ScanProgress[], visible: number) => {
+      const pre = values
+        .slice(0, visible)
+        .map((p) => text(p))
+        .join("\n");
+      const prefix =
+        (pre ? pre + "\n" : "") +
+        "h".repeat(32_743 - (pre ? pre.length + 1 : 0));
+      const rest =
+        values
+          .slice(visible)
+          .map((p) => text(p))
+          .join("\n") || "m".repeat(100);
+      return {
+        full: `${prefix}\n${rest}\n${commandTail}`,
+        saved: `${prefix}\n... command output truncated for persistence ...\n${commandTail}`,
+      };
+    };
+    const scenarios: Scenario[] = [];
+    for (const initialScope of [8, null]) {
+      for (const mode of [
+        "delayed",
+        "early",
+        "exact",
+        "untruncated",
+        "ambiguous",
+        "unadmitted",
+        "new turn",
+      ] as const) {
+        const old = outputs([inventory(9)], 0);
+        const current = outputs(
+          [inventory(8), progress("validation", 1, 8)],
+          1,
+        );
+        const unresolved = mode === "ambiguous" || mode === "new turn";
+        const reviewed = progress("reporting", 1, unresolved ? 9 : 8);
+        const settled = unresolved
+          ? progress("attack_path", 6, 9)
+          : progress("reporting", 3, 8);
+        const currentText =
+          mode === "untruncated"
+            ? text([inventory(8), progress("validation", 1, 8)])
+            : current.full;
+        const currentSaved =
+          mode === "untruncated" ? currentText : current.saved;
+        scenarios.push({
+          name: `delayed inventory (mode=${mode}, initial=${initialScope})`,
+          initialScope,
+          partitions: mode === "unadmitted" ? ["batch"] : undefined,
+          expected: settled,
+          steps: [
+            ["save", "old", old.saved],
+            ["save", "current", currentSaved],
+            ...(mode === "ambiguous"
+              ? ([["save", "repeated current", currentSaved]] as Step[])
+              : []),
+            ...(mode === "unadmitted"
+              ? []
+              : ([
+                  ["poll"],
+                  [
+                    "scope",
+                    mode === "untruncated"
+                      ? progress("validation", 1, 8)
+                      : inventory(8),
+                  ],
+                ] as Step[])),
+            ...(mode === "new turn" ? ([["begin"]] as Step[]) : []),
+            ...(mode === "early"
+              ? ([["live-changed", "current", currentText]] as Step[])
+              : []),
+            ["save-quiet", "review", progress("reporting", 1, 8)],
+            ["live-changed", "old", old.full],
+            ["poll"],
+            ["resolve"],
+            ...(mode === "early"
+              ? []
+              : ([
+                  [
+                    mode === "exact" ? "live" : "live-changed",
+                    "current",
+                    currentText,
+                  ],
+                ] as Step[])),
+            ["live", "review", progress("reporting", 1, 8)],
+            ["poll"],
+            ["check", reviewed],
+            ["worker", progress("attack_path", 6, 9)],
+            ["poll"],
+            ["check", unresolved ? settled : reviewed],
+            ...(unresolved
+              ? []
+              : ([
+                  ["additional-worker", progress("attack_path", 2, 8)],
+                  ["poll"],
+                  ["check", progress("attack_path", 2, 8)],
+                  ["save", "followup", progress("reporting", 3, 8)],
+                  ["poll"],
+                  ["check", settled],
+                ] as Step[])),
+          ],
+        });
+      }
+    }
+    test.each(
+      scenarios.flatMap((scenario) =>
+        [false, true].flatMap((workerFirst) =>
+          (scenario.partitions ?? (["batch", "each"] as const)).flatMap(
+            (partition) =>
+              [false, true].map((stopBeforeResolution) => ({
+                ...scenario,
+                workerFirst,
+                partition,
+                stopBeforeResolution,
+              })),
+          ),
+        ),
+      ),
+    )(
+      "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, partition=$partition)",
+      async ({
+        steps,
+        expected,
+        initialScope,
+        workerFirst,
+        stopBeforeResolution,
+        partition,
+      }) => {
+        const { root, repository, codexHome, scanDir } =
+          await scanDirectories();
+        const updates: ScanProgress[] = [];
+        const checkpoints: {
+          actual: ScanProgress | undefined;
+          expected: ScanProgress;
+          scopeOnly?: boolean;
+        }[] = [];
+        let tracker: ScanCostTracker | undefined;
+        const originalStart = ScanCostTracker.prototype.start;
+        const starting = spyOn(
+          ScanCostTracker.prototype,
+          "start",
+        ).mockImplementation(function (
+          this: ScanCostTracker,
+          threadId: string,
+        ) {
+          originalStart.call(this, threadId);
+          if (threadId === "thread-1") tracker = this;
+        });
+        let parentPath = "",
+          workerPath = "";
+        const originalReaddir = fsPromises.readdir;
+        const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
+          ...args: Parameters<typeof originalReaddir>
+        ) => {
+          const entries = await originalReaddir(...args);
+          if (String(args[0]) !== dirname(parentPath)) return entries;
+          const first = basename(workerFirst ? workerPath : parentPath);
+          return entries.toSorted(
+            (left, right) =>
+              Number(String(right.name) === first) -
+              Number(String(left.name) === first),
+          );
+        }) as typeof originalReaddir);
+        const client = TestClient.withDependencies({
+          ...scanRuntimeDependencies(codexHome, scanDir),
+          runWorkbench: async (
+            _options: unknown,
+            args: readonly string[],
+            input?: string,
+          ): Promise<JsonObject> =>
+            args[0] === "register-cli-scan"
+              ? {
+                  ...mockScanRegistration(args, input),
+                  scopeFileCount: initialScope,
+                }
+              : mockWorkbench(args, input),
+          createCodex: codexFactory(async () => {
+            await copyCompletedScan(root);
+            parentPath = await writeUsageSession(codexHome, "thread-1", {});
+            workerPath = await writeUsageSession(
+              codexHome,
+              "worker-thread",
+              {},
+              { parent: "thread-1" },
+            );
+            async function* events(): AsyncGenerator<ThreadEvent> {
+              expect(tracker).toBeDefined();
+              await tracker!.stop();
+              for (const [index, step] of steps.entries()) {
+                if (step[0] === "begin") {
+                  tracker!.beginParentTurn(true);
+                  continue;
+                }
+                if (step[0] === "resolve") {
+                  if (stopBeforeResolution) {
+                    await tracker!.stop();
+                    await tracker!.refresh();
+                  }
+                  continue;
+                }
+                if (step[0] === "boundary") {
+                  if (partition !== "batch") await tracker!.refresh();
+                } else if (step[0] === "poll") await tracker!.refresh();
+                else if (step[0] === "check" || step[0] === "scope")
+                  checkpoints.push({
+                    actual: updates.at(-1),
+                    expected: step[1],
+                    scopeOnly: step[0] === "scope",
+                  });
+                else if (step[0] === "live-changed")
+                  yield completedCommand(
+                    `${step[1]} displayed`,
+                    text(step[2]),
+                    `item-${index}`,
+                  );
+                else if (step[0] === "save-response")
+                  await appendFile(
+                    parentPath,
+                    jsonLines([
+                      {
+                        type: "response_item",
+                        payload: {
+                          type: "message",
+                          role: "assistant",
+                          content: [
+                            { type: "output_text", text: text(step[2]) },
+                          ],
+                        },
+                      },
+                    ]) + "\n",
+                  );
+                else if (step[0] === "live-message")
+                  yield {
+                    type: "item.completed",
+                    item: {
+                      id: `item-${index}`,
+                      type: "agent_message",
+                      text: text(step[2]),
+                    },
+                  };
+                else if (step[0] === "save-message")
+                  await appendFile(
+                    parentPath,
+                    jsonLines([
+                      {
+                        type: "event_msg",
+                        payload: {
+                          type: "item_completed",
+                          item: {
+                            type: "AgentMessage",
+                            id: `native-${index}`,
+                            content: [{ type: "Text", text: text(step[2]) }],
+                          },
+                        },
+                      },
+                    ]) + "\n",
+                  );
+                else if (step[0] === "live")
+                  yield completedCommand(
+                    step[1],
+                    text(step[2]),
+                    `item-${index}`,
+                  );
+                else if (step[0] === "save" || step[0] === "save-quiet")
+                  await appendFile(
+                    parentPath,
+                    jsonLines([
+                      nativeCommand(step[1], text(step[2]), `native-${index}`),
+                    ]) + "\n",
+                  );
+                else
+                  await appendFile(
+                    step[0] === "additional-worker"
+                      ? await writeUsageSession(
+                          codexHome,
+                          "followup-worker-thread",
+                          {},
+                          { parent: "thread-1" },
+                        )
+                      : step[0] === "receipt"
+                        ? parentPath
+                        : workerPath,
+                    jsonLines([
+                      {
+                        type: "response_item",
+                        payload: {
+                          type: "custom_tool_call_output",
+                          call_id: `worker-${index}`,
+                          output: text(step[1]),
+                        },
+                      },
+                    ]) + "\n",
+                  );
+                if (
+                  partition === "each" &&
+                  step[0] !== "save-quiet" &&
+                  (step[0].startsWith("save") || step[0] === "receipt")
+                )
+                  await tracker!.refresh();
+              }
+              await tracker!.refresh();
+              await tracker!.refresh();
+              await tracker!.stop();
+            }
+            return { events: completedEvents("thread-1", events()) };
+          }),
+        });
+        try {
+          await client.run(repository, {
+            onProgress: (update) => updates.push(update),
+          });
+          expect(updates.at(-1)).toEqual(expected);
+          for (const checkpoint of checkpoints)
+            if (checkpoint.scopeOnly)
+              expect(checkpoint.actual).toMatchObject({
+                filesCompleted: checkpoint.expected.filesCompleted,
+                filesTotal: checkpoint.expected.filesTotal,
+              });
+            else expect(checkpoint.actual).toEqual(checkpoint.expected);
+          const settled = [...updates];
+          await tracker!.refresh();
+          await tracker!.stop();
+          expect(updates).toEqual(settled);
+        } finally {
+          await client.close();
+          starting.mockRestore();
+          listing.mockRestore();
+        }
+      },
+    );
+  });
+
   describe("saved inventory receipts and live prefix proof", () => {
     const progress = (
       phase: ScanProgress["phase"],
