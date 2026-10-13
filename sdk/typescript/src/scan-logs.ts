@@ -72,10 +72,7 @@ interface SessionLog {
   path: string;
 }
 
-async function* scanSessions(
-  codexHome: string,
-  directory = "sessions",
-): AsyncGenerator<SessionLog> {
+async function* scanSessions(codexHome: string, directory = "sessions") {
   for await (const path of sessionFiles(
     join(codexHome, directory),
     readsCompressedSessions,

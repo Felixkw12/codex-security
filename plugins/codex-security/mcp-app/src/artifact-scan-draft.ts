@@ -35,7 +35,9 @@ import {
   readArtifactTextWithMetadata,
   requireArtifactRoot,
 } from "./artifact-io.js";
+import { artifactSchemaDocuments } from "./artifact-contracts.js";
 import {
+  projectArtifactToolSchema,
   loadArtifactZodSchema,
   type SchemaDocument,
 } from "./artifact-schema-loader.js";
@@ -79,13 +81,11 @@ type PublishScanDraft = (
   reconciledCheckpointIds: readonly string[],
 ) => Promise<string[] | void>;
 
-const schemaDocuments = [commonSchema, scanDraftDocument] as SchemaDocument[];
+const draftDefinitions = artifactSchemaDocuments["tools/scan-draft"].$defs;
 
-export const scanDraftInputSchema = loadArtifactZodSchema(
-  schemaDocuments,
-  scanDraftDocument.$id,
-  "scanDraftInput",
-) as z.ZodType<ScanDraftInput>;
+export const scanDraftInputSchema = projectArtifactToolSchema(
+  draftDefinitions.scanDraftInput,
+);
 
 // Keep draft completion/host-field handling, using canonical persisted field rules.
 const canonicalScanDraftInputSchema = loadArtifactZodSchema(
@@ -98,6 +98,13 @@ const canonicalScanDraftInputSchema = loadArtifactZodSchema(
         ...findingsDocument.$defs,
         ...scanDraftDocument.$defs,
         scanId: scanManifestDocument.properties.scan.properties.id,
+        scanDraftInput: {
+          ...scanDraftDocument.$defs.scanDraftInput,
+          properties: {
+            ...scanDraftDocument.$defs.scanDraftInput.properties,
+            scanId: scanManifestDocument.properties.scan.properties.id,
+          },
+        },
         scope: {
           ...scanDraftDocument.$defs.scope,
           properties:
@@ -149,11 +156,7 @@ const canonicalScanDraftInputSchema = loadArtifactZodSchema(
   "scanDraftInput",
 ) as z.ZodType<ScanDraftInput>;
 
-export const completedScanInputSchema = loadArtifactZodSchema(
-  schemaDocuments,
-  scanDraftDocument.$id,
-  "completedScanInput",
-) as z.ZodType<CompletedScanInput>;
+export const completedScanInputSchema = draftDefinitions.completedScanInput;
 
 /** Replace the three existing final-input documents without completing or sealing a scan. */
 export async function recordCodexSecurityScanDraft(
@@ -1079,7 +1082,7 @@ function parsePersistedDraft(
 
 function parsePersistedCheckpoint(
   input: Record<string, unknown>,
-  schema = scanDraftInputSchema,
+  schema: z.ZodType<ScanDraftInput> = scanDraftInputSchema,
 ): ScanDraftInput {
   const compatible = structuredClone(input);
   if (isObject(compatible.scope)) {

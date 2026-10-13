@@ -1,4 +1,5 @@
 import type { JsonObject, ScanResults } from "./src/types.js";
+import { workbenchArgs } from "./src/workbench-arguments.js";
 import {
   readingAnnotations,
   writingAnnotations,
@@ -827,11 +828,9 @@ export function createCodexSecurityServer(): McpServer {
       _meta: appMeta,
     },
     async ({ targetPath }) => {
-      const target = await runWorkbench([
-        "inspect-target",
-        "--target-path",
-        targetPath,
-      ]);
+      const target = await runWorkbench(
+        workbenchArgs("inspect-target", { targetPath }),
+      );
       return scanActionResult(
         { target },
         "Validated the local Codex Security target.",
@@ -1142,7 +1141,7 @@ export function createCodexSecurityServer(): McpServer {
     },
     async ({ scanId }) =>
       scanActionResult(
-        await runWorkbench(["recover-scan-results", "--scan-id", scanId]),
+        await runWorkbench(workbenchArgs("recover-scan-results", { scanId })),
         "Recovered retained Codex Security scan results.",
       ),
   );
@@ -1384,7 +1383,7 @@ export function createCodexSecurityServer(): McpServer {
       _meta: appMeta,
     },
     async ({ scanId, userContext }) => {
-      const current = await runWorkbench(["get-scan", "--scan-id", scanId]);
+      const current = await runWorkbench(workbenchArgs("get-scan", { scanId }));
       const workspace = isJsonObject(current.workspace)
         ? current.workspace
         : undefined;
@@ -1428,7 +1427,7 @@ export function createCodexSecurityServer(): McpServer {
       extra,
     ) => {
       const modelSettings = codexModelSettingsFromExtra(extra);
-      const current = await runWorkbench(["get-scan", "--scan-id", scanId]);
+      const current = await runWorkbench(workbenchArgs("get-scan", { scanId }));
       const scan = isJsonObject(current.scan) ? current.scan : undefined;
       const progress =
         scan && isJsonObject(scan.progress) ? scan.progress : undefined;
@@ -1606,15 +1605,13 @@ export function createCodexSecurityServer(): McpServer {
     },
     async ({ occurrenceId, requestId, actionToken }) =>
       scanActionResult(
-        await runWorkbench([
-          "request-finding-remediation",
-          "--occurrence-id",
-          occurrenceId,
-          "--request-id",
-          requestId,
-          "--action-token",
-          actionToken,
-        ]),
+        await runWorkbench(
+          workbenchArgs("request-finding-remediation", {
+            occurrenceId,
+            requestId,
+            actionToken,
+          }),
+        ),
         "Queued the local Codex Security finding remediation request.",
       ),
   );
@@ -1631,19 +1628,15 @@ export function createCodexSecurityServer(): McpServer {
     },
     async ({ occurrenceId, requestId, expectedVersion, action, actionToken }) =>
       scanActionResult(
-        await runWorkbench([
-          "request-finding-remediation-action",
-          "--occurrence-id",
-          occurrenceId,
-          "--request-id",
-          requestId,
-          "--expected-version",
-          String(expectedVersion),
-          "--action",
-          action,
-          "--action-token",
-          actionToken,
-        ]),
+        await runWorkbench(
+          workbenchArgs("request-finding-remediation-action", {
+            occurrenceId,
+            requestId,
+            expectedVersion: String(expectedVersion),
+            action,
+            actionToken,
+          }),
+        ),
         `Queued the local Codex Security finding remediation ${action} request.`,
       ),
   );

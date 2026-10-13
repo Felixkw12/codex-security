@@ -1,9 +1,5 @@
 import type * as z from "zod/v4";
-import definitions from "../../schemas/definitions/discovery-candidate.schema.json";
-import {
-  loadArtifactZodSchema,
-  type SchemaDocument,
-} from "./artifact-schema-loader.js";
+import { artifactSchemaDocuments } from "./artifact-contracts.js";
 
 export interface DiscoveryCandidate extends Record<string, unknown> {
   candidate_id: string;
@@ -20,11 +16,9 @@ export interface DiscoveryCandidate extends Record<string, unknown> {
   instance?: string;
 }
 
-const candidate = loadArtifactZodSchema(
-  [definitions] as SchemaDocument[],
-  definitions.$id,
-  "discoveryCandidate",
-) as z.ZodObject;
+const candidate =
+  artifactSchemaDocuments["definitions/discovery-candidate"].$defs
+    .discoveryCandidate;
 
 function validLocations(value: DiscoveryCandidate): boolean {
   return value.locations.every(

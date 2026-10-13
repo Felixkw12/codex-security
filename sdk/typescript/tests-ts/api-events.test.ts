@@ -486,9 +486,8 @@ describe("one-shot scan events", () => {
     expect(warnings).toEqual([]);
   });
 
-  test.each([false, true])(
-    "captures warning observers before payload evaluation and isolates failures (admit: %s)",
-    async (admit) => {
+  for (const admit of [false, true]) {
+    test(`captures warning observers before payload evaluation and isolates failures (admit: ${admit})`, async () => {
       const scanDir = await copyCompletedScan(await temporaryDirectory());
       const observerErrors: Array<[ScanObserverName, string]> = [];
       const replacement = mock();
@@ -545,8 +544,8 @@ describe("one-shot scan events", () => {
         ["onWarning", "TAC warning observer failed"],
       ]);
       expect(replacement).not.toHaveBeenCalled();
-    },
-  );
+    });
+  }
 
   test("isolates trusted cyber access status observer failures", async () => {
     const scanDir = await temporaryDirectory();
