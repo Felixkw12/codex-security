@@ -9064,6 +9064,8 @@ async function changedPatchFiles(
     dependencies,
     bound.directory,
     retainTrees,
+    undefined,
+    base.context,
   );
   if (dirtyFiles?.size) {
     const renamed = Buffer.from(
@@ -9358,9 +9360,21 @@ async function snapshotGitPatchState(
   directory = repository,
   retainTrees = false,
   signal?: AbortSignal,
+  context?: GitPatchState["context"],
 ): Promise<GitPatchState> {
   signal?.throwIfAborted();
   dependencies = patchCommandDirectoryDependencies(directory, dependencies);
+  if (context === undefined) {
+    context = await patchCommandContext(directory, repository, dependencies);
+    dependencies = (
+      await bindPatchCommandContext(
+        directory,
+        repository,
+        context,
+        dependencies,
+      )
+    ).dependencies;
+  }
   const tree = await snapshotPatchTree(repository, dependencies);
   const files = new Map<string, string>();
   const trees = new Map<string, string>();
@@ -9474,7 +9488,7 @@ async function snapshotGitPatchState(
   await visit("", tree, [repositoryRoot]);
   return {
     root: directoryRoot,
-    context: await patchCommandContext(directory, directoryRoot, dependencies),
+    context,
     tree,
     trees,
     files,
@@ -10155,6 +10169,7 @@ async function runFindingPatches(
                 bound.directory,
                 false,
                 signal,
+                gitBase.context,
               );
             } else {
               base = await snapshotPatchState(
