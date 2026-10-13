@@ -914,10 +914,7 @@ test("compares registered scan history after its checkout moves", () => {
   expect(JSON.parse(result.stdout)).toBe(true);
 });
 
-test("finds registered ancestors beyond isolated targetless child scans", () => {
-  const python = Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
-  if (python === null) throw new Error("A Python interpreter is required.");
-
+test("finds registered ancestors beyond isolated targetless child scans", async () => {
   const probe = [
     "import argparse, json, os, pathlib, sqlite3, subprocess, sys, tempfile",
     "sys.path.insert(0, sys.argv[1])",
@@ -970,14 +967,7 @@ test("finds registered ancestors beyond isolated targetless child scans", () => 
     "print(json.dumps(result))",
   ].join("\n");
 
-  const result = spawnSync(
-    python,
-    ["-I", "-B", "-c", probe, join(PLUGIN_ROOT, "scripts")],
-    { encoding: "utf8", timeout: 10_000 },
-  );
-
-  expect(result.status, result.stderr).toBe(0);
-  expect(JSON.parse(result.stdout)).toEqual({
+  expect(await runPythonProbe(probe)).toEqual({
     direct: ["current-owner"],
     nested: ["current-owner"],
     standaloneGit: ["legacy-git-child"],
