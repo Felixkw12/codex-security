@@ -1,7 +1,22 @@
 # Dependency assessment example
 
 Install [OSV-Scanner v2.6.0](https://github.com/google/osv-scanner/releases/tag/v2.6.0)
-on your PATH, then build this checkout:
+on your PATH separately. With Codex Security installed, run:
+
+```sh
+cs scan dependencies /path/to/repository \
+  --output-dir /path/outside/repository/sca-result --max-cost 5
+```
+
+Omit the repository to use the current directory. Omit `--output-dir` to save
+artifacts in a persistent directory under the Codex Security state root. Add
+`--json` for structured stdout; the default summary and diagnostics go to stderr.
+The command uses the existing `--auth`, `--model`, `--effort`, and provider/runtime
+settings. See the [command options](../../sdk/typescript/docs/cli.md#dependency-command-options)
+for supported settings and rejected source-scan options. To scan source in a
+directory named `dependencies`, use `cs scan ./dependencies`.
+
+To run the SDK example from this checkout, build it first:
 
 ```sh
 pnpm --dir sdk/typescript install --frozen-lockfile
@@ -10,7 +25,8 @@ pnpm --dir sdk/typescript run build
 node examples/sca/run.mjs /path/to/repository /path/outside/repository/sca-result
 ```
 
-Use a new or empty output directory. Node 24 or 26 supports the example's
+Use a new or empty output directory outside the repository and its enclosing Git
+worktree. Node 24 or 26 supports the SDK example's
 `await using` syntax. The SDK also supports Node 22; use `try/finally` and
 `await security.close()` there. The existing Codex authentication and SDK model
 configuration apply. Complete scans without advisory matches do not need Codex
@@ -46,8 +62,10 @@ unreported model cost is not a measured zero-dollar result. The existing
 `maxCostUsd` option interrupts on estimated assessment cost across turns; it is
 not a hard billing ceiling.
 
-The runner returns 0 for complete execution, including advisory matches, and 2
-for partial/failed execution. [ci.yml](ci.yml) shows artifact-only CI steps;
+The CLI and SDK example runner return 0 for complete execution, including
+advisory matches, and 2 for partial/failed execution. The CLI also returns 2 for
+invalid inputs and budget stops, and 130/143 for SIGINT/SIGTERM interruptions.
+[ci.yml](ci.yml) shows artifact-only CLI steps;
 provide the normal build, scanner installation, and authentication setup in the
 surrounding job. There is no automatic merge gate or publication.
 

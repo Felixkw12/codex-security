@@ -1,6 +1,6 @@
 # SCA MVP design
 
-This note records the September 30, 2026 design, building on [the research note](sca-research.md). The SDK workflow and synthetic evaluation harness are implemented. Independent corpus labeling and the developer pilot are pending; [implementation QA](sca-qa.md) records completed checks.
+This note records the September 30, 2026 design, building on [the research note](sca-research.md), updated to include the dependency CLI command. The SDK workflow, CLI entry point, and synthetic evaluation harness are implemented. Independent corpus labeling and the developer pilot are pending; [implementation QA](sca-qa.md) records completed checks.
 
 **Product contract.** Given a local repository using supported JavaScript/TypeScript, Python, Go, Rust, Java/Kotlin, Ruby, PHP, or .NET dependency files, return the components visible to OSV, their known advisory matches, static application assessments, and a reviewable update handoff. Keep the advisory match and application assessment separate. The initial product assists developer decisions and reports incomplete evidence explicitly.
 
@@ -10,8 +10,8 @@ This note records the September 30, 2026 design, building on [the research note]
 | npm precedence | Explicitly support and test npm-shrinkwrap precedence within the npm lockfile family. If the pinned scanner cannot attribute the effective input correctly, report that input unsupported rather than silently assessing a different resolution. |
 | Scanner        | Operator-installed OSV-Scanner, initially tested against v2.6.0. Pin it in CI and examples; record the actual version.                                                                                                                           |
 | Model work     | Existing inline static `triage-finding` workflow, with typed package/advisory evidence.                                                                                                                                                          |
-| Entry point    | One additive SDK method, `scanDependencies(options)`, plus a runnable example and the existing plugin skill.                                                                                                                                     |
-| Output         | Standalone SCA JSON, retained scanner evidence, and Markdown. Keep ordinary completed-scan storage and CLI behavior unchanged.                                                                                                                   |
+| Entry point    | `cs scan dependencies [repository]`, the additive SDK method `scanDependencies(options)`, a runnable SDK example, and the existing plugin skill.                                                                                                 |
+| Output         | Standalone SCA JSON, retained scanner evidence, and Markdown. Keep ordinary completed source-scan storage unchanged.                                                                                                                             |
 | Remediation    | User-selected handoff to the existing patch workflow; verify resolution and normal project checks separately.                                                                                                                                    |
 | Later work     | Full dependency graphs, general function-level reachability, containers, license policy, new-malware discovery, SBOM/VEX exports, continuous monitoring, and dashboard integration.                                                              |
 
@@ -33,7 +33,9 @@ try {
 }
 ```
 
-Options reuse `auth`, `outputDir`, `signal`, and `maxCostUsd` semantics from existing operations. Authentication defaults to the existing configured mechanism; output defaults to a per-run SCA directory under the existing state root; omitted signal/cost limit adds no new limit. Model, provider, permissions, environment, executable handling, and user-selected Codex configuration follow existing session preparation. No new command, flag, public environment variable, scan mode, or default for existing operations is proposed.
+Options reuse `auth`, `outputDir`, `signal`, and `maxCostUsd` semantics from existing operations. Authentication defaults to the existing configured mechanism; output defaults to a per-run SCA directory under the existing state root; omitted signal/cost limit adds no new limit. Model, provider, permissions, environment, executable handling, and user-selected Codex configuration follow existing session preparation.
+
+The CLI command `cs scan dependencies [repository]` defaults to the current directory and exposes the existing applicable configuration, authentication, model/runtime, output, cost, and structured-output flags. Unsupported source-scan settings are rejected, including explicit settings in project configuration. The [CLI reference](../sdk/typescript/docs/cli.md#dependency-command-options) records the complete contract. No new scan mode or public environment variable is introduced. The command reserves the bare `dependencies` argument; a source scan of a directory with that name now requires `cs scan ./dependencies`.
 
 The method runs matching first and invokes Codex only when there are advisory matches to assess. A complete zero-match result requires no model call or model authentication. It performs no dependency installation, source modification, dynamic validation, publication, or automatic dismissal. Existing `run()` and `ScanResult` retain their current meanings.
 

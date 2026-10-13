@@ -8,6 +8,7 @@ They accept the same arguments and options. The examples below use
 ```bash
 codex-security --help
 codex-security scan --help
+codex-security scan dependencies --help
 codex-security --version
 codex-security info --json
 ```
@@ -1602,10 +1603,72 @@ for deployment and source-build instructions.
 
 ## Dependency assessment (SCA MVP)
 
-`scanDependencies` runs an installed OSV-Scanner over supported dependency files,
-then uses `triage-finding` to assess matched advisories. Install
-OSV-Scanner v2.6.0 (the tested contract) or a compatible executable on PATH. It
-is not installed by the SDK. Files are discovered in nested projects too.
+`cs scan dependencies [repository]` and the SDK's `scanDependencies()` run an
+installed OSV-Scanner over supported dependency files, then use `triage-finding`
+to assess matched advisories. Install OSV-Scanner v2.6.0 (the tested contract) or
+a compatible executable on PATH separately. Codex Security does not install it.
+Files are discovered in nested projects too.
+
+```bash
+cs scan dependencies
+cs scan dependencies /path/to/repository --max-cost 5
+cs scan dependencies . --auth api-key --json \
+  --output-dir /path/outside/repository/dependency-results
+```
+
+The repository defaults to the current directory. Output defaults to a persistent
+per-run directory under the Codex Security state's `dependencies` directory.
+`--output-dir` must select a new or empty directory outside the repository and
+its enclosing Git worktree; existing output directories must be private to you
+on macOS and Linux. The command reports the artifact directory in its result.
+These are standalone dependency artifacts; they are not registered in source
+scan history.
+
+Compatibility: `cs scan dependencies` now selects this command. To run a source
+scan on a directory named `dependencies`, use `cs scan ./dependencies`.
+
+### Dependency command options
+
+| Options                                                                                   | Behavior                                                                                                                             |
+| ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `-c`, `--config FILE`                                                                     | Load supported project settings; configured paths remain relative to the configuration file.                                         |
+| `--auth auto\|chatgpt\|api-key`, `--model MODEL`, `--effort LEVEL`, `--provider PROVIDER` | Reuse scan authentication and model settings. Authentication defaults to `auto`; model and effort retain the existing scan defaults. |
+| `--codex KEY=VALUE`, `--plugin-path PATH`, `--python PATH`                                | Reuse the existing Codex and plugin runtime configuration. `--codex` can be repeated.                                                |
+| `--output-dir PATH`, `--max-cost USD`                                                     | Choose the artifact directory and optional assessment cost limit. No cost limit is added by default.                                 |
+| `--verbose`, `--show-cost`                                                                | Include diagnostics or estimated model cost in progress output.                                                                      |
+| `--json`, `--format FORMAT`, `--full-output`                                              | Select structured command output. `--json` is shorthand for `--format json`.                                                         |
+
+The command supports project `auth`, `codex`, `output.directory`, and
+`limits.max_cost_usd_per_scan` settings. Explicit source-scan settings in the
+project's `scan` section and `policy.fail_on_severity` are rejected, including
+`scan.mode: standard` and empty source-scan lists. Use a configuration containing
+only settings applicable to dependency assessment.
+
+Source paths and diffs, scan modes and Deep Scan settings, custom prompts,
+knowledge bases, Cyber access program and safety-identifier selectors, severity
+gates, patching, archive replacement, workflow selection, dry runs, and mock
+scans are unsupported. `--headless` is also unsupported: dependency assessment
+always uses a plain summary without an interactive dashboard. Unsupported
+settings fail instead of silently changing the requested scope or behavior.
+
+By default, the summary and diagnostics go to stderr and stdout remains empty.
+`--json` emits the native dependency result, including all matches and coverage;
+other supported formats are `toon`, `yaml`, and `jsonl`. Framework token controls
+remain available, but `--filter-output` and Markdown output are unsupported.
+With JSON or JSONL, `--full-output` wraps the result; incomplete execution returns
+`ok: false` with the retained result in `data` and a `SCAN_FAILED` error.
+
+| Exit code    | Meaning                                                                |
+| ------------ | ---------------------------------------------------------------------- |
+| `0`          | Completed execution, including runs with advisory matches.             |
+| `2`          | Partial or failed execution, invalid input, or an exceeded cost limit. |
+| `130`, `143` | Interrupted by SIGINT or SIGTERM, respectively.                        |
+
+Advisories do not set a failing exit code. A cost stop or interruption preserves
+available artifacts and reports their directory. OSV's own process exit codes
+remain in the saved scanner evidence.
+
+### Supported dependency inputs
 
 The file matrix describes supported inventory inputs. It does not establish
 per-language accuracy of the model's static applicability assessments or
@@ -1647,6 +1710,8 @@ downloads, not the registry that supplied them; remote archives retain name/vers
 matching, while source-only VCS packages remain unresolved. Complete matching
 coverage means the supported inputs were inventoried and matched, not that every
 package's public registry origin was verified.
+
+### TypeScript SDK
 
 ```ts
 import { createSecurity } from "@openai/codex-security";
@@ -1696,8 +1761,8 @@ The report summarizes assessment execution and model cost before listing
 components, with diagnostics near the top. A zero-match result with incomplete
 coverage does not establish a clean repository; model assessment does not run
 when there are no retained matches. A null model cost means cost was not
-reported, not a measured zero-dollar run. The example runner's exit code describes
-overall execution separately from OSV's retained process exit codes.
+reported, not a measured zero-dollar run. The CLI and example runner's exit codes
+describe overall execution separately from OSV's retained process exit codes.
 
 OSV sends package identities to its advisory service, not repository source.
 The assessment uses the existing Codex provider/model/authentication settings
@@ -1731,5 +1796,6 @@ Ordinary dependency resolution
 and build/test checks are still required before calling an update verified.
 
 See [local, CI, comparison, and handoff examples](../../../examples/sca/README.md)
-and the [evaluation harness](../../../evals/triage-finding/sca/README.md). This MVP
-is an additive SDK workflow; there are no new CLI commands or scan modes.
+and the [evaluation harness](../../../evals/triage-finding/sca/README.md).
+Dependency assessment uses a separate command and SDK result contract; existing
+source-scan modes keep their current behavior.

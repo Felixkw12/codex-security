@@ -1,11 +1,20 @@
 # SCA MVP implementation and QA
 
-The additive SDK entry point is
+The CLI entry point is `cs scan dependencies [repository]`; the additive SDK
+entry point is
 `security.scanDependencies({ repositoryPath, outputDir, auth, signal, maxCostUsd })`.
 The MVP covers the [supported language/file matrix](../sdk/typescript/docs/cli.md#dependency-assessment-sca-mvp), retains OSV evidence,
 performs static application assessment, and produces a report, conservative
 base/head comparison, and developer-selected update handoff.
 See [the runnable examples](../examples/sca/README.md).
+
+The CLI defaults to the current directory and reports completed execution with
+exit code 0, including retained advisory matches. Partial/failed execution,
+invalid input, and budget stops return 2; SIGINT/SIGTERM return 130/143.
+Its [documented command contract](../sdk/typescript/docs/cli.md#dependency-command-options)
+limits configuration to applicable dependency-assessment settings. The bare
+`dependencies` scan argument selects this command; source scans of a directory
+with that name use `cs scan ./dependencies`.
 
 ## Historical verification
 
