@@ -454,7 +454,8 @@ export class ScanCostTracker {
     if (
       marker !== undefined &&
       marker === this.#parentInventory &&
-      (this.#parentProgress?.progress.filesCompleted ?? 0) === 0
+      (!this.#parentIsEligible(this.#parentProgress) ||
+        this.#parentProgress.progress.filesCompleted === 0)
     )
       marker.accepted = true;
   }
@@ -533,12 +534,48 @@ export class ScanCostTracker {
       // Inventory establishes scope; only coverage is bounded by its prefix.
       (candidate.progress.phase === "discovery" &&
         candidate.progress.filesCompleted === 0) ||
-      marker?.accepted === true ||
       candidate.progress.filesTotal <=
         (candidate.source?.scopeFilesTotal ??
           marker?.scopeFilesTotal ??
           Number.MAX_SAFE_INTEGER)
     );
+  }
+
+  #parentIsEligible(
+    candidate: OrderedProgress | null,
+  ): candidate is OrderedProgress {
+    return (
+      candidate !== null &&
+      this.#parentSourceIsEligible(candidate) &&
+      candidate.progress.filesTotal <=
+        (this.#expectedFilesTotal ?? Number.MAX_SAFE_INTEGER)
+    );
+  }
+
+  #inventoryPrecedesAcceptedParent(source: ProgressOrder): boolean {
+    const live = this.#acceptedParent;
+    if (live === null) return false;
+    return live.markers.some((marker) => {
+      if (
+        marker.progress.phase === "discovery" &&
+        marker.progress.filesCompleted === 0
+      )
+        return false;
+      // A rejected phase still orders earlier inventory. Its proof belongs to
+      // this marker, independently of whichever phase currently sets a cutoff.
+      const position = live.position ?? marker.projection?.position;
+      if (position === undefined) return false;
+      const markerIndex =
+        live.position === null ? marker.projection!.markerIndex : marker.index;
+      return (
+        (compareSourceOrder(source, {
+          position,
+          markerIndex,
+          order: marker.order,
+          live,
+        }) ?? 0) < 0
+      );
+    });
   }
 
   #retainedInventory(): InventoryEvidence | undefined {
@@ -692,8 +729,14 @@ export class ScanCostTracker {
     projection?: StreamedProgressItem,
   ): void {
     let reviewed = progress.filesCompleted > 0;
+    filesTotal ??= projection?.markers[markerIndex]?.scopeFilesTotal;
     if (position === undefined) {
-      if (reviewed && admitted && projection?.after !== undefined) {
+      if (
+        reviewed &&
+        admitted &&
+        projection?.after !== undefined &&
+        progress.filesTotal <= (filesTotal ?? Number.MAX_SAFE_INTEGER)
+      ) {
         const marker = projection.markers[markerIndex]!;
         const previous = this.#parentReviewBefore;
         if (
@@ -828,7 +871,10 @@ export class ScanCostTracker {
         for (const marker of live.markers) {
           if (
             marker.progress.phase !== "discovery" ||
-            marker.progress.filesCompleted !== 0
+            marker.progress.filesCompleted !== 0 ||
+            // A bound orders a lossy inventory but does not admit its scope.
+            // Unaccepted inventory needs a complete projection or corroboration.
+            (!marker.accepted && !projectedItems.has(live))
           )
             continue;
           const bounded = {
@@ -1502,6 +1548,8 @@ export class ScanCostTracker {
             live.position,
             marker.index,
             true,
+            marker.scopeFilesTotal,
+            live,
           );
       }
       if (marker.accepted && live.position !== null) {
@@ -1545,7 +1593,7 @@ export class ScanCostTracker {
         !marker.accepted &&
         this.#parentProgress !== null &&
         this.#parentProgress.progress.filesCompleted > 0 &&
-        this.#parentSourceIsEligible(this.#parentProgress) &&
+        this.#parentIsEligible(this.#parentProgress) &&
         this.#parentInventoryBoundary?.reviewed !== true
       ) {
         // A read can reach EOF before the next completion is appended, then
@@ -1585,7 +1633,8 @@ export class ScanCostTracker {
       acceptedInventory !== undefined &&
       acceptedInventory.marker === this.#parentInventory &&
       acceptedInventory.live.position === null &&
-      (this.#parentProgress?.progress.filesCompleted ?? 0) === 0 &&
+      (!this.#parentIsEligible(this.#parentProgress) ||
+        this.#parentProgress.progress.filesCompleted === 0) &&
       acceptedInventory.order > (this.#parentProgress?.order ?? 0)
     ) {
       // This live inventory was accepted for deferred scope reconciliation;
@@ -1619,10 +1668,11 @@ export class ScanCostTracker {
     this.#projectParentInventory();
     const inventoryChanged = this.#inventoryNeedsReconciliation;
     this.#inventoryNeedsReconciliation = false;
-    if (inventoryChanged) {
-      const parentIneligible =
-        this.#parentProgress !== null &&
-        this.#parentProgress.progress.filesTotal > this.#expectedFilesTotal!;
+    const parentIneligible =
+      this.#parentProgress !== null &&
+      !this.#parentIsEligible(this.#parentProgress);
+    const inventoryReconciled = inventoryChanged || parentIneligible;
+    if (inventoryReconciled) {
       let retainedWorker: OrderedProgress | null = null;
       // Reconsider compact worker receipts under the proven inventory. Keep an
       // oversized receipt available without counting it as reviewed coverage.
@@ -1669,11 +1719,9 @@ export class ScanCostTracker {
             corrected = { ...latest, owner: "worker" };
         } else this.#workerProgress.delete(session.threadId);
       }
-      const parent = this.#parentProgress?.progress ?? null;
-      const parentCount =
-        parent !== null && parent.filesTotal <= this.#expectedFilesTotal!
-          ? parent.filesCompleted
-          : 0;
+      const parentCount = this.#parentIsEligible(this.#parentProgress)
+        ? this.#parentProgress.progress.filesCompleted
+        : 0;
       // Project the phase from the greatest eligible coverage. A zero-count
       // inventory establishes scope but cannot mask restored worker progress.
       const workerCoverage = Math.min(
@@ -1815,9 +1863,7 @@ export class ScanCostTracker {
         this.#acceptedParent = live;
         const selectedParent = this.#parentProgress;
         if (
-          selectedParent === null ||
-          selectedParent.progress.filesTotal >
-            (this.#expectedFilesTotal ?? selectedParent.progress.filesTotal) ||
+          !this.#parentIsEligible(selectedParent) ||
           progress.filesCompleted !== selectedParent.progress.filesCompleted ||
           compareProgressOrder(candidate, selectedParent) >= 0
         )
@@ -1839,8 +1885,7 @@ export class ScanCostTracker {
         this.#highestFilesCompleted = progress.filesCompleted;
         if (preferCandidate) corrected = candidate;
       } else if (
-        progress.filesTotal <=
-          (this.#expectedFilesTotal ?? progress.filesTotal) &&
+        this.#parentIsEligible(candidate) &&
         this.#displayedProgress?.owner === "parent" &&
         compareProgressOrder(candidate, this.#displayedProgress) > 0 &&
         preferCandidate
@@ -1852,12 +1897,9 @@ export class ScanCostTracker {
     }
     // Parent facts outlive display admission and queue draining. Preserve the
     // greatest eligible coverage for each original inventory, then source order.
-    let eligible =
-      this.#parentProgress !== null &&
-      this.#parentProgress.progress.filesTotal <=
-        (this.#expectedFilesTotal ?? Number.MAX_SAFE_INTEGER)
-        ? this.#parentProgress
-        : null;
+    let eligible = this.#parentIsEligible(this.#parentProgress)
+      ? this.#parentProgress
+      : null;
     for (const candidate of [
       ...this.#parentFacts.values(),
       ...(inventory === undefined ? [] : [inventory]),
@@ -1880,9 +1922,7 @@ export class ScanCostTracker {
       )
         continue;
       if (
-        !this.#parentSourceIsEligible(candidate) ||
-        candidate.progress.filesTotal >
-          (this.#expectedFilesTotal ?? Number.MAX_SAFE_INTEGER) ||
+        !this.#parentIsEligible(candidate) ||
         candidate.progress.filesCompleted < workerCoverage
       )
         continue;
@@ -1895,7 +1935,7 @@ export class ScanCostTracker {
       )
         eligible = candidate;
     }
-    if (eligible !== null && eligible !== this.#parentProgress) {
+    if (eligible !== null) {
       this.#parentProgress = eligible;
       if (this.#afterParentFrontier(eligible.position!, eligible.markerIndex!))
         this.#parentFrontier = {
@@ -1907,7 +1947,9 @@ export class ScanCostTracker {
         eligible.position!,
         eligible.markerIndex!,
         false,
-        eligible.source?.scopeFilesTotal,
+        eligible.source?.scopeFilesTotal ??
+          eligible.live?.markers[eligible.markerIndex ?? 0]?.scopeFilesTotal,
+        eligible.live,
       );
       this.#highestFilesCompleted = Math.max(
         workerCoverage,
@@ -1935,10 +1977,9 @@ export class ScanCostTracker {
       displayed !== null &&
       displayed.owner !== "worker" &&
       previousParent !== null &&
-      previousParent.progress.filesTotal >
-        (this.#expectedFilesTotal ?? Number.MAX_SAFE_INTEGER) &&
+      !this.#parentIsEligible(previousParent) &&
       compareProgressOrder(previousParent, displayed) === 0;
-    if (!inventoryChanged && corrected === null) return;
+    if (!inventoryReconciled && corrected === null) return;
     const correctedCoverage =
       corrected?.owner === "worker"
         ? workerCoverage
@@ -1954,10 +1995,8 @@ export class ScanCostTracker {
     const parent = this.#parentProgress;
     const parentAtEqualCoverage =
       selected?.owner === "worker" &&
-      parent !== null &&
-      parent.progress.filesCompleted === this.#highestFilesCompleted &&
-      parent.progress.filesTotal <=
-        (this.#expectedFilesTotal ?? parent.progress.filesTotal);
+      this.#parentIsEligible(parent) &&
+      parent.progress.filesCompleted === this.#highestFilesCompleted;
     const phase = parentAtEqualCoverage
       ? parent.progress.phase
       : replacePhase
@@ -1979,7 +2018,7 @@ export class ScanCostTracker {
     const duplicate =
       displayed !== null &&
       progressKey(displayed.update) === key &&
-      (!inventoryChanged || inventoryReported);
+      (!inventoryReconciled || inventoryReported);
     const displaySource = parentAtEqualCoverage
       ? { ...parent, owner: "parent" as const }
       : selected;
@@ -1998,7 +2037,9 @@ export class ScanCostTracker {
     if (duplicate) return;
     this.#options.onProgress?.(progress, {
       reconciled: true,
-      ...(inventoryChanged ? { inventory: true } : {}),
+      // Recovered prefix scope can invalidate coverage even when a later
+      // inventory restores the same total. Synchronize the API's count too.
+      ...(inventoryReconciled ? { inventory: true } : {}),
     });
   }
 
@@ -2324,18 +2365,15 @@ export class ScanCostTracker {
     if (
       this.#precedesParentBoundary(saved.position, saved.markerIndex) &&
       (this.#parentInventoryBoundary?.reviewed === true ||
-        (this.#parentProgress?.progress.filesCompleted ?? 0) === 0 ||
-        (this.#parentInventoryBoundary?.projection?.live ===
-          this.#acceptedParent &&
-          (compareSourceOrder(
-            source,
-            this.#parentInventoryBoundary.projection,
-          ) ?? 0) < 0)) &&
+        !this.#parentIsEligible(this.#parentProgress) ||
+        this.#parentProgress.progress.filesCompleted === 0 ||
+        this.#inventoryPrecedesAcceptedParent(source)) &&
       relation >= 0
     )
       return "proven";
     if (
-      (this.#parentProgress?.progress.filesCompleted ?? 0) > 0 ||
+      (this.#parentIsEligible(this.#parentProgress) &&
+        this.#parentProgress.progress.filesCompleted > 0) ||
       !this.#savedParentProgressIsCurrent(saved) ||
       (command !== undefined &&
         command.live === this.#acceptedParent &&
@@ -2463,7 +2501,10 @@ export class ScanCostTracker {
         // An inventory behind admitted review changes scope without replaying
         // its earlier phase. At zero coverage it follows normal source-ordered
         // phase admission below, including when the inventory total changes.
-        if ((this.#parentProgress?.progress.filesCompleted ?? 0) === 0) {
+        if (
+          !this.#parentIsEligible(this.#parentProgress) ||
+          this.#parentProgress.progress.filesCompleted === 0
+        ) {
           const candidate = {
             progress,
             order,
@@ -2515,10 +2556,8 @@ export class ScanCostTracker {
       // when the aggregate count adds no reviewed files. Counts remain above.
       if (
         !parent &&
-        this.#parentProgress !== null &&
-        filesCompleted === this.#parentProgress.progress.filesCompleted &&
-        this.#parentProgress.progress.filesTotal <=
-          (expectedFilesTotal ?? this.#parentProgress.progress.filesTotal)
+        this.#parentIsEligible(this.#parentProgress) &&
+        filesCompleted === this.#parentProgress.progress.filesCompleted
       )
         continue;
       if (parent)
