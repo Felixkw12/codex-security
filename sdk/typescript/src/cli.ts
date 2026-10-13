@@ -7806,6 +7806,7 @@ async function patchCommandContext(
   dependencies: CliDependencies,
 ): Promise<{
   root: string;
+  callerDirectory: string;
   directory: string;
   gitDirectory: string;
   environment: NodeJS.ProcessEnv;
@@ -7921,6 +7922,7 @@ async function patchCommandContext(
   }
   return {
     root: await realpath(repository),
+    callerDirectory: directory,
     directory: physicalDirectory,
     gitDirectory: await realpath(environment["GIT_DIR"]!),
     environment,
@@ -7933,7 +7935,7 @@ async function bindPatchCommandContext(
   context: GitPatchState["context"],
   dependencies: CliDependencies,
 ): Promise<{ directory: string; dependencies: CliDependencies }> {
-  const currentDirectory = await realpath(directory)
+  const currentDirectory = await realpath(context.callerDirectory)
     .then(async (path) =>
       (await lstat(path)).isDirectory() ? path : undefined,
     )
