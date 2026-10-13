@@ -116,11 +116,11 @@ interface ProgressOrder {
   position?: number;
   markerIndex?: number;
   live?: StreamedProgressItem;
+  source?: SessionProgress;
 }
 
 interface OrderedProgress extends ProgressOrder {
   progress: ScanProgress;
-  source?: SessionProgress;
 }
 
 interface LiveInventory extends OrderedProgress {
@@ -147,7 +147,17 @@ function compareProgressOrder(
   // an unresolved prefix, while retaining that prefix for later reconciliation.
   if (left.live?.after !== undefined && right.position !== undefined) return 1;
   if (right.live?.after !== undefined && left.position !== undefined) return -1;
-  return left.order - right.order;
+  const observedOrder = (candidate: ProgressOrder) => {
+    const marker =
+      candidate.source?.projection?.markers[candidate.markerIndex ?? 0];
+    // A complete source projection retains its originating live order even
+    // when polling observes that copy after a newer unpositioned phase.
+    return marker !== undefined &&
+      progressKey(marker.progress) === progressKey(candidate.source!.update)
+      ? marker.order
+      : candidate.order;
+  };
+  return observedOrder(left) - observedOrder(right);
 }
 
 function compareSourceOrder(
@@ -609,11 +619,6 @@ export class ScanCostTracker {
               marker.index,
               live,
             )) ||
-          (marker.projection !== undefined &&
-            !this.#inventoryPrecedesReview(
-              marker.projection.position,
-              marker.projection.markerIndex,
-            )) ||
           // An unresolved command follows the whole preceding exact completion.
           // That lower bound can exclude it without assigning it a position.
           (live.position === null &&
@@ -731,7 +736,13 @@ export class ScanCostTracker {
     const filesTotal =
       selected?.progress.filesTotal ??
       (invalidated ? this.#parentTurnFilesTotal : undefined);
-    if (filesTotal !== undefined) this.setExpectedFilesTotal(filesTotal);
+    if (filesTotal !== undefined) {
+      // Scope recovered here has not necessarily reached the API, including
+      // its first assignment when registration supplied no file count.
+      if (filesTotal !== this.#expectedFilesTotal)
+        this.#inventoryNeedsReconciliation = true;
+      this.setExpectedFilesTotal(filesTotal);
+    }
   }
 
   #recordParentBoundary(
@@ -870,6 +881,33 @@ export class ScanCostTracker {
         : this.#parentTurnFilesTotal;
     let inventory: InventoryEvidence | LiveInventory | undefined;
     let savedInventory: InventoryEvidence | undefined;
+    const scopeAt = (
+      candidate: InventoryEvidence,
+      completion?: SessionCompletion,
+    ) => {
+      if (
+        !native ||
+        inventory !== undefined ||
+        authority?.live.position !== null ||
+        Number.isFinite(authority.live.after)
+      )
+        return filesTotal;
+      if (
+        candidate.markerIndex < authority.marker.index &&
+        completion?.item?.kind === "command" &&
+        completion.item.outputDigest === authority.live.item?.outputDigest
+      )
+        // Complete output agreement proves marker layout, not occurrence.
+        // A command's later inventory cannot justify its own earlier coverage.
+        return filesTotal;
+      // An initial estimate is not source proof against an admitted inventory
+      // missing from persistence. Keep it for rows known or observed before
+      // that live authority; unresolved later rows retain the admitted scope.
+      const order =
+        this.#inventorySourceOrder(candidate, authority) ??
+        (candidate.order === 0 ? 1 : candidate.order - authority.order);
+      return order < 0 ? filesTotal : authority.progress.filesTotal;
+    };
     let liveIndex = 0;
     const applyBounds = (position: number) => {
       while (liveIndex < this.#liveParentItems.length) {
@@ -898,11 +936,10 @@ export class ScanCostTracker {
             markerIndex: marker.index,
             order: marker.order,
           };
-          const reviewOrder = this.#inventoryReviewOrder(bounded);
           if (
-            (reviewOrder === undefined
-              ? this.#inventoryPrecedesReview(live.after, -1)
-              : reviewOrder < 0) &&
+            // An upper bound does not place this inventory at the anchor.
+            // Unknown relative order cannot revoke already admitted scope.
+            (this.#inventoryReviewOrder(bounded) ?? -1) < 0 &&
             (inventory === undefined ||
               ("marker" in inventory
                 ? compareProgressOrder(inventory, bounded) < 0
@@ -941,7 +978,16 @@ export class ScanCostTracker {
         index++
       ) {
         const marker = live.markers[index]!;
-        marker.scopeFilesTotal = filesTotal;
+        marker.scopeFilesTotal = scopeAt(
+          {
+            progress: marker.progress,
+            position: completion.position,
+            markerIndex: marker.index,
+            order: marker.order,
+            live,
+          },
+          completion,
+        );
         if (
           marker.progress.phase === "discovery" &&
           marker.progress.filesCompleted === 0
@@ -966,7 +1012,7 @@ export class ScanCostTracker {
             completion.position,
             marker.index,
             marker.accepted,
-            filesTotal,
+            marker.scopeFilesTotal,
           );
       }
     };
@@ -985,11 +1031,20 @@ export class ScanCostTracker {
       const projected = saved.projection?.markers[saved.markerIndex];
       if (saved.duplicate) continue;
       const progress = saved.update;
-      saved.scopeFilesTotal = filesTotal;
+      saved.scopeFilesTotal = scopeAt(
+        {
+          progress,
+          position: saved.position,
+          markerIndex: saved.markerIndex,
+          order: saved.order ?? 0,
+          source: saved,
+        },
+        completion?.position === saved.position ? completion : undefined,
+      );
       const exact = completion?.projection?.position === saved.position;
       const nativeOccurrence = this.#parentTurnStartKnown && saved.completion;
       if (projected !== undefined) {
-        projected.scopeFilesTotal = filesTotal;
+        projected.scopeFilesTotal = saved.scopeFilesTotal;
         if (progressKey(projected.progress) === progressKey(progress))
           projected.projection = {
             position: saved.position,
@@ -1055,7 +1110,7 @@ export class ScanCostTracker {
           saved.position,
           saved.markerIndex,
           exact && (projected?.accepted ?? false),
-          filesTotal,
+          saved.scopeFilesTotal,
           projected === undefined ? undefined : completion!.projection,
         );
     }
@@ -1100,7 +1155,16 @@ export class ScanCostTracker {
   }
 
   #inventoryReviewOrder(inventory: ProgressOrder): number | undefined {
+    const projection =
+      inventory.live?.markers[inventory.markerIndex ?? 0]?.projection;
     if (
+      // A complete projection can exclude this inventory even though its live
+      // occurrence remains unknown. A mere upper bound cannot do so.
+      (projection !== undefined &&
+        !this.#inventoryPrecedesReview(
+          projection.position,
+          projection.markerIndex,
+        )) ||
       !this.#inventoryAllowedInCompletion(
         inventory.live,
         inventory.markerIndex ?? 0,
