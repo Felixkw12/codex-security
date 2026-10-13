@@ -388,37 +388,46 @@ try {
   );
   for (const version of [2, 3]) {
     for (const origin of ["local", "direct-url", "registry"]) {
-      const resolved =
-        origin === "local"
-          ? "file:../local-lib.tgz"
-          : origin === "registry"
-            ? "https://registry.npmjs.org/synthetic-lib/-/synthetic-lib-1.2.0.tgz"
-            : "https://example.invalid/synthetic-lib.tgz";
-      const tarball = await scan(`npm-v${version}-${origin}-tarball`, {
-        "package-lock.json": JSON.stringify({
-          lockfileVersion: version,
-          packages: {
-            "": {
-              name: "synthetic-app",
-              version: "1.0.0",
-              dependencies: {
-                "synthetic-lib": origin === "registry" ? "^1.2.0" : resolved,
+      // npm preserves scheme casing in direct and registry-supplied tarball URLs.
+      for (const scheme of origin === "local"
+        ? ["https"]
+        : ["https", "HTTPS", "HtTpS"]) {
+        const resolved =
+          origin === "local"
+            ? "file:../local-lib.tgz"
+            : origin === "registry"
+              ? `${scheme}://registry.npmjs.org/synthetic-lib/-/synthetic-lib-1.2.0.tgz`
+              : `${scheme}://example.invalid/synthetic-lib.tgz`;
+        const tarball = await scan(
+          `npm-v${version}-${origin}-${scheme}-tarball`,
+          {
+            "package-lock.json": JSON.stringify({
+              lockfileVersion: version,
+              packages: {
+                "": {
+                  name: "synthetic-app",
+                  version: "1.0.0",
+                  dependencies: {
+                    "synthetic-lib":
+                      origin === "registry" ? "^1.2.0" : resolved,
+                  },
+                },
+                "node_modules/synthetic-lib": { version: "1.2.0", resolved },
               },
-            },
-            "node_modules/synthetic-lib": { version: "1.2.0", resolved },
+            }),
           },
-        }),
-      });
-      assert.equal(
-        tarball.status,
-        origin === "registry" ? "completed" : "partial",
-      );
-      assert.equal(
-        tarball.coverage.unresolvedPackages,
-        origin === "registry" ? 0 : 1,
-      );
-      assert.equal(tarball.components[0]?.version, "1.2.0");
-      assert.equal(tarball.matches.length, 1);
+        );
+        assert.equal(
+          tarball.status,
+          origin === "registry" ? "completed" : "partial",
+        );
+        assert.equal(
+          tarball.coverage.unresolvedPackages,
+          origin === "registry" ? 0 : 1,
+        );
+        assert.equal(tarball.components[0]?.version, "1.2.0");
+        assert.equal(tarball.matches.length, 1);
+      }
     }
   }
   const workspaceLink = await scan("npm-workspace-link", {

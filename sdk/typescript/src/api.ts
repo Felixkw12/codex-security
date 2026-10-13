@@ -5261,8 +5261,11 @@ function dependencyPermissions(
       join(home, "_netrc"),
       join(home, ".gem", "credentials"),
       join(home, ".local", "share", "gem", "credentials"),
+      join(home, ".bundle", "config"),
       join(home, ".composer", "auth.json"),
       join(home, ".config", "composer", "auth.json"),
+      join(home, ".cargo", "credentials.toml"),
+      join(home, ".cargo", "credentials"),
       join(home, ".gradle", "gradle.properties"),
       join(home, ".nuget", "NuGet", "NuGet.Config"),
       join(home, ".config", "NuGet", "NuGet.Config"),
@@ -5270,7 +5273,9 @@ function dependencyPermissions(
     ...[process.env, environment].flatMap((source) => {
       const xdg = environmentEntry(source, "XDG_CONFIG_HOME");
       const dataHome = environmentEntry(source, "XDG_DATA_HOME");
+      const bundlerHome = environmentEntry(source, "BUNDLE_USER_HOME");
       const composerHome = environmentEntry(source, "COMPOSER_HOME");
+      const cargoHome = environmentEntry(source, "CARGO_HOME");
       const gradleHome = environmentEntry(source, "GRADLE_USER_HOME");
       const appData = environmentEntry(source, "AppData");
       return [
@@ -5281,7 +5286,14 @@ function dependencyPermissions(
             ]
           : []),
         ...(dataHome ? [join(dataHome, "gem", "credentials")] : []),
+        ...(bundlerHome ? [join(bundlerHome, "config")] : []),
         ...(composerHome ? [join(composerHome, "auth.json")] : []),
+        ...(cargoHome
+          ? [
+              join(cargoHome, "credentials.toml"),
+              join(cargoHome, "credentials"),
+            ]
+          : []),
         ...(gradleHome ? [join(gradleHome, "gradle.properties")] : []),
         ...(process.platform === "win32" && appData
           ? [
@@ -5289,20 +5301,26 @@ function dependencyPermissions(
               join(appData, "NuGet", "NuGet.Config"),
             ]
           : []),
-        ...["AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE", "NETRC"].flatMap(
-          (name) => {
-            const file = environmentEntry(source, name);
-            return file ? [file] : [];
-          },
-        ),
+        ...[
+          "AWS_SHARED_CREDENTIALS_FILE",
+          "AWS_CONFIG_FILE",
+          "NETRC",
+          "BUNDLE_USER_CONFIG",
+        ].flatMap((name) => {
+          const file = environmentEntry(source, name);
+          return file ? [file] : [];
+        }),
       ].map((file) => resolve(workingDirectory, expandHome(file, source)));
     }),
     join(homedir(), ".npmrc"),
     resolve(workingDirectory, expandHome("~", environment), ".npmrc"),
     join(npmHome, ".npmrc"),
-    // curl follows HOME before USERPROFILE when locating netrc on Windows.
+    // curl and Ruby follow HOME before USERPROFILE on Windows.
     join(npmHome, ".netrc"),
     join(npmHome, "_netrc"),
+    join(npmHome, ".gem", "credentials"),
+    join(npmHome, ".local", "share", "gem", "credentials"),
+    join(npmHome, ".bundle", "config"),
     ...npmConfigs,
     runtimeHome,
     codexSecurityCredentialHome({}),

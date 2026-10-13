@@ -1173,19 +1173,21 @@ describe("SCA scanner execution", () => {
   );
   test.each(
     [
-      ...[2, 3].map((lockfileVersion) => ({
-        path: "package-lock.json",
-        content: JSON.stringify({
-          lockfileVersion,
-          packages: {
-            "": { dependencies: { "synthetic-lib": "^1.2.0" } },
-            "node_modules/synthetic-lib": {
-              version: "1.2.0",
-              resolved: "https://registry.example.test/synthetic-lib.tgz",
+      ...[2, 3].flatMap((lockfileVersion) =>
+        ["https", "HTTPS", "HtTpS"].map((scheme) => ({
+          path: "package-lock.json",
+          content: JSON.stringify({
+            lockfileVersion,
+            packages: {
+              "": { dependencies: { "synthetic-lib": "^1.2.0" } },
+              "node_modules/synthetic-lib": {
+                version: "1.2.0",
+                resolved: `${scheme}://registry.example.test/synthetic-lib.tgz`,
+              },
             },
-          },
-        }),
-      })),
+          }),
+        })),
+      ),
       {
         path: "pnpm-lock.yaml",
         content: `lockfileVersion: '9.0'
@@ -1259,7 +1261,7 @@ packages:
       expect(result.coverage.unresolvedPackages).toBe(1);
       expect(result.coverage.limitations.join("\n")).toContain(
         ecosystem === "npm"
-          ? "https://registry.example.test"
+          ? "registry.example.test"
           : ecosystem === "RubyGems"
             ? "https://gems.example.test"
             : "https://index.example.test/simple",
@@ -1306,11 +1308,19 @@ packages:
       expect(result.matches).toHaveLength(matched ? 1 : 0);
     },
   );
-  test.each(["dependencies", "devDependencies", "optionalDependencies"])(
-    "preserves npm direct URL provenance recorded in %s without changing registry tarballs",
-    async (group) => {
-      const resolved =
-        "https://registry.npmjs.org/synthetic-lib/-/synthetic-lib-1.2.0.tgz";
+  test.each(
+    ["dependencies", "devDependencies", "optionalDependencies"].flatMap(
+      (group) =>
+        [
+          "https://registry.npmjs.org",
+          "HTTPS://REGISTRY.NPMJS.ORG",
+          "HtTpS://Registry.Npmjs.Org",
+        ].map((origin) => ({ group, origin })),
+    ),
+  )(
+    "preserves npm direct URL provenance from $origin in $group without changing registry tarballs",
+    async ({ group, origin }) => {
+      const resolved = `${origin}/synthetic-lib/-/synthetic-lib-1.2.0.tgz`;
       for (const direct of [false, true]) {
         const result = await scanFixture(
           {

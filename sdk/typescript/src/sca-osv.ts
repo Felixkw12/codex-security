@@ -161,8 +161,8 @@ function referenceVersionMatches(
 
 function alternateNpmTarball(value: string): boolean {
   return (
-    /^https?:\/\//u.test(value) &&
-    !/^https?:\/\/registry\.npmjs\.org(?:\/|$)/u.test(value)
+    /^https?:\/\//iu.test(value) &&
+    !/^https?:\/\/registry\.npmjs\.org(?:\/|$)/iu.test(value)
   );
 }
 
@@ -287,7 +287,7 @@ function npmLocalReferences(
       const specifiers = dependency[group];
       if (!record(specifiers)) continue;
       for (const specifier of Object.values(specifiers))
-        if (typeof specifier === "string" && /^https?:\/\//u.test(specifier))
+        if (typeof specifier === "string" && /^https?:\/\//iu.test(specifier))
           directUrls.add(specifier);
     }
   }

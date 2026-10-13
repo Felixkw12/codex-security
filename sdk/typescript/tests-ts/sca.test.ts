@@ -996,6 +996,17 @@ nativeDependencyTest.each([
       join(dirname(f.repository), "gradle-home", "gradle.properties"),
       join(dirname(f.repository), "registry-config", "composer", "auth.json"),
     ];
+    const cargoFiles = [
+      join(f.selectedUserHome, ".cargo", "credentials.toml"),
+      join(f.selectedUserHome, ".cargo", "credentials"),
+      join(dirname(f.repository), "cargo-home", "credentials.toml"),
+      join(dirname(f.repository), "cargo-home", "credentials"),
+    ];
+    const bundlerFiles = [
+      join(f.selectedUserHome, ".bundle", "config"),
+      join(dirname(f.repository), "bundler-home", "config"),
+      join(dirname(f.repository), "bundler-config"),
+    ];
     Object.assign(f.environment, {
       NPM_CONFIG_USERCONFIG: npmFiles[1],
       npm_config_userconfig: npmFiles[2],
@@ -1006,6 +1017,9 @@ nativeDependencyTest.each([
       XDG_DATA_HOME: dirname(dirname(configuredStores[4]!)),
       COMPOSER_HOME: dirname(configuredStores[5]!),
       GRADLE_USER_HOME: dirname(configuredStores[6]!),
+      CARGO_HOME: dirname(cargoFiles[2]!),
+      BUNDLE_USER_HOME: dirname(bundlerFiles[1]!),
+      BUNDLE_USER_CONFIG: bundlerFiles[2],
     });
     await using security = f.client;
     const result = await security.scanDependencies({
@@ -1028,6 +1042,8 @@ nativeDependencyTest.each([
     const privateFiles = [
       ...npmFiles,
       ...configuredStores,
+      ...cargoFiles,
+      ...bundlerFiles,
       ...[
         ".git-credentials",
         ".config/git/credentials",
@@ -1096,6 +1112,8 @@ nativeDependencyTest.each([
     for (const path of [
       ...npmFiles,
       ...configuredStores,
+      ...cargoFiles,
+      ...bundlerFiles,
       join(homedir(), ".npmrc"),
       join(homedir(), ".git-credentials"),
       join(homedir(), ".config", "git", "credentials"),
@@ -1107,8 +1125,11 @@ nativeDependencyTest.each([
       join(homedir(), "_netrc"),
       join(homedir(), ".gem", "credentials"),
       join(homedir(), ".local", "share", "gem", "credentials"),
+      join(homedir(), ".bundle", "config"),
       join(homedir(), ".composer", "auth.json"),
       join(homedir(), ".config", "composer", "auth.json"),
+      join(homedir(), ".cargo", "credentials.toml"),
+      join(homedir(), ".cargo", "credentials"),
       join(homedir(), ".gradle", "gradle.properties"),
       join(homedir(), ".nuget", "NuGet", "NuGet.Config"),
       join(homedir(), ".config", "NuGet", "NuGet.Config"),
@@ -1183,7 +1204,10 @@ test.each(["absolute", "relative"] as const)(
         NETRC: join(base, "netrc"),
         XDG_CONFIG_HOME: join(base, "config"),
         XDG_DATA_HOME: join(base, "data"),
+        BUNDLE_USER_HOME: join(base, "bundler"),
+        BUNDLE_USER_CONFIG: join(base, "bundler-config"),
         COMPOSER_HOME: join(base, "composer"),
+        CARGO_HOME: join(base, "cargo"),
         GRADLE_USER_HOME: join(base, "gradle"),
         AppData: join(base, "appdata"),
       };
@@ -1200,7 +1224,11 @@ test.each(["absolute", "relative"] as const)(
         overrides.NETRC,
         join(overrides.XDG_CONFIG_HOME, "composer", "auth.json"),
         join(overrides.XDG_DATA_HOME, "gem", "credentials"),
+        join(overrides.BUNDLE_USER_HOME, "config"),
+        overrides.BUNDLE_USER_CONFIG,
         join(overrides.COMPOSER_HOME, "auth.json"),
+        join(overrides.CARGO_HOME, "credentials.toml"),
+        join(overrides.CARGO_HOME, "credentials"),
         join(overrides.GRADLE_USER_HOME, "gradle.properties"),
         ...(process.platform === "win32"
           ? [
@@ -1208,6 +1236,9 @@ test.each(["absolute", "relative"] as const)(
               join(overrides.AppData, "NuGet", "NuGet.Config"),
               join(curlHome, ".netrc"),
               join(curlHome, "_netrc"),
+              join(curlHome, ".gem", "credentials"),
+              join(curlHome, ".local", "share", "gem", "credentials"),
+              join(curlHome, ".bundle", "config"),
             ]
           : []),
       ].map((path) => resolve(f.outputDir, path));
@@ -1237,8 +1268,11 @@ test.each(["absolute", "relative"] as const)(
           "_netrc",
           ".gem/credentials",
           ".local/share/gem/credentials",
+          ".bundle/config",
           ".composer/auth.json",
           ".config/composer/auth.json",
+          ".cargo/credentials.toml",
+          ".cargo/credentials",
           ".gradle/gradle.properties",
           ".nuget/NuGet/NuGet.Config",
           ".config/NuGet/NuGet.Config",
