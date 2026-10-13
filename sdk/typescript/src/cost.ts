@@ -105,6 +105,8 @@ interface ParentProgressMarker {
   order: number;
   accepted: boolean;
   scopeFilesTotal?: number;
+  // Source coordinates of a complete saved projection, not a live occurrence.
+  projection?: { position: number; markerIndex: number };
 }
 
 interface ProgressOrder {
@@ -551,6 +553,11 @@ export class ScanCostTracker {
           marker.progress.filesCompleted !== 0 ||
           (live.position !== null &&
             !this.#inventoryPrecedesReview(live.position, marker.index)) ||
+          (marker.projection !== undefined &&
+            !this.#inventoryPrecedesReview(
+              marker.projection.position,
+              marker.projection.markerIndex,
+            )) ||
           // An unresolved command follows the whole preceding exact completion.
           // That lower bound can exclude it without assigning it a position.
           (live.position === null &&
@@ -755,7 +762,9 @@ export class ScanCostTracker {
       };
   }
 
-  #recordParentSourceBoundaries(command?: UnresolvedParentCommand): void {
+  #recordParentSourceBoundaries(
+    command?: UnresolvedParentCommand,
+  ): InventoryEvidence | undefined {
     const session = this.#parentSession;
     if (session === null) return;
     const native = session.completions.some(
@@ -766,7 +775,8 @@ export class ScanCostTracker {
       if (completion.projection !== undefined)
         projectedItems.add(completion.projection);
     this.#parentReviewBefore = null;
-    for (const live of this.#liveParentItems)
+    for (const live of this.#liveParentItems) {
+      for (const marker of live.markers) delete marker.projection;
       if (
         live.position === null &&
         live.after !== undefined &&
@@ -784,6 +794,7 @@ export class ScanCostTracker {
               undefined,
               live,
             );
+    }
     const authority = this.#acceptedInventory();
     // Legacy logs without command positions keep the established live scope.
     // An old copied preview cannot replace it merely by being read later.
@@ -794,6 +805,7 @@ export class ScanCostTracker {
         ? authority.progress.filesTotal
         : this.#parentTurnFilesTotal;
     let inventory: InventoryEvidence | LiveInventory | undefined;
+    let savedInventory: InventoryEvidence | undefined;
     let liveIndex = 0;
     const applyBounds = (position: number) => {
       while (liveIndex < this.#liveParentItems.length) {
@@ -842,6 +854,7 @@ export class ScanCostTracker {
         retained.markerIndex === candidate.markerIndex
           ? retained
           : candidate;
+      savedInventory = inventory;
       filesTotal = candidate.progress.filesTotal;
     };
     let completionIndex = 0;
@@ -902,7 +915,14 @@ export class ScanCostTracker {
       saved.scopeFilesTotal = filesTotal;
       const exact = completion?.projection?.position === saved.position;
       const nativeOccurrence = this.#parentTurnStartKnown && saved.completion;
-      if (projected !== undefined) projected.scopeFilesTotal = filesTotal;
+      if (projected !== undefined) {
+        projected.scopeFilesTotal = filesTotal;
+        if (progressKey(projected.progress) === progressKey(progress))
+          projected.projection = {
+            position: saved.position,
+            markerIndex: saved.markerIndex,
+          };
+      }
       if (progress.phase === "discovery" && progress.filesCompleted === 0) {
         // Source eligibility follows the inventory at this position, not the
         // display scope at the start or end of a poll. The retained rows make
@@ -961,6 +981,7 @@ export class ScanCostTracker {
     }
     while (completionIndex < session.completions.length)
       remainingMarkers(session.completions[completionIndex++]!);
+    return savedInventory;
   }
 
   #precedesParentBoundary(position: number, markerIndex: number): boolean {
@@ -1031,14 +1052,22 @@ export class ScanCostTracker {
     session: SessionUsage,
     start = 0,
     end = this.#liveParentItems.length,
+    completionIndex = 0,
   ): void {
+    // Exact-only intervals require neither source scans nor alias indexes.
+    while (start < end && this.#liveParentItems[start]!.position !== null)
+      start++;
     if (
+      start === end ||
       !this.#parentTurnStartKnown ||
       !session.completions.some((completion) => completion.kind === "command")
     )
       return;
-    let completionIndex = 0;
     while (start < end) {
+      if (this.#liveParentItems[start]!.position !== null) {
+        start++;
+        continue;
+      }
       let stop = start;
       while (stop < end && this.#liveParentItems[stop]!.position === null)
         stop++;
@@ -1230,6 +1259,7 @@ export class ScanCostTracker {
         this.#parentSession,
         this.#matchedParentItems,
         index + 1,
+        this.#parentCompletionCursor,
       );
       const changed = new Set<string>();
       const remove = (key: string, queues: ProgressOccurrenceQueues) => {
@@ -1425,7 +1455,8 @@ export class ScanCostTracker {
     const unresolvedCommand = this.#unresolvedParentCommand();
     // Source proof and its eligible review cutoff precede inventory admission.
     // A count-rejected review can invalidate a later provisional inventory.
-    this.#recordParentSourceBoundaries(unresolvedCommand);
+    const sourceInventory =
+      this.#recordParentSourceBoundaries(unresolvedCommand);
     if (
       !this.#inventoryPrecedesReview(
         this.#inventoryFrontier.position,
@@ -1502,6 +1533,19 @@ export class ScanCostTracker {
       };
       this.#liveParentProgress.add(progressKey(progress));
       corrected = { ...this.#parentProgress, owner: "live" };
+    }
+    // Recover eligible retained source authority before a baseline rollback
+    // could temporarily revive an out-of-scope parent or worker phase.
+    if (
+      this.#retainedInventory() === undefined &&
+      sourceInventory?.source !== undefined
+    ) {
+      const admission = this.#parentInventoryAdmission(
+        sourceInventory.source,
+        unresolvedCommand,
+      );
+      if (admission === "current" || admission === "proven")
+        this.#inventoryFrontier = sourceInventory;
     }
     const inventory = this.#retainedInventory();
     this.#projectParentInventory();
