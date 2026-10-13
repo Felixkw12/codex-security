@@ -224,11 +224,12 @@ jobs:
           path: dist
       - name: Restore bundled plugin
         run: tar -xzf dist/*.tgz --strip-components=1 -C sdk/typescript package/_bundled_plugin
-      - name: Install ripgrep
+      - name: Set up Linux test tools and sandbox
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install --yes ripgrep
+          sudo apt-get install --yes ripgrep bubblewrap apparmor-profiles
+          sudo apparmor_parser -r /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
       - name: Test
         working-directory: sdk/typescript
         env:

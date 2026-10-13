@@ -3853,6 +3853,8 @@ async function testSaturationIgnoresDiscoveryCancellationWriteFailure(
 
 async function testPublicationUsesAcceptedReducerSnapshot() {
   const { fixture, store } = await coordinatorFixture();
+  fixture.run.coordinatorGeneration = 3;
+  store.run.coordinatorGeneration = 3;
   const commitDedup = store.commitDedup.bind(store);
   store.commitDedup = async (commit) => {
     const accepted = await commitDedup(commit);
@@ -3869,21 +3871,33 @@ async function testPublicationUsesAcceptedReducerSnapshot() {
     return structuredClone(store.run);
   };
   const completed: ScanDraftInput[] = [];
+  const published: {
+    coordinatorGeneration?: number;
+    resultPath: string | null;
+  }[] = [];
   const terminal = await runCoordinator(
     fixture,
     store,
     new FakeExecutor({ discoveryCandidateId: "accepted-finding" }),
     {
-      onComplete: async (draft) => void completed.push(structuredClone(draft)),
+      onComplete: async (draft, _signal, publication) => {
+        completed.push(structuredClone(draft));
+        published.push(publication);
+      },
     },
   );
   assert.equal(terminal?.status, "succeeded", terminal?.error);
   assert.equal(
-    (completed[0].findings[0].provenance as { candidateId: string })
-      .candidateId,
+    completed[0].findings[0].provenance.candidateId,
     "accepted-finding",
   );
   assert.equal(completed[0].coverage.completeness, "complete");
+  const reducer = [...store.workers.values()].find(
+    (worker) => worker.kind === "dedup",
+  );
+  assert.deepEqual(published, [
+    { coordinatorGeneration: 3, resultPath: reducer!.resultManifestPath },
+  ]);
 }
 
 async function testResumeDoesNotRequireHistoricalWorkerPrompt(

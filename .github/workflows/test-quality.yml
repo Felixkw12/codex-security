@@ -131,6 +131,12 @@ jobs:
         run: |
           pnpm --dir sdk/typescript install --frozen-lockfile
           pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
+      - name: Set up the Ubuntu sandbox
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap apparmor-profiles
+          sudo apparmor_parser -r /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
       - name: Prepare private Windows test root
         if: runner.os == 'Windows'
         id: windows-temp
