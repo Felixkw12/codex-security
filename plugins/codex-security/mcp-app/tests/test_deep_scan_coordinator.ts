@@ -3738,7 +3738,7 @@ async function testSuccessfulDeepCoveragePreservesWorkerReviewStatus() {
   const terminal = await coordinator.wait(undefined, 5_000);
   assert.equal(terminal?.status, "succeeded", terminal?.error);
   assert.equal(completed.length, 1);
-  const projection = completed[0].coverage as {
+  const projection = completed[0].coverage as ScanDraftInput["coverage"] & {
     completeness: string;
     deferred: { provenance: { attempt: number; workerId: string } }[];
     surfaces: unknown[];
@@ -3946,8 +3946,7 @@ async function testPublicationUsesAcceptedReducerSnapshot() {
   );
   assert.equal(terminal?.status, "succeeded", terminal?.error);
   assert.equal(
-    (completed[0].findings[0].provenance as { candidateId: string })
-      .candidateId,
+    completed[0].findings[0].provenance.candidateId,
     "accepted-finding",
   );
   assert.equal(completed[0].coverage.completeness, "complete");

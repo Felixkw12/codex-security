@@ -1227,6 +1227,7 @@ def complete_budget_exhausted_scan(
             )
         selection = deep_scan.deep_scan_finalization_input(run)
         draft_documents = None
+        sealed_replay = False
         try:
             if selection is not None:
                 saved_results._require_selected_result(scan, selection)
@@ -1248,6 +1249,7 @@ def complete_budget_exhausted_scan(
                     saved_results.require_selected_publication(
                         _WORKBENCH_DB_CONTEXT, connection, scan, validated
                     )
+                    sealed_replay = validated[5]
             if before_selection:
                 prepared = deep_scan.prepare_budget_exhausted_deep_scan(
                     connection,
@@ -1275,9 +1277,15 @@ def complete_budget_exhausted_scan(
                     draft_documents=draft_documents,
                 )
                 if selection is not None:
-                    saved_results.record_selected_publication(
-                        _WORKBENCH_DB_CONTEXT, connection, scan, prepared
-                    )
+                    if sealed_replay:
+                        # Bind replay to the validated snapshot, even if disk lost its seal.
+                        saved_results.require_selected_publication(
+                            _WORKBENCH_DB_CONTEXT, connection, scan, prepared
+                        )
+                    else:
+                        saved_results.record_selected_publication(
+                            _WORKBENCH_DB_CONTEXT, connection, scan, prepared
+                        )
         except ContractError as exc:
             raise SystemExit(str(exc)) from exc
         warnings = json.loads(scan["completion_warnings_json"])

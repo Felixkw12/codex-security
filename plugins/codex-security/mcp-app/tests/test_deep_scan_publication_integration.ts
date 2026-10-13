@@ -65,7 +65,7 @@ const pluginRoot = path.resolve(mcpAppRoot, "..");
 const workbenchPath = path.join(pluginRoot, "scripts", "workbench_db.py");
 const python = process.env.PYTHON?.trim() || "python3";
 const owner = "publication-test-owner";
-const coverage = {
+const coverage: ScanDraftInput["coverage"] = {
   completeness: "complete",
   surfaces: [],
   explicitExclusions: [],
