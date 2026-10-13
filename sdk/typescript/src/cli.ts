@@ -3,6 +3,7 @@ import {
   requireCloudScanEligibility,
   cloudRepositoryIdentity,
 } from "./cloud-scan-eligibility.js";
+import { workbenchArgs } from "./workbench-arguments.js";
 import { listenForAbort } from "./cli-signals.js";
 import { isNonEmptyString, parseJson } from "./value.js";
 
@@ -150,13 +151,21 @@ import {
   formatScanCost,
   formatScanCostTokens,
   formatTokenUsage,
+  type ScanTokenUsage,
 } from "./cost-model.js";
 import { readRegularInputFile, resolveScanPrompts } from "./prompt-files.js";
+import {
+  readKnowledgeBaseSnapshot,
+  type KnowledgeBaseSnapshot,
+} from "./knowledge-base.js";
+import { restoreScanKnowledge, scanInputIdentity } from "./scan-inputs.js";
+import { workflowDigest } from "./finding-workflow.js";
 import {
   CodexSecurityError,
   AuthenticationRequiredError,
   ConfigurationError,
   InvalidTargetError,
+  IncompleteScanError,
   LocalPluginBootstrapError,
   OutputDirectoryError,
   OutputInsideProtectedRootError,
@@ -255,6 +264,7 @@ import {
   abortable,
   DiffTarget,
   enclosingGitWorktreeRoots,
+  UNSUPPORTED_GIT_ENVIRONMENT,
   type ScanTarget,
   relativePathIsOutside as isOutsidePath,
 } from "./targets.js";
@@ -371,6 +381,8 @@ const PROVIDER_OPTION = z
   .enum(["openai", "openrouter", "fireworks", "amazon-bedrock"])
   .default("openai")
   .describe("Inference provider for scans.");
+const positiveInteger = z.number().int().positive();
+
 const SHOW_COST_OPTION = z
   .boolean()
   .default(false)
@@ -940,6 +952,8 @@ export function resolveCliPath(directory: string, value: string): AbsolutePath {
 }
 
 interface ScanArguments extends ResolvedScanSettings {
+  rerunInputIdentity?: JsonValue;
+  knowledgeBaseSnapshot?: KnowledgeBaseSnapshot;
   codexOverrides: JsonObject;
   projectConfig?: ProjectConfigProvenance;
   resumeScanId?: string;
@@ -1742,13 +1756,10 @@ export async function main(
   let exitCode = 0;
   let frameworkExit: number | undefined;
   const frameworkCapture = captureOutput();
+  let rawExportOutput = false;
   let streamedLogs: Awaited<ReturnType<typeof readSavedScanLogs>> | undefined;
-  let renderedHistory: string | undefined;
-  let renderedPublication: string | undefined;
-  let renderedPolicy: string | undefined;
-  let renderedPatch: string | undefined;
-  let patchStructuredError = false;
-  let scanStructuredError = false;
+  let renderedOutput: string | undefined;
+  let structuredError = false;
   let incompleteScanOutput:
     { format: "json" | "jsonl"; message: string } | undefined;
   const recordIncompleteScanOutput = (outcome: ScanOutcome, format: string) => {
@@ -1762,7 +1773,6 @@ export async function main(
   };
   let filteredScanFailure:
     { format: string; data: Record<string, unknown> } | undefined;
-  let renderedScanFailure: string | undefined;
   const finishScan = (
     outcome: ScanOutcome,
     format: string,
@@ -1787,7 +1797,7 @@ export async function main(
         return data;
       }
       // Incur would wrap returned data in an ok: true envelope.
-      scanStructuredError = true;
+      structuredError = true;
       return incurError({ code, message, exitCode });
     }
     return incurError({ code, message: outcome.error, exitCode });
@@ -1816,14 +1826,11 @@ export async function main(
     pythonPath?: string,
   ): Promise<SavedScan[] | undefined> => {
     const result = await history(
-      [
-        "list-scans",
-        "--repository",
-        dependencies.currentDirectory(),
-        ...(status === "complete" ? ["--status", "complete"] : []),
-        "--limit",
-        String(count),
-      ],
+      workbenchArgs("list-scans", {
+        repository: dependencies.currentDirectory(),
+        status: status === "complete" ? "complete" : undefined,
+        limit: String(count),
+      }),
       (value) => {
         if ((value["scans"] as SavedScan[]).length < count) {
           const kind = status === "complete" ? "completed" : "saved";
@@ -1895,14 +1902,11 @@ export async function main(
     runMatching(async (options) => {
       const { matchingCached, matchingInputs, ...comparison } =
         await dependencies.runWorkbench(
-          [
-            "compare-scans",
-            "--before-scan-id",
-            beforeId,
-            "--after-scan-id",
-            afterId,
-            "--include-matching-inputs",
-          ],
+          workbenchArgs("compare-scans", {
+            beforeScanId: beforeId,
+            afterScanId: afterId,
+            includeMatchingInputs: true,
+          }),
           undefined,
           options.signal,
         );
@@ -1911,14 +1915,11 @@ export async function main(
       const matching = await dependencies.matchFindings(input, options);
       options.signal?.throwIfAborted();
       return await dependencies.runWorkbench(
-        [
-          "save-scan-comparison",
-          "--before-scan-id",
-          beforeId,
-          "--after-scan-id",
-          afterId,
-          "--matches-json-stdin",
-        ],
+        workbenchArgs("save-scan-comparison", {
+          beforeScanId: beforeId,
+          afterScanId: afterId,
+          matchesJsonStdin: true,
+        }),
         JSON.stringify(matching),
         options.signal,
       );
@@ -1941,7 +1942,7 @@ export async function main(
     ) {
       return result;
     }
-    renderedHistory = renderScanHistory(result, command, {
+    renderedOutput = renderScanHistory(result, command, {
       columns: output.columns,
       color:
         dependencies.environment["NO_COLOR"] === undefined &&
@@ -1952,6 +1953,24 @@ export async function main(
       showLinkedFindings: settings.showLinkedFindings,
     });
     return result;
+  };
+  const showHistoryNavigation = async (
+    scan: JsonObject,
+    format: string,
+    selection?: string,
+  ): Promise<void> => {
+    if (
+      format !== "toon" ||
+      argv.some((argument) => OUTPUT_OPTION.test(argument))
+    )
+      return;
+    await withTerminalErrorsHandled(errorOutput, async () => {
+      try {
+        printScanReference(scan, errorOutput, selection);
+      } catch {
+        // Optional navigation must not prevent reading saved results or logs.
+      }
+    });
   };
   const findingFeedback = Cli.create("findings", {
     description: "Review saved findings (default: list).",
@@ -2044,12 +2063,15 @@ export async function main(
                     dependencies.runWorkbench,
                     target["targetId"] as string,
                   );
-            return { repository, findings: findings ?? [] };
+            return {
+              repository: requestedRepository,
+              findings: findings ?? [],
+            };
           },
         ),
         "findings",
         format,
-        { repository },
+        { repository: requestedRepository },
       );
     },
   });
@@ -2087,11 +2109,12 @@ export async function main(
             ? undefined
             : resolveCliPath(directory, args.repository ?? directory);
         return presentHistory(
-          await history([
-            "list-scans",
-            ...(repository === undefined ? [] : ["--repository", repository]),
-            ...(scanRoot === undefined ? [] : ["--scan-root", scanRoot]),
-          ]),
+          await history(
+            workbenchArgs("list-scans", {
+              repository,
+              scanRoot,
+            }),
+          ),
           "list",
           format,
           {
@@ -2103,6 +2126,7 @@ export async function main(
     })
     .command("show", {
       description: "Show the results and saved configuration for a scan.",
+      hint: "Without an ID, show selects the latest completed scan; logs selects the latest scan of any status. Pass the same ID to inspect one run.",
       mcp: false,
       args: z.object({
         scanId: z
@@ -2126,11 +2150,31 @@ export async function main(
       ],
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, format, options }) {
-        const scanId = args.scanId ?? (await latestScans())?.[0]?.scanId;
+        let scanId = args.scanId;
+        if (scanId === undefined) {
+          try {
+            scanId = (await latestScans())?.[0]?.scanId;
+          } catch (error) {
+            if (
+              format === "toon" &&
+              !argv.some((argument) => OUTPUT_OPTION.test(argument))
+            ) {
+              errorOutput.write(
+                "Use codex-security scans list to find failed or active scans, then pass a scan ID to scans show and scans logs.\n",
+              );
+            }
+            throw error;
+          }
+        }
         if (scanId === undefined) return;
         return presentHistory(
-          await history(["get-scan", "--scan-id", scanId], (value) => {
+          await history(["get-scan", "--scan-id", scanId], async (value) => {
             const { scan, recipe, parentScanId } = value;
+            await showHistoryNavigation(
+              scan as JsonObject,
+              format,
+              args.scanId === undefined ? "latest completed scan" : undefined,
+            );
             return {
               ...(scan as JsonObject),
               ...(recipe === undefined ? {} : { recipe }),
@@ -2145,13 +2189,16 @@ export async function main(
     })
     .command("logs", {
       description: "Show saved activity for a scan and its workers.",
+      hint: "Without an ID, logs selects the latest scan, including failed and active runs; show selects the latest completed scan. Pass the same ID to inspect one run.",
       mcp: false,
       args: z.object({
         scanId: z
           .string()
           .min(1)
           .optional()
-          .describe("Scan identifier or unique prefix (default: latest)."),
+          .describe(
+            "Scan identifier or unique prefix (default: latest, any status).",
+          ),
       }),
       examples: [
         { args: {}, description: "Show activity from the latest scan." },
@@ -2169,6 +2216,13 @@ export async function main(
           ["get-scan", "--scan-id", scanId],
           async (value) => {
             const scan = value["scan"] as ScanLogSource;
+            await showHistoryNavigation(
+              scan,
+              format,
+              args.scanId === undefined
+                ? "latest scan, including failed and active runs"
+                : undefined,
+            );
             const logs = await readSavedScanLogs(
               scan,
               [
@@ -2221,11 +2275,9 @@ export async function main(
       async run({ args, error: incurError, format, options }) {
         let scanArguments: ScanArguments;
         try {
-          const saved = await dependencies.runWorkbench([
-            "get-cli-scan-resume",
-            "--scan-id",
-            args.scanId,
-          ]);
+          const saved = await dependencies.runWorkbench(
+            workbenchArgs("get-cli-scan-resume", { scanId: args.scanId }),
+          );
           if (
             typeof saved["scanId"] !== "string" ||
             typeof saved["scanDir"] !== "string"
@@ -2250,6 +2302,13 @@ export async function main(
             dependencies.currentDirectory(),
             saved["scanDir"],
           );
+          if (scanArguments.knowledgeBasePaths.length > 0) {
+            scanArguments.knowledgeBaseSnapshot = await restoreScanKnowledge(
+              scanArguments.outputDir,
+              scanArguments.repository!,
+              (saved["recipe"] as JsonObject)["scanInputs"],
+            );
+          }
           scanArguments.parentScanId = undefined;
           // Resume uses the installed engine with the saved recipe and checkpoints.
           scanArguments.expectedPluginVersion = undefined;
@@ -2270,7 +2329,8 @@ export async function main(
       },
     })
     .command("rerun", {
-      description: "Rerun a saved scan with its original configuration.",
+      description:
+        "Start a new scan using saved settings and current checkout/context files.",
       hint: "Incomplete full-output JSON or JSONL uses ok: false and keeps available scan results under data.",
       destructive: true,
       mcp: false,
@@ -2329,11 +2389,9 @@ export async function main(
         let scanArguments: ScanArguments;
         try {
           const { recipe, scanId: resolvedScanId } =
-            await dependencies.runWorkbench([
-              "get-scan-recipe",
-              "--scan-id",
-              scanId,
-            ]);
+            await dependencies.runWorkbench(
+              workbenchArgs("get-scan-recipe", { scanId }),
+            );
           const parentScanId = resolvedScanId as string;
           if (
             isJsonObject(recipe) &&
@@ -2398,6 +2456,9 @@ export async function main(
           );
           scanArguments.verbose = options.verbose;
           scanArguments.showCost = options.showCost;
+          scanArguments.rerunInputIdentity = isJsonObject(recipe)
+            ? (recipe["scanInputs"] ?? null)
+            : null;
         } catch (error) {
           const message = errorMessage(error);
           errorOutput.write(`codex-security: ${diagnosticLines(message)}\n`);
@@ -2836,11 +2897,9 @@ export async function main(
               (item) => item.environment_id === cloudEnvironment,
             );
           }
-          const saved = await scanDependencies.runWorkbench([
-            "list-scans",
-            "--status",
-            "complete",
-          ]);
+          const saved = await scanDependencies.runWorkbench(
+            workbenchArgs("list-scans", { status: "complete" }),
+          );
           const listedScans = saved["scans"];
           if (!Array.isArray(listedScans)) {
             throw new CodexSecurityError(
@@ -3182,7 +3241,7 @@ export async function main(
           !options.dryRun &&
           !argv.some((argument) => OUTPUT_OPTION.test(argument))
         ) {
-          renderedPublication = renderPublicationSummary(
+          renderedOutput = renderPublicationSummary(
             result,
             output.isTTY === true &&
               dependencies.environment["NO_COLOR"] === undefined &&
@@ -3270,7 +3329,7 @@ export async function main(
         z.object({
           source: z.literal("github-code-scanning"),
           repository: z.string(),
-          number: z.number().int().positive(),
+          number: positiveInteger,
           url: z.string(),
           alert: z.record(z.string(), z.unknown()),
         }),
@@ -3338,7 +3397,7 @@ export async function main(
     },
   })
     .command("policy", {
-      description: "Draft SECURITY.md guidance for review.",
+      description: "Draft SECURITY.md for review.",
       destructive: true,
       mcp: false,
       args: z.object({
@@ -3369,11 +3428,11 @@ export async function main(
         headless: z
           .boolean()
           .default(false)
-          .describe("Skip owner questions and authentication prompts."),
+          .describe("Skip questions and sign-in prompts."),
         dryRun: z
           .boolean()
           .default(false)
-          .describe("Validate local generation inputs without starting Codex."),
+          .describe("Check inputs without generating a policy."),
         auth: SKILL_AUTH_OPTION,
         ...MODEL_OPTIONS.shape,
         provider: PROVIDER_OPTION.describe(
@@ -3389,7 +3448,9 @@ export async function main(
         { args: { repository: "." }, options: { path: "services/api" } },
       ],
       hint:
-        "Save a draft for review:\n" +
+        "Review the diff and notes. Edit the draft, then copy only SECURITY.md to the Policy target shown.\n" +
+        "Your existing policy stays unchanged until you replace it.\n\n" +
+        "Save a draft without answering questions:\n" +
         "  codex-security policy . --headless --output-dir /path/outside/repository/policy --json",
       output: z
         .union([z.record(z.string(), z.unknown()), z.string()])
@@ -3487,7 +3548,7 @@ export async function main(
             outcome.markdown !== undefined &&
             !filterOutput
           ) {
-            if (!transformOutput) renderedPolicy = outcome.markdown;
+            if (!transformOutput) renderedOutput = outcome.markdown;
             return outcome.markdown;
           }
           return format === "toon" && !explicitOutput && !options.dryRun
@@ -3797,12 +3858,17 @@ export async function main(
           ]
             .map((path) => `'${path.replaceAll("'", `'"'"'`)}'`)
             .join(" ");
-          const contents = `#!/bin/sh\nset -eu\nexec ${command} scan . --working-tree --fail-on-severity ${options.failOnSeverity}\n`;
+          const invocation = `exec ${command} scan . --working-tree --fail-on-severity ${options.failOnSeverity}\n`;
+          const contents = `#!/bin/sh\nset -eu\nunset ${[...UNSUPPORTED_GIT_ENVIRONMENT].join(" ")}\n${invocation}`;
+          const previousScopedContents = `#!/bin/sh\nset -eu\nunset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE\n${invocation}`;
+          const previousContents = `#!/bin/sh\nset -eu\n${invocation}`;
           const legacyContents = `#!/bin/sh\nset -eu\nexec npx --no-install codex-security scan . --working-tree --fail-on-severity ${options.failOnSeverity}\n`;
           const existing = await readFile(hook, "utf8").catch(() => null);
           if (
             existing !== null &&
             existing !== contents &&
+            existing !== previousScopedContents &&
+            existing !== previousContents &&
             existing !== legacyContents
           ) {
             throw new Error(`A pre-commit hook already exists at ${hook}.`);
@@ -3810,7 +3876,7 @@ export async function main(
           if (existing === null) {
             await mkdir(dirname(hook), { recursive: true });
             await writeFile(hook, contents, { flag: "wx", mode: 0o755 });
-          } else if (existing === legacyContents) {
+          } else if (existing !== contents) {
             await writeFile(hook, contents, { flag: "w" });
           }
           return {
@@ -3998,10 +4064,7 @@ export async function main(
       destructive: true,
       mcp: false,
       options: z.object({
-        concurrency: z
-          .number()
-          .int()
-          .positive()
+        concurrency: positiveInteger
           .default(DEFAULT_DEDUPE_CONCURRENCY)
           .describe(
             "Maximum concurrent dedupe jobs across Luna and Sol; use 1 for serial execution.",
@@ -4222,10 +4285,7 @@ export async function main(
           outputDir: optionValue("--output-dir")
             .optional()
             .describe("Empty results directory outside the repository."),
-          workers: z
-            .number()
-            .int()
-            .positive()
+          workers: positiveInteger
             .default(4)
             .describe(
               "Concurrent component scans; deep workers are configured per scan.",
@@ -4461,10 +4521,7 @@ export async function main(
           .optional()
           .meta({ default: [] })
           .describe("Read shared security docs for every repository."),
-        workers: z
-          .number()
-          .int()
-          .positive()
+        workers: positiveInteger
           .default(4)
           .describe(
             "Concurrent repository scans. Per-scan Codex workers are separate.",
@@ -4487,10 +4544,7 @@ export async function main(
           `OpenAI model for each repository (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
         ).shape,
         provider: PROVIDER_OPTION,
-        maxAttempts: z
-          .number()
-          .int()
-          .positive()
+        maxAttempts: positiveInteger
           .default(1)
           .describe("Maximum scan attempts per repository."),
         maxCost: ScanSettingsSchema.shape.maxCostUsd.describe(
@@ -4626,7 +4680,7 @@ export async function main(
               ? {
                   recoverScan: async (scanDir, prompts) => {
                     const history = await dependencies.runWorkbench(
-                      ["list-scans", "--scan-root", scanDir],
+                      workbenchArgs("list-scans", { scanRoot: scanDir }),
                       undefined,
                       controller.signal,
                     );
@@ -4652,12 +4706,10 @@ export async function main(
                     if (status !== "running" || scan["mode"] !== "deep")
                       return undefined;
                     const saved = await dependencies.runWorkbench(
-                      [
-                        "get-cli-scan-resume",
-                        "--scan-id",
-                        scan.scanId,
-                        "--allow-unavailable",
-                      ],
+                      workbenchArgs("get-cli-scan-resume", {
+                        scanId: scan.scanId,
+                        allowUnavailable: true,
+                      }),
                       undefined,
                       controller.signal,
                     );
@@ -4805,6 +4857,7 @@ export async function main(
           },
         ),
       async run({ args, options }) {
+        rawExportOutput = options.output === "-";
         try {
           const currentDirectory = dependencies.currentDirectory();
           if (args.scanDir !== undefined && options.scan !== undefined) {
@@ -5476,14 +5529,14 @@ export async function main(
           const message = errorMessage(error);
           errorOutput.write(`codex-security: ${diagnosticValue(message)}\n`);
           if (!structuredOutput) return;
-          patchStructuredError = true;
+          structuredError = true;
           const failure = {
             code:
               error instanceof PatchCommandError ? error.code : "PATCH_FAILED",
             message,
           };
           if (!fullOutput) {
-            renderedPatch =
+            renderedOutput =
               JSON.stringify({
                 ok: false,
                 ...patchResult,
@@ -5629,40 +5682,6 @@ export async function main(
         });
       },
     })
-    .command("serve", {
-      description: "Start the local findings HTTP service.",
-      hint:
-        "Environment: HOST=127.0.0.1, PORT=3000.\n" +
-        "CODEX_SECURITY_EMBEDDINGS_URL overrides the embeddings endpoint\n" +
-        "(default: https://api.openai.com/v1/embeddings).",
-      destructive: true,
-      mcp: false,
-      options: z.object({
-        port: z
-          .number()
-          .int()
-          .min(0)
-          .max(65535)
-          .optional()
-          .describe(
-            "Listen port (default: PORT or 3000; 0 picks a free port).",
-          ),
-      }),
-      async run({ options }) {
-        try {
-          const { serveFindings } = await import("./server/serve.js");
-          await serveFindings(
-            options.port === undefined
-              ? dependencies.environment
-              : { ...dependencies.environment, PORT: String(options.port) },
-            output,
-          );
-        } catch (error) {
-          errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
-          exitCode = 1;
-        }
-      },
-    })
     .command("init", {
       description: "Create a starter project configuration.",
       hint: "Existing files are never overwritten.",
@@ -5724,11 +5743,11 @@ export async function main(
       async run({ args, options }) {
         let scanId = args.scanId;
         if (scanId === undefined) {
-          const value = await history([
-            "list-scans",
-            "--repository",
-            dependencies.currentDirectory(),
-          ]);
+          const value = await history(
+            workbenchArgs("list-scans", {
+              repository: dependencies.currentDirectory(),
+            }),
+          );
           const scans = value["scans"] as {
             scanId: string;
             startedAt: string;
@@ -5896,7 +5915,7 @@ export async function main(
     );
     if (
       structuredOutput &&
-      ["validate", "login", "logout", "serve"].includes(command) &&
+      ["validate", "login", "logout"].includes(command) &&
       !argv.includes("--schema")
     ) {
       return `${command} does not support noninteractive JSON output; run it without --json, --format json, or --format jsonl.`;
@@ -6030,10 +6049,7 @@ export async function main(
       command !== "verify-fix" &&
       command !== "patch" &&
       positionals.length >
-        (scanImport ||
-        command === "logout" ||
-        command === "info" ||
-        command === "serve"
+        (scanImport || command === "logout" || command === "info"
           ? 0
           : subcommand === "compare" || subcommand === "match"
             ? 2
@@ -6210,12 +6226,12 @@ export async function main(
         stdout: failureOutput.stream.write,
         exit: () => undefined,
       });
-    renderedScanFailure = failureOutput.text();
+    renderedOutput = failureOutput.text();
   }
   let frameworkOutput = frameworkCapture.text();
   if (notice !== undefined) errorOutput.write(formatUpdateNotice(notice));
   if (frameworkExit !== undefined) {
-    if (policyFullOutput || patchStructuredError || scanStructuredError) {
+    if (policyFullOutput || structuredError) {
       if (exitCode === 0) exitCode = 2;
     } else {
       if (exitCode !== 0) return exitCode;
@@ -6225,10 +6241,11 @@ export async function main(
       return 2;
     }
   }
+  if (rawExportOutput) return exitCode;
   if (
     frameworkOutput.length === 0 &&
     streamedLogs === undefined &&
-    renderedScanFailure === undefined
+    filteredScanFailure === undefined
   )
     return exitCode;
   try {
@@ -6261,11 +6278,7 @@ export async function main(
     await writeCliOutput(
       output,
       logOutput ??
-        renderedScanFailure ??
-        renderedPolicy ??
-        renderedPatch ??
-        renderedPublication ??
-        renderedHistory ??
+        renderedOutput ??
         formatCliHelp(frameworkOutput, output.columns),
     );
     return exitCode;
@@ -6558,12 +6571,10 @@ async function matchAllScans(
   options: ScanComparisonOptions = {},
 ): Promise<JsonObject> {
   const result = (await dependencies.runWorkbench(
-    [
-      "list-unmatched-scan-pairs",
-      "--repository",
-      dependencies.currentDirectory(),
-      ...(force ? ["--force"] : []),
-    ],
+    workbenchArgs("list-unmatched-scan-pairs", {
+      repository: dependencies.currentDirectory(),
+      force: Boolean(force),
+    }),
     undefined,
     options.signal,
   )) as MatchingPlan;
@@ -6606,14 +6617,11 @@ async function matchAllScans(
     for (const { scanId, comparison } of comparisons) {
       options.signal?.throwIfAborted();
       await dependencies.runWorkbench(
-        [
-          "save-scan-comparison",
-          "--before-scan-id",
-          scanId,
-          "--after-scan-id",
+        workbenchArgs("save-scan-comparison", {
+          beforeScanId: scanId,
           afterScanId,
-          "--matches-json-stdin",
-        ],
+          matchesJsonStdin: true,
+        }),
         JSON.stringify(comparison),
         options.signal,
       );
@@ -6695,13 +6703,9 @@ async function selectSavedFindings(
   let scanId = requestedScanId;
   if (scanId === "latest") {
     const repository = resolve(dependencies.currentDirectory());
-    const history = await dependencies.runWorkbench([
-      "list-scans",
-      "--repository",
-      repository,
-      "--status",
-      "complete",
-    ]);
+    const history = await dependencies.runWorkbench(
+      workbenchArgs("list-scans", { repository, status: "complete" }),
+    );
     const latest = (history["scans"] as { scanId?: string }[] | undefined)?.[0]
       ?.scanId;
     if (typeof latest !== "string") {
@@ -7420,10 +7424,9 @@ async function runFindingPatches(
           : [];
         const matches = entries.filter(
           (entry) =>
-            typeof entry === "object" &&
-            entry !== null &&
+            isJsonObject(entry) &&
             "occurrenceId" in entry &&
-            entry.occurrenceId === finding.occurrenceId,
+            entry["occurrenceId"] === finding.occurrenceId,
         );
         const parsed = findingPatchSchema.safeParse(matches[0]);
         if (matches.length !== 1 || !parsed.success) {
@@ -8047,24 +8050,16 @@ export async function readSkillCommandOutput(
     if (value["type"] === "item.completed") {
       const item = value["item"];
       if (
-        typeof item === "object" &&
-        item !== null &&
-        "type" in item &&
-        item.type === "agent_message" &&
-        "text" in item &&
-        typeof item.text === "string"
+        isJsonObject(item) &&
+        item["type"] === "agent_message" &&
+        typeof item["text"] === "string"
       ) {
-        message = item.text;
+        message = item["text"];
       }
     } else if (value["type"] === "turn.failed") {
       const detail = value["error"];
-      if (
-        typeof detail === "object" &&
-        detail !== null &&
-        "message" in detail &&
-        typeof detail.message === "string"
-      ) {
-        error = detail.message;
+      if (isJsonObject(detail) && typeof detail["message"] === "string") {
+        error = detail["message"];
       }
     } else if (
       value["type"] === "error" &&
@@ -8218,6 +8213,7 @@ async function executeScan(
   dependencies: CliDependencies,
   interactive = true,
 ): Promise<ScanOutcome> {
+  let registeredScan: JsonObject | undefined;
   let scanDir: string | null = null;
   const scanInput = dependencies.scanInput ?? process.stdin;
   let requestedSignal: SignalName | null = null;
@@ -8231,6 +8227,7 @@ async function executeScan(
   let deepProgress: DeepScanProgress | null = null;
   let deepConsolidating = false;
   let runningCost: Readonly<ScanCost> | null = null;
+  let runningUsage: Readonly<ScanTokenUsage> | null = null;
   let maxCostUsd = arguments_.maxCostUsd;
   const showCost = arguments_.showCost === true || maxCostUsd !== undefined;
   let phase: string | null = null;
@@ -8456,9 +8453,13 @@ async function executeScan(
           `Files: ${fileProgress.filesCompleted.toLocaleString("en-US")}/${fileProgress.filesTotal.toLocaleString("en-US")}`,
         );
       }
-      if (runningCost !== null) {
-        details.push(`Tokens: ${formatScanCostTokens(runningCost)}`);
-        if (showCost) details.push(`Cost: ${formatScanCost(runningCost)}`);
+      const tokens =
+        runningCost !== null
+          ? formatScanCostTokens(runningCost)
+          : formatTokenUsage(runningUsage);
+      if (tokens !== null) details.push(`Tokens: ${tokens}`);
+      if (showCost && runningCost !== null) {
+        details.push(`Cost: ${formatScanCost(runningCost)}`);
       }
       return details.length === 0 ? stage : `${stage} | ${details.join(" | ")}`;
     };
@@ -8483,6 +8484,7 @@ async function executeScan(
     }
     const options: ScanOptions = {
       ...pickScanSettings(arguments_),
+      knowledgeBaseSnapshot: arguments_.knowledgeBaseSnapshot,
       ...(arguments_.resumeScanId === undefined
         ? {}
         : { resumeScanId: arguments_.resumeScanId }),
@@ -8496,6 +8498,20 @@ async function executeScan(
       archiveExisting: arguments_.archiveExisting,
       parentScanId: arguments_.parentScanId,
       expectedPluginVersion: arguments_.expectedPluginVersion,
+      onUsage: async (usage) => {
+        runningUsage = usage;
+        if (dashboard !== null) {
+          dashboard.setUsage(usage);
+          return;
+        }
+        const priorCost = runningCost;
+        // The tracker queues usage before cost; let the paired cost update render once.
+        await Promise.resolve();
+        if (runningCost !== priorCost) return;
+        progress?.stopTimer();
+        progress?.stage(`Tokens: ${formatTokenUsage(usage)}.`);
+        progress?.startTimer(runningMessage());
+      },
       onCost: (cost, limit = maxCostUsd) => {
         if (limit !== maxCostUsd && limit !== undefined) {
           dashboard?.note(`Total cost limit increased to ${formatUsd(limit)}.`);
@@ -8548,6 +8564,10 @@ async function executeScan(
         );
       },
       signal: preparationAbortController.signal,
+      onScanRegistered: (scan) => {
+        registeredScan = scan;
+        scanDir = scan.scanDir;
+      },
       onOutputDirReady: (path) => {
         scanDir = path;
         diagnostic("scan.output_ready", { scan_dir: path });
@@ -8650,13 +8670,15 @@ async function executeScan(
         progress?.stage(message);
         progress?.startTimer(runningMessage());
       },
-      onActivity: (activity) => {
-        if (dashboard === null) return;
-        dashboard.record(activity);
-        if (activity.paths.length > 0 && phase === "preflight") {
-          dashboard.setStage("inspecting repository files");
-        }
-      },
+      onActivity:
+        dashboard === null
+          ? undefined
+          : (activity) => {
+              dashboard?.record(activity);
+              if (activity.paths.length > 0 && phase === "preflight") {
+                dashboard?.setStage("inspecting repository files");
+              }
+            },
       onSessionEvent:
         scanInput.isTTY === true
           ? dashboard?.recordDetails.bind(dashboard)
@@ -8764,6 +8786,41 @@ async function executeScan(
         }
       },
     };
+    if (arguments_.rerunInputIdentity !== undefined) {
+      if (options.knowledgeBasePaths?.length) {
+        options.knowledgeBaseSnapshot = await readKnowledgeBaseSnapshot(
+          options.knowledgeBasePaths,
+          preparationAbortController.signal,
+        );
+      }
+      const previousInputs = arguments_.rerunInputIdentity;
+      const currentInputs = scanInputIdentity(
+        options.scanPrompt,
+        options.knowledgeBaseSnapshot,
+      );
+      const changes = isJsonObject(previousInputs)
+        ? ["scanPromptSha256", "knowledgeBase"]
+            .filter(
+              (key) =>
+                workflowDigest(previousInputs[key] ?? null) !==
+                workflowDigest(currentInputs[key] ?? null),
+            )
+            .map((key) =>
+              key === "scanPromptSha256"
+                ? "scan instructions"
+                : "knowledge base",
+            )
+        : [];
+      try {
+        writeAboveProgress(() =>
+          errorOutput.write(
+            `codex-security: Starting a new scan with current checkout/context files.${changes.length ? ` Changed inputs: ${changes.join(", ")}.` : ""}\n`,
+          ),
+        );
+      } catch {
+        // Optional input-change diagnostics must not prevent the new scan.
+      }
+    }
     if (arguments_.dryRun) {
       preflight = await security.preflight(repository, options);
     } else {
@@ -8799,8 +8856,10 @@ async function executeScan(
       signal: requestedSignal,
       partial_output: scanDir !== null,
     });
+    const exitCode = interruptedExit(requestedSignal, scanDir, errorOutput);
+    printFailedScanReference(registeredScan, phase, arguments_, errorOutput);
     return {
-      exitCode: interruptedExit(requestedSignal, scanDir, errorOutput),
+      exitCode,
       error:
         requestedSignal === "SIGINT"
           ? "Scan canceled by Ctrl-C."
@@ -8835,6 +8894,7 @@ async function executeScan(
     });
     errorOutput.write(`${message}\n`);
     if (failure instanceof ScanInterruptedError) {
+      printFailedScanReference(registeredScan, phase, arguments_, errorOutput);
       return { exitCode: 2, error: message };
     }
     if (scanDir !== null) {
@@ -8842,6 +8902,7 @@ async function executeScan(
         `Partial output was kept at ${errorMessage(scanDir)}.\n`,
       );
     }
+    printFailedScanReference(registeredScan, phase, arguments_, errorOutput);
     return { exitCode: 2, error: message };
   }
   if (preflight !== null) {
@@ -8890,6 +8951,7 @@ async function executeScan(
       message: "Scan completed without a result.",
     });
     errorOutput.write("scan completed without a result\n");
+    printFailedScanReference(registeredScan, phase, arguments_, errorOutput);
     return { exitCode: 2, error: "Scan completed without a result." };
   }
   const threshold = arguments_.failureSeverity;
@@ -9095,6 +9157,7 @@ const LOCAL_SYSCALL_CODES = new Set([
 ]);
 
 function isLocalScanFailure(error: unknown): boolean {
+  if (error instanceof IncompleteScanError) error = error.cause;
   if (
     error instanceof InvalidTargetError ||
     error instanceof OutputDirectoryError ||
@@ -9203,13 +9266,19 @@ function scanFailureMessage(
   const nativeRefreshRecovery = message.match(
     /\b(?:your access token could not be refreshed because you have since logged out or signed in to another account\. Please sign in again\.|your authentication session could not be refreshed automatically\. Please log out and sign in again\.)/iu,
   )?.[0];
-  if (nativeRefreshRecovery !== undefined) return nativeRefreshRecovery;
+  if (nativeRefreshRecovery !== undefined)
+    return error instanceof IncompleteScanError
+      ? diagnosticValue(error)
+      : nativeRefreshRecovery;
+  const detail =
+    error instanceof IncompleteScanError ? `${diagnosticValue(error)}\n` : "";
   if (
     /\byour access token could not be refreshed(?: because your refresh token (?:has expired|was already used|was revoked))?\. Please log out and sign in again\./iu.test(
       message,
     )
   ) {
     return (
+      detail +
       "Codex Security's stored ChatGPT sign-in could not be refreshed. " +
       "Codex may still need it to load workspace-managed policies when an API key is selected for model authentication. " +
       "If the sign-in recently changed, check 'npx @openai/codex-security login status' and retry. " +
@@ -9218,18 +9287,18 @@ function scanFailureMessage(
   }
   switch (classification) {
     case "unauthorized":
-      return authenticationFailureMessage(authentication);
+      return detail + authenticationFailureMessage(authentication);
     case "forbidden":
       if (authentication?.method === "command") {
-        return "The configured Codex provider denied access. Check the command credentials and provider permissions.";
+        return `${detail}The configured Codex provider denied access. Check the command credentials and provider permissions.`;
       }
       return authentication?.method === "api_key"
-        ? `The API key from ${authentication.source} cannot access the configured model. ` +
+        ? `${detail}The API key from ${authentication.source} cannot access the configured model. ` +
             "Retry with '--auth chatgpt' or use an API key with model access."
-        : "The stored ChatGPT credentials cannot access the configured model. " +
+        : `${detail}The stored ChatGPT credentials cannot access the configured model. ` +
             "Use an account or API key with model access.";
     case "rate_limited":
-      return "The configured account reached its rate limit. Wait and retry.";
+      return `${detail}The configured account reached its rate limit. Wait and retry.`;
     case "network_error":
     case "timeout":
     case "unknown":
@@ -9281,13 +9350,12 @@ async function readDeepScanStop(
       nextStep: "To scan further, rerun with a higher --max-cost.",
     };
   }
-  const response = await runWorkbench([
-    "get-deep-scan",
-    "--scan-id",
-    result.manifest.scan.id,
-    "--thread-id",
-    result.threadId,
-  ]);
+  const response = await runWorkbench(
+    workbenchArgs("get-deep-scan", {
+      scanId: result.manifest.scan.id,
+      threadId: result.threadId,
+    }),
+  );
   const state = response["deepScan"] as
     | {
         terminalReason: string;
@@ -9326,6 +9394,72 @@ async function readDeepScanStop(
   return {
     reason: "Stopped before the review finished. See the report for details.",
   };
+}
+
+function printScanReference(
+  scan: JsonObject,
+  output: Writable,
+  selection?: string,
+): void {
+  const scanId = scan["scanId"];
+  if (typeof scanId !== "string") return;
+  const progress = scan["progress"] as JsonObject | undefined;
+  const detail = [
+    `Scan ${diagnosticValue(scanId)}`,
+    ...(typeof progress?.["status"] === "string"
+      ? [diagnosticValue(progress["status"])]
+      : []),
+    ...(typeof progress?.["phase"] === "string"
+      ? [diagnosticValue(progress["phase"])]
+      : []),
+    ...(typeof scan["startedAt"] === "string"
+      ? [`started ${diagnosticValue(scan["startedAt"])}`]
+      : typeof scan["updatedAt"] === "string"
+        ? [`updated ${diagnosticValue(scan["updatedAt"])}`]
+        : []),
+  ];
+  const argument = quoteCliPath(diagnosticValue(scanId));
+  output.write(
+    `\n${detail.join(" · ")}\n` +
+      (selection === undefined ? "" : `Selected ${selection}.\n`) +
+      `Inspect: codex-security scans show ${argument}\n` +
+      `Logs:    codex-security scans logs ${argument}\n`,
+  );
+}
+
+function printFailedScanReference(
+  scan: JsonObject | undefined,
+  phase: string | null,
+  arguments_: ScanArguments,
+  output: Writable,
+): void {
+  if (scan === undefined) return;
+  try {
+    printScanReference(scan, output);
+    if (phase !== null)
+      output.write(`Last observed phase: ${diagnosticValue(phase)}\n`);
+    output.write(
+      `Retained results: ${diagnosticValue(scan["scanDir"])}\n` +
+        "Inspect the saved scan status before choosing resume or rerun.\n",
+    );
+    const prompts = [
+      ...(arguments_.scanPromptFile !== undefined ||
+      arguments_.scanPrompt !== undefined
+        ? ["--scan-prompt-file"]
+        : []),
+      ...(arguments_.validationPromptFile !== undefined ||
+      arguments_.validationPrompt !== undefined
+        ? ["--validation-prompt-file"]
+        : []),
+    ];
+    if (prompts.length > 0) {
+      output.write(
+        `A rerun requires the original instructions via ${prompts.join(" and ")}.\n`,
+      );
+    }
+  } catch {
+    // Optional navigation must not replace the scan's original failure.
+  }
 }
 
 function printScanSummary(
@@ -9406,6 +9540,14 @@ function printScanSummary(
   errorOutput.write(
     `  ${paint("RESULTS", 1)}   ${errorMessage(result.scanDir)}\n`,
   );
+  printScanReference(
+    {
+      scanId: result.manifest.scan.id,
+      progress: { status: "complete" },
+      startedAt: result.manifest.scan.startedAt,
+    },
+    errorOutput,
+  );
   if (deepScanStop?.nextStep !== undefined) {
     errorOutput.write(`\n  ${deepScanStop.nextStep}\n`);
   }
@@ -9420,9 +9562,14 @@ function componentScanEventLine(
     const progress = event.value;
     return `codex-security: ${componentName} ${scanPhase(progress.phase)} | Files: ${progress.filesCompleted.toLocaleString("en-US")}/${progress.filesTotal.toLocaleString("en-US")}\n`;
   }
-  if (event.type !== "cost") return null;
-  const cost = event.value;
-  return `codex-security: ${componentName} | Tokens: ${formatScanCostTokens(cost)}${showCost ? ` | Cost: ${formatScanCost(cost)}` : ""}\n`;
+  if (event.type === "usage") {
+    const tokens = formatTokenUsage(event.value);
+    return tokens === null
+      ? null
+      : `codex-security: ${componentName} | Tokens: ${tokens}\n`;
+  }
+  if (event.type !== "cost" || !showCost) return null;
+  return `codex-security: ${componentName} | Cost: ${formatScanCost(event.value)}\n`;
 }
 
 function protectedRootErrorMessage(

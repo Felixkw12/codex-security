@@ -1,3 +1,4 @@
+import { notify } from "./value.js";
 import { execFile as execFileCallback } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
@@ -35,7 +36,11 @@ import {
 } from "./knowledge-base.js";
 import { resolveScanPrompts } from "./prompt-files.js";
 import { requireSecureOutputAncestry, validateOutputDir } from "./runtime.js";
-import { DiffTarget, type ScanMode } from "./targets.js";
+import {
+  DiffTarget,
+  UNSUPPORTED_GIT_ENVIRONMENT,
+  type ScanMode,
+} from "./targets.js";
 import {
   meetsSeverity,
   type ScanPromptSettings,
@@ -57,14 +62,7 @@ const LOCK_HEARTBEAT_MS = 5_000;
 const WINDOWS_DEVICE_PATH_NAME =
   /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu;
 
-interface MultiscanTask {
-  id: string;
-  repository: string;
-  revision: string;
-  mode: ScanMode;
-  scope?: string;
-  prompt?: string;
-}
+type MultiscanTask = ReturnType<typeof parseInventory>[number];
 
 interface MultiscanReceipt extends MultiscanTask {
   status: "completed" | "completed_with_incomplete_coverage" | "failed";
@@ -641,9 +639,7 @@ function notifyProgress(
   options: MultiscanOptions,
   event: Parameters<NonNullable<MultiscanOptions["onProgress"]>>[0],
 ): void {
-  try {
-    void Promise.resolve(options.onProgress?.(event)).catch(() => {});
-  } catch {}
+  notify(() => options.onProgress?.(event));
 }
 
 async function ensureOutputDirectory(path: string): Promise<string> {
@@ -1067,7 +1063,7 @@ function parseInventory(
   source: string,
   directory: string,
   defaultMode: ScanMode,
-): MultiscanTask[] {
+) {
   const { data: rows, errors } = Papa.parse<string[]>(source, {
     delimiter: ",",
     skipEmptyLines: "greedy",
@@ -1129,7 +1125,7 @@ function parseInventory(
       id,
       repository: normalizeRepository(get("repository"), directory),
       revision,
-      mode,
+      mode: mode as ScanMode,
       ...(scope ? { scope } : {}),
       ...(prompt ? { prompt } : {}),
     };
@@ -1181,18 +1177,14 @@ async function checkoutRevision(
   githubHost?: string,
 ): Promise<void> {
   const environment = { ...process.env };
-  const repositoryVariables = new Set([
-    "GIT_DIR",
-    "GIT_WORK_TREE",
-    "GIT_INDEX_FILE",
-    "GIT_OBJECT_DIRECTORY",
-    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-  ]);
   for (const name of Object.keys(environment)) {
-    if (repositoryVariables.has(name.toUpperCase())) delete environment[name];
+    if (UNSUPPORTED_GIT_ENVIRONMENT.has(name.toUpperCase()))
+      delete environment[name];
   }
   environment["GIT_TERMINAL_PROMPT"] = "0";
   environment["GIT_LFS_SKIP_SMUDGE"] = "1";
+  environment["GIT_DEFAULT_HASH"] =
+    task.revision.length === 64 ? "sha256" : "sha1";
   const command = await resolveTrustedExecutable(
     "git",
     environment,

@@ -3,9 +3,9 @@ import { resolving } from "./support/promises.js";
 import {
   chmod,
   cp,
-  readFile,
   mkdir,
   mkdtemp,
+  readFile,
   realpath,
   rm,
   symlink,

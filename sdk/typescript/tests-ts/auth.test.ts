@@ -13,7 +13,6 @@ import {
 } from "../src/auth.js";
 import { PluginBootstrapError } from "../src/index.js";
 import { runCodexCommand } from "../src/runtime.js";
-import type { CodexCommand } from "../src/index.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { throwing } from "./support/errors.js";
 
@@ -24,10 +23,7 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures(
 
 afterEach(cleanup);
 
-async function fakeCodex(): Promise<{
-  command: CodexCommand;
-  environment: NodeJS.ProcessEnv;
-}> {
+async function fakeCodex() {
   const root = await temporaryDirectory();
   const script = join(root, "codex.mjs");
   await writeFile(
@@ -189,6 +185,24 @@ describe("Codex authentication process boundary", () => {
     expect(handle.userCode).toBe("8356-V2EGR");
     expect(observeSucceeded).toHaveBeenCalled();
   });
+
+  test.each(["sync", "async"])(
+    "rejects wait when required login completion fails: %s",
+    async (mode) => {
+      const { command, environment } = await fakeCodex();
+      const failure = new Error("Synthetic credential persistence failed");
+      const handle = new CodexLoginHandle(
+        command,
+        ["login", "--device-auth"],
+        environment,
+        () => {
+          if (mode === "sync") throw failure;
+          return Promise.reject(failure);
+        },
+      );
+      await expect(handle.wait()).rejects.toBe(failure);
+    },
+  );
 
   test.each(["User code: RIGHT-CODE", "Code: RIGHT-CODE", "RIGHT-CODE"])(
     "ignores URL parameters when reading device instructions: %s",

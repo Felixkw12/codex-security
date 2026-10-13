@@ -29,12 +29,10 @@ from finalize_scan_contract import (
 
 
 def linear_publication_input(
-    db: Any,
-    args: argparse.Namespace,
+    payload: dict[str, Any],
     *,
     recording: bool,
 ) -> tuple[dict[str, Any], dict[str, str], list[dict[str, str]]]:
-    payload = db.read_json_object(Path(args.input_file))
     required = {"scanId", "scanDirectory", "destination", "findings"}
     if recording:
         required.add("publications")
@@ -138,11 +136,20 @@ def verify_linear_publication_scan(
     return scan
 
 
+def _linear_publication_record(row: sqlite3.Row) -> dict[str, str]:
+    return {
+        "findingId": row["finding_id"],
+        "occurrenceId": row["occurrence_id"],
+        "issueIdentifier": row["external_id"],
+        **({"url": row["external_url"]} if row["external_url"] is not None else {}),
+    }
+
+
 def inspect_linear_publication(
     db: Any,
-    args: argparse.Namespace,
+    payload: dict[str, Any],
 ) -> dict[str, Any]:
-    payload, destination, findings = linear_publication_input(db, args, recording=False)
+    payload, destination, findings = linear_publication_input(payload, recording=False)
     database_uri = f"file:{quote(str(db.database_path()), safe='')}?mode=ro"
     with closing(sqlite3.connect(database_uri, uri=True, timeout=5)) as connection:
         connection.row_factory = sqlite3.Row
@@ -166,15 +173,7 @@ def inspect_linear_publication(
                     destination.get("projectId"),
                 ),
             ):
-                recorded.setdefault(
-                    row["occurrence_id"],
-                    {
-                        "findingId": row["finding_id"],
-                        "occurrenceId": row["occurrence_id"],
-                        "issueIdentifier": row["external_id"],
-                        **({"url": row["external_url"]} if row["external_url"] is not None else {}),
-                    },
-                )
+                recorded.setdefault(row["occurrence_id"], _linear_publication_record(row))
         return {
             "scanId": scan["id"],
             "destination": destination,
@@ -190,26 +189,25 @@ def inspect_linear_publication(
 def prepare_linear_publication(
     db: Any,
     connection: sqlite3.Connection,
-    args: argparse.Namespace,
+    payload: dict[str, Any],
 ) -> dict[str, Any]:
-    payload, destination, findings = linear_publication_input(db, args, recording=False)
+    payload, destination, findings = linear_publication_input(payload, recording=False)
     connection.execute("BEGIN IMMEDIATE")
     with connection:
         scan = verify_linear_publication_scan(db, connection, payload, findings)
-        result = {
+        return {
             "scanId": scan["id"],
             "destination": destination,
             "findingCount": len(findings),
         }
-    return result
 
 
 def record_linear_publications(
     db: Any,
     connection: sqlite3.Connection,
-    args: argparse.Namespace,
+    payload: dict[str, Any],
 ) -> dict[str, Any]:
-    payload, destination, findings = linear_publication_input(db, args, recording=True)
+    payload, destination, findings = linear_publication_input(payload, recording=True)
     publications = payload["publications"]
     if not isinstance(publications, list):
         raise SystemExit("Linear publication results must be an array.")
@@ -321,16 +319,8 @@ def record_linear_publications(
             ).fetchone()
             if row is None:
                 raise SystemExit("A created Linear issue could not be read from scan history.")
-            created.append(
-                {
-                    "findingId": row["finding_id"],
-                    "occurrenceId": row["occurrence_id"],
-                    "issueIdentifier": row["external_id"],
-                    **({"url": row["external_url"]} if row["external_url"] is not None else {}),
-                }
-            )
-        result = {"scanId": scan["id"], "destination": destination, "created": created}
-    return result
+            created.append(_linear_publication_record(row))
+        return {"scanId": scan["id"], "destination": destination, "created": created}
 
 
 def export_findings(
