@@ -25,9 +25,8 @@ import type {
 import { requirePrivateOutputDirectory } from "./runtime.js";
 import type { NormalizedTarget } from "./targets.js";
 
-type CanonicalFinding = FindingsDocument["findings"][number];
 type Finding = Pick<
-  CanonicalFinding,
+  FindingsDocument["findings"][number],
   | "title"
   | "locations"
   | "severity"

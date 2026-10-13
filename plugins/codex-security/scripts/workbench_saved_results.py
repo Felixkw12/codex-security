@@ -41,7 +41,6 @@ from finalize_scan_contract import (
     _read_saved_threat_model,
     _read_scan_local_json,
     _read_scan_local_json_bytes,
-    _read_scan_local_json_with_metadata,
     _recover_unsealed_findings,
     _remove_scan_local_file_if_exists,
     _require_safe_json_value,
@@ -84,6 +83,16 @@ from workbench_budget_candidates import (
     resolved_deferred_rows as _resolved_deferred_rows,
 )
 from workbench_constants import PHASES
+from workbench_saved_source_order import (
+    _capture_saved_source,
+    _checkpoint_head_directory,
+    _digest,
+    _encoded,
+    _freeze_source_times,
+    _frozen_source_times,
+    _is_source_order_snapshot,
+    _read_saved_result,
+)
 from workbench_target import committed_diff_snapshot_digest
 from workbench_validation import path_within_scope
 
@@ -157,16 +166,6 @@ def refresh_completed_scan(
                 (json.dumps(warnings), scan["id"]),
             )
     return db.scan_context(connection, scan["id"])
-
-
-def _encoded(value: Any) -> bytes:
-    return json.dumps(
-        value, ensure_ascii=True, allow_nan=False, sort_keys=True, separators=(",", ":")
-    ).encode()
-
-
-def _digest(value: Any) -> str:
-    return hashlib.sha256(_encoded(value)).hexdigest()
 
 
 def _children(scan_dir: Path, relative: str) -> list[str]:
@@ -253,137 +252,6 @@ def _saved_result_paths(scan_dir: Path, workers: list[Any]) -> Iterator[tuple[st
                 )
             except ValueError:
                 continue
-
-
-def _checkpoint_head_directory(relative: str) -> Path | None:
-    path = Path(relative)
-    if path.name == "checkpoint-head.json":
-        return path.parent
-    if path.parent.name == "checkpoint-heads":
-        return path.parent.parent
-    return None
-
-
-def _capture_saved_source(
-    scan_dir: Path,
-    relative: str,
-    scan_id: str,
-    *,
-    kind: str | None = None,
-    snapshot_head: bool = True,
-    write: bool = True,
-) -> dict[str, tuple[str, int]]:
-    if not snapshot_head or Path(relative).name != "checkpoint-head.json":
-        _, digest, observed = _read_saved_result(scan_dir, relative, scan_id, kind=kind)
-        return {relative: (digest, observed)}
-    head, _, observed = _read_saved_result(scan_dir, relative, scan_id)
-    observation = {"checkpoint": head["checkpoint"], "observedAtNs": str(observed)}
-    directory = Path(relative).parent
-    selected = (directory / "checkpoints" / observation["checkpoint"]).as_posix()
-    _, selected_digest, selected_time = _read_saved_result(scan_dir, selected, scan_id)
-    digest = _digest(observation)
-    snapshot = (directory / "checkpoint-heads" / f"{digest}.json").as_posix()
-    # Capture the selected file even if the worker created it after directory enumeration.
-    if write and not (scan_dir / snapshot).exists():
-        write_scan_local_bytes(scan_dir, snapshot, _encoded(observation))
-    return {
-        snapshot: (digest, int(observation["observedAtNs"])),
-        selected: (selected_digest, selected_time),
-    }
-
-
-def _is_source_order_snapshot(relative: str) -> bool:
-    path = Path(relative)
-    return path.parent == Path("source-order") and bool(
-        re.fullmatch(r"[0-9a-f]{64}\.json", path.name)
-    )
-
-
-def _read_saved_result(
-    scan_dir: Path, relative: str, scan_id: str, *, kind: str | None = None
-) -> tuple[dict[str, Any], str, int]:
-    draft, _, metadata = _read_scan_local_json_with_metadata(
-        scan_dir, relative, "Saved scan checkpoint"
-    )
-    directory = _checkpoint_head_directory(relative)
-    if directory is not None:
-        checkpoint = draft.get("checkpoint")
-        if not isinstance(checkpoint, str) or not re.fullmatch(r"[0-9a-f]{64}\.json", checkpoint):
-            raise ContractError("checkpoint head does not name a saved checkpoint")
-        _read_saved_result(scan_dir, (directory / "checkpoints" / checkpoint).as_posix(), scan_id)
-        if Path(relative).name == "checkpoint-head.json":
-            return draft, _digest([draft, metadata.st_mtime_ns]), metadata.st_mtime_ns
-        observed = draft.get("observedAtNs")
-        if not isinstance(observed, str) or not re.fullmatch(r"-?[0-9]+", observed):
-            raise ContractError("checkpoint head has no observation time")
-        return draft, _digest(draft), int(observed)
-    if draft.get("scanId") != scan_id:
-        raise ContractError("checkpoint belongs to a different scan")
-    if not _is_source_order_snapshot(relative) and (
-        not isinstance(draft.get("findings"), list)
-        or not isinstance(draft.get("coverage", {} if kind == "dedup" else None), dict)
-    ):
-        raise ContractError("checkpoint has no semantic findings or coverage")
-    return draft, _digest(draft), metadata.st_mtime_ns
-
-
-def _frozen_source_times(
-    scan_dir: Path,
-    scan_id: str,
-    sources: dict[str, str],
-    receipt_states: dict[str, Any] | None = None,
-) -> dict[str, int]:
-    times: dict[str, int] = {}
-    snapshots = [path for path in sources if _is_source_order_snapshot(path)]
-    for path in snapshots:
-        record, digest, _ = _read_saved_result(scan_dir, path, scan_id)
-        if digest != sources[path] or not isinstance(record.get("sources"), dict):
-            raise ContractError("saved source ordering changed after the scan stopped")
-        if receipt_states is not None:
-            receipt_states.update(copy.deepcopy(record.get("receiptRecovery", {})))
-        for relative, observation in record["sources"].items():
-            if (
-                not isinstance(observation, dict)
-                or relative not in sources
-                or observation.get("digest") != sources[relative]
-                or not isinstance(observation.get("observedAtNs"), str)
-                or not re.fullmatch(r"-?[0-9]+", observation["observedAtNs"])
-            ):
-                raise ContractError("saved source ordering does not match its frozen sources")
-            observed = int(observation["observedAtNs"])
-            if relative in times and times[relative] != observed:
-                raise ContractError("saved source ordering has conflicting observations")
-            times[relative] = observed
-    if snapshots and sources.keys() - set(snapshots) - times.keys():
-        raise ContractError("saved source ordering is incomplete")
-    return times
-
-
-def _freeze_source_times(
-    scan_dir: Path,
-    scan_id: str,
-    sources: dict[str, str],
-    times: dict[str, int],
-    receipt_states: dict[str, Any] | None = None,
-) -> None:
-    # Identical result rewrites must not change the order of frozen review evidence.
-    observations = {
-        path: {"digest": digest, "observedAtNs": str(times[path])}
-        for path, digest in sources.items()
-        if not _is_source_order_snapshot(path)
-    }
-    if not observations:
-        return
-    record = {"scanId": scan_id, "sources": observations}
-    if recovered := {key: state for key, state in (receipt_states or {}).items() if state}:
-        record["receiptRecovery"] = recovered
-    digest = _digest(record)
-    path = f"source-order/{digest}.json"
-    if not (scan_dir / path).exists():
-        write_scan_local_bytes(scan_dir, path, _encoded(record))
-    if _read_saved_result(scan_dir, path, scan_id)[1] != digest:
-        raise ContractError("saved source ordering does not match its digest")
-    sources[path] = digest
 
 
 def _parent_scan_draft(
@@ -2969,7 +2837,7 @@ def preserve_scan_results_locked(
         completion_binding=binding,
         completion_warnings=warnings,
         draft_documents=documents,
-        finding_scope=db.requested_scan_paths(scan) if scan["mode"] == "deep" else None,
+        finding_scope=db.requested_finding_scope(scan) if scan["mode"] == "deep" else None,
     )
     snapshots = _snapshot_published_outputs(scan_dir)
     try:
@@ -3082,6 +2950,66 @@ def save_scan_artifact(db: Any, connection: Any, args: Any) -> dict[str, Any]:
     return {"scanId": scan_id, "path": str(scan_dir / output)}
 
 
+def _require_current_deep_publication(
+    db: Any, connection: Any, scan: Any, draft: dict[str, Any]
+) -> None:
+    scan_id = scan["id"]
+    run = connection.execute(
+        "SELECT * FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
+    ).fetchone()
+    publication = draft.get("deepScanPublication")
+    if (
+        publication is None
+        and draft["manifest"]["scan"].get("complete") is False
+        and (run is None or run["status"] == "running")
+    ):
+        return
+    if run is None:
+        run = db.deep_scan.require_deep_scan_run(connection, scan_id)
+    # Finished discovery-only runs hand remaining publication back to the parent.
+    if (
+        publication is None
+        and run["status"] != "running"
+        and run["manifest_path"] != str(Path(scan["scan_dir"]) / "scan-manifest.json")
+    ):
+        return
+    db.deep_scan.require_current_coordinator(
+        run,
+        argparse.Namespace(
+            coordinator_generation=publication.get("coordinatorGeneration") if publication else None
+        ),
+    )
+    # Once finish selects the canonical parent, only completion may replay it.
+    if publication is None:
+        if run["status"] != "running" and run["manifest_path"] == str(
+            Path(scan["scan_dir"]) / "scan-manifest.json"
+        ):
+            raise SystemExit("Deep Scan is terminal; drafts cannot replace its publication.")
+        return
+
+    # Match the durable reducer sequence used by coordinator recovery.
+    def reducer_order(worker: Any) -> tuple[int, str]:
+        match = re.fullmatch(r"dedup-([0-9]+)", Path(worker["prompt_path"]).parent.name)
+        return (int(match[1]) if match else 0, worker["id"])
+
+    reducer = max(
+        (
+            worker
+            for worker in connection.execute(
+                "SELECT * FROM deep_scan_workers WHERE scan_id = ?", (scan_id,)
+            )
+            if worker["kind"] == "dedup"
+            and worker["status"] == "succeeded"
+            and worker["result_manifest_path"]
+        ),
+        key=reducer_order,
+        default=None,
+    )
+    selected_result = reducer["result_manifest_path"] if reducer is not None else None
+    if publication["resultPath"] != selected_result:
+        raise SystemExit("Deep Scan aggregate belongs to a superseded publication selection.")
+
+
 def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
     scan_id = db.require_uuid(args.scan_id, "scan-id")
     with db.scan_completion_lock(scan_id):
@@ -3116,6 +3044,8 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         _populate_unsealed_manifest_envelope(manifest, manifest["scan"], binding)
         _populate_unsealed_artifact_envelope(manifest, findings, coverage, binding)
         _validate_completion_binding(manifest, findings, coverage, binding)
+        checkpoint = manifest["scan"]
+        checkpoint_contents = None
         if args.checkpoint_path is not None:
             try:
                 checkpoint_relative = Path(args.checkpoint_path).relative_to(scan_dir).as_posix()
@@ -3132,18 +3062,36 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             )
             if checkpoint.get("scanId") != scan_id:
                 raise SystemExit("Staged scan checkpoint belongs to another scan.")
+        checkpoint_only = (
+            scan["mode"] == "deep"
+            and draft.get("deepScanPublication") is None
+            and checkpoint.get("complete") is False
+            and connection.execute(
+                "SELECT 1 FROM deep_scan_runs WHERE scan_id = ? "
+                "AND status = 'running' AND manifest_path = ?",
+                (scan_id, str(scan_dir / "scan-manifest.json")),
+            ).fetchone()
+            is not None
+        )
+        if scan["mode"] == "deep" and not checkpoint_only:
+            _require_current_deep_publication(db, connection, scan, draft)
+        if checkpoint_contents is not None:
             checkpoint_digest = hashlib.sha256(checkpoint_contents).hexdigest()
             write_scan_local_bytes(
                 scan_dir,
                 f"checkpoints/{checkpoint_digest}.json",
                 checkpoint_contents,
             )
+            if checkpoint_only:
+                return {"scanId": scan_id, "status": "draft_written"}
         checkpoint = _parent_scan_draft(scan_id, manifest["scan"], findings, coverage)
         checkpoint_contents = _encoded(checkpoint)
         checkpoint_name = f"{hashlib.sha256(checkpoint_contents).hexdigest()}.json"
         checkpoint_relative = f"checkpoints/{checkpoint_name}"
         if not (scan_dir / checkpoint_relative).exists():
             write_scan_local_bytes(scan_dir, checkpoint_relative, checkpoint_contents)
+        if checkpoint_only:
+            return {"scanId": scan_id, "status": "draft_written"}
         write_scan_local_bytes(
             scan_dir, "checkpoint-head.json", _encoded({"checkpoint": checkpoint_name})
         )
@@ -3157,6 +3105,14 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
                 filename,
                 (json.dumps(document, allow_nan=False, indent=2) + "\n").encode(),
             )
+        if scan["mode"] == "deep" and manifest["scan"].get("complete") is not False:
+            # Select the accepted final publication before releasing the write lock.
+            with connection:
+                connection.execute(
+                    "UPDATE deep_scan_runs SET manifest_path = ? "
+                    "WHERE scan_id = ? AND status = 'running'",
+                    (str(scan_dir / "scan-manifest.json"), scan_id),
+                )
         model_warning = write_threat_model_projection_if_possible(scan_dir, manifest)
         # Accepted Standard drafts are evidence of review or report assembly,
         # even when the parent omitted its explicit progress call.

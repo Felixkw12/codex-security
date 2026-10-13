@@ -20,10 +20,11 @@ import {
 } from "./artifacts.js";
 import type { DeepScanArtifacts } from "./artifacts.js";
 
-export interface UnresolvedCandidate extends Record<string, unknown> {
-  candidateId: string;
-  sourceWorkerId: string;
-}
+export type UnresolvedCandidate =
+  ScanDraftInput["coverage"]["deferred"][number] & {
+    candidateId: string;
+    sourceWorkerId: string;
+  };
 
 export type DeepReductionInput = Omit<ScanDraftInput, "coverage"> & {
   unresolvedCandidates?: UnresolvedCandidate[];
@@ -75,7 +76,7 @@ export function discoveryReductionInput(
 ): DeepReductionInput {
   const { coverage, ...result } = input;
   const resolved = resolvedCandidateKeys(input, workerId);
-  const unresolvedCandidates = (coverage.deferred as Record<string, unknown>[])
+  const unresolvedCandidates = coverage.deferred
     .filter(
       (item) =>
         typeof item.candidateId === "string" &&
@@ -92,7 +93,7 @@ export function discoveryReductionInput(
       if (findingCandidateId(finding) === undefined) return finding;
       const normalized = structuredClone(finding);
       normalized.provenance = {
-        ...(normalized.provenance as Record<string, unknown>),
+        ...normalized.provenance,
         sourceWorkerId: workerId,
       };
       const previousOwner = findingCandidateOwner(finding);
@@ -300,7 +301,7 @@ export function reconcileDeepReduction(
     const sourceValues = [
       ...discoveries.map((discovery) => discovery.result[field]),
       previous?.[field],
-    ].filter((value): value is Record<string, unknown> => value !== undefined);
+    ].filter((value) => value !== undefined);
     if (
       sourceValues.some((value) => !isDeepStrictEqual(sourceValues[0], value))
     ) {
@@ -309,7 +310,7 @@ export function reconcileDeepReduction(
       );
     }
     if (sourceValues[0] !== undefined) {
-      result[field] = structuredClone(sourceValues[0]);
+      Object.assign(result, { [field]: structuredClone(sourceValues[0]) });
     }
   }
   return result;

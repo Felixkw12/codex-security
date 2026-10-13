@@ -71,9 +71,12 @@ export function surfaceReferenceKey(
   return candidateKey(id, candidateOwner(owner, target.sourceWorkerId));
 }
 
-export function isTerminalCandidateDecision(
-  item: JsonObject,
-): item is JsonObject & { candidateId: string } {
+export function isTerminalCandidateDecision<Item extends JsonObject>(
+  item: Item,
+): item is Item & {
+  candidateId: string;
+  disposition: "rejected" | "not_applicable";
+} {
   return (
     typeof item.candidateId === "string" &&
     (item.disposition === "rejected" || item.disposition === "not_applicable")

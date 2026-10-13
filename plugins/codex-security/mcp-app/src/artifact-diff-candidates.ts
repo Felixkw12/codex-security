@@ -18,6 +18,7 @@ import {
 import { candidateSchemaV1 } from "./deep-scan/artifact-contracts.js";
 
 type JsonObject = Record<string, unknown>;
+type DraftCoverage = ScanDraftInput["coverage"];
 
 export async function readDiffCandidates(context: ArtifactContext) {
   return context.mode === "diff"
@@ -71,9 +72,7 @@ function candidateHistory(
   const pendingDecisions = new Set<string>();
   for (const source of sources) {
     const pendingKeys = new Set(
-      (source.coverage.deferred as JsonObject[]).map((item) =>
-        coverageCandidateKey(item),
-      ),
+      source.coverage.deferred.map((item) => coverageCandidateKey(item)),
     );
     const authored = [
       ...source.findings
@@ -89,10 +88,7 @@ function candidateHistory(
           return !candidate || !changedFindingDecision(finding, candidate);
         })
         .map((finding) => findingCandidateKey(finding)),
-      ...[
-        ...(source.coverage.surfaces as JsonObject[]),
-        ...(source.coverage.explicitExclusions as JsonObject[]),
-      ]
+      ...[...source.coverage.surfaces, ...source.coverage.explicitExclusions]
         .filter(
           (item) =>
             isTerminalCandidateDecision(item) && !isGeneratedDecision(item),
@@ -100,7 +96,7 @@ function candidateHistory(
         .map((item) => coverageCandidateKey(item)),
     ].filter((id): id is string => typeof id === "string");
     for (const id of authored) if (!seen.has(id)) authoredResolutions.add(id);
-    for (const pending of source.coverage.deferred as JsonObject[]) {
+    for (const pending of source.coverage.deferred) {
       const key = coverageCandidateKey(pending);
       const saved = object(pending.candidate);
       const candidate = ledger.get(key ?? "");
@@ -121,12 +117,10 @@ function candidateHistory(
     for (const id of [
       ...source.findings.map((finding) => findingCandidateKey(finding)),
       ...authored,
-      ...(source.coverage.surfaces as JsonObject[])
+      ...source.coverage.surfaces
         .filter(isTerminalCandidateDecision)
         .map((item) => coverageCandidateKey(item)),
-      ...(source.coverage.deferred as JsonObject[]).map((item) =>
-        coverageCandidateKey(item),
-      ),
+      ...source.coverage.deferred.map((item) => coverageCandidateKey(item)),
     ])
       if (typeof id === "string") seen.add(id);
   }
@@ -152,10 +146,10 @@ export function refreshDiffCandidateHistory(
     pendingDecisions.has(candidateKey(candidate.candidate_id)!)
       ? undefined
       : candidateDisposition(candidate);
-  const reopened = new Map<string, JsonObject>();
+  const reopened = new Map<string, DraftCoverage["deferred"][number]>();
   const refreshed = sources.map((source) => {
     const result = structuredClone(source);
-    const deferred = result.coverage.deferred as JsonObject[];
+    const deferred = result.coverage.deferred;
     const closed = new Set<string>();
     // Rediscovery can restore old phase values without resolving a saved proof gap.
     for (const pending of deferred) {
@@ -192,93 +186,91 @@ export function refreshDiffCandidateHistory(
       if (!reopened.has(key!)) reopened.set(key!, pending);
       Object.assign(result.coverage, candidatePartialCoverage(result.coverage));
     }
-    result.coverage.surfaces = (result.coverage.surfaces as JsonObject[]).map(
-      (surface) => {
-        const key = coverageCandidateKey(surface);
-        if (!key) return surface;
-        const candidate = ledger.get(key);
-        const pending = deferred.find(
-          (item) => coverageCandidateKey(item) === key,
-        );
-        const generatedFollowUp = isGeneratedFollowUp(
-          surface,
-          pending,
-          deferred,
-          result.coverage.surfaces as JsonObject[],
-        );
-        if (!candidate || (!isGeneratedDecision(surface) && !generatedFollowUp))
-          return surface;
-        const disposition = dispositionFor(candidate);
-        if (
-          generatedFollowUp &&
-          disposition === undefined &&
-          surface.disposition === "needs_follow_up"
-        )
-          return surface;
-        if (disposition === undefined && authoredResolutions.has(key))
-          return surface;
-        if (disposition === undefined) {
-          const item = pending ?? {
-            candidateId: candidate.candidate_id,
-            candidate,
-            reason: candidateReason(candidate),
-            ...(surface.finding === undefined
-              ? {}
-              : { finding: surface.finding }),
-          };
-          if (!deferred.includes(item)) deferred.push(item);
-          if (!reopened.has(key)) reopened.set(key, item);
-          Object.assign(
-            result.coverage,
-            candidatePartialCoverage(result.coverage),
-          );
-        } else if (generatedFollowUp) {
-          closed.add(key);
-          const resolved = deferred.filter(
-            (row) => coverageCandidateKey(row) === key,
-          );
-          for (const [field, archive] of [
-            ["candidate", "originalCandidates"],
-            ["finding", "previousFindings"],
-          ] as const) {
-            const values = resolved.flatMap((row) => [
-              ...(row[field] === undefined ? [] : [row[field]]),
-              ...(Array.isArray(row[archive]) ? row[archive] : []),
-            ]);
-            if (values.length > 0)
-              surface[archive] = exactUnion(
-                Array.isArray(surface[archive]) ? surface[archive] : [],
-                values,
-              );
-          }
-        }
-        const previousCandidate = surface.candidate ?? pending?.candidate;
-        const snapshot = candidateSnapshot(previousCandidate, candidate);
-        if (
-          previousCandidate !== undefined &&
-          !isDeepStrictEqual(previousCandidate, snapshot)
-        )
-          surface.originalCandidates = exactUnion(
-            Array.isArray(surface.originalCandidates)
-              ? surface.originalCandidates
-              : [],
-            [previousCandidate],
-          );
-        return {
-          ...surface,
-          candidate: snapshot,
-          ...(surface.finding === undefined && pending?.finding !== undefined
-            ? { finding: pending.finding }
-            : {}),
-          label: candidate.summary,
-          disposition: disposition ?? "needs_follow_up",
-          notes:
-            disposition === undefined
-              ? candidateReason(candidate)
-              : terminalReason(candidate),
+    result.coverage.surfaces = result.coverage.surfaces.map((surface) => {
+      const key = coverageCandidateKey(surface);
+      if (!key) return surface;
+      const candidate = ledger.get(key);
+      const pending = deferred.find(
+        (item) => coverageCandidateKey(item) === key,
+      );
+      const generatedFollowUp = isGeneratedFollowUp(
+        surface,
+        pending,
+        deferred,
+        result.coverage.surfaces,
+      );
+      if (!candidate || (!isGeneratedDecision(surface) && !generatedFollowUp))
+        return surface;
+      const disposition = dispositionFor(candidate);
+      if (
+        generatedFollowUp &&
+        disposition === undefined &&
+        surface.disposition === "needs_follow_up"
+      )
+        return surface;
+      if (disposition === undefined && authoredResolutions.has(key))
+        return surface;
+      if (disposition === undefined) {
+        const item = pending ?? {
+          candidateId: candidate.candidate_id,
+          candidate,
+          reason: candidateReason(candidate),
+          ...(surface.finding === undefined
+            ? {}
+            : { finding: surface.finding }),
         };
-      },
-    );
+        if (!deferred.includes(item)) deferred.push(item);
+        if (!reopened.has(key)) reopened.set(key, item);
+        Object.assign(
+          result.coverage,
+          candidatePartialCoverage(result.coverage),
+        );
+      } else if (generatedFollowUp) {
+        closed.add(key);
+        const resolved = deferred.filter(
+          (row) => coverageCandidateKey(row) === key,
+        );
+        for (const [field, archive] of [
+          ["candidate", "originalCandidates"],
+          ["finding", "previousFindings"],
+        ] as const) {
+          const values = resolved.flatMap((row) => [
+            ...(row[field] === undefined ? [] : [row[field]]),
+            ...(Array.isArray(row[archive]) ? row[archive] : []),
+          ]);
+          if (values.length > 0)
+            surface[archive] = exactUnion(
+              Array.isArray(surface[archive]) ? surface[archive] : [],
+              values,
+            );
+        }
+      }
+      const previousCandidate = surface.candidate ?? pending?.candidate;
+      const snapshot = candidateSnapshot(previousCandidate, candidate);
+      if (
+        previousCandidate !== undefined &&
+        !isDeepStrictEqual(previousCandidate, snapshot)
+      )
+        surface.originalCandidates = exactUnion(
+          Array.isArray(surface.originalCandidates)
+            ? surface.originalCandidates
+            : [],
+          [previousCandidate],
+        );
+      return {
+        ...surface,
+        candidate: snapshot,
+        ...(surface.finding === undefined && pending?.finding !== undefined
+          ? { finding: pending.finding }
+          : {}),
+        label: candidate.summary,
+        disposition: disposition ?? "needs_follow_up",
+        notes:
+          disposition === undefined
+            ? candidateReason(candidate)
+            : terminalReason(candidate),
+      };
+    });
     result.coverage.deferred = deferred.filter(
       (item) => !closed.has(coverageCandidateKey(item) ?? ""),
     );
@@ -356,7 +348,7 @@ export function preserveDiffCandidateDecisions(
   input: ScanDraftInput,
   candidates: DiffCandidates,
   previous: ScanDraftInput[] = [],
-  currentFindings: JsonObject[] = input.findings,
+  currentFindings: ScanDraftInput["findings"] = input.findings,
 ): ScanDraftInput {
   if (candidates === undefined) return input;
   const ledger = new Map(
@@ -390,7 +382,11 @@ export function preserveDiffCandidateDecisions(
   accepted.delete(undefined);
   const previousDecisions = new Map<
     string,
-    { section: string; item: JsonObject }
+    | { section: "surfaces"; item: DraftCoverage["surfaces"][number] }
+    | {
+        section: "explicitExclusions";
+        item: DraftCoverage["explicitExclusions"][number];
+      }
   >();
   const seen = resolvedCandidateKeys({ ...input, findings: [] });
   for (const finding of currentFindings) {
@@ -415,23 +411,30 @@ export function preserveDiffCandidateDecisions(
         accepted.add(key);
       if (key) seen.add(key);
     }
-    for (const section of ["surfaces", "explicitExclusions"]) {
-      for (const item of source.coverage[section] as JsonObject[]) {
-        if (!isTerminalCandidateDecision(item)) continue;
-        const key = coverageCandidateKey(item)!;
-        if (!seen.has(key)) previousDecisions.set(key, { section, item });
-        seen.add(key);
-      }
+    for (const decision of [
+      ...source.coverage.surfaces.map((item) => ({
+        section: "surfaces" as const,
+        item,
+      })),
+      ...source.coverage.explicitExclusions.map((item) => ({
+        section: "explicitExclusions" as const,
+        item,
+      })),
+    ]) {
+      if (!isTerminalCandidateDecision(decision.item)) continue;
+      const key = coverageCandidateKey(decision.item)!;
+      if (!seen.has(key)) previousDecisions.set(key, decision);
+      seen.add(key);
     }
-    for (const item of source.coverage.deferred as JsonObject[]) {
+    for (const item of source.coverage.deferred) {
       const key = coverageCandidateKey(item);
       if (key) seen.add(key);
     }
   }
   const dismissed = new Set<string>();
   for (const item of [
-    ...(input.coverage.surfaces as JsonObject[]),
-    ...(input.coverage.explicitExclusions as JsonObject[]),
+    ...input.coverage.surfaces,
+    ...input.coverage.explicitExclusions,
   ]) {
     if (!isTerminalCandidateDecision(item)) continue;
     const key = coverageCandidateKey(item)!;
@@ -440,9 +443,9 @@ export function preserveDiffCandidateDecisions(
   const retainDecision = (item: JsonObject) =>
     !isTerminalCandidateDecision(item) ||
     !accepted.has(coverageCandidateKey(item));
-  const inputSurfaces = input.coverage.surfaces as JsonObject[];
+  const inputSurfaces = input.coverage.surfaces;
   const pendingReferences = new Set(
-    (input.coverage.deferred as JsonObject[]).flatMap((item) => {
+    input.coverage.deferred.flatMap((item) => {
       const key = coverageCandidateKey(item);
       return (key === undefined || !resolved.has(key)) &&
         Array.isArray(item.surfaceIds)
@@ -452,17 +455,15 @@ export function preserveDiffCandidateDecisions(
         : [];
     }),
   );
-  const surfaces = inputSurfaces
+  const surfaces: DraftCoverage["surfaces"] = inputSurfaces
     .map((item) =>
       !retainDecision(item) &&
       pendingReferences.has(candidateKey(item.id, item.sourceWorkerId))
-        ? { ...item, disposition: "reported" }
+        ? { ...item, disposition: "reported" as const }
         : item,
     )
     .filter(retainDecision);
-  const exclusions = (input.coverage.explicitExclusions as JsonObject[]).filter(
-    retainDecision,
-  );
+  const exclusions = input.coverage.explicitExclusions.filter(retainDecision);
   for (const candidate of candidates) {
     const key = candidateKey(candidate.candidate_id)!;
     const disposition = candidateDisposition(candidate);
@@ -477,9 +478,9 @@ export function preserveDiffCandidateDecisions(
     // An authored final decision keeps its rationale on later empty saves.
     const retained = previousDecisions.get(key);
     if (retained) {
-      (retained.section === "surfaces" ? surfaces : exclusions).push(
-        structuredClone(retained.item),
-      );
+      if (retained.section === "surfaces")
+        surfaces.push(structuredClone(retained.item));
+      else exclusions.push(structuredClone(retained.item));
     } else {
       surfaces.push({
         candidateId: candidate.candidate_id,
@@ -541,9 +542,9 @@ export function preserveUnresolvedDiffCandidates(
       const key = findingCandidateKey(retained);
       if (key && mergedResolutions.has(key)) confirmed.set(key, finding);
     }
-  const inputSurfaces = input.coverage.surfaces as JsonObject[];
+  const inputSurfaces = input.coverage.surfaces;
   const decisions = new Map(
-    [...inputSurfaces, ...(input.coverage.explicitExclusions as JsonObject[])]
+    [...inputSurfaces, ...input.coverage.explicitExclusions]
       .filter(isTerminalCandidateDecision)
       .map((item) => [coverageCandidateKey(item), item]),
   );
@@ -560,10 +561,10 @@ export function preserveUnresolvedDiffCandidates(
   }
   // Resolved rows still carry submitted evidence; archive it before clearing the gap.
   for (const pending of [
-    ...(submitted.coverage.deferred as JsonObject[]),
+    ...submitted.coverage.deferred,
     ...[
-      ...(submitted.coverage.surfaces as JsonObject[]),
-      ...(submitted.coverage.explicitExclusions as JsonObject[]),
+      ...submitted.coverage.surfaces,
+      ...submitted.coverage.explicitExclusions,
     ].filter(
       (row) =>
         isTerminalCandidateDecision(row) &&
@@ -644,13 +645,13 @@ export function preserveUnresolvedDiffCandidates(
       .map((candidate) => [candidateKey(candidate.candidate_id)!, candidate]),
   );
   const previous = new Map<string | undefined, JsonObject[]>();
-  for (const item of input.coverage.deferred as JsonObject[]) {
+  for (const item of input.coverage.deferred) {
     const key = coverageCandidateKey(item);
     const rows = previous.get(key) ?? [];
     rows.push(item);
     previous.set(key, rows);
   }
-  const deferred = (input.coverage.deferred as JsonObject[])
+  const deferred: DraftCoverage["deferred"] = input.coverage.deferred
     .filter((item) => {
       const candidateId = coverageCandidateKey(item);
       return typeof candidateId !== "string" || !resolvedKeys.has(candidateId);
@@ -684,10 +685,7 @@ export function preserveUnresolvedDiffCandidates(
       };
     });
   const receiptDecisions = new Set(
-    [
-      ...(submitted.coverage.surfaces as JsonObject[]),
-      ...(submitted.coverage.explicitExclusions as JsonObject[]),
-    ]
+    [...submitted.coverage.surfaces, ...submitted.coverage.explicitExclusions]
       .filter(
         (surface) =>
           isTerminalCandidateDecision(surface) &&
@@ -699,7 +697,7 @@ export function preserveUnresolvedDiffCandidates(
       .map((surface) => coverageCandidateKey(surface)),
   );
   // Keep submitted proof gaps until the terminal decision's receipts are verified.
-  for (const item of submitted.coverage.deferred as JsonObject[]) {
+  for (const item of submitted.coverage.deferred) {
     const key = coverageCandidateKey(item);
     if (
       resolvedKeys.has(key!) &&
@@ -720,7 +718,7 @@ export function preserveUnresolvedDiffCandidates(
       paths: [...new Set(candidate.locations.map((location) => location.path))],
     });
   }
-  const surfaces = inputSurfaces
+  const surfaces: DraftCoverage["surfaces"] = inputSurfaces
     .map((surface) => {
       const key = coverageCandidateKey(surface);
       const items = previous.get(key) ?? [];
@@ -738,15 +736,16 @@ export function preserveUnresolvedDiffCandidates(
         if (finding)
           return {
             ...surface,
-            disposition: "reported",
+            disposition: "reported" as const,
             notes: finding.summary,
           };
-        if (inputSurfaces.includes(decision!)) {
+        const surfaceDecision = inputSurfaces.find((item) => item === decision);
+        if (surfaceDecision) {
           replacedDecisions.add(decision!);
           const { notes: _generatedNotes, ...generatedSurface } = surface;
           return {
             ...generatedSurface,
-            ...decision,
+            ...surfaceDecision,
             receiptRefs: [
               ...new Set([
                 ...((surface.receiptRefs as string[]) ?? []),
@@ -758,7 +757,7 @@ export function preserveUnresolvedDiffCandidates(
         return {
           ...surface,
           disposition: decision!.disposition,
-          notes: decision!.reason,
+          notes: decision!.reason as string,
         };
       }
       const candidate = pending.get(key ?? "");
@@ -767,17 +766,14 @@ export function preserveUnresolvedDiffCandidates(
         !candidate ||
         !oldCandidate ||
         surface.disposition !== "needs_follow_up" ||
-        (input.coverage.deferred as JsonObject[]).some(
+        input.coverage.deferred.some(
           (other) =>
             other !== item &&
             Array.isArray(other.surfaceIds) &&
             other.surfaceIds.some(
               (id) =>
-                surfaceReferenceKey(
-                  id,
-                  other,
-                  input.coverage.surfaces as JsonObject[],
-                ) === candidateKey(surface.id, surface.sourceWorkerId),
+                surfaceReferenceKey(id, other, input.coverage.surfaces) ===
+                candidateKey(surface.id, surface.sourceWorkerId),
             ),
         )
       )
@@ -831,7 +827,7 @@ export function preserveUnresolvedDiffCandidates(
     surfaces.push({
       candidateId: item.candidateId,
       label: candidate.summary,
-      disposition: "needs_follow_up",
+      disposition: "needs_follow_up" as const,
       notes: item.reason,
     });
   }
@@ -861,13 +857,15 @@ function restoreCandidateCompleteness(coverage: JsonObject): void {
 }
 
 // Retain the author's completeness only when candidate projection changes it.
-function candidatePartialCoverage(coverage: JsonObject): JsonObject {
+function candidatePartialCoverage<Coverage extends JsonObject>(
+  coverage: Coverage,
+) {
   return {
     ...coverage,
     ...(coverage.completeness === "partial"
       ? {}
       : { completenessBeforeCandidates: coverage.completeness }),
-    completeness: "partial",
+    completeness: "partial" as const,
   };
 }
 
@@ -956,6 +954,8 @@ function candidateReason(candidate: JsonObject): string {
   );
 }
 
+function object<Value extends JsonObject>(value: Value): Value;
+function object(value: unknown): JsonObject | undefined;
 function object(value: unknown): JsonObject | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as JsonObject)

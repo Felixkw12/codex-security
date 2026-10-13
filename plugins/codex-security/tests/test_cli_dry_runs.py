@@ -34,6 +34,7 @@ def test_all_scripts_support_help() -> None:
     "name",
     (
         "workbench_publication.py",
+        "workbench_saved_source_order.py",
         "finalize_scan_contract.py",
         "validate_scan_contract.py",
         "validate_tracking_source.py",
