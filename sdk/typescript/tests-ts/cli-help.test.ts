@@ -231,6 +231,10 @@ describe("CLI help", () => {
       usage: "codex-security scan dependencies [repository]",
     },
     {
+      args: ["scan", "--json", "dependencies", "--help"],
+      usage: "codex-security scan dependencies [repository]",
+    },
+    {
       args: ["--format", "json", "scan", "import", "--help"],
       usage: "codex-security scan import",
     },

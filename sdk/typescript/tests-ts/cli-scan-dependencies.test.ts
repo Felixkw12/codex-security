@@ -115,6 +115,18 @@ describe("scan dependencies CLI", () => {
     ["local JSON shortcut", ["scan", "dependencies", "--json"]],
     ["global JSON shortcut", ["--json", "scan", "dependencies"]],
     ["global JSON format", ["--format", "json", "scan", "dependencies"]],
+    ["interleaved JSON shortcut", ["scan", "--json", "dependencies", "."]],
+    [
+      "interleaved JSON format",
+      ["scan", "--format", "json", "dependencies", "."],
+    ],
+    ["local JSON format", ["scan", "dependencies", ".", "--format", "json"]],
+    ["global equals format", ["--format=json", "scan", "dependencies"]],
+    [
+      "interleaved equals format",
+      ["scan", "--format=json", "dependencies", "."],
+    ],
+    ["local equals format", ["scan", "dependencies", ".", "--format=json"]],
   ] as const)("routes %s without generic model preflight", async (_, args) => {
     const result = dependencyResult();
     const scan = mock(async (_options: DependencyScanOptions) => result);
@@ -133,6 +145,52 @@ describe("scan dependencies CLI", () => {
     });
     expect(close).toHaveBeenCalledTimes(1);
   });
+
+  test.each([
+    { label: "full output", flags: ["--json", "--full-output"] },
+    { label: "token count", flags: ["--json", "--token-count"] },
+    {
+      label: "token window",
+      flags: ["--json", "--token-limit=10", "--token-offset", "2"],
+    },
+  ])(
+    "preserves $label controls before, between, and after command tokens",
+    async ({ label, flags }) => {
+      const result = dependencyResult();
+      const outputs: string[] = [];
+      const scan = mock(async (_options: DependencyScanOptions) => result);
+      for (const args of [
+        [...flags, "scan", "dependencies", "synthetic-repository"],
+        ["scan", ...flags, "dependencies", "synthetic-repository"],
+        ["scan", "dependencies", "synthetic-repository", ...flags],
+      ]) {
+        const { stdout, stderr, runCli } = createCliTest(main);
+        const deps = dependencies({ onScanDependencies: scan });
+        deps.createSecurity = throwing(
+          "Output flags must retain the dependency route",
+        );
+        expect(await runCli(args, deps), stderr.text()).toBe(0);
+        outputs.push(stdout.text());
+      }
+      expect(scan).toHaveBeenCalledTimes(3);
+      for (const [options] of scan.mock.calls)
+        expect(options.repositoryPath).toBe(
+          resolve("/current/repository", "synthetic-repository"),
+        );
+      if (label === "full output") {
+        for (const output of outputs)
+          expect(JSON.parse(output)).toMatchObject({ ok: true, data: result });
+      } else {
+        expect(new Set(outputs).size).toBe(1);
+        if (label === "token count")
+          expect(JSON.parse(outputs[0]!)).toBeGreaterThan(0);
+        else
+          expect(outputs[0]!.length).toBeLessThan(
+            JSON.stringify(result).length,
+          );
+      }
+    },
+  );
 
   for (const fullOutput of [false, true]) {
     test.each(["completed", "partial", "failed"] as const)(
@@ -561,14 +619,23 @@ describe("scan dependencies CLI", () => {
     },
   );
 
-  test("keeps an explicitly relative dependencies directory on the source scan route", async () => {
+  test.each([
+    {
+      label: "relative dependencies directory",
+      args: ["scan", "./dependencies", "--json"],
+    },
+    {
+      label: "model value named dependencies",
+      args: ["scan", "--model", "dependencies", "--json"],
+    },
+  ])("keeps $label on the source scan route", async ({ args }) => {
     const sourceScan = mock();
     const dependencyScan = mock(async () => dependencyResult());
     const { stderr, runCli } = createCliTest(main);
 
     expect(
       await runCli(
-        ["scan", "./dependencies", "--json"],
+        args,
         dependencies({ onRun: sourceScan, onScanDependencies: dependencyScan }),
       ),
       stderr.text(),
@@ -576,4 +643,39 @@ describe("scan dependencies CLI", () => {
     expect(sourceScan).toHaveBeenCalledTimes(1);
     expect(dependencyScan).not.toHaveBeenCalled();
   });
+
+  test("does not promote a dependencies argument after the existing unsupported delimiter", async () => {
+    const dependencyScan = mock(async () => dependencyResult());
+    const { stderr, runCli } = createCliTest(main);
+
+    expect(
+      await runCli(
+        ["scan", "--json", "--", "dependencies"],
+        dependencies({ onScanDependencies: dependencyScan }),
+      ),
+    ).toBe(2);
+    expect(stderr.text()).not.toBe("");
+    expect(dependencyScan).not.toHaveBeenCalled();
+  });
+
+  test.each(["--format", "--token-limit"])(
+    "validates dependencies as a %s value without selecting a subcommand",
+    async (flag) => {
+      const initialize = mock();
+      const { stdout, stderr, runCli } = createCliTest(main);
+
+      expect(
+        await runCli(
+          ["scan", flag, "dependencies"],
+          dependencies({ onConfig: initialize }),
+        ),
+      ).toBe(2);
+      expect(initialize).not.toHaveBeenCalled();
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toContain(
+        flag === "--format" ? "Invalid format" : `Invalid value for ${flag}`,
+      );
+      expect(stderr.text()).toContain('"dependencies"');
+    },
+  );
 });

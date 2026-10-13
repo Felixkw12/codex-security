@@ -5821,6 +5821,52 @@ export async function main(
 
   const commands = Cli.toCommands.get(cli)!;
   const valueOptions = cliValueOptions(commands);
+  function normalizeScanGlobalArguments(
+    argv: readonly string[],
+  ): readonly string[] {
+    const commandIndex = cliCommandIndex(argv);
+    if (argv[commandIndex] !== "scan") return argv;
+    let next = commandIndex + 1;
+    while (next < argv.length) {
+      const argument = argv[next]!;
+      const option = argument.split("=", 1)[0]!;
+      if (OUTPUT_OPTION.test(argument) && valueOptions.has(option)) {
+        if (argument.includes("=")) next += 1;
+        else if (
+          argv[next + 1] !== undefined &&
+          !argv[next + 1]!.startsWith("--") &&
+          argv[next + 1] !== "-h"
+        )
+          next += 2;
+        else break;
+      } else if (
+        [
+          "--json",
+          "--full-output",
+          "--token-count",
+          "--help",
+          "-h",
+          "--schema",
+          "--llms",
+          "--llms-full",
+          "--mcp",
+          "--update",
+        ].includes(argument)
+      ) {
+        next += 1;
+      } else break;
+    }
+    if (next === commandIndex + 1) return argv;
+    // Incur extracts globals before dispatch. Give the wrapper the same route
+    // while keeping command-local values and everything after -- in place.
+    return [
+      ...argv.slice(0, commandIndex),
+      ...argv.slice(commandIndex + 1, next),
+      "scan",
+      ...argv.slice(next),
+    ];
+  }
+
   function isScanImportCommand(argv: readonly string[]): boolean {
     const commandIndex = cliCommandIndex(argv);
     return argv[commandIndex] === "scan" && argv[commandIndex + 1] === "import";
@@ -6050,7 +6096,9 @@ export async function main(
       return `Unexpected positional argument for ${command}${subcommand === undefined ? "" : ` ${subcommand}`}.`;
     }
   }
-  argv = normalizeScanImportArguments(defaultListCommand(argv));
+  argv = normalizeScanImportArguments(
+    defaultListCommand(normalizeScanGlobalArguments(argv)),
+  );
   const policyFullOutput =
     argv[cliCommandIndex(argv)] === "policy" && argv.includes("--full-output");
   const argumentError = validateCliArguments(argv, positionals);
