@@ -7819,13 +7819,18 @@ async function patchCommandContext(
       )
     ).replace(/\n$/u, "");
   const gitDirectory = await gitPath(["--git-dir"]);
+  const physicalDirectory = await realpath(directory);
+  const gitDirectoryBase =
+    dependencies.environment["GIT_DIR"] === undefined
+      ? physicalDirectory
+      : directory;
   // Preserve aliases used by includeIf.gitdir; adding a worktree would canonicalize them.
   const environment: NodeJS.ProcessEnv = {
     GIT_DIR: isAbsolute(gitDirectory)
       ? gitDirectory
       : process.platform === "win32" && /^[a-z]:/iu.test(gitDirectory)
-        ? resolve(directory, gitDirectory)
-        : `${directory.replaceAll(sep, "/")}/${gitDirectory}`,
+        ? resolve(gitDirectoryBase, gitDirectory)
+        : `${gitDirectoryBase.replaceAll(sep, "/")}/${gitDirectory}`,
     ...(dependencies.environment["GIT_DIR"] !== undefined &&
     dependencies.environment["GIT_WORK_TREE"] === undefined
       ? {}
@@ -7902,7 +7907,6 @@ async function patchCommandContext(
           : `${configurationDirectory.replaceAll(sep, "/")}/${value}`;
   }
 
-  const physicalDirectory = await realpath(directory);
   for (const name of ["GH_CONFIG_DIR", "GLAB_CONFIG_DIR"]) {
     const value = dependencies.environment[name];
     if (value === undefined) continue;
@@ -7945,12 +7949,27 @@ async function bindPatchCommandContext(
     throw new CodexSecurityError(
       "Patch directory now resolves outside the selected repository. Local edits and patches were kept.",
     );
-  if (currentDirectory !== context.directory) directory = repository;
+  const inspectChangedDirectory =
+    dependencies.environment["GIT_DIR"] === undefined &&
+    currentDirectory !== undefined &&
+    currentDirectory !== context.directory;
   const gitDirectory = await dependencies.runRepositoryCommand(
     "git",
-    ["rev-parse", "--absolute-git-dir"],
+    [
+      ...(inspectChangedDirectory ? ["-C", currentDirectory] : []),
+      "rev-parse",
+      "--absolute-git-dir",
+    ],
     repository,
-    { trim: false, directory, environment: context.environment },
+    {
+      trim: false,
+      directory:
+        currentDirectory !== context.directory ? repository : directory,
+      environment: {
+        ...context.environment,
+        ...(inspectChangedDirectory ? { GIT_DIR: undefined } : {}),
+      },
+    },
   );
   if (
     (await realpath(gitDirectory.replace(/\n$/u, ""))) !== context.gitDirectory
@@ -7958,6 +7977,7 @@ async function bindPatchCommandContext(
     throw new CodexSecurityError(
       "The patch Git directory changed during patching. Local edits and patches were kept.",
     );
+  if (currentDirectory !== context.directory) directory = repository;
   return {
     directory,
     dependencies: {

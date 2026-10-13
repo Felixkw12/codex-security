@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
+import { join, relative, sep } from "node:path";
 import { runRepositoryCommand } from "../src/cli.js";
 import {
   patchRiskAssessment,
@@ -153,6 +153,148 @@ test.each([
     expect(git("diff", "--cached", "--name-only")).toBe("");
     expect(repositoryGit(remote)("for-each-ref", "--format=%(refname)")).toBe(
       "",
+    );
+  },
+);
+
+test.each(
+  [
+    "physical",
+    "directory alias",
+    "absolute Git alias",
+    "relative Git alias",
+  ].flatMap((mode) => [false, true].map((assess) => ({ mode, assess }))),
+)(
+  "saved patch preserves conditional filters through $mode (assessment: $assess)",
+  async ({ mode, assess }) => {
+    const { directory, git } = await publicationRepository(fixtures);
+    const support = await fixtures.create("patch-saved-alias-filter-");
+    const alias = join(support, "alias");
+    await symlink(
+      directory,
+      alias,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    const filter = join(support, "clean.cjs");
+    await writeFile(
+      filter,
+      'process.stdout.write(require("node:fs").readFileSync(0,"utf8").toUpperCase());\n',
+    );
+    const include = join(support, "filter-config");
+    git("config", "--file", include, "synthetic.marker", "alias-selected");
+    git(
+      "config",
+      "--file",
+      include,
+      "filter.synthetic.clean",
+      `node ${JSON.stringify(filter.replaceAll("\\", "/"))}`,
+    );
+    git("config", "--file", include, "filter.synthetic.required", "true");
+    git("config", "includeIf.gitdir:**/alias/.git.path", include);
+    await writeFile(join(directory, "app.ts"), "original\n");
+    await writeFile(join(directory, "unrelated.txt"), "unchanged\n");
+    await writeFile(
+      join(directory, ".gitattributes"),
+      "app.ts filter=synthetic\nunrelated.txt filter=synthetic\n",
+    );
+    const explicit = mode.endsWith("Git alias");
+    const target = mode === "directory alias" ? alias : directory;
+    const environment: NodeJS.ProcessEnv = explicit
+      ? {
+          GIT_DIR: (mode.startsWith("absolute")
+            ? join(alias, ".git")
+            : relative(directory, join(alias, ".git"))
+          ).replaceAll(sep, "/"),
+        }
+      : {};
+    const selectedGit = (...args: string[]) =>
+      runGitRepositoryCommand("git", args, target, { environment });
+    expect(
+      selectedGit("config", "--get", "--default=inactive", "synthetic.marker"),
+    ).toBe(explicit ? "alias-selected" : "inactive");
+    selectedGit("add", ".");
+    selectedGit("commit", "-m", "Synthetic conditional filter baseline");
+    const head = git("rev-parse", "HEAD");
+    const index = await readFile(join(directory, ".git/index"));
+    const result = resultWithFindings(["high"]);
+    result.findings.findings[0]!.locations[0]!.path = "app.ts";
+    let assessments = 0;
+    const outcome = await runWorkflow(
+      [
+        "patch",
+        "--scan",
+        "scan-1",
+        "--json",
+        ...(assess ? ["--assess-patch-risk"] : []),
+      ],
+      {
+        currentDirectory: directory,
+        environment,
+        onWorkbench: () => savedScan(result, "scan-1", target),
+        onRepositoryCommand: (command, args, cwd, options) =>
+          runGitRepositoryCommand(command, args, cwd, {
+            ...options,
+            environment: { ...environment, ...options?.environment },
+          }),
+        onCodex: async (_args, output) => {
+          if (output!.appServer!.prompt.includes("immutable patch artifact")) {
+            assessments++;
+            const artifact = JSON.parse(
+              output!
+                .appServer!.prompt.split("\n")
+                .find((line) => line.startsWith('{"path":'))!,
+            );
+            expect(artifact.changedFiles).toEqual(["app.ts"]);
+            const verification = await fixtures.create(
+              "patch-alias-assessment-",
+            );
+            const verify = repositoryGit(verification);
+            verify(
+              "clone",
+              "-c",
+              "core.autocrlf=false",
+              "--no-hardlinks",
+              directory,
+              ".",
+            );
+            verify("apply", "--check", artifact.path);
+            verify("apply", artifact.path);
+            expect(await readFile(join(verification, "app.ts"), "utf8")).toBe(
+              explicit ? "FIXED\n" : "fixed\n",
+            );
+            expect(
+              await readFile(join(verification, "unrelated.txt"), "utf8"),
+            ).toBe(explicit ? "UNCHANGED\n" : "unchanged\n");
+            output!.stdout.write(patchRiskAssessment().report);
+          } else {
+            await writeFile(join(directory, "app.ts"), "fixed\n");
+            output!.stdout.write(
+              JSON.stringify({
+                patches: [
+                  {
+                    occurrenceId: "occ_1",
+                    status: "verified",
+                    files: ["app.ts"],
+                    verification: "Synthetic conditional filter check.",
+                  },
+                ],
+              }),
+            );
+          }
+          return 0;
+        },
+      },
+    );
+    expect(outcome.exitCode, outcome.stderr).toBe(0);
+    expect(JSON.parse(outcome.stdout)).toMatchObject({
+      files: ["app.ts"],
+      filesChanged: 1,
+    });
+    expect(assessments).toBe(assess ? 1 : 0);
+    expect(git("rev-parse", "HEAD")).toBe(head);
+    expect(await readFile(join(directory, ".git/index"))).toEqual(index);
+    expect(await readFile(join(directory, "unrelated.txt"), "utf8")).toBe(
+      "unchanged\n",
     );
   },
 );

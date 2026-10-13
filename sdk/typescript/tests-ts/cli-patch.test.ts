@@ -10197,7 +10197,7 @@ test.each(["absolute", "relative", "quoted relative"])(
 );
 
 describe("patch Git metadata identity", () => {
-  test.each(["stable", "retargeted"])(
+  test.each(["stable", "retargeted", "deleted", "relocated"])(
     "preserves foreign objects for a %s caller alias",
     async (kind) => {
       const root = await temporaryDirectory("patch-metadata-binding-");
@@ -10235,22 +10235,43 @@ describe("patch Git metadata identity", () => {
           ["patch", "Synthetic issue", "--json"],
           {
             currentDirectory: alias,
-            onRepositoryCommand: runGitRepositoryCommand,
+            onRepositoryCommand: (command, args, cwd, options) => {
+              if (args[0] === "-C" && args.includes("--absolute-git-dir")) {
+                expect(args[1]).toBe(destination);
+                expect(Object.hasOwn(options!.environment!, "GIT_DIR")).toBe(
+                  true,
+                );
+                expect(options!.environment!["GIT_DIR"]).toBeUndefined();
+                expect(options!.environment!["GIT_WORK_TREE"]).toBe(repository);
+                return runGitRepositoryCommand(command, args, cwd, {
+                  ...options,
+                  environment: {
+                    GIT_DIR: join(foreign, ".git"),
+                    ...options?.environment,
+                  },
+                });
+              }
+              return runGitRepositoryCommand(command, args, cwd, options);
+            },
             onCodex: async (_args, output) => {
               modelCalls++;
               await writeFile(join(repository, "app.ts"), "fixed\n");
-              if (kind === "retargeted") {
-                await mkdir(destination);
-                await writeFile(
-                  join(destination, ".git"),
-                  `gitdir: ${join(foreign, ".git")}\n`,
-                );
+              if (kind !== "stable") {
+                if (kind !== "deleted") {
+                  await mkdir(destination);
+                  if (kind === "retargeted")
+                    await writeFile(
+                      join(destination, ".git"),
+                      `gitdir: ${join(foreign, ".git")}\n`,
+                    );
+                }
                 await rm(alias, { recursive: true });
-                await symlink(
-                  destination,
-                  alias,
-                  process.platform === "win32" ? "junction" : "dir",
-                );
+                if (kind !== "deleted")
+                  await symlink(
+                    destination,
+                    alias,
+                    process.platform === "win32" ? "junction" : "dir",
+                  );
               }
               output?.stdout.write("Fixed and checked.");
               return 0;
