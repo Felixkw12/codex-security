@@ -288,65 +288,75 @@ for (const changed of ["result provenance", "checkpoint contents"] as const) {
   });
 }
 
-for (const inScope of [false, true]) {
-  for (const complete of [false, true]) {
-    test(`scoped worker ${complete ? "publication" : "checkpoint"} retains shared receipts from a legacy draft (finding in scope: ${inScope})`, async () => {
-      const f = await fixture();
-      try {
-        const ref = "artifacts/evidence.txt";
-        await receipt(f.root, ref, "Shared evidence\n");
-        // Older workers saved progress without the requested-path binding.
-        await recordCodexSecurityWorkerScanDraft(f.worker, {
-          ...draft([ref]),
-          findings: [
-            finding("inherited", inScope ? "src/route.ts" : "other/route.ts"),
-          ],
-        });
-        await receipt(f.workerRoot, ref, "Unrelated local evidence\n");
-        await recordCodexSecurityWorkerScanDraft(
-          { ...f.worker, includePaths: ["src"] },
-          { ...workerDraft([]), complete },
-        );
-        const published = JSON.parse(
-          await readFile(path.join(f.workerRoot, "result.json"), "utf8"),
-        );
-        assert.equal(published.findings.length, inScope ? 1 : 0);
-        const sources = complete
-          ? await readDeepReductionSources(f.reducer)
-          : undefined;
-        const recovered = recoverCoverage(f, complete);
-        assert.deepEqual(
-          {
-            reduction: sources?.discoveries[0].coverage.surfaces[0].receiptRefs,
-            recovery: recovered.refs,
-          },
-          { reduction: complete ? [ref] : undefined, recovery: [ref] },
-        );
-        assert.equal(recovered.surfaces[0].disposition, "no_issue_found");
-        assert.deepEqual(recovered.warnings, []);
-        assert.equal(
-          await readFile(path.join(f.root, recovered.refs[0]), "utf8"),
-          "Shared evidence\n",
-        );
-        const head = JSON.parse(
-          await readFile(
-            path.join(f.workerRoot, "checkpoint-head.json"),
-            "utf8",
-          ),
-        );
-        assert.deepEqual(
-          JSON.parse(
+for (const fileScope of [false, true]) {
+  for (const inScope of [false, true]) {
+    for (const complete of [false, true]) {
+      test(`scoped worker ${complete ? "publication" : "checkpoint"} retains shared receipts from a legacy draft (finding in scope: ${inScope}, exact file: ${fileScope})`, async () => {
+        const f = await fixture();
+        try {
+          const ref = "artifacts/evidence.txt";
+          await receipt(f.root, ref, "Shared evidence\n");
+          // Older workers saved progress without the requested-path binding.
+          await recordCodexSecurityWorkerScanDraft(f.worker, {
+            ...draft([ref]),
+            findings: [
+              finding("inherited", inScope ? "src/route.ts" : "other/route.ts"),
+              ...(fileScope
+                ? [finding("file-descendant", "src/route.ts/generated")]
+                : []),
+            ],
+          });
+          await receipt(f.workerRoot, ref, "Unrelated local evidence\n");
+          await recordCodexSecurityWorkerScanDraft(
+            {
+              ...f.worker,
+              includePaths: [fileScope ? "src/route.ts" : "src"],
+              filePaths: fileScope ? ["src/route.ts"] : [],
+            },
+            { ...workerDraft([]), complete },
+          );
+          const published = JSON.parse(
+            await readFile(path.join(f.workerRoot, "result.json"), "utf8"),
+          );
+          assert.equal(published.findings.length, inScope ? 1 : 0);
+          const sources = complete
+            ? await readDeepReductionSources(f.reducer)
+            : undefined;
+          const recovered = recoverCoverage(f, complete);
+          assert.deepEqual(
+            {
+              reduction:
+                sources?.discoveries[0].coverage.surfaces[0].receiptRefs,
+              recovery: recovered.refs,
+            },
+            { reduction: complete ? [ref] : undefined, recovery: [ref] },
+          );
+          assert.equal(recovered.surfaces[0].disposition, "no_issue_found");
+          assert.deepEqual(recovered.warnings, []);
+          assert.equal(
+            await readFile(path.join(f.root, recovered.refs[0]), "utf8"),
+            "Shared evidence\n",
+          );
+          const head = JSON.parse(
             await readFile(
-              path.join(f.workerRoot, "checkpoints", head.checkpoint),
+              path.join(f.workerRoot, "checkpoint-head.json"),
               "utf8",
             ),
-          ),
-          published,
-        );
-      } finally {
-        await rm(f.root, { recursive: true, force: true });
-      }
-    });
+          );
+          assert.deepEqual(
+            JSON.parse(
+              await readFile(
+                path.join(f.workerRoot, "checkpoints", head.checkpoint),
+                "utf8",
+              ),
+            ),
+            published,
+          );
+        } finally {
+          await rm(f.root, { recursive: true, force: true });
+        }
+      });
+    }
   }
 }
 
@@ -501,85 +511,91 @@ for (const explicit of [false, true]) {
   }
 }
 
-test("the coordinator binds the requested scope while reducing legacy receipt ownership", async () => {
-  const fixture = await fixtureRun();
-  fixture.run.scope = "src";
-  fixture.run.includePaths = ["src"];
-  const store = new FakeStore(fixture.run);
-  const executor = new FakeExecutor();
-  const run = executor.run.bind(executor);
-  const ref = "artifacts/evidence.txt";
-  executor.run = async (request) => {
-    const result = await run(request);
-    if (request.kind === "discovery") {
-      const legacy = JSON.parse(
-        await readFile(
-          path.join(
-            import.meta.dirname,
-            "fixtures/legacy-scoped-worker-receipts.json",
-          ),
-          "utf8",
-        ),
-      );
-      legacy.checkpoint.scanId = fixture.run.scanId;
-      legacy.result.scanId = fixture.run.scanId;
-      await receipt(fixture.run.scanDir, ref, "Shared evidence\n");
-      await receipt(
-        request.workingDirectory,
-        ref,
-        "Unrelated local evidence\n",
-      );
-      await saveScanDraftCheckpoint(
-        {
-          ...request.artifactContext,
-          scanId: fixture.run.scanId,
-          repoRoot: fixture.run.targetPath,
-        },
-        legacy.checkpoint,
-      );
-      await writeFile(
-        path.join(request.workingDirectory, "result.json"),
-        JSON.stringify(legacy.result),
-      );
-    }
-    return result;
-  };
-  try {
-    for (const resume of [false, true]) {
-      if (resume) {
-        store.run = {
-          ...store.run,
-          status: "running",
-          terminalReason: undefined,
-          manifestPath: undefined,
-          persistedWorkers: structuredClone([...store.workers.values()]),
-          persistedDedupInputs: store.dedupClaims.flatMap(claimDedupInputs),
-        };
-      }
-      const activeExecutor = resume ? new FakeExecutor() : executor;
-      const receiptRefs: unknown[] = [];
-      const terminal = await runCoordinator(fixture, store, activeExecutor, {
-        run: store.run,
-        onComplete: async (draft) => {
-          receiptRefs.push(
-            ...(draft.coverage.surfaces as { receiptRefs: string[] }[]).flatMap(
-              (surface) => surface.receiptRefs,
+for (const fileScope of [false, true]) {
+  test(`the coordinator binds the requested scope while reducing legacy receipt ownership (exact file: ${fileScope})`, async () => {
+    const fixture = await fixtureRun();
+    fixture.run.scope = fileScope ? "src/route.ts" : "src";
+    fixture.run.includePaths = [fixture.run.scope];
+    fixture.run.filePaths = fileScope ? [fixture.run.scope] : [];
+    const store = new FakeStore(fixture.run);
+    const executor = new FakeExecutor();
+    const run = executor.run.bind(executor);
+    const ref = "artifacts/evidence.txt";
+    executor.run = async (request) => {
+      const result = await run(request);
+      if (request.kind === "discovery") {
+        const legacy = JSON.parse(
+          await readFile(
+            path.join(
+              import.meta.dirname,
+              "fixtures/legacy-scoped-worker-receipts.json",
             ),
-          );
-        },
+            "utf8",
+          ),
+        );
+        if (fileScope)
+          legacy.checkpoint.findings[1].locations[0].path =
+            "src/route.ts/generated";
+        legacy.checkpoint.scanId = fixture.run.scanId;
+        legacy.result.scanId = fixture.run.scanId;
+        await receipt(fixture.run.scanDir, ref, "Shared evidence\n");
+        await receipt(
+          request.workingDirectory,
+          ref,
+          "Unrelated local evidence\n",
+        );
+        await saveScanDraftCheckpoint(
+          {
+            ...request.artifactContext,
+            scanId: fixture.run.scanId,
+            repoRoot: fixture.run.targetPath,
+          },
+          legacy.checkpoint,
+        );
+        await writeFile(
+          path.join(request.workingDirectory, "result.json"),
+          JSON.stringify(legacy.result),
+        );
+      }
+      return result;
+    };
+    try {
+      for (const resume of [false, true]) {
+        if (resume) {
+          store.run = {
+            ...store.run,
+            status: "running",
+            terminalReason: undefined,
+            manifestPath: undefined,
+            persistedWorkers: structuredClone([...store.workers.values()]),
+            persistedDedupInputs: store.dedupClaims.flatMap(claimDedupInputs),
+          };
+        }
+        const activeExecutor = resume ? new FakeExecutor() : executor;
+        const receiptRefs: unknown[] = [];
+        const terminal = await runCoordinator(fixture, store, activeExecutor, {
+          run: store.run,
+          onComplete: async (draft) => {
+            receiptRefs.push(
+              ...(
+                draft.coverage.surfaces as { receiptRefs: string[] }[]
+              ).flatMap((surface) => surface.receiptRefs),
+            );
+          },
+        });
+        assert.equal(terminal?.status, "succeeded", terminal?.error);
+        assert.equal(activeExecutor.discoveryCalls, resume ? 0 : 1);
+        assert.equal(activeExecutor.dedupCalls, resume ? 0 : 1);
+        assert.deepEqual(receiptRefs, [ref]);
+      }
+    } finally {
+      await rm(path.dirname(fixture.run.scanDir), {
+        recursive: true,
+        force: true,
       });
-      assert.equal(terminal?.status, "succeeded", terminal?.error);
-      assert.equal(activeExecutor.discoveryCalls, resume ? 0 : 1);
-      assert.equal(activeExecutor.dedupCalls, resume ? 0 : 1);
-      assert.deepEqual(receiptRefs, [ref]);
     }
-  } finally {
-    await rm(path.dirname(fixture.run.scanDir), {
-      recursive: true,
-      force: true,
-    });
-  }
-});
+  });
+}
 
 test("a retained surface keeps only retained shared references and resolves new receipts locally", async () => {
   const f = await fixture();

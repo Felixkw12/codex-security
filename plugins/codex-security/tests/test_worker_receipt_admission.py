@@ -4,6 +4,7 @@ import copy
 import hashlib
 import json
 import os
+from argparse import Namespace
 from pathlib import Path
 
 import pytest
@@ -188,3 +189,74 @@ def test_saved_candidate_projection_matches_javascript_utf8(tmp_path: Path, inde
     assert surface["provenance"]["candidateId"] == json.loads(json.dumps(candidate))
     assert recover(tmp_path, saved, [worker], result[0]["scan"]["preservedSources"])[2] == result[2]
     assert result_path.read_bytes() == original
+
+
+@pytest.mark.parametrize("outcome", ["failed", "canceled"])
+@pytest.mark.parametrize("changed_checkout", [False, True])
+def test_legacy_file_scope_preserves_shared_receipts_when_stopped(
+    workbench_api, workbench_db, publication_scan, outcome, changed_checkout
+):
+    scope = "subdir/extract.py"
+    scan = publication_scan(paths=[scope])
+    db = workbench_api["_WORKBENCH_DB_CONTEXT"]
+    registered = db.require_scan(workbench_db, scan.scan_id)
+    assert db.requested_finding_scope(registered) == [(scope, True)]
+    legacy_path = (
+        Path(__file__).parents[1] / "mcp-app/tests/fixtures/legacy-scoped-worker-receipts.json"
+    )
+    legacy = json.loads(legacy_path.read_text())
+    for draft in legacy.values():
+        draft["scanId"] = scan.scan_id
+        draft["findings"][0]["locations"][0]["path"] = scope
+    legacy["checkpoint"]["findings"][1]["locations"][0]["path"] = f"{scope}/generated"
+    initial = add_worker(workbench_db, scan)
+    worker_id = initial.parent.name
+    output = scan.scan_dir / "artifacts" / "deep_discovery" / "workers" / worker_id / "output"
+    output.mkdir(parents=True)
+    result = output / "result.json"
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_workers SET artifact_dir = ?, result_manifest_path = ? WHERE id = ?",
+            (str(output), str(result), worker_id),
+        )
+    result.write_text(json.dumps(legacy["result"]))
+    checkpoint = write_checkpoint(result.parent / "checkpoints", legacy["checkpoint"])
+    os.utime(checkpoint, ns=(1_000_000_000, 1_000_000_000))
+    os.utime(result, ns=(2_000_000_000, 2_000_000_000))
+    ref = "artifacts/evidence.txt"
+    shared, local = scan.scan_dir / ref, result.parent / ref
+    for path, contents in ((shared, "Shared evidence\n"), (local, "Unrelated local evidence\n")):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(contents)
+    original = {path: path.read_bytes() for path in (result, checkpoint, shared, local)}
+    if changed_checkout:
+        target = Path(registered["target_path"]) / scope
+        target.unlink()
+        target.mkdir()
+    for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+        (scan.scan_dir / name).unlink()
+    saved = workbench_api["saved_results"]
+    args = Namespace(
+        scan_id=scan.scan_id,
+        claim_token=None,
+        thread_id=None,
+        cost_json=None,
+        message="Synthetic stopped review.",
+        coordinator_generation=None,
+    )
+    (saved.fail_scan if outcome == "failed" else saved.cancel_scan)(db, workbench_db, args)
+    coverage_path = scan.scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    assert len(coverage["surfaces"]) == 1
+    assert coverage["surfaces"][0]["receiptRefs"] == [ref]
+    assert (
+        scan.scan_dir / coverage["surfaces"][0]["receiptRefs"][0]
+    ).read_text() == "Shared evidence\n"
+    manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())
+    assert manifest["scan"]["status"] == outcome
+    assert "filePaths" not in manifest["scan"]["scope"]
+    assert "filePaths" not in coverage
+    published = coverage_path.read_bytes()
+    saved.preserve_scan_results(db, workbench_db, args)
+    assert coverage_path.read_bytes() == published
+    assert {path: path.read_bytes() for path in original} == original

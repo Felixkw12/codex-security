@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import copy
 import os
 import re
 from collections.abc import Callable, Sequence
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
-from finalize_scan_contract import ContractError, open_scan_local_file_descriptor, path_within_scope
+from finalize_scan_contract import (
+    ContractError,
+    _validate_schema_node,
+    open_scan_local_file_descriptor,
+    path_within_scope,
+)
 
 
 def _checkpoint_head_directory(relative: str) -> Path | None:
@@ -65,12 +71,16 @@ def retain_recorded_receipt_ownership(
     sources: list[tuple[str, dict[str, Any], str | None]],
     digest: Callable[[Any], str],
     include_paths: Sequence[str],
+    finding_scope: Sequence[tuple[str, bool]] | None = None,
 ) -> None:
     # Checkpoints are written by the host tool; direct result files can be authored
     # without it. Compare the entire payload within the same worker attempt.
     def payload_digest(draft: dict[str, Any]) -> str:
         return digest({key: value for key, value in draft.items() if key != "handoffClaimToken"})
 
+    scope = (
+        finding_scope if finding_scope is not None else [(path, False) for path in include_paths]
+    )
     recorded: dict[Path, set[str]] = {}
     for relative, draft, worker_id in sources:
         directory = Path(relative).parent
@@ -87,7 +97,12 @@ def retain_recorded_receipt_ownership(
                     and any(
                         isinstance(location, dict)
                         and isinstance(location.get("path"), str)
-                        and any(path_within_scope(location["path"], path) for path in include_paths)
+                        and any(
+                            PurePosixPath(location["path"]) == PurePosixPath(path)
+                            if is_file
+                            else path_within_scope(location["path"], path)
+                            for path, is_file in scope
+                        )
                         for location in finding["locations"]
                     )
                 ]
@@ -148,3 +163,157 @@ def resolve_coverage_receipts(
         return local_ref if scan_receipt(local_ref) or not scan_receipt(ref) else ref
 
     return [qualified_receipt(ref) for ref in refs]
+
+
+def _deferred_candidate_id(
+    row: dict[str, Any],
+    owner: str | None,
+    ambiguous_deferred: set[tuple[str | None, str]],
+) -> str | None:
+    identity = row.get("candidateId") or row.get("id")
+    if not isinstance(identity, str):
+        return None
+    if (owner, identity) in ambiguous_deferred and not any(
+        key in row for key in ("candidateId", "candidate", "finding")
+    ):
+        return None
+    return identity
+
+
+def _generic_surface_updates(
+    sources: list[tuple[str, dict[str, Any], str | None]],
+    closed_deferred: dict[tuple[str | None, str], tuple[tuple[int, int], dict[str, Any], str]],
+    active_deferred: dict[tuple[str | None, str], tuple[tuple[int, int], dict[str, Any], str]],
+    resolved_candidates: dict[tuple[str | None, str], str],
+    reopened_generic: set[tuple[str | None, str]],
+    surface_schema: dict[str, Any],
+    deferred_rows: dict[str, list[Any]],
+    ambiguous_deferred: set[tuple[str | None, str]],
+    record_source: Any,
+    record_order: Any,
+    surface_receipts: Any,
+) -> tuple[set[int], list[tuple[str, str | None, dict[str, Any], dict[str, Any]]]]:
+    if not closed_deferred and not reopened_generic:
+        return set(), []
+
+    def record_key(field: str, owner: str | None, row: dict[str, Any]) -> tuple[str | None, Any]:
+        source_owner, original = record_source(field, owner, row)
+        identity = original.get("id")
+        return source_owner, identity if isinstance(identity, str) else None
+
+    def linked(row: dict[str, Any], identity: str | None, owner: str | None) -> bool:
+        _, row = record_source("deferred", owner, row)
+        surface_ids = row.get("surfaceIds", [])
+        return identity is not None and (
+            row.get("id") == identity or (isinstance(surface_ids, list) and identity in surface_ids)
+        )
+
+    saved_surfaces: dict[tuple[str | None, str], list[tuple[str, dict[str, Any]]]] = {}
+    for relative, draft, owner in sources:
+        rows = draft["coverage"].get("surfaces", [])
+        for row in rows if isinstance(rows, list) else []:
+            if isinstance(row, dict) and isinstance(row.get("id"), str):
+                saved_surfaces.setdefault(record_key("surfaces", owner, row), []).append(
+                    (relative, row)
+                )
+    replaced: set[int] = set()
+    updates: list[tuple[str, str | None, dict[str, Any], dict[str, Any]]] = []
+    for relative, draft, owner in sources:
+        current = draft["coverage"].get("surfaces", [])
+        for surface in current if isinstance(current, list) else []:
+            if not isinstance(surface, dict):
+                continue
+            surface_owner, identity = record_key("surfaces", owner, surface)
+            closed_ids = {
+                identity
+                for (saved_owner, identity), (_, _, source) in closed_deferred.items()
+                if saved_owner == surface_owner and source == relative
+            }
+            reopened_ids = {
+                identity
+                for (saved_owner, identity), (_, _, source) in active_deferred.items()
+                if saved_owner == surface_owner
+                and source == relative
+                and (saved_owner, identity) in reopened_generic
+            }
+            reopening = surface.get("disposition") == "needs_follow_up"
+            work_ids = reopened_ids if reopening else closed_ids
+            if not work_ids:
+                continue
+            if not isinstance(identity, str):
+                continue
+            matches = saved_surfaces[(surface_owner, identity)]
+            # Older writers could assign one ID to distinct surfaces in a draft.
+            # A closure cannot identify which of those observations it replaces.
+            by_source = dict(matches)
+            if any(row != by_source[saved_path] for saved_path, row in matches):
+                continue
+            if any(
+                "candidateId" in row or "candidate" in row or "finding" in row for _, row in matches
+            ):
+                continue
+            if any(
+                row is not surface
+                and record_order(saved_path, surface_owner, row)
+                >= record_order(relative, surface_owner, surface)
+                and row.get("disposition") != surface.get("disposition")
+                for saved_path, row in matches
+            ):
+                continue
+
+            if not reopening and any(
+                record_key("deferred", saved_owner, row)[0] == surface_owner
+                and (
+                    not isinstance(row.get("id") or row.get("candidateId"), str)
+                    or (
+                        isinstance(row.get("id"), str)
+                        and record_key("deferred", saved_owner, row) in ambiguous_deferred
+                        and not any(key in row for key in ("candidateId", "candidate", "finding"))
+                    )
+                )
+                and linked(row, identity, saved_owner)
+                for saved_path, _, saved_owner in sources
+                for row in deferred_rows[saved_path]
+                if isinstance(row, dict)
+            ):
+                continue
+            if not reopening and any(
+                saved_owner == surface_owner
+                and (saved_owner, deferred_id) not in closed_deferred
+                and (
+                    (candidate_id := _deferred_candidate_id(row, saved_owner, ambiguous_deferred))
+                    is None
+                    or (saved_owner, candidate_id) not in resolved_candidates
+                )
+                and linked(row, identity, saved_owner)
+                for (saved_owner, deferred_id), (_, row, _) in active_deferred.items()
+            ):
+                continue
+            # An accepted checkpoint can update a saved surface by ID without
+            # optional surfaceIds links on its generic task.
+            latest_relative, latest_surface = max(
+                matches, key=lambda match: record_order(match[0], surface_owner, match[1])
+            )
+            update = copy.deepcopy(latest_surface)
+            refs = copy.deepcopy(surface_receipts(latest_relative, latest_surface))
+            update["receiptRefs"] = refs
+            if isinstance(refs, list):
+                for saved_relative, row in matches:
+                    previous_refs = surface_receipts(saved_relative, row)
+                    for ref in previous_refs if isinstance(previous_refs, list) else []:
+                        if ref not in refs:
+                            refs.append(ref)
+            try:
+                _validate_schema_node(update, surface_schema, "coverage.surfaces")
+            except ContractError:
+                continue
+            replaced.update(
+                id(row)
+                for _, row in matches
+                if reopening
+                or row.get("disposition") in {"needs_follow_up", surface.get("disposition")}
+            )
+            entry = (latest_relative, owner, latest_surface, update)
+            if entry not in updates:
+                updates.append(entry)
+    return replaced, updates

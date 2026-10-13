@@ -1802,7 +1802,15 @@ def test_selected_worker_projection_keeps_links_and_pending_authority(
 
 
 def publish_review_projection(workbench_api, connection, scan, coverage):
+    # Publish through an active coordinator before exercising stopped recovery.
+    with connection:
+        connection.execute(
+            "UPDATE deep_scan_runs SET status = 'running', coordinator_generation = 2, "
+            "terminal_reason = NULL, completed_at = NULL WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
     documents = {
+        "deepScanPublication": {"coordinatorGeneration": 2, "resultPath": None},
         "manifest": json.loads((scan.scan_dir / "scan-manifest.json").read_text()),
         "findings": {"findings": []},
         "coverage": coverage,
