@@ -691,6 +691,15 @@ export class ScanCostTracker {
       !admitted &&
       progress.filesTotal > (filesTotal ?? Number.MAX_SAFE_INTEGER)
     ) {
+      const boundary = this.#parentInventoryBoundary;
+      if (
+        boundary?.reviewed === true &&
+        boundary.position === position &&
+        boundary.markerIndex === markerIndex
+      )
+        // Retire the contradicted cutoff while preserving its source position
+        // as an ordering witness for preceding inventory.
+        boundary.reviewed = false;
       if (projection === undefined) return;
       // A bounded current completion still orders its preceding inventory.
       // Scope-ineligible progress supplies that witness, not a reviewed cutoff.
@@ -841,13 +850,14 @@ export class ScanCostTracker {
       const progress = saved.update;
       saved.scopeFilesTotal = filesTotal;
       const exact = completion?.projection?.position === saved.position;
+      const nativeOccurrence = this.#parentTurnStartKnown && saved.completion;
       if (projected !== undefined) projected.scopeFilesTotal = filesTotal;
       if (progress.phase === "discovery" && progress.filesCompleted === 0) {
         // Source eligibility follows the inventory at this position, not the
         // display scope at the start or end of a poll. The retained rows make
         // this ordered pass identical for every partition of the same input.
         if (this.#inventoryPrecedesReview(saved.position, saved.markerIndex)) {
-          if (exact || !this.#unboundParentCopy(saved))
+          if (exact || nativeOccurrence || !this.#unboundParentCopy(saved))
             recordInventory({
               progress,
               position: saved.position,
@@ -879,9 +889,7 @@ export class ScanCostTracker {
         projected !== undefined ||
         // Native current-turn review rows have their own source evidence. Their
         // eligibility does not depend on the provisional display frontier.
-        (this.#parentTurnStartKnown &&
-          saved.completion &&
-          progress.filesCompleted > 0) ||
+        (nativeOccurrence && progress.filesCompleted > 0) ||
         (this.#savedParentProgressIsCurrent(saved) &&
           (command === undefined ||
             command.live !== this.#acceptedParent ||
@@ -1323,7 +1331,9 @@ export class ScanCostTracker {
       if (
         marker === this.#parentInventory &&
         !marker.accepted &&
-        (this.#parentProgress?.progress.filesCompleted ?? 0) > 0 &&
+        this.#parentProgress !== null &&
+        this.#parentProgress.progress.filesCompleted > 0 &&
+        this.#parentSourceIsEligible(this.#parentProgress) &&
         this.#parentInventoryBoundary?.reviewed !== true
       ) {
         // A read can reach EOF before the next completion is appended, then
