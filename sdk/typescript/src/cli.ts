@@ -1239,44 +1239,40 @@ interface CliDependencies {
 // Apply coordinator-owned Git bindings after native shell environment filtering.
 const PATCH_GIT_ENVIRONMENT_RUNNER = `
 const { spawn } = require("node:child_process");
-const [command, ...args] = process.argv.slice(1);
-let header = Buffer.alloc(0);
-const readHeader = (chunk) => {
-  header = Buffer.concat([header, chunk]);
-  const end = header.indexOf(10);
-  if (end < 0) return;
-  process.stdin.off("data", readHeader);
-  const nativeGitOptions = [];
-  if (process.platform === "win32") {
-    // The native sandbox grants its Windows user access to the checkout.
-    for (let index = 0; index < Number(process.env.GIT_CONFIG_COUNT ?? 0); index++) {
-      const value = process.env["GIT_CONFIG_VALUE_" + index];
-      if (process.env["GIT_CONFIG_KEY_" + index]?.toLowerCase() !== "safe.directory") continue;
-      if (value === "") nativeGitOptions.length = 0;
-      else if (value !== undefined)
-        nativeGitOptions.push("-c", "safe.directory=" + value);
-    }
+const { readSync } = require("node:fs");
+const [headerLength, command, ...args] = process.argv.slice(1);
+const header = Buffer.alloc(Number(headerLength));
+// Read exactly the bindings, leaving command input on the inherited handle.
+for (let offset = 0; offset < header.length;) {
+  const bytes = readSync(0, header, offset, header.length - offset, null);
+  if (bytes === 0) {
+    console.error("Snapshot Git bindings ended before the complete frame.");
+    process.exit(1);
   }
-  for (const [name, value] of JSON.parse(header.subarray(0, end).toString())) {
-    if (value === null) delete process.env[name];
-    else process.env[name] = value;
+  offset += bytes;
+}
+const nativeGitOptions = [];
+if (process.platform === "win32") {
+  // The native sandbox grants its Windows user access to the checkout.
+  for (let index = 0; index < Number(process.env.GIT_CONFIG_COUNT ?? 0); index++) {
+    const value = process.env["GIT_CONFIG_VALUE_" + index];
+    if (process.env["GIT_CONFIG_KEY_" + index]?.toLowerCase() !== "safe.directory") continue;
+    if (value === "") nativeGitOptions.length = 0;
+    else if (value !== undefined)
+      nativeGitOptions.push("-c", "safe.directory=" + value);
   }
-  const child = spawn(command, [...nativeGitOptions, ...args], { stdio: ["pipe", "inherit", "inherit"] });
-  child.on("error", (error) => { console.error(error); process.exitCode = 1; });
-  child.on("exit", (code, signal) => {
-    if (signal) process.kill(process.pid, signal);
-    else process.exitCode = code === 0 ? (process.exitCode ?? 0) : (code ?? 1);
-  });
-  child.stdin.on("error", (error) => {
-    if (error.code !== "EPIPE") { console.error(error); process.exitCode = 1; }
-    process.stdin.unpipe(child.stdin);
-    process.stdin.resume();
-  });
-  child.stdin.write(header.subarray(end + 1));
-  header = undefined;
-  process.stdin.pipe(child.stdin);
-};
-process.stdin.on("data", readHeader);
+}
+for (const [name, value] of JSON.parse(header.toString())) {
+  if (value === null) delete process.env[name];
+  else process.env[name] = value;
+}
+// Inherit sandbox handles so Git does not need an inner runtime pipe.
+const child = spawn(command, [...nativeGitOptions, ...args], { stdio: "inherit" });
+child.on("error", (error) => { console.error(error); process.exitCode = 1; });
+child.on("exit", (code, signal) => {
+  if (signal) process.kill(process.pid, signal);
+  else process.exitCode = code === 0 ? (process.exitCode ?? 0) : (code ?? 1);
+});
 `;
 
 export async function runRepositoryCommand(
@@ -1299,7 +1295,7 @@ export async function runRepositoryCommand(
     );
   }
   const codex = sandbox && resolveCodexCommand(sandbox.environment);
-  // Bun cannot spawn Git from the restricted Windows sandbox token.
+  // Node preserves inherited standard handles in the native Windows sandbox.
   const bridgeRuntime =
     sandbox !== undefined &&
     process.platform === "win32" &&
@@ -1349,6 +1345,16 @@ export async function runRepositoryCommand(
         if (name.toUpperCase() === "CODEX_HOME") delete environment[name];
       environment["CODEX_HOME"] = configuredCodexHome(sandbox.environment);
     }
+    const bindings =
+      sandbox === undefined
+        ? undefined
+        : Buffer.from(
+            JSON.stringify(
+              Object.entries(sandbox.gitEnvironment ?? {}).map(
+                ([key, value]) => [key, value ?? null],
+              ),
+            ),
+          );
     const execution = spawn(
       codex === undefined
         ? executable.executable
@@ -1370,6 +1376,7 @@ export async function runRepositoryCommand(
             "-e",
             PATCH_GIT_ENVIRONMENT_RUNNER,
             "--",
+            String(bindings!.length),
             executable.executable,
             "-C",
             options?.directory ?? repository,
@@ -1458,14 +1465,7 @@ export async function runRepositoryCommand(
         ? undefined
         : new Promise<void>((resolve, reject) => {
             execution.stdin.once("error", reject);
-            if (sandbox !== undefined)
-              execution.stdin.write(
-                JSON.stringify(
-                  Object.entries(sandbox.gitEnvironment ?? {}).map(
-                    ([key, value]) => [key, value ?? null],
-                  ),
-                ) + "\n",
-              );
+            if (bindings !== undefined) execution.stdin.write(bindings);
             execution.stdin.end(options?.input, resolve);
           });
     const [{ stdout }, inputError] = await Promise.all([

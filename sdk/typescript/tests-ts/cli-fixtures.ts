@@ -297,7 +297,9 @@ export function dependencies(
       (command === "gh" && args[0] === "pr" && args[1] === "list"
         ? "[]"
         : command === "git" && args.includes("--absolute-git-dir")
-          ? (commandOptions?.environment?.["GIT_DIR"] ?? repository)
+          ? (commandOptions?.environment?.["GIT_DIR"] ??
+            commandOptions?.directory ??
+            repository)
           : args.includes("--name-only")
             ? "src/finding-1.ts\0"
             : ""),
