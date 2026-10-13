@@ -1534,6 +1534,10 @@ def register_cli_scan(
     repository = require_target(args.repository)
     require_scannable_target(repository)
     scan_dir = None
+    if not args.registration_json_stdin and (
+        not args.archive_existing or args.archived_scan_dir is not None
+    ):
+        require_cli_scan_directory(repository, args)
     user_context = None
     registration = {}
     workflow_id = None
@@ -1544,6 +1548,12 @@ def register_cli_scan(
         workflow_id = registration.get("workflowId")
     else:
         recipe_json = sys.stdin.read() if args.recipe_json_stdin else args.recipe_json
+    if (
+        args.registration_json_stdin
+        and registration.get("scanId") is None
+        and (not args.archive_existing or args.archived_scan_dir is not None)
+    ):
+        require_cli_scan_directory(repository, args)
     recipe = parse_scan_recipe(recipe_json, repository)
     if registration.get("scanId") is not None:
         scan_dir = require_canonical_scan_directory(Path(args.scan_dir).expanduser())
@@ -1604,8 +1614,6 @@ def register_cli_scan(
                 registration.get("claimToken"),
                 sealed_producer_version=resume_verifier,
             )
-    if not args.archive_existing or args.archived_scan_dir is not None:
-        scan_dir = require_cli_scan_directory(repository, args)
     requested_target = recipe["target"]
     paths = requested_target["paths"]
     # Capture host-observed kinds once; resumes and publication use the saved recipe.

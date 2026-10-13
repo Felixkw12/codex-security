@@ -100,7 +100,7 @@ import {
   sep,
 } from "node:path";
 import { type CodexOptions, type ThreadOptions } from "@openai/codex-sdk";
-import { z } from "incur";
+import { z } from "zod";
 import { readThreatModelPath } from "./artifact-export.js";
 import {
   createProviderProfile,
