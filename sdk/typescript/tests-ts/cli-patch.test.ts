@@ -916,7 +916,11 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
             if (command === "gh")
               throw new Error("GitHub authentication failed.");
             if (args.includes("--absolute-git-dir"))
-              return options?.environment?.["GIT_DIR"] ?? repository;
+              return (
+                options?.environment?.["GIT_DIR"] ??
+                options?.directory ??
+                repository
+              );
             return args.includes("--name-only") &&
               !args.includes("HEAD") &&
               !args.includes("--cached")
@@ -1547,7 +1551,7 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
             },
           },
         );
-        expect(outcome.exitCode).toBe(0);
+        expect(outcome.exitCode, outcome.stderr).toBe(0);
         expect(calls).toBe(1);
         expect(JSON.parse(outcome.stdout).report).toBe(
           "Fixed; runtime validation passed.",
