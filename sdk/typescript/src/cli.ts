@@ -9092,8 +9092,9 @@ async function changedPatchFiles(
       .toString("latin1")
       .split("\0");
     for (let index = 0; index + 2 < renamed.length; index += 3) {
-      if (dirtyFiles.has(renamed[index + 1]!))
-        dirtyFiles.add(renamed[index + 2]!);
+      const source = relativePatchPath(".", renamed[index + 1]!);
+      const destination = relativePatchPath(".", renamed[index + 2]!);
+      if (dirtyFiles.has(source)) dirtyFiles.add(destination);
     }
   }
   const output = await dependencies.runRepositoryCommand(
