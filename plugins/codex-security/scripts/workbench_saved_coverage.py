@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import argparse
 import copy
+import sys
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from finalize_scan_contract import ContractError, _validate_schema_node
 
@@ -149,3 +154,7 @@ def _generic_surface_updates(
             if projected not in updates:
                 updates.append(projected)
     return replaced, updates
+
+
+if __name__ == "__main__":
+    argparse.ArgumentParser(description=__doc__).parse_args()
