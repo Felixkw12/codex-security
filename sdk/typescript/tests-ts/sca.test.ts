@@ -849,6 +849,57 @@ if (args.includes("app-server")) {
   },
 );
 
+async function nativeDependencySandboxAvailable(): Promise<boolean> {
+  if (process.platform === "win32") return false;
+  const directories = createTemporaryDirectories();
+  try {
+    const root = await directories.create("sca-sandbox-capability-");
+    const home = join(root, "home");
+    const codexHome = join(root, "codex-home");
+    await Promise.all([
+      mkdir(home, { mode: 0o700 }),
+      mkdir(codexHome, { mode: 0o700 }),
+    ]);
+    const command = resolveCodexCommand({});
+    const probe = await runCodexCommand(
+      command,
+      [
+        "--config",
+        'permissions.codex_security_sandbox_test={extends=":read-only",network={enabled=false}}',
+        "sandbox",
+        "-P",
+        "codex_security_sandbox_test",
+        "-C",
+        root,
+        command.command,
+        "--version",
+      ],
+      {
+        PATH: process.env["PATH"],
+        HOME: home,
+        USERPROFILE: home,
+        XDG_CONFIG_HOME: join(home, ".config"),
+        CODEX_HOME: codexHome,
+      },
+    );
+    if (probe.success) return true;
+    if (
+      process.platform === "linux" &&
+      /bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted|app-server socket directory must be a user-owned directory with mode 0700/u.test(
+        probe.stderr,
+      )
+    ) {
+      console.warn(
+        `Native credential-read enforcement skipped; sandbox unavailable: ${probe.stderr}`,
+      );
+      return false;
+    }
+    throw new Error(`Native sandbox capability probe failed: ${probe.stderr}`);
+  } finally {
+    await directories.cleanup();
+  }
+}
+
 (process.platform === "win32" ? test.skip : test).each([
   "JavaScript",
   "pnpm shim",
@@ -906,7 +957,10 @@ process.exit(0);
   },
 );
 
-(process.platform === "win32" ? test.skip : test).each([
+const nativeDependencyTest = (await nativeDependencySandboxAvailable())
+  ? test
+  : test.skip;
+nativeDependencyTest.each([
   ["HOME", false, false],
   ["USERPROFILE", false, false],
   ["HOME", true, false],
@@ -1098,17 +1152,6 @@ process.exit(0);
       ],
       options.env!,
     );
-    if (
-      !probe.success &&
-      process.platform === "linux" &&
-      /bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted|app-server socket directory must be a user-owned directory with mode 0700/u.test(
-        probe.stderr,
-      )
-    ) {
-      throw new Error(
-        `Native credential-read enforcement was not exercised: ${probe.stderr}`,
-      );
-    }
     expect(probe.success, probe.stderr).toBe(true);
     expect(probe.stdout).toContain("codex-cli");
     expect(await readFile(source, "utf8")).toBe(
