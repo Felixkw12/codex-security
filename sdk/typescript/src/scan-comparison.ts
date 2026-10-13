@@ -9,7 +9,7 @@ import {
   type ThreadOptions,
   type TurnOptions,
 } from "@openai/codex-sdk";
-import { z } from "incur";
+import { z } from "zod";
 import {
   scanCodexHome,
   type CodexSecuritySurface,
@@ -101,22 +101,12 @@ export interface ScanComparisonProgress {
   pages?: number;
 }
 
-interface ScanComparisonMatch {
-  beforeOccurrenceIds: string[];
-  afterOccurrenceIds: string[];
-  confidence: "high";
-  reason: string;
-}
+type ScanComparisonPair = z.infer<typeof findingPairSchema>;
 
-interface ScanComparisonPair {
-  beforeOccurrenceId: string;
-  afterOccurrenceId: string;
-  reason: string;
-}
-
-export interface ScanComparisonResult {
-  matches: ScanComparisonMatch[];
-  uncertain: ScanComparisonPair[];
+export interface ScanComparisonResult extends Omit<
+  z.infer<typeof comparisonSchema>,
+  "related"
+> {
   related?: ScanComparisonPair[];
 }
 
