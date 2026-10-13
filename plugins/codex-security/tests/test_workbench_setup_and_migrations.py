@@ -2795,3 +2795,206 @@ def test_registration_keeps_a_competing_targets_existing_id(tmp_path: Path) -> N
     assert [
         tuple(row) for row in connection.execute("SELECT id, current_path FROM security_targets")
     ] == [(target, str(repository))]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="The executable marker fixture is a POSIX script")
+@pytest.mark.parametrize("executable_source", ["caller", "historical", "unavailable-historical"])
+def test_identity_migration_excludes_all_history_and_caller_git(
+    tmp_path: Path, executable_source: str
+) -> None:
+    git = shutil.which("git")
+    assert git is not None
+    caller, saved, other = (tmp_path / name for name in ("caller", "saved", "other"))
+    for repository in (caller, saved, other):
+        initialize_git_repository(repository)
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    connection, _ = create_historical_database(48)
+    timestamp = "2026-08-01T00:00:00Z"
+    for index, repository in enumerate((saved, other)):
+        if index == 1 and executable_source == "unavailable-historical":
+            (repository / "replaced-component").write_text("no longer a directory\n")
+            repository = repository / "replaced-component" / "old-target"
+        connection.execute(
+            "INSERT INTO security_targets(id, current_path, display_name, created_at, updated_at) "
+            "VALUES (?, ?, 'Saved repository', ?, ?)",
+            (f"saved-{index}", str(repository), timestamp, timestamp),
+        )
+    connection.commit()
+    with sqlite3.connect(state / "workbench.sqlite3") as database:
+        connection.backup(database)
+    connection.close()
+    executable_root = caller if executable_source == "caller" else other
+    marker = tmp_path / "repository-git-ran"
+    executable = executable_root / "git"
+    executable.write_text(
+        '#!/bin/sh\nprintf invoked > "$MIGRATION_GIT_MARKER"\nexec "$MIGRATION_HOST_GIT" "$@"\n',
+        encoding="utf-8",
+    )
+    executable.chmod(0o700)
+    environment = {key: value for key, value in os.environ.items() if key != "CODEX_SECURITY_GIT"}
+    environment.update(
+        CODEX_SECURITY_STATE_DIR=str(state),
+        PATH=str(executable_root) + os.pathsep + os.environ.get("PATH", ""),
+        MIGRATION_GIT_MARKER=str(marker),
+        MIGRATION_HOST_GIT=git,
+    )
+    completed = subprocess.run(
+        [sys.executable, str(SCRIPT), "list-scans"],
+        cwd=caller,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert json.loads(completed.stdout)["scans"] == []
+    assert not marker.exists()
+    with sqlite3.connect(state / "workbench.sqlite3") as database:
+        identities = dict(database.execute("SELECT id, repository_identity FROM security_targets"))
+        assert identities["saved-0"] is not None
+        assert (identities["saved-1"] is None) == (executable_source == "unavailable-historical")
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("clock_reversed", [False, True])
+def test_identity_migration_merges_partially_sequenced_completion_history(
+    clock_reversed: bool,
+) -> None:
+    connection, apply_migrations = create_historical_database(50)
+    connection.execute(
+        "INSERT INTO workspaces(id, created_at, updated_at) VALUES ('workspace', 'created', 'updated')"
+    )
+    for scan_id, started, completed in (
+        ("older", "2026-08-01T00:01:00Z", "2026-08-01T00:02:00Z"),
+        ("newer", "2026-08-01T00:00:00Z", "2026-08-01T00:03:00Z"),
+        (
+            "last",
+            "2026-08-01T00:00:00Z",
+            "2026-08-01T00:01:00Z" if clock_reversed else "2026-08-01T00:04:00Z",
+        ),
+    ):
+        connection.execute(
+            "INSERT INTO scans(id, workspace_id, target_path, target_revision, scope, mode, "
+            "scan_dir, status, phase, started_at, completed_at, created_at, updated_at) "
+            "VALUES (?, 'workspace', '/synthetic/repository', 'revision', '.', 'standard', "
+            "?, 'complete', 'reporting', ?, ?, ?, ?)",
+            (scan_id, f"/synthetic/output/{scan_id}", started, completed, started, completed),
+        )
+    connection.execute("UPDATE scans SET completion_sequence = NULL WHERE id = 'older'")
+    for _ in range(2):
+        apply_migrations(connection)
+        assert [
+            row["id"]
+            for row in connection.execute("SELECT id FROM scans ORDER BY completion_sequence")
+        ] == ["older", "newer", "last"]
+    connection.close()
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("migration", ["pre-release", "linux-v3"])
+@pytest.mark.parametrize("unavailable", ["file-parent", "permission-error"])
+def test_identity_migrations_keep_healthy_targets_when_another_path_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, migration: str, unavailable: str
+) -> None:
+    if migration == "linux-v3" and sys.platform != "linux":
+        pytest.skip("Linux generation conversion")
+    repository = tmp_path / "healthy"
+    initialize_git_repository(repository)
+    connection, apply_migrations = create_historical_database(
+        48 if migration == "pre-release" else 49
+    )
+    import workbench_target as target
+    import workbench_target_state as state
+
+    identity = state._repository_identity_details(repository)
+    assert identity is not None
+    stored_identity = identity.value if migration == "pre-release" else identity.previous_value
+    assert stored_identity is not None
+    timestamp = apply_migrations.__globals__["now"]()
+    if migration == "pre-release":
+        connection.execute("ALTER TABLE security_targets ADD COLUMN repository_identity TEXT")
+        connection.execute(
+            "INSERT INTO schema_migrations VALUES (48, 'persist repository identities', ?)",
+            (timestamp,),
+        )
+    missing = tmp_path / "unavailable" / "old-checkout"
+    if unavailable == "file-parent":
+        missing.parent.write_text("no longer a directory\n")
+    else:
+        original = target._protected_repository_root
+
+        def inaccessible(path: Path) -> Path:
+            if path == missing:
+                raise PermissionError("historical checkout is inaccessible")
+            return original(path)
+
+        monkeypatch.setattr(target, "_protected_repository_root", inaccessible)
+    connection.executemany(
+        "INSERT INTO security_targets(id, current_path, display_name, created_at, updated_at, "
+        "repository_identity) VALUES (?, ?, 'Saved checkout', ?, ?, ?)",
+        [
+            ("healthy", str(repository), timestamp, timestamp, stored_identity),
+            ("unavailable", str(missing), timestamp, timestamp, None),
+        ],
+    )
+    connection.execute(
+        "INSERT INTO workspaces(id, target_id, target_path, created_at, updated_at) "
+        "VALUES ('workspace', 'healthy', ?, ?, ?)",
+        (str(repository), timestamp, timestamp),
+    )
+    metadata = repository.stat()
+    connection.execute(
+        "INSERT INTO scans(id, workspace_id, target_id, target_path, target_revision, scope, mode, "
+        "scan_dir, status, phase, started_at, completed_at, created_at, updated_at, "
+        "target_device, target_inode) "
+        "VALUES ('scan', 'workspace', 'healthy', ?, 'revision', '.', 'standard', "
+        "'/synthetic/output', 'complete', 'reporting', ?, ?, ?, ?, ?, ?)",
+        (
+            str(repository),
+            timestamp,
+            timestamp,
+            timestamp,
+            timestamp,
+            metadata.st_dev,
+            metadata.st_ino,
+        ),
+    )
+    if migration == "linux-v3":
+        connection.execute("UPDATE scans SET repository_generation = ?", (stored_identity,))
+    monkeypatch.delenv("CODEX_SECURITY_GIT", raising=False)
+    for _ in range(2):
+        apply_migrations(connection)
+        assert (
+            connection.execute(
+                "SELECT repository_identity FROM security_targets WHERE id = 'healthy'"
+            ).fetchone()[0]
+            == identity.value
+        )
+        if migration == "linux-v3":
+            assert (
+                connection.execute("SELECT repository_generation FROM scans").fetchone()[0]
+                == identity.value
+            )
+    connection.close()
+
+
+@pytest.mark.cross_platform
+def test_current_database_does_not_inspect_historical_git_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection, apply_migrations = create_historical_database(50)
+    connection.executemany(
+        "INSERT INTO security_targets(id, current_path, display_name, created_at, updated_at) "
+        "VALUES (?, ?, 'Saved checkout', 'created', 'updated')",
+        [(str(index), f"/synthetic/history/{index}") for index in range(100)],
+    )
+    import workbench_target as target
+
+    monkeypatch.delenv("CODEX_SECURITY_GIT", raising=False)
+    with mock.patch.object(
+        target, "_protected_repository_root", wraps=target._protected_repository_root
+    ) as inspect_root:
+        apply_migrations(connection)
+        inspect_root.assert_not_called()
+    assert connection.execute("SELECT COUNT(*) FROM security_targets").fetchone()[0] == 100
+    connection.close()

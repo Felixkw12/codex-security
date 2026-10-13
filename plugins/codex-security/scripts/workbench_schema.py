@@ -52,9 +52,11 @@ def apply_migrations(
     *,
     immediate: bool = False,
 ) -> None:
+    from workbench_target import scoped_git_discovery
+
     connection.commit()
     connection.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
-    with connection:
+    with connection, scoped_git_discovery(lambda: migration_target_paths(connection)):
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -106,6 +108,24 @@ def apply_migrations(
             repair_deep_scan_failure_counter_migration(connection)
         if should_backfill_targets:
             backfill_security_targets(connection)
+
+
+def migration_target_paths(connection: sqlite3.Connection) -> list[Path]:
+    paths: set[Path] = set()
+    for table, column in (
+        ("security_targets", "current_path"),
+        ("workspaces", "target_path"),
+        ("scans", "target_path"),
+    ):
+        columns = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
+        if column in columns:
+            paths.update(
+                Path(row[0])
+                for row in connection.execute(
+                    f"SELECT DISTINCT {column} FROM {table} WHERE {column} IS NOT NULL"
+                )
+            )
+    return list(paths)
 
 
 def normalize_pre_release_migrations(connection: sqlite3.Connection, timestamp: str) -> None:
@@ -300,19 +320,42 @@ def repair_repository_identity_migration(connection: sqlite3.Connection) -> bool
 
     from workbench_scan_history import _scan_completion_order
 
-    sequence = connection.execute(
-        "SELECT COALESCE(MAX(completion_sequence), 0) FROM scans"
-    ).fetchone()[0]
-    unsequenced = connection.execute(
-        "SELECT id, started_at, completed_at FROM scans "
-        "WHERE status = 'complete' AND completion_sequence IS NULL"
-    ).fetchall()
-    for scan in sorted(unsequenced, key=_scan_completion_order):
-        sequence += 1
-        connection.execute(
-            "UPDATE scans SET completion_sequence = ? WHERE id = ? AND completion_sequence IS NULL",
-            (sequence, scan["id"]),
-        )
+    if connection.execute(
+        "SELECT 1 FROM scans WHERE status = 'complete' AND completion_sequence IS NULL LIMIT 1"
+    ).fetchone():
+        recorded = connection.execute(
+            "SELECT id, started_at, completed_at FROM scans "
+            "WHERE status = 'complete' AND completion_sequence IS NOT NULL "
+            "ORDER BY completion_sequence"
+        ).fetchall()
+        unsequenced = connection.execute(
+            "SELECT id, started_at, completed_at FROM scans "
+            "WHERE status = 'complete' AND completion_sequence IS NULL"
+        ).fetchall()
+        pending = iter(sorted(unsequenced, key=_scan_completion_order))
+        candidate = next(pending, None)
+        completed = []
+        # Insert historical rows chronologically without reordering recorded completions.
+        for scan in recorded:
+            while candidate is not None and _scan_completion_order(
+                candidate
+            ) <= _scan_completion_order(scan):
+                completed.append(candidate)
+                candidate = next(pending, None)
+            completed.append(scan)
+        if candidate is not None:
+            completed.append(candidate)
+            completed.extend(pending)
+        connection.execute("UPDATE scans SET completion_sequence = NULL WHERE status = 'complete'")
+        sequence = connection.execute(
+            "SELECT COALESCE(MAX(completion_sequence), 0) FROM scans"
+        ).fetchone()[0]
+        for scan in completed:
+            sequence += 1
+            connection.execute(
+                "UPDATE scans SET completion_sequence = ? WHERE id = ?",
+                (sequence, scan["id"]),
+            )
     return identity_changed
 
 

@@ -13,7 +13,10 @@ import stat
 import subprocess
 import sys
 import tempfile
+from collections.abc import Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, Callable
 
@@ -25,6 +28,7 @@ from windows_scan_local_files import copy_directory_junction
 from workbench_constants import GIT_REPOSITORY_ENVIRONMENT
 
 _WINDOWS = os.name == "nt"
+_SCOPED_GIT: ContextVar[Callable[[], str] | None] = ContextVar("workbench_git", default=None)
 
 
 def committed_diff_snapshot_digest(kind: str, base_revision: str, head_revision: str) -> str:
@@ -189,6 +193,34 @@ def _protected_repository_root(target: Path) -> Path:
 def trusted_git_executable(protected_root: Path) -> str | None:
     """Validate host-selected Git, or discover Git for a direct plugin invocation."""
     configured = os.environ.get("CODEX_SECURITY_GIT")
+    scoped = _SCOPED_GIT.get()
+    if configured is None and scoped is not None:
+        configured = scoped()
+    return _resolve_git_executable(protected_root, configured)
+
+
+def _historical_repository_root(target: Path) -> Path:
+    try:
+        return _protected_repository_root(target)
+    except (OSError, RuntimeError):
+        # An unavailable descendant still excludes its lexical checkout ancestry.
+        root = Path(os.path.abspath(target))
+        protected = root
+        for ancestor in (root, *root.parents):
+            try:
+                (ancestor / ".git").lstat()
+            except (OSError, RuntimeError):
+                continue
+            try:
+                protected = ancestor.resolve()
+            except (OSError, RuntimeError):
+                protected = ancestor
+        return protected
+
+
+def _resolve_git_executable(
+    protected_root: Path, configured: str | None, *, discovery_roots: Iterable[Path] = ()
+) -> str | None:
     windows = sys.platform == "win32"
     if configured is None:
         names = ("git.exe", "git.com") if windows else ("git",)
@@ -206,7 +238,9 @@ def trusted_git_executable(protected_root: Path) -> str | None:
         candidates = iter((candidate,))
 
     try:
-        repository = _protected_repository_root(protected_root)
+        repositories = [_protected_repository_root(protected_root)]
+        if configured is None:
+            repositories.extend(_historical_repository_root(root) for root in discovery_roots)
     except (OSError, RuntimeError):
         return None
 
@@ -231,6 +265,7 @@ def trusted_git_executable(protected_root: Path) -> str | None:
             continue
         if any(
             path == repository or repository in path.parents
+            for repository in repositories
             for path in (lexical, invocation, canonical)
         ):
             if configured is not None:
@@ -238,6 +273,29 @@ def trusted_git_executable(protected_root: Path) -> str | None:
             continue
         return str(invocation)
     return None
+
+
+@contextmanager
+def scoped_git_discovery(protected_roots: Callable[[], Iterable[Path]]) -> Iterator[None]:
+    """Pin ambient Git when a migration first needs to inspect repository targets."""
+    if os.environ.get("CODEX_SECURITY_GIT") is not None:
+        yield
+        return
+    executable: str | None = None
+
+    def resolve_once() -> str:
+        nonlocal executable
+        if executable is None:
+            executable = (
+                _resolve_git_executable(Path.cwd(), None, discovery_roots=protected_roots()) or ""
+            )
+        return executable
+
+    token = _SCOPED_GIT.set(resolve_once)
+    try:
+        yield
+    finally:
+        _SCOPED_GIT.reset(token)
 
 
 def git_command(
