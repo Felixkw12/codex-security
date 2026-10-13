@@ -1226,6 +1226,8 @@ def test_parent_draft_preserves_reconciled_candidate_identity_before_publication
             ("coverage", "coverage.json"),
         )
     }
+    if mode == "deep":
+        documents["manifest"]["scan"]["complete"] = False
     documents["findings"]["findings"] = []
     documents["coverage"].update(completeness="partial", surfaces=[], deferred=[])
     for identity in ("review-a", "review-b"):
@@ -1355,7 +1357,11 @@ def test_parent_draft_preserves_reconciled_candidate_identity_before_publication
         assert canonical["resolvedDeferred"] == raw["coverage"]["resolvedDeferred"]
 
 
-def test_deep_draft_admission_survives_interrupted_projection(tmp_path, monkeypatch):
+@pytest.mark.parametrize("replay_accepted", [False, True])
+@pytest.mark.parametrize("empty_interruption", [False, True])
+def test_deep_draft_admission_survives_interrupted_projection(
+    tmp_path, monkeypatch, replay_accepted, empty_interruption
+):
     monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "scripts"))
     import workbench_db as db
     import workbench_saved_results as results
@@ -1375,6 +1381,7 @@ def test_deep_draft_admission_survives_interrupted_projection(tmp_path, monkeypa
             ("coverage", "coverage.json"),
         )
     }
+    documents["manifest"]["scan"]["complete"] = False
     raw = {
         "scanId": scan_id,
         "findings": documents["findings"]["findings"],
@@ -1396,6 +1403,8 @@ def test_deep_draft_admission_survives_interrupted_projection(tmp_path, monkeypa
         raw_path.write_text(json.dumps(raw))
         results.write_scan_draft(db._WORKBENCH_DB_CONTEXT, connection, args)
         previous_head = json.loads((scan_dir / "checkpoint-head.json").read_text())
+        accepted_documents = copy.deepcopy(documents)
+        accepted_raw = copy.deepcopy(raw)
         original = results.write_scan_local_bytes
         writes = 0
 
@@ -1407,7 +1416,10 @@ def test_deep_draft_admission_survives_interrupted_projection(tmp_path, monkeypa
                     raise OSError("Interrupted projected checkpoint")
             original(root, relative, contents)
 
-        raw["findings"][0]["summary"] = "Updated synthetic evidence."
+        if empty_interruption:
+            raw["findings"].clear()
+        else:
+            raw["findings"][0]["summary"] = "Updated synthetic evidence."
         staged.write_text(json.dumps(documents))
         raw_path.write_text(json.dumps(raw))
         with monkeypatch.context() as context:
@@ -1416,6 +1428,14 @@ def test_deep_draft_admission_survives_interrupted_projection(tmp_path, monkeypa
                 results.write_scan_draft(db._WORKBENCH_DB_CONTEXT, connection, args)
         assert writes == 2
         assert json.loads((scan_dir / "checkpoint-head.json").read_text()) == previous_head
+        if replay_accepted:
+            staged.write_text(json.dumps(accepted_documents))
+            raw_path.write_text(json.dumps(accepted_raw))
+            results.write_scan_draft(db._WORKBENCH_DB_CONTEXT, connection, args)
+            replay_head = json.loads((scan_dir / "checkpoint-head.json").read_text())
+            assert replay_head["inputCheckpoint"] != previous_head["inputCheckpoint"]
+            assert replay_head["checkpoint"] == previous_head["checkpoint"]
+        expected_findings = accepted_raw["findings"] if replay_accepted else raw["findings"]
         binding = db.workbench_completion_binding(db.require_scan(connection, scan_id), db.now())
         warnings = []
         recovered = results.merge_saved_results(
@@ -1429,7 +1449,7 @@ def test_deep_draft_admission_survives_interrupted_projection(tmp_path, monkeypa
             scan_mode="deep",
         )
         assert [row["summary"] for row in recovered[1]["findings"]] == [
-            "Updated synthetic evidence."
+            row["summary"] for row in expected_findings
         ]
         assert warnings == []
         replayed = results.merge_saved_results(

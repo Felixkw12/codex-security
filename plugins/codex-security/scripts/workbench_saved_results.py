@@ -15,7 +15,7 @@ import unicodedata
 from collections import Counter
 from collections.abc import Iterator
 from contextlib import contextmanager
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -58,7 +58,10 @@ from workbench_saved_sources import (
     _frozen_source_times,
     _is_source_order_snapshot,
     _parent_publication_ancestors,
+    _parent_scan_draft,
+    _read_saved_parent_result,
     _read_saved_result,
+    _require_current_deep_publication,
     _retained_source_state,
     _source_digests,
 )
@@ -202,45 +205,6 @@ def _saved_result_paths(scan_dir: Path, workers: list[Any]) -> Iterator[tuple[st
                 )
             except ValueError:
                 continue
-
-
-def _parent_scan_draft(
-    scan_id: str,
-    parent_scan: dict[str, Any],
-    findings: dict[str, Any],
-    coverage: dict[str, Any],
-) -> dict[str, Any]:
-    parent = {
-        "scanId": scan_id,
-        "findings": findings.get("findings"),
-        "coverage": coverage,
-        **{
-            key: parent_scan[key]
-            for key in ("scope", "threatModel", "complete")
-            if key in parent_scan
-        },
-    }
-    if not isinstance(parent["findings"], list):
-        raise ContractError("Saved parent draft has no findings array")
-    return parent
-
-
-def _read_saved_parent_result(
-    scan_dir: Path, scan_id: str
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    manifest = _read_scan_local_json(scan_dir, "scan-manifest.json", "Saved parent manifest")
-    findings = _read_scan_local_json(scan_dir, "findings.json", "Saved parent findings")
-    coverage = _read_scan_local_json(scan_dir, "coverage.json", "Saved parent coverage")
-    parent_scan = manifest.get("scan")
-    if not isinstance(parent_scan, dict):
-        raise ContractError("Saved parent manifest has no scan object")
-    if manifest_is_sealed(parent_scan) and (
-        parent_scan.get("id", scan_id) != scan_id
-        or findings.get("scanId", scan_id) != scan_id
-        or coverage.get("scanId", scan_id) != scan_id
-    ):
-        raise ContractError("Saved parent documents belong to a different scan")
-    return manifest, _parent_scan_draft(scan_id, parent_scan, findings, coverage)
 
 
 def _saved_results_changed(db: Any, connection: Any, scan: Any) -> bool:
@@ -859,6 +823,7 @@ def merge_saved_results(
     allow_frozen_legacy_parent: bool = False,
     frozen_model_source: str | None = None,
     selected_model_source: list[str] | None = None,
+    finding_scope: list[tuple[str, bool]] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None:
     """Read only bound parent/worker files; return an unsealed loss-preserving union."""
     initial_warnings = set(warnings)
@@ -1318,8 +1283,14 @@ def merge_saved_results(
             isinstance(location, dict)
             and isinstance(location.get("path"), str)
             and any(
-                path_within_scope(location["path"], path)
-                for path in binding["scope"]["includePaths"]
+                PurePosixPath(location["path"]) == PurePosixPath(path)
+                if is_file
+                else path_within_scope(location["path"], path)
+                for path, is_file in (
+                    finding_scope
+                    if finding_scope is not None
+                    else [(path, False) for path in binding["scope"]["includePaths"]]
+                )
             )
             for location in locations
         )
@@ -2894,6 +2865,7 @@ def preserve_scan_results_locked(
         warnings,
         stopped=True,
         scan_mode=scan["mode"],
+        finding_scope=db.requested_finding_scope(scan) if scan["mode"] == "deep" else None,
         reason=(
             f"Scan {outcome}; saved findings and pending review were preserved. "
             f"{scan['failure_message'] or ''}"
@@ -2945,7 +2917,7 @@ def preserve_scan_results_locked(
         completion_binding=binding,
         completion_warnings=warnings,
         draft_documents=documents,
-        finding_scope=db.requested_scan_paths(scan) if scan["mode"] == "deep" else None,
+        finding_scope=db.requested_finding_scope(scan) if scan["mode"] == "deep" else None,
     )
     snapshots = _snapshot_published_outputs(scan_dir)
     try:
@@ -3092,7 +3064,10 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         _populate_unsealed_manifest_envelope(manifest, manifest["scan"], binding)
         _populate_unsealed_artifact_envelope(manifest, findings, coverage, binding)
         _validate_completion_binding(manifest, findings, coverage, binding)
+        projected = _parent_scan_draft(scan_id, manifest["scan"], findings, coverage)
         admitted_input = None
+        checkpoint = manifest["scan"]
+        checkpoint_contents = None
         if args.checkpoint_path is not None:
             try:
                 checkpoint_relative = Path(args.checkpoint_path).relative_to(scan_dir).as_posix()
@@ -3110,7 +3085,23 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             if checkpoint.get("scanId") != scan_id:
                 raise SystemExit("Staged scan checkpoint belongs to another scan.")
             if scan["mode"] == "deep":
-                checkpoint_contents = _admit_parent_checkpoint(scan_dir, scan_id, checkpoint)
+                checkpoint_contents = _admit_parent_checkpoint(
+                    scan_dir, scan_id, checkpoint, projected
+                )
+        checkpoint_only = (
+            scan["mode"] == "deep"
+            and draft.get("deepScanPublication") is None
+            and checkpoint.get("complete") is False
+            and connection.execute(
+                "SELECT 1 FROM deep_scan_runs WHERE scan_id = ? "
+                "AND status = 'running' AND manifest_path = ?",
+                (scan_id, str(scan_dir / "scan-manifest.json")),
+            ).fetchone()
+            is not None
+        )
+        if scan["mode"] == "deep" and not checkpoint_only:
+            _require_current_deep_publication(db, connection, scan, draft)
+        if checkpoint_contents is not None:
             checkpoint_digest = hashlib.sha256(checkpoint_contents).hexdigest()
             if scan["mode"] == "deep":
                 admitted_input = f"{checkpoint_digest}.json"
@@ -3119,12 +3110,15 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
                 f"checkpoints/{checkpoint_digest}.json",
                 checkpoint_contents,
             )
-        projected = _parent_scan_draft(scan_id, manifest["scan"], findings, coverage)
+            if checkpoint_only:
+                return {"scanId": scan_id, "status": "draft_written"}
         projected_contents = _encoded(projected)
         checkpoint_name = f"{hashlib.sha256(projected_contents).hexdigest()}.json"
         checkpoint_relative = f"checkpoints/{checkpoint_name}"
         if not (scan_dir / checkpoint_relative).exists():
             write_scan_local_bytes(scan_dir, checkpoint_relative, projected_contents)
+        if checkpoint_only:
+            return {"scanId": scan_id, "status": "draft_written"}
         head = {"checkpoint": checkpoint_name}
         if admitted_input is not None:
             head["inputCheckpoint"] = admitted_input
@@ -3139,6 +3133,14 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
                 filename,
                 (json.dumps(document, allow_nan=False, indent=2) + "\n").encode(),
             )
+        if scan["mode"] == "deep" and manifest["scan"].get("complete") is not False:
+            # Select the accepted final publication before releasing the write lock.
+            with connection:
+                connection.execute(
+                    "UPDATE deep_scan_runs SET manifest_path = ? "
+                    "WHERE scan_id = ? AND status = 'running'",
+                    (str(scan_dir / "scan-manifest.json"), scan_id),
+                )
         model_warning = write_threat_model_projection_if_possible(scan_dir, manifest)
         # Accepted Standard drafts are evidence of review or report assembly,
         # even when the parent omitted its explicit progress call.

@@ -15,7 +15,9 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from finalize_scan_contract import (
     ContractError,
+    _read_scan_local_json,
     _read_scan_local_json_with_metadata,
+    manifest_is_sealed,
     write_scan_local_bytes,
 )
 
@@ -267,11 +269,34 @@ def _parent_publication_ancestors(
     return ancestors
 
 
-def _admit_parent_checkpoint(scan_dir: Path, scan_id: str, checkpoint: dict[str, Any]) -> bytes:
+def _admit_parent_checkpoint(
+    scan_dir: Path, scan_id: str, checkpoint: dict[str, Any], projected: dict[str, Any]
+) -> bytes:
     """Bind a Deep input to the accepted head under the host's publication lock."""
     previous = {}
     try:
         previous, _, _ = _read_saved_result(scan_dir, "checkpoint-head.json", scan_id)
+        if (
+            previous.get("checkpoint") == f"{_digest(projected)}.json"
+            and "inputCheckpoint" in previous
+        ):
+            accepted, _, _ = _read_saved_result(
+                scan_dir, f"checkpoints/{previous['inputCheckpoint']}", scan_id
+            )
+            if {key: value for key, value in accepted.items() if key != "publication"} == {
+                key: value for key, value in checkpoint.items() if key != "publication"
+            }:
+                for relative in _checkpoint_paths(scan_dir, "checkpoints"):
+                    pending, _, _ = _read_saved_result(scan_dir, relative, scan_id)
+                    publication = pending.get("publication")
+                    if (
+                        isinstance(publication, dict)
+                        and publication.get("previousInputCheckpoint")
+                        == previous["inputCheckpoint"]
+                    ):
+                        break
+                else:
+                    return _encoded(accepted)
     except (ContractError, OSError, ValueError):
         pass  # An absent or unreadable previous head contributes no predecessor.
     return _encoded(
@@ -300,6 +325,105 @@ def _capture_parent_observation(
     if not (scan_dir / snapshot).exists():
         write_scan_local_bytes(scan_dir, snapshot, _encoded(observation))
     return {snapshot: (digest, observed)}
+
+
+def _parent_scan_draft(
+    scan_id: str,
+    parent_scan: dict[str, Any],
+    findings: dict[str, Any],
+    coverage: dict[str, Any],
+) -> dict[str, Any]:
+    parent = {
+        "scanId": scan_id,
+        "findings": findings.get("findings"),
+        "coverage": coverage,
+        **{
+            key: parent_scan[key]
+            for key in ("scope", "threatModel", "complete")
+            if key in parent_scan
+        },
+    }
+    if not isinstance(parent["findings"], list):
+        raise ContractError("Saved parent draft has no findings array")
+    return parent
+
+
+def _read_saved_parent_result(
+    scan_dir: Path, scan_id: str
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    manifest = _read_scan_local_json(scan_dir, "scan-manifest.json", "Saved parent manifest")
+    findings = _read_scan_local_json(scan_dir, "findings.json", "Saved parent findings")
+    coverage = _read_scan_local_json(scan_dir, "coverage.json", "Saved parent coverage")
+    parent_scan = manifest.get("scan")
+    if not isinstance(parent_scan, dict):
+        raise ContractError("Saved parent manifest has no scan object")
+    if manifest_is_sealed(parent_scan) and (
+        parent_scan.get("id", scan_id) != scan_id
+        or findings.get("scanId", scan_id) != scan_id
+        or coverage.get("scanId", scan_id) != scan_id
+    ):
+        raise ContractError("Saved parent documents belong to a different scan")
+    return manifest, _parent_scan_draft(scan_id, parent_scan, findings, coverage)
+
+
+def _require_current_deep_publication(
+    db: Any, connection: Any, scan: Any, draft: dict[str, Any]
+) -> None:
+    scan_id = scan["id"]
+    run = connection.execute(
+        "SELECT * FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
+    ).fetchone()
+    publication = draft.get("deepScanPublication")
+    if (
+        publication is None
+        and draft["manifest"]["scan"].get("complete") is False
+        and (run is None or run["status"] == "running")
+    ):
+        return
+    if run is None:
+        run = db.deep_scan.require_deep_scan_run(connection, scan_id)
+    # Finished discovery-only runs hand remaining publication back to the parent.
+    if (
+        publication is None
+        and run["status"] != "running"
+        and run["manifest_path"] != str(Path(scan["scan_dir"]) / "scan-manifest.json")
+    ):
+        return
+    db.deep_scan.require_current_coordinator(
+        run,
+        argparse.Namespace(
+            coordinator_generation=publication.get("coordinatorGeneration") if publication else None
+        ),
+    )
+    # Once finish selects the canonical parent, only completion may replay it.
+    if publication is None:
+        if run["status"] != "running" and run["manifest_path"] == str(
+            Path(scan["scan_dir"]) / "scan-manifest.json"
+        ):
+            raise SystemExit("Deep Scan is terminal; drafts cannot replace its publication.")
+        return
+
+    # Match the durable reducer sequence used by coordinator recovery.
+    def reducer_order(worker: Any) -> tuple[int, str]:
+        match = re.fullmatch(r"dedup-([0-9]+)", Path(worker["prompt_path"]).parent.name)
+        return (int(match[1]) if match else 0, worker["id"])
+
+    reducer = max(
+        (
+            worker
+            for worker in connection.execute(
+                "SELECT * FROM deep_scan_workers WHERE scan_id = ?", (scan_id,)
+            )
+            if worker["kind"] == "dedup"
+            and worker["status"] == "succeeded"
+            and worker["result_manifest_path"]
+        ),
+        key=reducer_order,
+        default=None,
+    )
+    selected_result = reducer["result_manifest_path"] if reducer is not None else None
+    if publication["resultPath"] != selected_result:
+        raise SystemExit("Deep Scan aggregate belongs to a superseded publication selection.")
 
 
 if __name__ == "__main__":
