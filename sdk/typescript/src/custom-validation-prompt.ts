@@ -9,9 +9,9 @@ import { PLUGIN_NAME } from "./runtime.js";
 // the ordinary validation sequence with a custom-validation request.
 const SOURCES = {
   "references/core-scan.md":
-    "1f36d34cc789f84a9b8ac6c93bf1bfe675d2d3bb62154791ac52a8cbaa86dcb6",
+    "87d4d385ecd020660f9a2f7ef59eaa268d7c68442fc1403f59c50c1baa910a63",
   "skills/security-scan/SKILL.md":
-    "bd923551dbf5349715a9e3583e07883352f3366eaee2b8ffe3dc9520d44179b2",
+    "b6436deb23b999b76d652f3936bd49bf1b03bafaa8d514b3ec71a4150e524843",
   "skills/security-diff-scan/SKILL.md":
     "2dbe04cbe50f8a511327fa384e37f23cdf0630b233186a52d02c515082c4c881",
 } as const;
@@ -63,6 +63,10 @@ export async function customDiscoveryPrompt(
       .replace(
         /^Keep discovery, validation, and attack-path reasoning.+$/m,
         "Keep source-evidence and counterevidence checks within discovery. Do not run an independent final validation pass or invoke separate phase skills.",
+      )
+      .replace(
+        "reconcile their evidence and submit the result;",
+        "reconcile their evidence and preserve provisional candidates through the SDK-owned discovery handoff;",
       );
     workflow = [
       skill.slice(

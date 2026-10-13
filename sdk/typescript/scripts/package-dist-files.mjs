@@ -73,6 +73,7 @@ const distModules = [
   "deduplication/retry",
   "deduplication/deduplication",
   "finding-retrieval",
+  "finding-normalization",
   "finding-workflow",
   "findings-client",
   "findings-errors",
