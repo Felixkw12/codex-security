@@ -1286,11 +1286,9 @@ export async function runRepositoryCommand(
     );
   }
   const codex = sandbox && resolveCodexCommand(sandbox.environment);
-  // Node preserves inherited standard handles in the native Windows sandbox.
+  // Node preserves inherited handles and reports errors after stdin closes.
   const bridgeRuntime =
-    sandbox !== undefined &&
-    process.platform === "win32" &&
-    process.versions["bun"]
+    sandbox !== undefined && process.versions["bun"]
       ? await resolveTrustedExecutable("node", sandbox.environment, repository)
       : undefined;
   if (bridgeRuntime === null) {

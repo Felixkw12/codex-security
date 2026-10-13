@@ -6,6 +6,7 @@ import { createInterface } from "node:readline";
 import { PassThrough, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { readSkillCommandOutput } from "../src/cli.js";
+import { patchSnapshotWindowsConfig } from "./support/patch-snapshot-environment.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
 const fixtures = createTemporaryDirectories(true);
@@ -23,11 +24,7 @@ async function resolvePatchProfile(configured: boolean) {
   execFileSync("git", ["init", "--quiet", repository]);
   const administration = join(repository, ".git");
   const configBefore = await readFile(join(administration, "config"));
-  // Native Windows legacy workspace policies require an enabled sandbox backend.
-  const windows =
-    process.platform === "win32"
-      ? 'windows = { sandbox = "unelevated" }\n'
-      : "";
+  const windows = patchSnapshotWindowsConfig();
   await writeFile(
     join(home, "config.toml"),
     `model_provider = "synthetic"

@@ -21,12 +21,14 @@ import {
   runWorkflow,
 } from "./cli-patch-fixtures.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
-import { patchSnapshotEnvironment } from "./support/patch-snapshot-environment.js";
+import {
+  patchSnapshotEnvironment,
+  patchSnapshotWindowsConfig,
+} from "./support/patch-snapshot-environment.js";
 
 const fixtures = createTemporaryDirectories(true);
 afterEach(fixtures.cleanup);
-const windows =
-  process.platform === "win32" ? 'windows = { sandbox = "unelevated" }\n' : "";
+const windows = patchSnapshotWindowsConfig();
 const provider =
   'model_provider = "synthetic"\n[model_providers.synthetic]\nname = "Synthetic"\nbase_url = "http://127.0.0.1:9/v1"\nwire_api = "responses"\n';
 
