@@ -1,6 +1,11 @@
-import { expect, test } from "bun:test";
+import { afterEach, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { createTemporaryDirectories } from "./support/temporary-directories.js";
+
+const fixtures = createTemporaryDirectories(true);
+afterEach(fixtures.cleanup);
 
 const source = await readFile(
   new URL("../src/cli.ts", import.meta.url),
@@ -160,4 +165,39 @@ test("snapshot Git reports an incomplete binding frame before starting the comma
     "Snapshot Git bindings ended before the complete frame.",
   );
   expect(stderr).not.toContain("ENOENT");
+});
+
+test("snapshot Git launch failures retain diagnostics with a non-emitting stderr stream", async () => {
+  const missingGit = join(await fixtures.create("patch-missing-git-"), "git");
+  const results: {
+    code: number | null;
+    signal: string | null;
+    stderr: string;
+  }[] = [];
+  for (const dummyStderr of [false, true]) {
+    const prefix = dummyStderr
+      ? 'Object.defineProperty(process,"stderr",{value:new (require("node:stream").Writable)({write(chunk,encoding,callback){callback();}})});'
+      : "";
+    const child = spawn(
+      Bun.which("node")!,
+      ["-e", prefix + runner, "--", "2", missingGit, "status"],
+      { stdio: "pipe" },
+    );
+    let stderr = "";
+    child.stderr.setEncoding("utf8").on("data", (chunk) => {
+      stderr += chunk;
+    });
+    const closed = new Promise<{ code: number | null; signal: string | null }>(
+      (resolve, reject) => {
+        child.once("error", reject);
+        child.once("close", (code, signal) => resolve({ code, signal }));
+      },
+    );
+    child.stdin.end("[]");
+    results.push({ ...(await closed), stderr });
+  }
+  expect(results[0]).toMatchObject({ code: 1, signal: null });
+  expect(results[0]!.stderr).toContain(`spawn ${missingGit} ENOENT`);
+  expect(results[0]!.stderr).toContain("spawnargs: [ 'status' ]");
+  expect(results[1]).toEqual(results[0]);
 });

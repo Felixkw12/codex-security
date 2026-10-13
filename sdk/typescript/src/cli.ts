@@ -1233,14 +1233,14 @@ interface CliDependencies {
 // Apply coordinator-owned Git bindings after native shell environment filtering.
 const PATCH_GIT_ENVIRONMENT_RUNNER = `
 const { spawn } = require("node:child_process");
-const { readSync } = require("node:fs");
+const { readSync, writeSync } = require("node:fs");
 const [headerLength, command, ...args] = process.argv.slice(1);
 const header = Buffer.alloc(Number(headerLength));
 // Read exactly the bindings, leaving command input on the inherited handle.
 for (let offset = 0; offset < header.length;) {
   const bytes = readSync(0, header, offset, header.length - offset, null);
   if (bytes === 0) {
-    console.error("Snapshot Git bindings ended before the complete frame.");
+    writeSync(2, "Snapshot Git bindings ended before the complete frame.\\n");
     process.exit(1);
   }
   offset += bytes;
@@ -1262,7 +1262,7 @@ for (const [name, value] of JSON.parse(header.toString())) {
 }
 // Inherit sandbox handles so Git does not need an inner runtime pipe.
 const child = spawn(command, [...nativeGitOptions, ...args], { stdio: "inherit" });
-child.on("error", (error) => { console.error(error); process.exitCode = 1; });
+child.on("error", (error) => { writeSync(2, require("node:util").format(error) + "\\n"); process.exitCode = 1; });
 child.on("exit", (code, signal) => {
   if (signal) process.kill(process.pid, signal);
   else process.exitCode = code === 0 ? (process.exitCode ?? 0) : (code ?? 1);

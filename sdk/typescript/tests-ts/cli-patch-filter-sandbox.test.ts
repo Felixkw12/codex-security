@@ -211,8 +211,8 @@ for (const linkedHome of [false, true]) {
       `const fs = require("node:fs");
 let denied = false;
 try { fs.writeFileSync(${JSON.stringify(protectedFile)}, "changed"); } catch (error) { if (!["EACCES", "EPERM", "EROFS"].includes(error.code)) throw error; denied = true; }
-process.stdout.write(JSON.stringify({ denied, inherited: process.env.SNAPSHOT_FIXTURE_SETTING }));
-if (process.argv[2] === "fail") { process.stderr.write("Synthetic snapshot failure detail.\\n"); process.exitCode = 7; }
+fs.writeSync(1, JSON.stringify({ denied, inherited: process.env.SNAPSHOT_FIXTURE_SETTING }));
+if (process.argv[2] === "fail") { fs.writeSync(2, "Synthetic snapshot failure detail.\\n"); process.exitCode = 7; }
 `,
     );
     const sandbox = {
