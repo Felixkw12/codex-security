@@ -18,15 +18,8 @@ from typing import Any, Mapping
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from workbench_composition import CompositionView, load_composition
+from workbench_constants import TOKEN_FIELDS
 
-TOKEN_FIELDS = {
-    "input_tokens": "inputTokens",
-    "cached_input_tokens": "cachedInputTokens",
-    "cache_write_input_tokens": "cacheWriteInputTokens",
-    "output_tokens": "outputTokens",
-    "reasoning_output_tokens": "reasoningOutputTokens",
-    "total_tokens": "totalTokens",
-}
 STATE_DATABASE_NAME = re.compile(r"state_(\d+)\.sqlite")
 STATE_DATABASE_TIMEOUT_SECONDS = 1.0
 

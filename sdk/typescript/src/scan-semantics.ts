@@ -1,3 +1,4 @@
+import { posix } from "node:path";
 import { createHash } from "node:crypto";
 import type {
   CoverageDocument,
@@ -406,7 +407,11 @@ export function prepareSemanticScanDraft(
     findings: {
       findings: prepareScanFindings(
         context.mode === "deep"
-          ? findingsWithinScope(input.findings, scope.includePaths)
+          ? findingsWithinScope(
+              input.findings,
+              scope.includePaths,
+              trustedScope["filePaths"] as string[] | undefined,
+            )
           : input.findings,
         context.mode,
       ),
@@ -823,13 +828,24 @@ export function normalizeDeferred(deferred: SemanticCoverage["deferred"]) {
 /** Keep terminal Deep findings inside the host-selected paths. */
 export function findingsWithinScope<
   T extends { locations: Array<{ path: string }> },
->(findings: T[], includePaths: readonly string[]): T[] {
-  if (includePaths.includes(".")) return findings;
+>(
+  findings: T[],
+  includePaths: readonly string[],
+  filePaths: readonly string[] = [],
+): T[] {
+  const scopes = includePaths.map((scope) =>
+    posix.normalize(scope).replace(/\/$/u, ""),
+  );
+  if (scopes.includes(".")) return findings;
+  const files = new Set(
+    filePaths.map((path) => posix.normalize(path).replace(/\/$/u, "")),
+  );
   return findings.filter((finding) =>
     finding.locations.some((location) => {
-      const path = location.path.replace(/^\.\//u, "");
-      return includePaths.some(
-        (scope) => path === scope || path.startsWith(`${scope}/`),
+      const path = posix.normalize(location.path);
+      return scopes.some(
+        (scope) =>
+          path === scope || (!files.has(scope) && path.startsWith(`${scope}/`)),
       );
     }),
   );
@@ -851,6 +867,10 @@ export function scopedDeepDraft(
   const scope = buildScope(context, trustedScope, draft.scope);
   return {
     ...draft,
-    findings: findingsWithinScope(draft.findings, scope.includePaths),
+    findings: findingsWithinScope(
+      draft.findings,
+      scope.includePaths,
+      trustedScope["filePaths"] as string[] | undefined,
+    ),
   };
 }

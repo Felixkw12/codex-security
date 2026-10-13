@@ -16,6 +16,7 @@ from typing import Any
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import finalize_scan_contract as finalizer
+from workbench_constants import TOKEN_FIELDS
 
 
 def reject_nonstandard_json_number(value: str) -> None:
@@ -64,14 +65,7 @@ def user_context_argument(args: argparse.Namespace) -> str | None:
     return optional_text(value)
 
 
-SCAN_USAGE_TOKEN_KEYS = (
-    "inputTokens",
-    "cachedInputTokens",
-    "cacheWriteInputTokens",
-    "outputTokens",
-    "reasoningOutputTokens",
-    "totalTokens",
-)
+SCAN_USAGE_TOKEN_KEYS = tuple(TOKEN_FIELDS.values())
 
 
 def _valid_legacy_scan_cost(cost: object) -> bool:

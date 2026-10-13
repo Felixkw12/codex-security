@@ -1784,6 +1784,8 @@ async function testParentToolList() {
           `${tool.name} must not accept a model-selected artifact destination.`,
         );
       }
+      if (tool.name === "record_codex_security_scan_draft")
+        assertSemanticInputProperties(tool.inputSchema);
     }
 
     const deepScanTool = tools.find(
@@ -1854,6 +1856,43 @@ async function testParentToolList() {
     );
   } finally {
     await client.close();
+  }
+}
+
+function assertSemanticInputProperties(schema) {
+  const properties = schema.properties;
+  const findingSchema = properties.findings.items;
+  const groups = [
+    [properties.scope, ["includePaths", "excludePaths"]],
+    [findingSchema, ["findingId", "occurrenceId", "fingerprints"]],
+  ];
+  if (properties.coverage)
+    groups.push([
+      properties.coverage,
+      [
+        "documentType",
+        "schemaVersion",
+        "scanId",
+        "mode",
+        "inventoryStrategy",
+        "includePaths",
+        "excludePaths",
+        "receiptRefs",
+      ],
+    ]);
+  for (const [object, forbidden] of groups) {
+    const names = object.propertyNames;
+    for (const key of forbidden) {
+      assert.equal(
+        Object.hasOwn(object.properties, key),
+        false,
+        `${key} must not be advertised as an optional unknown input`,
+      );
+      assert.ok(
+        names.not.enum.includes(key),
+        `${key} remains forbidden in tools/list`,
+      );
+    }
   }
 }
 

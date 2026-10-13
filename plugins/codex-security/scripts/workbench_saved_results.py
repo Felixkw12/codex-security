@@ -14,7 +14,7 @@ import stat
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -941,6 +941,7 @@ def merge_saved_results(
     allow_frozen_legacy_parent: bool = False,
     frozen_model_source: str | None = None,
     selected_model_source: list[str] | None = None,
+    finding_scope: list[tuple[str, bool]] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None:
     """Read only bound parent/worker files; return an unsealed loss-preserving union."""
     initial_warnings = set(warnings)
@@ -1374,6 +1375,24 @@ def merge_saved_results(
 
     finding_validity: dict[str, bool] = {}
 
+    def finding_in_scope(finding: dict[str, Any]) -> bool:
+        locations = finding.get("locations", [])
+        return isinstance(locations, list) and any(
+            isinstance(location, dict)
+            and isinstance(location.get("path"), str)
+            and any(
+                PurePosixPath(location["path"]) == PurePosixPath(path)
+                if is_file
+                else path_within_scope(location["path"], path)
+                for path, is_file in (
+                    finding_scope
+                    if finding_scope is not None
+                    else [(path, False) for path in binding["scope"]["includePaths"]]
+                )
+            )
+            for location in locations
+        )
+
     def valid_finding(value: Any) -> bool:
         # Use the finalizer's own per-record recovery before a draft can suppress
         # an earlier checkpoint. Invalid latest records must not hide valid history.
@@ -1527,6 +1546,7 @@ def merge_saved_results(
             if (
                 isinstance(finding, dict)
                 and valid_finding(finding)
+                and (finding_scope is None or finding_in_scope(finding))
                 and (candidate_id := finding_candidate_id(finding))
             ):
                 outcomes.append((relative, owner, candidate_id, "reported"))
@@ -1566,7 +1586,7 @@ def merge_saved_results(
     # A superseded checkpoint must not suppress a newer independent result.
     if parent:
         for finding in parent["findings"]:
-            if valid_finding(finding):
+            if valid_finding(finding) and (finding_scope is None or finding_in_scope(finding)):
                 canonical_key = _finding_key(finding)
                 for retained in _retained_findings(finding):
                     retained_key = _finding_key(retained)
@@ -1825,7 +1845,7 @@ def merge_saved_results(
                 ):
                     rejected_history.setdefault((owner, candidate_id), []).append(finding)
                     continue
-                if valid_finding(finding):
+                if valid_finding(finding) and (finding_scope is None or finding_in_scope(finding)):
                     finding_positions.setdefault(_finding_key(finding), len(findings))
                 findings.append(finding)
                 continue
@@ -1856,16 +1876,7 @@ def merge_saved_results(
                 continue
             for key in ("findingId", "occurrenceId", "fingerprints"):
                 finding.pop(key, None)
-            locations = finding.get("locations", [])
-            if not isinstance(locations, list) or not any(
-                isinstance(location, dict)
-                and isinstance(location.get("path"), str)
-                and any(
-                    path_within_scope(location["path"], path)
-                    for path in binding["scope"]["includePaths"]
-                )
-                for location in locations
-            ):
+            if not finding_in_scope(finding):
                 warnings.append(f"Skipped out-of-scope finding from {relative}.")
                 coverage["completeness"] = "partial"
                 continue
@@ -2149,6 +2160,7 @@ def _stopped_child_draft(db: Any, child: Any, scan_dir: Path) -> dict[str, Any] 
             warnings,
             stopped=True,
             reason="Independent scan stopped before aggregation.",
+            finding_scope=db.requested_finding_scope(child) if child["mode"] == "deep" else None,
         )
         if documents is None:
             return None
@@ -2157,6 +2169,7 @@ def _stopped_child_draft(db: Any, child: Any, scan_dir: Path) -> dict[str, Any] 
             completion_binding=binding,
             completion_warnings=warnings,
             draft_documents=documents,
+            finding_scope=db.requested_finding_scope(child) if child["mode"] == "deep" else None,
         )
     db.verify_manifest_binding(child, manifest)
     projected = project_scan_artifacts(
@@ -2416,6 +2429,7 @@ def preserve_scan_results_locked(
         frozen_source_digests=frozen_source_digests,
         frozen_model_source=model_source[0] if model_source else None,
         selected_model_source=model_source,
+        finding_scope=db.requested_finding_scope(scan) if scan["mode"] == "deep" else None,
         allow_frozen_legacy_parent=(
             include_parent_with_recovery
             or (
@@ -2460,7 +2474,7 @@ def preserve_scan_results_locked(
         completion_binding=binding,
         completion_warnings=warnings,
         draft_documents=documents,
-        finding_scope=db.requested_scan_paths(scan) if scan["mode"] == "deep" else None,
+        finding_scope=db.requested_finding_scope(scan) if scan["mode"] == "deep" else None,
     )
     snapshots = _snapshot_published_outputs(scan_dir)
     try:

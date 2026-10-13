@@ -136,6 +136,17 @@ async function generateSemanticModels() {
 Promise.all([
   generate().then((document) => ["models.ts", document]),
   generateSemanticModels().then((document) => ["semantic-models.ts", document]),
+  Promise.resolve([
+    "finding-normalization.ts",
+    "/* Generated from plugin finding-normalization.ts. Run `pnpm generate:models`. */\n" +
+      readFileSync(
+        join(
+          packageRoot,
+          "../../plugins/codex-security/mcp-app/src/finding-normalization.ts",
+        ),
+        "utf8",
+      ),
+  ]),
 ]).then((documents) => {
   for (const [filename, models] of documents) {
     const output = join(packageRoot, "src", filename);
