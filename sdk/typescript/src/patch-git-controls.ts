@@ -504,10 +504,10 @@ export async function capturePatchGitControls(
       inaccessibleHooks.add(path);
     }
   };
-  const captureReferences = async (checkout: string): Promise<void> => {
-    // Git can retain an outside caller's cwd or move an inside caller to the
-    // worktree root. Resolve relative configuration origins in its setup cwd.
-    const configurationDirectory = (
+  // Git can retain an outside caller's cwd or move an inside caller to the
+  // worktree root. Resolve its relative paths in that setup directory.
+  const setupDirectory = async (checkout: string): Promise<string> =>
+    (
       await runControl(
         root,
         checkout,
@@ -515,6 +515,8 @@ export async function capturePatchGitControls(
         { environment: { GIT_OBJECT_DIRECTORY: "." } },
       )
     ).replace(/\n$/u, "");
+  const captureReferences = async (checkout: string): Promise<void> => {
+    const configurationDirectory = await setupDirectory(checkout);
     const origins = await runConfigFields(checkout, [
       "config",
       "--null",
@@ -633,13 +635,14 @@ export async function capturePatchGitControls(
   const selectedCommonDirectory = usesCommonDirectoryMarker
     ? undefined
     : selectedDirectories[1];
+  const selectorDirectory = await setupDirectory(root);
   for (const argument of [
     ...(usesWorktreeMarker ? [] : ["--git-dir"]),
     ...(usesCommonDirectoryMarker ? [] : ["--git-common-dir"]),
   ]) {
     await rememberControl(
       relativeFile(
-        root,
+        selectorDirectory,
         (await runControl(root, root, ["rev-parse", argument])).replace(
           /\n$/u,
           "",
