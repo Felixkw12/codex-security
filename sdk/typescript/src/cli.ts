@@ -6399,6 +6399,16 @@ function requireDependencyScanConfig(
   }
 }
 
+function scanVerbose(
+  explicit: boolean | undefined,
+  environment: NodeJS.ProcessEnv,
+): boolean {
+  const configuredLogLevel =
+    environment["CODEX_SECURITY_LOG_LEVEL"]?.trim() ||
+    environment["LOG_LEVEL"]?.trim();
+  return explicit === true || configuredLogLevel?.toLowerCase() === "debug";
+}
+
 async function runDependencyScan(
   options: DependencyScanOptions,
   config: CodexSecurityConfig,
@@ -6406,6 +6416,7 @@ async function runDependencyScan(
   errorOutput: Writable,
   dependencies: CliDependencies,
 ): Promise<ScanOutcome> {
+  const verbose = scanVerbose(presentation.verbose, dependencies.environment);
   const controller = new AbortController();
   const removeSignals = listenForAbort(dependencies, controller);
   let security: Pick<CodexSecurity, "scanDependencies" | "close"> | undefined;
@@ -6417,7 +6428,7 @@ async function runDependencyScan(
     } catch {}
   };
   try {
-    if (presentation.verbose) {
+    if (verbose) {
       writeDiagnostic(
         `codex-security: Dependency scan repository: ${options.repositoryPath}`,
       );
@@ -6489,7 +6500,7 @@ async function runDependencyScan(
   ]) {
     writeDiagnostic(`codex-security: ${diagnostic}`);
   }
-  if (presentation.verbose) {
+  if (verbose) {
     writeDiagnostic(
       `Scanner: ${result.scanner.name} ${result.scanner.version ?? "unknown version"}\n` +
         `Model: ${result.model.model ?? "not used"}`,
@@ -8451,12 +8462,7 @@ async function executeScan(
   const showCost = arguments_.showCost === true || maxCostUsd !== undefined;
   let phase: string | null = null;
   const targetWarnings: string[] = [];
-  const configuredLogLevel =
-    dependencies.environment["CODEX_SECURITY_LOG_LEVEL"]?.trim() ||
-    dependencies.environment["LOG_LEVEL"]?.trim();
-  const verbose =
-    arguments_.verbose === true ||
-    configuredLogLevel?.toLowerCase() === "debug";
+  const verbose = scanVerbose(arguments_.verbose, dependencies.environment);
   const writeAboveProgress = (write: () => void): void => {
     if (progress === null) {
       write();

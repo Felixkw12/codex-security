@@ -281,6 +281,63 @@ describe("scan dependencies CLI", () => {
   );
 
   test.each([
+    {
+      label: "primary debug level",
+      environment: { CODEX_SECURITY_LOG_LEVEL: "debug" },
+      flag: false,
+      verbose: true,
+    },
+    {
+      label: "fallback debug level",
+      environment: { LOG_LEVEL: "debug" },
+      flag: false,
+      verbose: true,
+    },
+    {
+      label: "trimmed case-insensitive primary level",
+      environment: { CODEX_SECURITY_LOG_LEVEL: "  DeBuG  " },
+      flag: false,
+      verbose: true,
+    },
+    {
+      label: "blank primary with trimmed case-insensitive fallback",
+      environment: { CODEX_SECURITY_LOG_LEVEL: "  ", LOG_LEVEL: "  DEBUG  " },
+      flag: false,
+      verbose: true,
+    },
+    {
+      label: "nondebug primary overrides debug fallback",
+      environment: { CODEX_SECURITY_LOG_LEVEL: " info ", LOG_LEVEL: "debug" },
+      flag: false,
+      verbose: false,
+    },
+    {
+      label: "explicit flag overrides nondebug levels",
+      environment: { CODEX_SECURITY_LOG_LEVEL: "error", LOG_LEVEL: "warn" },
+      flag: true,
+      verbose: true,
+    },
+  ])(
+    "uses $label for dependency diagnostics",
+    async ({ environment, flag, verbose }) => {
+      const result = dependencyResult();
+      const { stdout, stderr, runCli } = createCliTest(main);
+
+      expect(
+        await runCli(
+          ["scan", "dependencies", "--json", ...(flag ? ["--verbose"] : [])],
+          dependencies({ environment, onScanDependencies: async () => result }),
+        ),
+      ).toBe(0);
+      expect(JSON.parse(stdout.text())).toEqual(result);
+      expect(stderr.text().includes("Dependency scan repository:")).toBe(
+        verbose,
+      );
+      expect(stderr.text().includes("Scanner: osv-scanner")).toBe(verbose);
+    },
+  );
+
+  test.each([
     { format: "raw JSON", fullOutput: false },
     { format: "full-output JSON", fullOutput: true },
   ])(
