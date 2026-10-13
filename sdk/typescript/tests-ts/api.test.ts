@@ -10439,6 +10439,426 @@ describe("CodexSecurity orchestration", () => {
     );
   });
 
+  describe("inventory cutoffs from retained source proof", () => {
+    const progress = (
+      phase: ScanProgress["phase"],
+      filesCompleted: number,
+      filesTotal: number,
+    ): ScanProgress => ({ phase, filesCompleted, filesTotal });
+    const inventory = (total: number) => progress("discovery", 0, total);
+    type Value = string | ScanProgress | readonly ScanProgress[];
+    type Step =
+      | readonly [
+          (
+            | "save"
+            | "live"
+            | "save-message"
+            | "live-message"
+            | "save-response"
+            | "live-changed"
+          ),
+          string,
+          Value,
+        ]
+      | readonly [
+          "worker" | "additional-worker" | "check" | "receipt",
+          ScanProgress,
+        ]
+      | readonly ["poll"]
+      | readonly ["resolve"];
+    type Scenario = {
+      name: string;
+      expected: ScanProgress;
+      steps: readonly Step[];
+      stopBeforeResolution?: boolean;
+    };
+    const text = (value: Value) =>
+      typeof value === "string"
+        ? value
+        : [value]
+            .flat()
+            .map((p) => progressMarker(p.phase, p.filesCompleted, p.filesTotal))
+            .join("\n");
+    const scenarios: Scenario[] = [];
+    for (const control of [false, true]) {
+      const finish = (state: ScanProgress, next: ScanProgress): Step[] => [
+        ["poll"],
+        ["check", state],
+        [
+          "worker",
+          progress("attack_path", state.filesTotal + 1, state.filesTotal + 2),
+        ],
+        ["poll"],
+        ["check", state],
+        ["save", "followup", next],
+        ["poll"],
+        ["check", next],
+        [
+          "additional-worker",
+          progress("attack_path", state.filesTotal, state.filesTotal),
+        ],
+        ["poll"],
+        ["check", progress("attack_path", state.filesTotal, state.filesTotal)],
+      ];
+      scenarios.push(
+        {
+          name: `restore scope after rejecting a provisional inventory (saved baseline=${control})`,
+          expected: progress("attack_path", 8, 8),
+          steps: [
+            ...(control
+              ? ([["save", "initial", inventory(8)], ["poll"]] as Step[])
+              : []),
+            ["worker", progress("attack_path", 2, 5)],
+            ["poll"],
+            ["live", "inventory", inventory(9)],
+            ["poll"],
+            ["save", "review", progress("validation", 3, 8)],
+            ["poll"],
+            ["resolve"],
+            ["save", "inventory", inventory(9)],
+            ...finish(
+              progress("validation", 3, 8),
+              progress("reporting", 4, 8),
+            ),
+          ],
+        },
+        {
+          name: `copy retains admitted source scope (native copy=${control})`,
+          expected: progress("attack_path", 6, 6),
+          steps: [
+            ["receipt", inventory(5)],
+            ["live-message", "inventory", inventory(6)],
+            ["live", "review", progress("discovery", 1, 6)],
+            ["resolve"],
+            [
+              control ? "save-message" : "save-response",
+              "inventory",
+              inventory(6),
+            ],
+            ["poll"],
+            ["receipt", progress("reporting", 2, 6)],
+            ...finish(progress("reporting", 2, 6), progress("reporting", 3, 6)),
+          ],
+        },
+        {
+          name: `later live inventory cannot rescope native history (persisted early=${control})`,
+          expected: progress("attack_path", 8, 8),
+          steps: [
+            ["save", "oversized", progress("validation", 9, 10)],
+            ["live", "oversized", progress("validation", 9, 10)],
+            ["poll"],
+            ["worker", progress("attack_path", 5, 5)],
+            ["live", "batch", [inventory(10), progress("threat_model", 0, 8)]],
+            ...(control
+              ? ([
+                  [
+                    "save",
+                    "batch",
+                    [inventory(10), progress("threat_model", 0, 8)],
+                  ],
+                ] as Step[])
+              : []),
+            ["poll"],
+            ["live", "current", inventory(8)],
+            ["resolve"],
+            ...(!control
+              ? ([
+                  [
+                    "save",
+                    "batch",
+                    [inventory(10), progress("threat_model", 0, 8)],
+                  ],
+                ] as Step[])
+              : []),
+            ["live", "phase", progress("discovery", 3, 8)],
+            ["save", "current", inventory(8)],
+            ["save", "phase", progress("discovery", 3, 8)],
+            ...finish(
+              progress("attack_path", 5, 8),
+              progress("reporting", 6, 8),
+            ),
+          ],
+        },
+        {
+          name: `bounded omitted review closes inventory admission (exact review=${control})`,
+          expected: progress("attack_path", 5, 5),
+          steps: [
+            ["save", "initial", inventory(5)],
+            ["live", "initial", inventory(5)],
+            ["poll"],
+            [
+              control ? "live" : "live-changed",
+              "review",
+              commandOutput(text(progress("validation", 3, 5))),
+            ],
+            ["live", "later", [inventory(8), progress("reporting", 3, 8)]],
+            ["save", "review", persistedCommandOutput],
+            ["resolve"],
+            ["save", "later", [inventory(8), progress("reporting", 3, 8)]],
+            ...finish(
+              progress("validation", 3, 5),
+              progress("reporting", 4, 5),
+            ),
+          ],
+        },
+        {
+          name: `inventory after a known review is excluded through bounds (exact inventory=${control})`,
+          expected: progress("attack_path", 8, 8),
+          steps: [
+            ["save", "initial", inventory(8)],
+            ["live", "initial", inventory(8)],
+            ["poll"],
+            ["save", "first", progress("attack_path", 6, 8)],
+            ["save", "before", "before"],
+            ["live", "before", "before"],
+            ["save", "late", inventory(10)],
+            [control ? "live" : "live-changed", "late", inventory(10)],
+            ["save", "last", progress("attack_path", 6, 8)],
+            ["live-changed", "last", progress("attack_path", 6, 8)],
+            ["save", "after", "after"],
+            ["resolve"],
+            ["live", "after", "after"],
+            ...finish(
+              progress("attack_path", 6, 8),
+              progress("reporting", 7, 8),
+            ),
+          ],
+        },
+        {
+          name: `earlier eligible review precedes provisional scope (review polled early=${control})`,
+          expected: progress("attack_path", 8, 8),
+          steps: [
+            ["save", "initial", inventory(8)],
+            ["poll"],
+            ["worker", progress("attack_path", 2, 5)],
+            ["poll"],
+            ...(control
+              ? ([
+                  ["save", "review", progress("validation", 3, 8)],
+                  ["poll"],
+                ] as Step[])
+              : []),
+            ["live", "inventory", inventory(6)],
+            ["poll"],
+            ...(!control
+              ? ([
+                  ["save", "review", progress("validation", 3, 8)],
+                  ["poll"],
+                ] as Step[])
+              : []),
+            ["resolve"],
+            ["save", "inventory", inventory(6)],
+            ...finish(
+              progress("validation", 3, 8),
+              progress("reporting", 4, 8),
+            ),
+          ],
+        },
+      );
+    }
+    test.each(
+      scenarios.flatMap((scenario) =>
+        [false, true].flatMap((workerFirst) =>
+          [false, true].flatMap((split) =>
+            [false, true].map((stopBeforeResolution) => ({
+              ...scenario,
+              workerFirst,
+              split,
+              stopBeforeResolution,
+            })),
+          ),
+        ),
+      ),
+    )(
+      "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, split=$split)",
+      async ({ steps, expected, workerFirst, stopBeforeResolution, split }) => {
+        const { root, repository, codexHome, scanDir } =
+          await scanDirectories();
+        const updates: ScanProgress[] = [];
+        const checkpoints: {
+          actual: ScanProgress | undefined;
+          expected: ScanProgress;
+        }[] = [];
+        let tracker: ScanCostTracker | undefined;
+        const originalStart = ScanCostTracker.prototype.start;
+        const starting = spyOn(
+          ScanCostTracker.prototype,
+          "start",
+        ).mockImplementation(function (
+          this: ScanCostTracker,
+          threadId: string,
+        ) {
+          originalStart.call(this, threadId);
+          if (threadId === "thread-1") tracker = this;
+        });
+        let parentPath = "",
+          workerPath = "";
+        const originalReaddir = fsPromises.readdir;
+        const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
+          ...args: Parameters<typeof originalReaddir>
+        ) => {
+          const entries = await originalReaddir(...args);
+          if (String(args[0]) !== dirname(parentPath)) return entries;
+          const first = basename(workerFirst ? workerPath : parentPath);
+          return entries.toSorted(
+            (left, right) =>
+              Number(String(right.name) === first) -
+              Number(String(left.name) === first),
+          );
+        }) as typeof originalReaddir);
+        const client = TestClient.withDependencies({
+          ...scanRuntimeDependencies(codexHome, scanDir),
+          runWorkbench: async (
+            _options: unknown,
+            args: readonly string[],
+            input?: string,
+          ): Promise<JsonObject> =>
+            args[0] === "register-cli-scan"
+              ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
+              : mockWorkbench(args, input),
+          createCodex: codexFactory(async () => {
+            await copyCompletedScan(root);
+            parentPath = await writeUsageSession(codexHome, "thread-1", {});
+            workerPath = await writeUsageSession(
+              codexHome,
+              "worker-thread",
+              {},
+              { parent: "thread-1" },
+            );
+            async function* events(): AsyncGenerator<ThreadEvent> {
+              expect(tracker).toBeDefined();
+              await tracker!.stop();
+              for (const [index, step] of steps.entries()) {
+                if (step[0] === "resolve") {
+                  if (stopBeforeResolution) {
+                    await tracker!.stop();
+                    await tracker!.refresh();
+                  }
+                  continue;
+                }
+                if (step[0] === "poll") await tracker!.refresh();
+                else if (step[0] === "check")
+                  checkpoints.push({
+                    actual: updates.at(-1),
+                    expected: step[1],
+                  });
+                else if (step[0] === "live-changed")
+                  yield completedCommand(
+                    `${step[1]} displayed`,
+                    text(step[2]),
+                    `item-${index}`,
+                  );
+                else if (step[0] === "save-response")
+                  await appendFile(
+                    parentPath,
+                    jsonLines([
+                      {
+                        type: "response_item",
+                        payload: {
+                          type: "message",
+                          role: "assistant",
+                          content: [
+                            { type: "output_text", text: text(step[2]) },
+                          ],
+                        },
+                      },
+                    ]) + "\n",
+                  );
+                else if (step[0] === "live-message")
+                  yield {
+                    type: "item.completed",
+                    item: {
+                      id: `item-${index}`,
+                      type: "agent_message",
+                      text: text(step[2]),
+                    },
+                  };
+                else if (step[0] === "save-message")
+                  await appendFile(
+                    parentPath,
+                    jsonLines([
+                      {
+                        type: "event_msg",
+                        payload: {
+                          type: "item_completed",
+                          item: {
+                            type: "AgentMessage",
+                            id: `native-${index}`,
+                            content: [{ type: "Text", text: text(step[2]) }],
+                          },
+                        },
+                      },
+                    ]) + "\n",
+                  );
+                else if (step[0] === "live")
+                  yield completedCommand(
+                    step[1],
+                    text(step[2]),
+                    `item-${index}`,
+                  );
+                else if (step[0] === "save")
+                  await appendFile(
+                    parentPath,
+                    jsonLines([
+                      nativeCommand(step[1], text(step[2]), `native-${index}`),
+                    ]) + "\n",
+                  );
+                else
+                  await appendFile(
+                    step[0] === "additional-worker"
+                      ? await writeUsageSession(
+                          codexHome,
+                          "followup-worker-thread",
+                          {},
+                          { parent: "thread-1" },
+                        )
+                      : step[0] === "receipt"
+                        ? parentPath
+                        : workerPath,
+                    jsonLines([
+                      {
+                        type: "response_item",
+                        payload: {
+                          type: "custom_tool_call_output",
+                          call_id: `worker-${index}`,
+                          output: text(step[1]),
+                        },
+                      },
+                    ]) + "\n",
+                  );
+                if (
+                  split &&
+                  (step[0].startsWith("save") || step[0] === "receipt")
+                )
+                  await tracker!.refresh();
+              }
+              await tracker!.refresh();
+              await tracker!.refresh();
+              await tracker!.stop();
+            }
+            return { events: completedEvents("thread-1", events()) };
+          }),
+        });
+        try {
+          await client.run(repository, {
+            onProgress: (update) => updates.push(update),
+          });
+          expect(updates.at(-1)).toEqual(expected);
+          for (const checkpoint of checkpoints)
+            expect(checkpoint.actual).toEqual(checkpoint.expected);
+          const settled = [...updates];
+          await tracker!.refresh();
+          await tracker!.stop();
+          expect(updates).toEqual(settled);
+        } finally {
+          await client.close();
+          starting.mockRestore();
+          listing.mockRestore();
+        }
+      },
+    );
+  });
+
   describe("source proof before inventory admission", () => {
     const progress = (
       phase: ScanProgress["phase"],
