@@ -84,9 +84,6 @@ interface SessionCompletion {
   // An exact completion, or a complete projection bounded by an exact anchor.
   // The latter does not identify the live command's occurrence.
   projection?: StreamedProgressItem;
-  // Latest inventory proved to precede this completion, even when its
-  // command's saved projection omitted the inventory marker.
-  inventoryBefore?: LiveInventory;
 }
 
 interface UnresolvedParentCommand {
@@ -280,7 +277,7 @@ export class ScanCostTracker {
     position: number;
     markerIndex: number;
     reviewed: boolean;
-    projection?: StreamedProgressItem;
+    projection?: ProgressOrder & { live: StreamedProgressItem };
   } | null = null;
   // A bound excludes inventories at or after it without locating the review.
   #parentReviewBefore: (ProgressOrder & { live: StreamedProgressItem }) | null =
@@ -365,7 +362,6 @@ export class ScanCostTracker {
       delete completion.kind;
       delete completion.lastCommandProgress;
       delete completion.projection;
-      delete completion.inventoryBefore;
     }
     this.#readyParentMarkers.clear();
     this.#matchedParentItems = 0;
@@ -738,10 +734,25 @@ export class ScanCostTracker {
         position,
         markerIndex,
         reviewed,
-        projection,
+        projection:
+          projection === undefined
+            ? reviewed
+              ? undefined
+              : boundary?.projection
+            : {
+                position,
+                markerIndex,
+                order: projection.markers[markerIndex]!.order,
+                live: projection,
+              },
       };
     else if (order === 0 && projection !== undefined)
-      boundary.projection = projection;
+      boundary.projection = {
+        position,
+        markerIndex,
+        order: projection.markers[markerIndex]!.order,
+        live: projection,
+      };
   }
 
   #recordParentSourceBoundaries(command?: UnresolvedParentCommand): void {
@@ -783,29 +794,45 @@ export class ScanCostTracker {
         ? authority.progress.filesTotal
         : this.#parentTurnFilesTotal;
     let inventory: InventoryEvidence | LiveInventory | undefined;
-    let begun: SessionCompletion | undefined;
-    const beginCompletion = (completion: SessionCompletion) => {
-      if (begun === completion) return;
-      begun = completion;
-      const bounded = completion.inventoryBefore;
-      const reviewOrder =
-        bounded === undefined ? undefined : this.#inventoryReviewOrder(bounded);
-      if (
-        bounded !== undefined &&
-        bounded.live.position === null &&
-        bounded.live.after === completion.position &&
-        // The anchor is an upper bound, not the inventory's occurrence. Live
-        // marker order can prove inventory precedes an omitted review too.
-        (reviewOrder === undefined
-          ? this.#inventoryPrecedesReview(completion.position, -1)
-          : reviewOrder < 0) &&
-        (inventory === undefined ||
-          ("marker" in inventory
-            ? compareProgressOrder(inventory, bounded) < 0
-            : !this.#savedInventorySupersedes(inventory, bounded, native)))
-      ) {
-        inventory = bounded;
-        filesTotal = bounded.progress.filesTotal;
+    let liveIndex = 0;
+    const applyBounds = (position: number) => {
+      while (liveIndex < this.#liveParentItems.length) {
+        const live = this.#liveParentItems[liveIndex]!;
+        if (live.position !== null || live.after === undefined) {
+          liveIndex++;
+          continue;
+        }
+        if (live.after > position) break;
+        liveIndex++;
+        // Every marker remains available. A rejected trailing zero must not
+        // replace inventory whose order still proves it precedes review.
+        for (const marker of live.markers) {
+          if (
+            marker.progress.phase !== "discovery" ||
+            marker.progress.filesCompleted !== 0
+          )
+            continue;
+          const bounded = {
+            progress: marker.progress,
+            marker,
+            live,
+            markerIndex: marker.index,
+            order: marker.order,
+          };
+          const reviewOrder = this.#inventoryReviewOrder(bounded);
+          if (
+            (reviewOrder === undefined
+              ? this.#inventoryPrecedesReview(live.after, -1)
+              : reviewOrder < 0) &&
+            (inventory === undefined ||
+              ("marker" in inventory
+                ? compareProgressOrder(inventory, bounded) < 0
+                : !this.#savedInventorySupersedes(inventory, bounded, native)))
+          ) {
+            inventory = bounded;
+            filesTotal = bounded.progress.filesTotal;
+          }
+        }
       }
     };
     const recordInventory = (candidate: InventoryEvidence) => {
@@ -819,7 +846,7 @@ export class ScanCostTracker {
     };
     let completionIndex = 0;
     const remainingMarkers = (completion: SessionCompletion) => {
-      beginCompletion(completion);
+      applyBounds(completion.position);
       const live = completion.projection;
       if (
         completion.kind !== "command" ||
@@ -864,7 +891,7 @@ export class ScanCostTracker {
       )
         remainingMarkers(session.completions[completionIndex++]!);
       const completion = session.completions[completionIndex];
-      if (completion?.position === saved.position) beginCompletion(completion);
+      applyBounds(saved.position);
       saved.projection =
         completion?.position === saved.position
           ? completion.projection
@@ -960,8 +987,8 @@ export class ScanCostTracker {
       reviews.push({
         position: boundary.position,
         markerIndex: boundary.markerIndex,
-        live: boundary.projection,
-        order: boundary.projection?.markers[boundary.markerIndex]?.order ?? 0,
+        live: boundary.projection?.live,
+        order: boundary.projection?.order ?? 0,
       });
     if (this.#parentReviewBefore !== null)
       reviews.push(this.#parentReviewBefore);
@@ -989,133 +1016,161 @@ export class ScanCostTracker {
     );
   }
 
-  #unresolvedParentCommand(
-    session: SessionUsage,
-  ): UnresolvedParentCommand | undefined {
+  #unresolvedParentCommand(): UnresolvedParentCommand | undefined {
     const live = this.#acceptedParent;
-    const marker = live?.markers.findLast((marker) => marker.accepted);
-    if (live?.position !== null || marker === undefined) return undefined;
-    const after = this.#boundParentCommand(session, live);
-    return after === undefined ? undefined : { live, after };
+    if (
+      live?.position !== null ||
+      live.after === undefined ||
+      !live.markers.some((marker) => marker.accepted)
+    )
+      return undefined;
+    return { live, after: live.after };
   }
 
-  #boundParentCommand(
+  #boundParentCommands(
     session: SessionUsage,
-    live: StreamedProgressItem,
-  ): number | undefined {
-    // Every marker belongs to the same immutable completion. Source proof uses
-    // its final parsed state, independently of which marker can be displayed.
-    const progress = live.markers.at(-1)?.progress;
-    // Legacy rollouts may never persist SDK command completions. Keep that
-    // distinction even after an earlier exact command consumes its signature.
+    start = 0,
+    end = this.#liveParentItems.length,
+  ): void {
     if (
       !this.#parentTurnStartKnown ||
-      progress === undefined ||
-      live.position !== null ||
-      live.item?.kind !== "command" ||
       !session.completions.some((completion) => completion.kind === "command")
     )
-      return undefined;
-    const item = live.item;
-    const liveIndex = this.#liveParentItems.indexOf(live);
-    const beforeIndex = this.#liveParentItems.findLastIndex(
-      (previous, index) => index < liveIndex && previous.position !== null,
-    );
-    const before = this.#liveParentItems[beforeIndex]?.position ?? 0;
-    const after =
-      this.#liveParentItems
-        .slice(liveIndex + 1)
-        .find((next) => next.position !== null)?.position ?? Infinity;
-    // A later exact anchor consumes queue prefixes, but does not locate an
-    // omitted marker inside a truncated command. Retain that command's evidence
-    // between its surrounding anchors until the progress itself is resolved.
-    const earlier = this.#liveParentItems
-      .slice(beforeIndex + 1, liveIndex)
-      .filter(
-        (previous) =>
-          previous.position === null && previous.item?.kind === "command",
-      );
-    let reserved = false;
-    let latest: SessionCompletion | undefined;
-    let boundary: SessionCompletion | undefined;
-    for (const completion of session.completions) {
-      if (completion.position === after) boundary = completion;
-      if (
-        completion.position > before &&
-        completion.position < after &&
-        completion.item?.kind === "command" &&
-        (completion.item.outputDigest === item.outputDigest ||
-          completion.item.outputDigest === item.persistedOutputDigest)
+      return;
+    let completionIndex = 0;
+    while (start < end) {
+      let stop = start;
+      while (stop < end && this.#liveParentItems[stop]!.position === null)
+        stop++;
+      const before = this.#liveParentItems[start - 1]?.position ?? 0;
+      const after = this.#liveParentItems[stop]?.position ?? Infinity;
+      const saved = new Map<string, SessionCompletion[]>();
+      while (
+        completionIndex < session.completions.length &&
+        session.completions[completionIndex]!.position < after
       ) {
-        // Reserve earlier compatible copies without assigning an occurrence:
-        // dropped live callbacks can leave other equal saved output in the gap.
-        const preceding = earlier.findIndex(
-          (previous) =>
-            completion.item!.outputDigest === previous.item!.outputDigest ||
-            completion.item!.outputDigest ===
-              previous.item!.persistedOutputDigest,
-        );
-        if (preceding !== -1) {
-          earlier.splice(preceding, 1);
-          reserved = true;
+        const completion = session.completions[completionIndex++]!;
+        if (
+          completion.position <= before ||
+          completion.item?.kind !== "command"
+        )
           continue;
-        }
-        latest = completion;
+        const key = completion.item.outputDigest;
+        const occurrences = saved.get(key);
+        if (occurrences === undefined) saved.set(key, [completion]);
+        else occurrences.push(completion);
       }
+      const observed = new Map<string, number[]>();
+      const groups = new Map<string, { keys: string[]; members: number[] }>();
+      for (let index = start; index < stop; index++) {
+        const live = this.#liveParentItems[index]!;
+        if (live.item?.kind !== "command") continue;
+        const keys = [
+          ...new Set([live.item.outputDigest, live.item.persistedOutputDigest]),
+        ]
+          .filter((key) => saved.has(key))
+          .sort();
+        for (const key of keys) {
+          const occurrences = observed.get(key);
+          if (occurrences === undefined) observed.set(key, [index]);
+          else occurrences.push(index);
+        }
+        if (live.markers.length === 0) continue;
+        const key = keys.join(":");
+        const group = groups.get(key);
+        if (group === undefined) groups.set(key, { keys, members: [index] });
+        else group.members.push(index);
+      }
+      const evidence = new Map<
+        number,
+        { latest?: SessionCompletion; reserved: boolean }
+      >();
+      for (const { keys, members } of groups.values()) {
+        const queues = keys.map((key) => ({
+          key,
+          saved: saved.get(key)!,
+          observed: observed.get(key)!,
+          reserved: 0,
+          next: 0,
+        }));
+        let reservations = 0;
+        for (const index of members) {
+          // Reserve preceding compatible live items once for this signature
+          // group. Advancing ordered cursors is equivalent to consuming the
+          // earliest compatible item for each saved occurrence, without splice.
+          while (true) {
+            const previous = Math.min(
+              ...queues.map((queue) => queue.observed[queue.next] ?? Infinity),
+            );
+            if (previous >= index) break;
+            const item = this.#liveParentItems[previous]!.item!;
+            let selected: (typeof queues)[number] | undefined;
+            for (const queue of queues) {
+              if (queue.observed[queue.next] === previous) queue.next++;
+              if (
+                (queue.key === item.outputDigest ||
+                  queue.key === item.persistedOutputDigest) &&
+                queue.reserved < queue.saved.length &&
+                (selected === undefined ||
+                  queue.saved[queue.reserved]!.position <
+                    selected.saved[selected.reserved]!.position)
+              )
+                selected = queue;
+            }
+            if (selected !== undefined) {
+              selected.reserved++;
+              reservations++;
+            }
+          }
+          let latest: SessionCompletion | undefined;
+          for (const queue of queues) {
+            const candidate =
+              queue.reserved < queue.saved.length
+                ? queue.saved.at(-1)
+                : undefined;
+            if (
+              candidate !== undefined &&
+              (latest === undefined || candidate.position > latest.position)
+            )
+              latest = candidate;
+          }
+          evidence.set(index, { latest, reserved: reservations > 0 });
+        }
+      }
+      for (let index = start; index < stop; index++) {
+        const live = this.#liveParentItems[index]!;
+        const progress = live.markers.at(-1)?.progress;
+        if (live.item?.kind !== "command" || progress === undefined) continue;
+        const { latest, reserved } = evidence.get(index)!;
+        if (
+          latest === undefined &&
+          !reserved &&
+          after === Infinity &&
+          !(progress.phase === "discovery" && progress.filesCompleted === 0)
+        )
+          continue;
+        const visible = latest?.lastCommandProgress;
+        const fullProjection =
+          after !== Infinity &&
+          visible !== undefined &&
+          visible.markerIndex === live.markers.length - 1 &&
+          progressKey(visible.update) === progressKey(progress);
+        if (fullProjection) latest!.projection = live;
+        live.after = Math.min(
+          live.after ?? Infinity,
+          fullProjection ? visible.position + 1 : after,
+        );
+      }
+      // A complete intermediate projection also bounds earlier live items.
+      // Propagate the proof without assigning an unknown saved occurrence.
+      let bound = after;
+      for (let index = stop - 1; index >= start; index--) {
+        const live = this.#liveParentItems[index]!;
+        bound = Math.min(bound, live.after ?? Infinity);
+        if (bound !== Infinity) live.after = bound;
+      }
+      start = stop + 1;
     }
-    // A full live inventory remains scope authority while its row is absent.
-    // Generic legacy progress without a compatible native projection keeps
-    // its existing best-effort receipt behavior.
-    if (
-      latest === undefined &&
-      !reserved &&
-      after === Infinity &&
-      !(progress.phase === "discovery" && progress.filesCompleted === 0)
-    )
-      return undefined;
-    // A later exact anchor closes the source interval. If a full projection
-    // retains the current state, rows after every compatible copy can advance
-    // it. Equal output alone never identifies the live occurrence or inventory.
-    const visible = latest?.lastCommandProgress;
-    const fullProjection =
-      after !== Infinity &&
-      visible !== undefined &&
-      // Matching output signatures establish a common prefix. Native parsing
-      // omits the truncated suffix, so its marker count must include the whole
-      // live sequence; a repeated final tuple alone cannot prove completeness.
-      visible.markerIndex === live.markers.length - 1 &&
-      progressKey(visible.update) === progressKey(progress);
-    if (fullProjection) latest!.projection = live;
-    live.after = Math.min(
-      live.after ?? Infinity,
-      fullProjection ? visible.position + 1 : after,
-    );
-    if (boundary !== undefined) this.#recordInventoryBefore(live, boundary);
-    return live.after;
-  }
-
-  #recordInventoryBefore(
-    live: StreamedProgressItem,
-    boundary: SessionCompletion,
-  ): void {
-    const marker = live.markers.findLast(
-      (marker) =>
-        marker.progress.phase === "discovery" &&
-        marker.progress.filesCompleted === 0,
-    );
-    if (marker === undefined) return;
-    const candidate = {
-      progress: marker.progress,
-      order: marker.order,
-      markerIndex: marker.index,
-      marker,
-      live,
-    };
-    if (
-      boundary.inventoryBefore === undefined ||
-      compareProgressOrder(candidate, boundary.inventoryBefore) > 0
-    )
-      boundary.inventoryBefore = candidate;
   }
 
   #matchParentCompletions(): void {
@@ -1171,6 +1226,11 @@ export class ScanCostTracker {
       completions[matched]!.projection = live;
       for (const marker of live.markers)
         this.#readyParentMarkers.set(marker, live);
+      this.#boundParentCommands(
+        this.#parentSession,
+        this.#matchedParentItems,
+        index + 1,
+      );
       const changed = new Set<string>();
       const remove = (key: string, queues: ProgressOccurrenceQueues) => {
         const queue = queues.get(key)!;
@@ -1184,14 +1244,11 @@ export class ScanCostTracker {
       while (this.#matchedParentItems <= index) {
         const previous = this.#liveParentItems[this.#matchedParentItems++]!;
         if (previous.position === null) {
-          if (previous.item?.kind === "command")
-            this.#boundParentCommand(this.#parentSession, previous);
-          else {
+          if (previous.item?.kind !== "command") {
             previous.after = Math.min(
               previous.after ?? Infinity,
               live.position,
             );
-            this.#recordInventoryBefore(previous, completions[matched]!);
           }
         }
         if (previous.item !== null) {
@@ -1313,7 +1370,6 @@ export class ScanCostTracker {
     // Its original live order continues to participate alongside newer scopes.
     if (later === undefined && pending.position === null) {
       inventory.accepted = true;
-      this.#boundParentCommand(this.#parentSession!, pending);
       return undefined;
     }
     return later === undefined
@@ -1364,13 +1420,9 @@ export class ScanCostTracker {
           Object.assign(this.#displayedProgress, source);
       }
     }
-    const unresolvedCommand =
-      this.#parentSession === null
-        ? undefined
-        : this.#unresolvedParentCommand(this.#parentSession);
-    const liveInventory = this.#acceptedInventory();
-    if (liveInventory !== undefined && this.#parentSession !== null)
-      this.#boundParentCommand(this.#parentSession, liveInventory.live);
+    if (this.#parentSession !== null)
+      this.#boundParentCommands(this.#parentSession);
+    const unresolvedCommand = this.#unresolvedParentCommand();
     // Source proof and its eligible review cutoff precede inventory admission.
     // A count-rejected review can invalidate a later provisional inventory.
     this.#recordParentSourceBoundaries(unresolvedCommand);
@@ -2070,7 +2122,7 @@ export class ScanCostTracker {
             });
         this.#matchParentCompletions();
         this.#reconcileParentProgress();
-        unresolvedCommand = this.#unresolvedParentCommand(session);
+        unresolvedCommand = this.#unresolvedParentCommand();
       }
       const reviewWasUnpositioned =
         this.#parentInventoryBoundary?.reviewed !== true;
@@ -2155,7 +2207,12 @@ export class ScanCostTracker {
       this.#precedesParentBoundary(saved.position, saved.markerIndex) &&
       (this.#parentInventoryBoundary?.reviewed === true ||
         (this.#parentProgress?.progress.filesCompleted ?? 0) === 0 ||
-        this.#parentInventoryBoundary?.projection === this.#acceptedParent) &&
+        (this.#parentInventoryBoundary?.projection?.live ===
+          this.#acceptedParent &&
+          (compareSourceOrder(
+            source,
+            this.#parentInventoryBoundary.projection,
+          ) ?? 0) < 0)) &&
       relation >= 0
     )
       return "proven";
