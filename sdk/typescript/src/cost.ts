@@ -580,15 +580,19 @@ export class ScanCostTracker {
       const live =
         (counter?.counterUsage?.total_tokens ?? -1) >
         (session?.usage?.total_tokens ?? -1);
-      const liveTokens = live ? counter?.counterUsage : session?.usage;
       const liveModels = live
         ? counter?.counterModelUsage
         : session?.modelUsage;
-      for (const [model, tokens] of liveModels ?? [])
+      let liveTokens: ScanTokenUsage | null = null;
+      for (const [model, tokens] of liveModels ?? []) {
         liveModelUsage.set(
           model,
           addTokenUsage(liveModelUsage.get(model) ?? null, tokens),
         );
+        liveTokens = addTokenUsage(liveTokens, tokens);
+      }
+      // Native cumulative totals can exceed the history with a known model.
+      // Keep that history priced and represent only the unassigned remainder.
       const liveRemainder = liveTokens
         ? subtractTokenUsage(value, liveTokens)
         : value;
@@ -865,6 +869,15 @@ function readSessionEvent(
         : session.currentTurnId;
     const cumulative = tokenUsage(payload["thread_token_usage"]);
     const timestamp = sessionStartedAt(event["timestamp"]);
+    // Unattributed tracking retains the native thread total across resumed turns.
+    if (
+      attribution === null &&
+      session.previousUsage !== null &&
+      cumulative !== null &&
+      cumulative.total_tokens >= usage.total_tokens &&
+      cumulative.total_tokens > (session.counterUsage?.total_tokens ?? -1)
+    )
+      session.counterUsage = cumulative;
     if (
       cumulative &&
       (attribution === null ||
@@ -1133,7 +1146,11 @@ function readSessionEvent(
     session.counterUsage =
       attribution && delta !== null
         ? addTokenUsage(session.counterUsage, delta)
-        : ownUsage;
+        : session.responseUsageObserved &&
+            session.counterUsage !== null &&
+            session.counterUsage.total_tokens >= ownUsage.total_tokens
+          ? session.counterUsage
+          : ownUsage;
     if (!session.responseUsageObserved) session.usage = session.counterUsage;
   }
 }

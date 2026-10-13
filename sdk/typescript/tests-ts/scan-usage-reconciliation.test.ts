@@ -611,3 +611,65 @@ test("late exact receipts replace an overlapping legacy counter without adding i
     await rm(home, { recursive: true, force: true });
   }
 });
+
+test.each([false, true])(
+  "keeps priced legacy history under a native cumulative floor (later counter: %p)",
+  async (laterCounter) => {
+    const home = await mkdtemp(join(tmpdir(), "usage-resumed-floor-"));
+    const lowerBounds: number[] = [];
+    const tracker = new ScanCostTracker({
+      codexHome: home,
+      model: "gpt-5.6-sol",
+      onCostLowerBound: (cost) => lowerBounds.push(cost.estimatedUsd),
+    });
+    const usage = (input: number, output: number) => ({
+      input_tokens: input,
+      output_tokens: output,
+    });
+    const counter = (input: number, output: number) => ({
+      type: "event_msg",
+      payload: {
+        type: "token_count",
+        info: { total_token_usage: usage(input, output) },
+      },
+    });
+    try {
+      await mkdir(join(home, "sessions"));
+      await writeFile(
+        join(home, "sessions", "worker.jsonl"),
+        [
+          {
+            type: "session_meta",
+            payload: { id: "worker", model: "gpt-5.6-sol" },
+          },
+          counter(1000, 100),
+          {
+            type: "token_usage_record",
+            payload: {
+              thread_id: "worker",
+              response_id: "new-response",
+              model: "gpt-5.6-sol",
+              usage: usage(20, 2),
+              thread_token_usage: usage(1020, 102),
+            },
+          },
+          ...(laterCounter ? [counter(1010, 101)] : []),
+        ]
+          .map((event) => JSON.stringify(event))
+          .join("\n") + "\n",
+      );
+      tracker.start("worker");
+      const result = await tracker.stop();
+      expect(result.usage).toMatchObject({ total_tokens: 1122 });
+      expect(lowerBounds.length).toBeGreaterThan(0);
+      const knownHistory = estimateScanCost(
+        "gpt-5.6-sol",
+        usage(laterCounter ? 1010 : 1000, laterCounter ? 101 : 100),
+      );
+      expect(lowerBounds.at(-1)).toBeCloseTo(knownHistory!.estimatedUsd, 12);
+    } finally {
+      await tracker.stop();
+      await rm(home, { recursive: true, force: true });
+    }
+  },
+);

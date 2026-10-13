@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import childProcess, { type SpawnOptions } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -109,6 +109,7 @@ export async function testLargeScopeTransport({
                 targetPath: fixture.root,
                 scope: ".",
                 includePaths,
+                filePaths: includePaths.filter((_, index) => index % 2 === 0),
                 executionSettings: {
                   version: 1,
                   settings: await captureDeepScanExecutionSettings(
@@ -160,7 +161,14 @@ export async function testLargeScopeTransport({
               );
               const invocation = await readJson(output, "invocation.json");
               assert.deepEqual(invocation.scopeInput.paths, includePaths);
+              assert.deepEqual(
+                invocation.scopeInput.filePaths,
+                includePaths.filter((_, index) => index % 2 === 0),
+              );
               assert.equal(path.isAbsolute(invocation.scopeInput.file), true);
+              await assert.rejects(readFile(invocation.scopeInput.file), {
+                code: "ENOENT",
+              });
               assert.equal(invocation.argv.includes("resume"), resumed);
               const argument = nativeConfigOverrides(invocation.argv).find(
                 (value) => value.startsWith("mcp_servers="),
