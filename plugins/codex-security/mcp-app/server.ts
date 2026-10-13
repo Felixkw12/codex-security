@@ -1055,20 +1055,64 @@ export function createCodexSecurityServer(): McpServer {
       ...optionalArg("--thread-id", threadId),
     ];
     let workspace: Awaited<ReturnType<typeof runWorkbench>> | undefined;
-    if (threadId && deepScanCoordinators.get(scanId)) {
+    const coordinator = deepScanCoordinators.get(scanId);
+    if (threadId && coordinator) {
       await deepScanStore.get(scanId, threadId);
     }
+    const ownerThreadId = coordinator?.owningThreadId;
+    const readOwnedParent = async (owner: string) => {
+      return await runWorkbench([
+        "get-deep-scan",
+        "--scan-id",
+        scanId,
+        "--thread-id",
+        owner,
+      ]);
+    };
     const canceledLocally = await deepScanCoordinators.cancelAndWait(
       scanId,
       "user_canceled_scan",
       async () => {
         workspace = await runWorkbench(args);
       },
+      async () => {
+        if (ownerThreadId) {
+          // The live coordinator owns this scan even if its checkout was replaced.
+          const parent = (await readOwnedParent(ownerThreadId))[
+            "parentScan"
+          ] as JsonObject;
+          return {
+            status: parent["status"] as string,
+            failureMessage:
+              typeof parent["failureMessage"] === "string"
+                ? parent["failureMessage"]
+                : undefined,
+          };
+        }
+        const current = (await runWorkbench(["get-scan", "--scan-id", scanId]))[
+          "workspace"
+        ] as JsonObject;
+        const scan = current["results"];
+        const progress = isJsonObject(scan) ? scan["progress"] : undefined;
+        return {
+          status:
+            isJsonObject(progress) && typeof progress["status"] === "string"
+              ? progress["status"]
+              : undefined,
+          failureMessage:
+            isJsonObject(scan) && typeof scan["failureMessage"] === "string"
+              ? scan["failureMessage"]
+              : undefined,
+        };
+      },
     );
     if (workspace === undefined && canceledLocally) {
-      workspace = (await runWorkbench(["get-scan", "--scan-id", scanId]))[
-        "workspace"
-      ] as JsonObject;
+      workspace = ownerThreadId
+        ? ((await readOwnedParent(ownerThreadId))["workspace"] as
+            JsonObject | undefined)
+        : ((await runWorkbench(["get-scan", "--scan-id", scanId]))[
+            "workspace"
+          ] as JsonObject);
     }
     const scan = workspace?.["results"];
     const progress = isJsonObject(scan) ? scan["progress"] : undefined;
@@ -1548,7 +1592,10 @@ export function createCodexSecurityServer(): McpServer {
         `--message=${message}`,
         ...optionalArg("--claim-token", handoffClaimToken),
       ]);
-      deepScanCoordinators.get(scanId)?.failExternallyPersisted(message);
+      const scan = failed["scan"];
+      const progress = isJsonObject(scan) ? scan["progress"] : undefined;
+      if (isJsonObject(progress) && progress["status"] === "failed")
+        deepScanCoordinators.get(scanId)?.failExternallyPersisted(message);
       return scanActionResult(
         failed,
         "Recorded the Codex Security scan failure.",

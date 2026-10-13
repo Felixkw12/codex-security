@@ -372,6 +372,7 @@ def deep_scan_state(connection: sqlite3.Connection, scan_id: str) -> dict[str, A
         "targetPath": scan["target_path"],
         "scope": scan["scope"],
         "includePaths": dependencies().requested_scan_paths(scan),
+        "filePaths": dependencies().requested_scan_file_paths(scan),
         "userContext": (
             json.loads(run["discovery_user_context_json"])
             if run["discovery_user_context_json"] is not None
@@ -823,7 +824,17 @@ def begin_deep_scan(connection: sqlite3.Connection, args: argparse.Namespace) ->
 
 def get_deep_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     scan, _ = require_owned_scan(connection, args.scan_id, args.thread_id)
-    return deep_scan_result(connection, scan["id"])
+    result = {
+        **deep_scan_result(connection, scan["id"]),
+        "parentScan": {
+            "workspaceId": scan["workspace_id"],
+            "status": "canceled" if scan["canceled_at"] else scan["status"],
+            "failureMessage": scan["failure_message"],
+        },
+    }
+    if scan["status"] != "running" or scan["canceled_at"]:
+        result["workspace"] = dependencies().scan_context(connection, scan["id"])["workspace"]
+    return result
 
 
 def coordinator_lease_is_live(
@@ -1876,6 +1887,8 @@ def fail_deep_scan_locked(
                     kind="file",
                 )
             )
+        elif run["manifest_path"] == str(Path(scan["scan_dir"]) / "scan-manifest.json"):
+            manifest_path = run["manifest_path"]
         if run["status"] in {"failed", "interrupted"} or scan["status"] == "failed":
             if (
                 run["status"] == args.deep_status
