@@ -13,7 +13,10 @@ import {
   savedScan,
 } from "./cli-patch-fixtures.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
-import { patchSnapshotEnvironment } from "./support/patch-snapshot-environment.js";
+import {
+  patchSnapshotEnvironment,
+  patchSnapshotWindowsConfig,
+} from "./support/patch-snapshot-environment.js";
 const fixtures = createTemporaryDirectories(true);
 afterEach(fixtures.cleanup);
 for (const policy of ["set", "exclude", "control"] as const) {
@@ -56,9 +59,12 @@ for (const policy of ["set", "exclude", "control"] as const) {
         policy === "set" ? "policy" : policy === "exclude" ? "unset" : "host";
       await writeFile(
         join(home, "config.toml"),
-        `${process.platform === "win32" ? 'windows={sandbox="unelevated"}\n' : ""}[shell_environment_policy]\ninherit="all"\n${policy === "exclude" ? 'exclude=["SNAPSHOT_STYLE"]\n' : ""}${policy === "set" ? '[shell_environment_policy.set]\nSNAPSHOT_STYLE="policy"\n' : ""}`,
+        `${patchSnapshotWindowsConfig()}[shell_environment_policy]\ninherit="all"\n${policy === "exclude" ? 'exclude=["SNAPSHOT_STYLE"]\n' : ""}${policy === "set" ? '[shell_environment_policy.set]\nSNAPSHOT_STYLE="policy"\n' : ""}`,
       );
-      const clean = join(home, "clean.cjs");
+      const clean = join(
+        await fixtures.create("patch-policy-filter-"),
+        "clean.cjs",
+      );
       const outsideWrite = join(home, "filter-write.txt");
       await writeFile(
         clean,
