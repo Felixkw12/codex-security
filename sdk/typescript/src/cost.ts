@@ -71,6 +71,8 @@ interface SessionUsage {
   accounting: { usage: ScanTokenUsage; cost: ScanCost | null } | null;
   accountingError: Error | null;
   taskCompleted: boolean;
+  responseUsage: ScanTokenUsage | null;
+  responseIds: Set<string>;
   calls: Map<string, ScanActivity>;
   activities: ScanActivity[];
   progress: ScanProgress[];
@@ -136,6 +138,8 @@ function createSessionUsage(): SessionUsage {
     accounting: null,
     accountingError: null,
     taskCompleted: false,
+    responseUsage: null,
+    responseIds: new Set(),
     calls: new Map(),
     activities: [],
     progress: [],
@@ -1232,6 +1236,45 @@ function readSessionEvent(
     return;
   }
   session.events?.push(event);
+  if (event["type"] === "token_usage_record") {
+    const responseId = payload["response_id"];
+    if (
+      payload["thread_id"] !== session.threadId ||
+      typeof responseId !== "string" ||
+      session.responseIds.has(responseId)
+    ) {
+      return;
+    }
+    const usage = tokenUsage(payload["usage"]);
+    if (usage === null) {
+      session.accountingError ??= new Error(
+        "The scan cost limit could not be verified because model pricing or token usage is unavailable.",
+      );
+      return;
+    }
+    session.responseIds.add(responseId);
+    session.responseUsage = addTokenUsage(session.responseUsage, usage);
+    // Native thread totals include compaction and any earlier turns. They are
+    // scoped to thread_id, unlike inherited legacy token_count snapshots.
+    const total = tokenUsage(payload["thread_token_usage"]);
+    const recorded =
+      total !== null && total.total_tokens >= session.responseUsage.total_tokens
+        ? total
+        : session.responseUsage;
+    const accounted = higherCostUsage(
+      model,
+      session.accounting?.usage ?? null,
+      recorded,
+    )!;
+    const cost = estimateScanCost(model, accounted);
+    if (cost === null)
+      session.accountingError ??= new Error(
+        "The scan cost limit could not be verified because model pricing or token usage is unavailable.",
+      );
+    session.accounting = { usage: accounted, cost };
+    session.taskCompleted = false;
+    return;
+  }
   if (event["type"] === "event_msg") {
     if (payload["type"] === "task_started") {
       session.taskCompleted = false;
@@ -1415,6 +1458,14 @@ function readSessionEvent(
   ]) {
     if (candidate === null) continue;
     const previous = session.accounting;
+    // Legacy counters can lag native receipts or omit their cache details.
+    if (
+      session.responseUsage !== null &&
+      previous !== null &&
+      candidate.usage.total_tokens <= previous.usage.total_tokens &&
+      !refinesCacheClassification(previous.usage, candidate.usage)
+    )
+      continue;
     if (
       previous === null ||
       refinesCacheClassification(
@@ -1589,8 +1640,7 @@ function higherCostUsage(
     previous !== null &&
     next.cache_write_input_tokens === 0 &&
     previous.input_tokens === next.input_tokens &&
-    previous.output_tokens === next.output_tokens &&
-    previousCost?.estimatedUsd === nextCost?.estimatedUsd
+    previous.output_tokens === next.output_tokens
   )
     return previous;
   // Growing receipts can refine reads without establishing omitted cache writes.

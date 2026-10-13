@@ -59,11 +59,10 @@ function capture() {
   if (pythonProbe && pythonProbe.status !== 0) throw new Error(pythonProbe.stderr || String(pythonProbe.error));
   const pythonRuntime = pythonProbe ? JSON.parse(pythonProbe.stdout) : undefined;
   let scopeInput;
-  if (stdin.includes('CAPTURE_SCOPE_INPUT')) {
+  {
     const configuration = process.argv.flatMap((arg, index) => arg === '--config' || arg === '-c' ? [parse(process.argv[index + 1])] : []).findLast(value => value.mcp_servers?.cs_artifacts);
-    const environment = configuration.mcp_servers.cs_artifacts.env;
-    const file = environment.CODEX_SECURITY_INCLUDE_PATHS_FILE;
-    scopeInput = { file, paths: JSON.parse(file ? readFileSync(file, 'utf8') : environment.CODEX_SECURITY_INCLUDE_PATHS_JSON) };
+    const file = configuration?.mcp_servers.cs_artifacts.env.CODEX_SECURITY_INCLUDE_PATHS_FILE;
+    if (file) scopeInput = { file, ...JSON.parse(readFileSync(file, 'utf8')) };
   }
   const knowledgePath = stdin.includes('synthetic worker configuration fixture') ? process.env.CODEX_SECURITY_KNOWLEDGE_BASE : undefined;
   const knowledgeDocuments = knowledgePath === undefined ? undefined : Object.fromEntries(readdirSync(knowledgePath).map(name => [name, readFileSync(join(knowledgePath, name), 'utf8')]));
@@ -136,6 +135,7 @@ if (stdin.includes('PERMISSION_PROFILE_FALLBACK_EVENT')) emit({ type: 'error', m
 if (stdin.includes('PERMISSION_PROFILE_FALLBACK_WARNING')) send({ method: 'warning', params: { threadId, message: permissionProfileFallbackWarning } });
 if (stdin.includes('NATIVE_WARNING')) send({ method: 'warning', params: { threadId, message: JSON.parse(stdin.split('\\n')[1]) } });
 if (stdin.includes('BLOCK_AFTER_START')) await new Promise(() => {});
+if (stdin.includes('FAIL_THEN_HANG')) { emit({ type: 'turn.failed', error: { message: 'fixture worker failed' } }); return; }
 if (stdin.includes('RATE_LIMIT_CYBER_POLICY_ERROR')) { emit({ type: 'turn.failed', error: { message: '429 Too Many Requests: Request blocked by cyberPolicy.' } }); process.exit(0); }
 if (stdin.includes('CYBER_POLICY_ERROR')) { emit({ type: 'turn.failed', error: { message: 'Request blocked by cyberPolicy.' } }); process.exit(0); }
 if (stdin.includes('SAFETY_POLICY_ERROR')) { emit({ type: 'turn.failed', error: { message: 'Request blocked by a safety policy violation.' } }); process.exit(0); }

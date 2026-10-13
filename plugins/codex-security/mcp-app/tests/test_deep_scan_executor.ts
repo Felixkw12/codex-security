@@ -19,6 +19,7 @@ import {
   copyFile,
   mkdir,
   readFile,
+  readdir,
   realpath,
   stat,
   symlink,
@@ -115,6 +116,7 @@ const deniedWorkerPermissionProfile = {
 try {
   testCodeModeFrameDiagnosticBoundaries();
   await testLargeScopeTransport();
+  await testScopeFileCleanup();
   await testOpenAiCredentialsReachWorker();
   await testWorkerRuntimeSettings();
   await testUnsupportedProviderSnapshotFailsBeforeLaunch();
@@ -1688,6 +1690,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 index % 2 === 0
                   ? ["api", `background jobs ${index}`]
                   : undefined,
+              filePaths: index % 2 === 0 ? [`background jobs ${index}`] : [],
               pythonCommand: `${helperPython}-${index} `,
             },
           }),
@@ -1988,10 +1991,14 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               servers["cs_artifacts"]!.env["CODEX_SECURITY_INCLUDE_PATHS_FILE"];
             if (index % 2 === 0) {
               assert.ok(scopeFile && path.isAbsolute(scopeFile));
-              assert.deepEqual(JSON.parse(await readFile(scopeFile, "utf8")), [
+              assert.deepEqual(invocation.scopeInput.paths, [
                 "api",
                 `background jobs ${index}`,
               ]);
+              assert.deepEqual(invocation.scopeInput.filePaths, [
+                `background jobs ${index}`,
+              ]);
+              await assert.rejects(readFile(scopeFile), { code: "ENOENT" });
             } else assert.equal(scopeFile, undefined);
             assert.equal(process.env.PYTHON, python);
             assert.equal(
@@ -2473,6 +2480,7 @@ async function testLargeScopeTransport() {
                   scanId,
                   scope: ".",
                   includePaths,
+                  filePaths: includePaths.filter((_, index) => index % 2 === 0),
                 },
               });
               await executor.run(
@@ -2505,6 +2513,10 @@ async function testLargeScopeTransport() {
               );
               const invocation = await readJson(output, "invocation.json");
               assert.deepEqual(invocation.scopeInput.paths, includePaths);
+              assert.deepEqual(
+                invocation.scopeInput.filePaths,
+                includePaths.filter((_, index) => index % 2 === 0),
+              );
               assert.equal(path.isAbsolute(invocation.scopeInput.file), true);
               assert.equal(
                 invocation.thread.method,
@@ -2515,6 +2527,9 @@ async function testLargeScopeTransport() {
                   invocation.thread.params.threadId,
                   `scope-thread-${index}`,
                 );
+              await assert.rejects(readFile(invocation.scopeInput.file), {
+                code: "ENOENT",
+              });
               const argument = nativeConfigOverrides(invocation.argv).find(
                 (value) => value.startsWith("mcp_servers="),
               )!;
@@ -2537,6 +2552,56 @@ async function testLargeScopeTransport() {
     syncBuiltinESMExports();
     for (const [name, value] of saved) restoreEnv(name, value);
   }
+}
+
+async function testScopeFileCleanup() {
+  await withWorkerFixture(async (fixture, promptPath, workingDirectory) => {
+    const executor = new CodexSdkWorkerExecutor({
+      parentSandbox: trustedParentSandbox,
+      artifactContext: {
+        pluginRoot: fixture.root,
+        repoRoot: fixture.root,
+        scanId: randomUUID(),
+        includePaths: ["api"],
+      },
+    });
+    const run = (controller: AbortController, onThreadStarted?: () => void) =>
+      executor.run({
+        kind: "discovery",
+        promptPath,
+        workingDirectory,
+        subagents: 0,
+        signal: controller.signal,
+        onThreadStarted,
+        artifactContext: { root: workingDirectory, layout: "worker" },
+      });
+    const canceled = new AbortController();
+    const reason = new Error("canceled before startup");
+    canceled.abort(reason);
+    await assert.rejects(run(canceled), (error: Error) => error === reason);
+    await assert.rejects(readFile(fixture.markerPath), { code: "ENOENT" });
+    await assert.rejects(readFile(fixture.preflightMarkerPath), {
+      code: "ENOENT",
+    });
+    for (const prompt of ["BLOCK_AFTER_START", "FAIL_THEN_HANG"]) {
+      await writeFile(promptPath, prompt);
+      const controller = new AbortController();
+      await assert.rejects(
+        run(controller, () => {
+          if (prompt === "BLOCK_AFTER_START") controller.abort(reason);
+        }),
+        /abort|fixture worker failed/i,
+      );
+      const invocation = await readJson(fixture.markerPath);
+      await assert.rejects(readFile(invocation.scopeInput.file), {
+        code: "ENOENT",
+      });
+    }
+    assert.equal(
+      (await readdir(fixture.root)).some((name) => name.startsWith("scope-")),
+      false,
+    );
+  });
 }
 
 async function testArtifactServerUsesExtendedStartupTimeout() {
