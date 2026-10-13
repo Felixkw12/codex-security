@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
+import { readdirSync, statSync } from "node:fs";
 import { mkdir, readFile, readdir, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { JsonObject } from "../src/index.js";
@@ -9,7 +10,10 @@ import {
   runWorkflow,
 } from "./cli-patch-fixtures.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
-import { patchSnapshotEnvironment } from "./support/patch-snapshot-environment.js";
+import {
+  patchSnapshotEnvironment,
+  patchSnapshotWindowsConfig,
+} from "./support/patch-snapshot-environment.js";
 
 const fixtures = createTemporaryDirectories(true);
 afterEach(fixtures.cleanup);
@@ -36,10 +40,7 @@ test.each([
     ]);
     const witness = join(outside, "witness.txt");
     const filter = join(nested, "clean.cjs");
-    const configuration =
-      process.platform === "win32"
-        ? 'windows = { sandbox = "unelevated" }\n'
-        : "";
+    const configuration = patchSnapshotWindowsConfig();
     await writeFile(join(home, "config.toml"), configuration);
     const environment = patchSnapshotEnvironment(
       await fixtures.create("patch-filter-temp-"),
@@ -168,7 +169,7 @@ test("snapshot profile files support large metadata and clean up concurrent succ
   const home = join(root, "home");
   await Promise.all([mkdir(repository), mkdir(home)]);
   repositoryGit(repository)("init", "--initial-branch=main");
-  const config = `${process.platform === "win32" ? 'windows = { sandbox = "unelevated" }\n' : ""}[shell_environment_policy.set]\nSNAPSHOT_FIXTURE_SETTING = "inherited"\n`;
+  const config = `${patchSnapshotWindowsConfig()}[shell_environment_policy.set]\nSNAPSHOT_FIXTURE_SETTING = "inherited"\n`;
   const auth =
     '{"auth_mode":"api_key","OPENAI_API_KEY":"sk-synthetic-local-only"}\n';
   await writeFile(join(home, "config.toml"), config);
@@ -187,16 +188,9 @@ test("snapshot profile files support large metadata and clean up concurrent succ
   await writeFile(
     script,
     `const fs = require("node:fs");
-const path = require("node:path");
-const home = ${JSON.stringify(home)};
-const names = fs.readdirSync(home).filter(name => /^codex_security_snapshot_.*\\.config\\.toml$/.test(name));
-const profiles = names.flatMap(name => {
-  try { const metadata = fs.statSync(path.join(home, name)); return [{ name, mode: metadata.mode & 0o777, bytes: metadata.size }]; }
-  catch (error) { if (error.code === "ENOENT") return []; throw error; }
-});
 let denied = false;
 try { fs.writeFileSync(${JSON.stringify(protectedFile)}, "changed"); } catch (error) { if (!["EACCES", "EPERM", "EROFS"].includes(error.code)) throw error; denied = true; }
-process.stdout.write(JSON.stringify({ profiles, denied, inherited: process.env.SNAPSHOT_FIXTURE_SETTING }));
+process.stdout.write(JSON.stringify({ denied, inherited: process.env.SNAPSHOT_FIXTURE_SETTING }));
 if (process.argv[2] === "fail") { process.stderr.write("Synthetic snapshot failure detail.\\n"); process.exitCode = 7; }
 `,
   );
@@ -214,8 +208,10 @@ if (process.argv[2] === "fail") { process.stderr.write("Synthetic snapshot failu
       filesystem,
     },
   };
-  const run = (fail: boolean) =>
-    runRepositoryCommand(
+  const run = async (fail: boolean) => {
+    const output: Buffer[] = [];
+    const profiles: { name: string; mode: number; bytes: number }[] = [];
+    await runRepositoryCommand(
       "git",
       [
         "-c",
@@ -224,8 +220,31 @@ if (process.argv[2] === "fail") { process.stderr.write("Synthetic snapshot failu
         ...(fail ? ["fail"] : []),
       ],
       repository,
-      { sandbox },
+      {
+        sandbox,
+        onStdout(chunk) {
+          output.push(chunk);
+          // The parent owns the private home; inspect profiles before cleanup.
+          for (const name of readdirSync(home)) {
+            if (!/^codex_security_snapshot_.*\.config\.toml$/.test(name))
+              continue;
+            try {
+              const metadata = statSync(join(home, name));
+              profiles.push({
+                name,
+                mode: metadata.mode & 0o777,
+                bytes: metadata.size,
+              });
+            } catch (error) {
+              if ((error as NodeJS.ErrnoException).code !== "ENOENT")
+                throw error;
+            }
+          }
+        },
+      },
     );
+    return { stdout: Buffer.concat(output).toString("utf8"), profiles };
+  };
   const outcomes = await Promise.allSettled([run(false), run(false)]);
   const results = outcomes.map((outcome) => {
     if (outcome.status === "rejected") throw outcome.reason;
@@ -233,11 +252,11 @@ if (process.argv[2] === "fail") { process.stderr.write("Synthetic snapshot failu
   });
   const names = new Set<string>();
   for (const result of results) {
-    const inspected = JSON.parse(result);
+    const inspected = JSON.parse(result.stdout);
     expect(inspected.denied).toBe(true);
     expect(inspected.inherited).toBe("inherited");
-    expect(inspected.profiles.length).toBeGreaterThan(0);
-    for (const profile of inspected.profiles) {
+    expect(result.profiles.length).toBeGreaterThan(0);
+    for (const profile of result.profiles) {
       names.add(profile.name);
       expect(profile.bytes).toBeGreaterThan(128 * 1024);
       if (process.platform !== "win32") expect(profile.mode).toBe(0o600);

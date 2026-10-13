@@ -13,6 +13,46 @@ import { runTestInSubprocess } from "./support/test-subprocess.js";
 const fixtures = createTemporaryDirectories(true);
 afterEach(fixtures.cleanup);
 
+test("snapshot bridge failures after stdin closes retain their diagnostics", async () => {
+  const name =
+    "snapshot bridge failures after stdin closes retain their diagnostics";
+  if (runTestInSubprocess(fileURLToPath(import.meta.url), name)) return;
+  const root = await fixtures.create("patch-bridge-failure-");
+  const home = join(root, "home");
+  await mkdir(home);
+  const native = join(root, "native.cjs");
+  await writeFile(
+    native,
+    `const {spawn}=require("node:child_process");
+const args=process.argv.slice(process.argv.indexOf("--")+1);
+args[args.indexOf("-e")+1]='require("node:fs").readFileSync(0); throw new Error("Synthetic snapshot bridge failure.");';
+const child=spawn(args[0],args.slice(1),{stdio:"inherit"});
+child.on("error",error=>{console.error(error);process.exitCode=1;});
+child.on("exit",code=>process.exitCode=code??1);
+`,
+  );
+  const command = spyOn(runtime, "resolveCodexCommand").mockReturnValue({
+    command: Bun.which("node")!,
+    args: [native],
+  });
+  try {
+    await expect(
+      runRepositoryCommand("git", [], root, {
+        sandbox: {
+          directory: root,
+          environment: { ...process.env, CODEX_HOME: home },
+          profile: { extends: ":workspace", filesystem: {} },
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: 1,
+      stderr: expect.stringContaining("Synthetic snapshot bridge failure."),
+    });
+  } finally {
+    command.mockRestore();
+  }
+});
+
 for (const configuration of [
   "unset",
   "empty",
