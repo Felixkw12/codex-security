@@ -29,6 +29,7 @@ import {
   copyFile,
   mkdir,
   readFile,
+  readdir,
   realpath,
   stat,
   symlink,
@@ -1842,6 +1843,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 index % 2 === 0
                   ? ["api", `background jobs ${index}`]
                   : undefined,
+              filePaths: index % 2 === 0 ? [`background jobs ${index}`] : [],
               pythonCommand: `${helperPython}-${index} `,
             },
           }),
@@ -2128,10 +2130,14 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               servers["cs_artifacts"]!.env["CODEX_SECURITY_INCLUDE_PATHS_FILE"];
             if (index % 2 === 0) {
               assert.ok(scopeFile && path.isAbsolute(scopeFile));
-              assert.deepEqual(JSON.parse(await readFile(scopeFile, "utf8")), [
+              assert.deepEqual(invocation.scopeInput.paths, [
                 "api",
                 `background jobs ${index}`,
               ]);
+              assert.deepEqual(invocation.scopeInput.filePaths, [
+                `background jobs ${index}`,
+              ]);
+              await assert.rejects(readFile(scopeFile), { code: "ENOENT" });
             } else assert.equal(scopeFile, undefined);
             assert.equal(process.env.PYTHON, python);
             assert.equal(
@@ -2615,6 +2621,7 @@ async function testLargeScopeTransport() {
                 targetPath: fixture.root,
                 scope: ".",
                 includePaths,
+                filePaths: includePaths.filter((_, index) => index % 2 === 0),
                 executionSettings: {
                   version: 1,
                   settings: await captureDeepScanExecutionSettings(
@@ -2666,7 +2673,14 @@ async function testLargeScopeTransport() {
               );
               const invocation = await readJson(output, "invocation.json");
               assert.deepEqual(invocation.scopeInput.paths, includePaths);
+              assert.deepEqual(
+                invocation.scopeInput.filePaths,
+                includePaths.filter((_, index) => index % 2 === 0),
+              );
               assert.equal(path.isAbsolute(invocation.scopeInput.file), true);
+              await assert.rejects(readFile(invocation.scopeInput.file), {
+                code: "ENOENT",
+              });
               assert.equal(invocation.argv.includes("resume"), resumed);
               const argument = nativeConfigOverrides(invocation.argv).find(
                 (value) => value.startsWith("mcp_servers="),
@@ -3579,12 +3593,11 @@ ${jsonLineInputSource(`      if (message.method === 'initialized') continue;
 } else {
 const stdin = (await process.stdin.toArray()).join('');
 let scopeInput;
-if (stdin.includes('CAPTURE_SCOPE_INPUT')) {
+{
   const { parse } = await import(${JSON.stringify(import.meta.resolve("smol-toml"))});
   const configuration = process.argv.flatMap((arg, index) => arg === '--config' || arg === '-c' ? [parse(process.argv[index + 1])] : []).findLast(value => value.mcp_servers?.cs_artifacts);
-  const environment = configuration.mcp_servers.cs_artifacts.env;
-  const file = environment.CODEX_SECURITY_INCLUDE_PATHS_FILE;
-  scopeInput = { file, paths: JSON.parse(file ? readFileSync(file, 'utf8') : environment.CODEX_SECURITY_INCLUDE_PATHS_JSON) };
+  const file = configuration?.mcp_servers.cs_artifacts.env.CODEX_SECURITY_INCLUDE_PATHS_FILE;
+  if (file) scopeInput = { file, ...JSON.parse(readFileSync(file, 'utf8')) };
 }
 
 const profileIndex = process.argv.indexOf('--profile');

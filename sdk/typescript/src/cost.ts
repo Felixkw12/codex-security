@@ -583,16 +583,20 @@ export class ScanCostTracker {
       const live =
         (session?.counterUsage?.total_tokens ?? -1) >
         (session?.usage?.total_tokens ?? -1);
-      const liveTokens = live ? session?.counterUsage : session?.usage;
       const liveModels = reconcileModelUsage(
         value,
         live ? session?.counterModelUsage : session?.modelUsage,
       );
-      for (const [model, tokens] of liveModels ?? [])
+      let liveTokens: ScanTokenUsage | null = null;
+      for (const [model, tokens] of liveModels ?? []) {
         liveModelUsage.set(
           model,
           addTokenUsage(liveModelUsage.get(model) ?? null, tokens),
         );
+        liveTokens = addTokenUsage(liveTokens, tokens);
+      }
+      // Native cumulative totals can exceed the history with a known model.
+      // Keep that history priced and represent only the unassigned remainder.
       const liveRemainder = liveTokens
         ? subtractTokenUsage(value, liveTokens)
         : value;
@@ -904,6 +908,15 @@ function readSessionEvent(
       return;
     session.responseIds.add(responseId);
     const cumulative = tokenUsage(payload["thread_token_usage"]);
+    // Keep native resumed totals above an observed legacy counter floor.
+    if (
+      attribution === null &&
+      session.previousUsage !== null &&
+      cumulative !== null &&
+      cumulative.total_tokens >= usage.total_tokens &&
+      cumulative.total_tokens > (session.counterUsage?.total_tokens ?? -1)
+    )
+      session.counterUsage = cumulative;
     if (cumulative)
       session.expectedResponseTokens = Math.max(
         session.expectedResponseTokens,
@@ -1133,7 +1146,11 @@ function readSessionEvent(
     session.counterUsage =
       attribution && delta !== null
         ? addTokenUsage(session.counterUsage, delta)
-        : ownUsage;
+        : session.responseUsageObserved &&
+            session.counterUsage !== null &&
+            session.counterUsage.total_tokens >= ownUsage.total_tokens
+          ? session.counterUsage
+          : ownUsage;
     if (!session.responseUsageObserved) session.usage = session.counterUsage;
   }
 }

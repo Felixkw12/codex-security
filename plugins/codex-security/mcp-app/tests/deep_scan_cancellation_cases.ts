@@ -3,7 +3,8 @@ import childProcess, {
   type SpawnOptions,
   type ChildProcess,
 } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 import { assertFlagPair } from "./assertions.ts";
@@ -59,6 +60,12 @@ export async function testWorkerCancellation({
     await mkdir(workingDirectory);
     const executor = new CodexSdkWorkerExecutor({
       parentSandbox: trustedParentSandbox,
+      artifactContext: {
+        pluginRoot: fixture.root,
+        repoRoot: fixture.root,
+        scanId: randomUUID(),
+        includePaths: ["api"],
+      },
     });
     const run = (controller: AbortController, onThreadStarted?: () => void) =>
       executor.run({
@@ -68,6 +75,7 @@ export async function testWorkerCancellation({
         subagents: 0,
         signal: controller.signal,
         onThreadStarted,
+        artifactContext: { root: workingDirectory, layout: "worker" },
       });
     const preAborted = new AbortController();
     const beforeStartup = new Error(
@@ -79,6 +87,10 @@ export async function testWorkerCancellation({
       (error: Error) => error === beforeStartup,
     );
     assert.equal(worker, undefined);
+    assert.equal(
+      (await readdir(fixture.root)).some((name) => name.startsWith("scope-")),
+      false,
+    );
     await assert.rejects(readFile(fixture.preflightMarkerPath), {
       code: "ENOENT",
     });
@@ -133,6 +145,10 @@ export async function testWorkerCancellation({
         assert(workerSignal);
         assert.equal(workerSignal.aborted, false);
       }
+      assert.equal(
+        (await readdir(fixture.root)).some((name) => name.startsWith("scope-")),
+        false,
+      );
       assert.notEqual(workerSignal, controller.signal);
       const currentWorker = worker as ChildProcess | undefined;
       assert(currentWorker);

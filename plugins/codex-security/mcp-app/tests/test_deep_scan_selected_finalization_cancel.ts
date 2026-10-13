@@ -226,6 +226,17 @@ for (const phase of [
       const detached = coordinator.wait(observer.signal);
       observer.abort();
       await assert.rejects(detached, { name: "AbortError" });
+      const parentRead = Promise.withResolvers<void>();
+      const readParentState = async () => {
+        const current = (
+          await runWorkbench(["get-scan", "--scan-id", begun.scanId])
+        ).scan;
+        parentRead.resolve();
+        return {
+          status: current.progress.status,
+          failureMessage: current.failureMessage,
+        };
+      };
       const persist = async () => {
         writes++;
         await runWorkbench([
@@ -246,6 +257,7 @@ for (const phase of [
             begun.scanId,
             "user_canceled_scan",
             persist,
+            readParentState,
           ),
           false,
         );
@@ -268,7 +280,10 @@ for (const phase of [
         begun.scanId,
         "user_canceled_scan",
         persist,
+        readParentState,
       );
+      await parentRead.promise;
+      await new Promise(setImmediate);
       const aborted = publicationSignal?.aborted;
       release.resolve();
       assert.equal(await cancellation, true);

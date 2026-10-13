@@ -2819,7 +2819,7 @@ def preserve_scan_results_locked(
         completion_binding=binding,
         completion_warnings=warnings,
         draft_documents=documents,
-        finding_scope=db.requested_scan_paths(scan) if scan["mode"] == "deep" else None,
+        finding_scope=db.requested_finding_scope(scan) if scan["mode"] == "deep" else None,
     )
     snapshots = _snapshot_published_outputs(scan_dir)
     try:
@@ -3003,17 +3003,37 @@ def require_selected_publication(db: Any, connection: Any, scan: Any, prepared: 
 
 
 def _require_current_deep_publication(
-    db: Any, connection: Any, scan_id: str, draft: dict[str, Any]
+    db: Any, connection: Any, scan: Any, draft: dict[str, Any]
 ) -> None:
+    scan_id = scan["id"]
+    run = connection.execute(
+        "SELECT * FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
+    ).fetchone()
     publication = draft.get("deepScanPublication")
-    run = db.deep_scan.require_deep_scan_run(connection, scan_id)
+    selection = db.deep_scan.deep_scan_finalization_input(run) if run is not None else None
+    if (
+        selection is None
+        and publication is None
+        and draft["manifest"]["scan"].get("complete") is False
+        and (run is None or run["status"] == "running")
+    ):
+        return
+    if run is None:
+        run = db.deep_scan.require_deep_scan_run(connection, scan_id)
+    # Finished discovery-only runs hand remaining publication back to the parent.
+    if (
+        selection is None
+        and publication is None
+        and run["status"] != "running"
+        and run["manifest_path"] != str(Path(scan["scan_dir"]) / "scan-manifest.json")
+    ):
+        return
     db.deep_scan.require_current_coordinator(
         run,
         argparse.Namespace(
             coordinator_generation=publication.get("coordinatorGeneration") if publication else None
         ),
     )
-    selection = db.deep_scan.deep_scan_finalization_input(run)
     if selection is not None:
         if publication is None:
             raise SystemExit("Deep Scan publication requires its committed selection.")
@@ -3036,8 +3056,29 @@ def _require_current_deep_publication(
         # Generation-one runs predate host publication metadata. Keep their existing
         # draft path; adopted coordinators must carry their generation and selection.
         if publication is None:
+            if run["status"] != "running" and run["manifest_path"] == str(
+                Path(scan["scan_dir"]) / "scan-manifest.json"
+            ):
+                raise SystemExit("Deep Scan is terminal; drafts cannot replace its publication.")
             return
-        reducer = _latest_successful_reducer(_saved_workers(connection, scan_id))
+
+        # Publication follows the coordinator's durable reducer sequence. Stopped
+        # legacy recovery separately retains its completion-time source ordering.
+        def reducer_order(worker: Any) -> tuple[int, str]:
+            match = re.fullmatch(r"dedup-([0-9]+)", Path(worker["prompt_path"]).parent.name)
+            return (int(match[1]) if match else 0, worker["id"])
+
+        reducer = max(
+            (
+                worker
+                for worker in _saved_workers(connection, scan_id)
+                if worker["kind"] == "dedup"
+                and worker["status"] == "succeeded"
+                and worker["result_manifest_path"]
+            ),
+            key=reducer_order,
+            default=None,
+        )
         selected_result = reducer["result_manifest_path"] if reducer is not None else None
     if publication["resultPath"] != selected_result:
         raise SystemExit("Deep Scan aggregate belongs to a superseded publication selection.")
@@ -3055,10 +3096,6 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
                 "The scan stopped; its saved checkpoint was retained without replacing sealed results."
             )
         scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
-        draft = None
-        if scan["mode"] == "deep":
-            draft = _read_staged_scan_draft(scan_dir, args.draft_path)
-            _require_current_deep_publication(db, connection, scan_id, draft)
         if (
             args.expected_draft_digest is not None
             and args.expected_draft_digest != _scan_draft_digest(scan_dir)
@@ -3066,14 +3103,15 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             raise SystemExit(
                 "scan_draft_conflict: canonical scan results changed; reconcile the saved checkpoint again."
             )
-        if draft is None:
-            draft = _read_staged_scan_draft(scan_dir, args.draft_path)
+        draft = _read_staged_scan_draft(scan_dir, args.draft_path)
         manifest, findings, coverage = draft["manifest"], draft["findings"], draft["coverage"]
         binding = db.workbench_completion_binding(scan, db.now())
         # Save scan IDs without sealing the draft.
         _populate_unsealed_manifest_envelope(manifest, manifest["scan"], binding)
         _populate_unsealed_artifact_envelope(manifest, findings, coverage, binding)
         _validate_completion_binding(manifest, findings, coverage, binding)
+        checkpoint = manifest["scan"]
+        checkpoint_contents = None
         if args.checkpoint_path is not None:
             try:
                 checkpoint_relative = Path(args.checkpoint_path).relative_to(scan_dir).as_posix()
@@ -3090,18 +3128,38 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             )
             if checkpoint.get("scanId") != scan_id:
                 raise SystemExit("Staged scan checkpoint belongs to another scan.")
+        checkpoint_only = (
+            scan["mode"] == "deep"
+            and draft.get("deepScanPublication") is None
+            and checkpoint.get("complete") is False
+            and connection.execute(
+                "SELECT 1 FROM deep_scan_runs WHERE scan_id = ? "
+                "AND status = 'running' AND manifest_path = ?",
+                (scan_id, str(scan_dir / "scan-manifest.json")),
+            ).fetchone()
+            is not None
+        )
+        run = None
+        if scan["mode"] == "deep" and not checkpoint_only:
+            _require_current_deep_publication(db, connection, scan, draft)
+            run = db.deep_scan.find_supported_deep_scan_run(connection, scan_id)
+        if checkpoint_contents is not None:
             checkpoint_digest = hashlib.sha256(checkpoint_contents).hexdigest()
             write_scan_local_bytes(
                 scan_dir,
                 f"checkpoints/{checkpoint_digest}.json",
                 checkpoint_contents,
             )
+            if checkpoint_only:
+                return {"scanId": scan_id, "status": "draft_written"}
         checkpoint = _parent_scan_draft(scan_id, manifest["scan"], findings, coverage)
         checkpoint_contents = _encoded(checkpoint)
         checkpoint_name = f"{hashlib.sha256(checkpoint_contents).hexdigest()}.json"
         checkpoint_relative = f"checkpoints/{checkpoint_name}"
         if not (scan_dir / checkpoint_relative).exists():
             write_scan_local_bytes(scan_dir, checkpoint_relative, checkpoint_contents)
+        if checkpoint_only:
+            return {"scanId": scan_id, "status": "draft_written"}
         write_scan_local_bytes(
             scan_dir, "checkpoint-head.json", _encoded({"checkpoint": checkpoint_name})
         )
@@ -3115,14 +3173,16 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
                 filename,
                 (json.dumps(document, allow_nan=False, indent=2) + "\n").encode(),
             )
+        if scan["mode"] == "deep" and manifest["scan"].get("complete") is not False:
+            # Select the accepted final publication before releasing the write lock.
+            with connection:
+                connection.execute(
+                    "UPDATE deep_scan_runs SET manifest_path = ? "
+                    "WHERE scan_id = ? AND status = 'running'",
+                    (str(scan_dir / "scan-manifest.json"), scan_id),
+                )
         model_warning = write_threat_model_projection_if_possible(scan_dir, manifest)
-        if (
-            scan["mode"] == "deep"
-            and db.deep_scan.deep_scan_finalization_input(
-                db.deep_scan.require_deep_scan_run(connection, scan_id)
-            )
-            is not None
-        ):
+        if run is not None and db.deep_scan.deep_scan_finalization_input(run) is not None:
             prepared = _prepare_scan_finalization(
                 scan_dir,
                 expected_coverage_mode=db.expected_coverage_mode(scan),

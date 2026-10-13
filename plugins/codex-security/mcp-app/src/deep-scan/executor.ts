@@ -73,6 +73,7 @@ export interface CodexSdkWorkerArtifactContext {
   scope?: string;
   scanRoot?: string;
   includePaths?: readonly string[];
+  filePaths?: readonly string[];
   pythonCommand?: string;
 }
 
@@ -100,6 +101,15 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
 
   async run(request: CodexWorkerRequest): Promise<CodexWorkerResult> {
     let providerProfile: ProviderProfile | undefined;
+    const includePaths = this.modelSettings.artifactContext?.includePaths;
+    const scopeInput = JSON.stringify({
+      paths: includePaths,
+      filePaths: this.modelSettings.artifactContext?.filePaths ?? [],
+    });
+    const includePathsFile =
+      includePaths === undefined
+        ? undefined
+        : resolve(dirname(request.promptPath), `scope-${randomUUID()}.json`);
     try {
       const parentSandbox = this.modelSettings.parentSandbox;
       if (!parentSandbox) {
@@ -127,6 +137,10 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           }
         }
         childEnv[name] = value;
+      }
+      if (includePathsFile !== undefined) {
+        // Keep host-bound inputs beside the prompt, outside the worker's output root.
+        await writePrivateFile(includePathsFile, scopeInput);
       }
       if (resolved?.apiKey !== undefined)
         childEnv.CODEX_API_KEY = resolved.apiKey;
@@ -167,7 +181,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
               : {}),
             // A disabled server still needs a valid transport during native resolution.
             "codex-security": { command: "node", enabled: false },
-            ...(await this.compactArtifactServer(request)),
+            ...this.compactArtifactServer(request, includePathsFile),
           },
           ...workerSubagentConfig(
             request.subagents,
@@ -351,22 +365,28 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
     } catch (error) {
       throw classifyCodexWorkerError(error);
     } finally {
-      await providerProfile?.cleanup();
+      try {
+        await providerProfile?.cleanup();
+      } finally {
+        if (includePathsFile !== undefined)
+          await fs.rm(includePathsFile, { force: true });
+      }
     }
   }
 
-  private async compactArtifactServer(request: CodexWorkerRequest): Promise<
-    Record<
-      string,
-      {
-        command: string;
-        args: string[];
-        env: Record<string, string>;
-        required: true;
-        startup_timeout_sec: number;
-        tool_timeout_sec: number;
-      }
-    >
+  private compactArtifactServer(
+    request: CodexWorkerRequest,
+    includePathsFile?: string,
+  ): Record<
+    string,
+    {
+      command: string;
+      args: string[];
+      env: Record<string, string>;
+      required: true;
+      startup_timeout_sec: number;
+      tool_timeout_sec: number;
+    }
   > {
     const scan = this.modelSettings.artifactContext;
     if (!scan) return {};
@@ -392,17 +412,6 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       );
     }
 
-    const includePathsFile =
-      scan.includePaths === undefined
-        ? undefined
-        : resolve(dirname(request.promptPath), `scope-${randomUUID()}.json`);
-    if (includePathsFile !== undefined) {
-      // Keep host-bound inputs beside the prompt, outside the worker's output root.
-      await writePrivateFile(
-        includePathsFile,
-        JSON.stringify(scan.includePaths),
-      );
-    }
     return {
       // Keep every qualified worker tool within Codex's existing name limit.
       cs_artifacts: {

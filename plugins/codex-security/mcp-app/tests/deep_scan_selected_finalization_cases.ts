@@ -10,6 +10,7 @@ import {
 } from "./deep_scan_coordinator_fixture.ts";
 
 export async function testSelectedFinalizationOwner() {
+  await testCancellationDuringSelectedParentPublication();
   for (const failure of [
     undefined,
     "draft",
@@ -145,4 +146,75 @@ export async function testSelectedFinalizationOwner() {
       fixture.run.finalizationInput,
     );
   }
+}
+
+async function testCancellationDuringSelectedParentPublication() {
+  const fixture = await fixtureRun({
+    workers: 1,
+    subagents: 0,
+    stopAfterNoNew: 1,
+    maxDiscoveryRuns: 1,
+  });
+  fixture.run.workflowVersion = "deep-security-scan/v2";
+  fixture.run.finalizationInput = {
+    version: 1,
+    resultPath: null,
+    resultSha256: null,
+    terminalReason: "capped",
+    omittedWorkerIds: [],
+    selectedAt: "2026-01-01T00:00:00Z",
+  };
+  const store = new FakeStore(fixture.run);
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  let publicationSignal: AbortSignal | undefined;
+  let completed = false;
+  let canceled = false;
+  const coordinator = new DeepScanCoordinator({
+    run: fixture.run,
+    store,
+    pluginRoot: fixture.pluginRoot,
+    threadId: "selected-owner",
+    executor: {
+      run: async () =>
+        assert.fail("Selected finalization cannot launch a worker"),
+    },
+    onComplete: async () => {},
+    onFinalized: async (_run: DeepScanRunState, signal: AbortSignal) => {
+      publicationSignal = signal;
+      entered.resolve();
+      await release.promise;
+      signal.throwIfAborted();
+      completed = true;
+    },
+  });
+  coordinator.start();
+  const settled = coordinator.settled();
+  void settled.catch(() => {});
+  await entered.promise;
+  const cancellation = coordinator.cancelAfterPersistence(
+    "cancel selected parent",
+    async () => {
+      if (completed) throw new Error("Only a running scan can be canceled.");
+      canceled = true;
+      store.run.status = "canceled";
+    },
+    async () => ({ status: completed ? "complete" : "running" }),
+  );
+  void cancellation.catch(() => {});
+  try {
+    await new Promise(setImmediate);
+    assert.equal(
+      publicationSignal?.aborted,
+      true,
+      "cancel aborts pending parent publication after reducer success",
+    );
+  } finally {
+    release.resolve();
+    await Promise.allSettled([settled, cancellation]);
+  }
+  assert.equal((await cancellation).status, "canceled");
+  assert.equal((await settled).status, "canceled");
+  assert.equal(canceled, true);
+  assert.equal(completed, false);
 }
