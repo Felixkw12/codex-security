@@ -5300,6 +5300,9 @@ function dependencyPermissions(
     join(homedir(), ".npmrc"),
     resolve(workingDirectory, expandHome("~", environment), ".npmrc"),
     join(npmHome, ".npmrc"),
+    // curl follows HOME before USERPROFILE when locating netrc on Windows.
+    join(npmHome, ".netrc"),
+    join(npmHome, "_netrc"),
     ...npmConfigs,
     runtimeHome,
     codexSecurityCredentialHome({}),

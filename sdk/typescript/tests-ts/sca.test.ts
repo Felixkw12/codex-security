@@ -1125,6 +1125,13 @@ test.each(["absolute", "relative"] as const)(
       fixture({ homeVariable: "USERPROFILE" }),
     ]);
     const expected = fixtures.map((f) => {
+      const curlHome = join(dirname(f.repository), "curl-home");
+      if (process.platform === "win32") {
+        Object.assign(f.environment, {
+          HOME: curlHome,
+          USERPROFILE: f.selectedUserHome,
+        });
+      }
       const base =
         pathKind === "relative"
           ? "../private-stores"
@@ -1156,6 +1163,8 @@ test.each(["absolute", "relative"] as const)(
           ? [
               join(overrides.AppData, "Composer", "auth.json"),
               join(overrides.AppData, "NuGet", "NuGet.Config"),
+              join(curlHome, ".netrc"),
+              join(curlHome, "_netrc"),
             ]
           : []),
       ].map((path) => resolve(f.outputDir, path));
