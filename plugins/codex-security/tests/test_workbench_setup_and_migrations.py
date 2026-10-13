@@ -2890,14 +2890,20 @@ def test_identity_migration_merges_partially_sequenced_completion_history(
     connection.close()
 
 
-@pytest.mark.cross_platform
-@pytest.mark.parametrize("migration", ["pre-release", "linux-v3"])
+@pytest.mark.parametrize(
+    "migration",
+    [
+        pytest.param("pre-release", marks=pytest.mark.cross_platform),
+        pytest.param(
+            "linux-v3",
+            marks=pytest.mark.skipif(sys.platform != "linux", reason="Linux generation conversion"),
+        ),
+    ],
+)
 @pytest.mark.parametrize("unavailable", ["file-parent", "permission-error"])
 def test_identity_migrations_keep_healthy_targets_when_another_path_is_unavailable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, migration: str, unavailable: str
 ) -> None:
-    if migration == "linux-v3" and sys.platform != "linux":
-        pytest.skip("Linux generation conversion")
     repository = tmp_path / "healthy"
     initialize_git_repository(repository)
     connection, apply_migrations = create_historical_database(
@@ -2905,6 +2911,7 @@ def test_identity_migrations_keep_healthy_targets_when_another_path_is_unavailab
     )
     import workbench_target as target
     import workbench_target_state as state
+    from filesystem_identity import serialize_filesystem_identity
 
     identity = state._repository_identity_details(repository)
     assert identity is not None
@@ -2955,8 +2962,8 @@ def test_identity_migrations_keep_healthy_targets_when_another_path_is_unavailab
             timestamp,
             timestamp,
             timestamp,
-            metadata.st_dev,
-            metadata.st_ino,
+            serialize_filesystem_identity(metadata.st_dev),
+            serialize_filesystem_identity(metadata.st_ino),
         ),
     )
     if migration == "linux-v3":
