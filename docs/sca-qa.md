@@ -59,8 +59,9 @@ for the six-call smoke measurements and its citation failure.
 A real-project scan through the actual scanner, public advisory matching, and
 model assessment is separate evidence. Inventory retained after an advisory
 connection failure validates recovery, not successful matching or assessment.
-For that outcome, record matching as incomplete, assessment as not run, and null
-model cost as unreported. Keep this distinction when recording future live runs.
+Record matching as incomplete. When no matches were retained, assessment does
+not run; otherwise, retained matches can still be assessed. Record null model
+cost as unreported. Keep these distinctions when recording future live runs.
 
 The live SDK smoke identified two integration requirements now covered by
 regressions: Codex structured output needs explicit types and required object
