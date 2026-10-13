@@ -14,7 +14,7 @@ import stat
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -945,6 +945,7 @@ def merge_saved_results(
     allow_frozen_legacy_parent: bool = False,
     frozen_model_source: str | None = None,
     selected_model_source: list[str] | None = None,
+    finding_scope: list[tuple[str, bool]] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None:
     """Read only bound parent/worker files; return an unsealed loss-preserving union."""
     initial_warnings = set(warnings)
@@ -1353,6 +1354,25 @@ def merge_saved_results(
         if parent_is_canonical
         else set()
     )
+
+    def finding_within_scope(finding: dict[str, Any]) -> bool:
+        locations = finding.get("locations", [])
+        return isinstance(locations, list) and any(
+            isinstance(location, dict)
+            and isinstance(location.get("path"), str)
+            and any(
+                PurePosixPath(location["path"]) == PurePosixPath(path)
+                if is_file
+                else path_within_scope(location["path"], path)
+                for path, is_file in (
+                    finding_scope
+                    if finding_scope is not None
+                    else [(path, False) for path in binding["scope"]["includePaths"]]
+                )
+            )
+            for location in locations
+        )
+
     findings: list[dict[str, Any]] = []
     inferred_identities: dict[int, dict[str, Any]] = {}
     finding_owners: dict[int, str | None] = {}
@@ -1493,7 +1513,9 @@ def merge_saved_results(
     explicit_identities: dict[str, list[tuple[dict[str, Any], str | None]]] = {}
     for _, draft, owner in all_sources:
         for finding in draft["findings"]:
-            if not isinstance(finding, dict):
+            if not isinstance(finding, dict) or (
+                finding_scope is not None and not finding_within_scope(finding)
+            ):
                 continue
             for retained, retained_owner in _retained_findings(
                 finding, owner, source_owners=source_owners
@@ -1773,6 +1795,21 @@ def merge_saved_results(
             ]
         )
 
+    if finding_scope is not None and parent:
+        # Excluded parent rows can make a retained row's explicit identity ambiguous.
+        parent_explicit_positions: dict[str, set[str]] = {}
+        for finding in parent["findings"]:
+            if (
+                isinstance(finding, dict)
+                and (identity_key := explicit_finding_key(finding)) is not None
+            ):
+                parent_explicit_positions.setdefault(identity_key, set()).add(_finding_key(finding))
+        represented_explicit.update(
+            (identity_key, None)
+            for identity_key, positions in parent_explicit_positions.items()
+            if len(positions) > 1
+        )
+
     def register_parent_finding(finding: dict[str, Any], canonical_key: str) -> None:
         identity_key = explicit_finding_key(finding)
         if identity_key is not None:
@@ -2031,6 +2068,7 @@ def merge_saved_results(
                 selected_model_source[:] = [model_path]
         source_explicit_positions: dict[str, set[str]] = {}
         if relative != "parent":
+            # Excluded positions still establish that an explicit identity was reused.
             for value in draft["findings"]:
                 if (
                     isinstance(value, dict)
@@ -2065,11 +2103,9 @@ def merge_saved_results(
                     rejected_history.setdefault((owner, candidate_id), []).append(finding)
                     continue
                 if recovered := recovered_finding(finding):
-                    if parent_requires_scope_filter and not any(
-                        path_within_scope(location["path"], included)
-                        for location in recovered["locations"]
-                        for included in binding["scope"]["includePaths"]
-                    ):
+                    if (
+                        finding_scope is not None or parent_requires_scope_filter
+                    ) and not finding_within_scope(recovered):
                         warnings.append(f"Skipped out-of-scope finding from {relative}.")
                         coverage["completeness"] = "partial"
                         continue
@@ -2109,16 +2145,7 @@ def merge_saved_results(
                 continue
             for key in ("findingId", "occurrenceId", "fingerprints"):
                 finding.pop(key, None)
-            locations = finding.get("locations", [])
-            if not isinstance(locations, list) or not any(
-                isinstance(location, dict)
-                and isinstance(location.get("path"), str)
-                and any(
-                    path_within_scope(location["path"], path)
-                    for path in binding["scope"]["includePaths"]
-                )
-                for location in locations
-            ):
+            if not finding_within_scope(finding):
                 warnings.append(f"Skipped out-of-scope finding from {relative}.")
                 coverage["completeness"] = "partial"
                 continue
@@ -2674,6 +2701,7 @@ def preserve_scan_results_locked(
         frozen_source_digests=frozen_source_digests,
         frozen_model_source=model_source[0] if model_source else None,
         selected_model_source=model_source,
+        finding_scope=db.requested_finding_scope(scan) if scan["mode"] == "deep" else None,
         allow_frozen_legacy_parent=(
             include_parent_with_recovery
             or (
@@ -2718,7 +2746,7 @@ def preserve_scan_results_locked(
         completion_binding=binding,
         completion_warnings=warnings,
         draft_documents=documents,
-        finding_scope=db.requested_scan_paths(scan) if scan["mode"] == "deep" else None,
+        finding_scope=db.requested_finding_scope(scan) if scan["mode"] == "deep" else None,
     )
     snapshots = _snapshot_published_outputs(scan_dir)
     try:
@@ -2831,6 +2859,66 @@ def save_scan_artifact(db: Any, connection: Any, args: Any) -> dict[str, Any]:
     return {"scanId": scan_id, "path": str(scan_dir / output)}
 
 
+def _require_current_deep_publication(
+    db: Any, connection: Any, scan: Any, draft: dict[str, Any]
+) -> None:
+    scan_id = scan["id"]
+    run = connection.execute(
+        "SELECT * FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
+    ).fetchone()
+    publication = draft.get("deepScanPublication")
+    if (
+        publication is None
+        and draft["manifest"]["scan"].get("complete") is False
+        and (run is None or run["status"] == "running")
+    ):
+        return
+    if run is None:
+        run = db.deep_scan.require_deep_scan_run(connection, scan_id)
+    # Finished discovery-only runs hand remaining publication back to the parent.
+    if (
+        publication is None
+        and run["status"] != "running"
+        and run["manifest_path"] != str(Path(scan["scan_dir"]) / "scan-manifest.json")
+    ):
+        return
+    db.deep_scan.require_current_coordinator(
+        run,
+        argparse.Namespace(
+            coordinator_generation=publication.get("coordinatorGeneration") if publication else None
+        ),
+    )
+    # Once finish selects the canonical parent, only completion may replay it.
+    if publication is None:
+        if run["status"] != "running" and run["manifest_path"] == str(
+            Path(scan["scan_dir"]) / "scan-manifest.json"
+        ):
+            raise SystemExit("Deep Scan is terminal; drafts cannot replace its publication.")
+        return
+
+    # Match the durable reducer sequence used by coordinator recovery.
+    def reducer_order(worker: Any) -> tuple[int, str]:
+        match = re.fullmatch(r"dedup-([0-9]+)", Path(worker["prompt_path"]).parent.name)
+        return (int(match[1]) if match else 0, worker["id"])
+
+    reducer = max(
+        (
+            worker
+            for worker in connection.execute(
+                "SELECT * FROM deep_scan_workers WHERE scan_id = ?", (scan_id,)
+            )
+            if worker["kind"] == "dedup"
+            and worker["status"] == "succeeded"
+            and worker["result_manifest_path"]
+        ),
+        key=reducer_order,
+        default=None,
+    )
+    selected_result = reducer["result_manifest_path"] if reducer is not None else None
+    if publication["resultPath"] != selected_result:
+        raise SystemExit("Deep Scan aggregate belongs to a superseded publication selection.")
+
+
 def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
     scan_id = db.require_uuid(args.scan_id, "scan-id")
     with db.scan_completion_lock(scan_id):
@@ -2865,6 +2953,8 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         _populate_unsealed_manifest_envelope(manifest, manifest["scan"], binding)
         _populate_unsealed_artifact_envelope(manifest, findings, coverage, binding)
         _validate_completion_binding(manifest, findings, coverage, binding)
+        checkpoint = manifest["scan"]
+        checkpoint_contents = None
         if args.checkpoint_path is not None:
             try:
                 checkpoint_relative = Path(args.checkpoint_path).relative_to(scan_dir).as_posix()
@@ -2881,18 +2971,36 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             )
             if checkpoint.get("scanId") != scan_id:
                 raise SystemExit("Staged scan checkpoint belongs to another scan.")
+        checkpoint_only = (
+            scan["mode"] == "deep"
+            and draft.get("deepScanPublication") is None
+            and checkpoint.get("complete") is False
+            and connection.execute(
+                "SELECT 1 FROM deep_scan_runs WHERE scan_id = ? "
+                "AND status = 'running' AND manifest_path = ?",
+                (scan_id, str(scan_dir / "scan-manifest.json")),
+            ).fetchone()
+            is not None
+        )
+        if scan["mode"] == "deep" and not checkpoint_only:
+            _require_current_deep_publication(db, connection, scan, draft)
+        if checkpoint_contents is not None:
             checkpoint_digest = hashlib.sha256(checkpoint_contents).hexdigest()
             write_scan_local_bytes(
                 scan_dir,
                 f"checkpoints/{checkpoint_digest}.json",
                 checkpoint_contents,
             )
+            if checkpoint_only:
+                return {"scanId": scan_id, "status": "draft_written"}
         checkpoint = _parent_scan_draft(scan_id, manifest["scan"], findings, coverage)
         checkpoint_contents = _encoded(checkpoint)
         checkpoint_name = f"{hashlib.sha256(checkpoint_contents).hexdigest()}.json"
         checkpoint_relative = f"checkpoints/{checkpoint_name}"
         if not (scan_dir / checkpoint_relative).exists():
             write_scan_local_bytes(scan_dir, checkpoint_relative, checkpoint_contents)
+        if checkpoint_only:
+            return {"scanId": scan_id, "status": "draft_written"}
         write_scan_local_bytes(
             scan_dir, "checkpoint-head.json", _encoded({"checkpoint": checkpoint_name})
         )
@@ -2906,6 +3014,14 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
                 filename,
                 (json.dumps(document, allow_nan=False, indent=2) + "\n").encode(),
             )
+        if scan["mode"] == "deep" and manifest["scan"].get("complete") is not False:
+            # Select the accepted final publication before releasing the write lock.
+            with connection:
+                connection.execute(
+                    "UPDATE deep_scan_runs SET manifest_path = ? "
+                    "WHERE scan_id = ? AND status = 'running'",
+                    (str(scan_dir / "scan-manifest.json"), scan_id),
+                )
         model_warning = write_threat_model_projection_if_possible(scan_dir, manifest)
         # Accepted Standard drafts are evidence of review or report assembly,
         # even when the parent omitted its explicit progress call.
