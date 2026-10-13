@@ -510,3 +510,153 @@ def test_legacy_tied_root_parent_preserves_accepted_pending_evidence(
     assert all(
         (scan.scan_dir / path).read_bytes() == contents for path, contents in originals.items()
     )
+
+
+@pytest.mark.parametrize("wrapped", [False, True], ids=["flat", "wrapped"])
+@pytest.mark.parametrize("flow", ["preserve", "recover"])
+@pytest.mark.parametrize("accepted_first", [False, True])
+@pytest.mark.parametrize("interrupted", [False, True])
+@pytest.mark.parametrize("accepted_time", [99, 100, 101], ids=["older", "tied", "newer"])
+@pytest.mark.parametrize("identity", ["candidate-only", "explicit", "alias"])
+def test_legacy_pending_ties_aggregate_accepted_provenance(
+    workbench_api,
+    workbench_db,
+    publication_scan,
+    monkeypatch,
+    wrapped,
+    flow,
+    accepted_first,
+    interrupted,
+    accepted_time,
+    identity,
+):
+    scan = publication_scan(mode="standard")
+    saved = workbench_api["saved_results"]
+    context = workbench_api["_WORKBENCH_DB_CONTEXT"]
+    finding = copy.deepcopy(scan.findings[0])
+    finding["extensions"] = {"candidateId": "candidate-review"}
+    pending = {"candidateId": "candidate-review", "reason": "Accepted pending review."}
+    if identity != "candidate-only":
+        pending["id"] = "pending-review" if identity == "alias" else "candidate-review"
+    unobserved = {**pending, "reason": "Unobserved pending details."}
+    rejected = saved_draft(
+        scan.scan_id,
+        complete=True,
+        surfaces=[
+            {
+                "id": "reviewed-surface",
+                "candidateId": "candidate-review",
+                "label": "Reviewed surface",
+                "disposition": "rejected",
+                "receiptRefs": [],
+            }
+        ],
+    )
+    observations = [
+        (saved_draft(scan.scan_id, findings=[finding], complete=True), 50),
+        (saved_draft(scan.scan_id, deferred=[pending]), accepted_time),
+        (rejected, 100),
+        (
+            saved_draft(
+                scan.scan_id,
+                deferred=[{"id": "independent-review", "reason": "Another task remains."}],
+            ),
+            200,
+        ),
+    ]
+    captures = {}
+    head = scan.scan_dir / "checkpoint-head.json"
+    for draft, observed in observations:
+        draft["coverage"] = {**scan.coverage, **draft["coverage"]}
+        checkpoint = write_checkpoint(scan.scan_dir / "checkpoints", draft)
+        os.utime(checkpoint, ns=(observed, observed))
+        head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+        os.utime(head, ns=(observed, observed))
+        captures.update(
+            saved._capture_saved_source(scan.scan_dir, "checkpoint-head.json", scan.scan_id)
+        )
+    head.unlink()
+    raw = saved_draft(scan.scan_id, deferred=[unobserved])
+    raw["coverage"] = {**scan.coverage, **raw["coverage"]}
+    unobserved_path = write_checkpoint(scan.scan_dir / "checkpoints", raw)
+    os.utime(unobserved_path, ns=(100, 100))
+    captures.update(
+        saved._capture_saved_source(
+            scan.scan_dir, unobserved_path.relative_to(scan.scan_dir).as_posix(), scan.scan_id
+        )
+    )
+    frozen = {path: digest for path, (digest, _) in captures.items()}
+    retained = (
+        {
+            "sources": frozen,
+            "sourceTimes": {path: observed for path, (_, observed) in captures.items()},
+        }
+        if wrapped
+        else frozen
+    )
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE scans SET status = 'failed', completed_at = ?, retained_source_digests_json = ?, "
+            "retained_checkpoint_heads_json = '{}' WHERE id = ?",
+            (scan.timestamp, json.dumps(retained), scan.scan_id),
+        )
+    originals = {path: (scan.scan_dir / path).read_bytes() for path in frozen}
+    children = saved._children
+    monkeypatch.setattr(
+        saved,
+        "_children",
+        lambda root, relative: sorted(
+            children(root, relative),
+            key=lambda name: (name == unobserved_path.name) == accepted_first,
+        ),
+    )
+    prepared_documents = []
+    write = saved._write_prepared_scan_finalization
+
+    def publish(prepared, **kwargs):
+        prepared_documents.append(copy.deepcopy((prepared[3], prepared[4])))
+        if interrupted:
+            raise OSError("Synthetic tied-pending publication interruption")
+        return write(prepared, **kwargs)
+
+    args = Namespace(
+        scan_id=scan.scan_id, claim_token=None, thread_id=None, coordinator_generation=None
+    )
+    action = saved.preserve_scan_results if flow == "preserve" else saved.recover_scan_results
+    with monkeypatch.context() as patch:
+        patch.setattr(saved, "_write_prepared_scan_finalization", publish)
+        if interrupted:
+            with pytest.raises(OSError, match="Synthetic tied-pending publication interruption"):
+                action(context, workbench_db, args)
+        else:
+            action(context, workbench_db, args)
+    published = saved.preserve_scan_results(context, workbench_db, args)["scan"]
+    retained_pending = accepted_time >= 100
+    assert published["findingCount"] == int(retained_pending)
+    assert not published["resultsRecoveryNeeded"]
+    findings = json.loads((scan.scan_dir / "findings.json").read_text())
+    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    assert len(prepared_documents) == 1
+    for current_findings, current_coverage in [(findings, coverage), *prepared_documents]:
+        assert len(current_findings["findings"]) == int(retained_pending)
+        candidate_rows = [
+            row
+            for row in current_coverage["deferred"]
+            if row.get("candidateId") == "candidate-review"
+        ]
+        assert bool(candidate_rows) is retained_pending
+        if retained_pending:
+            assert pending["reason"] in {row["reason"] for row in candidate_rows}
+        assert any(row["id"] == "independent-review" for row in current_coverage["deferred"])
+    recovered = saved.recover_scan_results(context, workbench_db, args)["scan"]
+    assert recovered["findingCount"] == int(retained_pending)
+    assert not recovered["resultsRecoveryNeeded"]
+    assert json.loads((scan.scan_dir / "findings.json").read_text()) == findings
+    assert json.loads((scan.scan_dir / "coverage.json").read_text()) == coverage
+    manifest_path = scan.scan_dir / "scan-manifest.json"
+    manifest = manifest_path.read_bytes()
+    saved.recover_scan_results(context, workbench_db, args)
+    assert manifest_path.read_bytes() == manifest
+    assert all(
+        (scan.scan_dir / path).read_bytes() == contents for path, contents in originals.items()
+    )

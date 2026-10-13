@@ -1756,9 +1756,11 @@ def merge_saved_results(
                     or relative in selected_observations
                 ):
                     try:
-                        # A malformed update cannot discard valid saved evidence.
+                        # Keep valid evidence.
                         _validate_schema_node(
-                            item, coverage_schema["deferred"]["items"], "coverage.deferred"
+                            {"id": identity, **item},
+                            coverage_schema["deferred"]["items"],
+                            "coverage.deferred",
                         )
                     except ContractError:
                         continue
@@ -1904,17 +1906,15 @@ def merge_saved_results(
             saved_owner == owner
             and _deferred_candidate_id(row, owner, ambiguous_deferred) == candidate_id
             and modified >= order
-            # Preserve accepted ties.
             and (
                 modified > order
                 or owner is not None
-                or source == "parent"
-                or source in selected_observations
+                or accepted_deferred_orders.get((saved_owner, identity)) == modified
                 or draft.get("complete") is False
                 or (relative != "parent" and relative not in authoritative_heads)
                 or other_root_order >= order
             )
-            for (saved_owner, _), (modified, row, source) in active_deferred.items()
+            for (saved_owner, identity), (modified, row, _) in active_deferred.items()
         ):
             continue
         previous = ordered_outcomes.get(key)
