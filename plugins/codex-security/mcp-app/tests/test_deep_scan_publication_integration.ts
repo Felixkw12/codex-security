@@ -680,7 +680,9 @@ async function assertInterleavedProgressRetained(fixture: PublicationFixture) {
     (name) => !(name in before.checkpoints),
   );
   assert.equal(added.length, 1);
-  const { publication, ...checkpoint } = JSON.parse(after.checkpoints[added[0]]);
+  const { publication, ...checkpoint } = JSON.parse(
+    after.checkpoints[added[0]],
+  );
   assert.deepEqual(checkpoint, progress);
   const previousHead = JSON.parse(before.files["checkpoint-head.json"]);
   assert.deepEqual(publication, {
