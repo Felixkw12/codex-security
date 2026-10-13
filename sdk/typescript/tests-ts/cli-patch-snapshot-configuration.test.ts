@@ -110,6 +110,8 @@ for (const selector of ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"]) {
                   "ORIGINAL\n",
                 );
                 const verify = repositoryGit(verification);
+                verify("init", "--initial-branch=main");
+                verify("config", "core.autocrlf", "false");
                 verify("apply", "--check", artifact.path);
                 verify("apply", artifact.path);
                 expect(
