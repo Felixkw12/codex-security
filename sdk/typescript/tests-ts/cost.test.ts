@@ -804,6 +804,699 @@ test.each(["open", "read", "close"] as const)(
   },
 );
 
+describe("inventory source ordering", () => {
+  async function fixture(workerFirst = false) {
+    const { home, parent, worker } = await workerSessionFixture();
+    const updates: ScanProgress[] = [];
+    const tracker = costTracker(home, {
+      expectedFilesTotal: 8,
+      onProgress: (update, source) => {
+        if (
+          source?.inventory === true ||
+          (update.phase === "discovery" && update.filesCompleted === 0)
+        )
+          tracker.setExpectedFilesTotal(update.filesTotal);
+        updates.push(update);
+      },
+    });
+    const originalReaddir = filesystem.readdir;
+    const listing = spyOn(filesystem, "readdir").mockImplementation((async (
+      ...args: Parameters<typeof originalReaddir>
+    ) => {
+      const entries = await originalReaddir(...args);
+      if (String(args[0]) !== dirname(parent)) return entries;
+      const first = basename(workerFirst ? worker : parent);
+      return entries.toSorted(
+        (left, right) =>
+          Number(String(right.name) === first) -
+          Number(String(left.name) === first),
+      );
+    }) as typeof originalReaddir);
+    let beforeClose: (() => void | Promise<void>) | undefined;
+    const originalOpen = filesystem.open;
+    const opening = spyOn(filesystem, "open").mockImplementation(
+      async (...args: Parameters<typeof originalOpen>) => {
+        const handle = await originalOpen(...args);
+        if (String(args[0]) === parent) {
+          const close = handle.close.bind(handle);
+          handle.close = async () => {
+            const callback = beforeClose;
+            beforeClose = undefined;
+            await callback?.();
+            return close();
+          };
+        }
+        return handle;
+      },
+    );
+    tracker.start("scan-thread");
+    await tracker.refresh();
+    tracker.beginParentTurn();
+    return {
+      parent,
+      worker,
+      tracker,
+      updates,
+      beforeClose(callback: () => void | Promise<void>) {
+        beforeClose = callback;
+      },
+      emit(command: string, progress: ScanProgress, output?: string) {
+        const event = completedCommand(
+          command,
+          output ??
+            progressMarker(
+              progress.phase,
+              progress.filesCompleted,
+              progress.filesTotal,
+            ),
+        );
+        const accepted = tracker.recordParentProgress(progress, event);
+        if (accepted) {
+          tracker.acceptParentProgress(progress, event);
+          if (progress.phase === "discovery" && progress.filesCompleted === 0)
+            tracker.setExpectedFilesTotal(progress.filesTotal);
+          updates.push(progress);
+        }
+        return accepted;
+      },
+      async close() {
+        beforeClose = undefined;
+        opening.mockRestore();
+        listing.mockRestore();
+        await tracker.stop();
+      },
+    };
+  }
+
+  test.each(
+    [false, true].flatMap((workerFirst) =>
+      [false, true].map((firstChanged) => ({ workerFirst, firstChanged })),
+    ),
+  )(
+    "keeps repeated inventories in occurrence order (workers first=$workerFirst, first display changed=$firstChanged)",
+    async ({ workerFirst, firstChanged }) => {
+      const f = await fixture(workerFirst);
+      const current = {
+        phase: "discovery",
+        filesCompleted: 0,
+        filesTotal: 5,
+      } as const;
+      const middle = { ...current, filesTotal: 10 };
+      try {
+        f.emit(firstChanged ? "first changed" : "first", current);
+        f.emit("middle changed", middle);
+        f.emit("latest", current);
+        await appendFile(
+          f.parent,
+          jsonLines([
+            nativeCommand("first", progressMarker("discovery", 0, 5)),
+          ]) + "\n",
+        );
+        await f.tracker.refresh();
+        await appendFile(
+          f.parent,
+          jsonLines([
+            nativeCommand("middle", progressMarker("discovery", 0, 10)),
+          ]) + "\n",
+        );
+        await appendSessionItem(
+          f.worker,
+          progressMessage(6, 10, "attack_path"),
+        );
+        await f.tracker.refresh();
+        expect(f.updates.at(-1)).toEqual(current);
+        await appendFile(
+          f.parent,
+          jsonLines([
+            nativeCommand("latest", progressMarker("discovery", 0, 5)),
+            nativeCommand("newer", progressMarker("discovery", 0, 10)),
+          ]) + "\n",
+        );
+        await f.tracker.stop();
+        expect(f.updates.at(-1)).toEqual({
+          phase: "attack_path",
+          filesCompleted: 6,
+          filesTotal: 10,
+        });
+      } finally {
+        await f.close();
+      }
+    },
+  );
+
+  test.each(
+    [false, true].flatMap((workerFirst) =>
+      [false, true].map((inventory) => ({ workerFirst, inventory })),
+    ),
+  )(
+    "keeps truncated live progress through an anchor arriving during close (workers first=$workerFirst, inventory=$inventory)",
+    async ({ workerFirst, inventory }) => {
+      const f = await fixture(workerFirst);
+      const old = {
+        phase: "discovery",
+        filesCompleted: inventory ? 0 : 3,
+        filesTotal: 8,
+      } as const;
+      const current = inventory
+        ? { ...old, filesTotal: 9 }
+        : { ...old, phase: "validation" as const };
+      try {
+        await appendFile(
+          f.parent,
+          jsonLines([
+            nativeCommand(
+              "old",
+              progressMarker(old.phase, old.filesCompleted, old.filesTotal),
+            ),
+            nativeCommand("original", persistedCommandOutput),
+            nativeCommand("anchor", "Finished the batch."),
+          ]) + "\n",
+        );
+        if (inventory)
+          await appendSessionItem(
+            f.worker,
+            progressMessage(5, 9, "attack_path"),
+          );
+        f.beforeClose(() => {
+          f.emit(
+            "changed-display",
+            current,
+            commandOutput(
+              progressMarker(
+                current.phase,
+                current.filesCompleted,
+                current.filesTotal,
+              ),
+            ),
+          );
+          f.tracker.recordParentItem(
+            completedCommand("anchor", "Finished the batch."),
+          );
+        });
+        await f.tracker.refresh();
+        await f.tracker.stop();
+        expect(f.updates.at(-1)).toEqual(
+          inventory
+            ? { phase: "attack_path", filesCompleted: 5, filesTotal: 9 }
+            : current,
+        );
+      } finally {
+        await f.close();
+      }
+    },
+  );
+
+  test.each([false, true])(
+    "keeps the newest inventory ahead of a raw copy released during close (workers first: %p)",
+    async (workerFirst) => {
+      const f = await fixture(workerFirst);
+      const initial = {
+        phase: "discovery",
+        filesCompleted: 0,
+        filesTotal: 9,
+      } as const;
+      const current = { ...initial, filesTotal: 8 };
+      try {
+        await appendFile(
+          f.parent,
+          jsonLines([
+            nativeCommand("initial", progressMarker("discovery", 0, 9)),
+          ]) + "\n",
+        );
+        await appendSessionItem(f.parent, {
+          type: "custom_tool_call_output",
+          call_id: "initial-copy",
+          output: progressMarker("discovery", 0, 9),
+        });
+        f.emit("initial changed", initial);
+        await appendFile(
+          f.parent,
+          jsonLines([
+            nativeCommand("final", progressMarker("discovery", 0, 8)),
+          ]) + "\n",
+        );
+        await f.tracker.refresh();
+        await appendFile(
+          f.parent,
+          jsonLines([nativeCommand("anchor", "done")]) + "\n",
+        );
+        f.emit("final changed", current);
+        f.beforeClose(() =>
+          f.tracker.recordParentItem(completedCommand("anchor", "done")),
+        );
+        await f.tracker.refresh();
+        await appendSessionItem(f.worker, progressMessage(5, 8, "attack_path"));
+        await f.tracker.stop();
+        expect(f.updates.at(-1)).toEqual({
+          phase: "attack_path",
+          filesCompleted: 5,
+          filesTotal: 8,
+        });
+      } finally {
+        await f.close();
+      }
+    },
+  );
+
+  test.each([false, true])(
+    "retains inventory provenance after a zero-count phase (workers first: %p)",
+    async (workerFirst) => {
+      const f = await fixture(workerFirst);
+      const initial = {
+        phase: "discovery",
+        filesCompleted: 0,
+        filesTotal: 9,
+      } as const;
+      try {
+        await appendFile(
+          f.parent,
+          jsonLines([
+            nativeCommand("initial", progressMarker("discovery", 0, 9)),
+          ]) + "\n",
+        );
+        f.emit("initial changed", initial);
+        await f.tracker.refresh();
+        await appendFile(
+          f.parent,
+          jsonLines([
+            nativeCommand("phase", progressMarker("threat_model", 0, 9)),
+          ]) + "\n",
+        );
+        await appendSessionItem(f.worker, progressMessage(5, 9, "attack_path"));
+        f.beforeClose(() => {
+          f.emit("phase changed", { ...initial, phase: "threat_model" });
+        });
+        await f.tracker.refresh();
+        await appendFile(
+          f.parent,
+          jsonLines([
+            nativeCommand("smaller", progressMarker("discovery", 0, 8)),
+            nativeCommand("restored", progressMarker("discovery", 0, 9)),
+          ]) + "\n",
+        );
+        await f.tracker.stop();
+        expect(f.updates.at(-1)).toEqual({
+          phase: "attack_path",
+          filesCompleted: 5,
+          filesTotal: 9,
+        });
+      } finally {
+        await f.close();
+      }
+    },
+  );
+
+  test.each([false, true])(
+    "restores replayed inventory when its delayed live copy is rejected (workers first: %p)",
+    async (workerFirst) => {
+      const f = await fixture(workerFirst);
+      const initial = {
+        phase: "discovery",
+        filesCompleted: 0,
+        filesTotal: 8,
+      } as const;
+      const larger = { ...initial, filesTotal: 9 };
+      try {
+        await appendFile(
+          f.parent,
+          jsonLines([
+            nativeCommand("initial", progressMarker("discovery", 0, 8)),
+          ]) + "\n",
+        );
+        f.emit("initial changed", initial);
+        await f.tracker.refresh();
+        await appendFile(
+          f.parent,
+          jsonLines([
+            nativeCommand("larger", progressMarker("discovery", 0, 9)),
+            nativeCommand("final", progressMarker("discovery", 0, 8)),
+          ]) + "\n",
+        );
+        await appendSessionItem(f.worker, progressMessage(5, 9, "attack_path"));
+        await f.tracker.refresh();
+        f.emit("larger changed", larger);
+        await f.tracker.refresh();
+        // As in the API, observe the final live source before its count guard
+        // rejects the zero following provisional worker coverage.
+        f.tracker.recordParentProgress(
+          initial,
+          completedCommand("final", progressMarker("discovery", 0, 8)),
+        );
+        await f.tracker.stop();
+        await f.tracker.refresh();
+        expect(f.updates.at(-1)).toEqual(initial);
+        // An older delayed inventory cannot undo the source-ordered final one.
+        f.tracker.recordParentProgress(
+          larger,
+          completedCommand("larger", progressMarker("discovery", 0, 9)),
+        );
+        await f.tracker.refresh();
+        expect(f.updates.at(-1)).toEqual(initial);
+      } finally {
+        await f.close();
+      }
+    },
+  );
+
+  test.each(["missing", "partial", "older raw copy"])(
+    "keeps live inventory while its saved row is %s",
+    async (persistence) => {
+      const f = await fixture();
+      const initial = {
+        phase: "discovery",
+        filesCompleted: 0,
+        filesTotal: 9,
+      } as const;
+      const current = { ...initial, filesTotal: 8 };
+      const row =
+        JSON.stringify(
+          nativeCommand("current", progressMarker("discovery", 0, 8)),
+        ) + "\n";
+      try {
+        if (persistence === "older raw copy")
+          await appendSessionItem(f.parent, {
+            type: "custom_tool_call_output",
+            call_id: "older-eight",
+            output: progressMarker("discovery", 0, 8),
+          });
+        await appendFile(
+          f.parent,
+          JSON.stringify(
+            nativeCommand("original", progressMarker("discovery", 0, 9)),
+          ) + "\n",
+        );
+        if (persistence === "partial")
+          await appendFile(f.parent, row.slice(0, 30));
+        expect(f.emit("changed-display", initial)).toBe(true);
+        expect(f.emit("current", current)).toBe(true);
+        await appendSessionItem(f.worker, progressMessage(6, 9, "attack_path"));
+        await f.tracker.refresh();
+        expect(f.updates.at(-1)).toEqual(current);
+        expect(
+          f.updates.slice(1).every((update) => update.filesTotal === 8),
+        ).toBe(true);
+        await appendFile(
+          f.parent,
+          persistence === "partial" ? row.slice(30) : row,
+        );
+        await f.tracker.stop();
+        expect(f.updates.at(-1)).toEqual(current);
+        expect(
+          f.updates.slice(1).every((update) => update.filesTotal === 8),
+        ).toBe(true);
+      } finally {
+        await f.close();
+      }
+    },
+  );
+
+  test.each(
+    [false, true].flatMap((workerFirst) =>
+      [false, true].map((changedDisplay) => ({ workerFirst, changedDisplay })),
+    ),
+  )(
+    "bounds an inventory observed during close with a later exact completion (workers first=$workerFirst, changed display=$changedDisplay)",
+    async ({ workerFirst, changedDisplay }) => {
+      const f = await fixture(workerFirst);
+      const initial = {
+        phase: "discovery",
+        filesCompleted: 0,
+        filesTotal: 9,
+      } as const;
+      const smaller = { ...initial, filesTotal: 8 };
+      try {
+        await appendFile(
+          f.parent,
+          JSON.stringify(
+            nativeCommand("original", progressMarker("discovery", 0, 9)),
+          ) + "\n",
+        );
+        await appendSessionItem(f.worker, progressMessage(5, 9, "attack_path"));
+        f.beforeClose(() => {
+          expect(
+            f.emit(changedDisplay ? "changed-display" : "original", initial),
+          ).toBe(true);
+        });
+        await f.tracker.refresh();
+        expect(f.updates.at(-1)).toEqual({
+          phase: "attack_path",
+          filesCompleted: 5,
+          filesTotal: 9,
+        });
+        // The read boundary and equal output do not locate the live command.
+        // An exact later completion bounds it before the new saved inventory.
+        await appendFile(
+          f.parent,
+          JSON.stringify(nativeCommand("anchor", "Inventory batch finished.")) +
+            "\n",
+        );
+        f.tracker.recordParentItem(
+          completedCommand("anchor", "Inventory batch finished."),
+        );
+        await appendFile(
+          f.parent,
+          JSON.stringify(
+            nativeCommand("smaller", progressMarker("discovery", 0, 8)),
+          ) + "\n",
+        );
+        await f.tracker.refresh();
+        expect(f.updates.at(-1)).toEqual(smaller);
+        await appendSessionItem(f.worker, progressMessage(6, 9, "attack_path"));
+        await f.tracker.stop();
+        expect(f.updates.at(-1)).toEqual(smaller);
+      } finally {
+        await f.close();
+      }
+    },
+  );
+
+  test.each([false, true])(
+    "keeps delayed full command progress after a rejected inventory (duplicate: %p)",
+    async (duplicate) => {
+      const f = await fixture();
+      const initial = {
+        phase: "discovery",
+        filesCompleted: 0,
+        filesTotal: 9,
+      } as const;
+      const discovery = { ...initial, filesCompleted: 3 };
+      const validation = { ...discovery, phase: "validation" } as const;
+      try {
+        await appendFile(
+          f.parent,
+          JSON.stringify(
+            nativeCommand("inventory", progressMarker("discovery", 0, 9)),
+          ) + "\n",
+        );
+        expect(f.emit("inventory", initial)).toBe(true);
+        await f.tracker.refresh();
+        expect(f.emit("unmatched-discovery", discovery)).toBe(true);
+        await appendSessionItem(f.parent, progressMessage(3, 9));
+        await appendFile(
+          f.parent,
+          JSON.stringify(nativeCommand("review", persistedCommandOutput)) +
+            "\n",
+        );
+        await appendSessionItem(f.parent, progressMessage(0, 9));
+        if (duplicate)
+          await appendFile(
+            f.parent,
+            JSON.stringify({
+              type: "event_msg",
+              payload: {
+                type: "item_completed",
+                item: {
+                  type: "AgentMessage",
+                  content: [
+                    { type: "Text", text: progressMarker("discovery", 0, 9) },
+                  ],
+                },
+              },
+            }) + "\n",
+          );
+        await f.tracker.refresh();
+        expect(
+          f.emit(
+            "review",
+            validation,
+            commandOutput(progressMarker("validation", 3, 9)),
+          ),
+        ).toBe(true);
+        await f.tracker.stop();
+        expect(f.updates.at(-1)).toEqual(validation);
+      } finally {
+        await f.close();
+      }
+    },
+  );
+
+  test.each([false, true])(
+    "recovers a repeated live total from newer inventories (same completion: %p)",
+    async (sameCompletion) => {
+      const f = await fixture();
+      const initial = {
+        phase: "discovery",
+        filesCompleted: 0,
+        filesTotal: 9,
+      } as const;
+      try {
+        await appendFile(
+          f.parent,
+          JSON.stringify(
+            nativeCommand("original", progressMarker("discovery", 0, 9)),
+          ) + "\n",
+        );
+        expect(f.emit("changed-display", initial)).toBe(true);
+        await appendSessionItem(f.worker, progressMessage(5, 9, "attack_path"));
+        await f.tracker.refresh();
+        const smaller = progressMarker("discovery", 0, 8);
+        const restored = progressMarker("discovery", 0, 9);
+        await appendFile(
+          f.parent,
+          jsonLines(
+            sameCompletion
+              ? [nativeCommand("rescope", smaller + "\n" + restored)]
+              : [
+                  nativeCommand("smaller", smaller),
+                  nativeCommand("restored", restored),
+                ],
+          ) + "\n",
+        );
+        await f.tracker.refresh();
+        await appendSessionItem(f.worker, progressMessage(6, 9, "attack_path"));
+        await f.tracker.stop();
+        expect(f.updates.at(-1)).toEqual({
+          phase: "attack_path",
+          filesCompleted: 6,
+          filesTotal: 9,
+        });
+      } finally {
+        await f.close();
+      }
+    },
+  );
+
+  test.each([false, true])(
+    "releases an older live inventory after a later completion anchor (workers first: %p)",
+    async (workerFirst) => {
+      const f = await fixture(workerFirst);
+      const initial = {
+        phase: "discovery",
+        filesCompleted: 0,
+        filesTotal: 9,
+      } as const;
+      const current = { ...initial, filesTotal: 8 };
+      try {
+        await appendFile(
+          f.parent,
+          jsonLines([
+            nativeCommand("original", progressMarker("discovery", 0, 9)),
+            nativeCommand("smaller", progressMarker("discovery", 0, 8)),
+            nativeCommand("anchor", "Inventory enumeration complete."),
+          ]) + "\n",
+        );
+        await appendSessionItem(f.worker, progressMessage(5, 9, "attack_path"));
+        f.beforeClose(() => {
+          expect(f.emit("changed-display", initial)).toBe(true);
+          f.tracker.recordParentItem(
+            completedCommand("anchor", "Inventory enumeration complete."),
+          );
+        });
+        await f.tracker.refresh();
+        await f.tracker.refresh();
+        await appendSessionItem(f.worker, progressMessage(6, 9, "attack_path"));
+        await f.tracker.stop();
+        expect(f.updates.at(-1)).toEqual(current);
+      } finally {
+        await f.close();
+      }
+    },
+  );
+
+  test.each([false, true])(
+    "retains proven scope when a live inventory is observed but not accepted (workers first: %p)",
+    async (workerFirst) => {
+      const f = await fixture(workerFirst);
+      const initial = {
+        phase: "discovery",
+        filesCompleted: 0,
+        filesTotal: 10,
+      } as const;
+      const current = { ...initial, filesTotal: 7 };
+      try {
+        await appendFile(
+          f.parent,
+          jsonLines([
+            nativeCommand("original", progressMarker("discovery", 0, 10)),
+            nativeCommand("smaller", progressMarker("discovery", 0, 7)),
+          ]) + "\n",
+        );
+        await appendSessionItem(f.parent, {
+          type: "custom_tool_call_output",
+          call_id: "current-seven",
+          output: progressMarker("discovery", 0, 7),
+        });
+        await appendSessionItem(f.worker, progressMessage(5, 5, "attack_path"));
+        f.beforeClose(() => {
+          expect(f.emit("changed-display", initial)).toBe(true);
+        });
+        await f.tracker.refresh();
+        expect(f.updates.at(-1)?.filesCompleted).toBe(5);
+        // The API observes source identity before rejecting a count decrease.
+        // Keep the rejected marker available for inventory reconciliation.
+        f.tracker.recordParentProgress(
+          current,
+          completedCommand("smaller", progressMarker("discovery", 0, 7)),
+        );
+        await f.tracker.refresh();
+        await f.tracker.stop();
+        expect(f.updates.at(-1)).toEqual({
+          phase: "attack_path",
+          filesCompleted: 5,
+          filesTotal: 7,
+        });
+      } finally {
+        await f.close();
+      }
+    },
+  );
+
+  test.each(["discovery", "threat_model"] as const)(
+    "takes scope from inventory when a newer zero-count %s arrives during close",
+    async (phase) => {
+      const f = await fixture(true);
+      const current = { phase, filesCompleted: 0, filesTotal: 8 };
+      try {
+        await appendFile(
+          f.parent,
+          JSON.stringify(
+            nativeCommand("inventory", progressMarker("discovery", 0, 5)),
+          ) + "\n",
+        );
+        await appendSessionItem(f.worker, progressMessage(3, 8, "attack_path"));
+        f.beforeClose(async () => {
+          await appendFile(
+            f.parent,
+            JSON.stringify(
+              nativeCommand("next-phase", progressMarker(phase, 0, 8)),
+            ) + "\n",
+          );
+          expect(f.emit("next-phase", current)).toBe(true);
+        });
+        await f.tracker.refresh();
+        await f.tracker.stop();
+        expect(f.updates.at(-1)).toEqual(
+          phase === "discovery"
+            ? { phase: "attack_path", filesCompleted: 3, filesTotal: 8 }
+            : { phase: "discovery", filesCompleted: 0, filesTotal: 5 },
+        );
+      } finally {
+        await f.close();
+      }
+    },
+  );
+});
+
 test("keeps the parent frontier ahead of duplicate saved inventory", async () => {
   const { home, parent } = await workerSessionFixture();
   const inventory = {
