@@ -144,7 +144,18 @@ Promise.all([
   generate().then((document) => ["models.ts", document]),
   generateSemanticModels().then((document) => ["semantic-models.ts", document]),
 ]).then((documents) => {
-  for (const [filename, models] of documents) {
+  const shared = ["finding-normalization"].map((name) => [
+    `${name}.ts`,
+    `/* Generated from plugin ${name}.ts. Run \`pnpm generate:models\`. */\n` +
+      readFileSync(
+        join(
+          packageRoot,
+          `../../plugins/codex-security/mcp-app/src/${name}.ts`,
+        ),
+        "utf8",
+      ),
+  ]);
+  for (const [filename, models] of [...documents, ...shared]) {
     const output = join(packageRoot, "src", filename);
     if (process.argv.includes("--check")) {
       if (readFileSync(output, "utf8").replaceAll("\r\n", "\n") !== models) {

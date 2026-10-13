@@ -25,8 +25,9 @@ def publication_scan(workbench_api, workbench_db, tmp_path, monkeypatch):
         (target / "subdir" / "extract.py").write_text("# Synthetic scan target\n")
         if paths is not None:
             for directory in [*paths, "unrelated"]:
-                (target / directory).mkdir(exist_ok=True)
-                (target / directory / "extract.py").write_text("# Synthetic scoped target\n")
+                if not (target / directory).is_file():
+                    (target / directory).mkdir(exist_ok=True)
+                    (target / directory / "extract.py").write_text("# Synthetic scoped target\n")
         include_paths = paths if paths is not None else [scope]
         scan_dir = tmp_path / "scan"
         scan_dir.mkdir(mode=0o700)
@@ -358,10 +359,11 @@ def test_stopped_deep_scan_preserves_checkpoint_without_coverage(
 
 
 @pytest.mark.parametrize("resumed", [False, True])
+@pytest.mark.parametrize("scope", ["./subdir/", "./subdir/extract.py"])
 def test_scoped_deep_completion_filters_old_parent_and_preserves_accepted_sources(
-    workbench_api, workbench_db, publication_scan, resumed
+    workbench_api, workbench_db, publication_scan, resumed, scope
 ):
-    scan = publication_scan(paths=["subdir", "background jobs"])
+    scan = publication_scan(paths=[scope, "background jobs"])
     findings = []
     for index, directory in enumerate(["subdir", "background jobs", "unrelated"]):
         finding = copy.deepcopy(scan.findings[0])
@@ -371,6 +373,10 @@ def test_scoped_deep_completion_filters_old_parent_and_preserves_accepted_source
         for key in ("findingId", "occurrenceId", "fingerprints"):
             finding.pop(key, None)
         findings.append(finding)
+    descendant = copy.deepcopy(findings[0])
+    descendant["identity"]["anchor"] = "scope-descendant"
+    descendant["locations"] = [{"path": "subdir/extract.py/generated", "startLine": 1}]
+    findings.append(descendant)
     (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": findings}))
     accepted = []
     if resumed:
@@ -390,7 +396,9 @@ def test_scoped_deep_completion_filters_old_parent_and_preserves_accepted_source
         row["locations"][0]["path"]
         for row in json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
     ]
-    assert paths == ["subdir/extract.py", "background jobs/extract.py"]
+    assert paths == ["subdir/extract.py", "background jobs/extract.py"] + (
+        [] if scope.endswith(".py") else ["subdir/extract.py/generated"]
+    )
     assert "Scope finding unrelated" not in (scan.scan_dir / "report.md").read_text()
     indexed = workbench_db.execute(
         "SELECT details_json FROM findings",

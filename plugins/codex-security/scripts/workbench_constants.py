@@ -2,6 +2,15 @@
 
 import argparse
 
+TOKEN_FIELDS = {
+    "input_tokens": "inputTokens",
+    "cached_input_tokens": "cachedInputTokens",
+    "cache_write_input_tokens": "cacheWriteInputTokens",
+    "output_tokens": "outputTokens",
+    "reasoning_output_tokens": "reasoningOutputTokens",
+    "total_tokens": "totalTokens",
+}
+
 MODES = ("diff", "standard", "deep")
 DIFF_TARGET_KINDS = ("working_tree", "commit", "range")
 PHASES = ("preflight", "threat_model", "discovery", "validation", "attack_path", "reporting")

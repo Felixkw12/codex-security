@@ -20,9 +20,8 @@ import {
   type ScanDraftPublicationOptions,
 } from "./scan-draft-publication.js";
 
-type CanonicalFinding = FindingsDocument["findings"][number];
 type Finding = Pick<
-  CanonicalFinding,
+  FindingsDocument["findings"][number],
   | "title"
   | "locations"
   | "severity"

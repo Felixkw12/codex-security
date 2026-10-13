@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { posix } from "node:path";
 import type {
   CoverageDocument,
   CoverageMode,
@@ -384,13 +385,29 @@ export interface PreparedScanDraft {
 
 export function findingsWithinScope<
   T extends { locations: Array<{ path: string }> },
->(findings: T[], includePaths: readonly string[]): T[] {
-  if (includePaths.includes(".")) return findings;
+>(
+  findings: T[],
+  includePaths: readonly string[],
+  filePaths: readonly string[] = [],
+): T[] {
+  const scopes = includePaths.map((scope) =>
+    posix.normalize(scope).replace(/\/$/u, ""),
+  );
+  if (scopes.includes(".")) return findings;
+  const files = new Set(
+    filePaths.map((path) => posix.normalize(path).replace(/\/$/u, "")),
+  );
+  const targets = scopes.map((scope) => ({
+    path: scope,
+    isFile: files.has(scope),
+  }));
   return findings.filter((finding) =>
     finding.locations.some((location) => {
-      const path = location.path.replace(/^\.\//u, "");
-      return includePaths.some(
-        (scope) => path === scope || path.startsWith(`${scope}/`),
+      const path = posix.normalize(location.path);
+      return targets.some(
+        (scope) =>
+          path === scope.path ||
+          (!scope.isFile && path.startsWith(`${scope.path}/`)),
       );
     }),
   );
@@ -420,7 +437,11 @@ export function prepareSemanticScanDraft(
     findings: {
       findings: prepareScanFindings(
         context.mode === "deep"
-          ? findingsWithinScope(input.findings, scope.includePaths)
+          ? findingsWithinScope(
+              input.findings,
+              scope.includePaths,
+              trustedScope["filePaths"] as string[] | undefined,
+            )
           : input.findings,
         context.mode,
       ),

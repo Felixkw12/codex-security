@@ -14,7 +14,7 @@ import stat
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -587,6 +587,7 @@ def merge_saved_results(
     selected_parent_checkpoint: str | None = None,
     write_snapshots: bool = True,
     composed_child_ids: tuple[str, ...] = (),
+    finding_scope: list[tuple[str, bool]] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None:
     """Read only bound current parent/checkpoint files; return an unsealed loss-preserving union."""
     initial_warnings = set(warnings)
@@ -939,8 +940,14 @@ def merge_saved_results(
             isinstance(location, dict)
             and isinstance(location.get("path"), str)
             and any(
-                path_within_scope(location["path"], path)
-                for path in binding["scope"]["includePaths"]
+                PurePosixPath(location["path"]) == PurePosixPath(path)
+                if is_file
+                else path_within_scope(location["path"], path)
+                for path, is_file in (
+                    finding_scope
+                    if finding_scope is not None
+                    else [(path, False) for path in binding["scope"]["includePaths"]]
+                )
             )
             for location in locations
         )
@@ -1602,6 +1609,7 @@ def _stopped_child_draft(
             warnings,
             stopped=True,
             reason="Independent scan stopped before aggregation.",
+            finding_scope=db.requested_finding_scope(child) if child["mode"] == "deep" else None,
             frozen_source_digests=frozen_sources,
             frozen_model_source=frozen_model,
             write_snapshots=write_snapshots,
@@ -1613,7 +1621,7 @@ def _stopped_child_draft(
             completion_binding=binding,
             completion_warnings=warnings,
             draft_documents=documents,
-            finding_scope=db.requested_scan_paths(child) if child["mode"] == "deep" else None,
+            finding_scope=db.requested_finding_scope(child) if child["mode"] == "deep" else None,
         )
     db.verify_manifest_binding(child, manifest)
     projected = project_scan_artifacts(
@@ -2045,6 +2053,7 @@ def preserve_scan_results_locked(
         frozen_source_digests=frozen_source_digests,
         frozen_model_source=frozen_model_source,
         composed_child_ids=tuple(child["id"] for child in composition.children),
+        finding_scope=db.requested_finding_scope(scan) if scan["mode"] == "deep" else None,
         selected_parent_checkpoint=selected_parent_checkpoint,
         allow_frozen_legacy_parent=(
             include_parent_with_recovery
@@ -2086,7 +2095,7 @@ def preserve_scan_results_locked(
         completion_binding=binding,
         completion_warnings=warnings,
         draft_documents=documents,
-        finding_scope=db.requested_scan_paths(scan) if scan["mode"] == "deep" else None,
+        finding_scope=db.requested_finding_scope(scan) if scan["mode"] == "deep" else None,
     )
     snapshots = _snapshot_published_outputs(scan_dir)
     try:

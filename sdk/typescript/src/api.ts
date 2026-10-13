@@ -104,7 +104,7 @@ import {
   type ThreadOptions,
   type TurnOptions,
 } from "@openai/codex-sdk";
-import { z } from "incur";
+import { z } from "zod";
 import { readThreatModelPath } from "./artifact-export.js";
 import { isRecord } from "./record.js";
 import {
@@ -386,21 +386,19 @@ export interface ValidationOptions extends Pick<
   finding: string | object;
 }
 
-const VALIDATION_DISPOSITIONS = [
-  "reportable",
-  "suppressed",
-  "not_applicable",
-  "deferred",
-] as const;
-
 const validationResponseSchema = z.strictObject({
-  disposition: z.enum(VALIDATION_DISPOSITIONS),
+  disposition: z.enum([
+    "reportable",
+    "suppressed",
+    "not_applicable",
+    "deferred",
+  ]),
   report: z.string().trim().min(1),
 });
 
-export interface ValidationResult {
-  disposition: (typeof VALIDATION_DISPOSITIONS)[number];
-  report: string;
+export interface ValidationResult extends z.infer<
+  typeof validationResponseSchema
+> {
   outputDir: string;
   threadId: string | null;
 }
