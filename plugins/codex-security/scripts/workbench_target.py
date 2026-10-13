@@ -199,23 +199,25 @@ def trusted_git_executable(protected_root: Path) -> str | None:
     return _resolve_git_executable(protected_root, configured)
 
 
-def _historical_repository_root(target: Path) -> Path:
+def _historical_repository_roots(target: Path) -> Iterator[Path]:
     try:
-        return _protected_repository_root(target)
+        yield _protected_repository_root(target)
     except (OSError, RuntimeError):
-        # An unavailable descendant still excludes its lexical checkout ancestry.
-        root = Path(os.path.abspath(target))
-        protected = root
-        for ancestor in (root, *root.parents):
-            try:
-                (ancestor / ".git").lstat()
-            except (OSError, RuntimeError):
-                continue
-            try:
-                protected = ancestor.resolve()
-            except (OSError, RuntimeError):
-                protected = ancestor
-        return protected
+        pass
+    # A moved or unavailable descendant still excludes its lexical checkout ancestry.
+    root = Path(os.path.abspath(target))
+    protected = root
+    for ancestor in (root, *root.parents):
+        try:
+            (ancestor / ".git").lstat()
+        except (OSError, RuntimeError):
+            continue
+        protected = ancestor
+    yield protected
+    try:
+        yield protected.resolve()
+    except (OSError, RuntimeError):
+        pass
 
 
 def _resolve_git_executable(
@@ -240,7 +242,11 @@ def _resolve_git_executable(
     try:
         repositories = [_protected_repository_root(protected_root)]
         if configured is None:
-            repositories.extend(_historical_repository_root(root) for root in discovery_roots)
+            repositories.extend(
+                repository
+                for root in discovery_roots
+                for repository in _historical_repository_roots(root)
+            )
     except (OSError, RuntimeError):
         return None
 

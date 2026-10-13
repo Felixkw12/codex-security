@@ -2798,7 +2798,16 @@ def test_registration_keeps_a_competing_targets_existing_id(tmp_path: Path) -> N
 
 
 @pytest.mark.skipif(os.name == "nt", reason="The executable marker fixture is a POSIX script")
-@pytest.mark.parametrize("executable_source", ["caller", "historical", "unavailable-historical"])
+@pytest.mark.parametrize(
+    "executable_source",
+    [
+        "caller",
+        "historical",
+        "unavailable-historical",
+        "redirected-historical",
+        "redirected-destination",
+    ],
+)
 def test_identity_migration_excludes_all_history_and_caller_git(
     tmp_path: Path, executable_source: str
 ) -> None:
@@ -2811,7 +2820,13 @@ def test_identity_migration_excludes_all_history_and_caller_git(
     state.mkdir(mode=0o700)
     connection, _ = create_historical_database(48)
     timestamp = "2026-08-01T00:00:00Z"
+    destination = tmp_path / "destination"
+    if executable_source.startswith("redirected-"):
+        initialize_git_repository(destination)
+        (other / "subdir").symlink_to(destination, target_is_directory=True)
     for index, repository in enumerate((saved, other)):
+        if index == 1 and executable_source.startswith("redirected-"):
+            repository = repository / "subdir"
         if index == 1 and executable_source == "unavailable-historical":
             (repository / "replaced-component").write_text("no longer a directory\n")
             repository = repository / "replaced-component" / "old-target"
@@ -2825,6 +2840,8 @@ def test_identity_migration_excludes_all_history_and_caller_git(
         connection.backup(database)
     connection.close()
     executable_root = caller if executable_source == "caller" else other
+    if executable_source == "redirected-destination":
+        executable_root = destination
     marker = tmp_path / "repository-git-ran"
     executable = executable_root / "git"
     executable.write_text(
