@@ -3524,7 +3524,7 @@ def test_legacy_reducer_replay_fences_partial_drafts_after_output_failure(
     )
     assert (outcome["returncode"] != 0) is terminal
     if terminal:
-        assert "retry their publication" in outcome["stderr"]
+        assert "Deep Scan is terminal" in outcome["stderr"]
         assert all((scan_dir / name).read_bytes() == contents for name, contents in before.items())
         completed = run_workbench(
             state, "complete-scan", "--scan-id", scan_id, environment=environment
