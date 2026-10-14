@@ -6,6 +6,7 @@ import {
   readFile,
   realpath,
   rename,
+  rm,
   symlink,
   unlink,
   writeFile,
@@ -27,6 +28,7 @@ for (const mode of [
   "relative",
   "linked file",
   "retargeted",
+  "retargeted shared storage",
 ] as const) {
   test(`retains storage selected through an explicit Git file: ${mode}`, async () => {
     const repository = await fixtures.create("patch-selected-file-");
@@ -66,7 +68,10 @@ for (const mode of [
     await mkdir(component);
     const currentDirectory = mode === "relative" ? component : repository;
     const environment = {
-      GIT_DIR: mode === "relative" ? relative(component, marker) : marker,
+      GIT_DIR: (mode === "relative"
+        ? relative(component, marker)
+        : marker
+      ).replaceAll("\\", "/"),
       GIT_WORK_TREE: repository,
     };
     const selectedGit = (...args: string[]) =>
@@ -83,8 +88,20 @@ for (const mode of [
     const head = selectedGit("rev-parse", "HEAD");
     const index = await readFile(join(administration, "index"));
     const replacement = join(support, "replacement");
-    if (mode === "retargeted")
-      await cp(administration, replacement, { recursive: true });
+    const retargeted = mode.startsWith("retargeted");
+    if (mode === "retargeted shared storage") {
+      await mkdir(join(administration, "lfs", "objects"), { recursive: true });
+      await mkdir(join(administration, "lfs", "tmp"), { recursive: true });
+    }
+    if (retargeted) await cp(administration, replacement, { recursive: true });
+    if (mode === "retargeted shared storage") {
+      await rm(join(replacement, "lfs"), { recursive: true });
+      await symlink(
+        join(administration, "lfs"),
+        join(replacement, "lfs"),
+        linkType,
+      );
+    }
     const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
       currentDirectory,
       environment,
@@ -101,19 +118,25 @@ for (const mode of [
         expect(output!.appServer!.permissions!.readOnlyPaths).not.toContain(
           marker,
         );
-        if (mode === "retargeted") {
+        if (retargeted) {
           await rename(alias, join(repository, "original-alias"));
           await symlink(replacement, alias, linkType);
+          if (mode === "retargeted shared storage") {
+            expect(
+              await realpath(selectedGit("rev-parse", "--absolute-git-dir")),
+            ).toBe(await realpath(replacement));
+            expect(await realpath(join(alias, "lfs"))).toBe(
+              join(administration, "lfs"),
+            );
+          }
         }
         await writeFile(join(repository, "app.ts"), "after\n");
         output!.stdout.write("Synthetic patch complete.\n");
         return 0;
       },
     });
-    expect(outcome.exitCode, outcome.stderr).toBe(
-      mode === "retargeted" ? 2 : 0,
-    );
-    if (mode === "retargeted")
+    expect(outcome.exitCode, outcome.stderr).toBe(retargeted ? 2 : 0);
+    if (retargeted)
       expect(outcome.stderr).toContain("changed location during the patch");
     else expect(JSON.parse(outcome.stdout).files).toEqual(["app.ts"]);
     expect(await readFile(marker, "utf8")).toBe(contents);
@@ -133,6 +156,7 @@ for (const mode of [
   "implicit absolute",
   "implicit relative",
   "implicit retargeted",
+  "implicit retargeted shared storage",
   "overridden alias",
   "overridden missing",
 ] as const) {
@@ -180,8 +204,16 @@ for (const mode of [
     const head = git("rev-parse", "HEAD");
     const index = await readFile(join(administration, "index"));
     const replacement = await fixtures.create("patch-common-replacement-");
-    if (mode === "implicit retargeted")
-      await cp(common, replacement, { recursive: true });
+    const retargeted = mode.startsWith("implicit retargeted");
+    if (mode === "implicit retargeted shared storage") {
+      await mkdir(join(common, "lfs", "objects"), { recursive: true });
+      await mkdir(join(common, "lfs", "tmp"), { recursive: true });
+    }
+    if (retargeted) await cp(common, replacement, { recursive: true });
+    if (mode === "implicit retargeted shared storage") {
+      await rm(join(replacement, "lfs"), { recursive: true });
+      await symlink(join(common, "lfs"), join(replacement, "lfs"), linkType);
+    }
     let launches = 0;
     const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
       currentDirectory: selected,
@@ -199,9 +231,27 @@ for (const mode of [
             : [join(common, "lfs", "objects"), join(common, "lfs", "tmp")],
         );
         expect(output!.appServer!.permissions!.readOnlyPaths).toContain(common);
-        if (mode === "implicit retargeted") {
+        if (retargeted) {
           await rename(alias, join(selected, "original-common-alias"));
           await symlink(replacement, alias, linkType);
+          if (mode === "implicit retargeted shared storage") {
+            expect(
+              await realpath(
+                execFileSync(
+                  "git",
+                  ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+                  {
+                    cwd: selected,
+                    env: { ...process.env, ...environment },
+                    encoding: "utf8",
+                  },
+                ).trim(),
+              ),
+            ).toBe(await realpath(replacement));
+            expect(await realpath(join(alias, "lfs"))).toBe(
+              join(common, "lfs"),
+            );
+          }
         }
         await writeFile(join(selected, "app.ts"), "after\n");
         output!.stdout.write("Synthetic patch complete.\n");
@@ -209,10 +259,8 @@ for (const mode of [
       },
     });
     expect(launches).toBe(1);
-    expect(outcome.exitCode, outcome.stderr).toBe(
-      mode === "implicit retargeted" ? 2 : 0,
-    );
-    if (mode === "implicit retargeted")
+    expect(outcome.exitCode, outcome.stderr).toBe(retargeted ? 2 : 0);
+    if (retargeted)
       expect(outcome.stderr).toContain("changed location during the patch");
     else expect(JSON.parse(outcome.stdout).files).toEqual(["app.ts"]);
     expect(await readFile(join(administration, "commondir"), "utf8")).toBe(
