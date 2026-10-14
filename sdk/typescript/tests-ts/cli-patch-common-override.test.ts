@@ -68,7 +68,10 @@ for (const mode of [
     await mkdir(component);
     const currentDirectory = mode === "relative" ? component : repository;
     const environment = {
-      GIT_DIR: mode === "relative" ? relative(component, marker) : marker,
+      GIT_DIR: (mode === "relative"
+        ? relative(component, marker)
+        : marker
+      ).replaceAll("\\", "/"),
       GIT_WORK_TREE: repository,
     };
     const selectedGit = (...args: string[]) =>
@@ -119,9 +122,9 @@ for (const mode of [
           await rename(alias, join(repository, "original-alias"));
           await symlink(replacement, alias, linkType);
           if (mode === "retargeted shared storage") {
-            expect(selectedGit("rev-parse", "--absolute-git-dir")).toBe(
-              replacement,
-            );
+            expect(
+              await realpath(selectedGit("rev-parse", "--absolute-git-dir")),
+            ).toBe(await realpath(replacement));
             expect(await realpath(join(alias, "lfs"))).toBe(
               join(administration, "lfs"),
             );
@@ -233,16 +236,18 @@ for (const mode of [
           await symlink(replacement, alias, linkType);
           if (mode === "implicit retargeted shared storage") {
             expect(
-              execFileSync(
-                "git",
-                ["rev-parse", "--path-format=absolute", "--git-common-dir"],
-                {
-                  cwd: selected,
-                  env: { ...process.env, ...environment },
-                  encoding: "utf8",
-                },
-              ).trim(),
-            ).toBe(replacement);
+              await realpath(
+                execFileSync(
+                  "git",
+                  ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+                  {
+                    cwd: selected,
+                    env: { ...process.env, ...environment },
+                    encoding: "utf8",
+                  },
+                ).trim(),
+              ),
+            ).toBe(await realpath(replacement));
             expect(await realpath(join(alias, "lfs"))).toBe(
               join(common, "lfs"),
             );
