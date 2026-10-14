@@ -502,6 +502,7 @@ test.each(["absolute", "relative"] as const)(
   async (selection) => {
     const { directory, git } = await publicationRepository(fixtures);
     await writeFile(join(directory, "src/finding-2.ts"), "original second\n");
+    await writeFile(join(directory, ".gitignore"), "administration-alias\n");
     git("add", ".");
     git("commit", "-m", "Synthetic successive patch baseline");
     const administration = await realpath(join(directory, ".git"));
