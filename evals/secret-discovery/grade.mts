@@ -34,7 +34,7 @@ export interface Result {
 }
 
 const explicitSecretTerms =
-  /secrets?|credentials?|passwords?|tokens?|(?:api|private)[-_ ]?keys?|hard[-_ ]?cod(?:e[ds]?|ing)?/i;
+  /secrets?|credentials?|passwords?|tokens?|(?:api|private|cryptographic)[-_ ]?keys?|hard[-_ ]?cod(?:e[ds]?|ing)?/i;
 const secretTerms = `${explicitSecretTerms.source}|sensitive[-_ ]?(?:data|information)[-_ ]?exposures?`;
 const explicitSecretCategory = new RegExp(
   String.raw`\b(?:${explicitSecretTerms.source})\b`,
@@ -228,7 +228,8 @@ export function gradeResult(
             !matchedCases.some(
               (expected) =>
                 matchesLocation(location, expected) ||
-                (location.role === "sink" &&
+                ((location.role === "sink" ||
+                  location.role === "sensitive_operation") &&
                   matchesConsumer(location, expected)),
             )),
       )

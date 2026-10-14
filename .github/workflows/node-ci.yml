@@ -444,9 +444,9 @@ jobs:
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
         working-directory: evals/triage-finding
         run: node --run test:deterministic
-      - name: Test secret discovery eval contracts
+      - name: Test scan eval contracts
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
-        run: node --experimental-strip-types --test evals/secret-discovery/test_*.mts
+        run: node --experimental-strip-types --test evals/secret-discovery/test_*.mts evals/scan-comparison/test_*.mts
 
   required-test:
     name: ${{ matrix.os }} / node-22
