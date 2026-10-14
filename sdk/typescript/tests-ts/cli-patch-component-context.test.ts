@@ -617,7 +617,10 @@ for (const selection of [
       await symlink(common, storageAlias, linkType);
     }
     const environment = {
-      GIT_DIR: selection === "absolute" ? marker : relative(directory, marker),
+      GIT_DIR: (selection === "absolute"
+        ? marker
+        : relative(directory, marker)
+      ).replaceAll(sep, "/"),
       GIT_WORK_TREE: directory,
       ...(selection === "common override"
         ? { GIT_COMMON_DIR: storageAlias }
@@ -628,9 +631,12 @@ for (const selection of [
         directory,
         environment,
       });
-    expect(await selectedGit(["rev-parse", "--absolute-git-dir"])).toBe(
-      administration,
-    );
+    expect(
+      (await selectedGit(["rev-parse", "--absolute-git-dir"])).replaceAll(
+        sep,
+        "/",
+      ),
+    ).toBe(administration.replaceAll(sep, "/"));
     await selectedGit(["config", "lfs.storage", join(storageAlias, "lfs")]);
     const originalHead = git("rev-parse", "HEAD");
     const originalIndex = await readFile(join(administration, "index"));
@@ -643,7 +649,8 @@ for (const selection of [
       onWorkbench: () => savedScan(result, "scan-1", directory),
       onRepositoryCommand: (command, args, cwd, options) => {
         const value = options?.environment?.["GIT_COMMON_DIR"];
-        if (value !== undefined) boundCommonDirectories.add(value);
+        if (value !== undefined)
+          boundCommonDirectories.add(value.replaceAll(sep, "/"));
         return runGitRepositoryCommand(command, args, cwd, {
           ...options,
           environment: { ...environment, ...options?.environment },
@@ -670,7 +677,9 @@ for (const selection of [
       ]),
     );
     expect(boundCommonDirectories).toEqual(
-      new Set(selection === "common override" ? [common] : []),
+      new Set(
+        selection === "common override" ? [common.replaceAll(sep, "/")] : [],
+      ),
     );
     expect(JSON.parse(outcome.stdout)).toMatchObject({
       files: ["src/finding-1.ts", "src/finding-2.ts"],
