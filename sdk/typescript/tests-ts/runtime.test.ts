@@ -4749,7 +4749,21 @@ process.stdout.write(JSON.stringify({accepted,aliases,error}));`,
             "$ErrorActionPreference = 'Stop'",
             "Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:CODEX_SECURITY_TEST_ACL_PATH | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl",
           ],
-          { ...process.env, CODEX_SECURITY_TEST_ACL_PATH: path },
+          {
+            ...Object.fromEntries(
+              Object.entries(process.env).filter(
+                ([name]) => name.toUpperCase() !== "PSMODULEPATH",
+              ),
+            ),
+            CODEX_SECURITY_TEST_ACL_PATH: path,
+            PSModulePath: join(
+              process.env["SystemRoot"] ?? "C:\\Windows",
+              "System32",
+              "WindowsPowerShell",
+              "v1.0",
+              "Modules",
+            ),
+          },
         );
         expect(inspected.status, inspected.stderr).toBe(0);
         return inspected.stdout.trim();

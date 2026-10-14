@@ -1241,14 +1241,14 @@ interface CliDependencies {
 // Apply coordinator-owned Git bindings after native shell environment filtering.
 const PATCH_GIT_ENVIRONMENT_RUNNER = `
 const { spawn } = require("node:child_process");
-const { readSync } = require("node:fs");
+const { readSync, writeSync } = require("node:fs");
 const [headerLength, command, ...args] = process.argv.slice(1);
 const header = Buffer.alloc(Number(headerLength));
 // Read exactly the bindings, leaving command input on the inherited handle.
 for (let offset = 0; offset < header.length;) {
   const bytes = readSync(0, header, offset, header.length - offset, null);
   if (bytes === 0) {
-    console.error("Snapshot Git bindings ended before the complete frame.");
+    writeSync(2, "Snapshot Git bindings ended before the complete frame.\\n");
     process.exit(1);
   }
   offset += bytes;
@@ -1270,7 +1270,7 @@ for (const [name, value] of JSON.parse(header.toString())) {
 }
 // Inherit sandbox handles so Git does not need an inner runtime pipe.
 const child = spawn(command, [...nativeGitOptions, ...args], { stdio: "inherit" });
-child.on("error", (error) => { console.error(error); process.exitCode = 1; });
+child.on("error", (error) => { writeSync(2, require("node:util").format(error) + "\\n"); process.exitCode = 1; });
 child.on("exit", (code, signal) => {
   if (signal) process.kill(process.pid, signal);
   else process.exitCode = code === 0 ? (process.exitCode ?? 0) : (code ?? 1);
@@ -7565,9 +7565,9 @@ async function patchPublicationDestination(
         "--output",
         "json",
         "--jq",
-        ".[0] | select(. != null) | {url: .web_url, head: .sha, state}",
+        "map(select(.source_project_id == .target_project_id))[0] | select(. != null) | {url: .web_url, head: .sha, state}",
         "--repo",
-        remote,
+        gitlabPatchRepository(remote),
       ]
     : [
         "pr",
@@ -8370,6 +8370,7 @@ async function publishPatchBranch(
   try {
     const { remote, gitlab, command, existing } =
       await patchPublicationDestination(repository, branch, dependencies);
+    const gitlabRepository = gitlab ? gitlabPatchRepository(remote) : remote;
     let url = existing?.url;
     if (existing) {
       const commit = await run("git", [
@@ -8387,6 +8388,7 @@ async function publishPatchBranch(
         );
       }
     }
+
     if (!url) {
       const configuredRecursion = (
         await run("git", ["config", "--list", "--name-only"])
@@ -8418,16 +8420,16 @@ async function publishPatchBranch(
               "create",
               "--draft",
               "--head",
-              remote,
+              gitlabRepository,
               "--source-branch",
               branch,
               "--title",
               PATCH_PR_TITLE,
               "--description",
-              body,
+              gitlabPatchDescription(body),
               "--yes",
               "--repo",
-              remote,
+              gitlabRepository,
             ]
           : [
               "pr",
@@ -8475,6 +8477,22 @@ function patchScpRemote(remote: string) {
     username: match[1] ?? "",
     pathname: match[3]!,
   };
+}
+
+function gitlabPatchRepository(remote: string): string {
+  if (remote.includes("://")) return remote;
+  const scp = patchScpRemote(remote)!;
+  return `ssh://${scp.username ? `${scp.username}@` : ""}${scp.hostname}/${scp.pathname}`;
+}
+
+function gitlabPatchDescription(body: string): string {
+  // GitLab ignores quick actions inside its native fenced blockquotes. Choose
+  // a fence the report cannot close after quick-action CR removal; preserve its
+  // original bytes and end the outer quote at EOF.
+  let fenceLength = 3;
+  for (const match of body.replaceAll("\r", "").matchAll(/^[ \t]*(>+)/gmu))
+    fenceLength = Math.max(fenceLength, match[1]!.length + 1);
+  return `${">".repeat(fenceLength)}\n${body}`;
 }
 
 function patchRemoteHost(remote: string): string | undefined {

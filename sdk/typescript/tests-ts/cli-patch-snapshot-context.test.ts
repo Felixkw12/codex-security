@@ -28,6 +28,8 @@ import {
 
 const fixtures = createTemporaryDirectories(true);
 afterEach(fixtures.cleanup);
+// Native Windows snapshots repeat account and file ACL setup per Git command.
+const nativeSnapshotTimeout = process.platform === "win32" ? 180_000 : 30_000;
 const windows = patchSnapshotWindowsConfig();
 const provider =
   'model_provider = "synthetic"\n[model_providers.synthetic]\nname = "Synthetic"\nbase_url = "http://127.0.0.1:9/v1"\nwire_api = "responses"\n';
@@ -166,116 +168,117 @@ test.each(["unused", "abort", "unexpected failure"])(
   },
 );
 
-test("native snapshots retain Windows Git home fallbacks when HOME is unset", async () => {
-  const root = await fixtures.create("patch-home-fallbacks-");
-  const repository = join(root, "repository"),
-    home = join(root, "home");
-  await Promise.all([mkdir(repository), mkdir(home)]);
-  const emptyConfig = join(root, "empty.gitconfig");
-  await writeFile(emptyConfig, "");
-  const fallback = {
-    USERPROFILE: home,
-    HOMEDRIVE: parse(home).root.slice(0, -1),
-    HOMEPATH: home.slice(parse(home).root.length - 1),
-  };
-  const environment = patchSnapshotEnvironment(
-    await fixtures.create("patch-home-fallback-temp-"),
-    {
-      ...process.env,
-      ...fallback,
-      HOME: undefined,
-      CODEX_HOME: home,
-      GIT_CONFIG_GLOBAL:
-        process.platform === "win32" ? undefined : join(home, ".gitconfig"),
-      GIT_CONFIG_SYSTEM: emptyConfig,
-      GIT_CONFIG_NOSYSTEM: "1",
-    },
-  );
-  const clean = join(root, "clean.cjs");
-  await writeFile(
-    clean,
-    `const fs=require("node:fs"); const expected=${JSON.stringify(fallback)}; const input=fs.readFileSync(0,"utf8"); process.stdout.write(Object.entries(expected).every(([key,value])=>process.env[key]===value) ? input.toUpperCase() : input);\n`,
-  );
-  await writeFile(
-    join(home, ".gitconfig"),
-    `[filter "home-fallback"]\n clean = ${JSON.stringify(`node ${JSON.stringify(clean.replaceAll("\\", "/"))}`)}\n required = true\n`,
-  );
-  await writeFile(
-    join(home, "config.toml"),
-    windows +
-      stringifyToml({
-        shell_environment_policy: {
-          inherit: "all",
-          exclude: ["HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH"],
-          set: {
-            USERPROFILE: join(root, "policy-home"),
-            HOMEDRIVE: "Z:",
-            HOMEPATH: "\\policy-home",
+test(
+  "native snapshots retain Windows Git home fallbacks when HOME is unset",
+  async () => {
+    const root = await fixtures.create("patch-home-fallbacks-");
+    const repository = join(root, "repository"),
+      home = join(root, "home");
+    await Promise.all([mkdir(repository), mkdir(home)]);
+    const emptyConfig = join(root, "empty.gitconfig");
+    await writeFile(emptyConfig, "");
+    const fallback = {
+      USERPROFILE: home,
+      HOMEDRIVE: parse(home).root.slice(0, -1),
+      HOMEPATH: home.slice(parse(home).root.length - 1),
+    };
+    const environment = patchSnapshotEnvironment(
+      await fixtures.create("patch-home-fallback-temp-"),
+      {
+        ...process.env,
+        ...fallback,
+        HOME: undefined,
+        CODEX_HOME: home,
+        GIT_CONFIG_GLOBAL:
+          process.platform === "win32" ? undefined : join(home, ".gitconfig"),
+        GIT_CONFIG_SYSTEM: emptyConfig,
+        GIT_CONFIG_NOSYSTEM: "1",
+      },
+    );
+    const cleanSource = `const fs=require("node:fs"); const expected=${JSON.stringify(fallback)}; const input=fs.readFileSync(0,"utf8"); process.stdout.write(Object.entries(expected).every(([key,value])=>process.env[key]===value) ? input.toUpperCase() : input);`;
+    const cleanCommand = `node -e '${cleanSource.replaceAll("'", "'\\''")}'`;
+    await writeFile(
+      join(home, ".gitconfig"),
+      `[filter "home-fallback"]\n clean = ${JSON.stringify(cleanCommand)}\n required = true\n`,
+    );
+    await writeFile(
+      join(home, "config.toml"),
+      windows +
+        stringifyToml({
+          shell_environment_policy: {
+            inherit: "all",
+            exclude: ["HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH"],
+            set: {
+              USERPROFILE: join(root, "policy-home"),
+              HOMEDRIVE: "Z:",
+              HOMEPATH: "\\policy-home",
+            },
           },
-        },
-      }),
-  );
-  const git = (...args: string[]) =>
-    execFileSync("git", args, {
-      cwd: repository,
-      env: environment,
-      encoding: "utf8",
-    }).trim();
-  git("init", "--initial-branch=main");
-  git("config", "user.name", "Synthetic User");
-  git("config", "user.email", "synthetic@example.test");
-  await writeFile(
-    join(repository, ".gitattributes"),
-    "data filter=home-fallback\n",
-  );
-  await writeFile(join(repository, "data"), "lowercase source\n");
-  git("add", ".");
-  git("commit", "-m", "Synthetic home fallback baseline");
-  expect(git("show", "HEAD:data")).toBe("LOWERCASE SOURCE");
-  const trees: string[] = [];
-  const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
-    currentDirectory: repository,
-    environment,
-    manualCodexPreparation: true,
-    onCodex: async (_args, output) => {
-      output!.appServer!.onPermissions!({
-        directory: repository,
-        environment,
-        snapshotStoragePaths: output!.appServer!.snapshotStoragePaths,
-        profile: {
-          extends: ":workspace",
-          network: { enabled: false },
-          workspace_roots: {},
-          filesystem: Object.fromEntries(
-            output!.appServer!.permissions!.readOnlyPaths.map((path) => [
-              path,
-              { ".": "read" },
-            ]),
-          ),
-        },
-      });
-      await output!.appServer!.onBeforeTurn?.();
-      output!.stdout.write("Synthetic no-op turn.\n");
-      return 0;
-    },
-    onRepositoryCommand: async (command, args, cwd, options) => {
-      const result = await runRepositoryCommand(command, args, cwd, {
-        ...options,
-        environment: { ...environment, ...options?.environment },
-      });
-      if (args.includes("write-tree")) trees.push(result.trim());
-      return result;
-    },
-  });
-  expect(outcome.exitCode, outcome.stderr).toBe(2);
-  expect(trees, outcome.stdout + outcome.stderr).toEqual([
-    git("rev-parse", "HEAD^{tree}"),
-    git("rev-parse", "HEAD^{tree}"),
-  ]);
-  expect(await readFile(join(repository, "data"), "utf8")).toBe(
-    "lowercase source\n",
-  );
-}, 30_000);
+        }),
+    );
+    const git = (...args: string[]) =>
+      execFileSync("git", args, {
+        cwd: repository,
+        env: environment,
+        encoding: "utf8",
+      }).trim();
+    git("init", "--initial-branch=main");
+    git("config", "user.name", "Synthetic User");
+    git("config", "user.email", "synthetic@example.test");
+    await writeFile(
+      join(repository, ".gitattributes"),
+      "data filter=home-fallback\n",
+    );
+    await writeFile(join(repository, "data"), "lowercase source\n");
+    git("add", ".");
+    git("commit", "-m", "Synthetic home fallback baseline");
+    expect(git("show", "HEAD:data")).toBe("LOWERCASE SOURCE");
+    const trees: string[] = [];
+    const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
+      currentDirectory: repository,
+      environment,
+      manualCodexPreparation: true,
+      onCodex: async (_args, output) => {
+        output!.appServer!.onPermissions!({
+          directory: repository,
+          environment,
+          snapshotStoragePaths: output!.appServer!.snapshotStoragePaths,
+          profile: {
+            extends: ":workspace",
+            network: { enabled: false },
+            workspace_roots: {},
+            filesystem: Object.fromEntries(
+              output!.appServer!.permissions!.readOnlyPaths.map((path) => [
+                path,
+                { ".": "read" },
+              ]),
+            ),
+          },
+        });
+        await output!.appServer!.onBeforeTurn?.();
+        output!.stdout.write("Synthetic no-op turn.\n");
+        return 0;
+      },
+      onRepositoryCommand: async (command, args, cwd, options) => {
+        const result = await runRepositoryCommand(command, args, cwd, {
+          ...options,
+          environment: { ...environment, ...options?.environment },
+        });
+        if (args.includes("write-tree")) trees.push(result.trim());
+        return result;
+      },
+    });
+    expect(outcome.exitCode, outcome.stderr).toBe(2);
+    expect(trees, outcome.stdout + outcome.stderr).toEqual([
+      git("rev-parse", "HEAD^{tree}"),
+      git("rev-parse", "HEAD^{tree}"),
+    ]);
+    expect(await readFile(join(repository, "data"), "utf8")).toBe(
+      "lowercase source\n",
+    );
+  },
+  nativeSnapshotTimeout,
+);
 
 test
   .skipIf(spawnSync("git", ["lfs", "version"]).status !== 0)
@@ -447,7 +450,7 @@ test
       originalIndex,
     );
   },
-  30_000,
+  nativeSnapshotTimeout,
 );
 
 test.each([
@@ -498,14 +501,14 @@ test.each([
       home = join(root, "home");
     await Promise.all([mkdir(repository), mkdir(home, { mode: 0o700 })]);
     const emptyConfig = join(root, "empty.gitconfig"),
-      filterConfig = join(root, "filter.gitconfig"),
-      clean = join(root, "clean.cjs");
+      filterConfig = join(root, "filter.gitconfig");
     await writeFile(emptyConfig, "");
-    await writeFile(
-      clean,
-      'const fs=require("node:fs");process.stdout.write(fs.readFileSync(0,"utf8").toUpperCase());\n',
-    );
-    const cleanCommand = `node ${JSON.stringify(clean.replaceAll("\\", "/"))}`;
+    const attributeValue =
+      state === "set" ? "1" : state === "empty" ? "" : undefined;
+    const cleanSource =
+      'const fs=require("node:fs");const input=fs.readFileSync(0,"utf8");' +
+      `process.stdout.write(${selector === "GIT_ATTR_NOSYSTEM" ? `process.env.GIT_ATTR_NOSYSTEM===${JSON.stringify(attributeValue)}?input.toUpperCase():input` : "input.toUpperCase()"});`;
+    const cleanCommand = `node -e '${cleanSource.replaceAll("'", "'\\''")}'`;
     const filterSettings = `[filter "synthetic-selector"]\n clean = ${JSON.stringify(cleanCommand)}\n`;
     await writeFile(filterConfig, filterSettings);
     const environment = patchSnapshotEnvironment(
@@ -564,10 +567,6 @@ test.each([
       environment[selector] =
         state === "set" ? "1" : state === "empty" ? "" : undefined;
       policySet[selector] = state === "set" ? "0" : "1";
-      await writeFile(
-        clean,
-        `const fs=require("node:fs");const input=fs.readFileSync(0,"utf8");process.stdout.write(process.env.GIT_ATTR_NOSYSTEM===${JSON.stringify(environment[selector])} ? input.toUpperCase() : input);\n`,
-      );
     } else if (selector !== "GIT_ALTERNATE_OBJECT_DIRECTORIES") {
       environment[selector] =
         state === "set" ? filterConfig : state === "empty" ? "" : undefined;
@@ -707,7 +706,7 @@ test.each([
       }
     }
   },
-  30_000,
+  nativeSnapshotTimeout,
 );
 
 test.each([
@@ -849,7 +848,7 @@ send({method:"turn/completed",params:{threadId:thread,turn:{id:"synthetic-turn",
     expect(JSON.parse(await readFile(record, "utf8")).home).toBe([...homes][0]);
     expect(await readFile(join(repository, ".git", "index"))).toEqual(index);
   },
-  30_000,
+  nativeSnapshotTimeout,
 );
 
 test("snapshot binding frames retain raw stdin and unset semantics while native environment filters remain active", async () => {
@@ -867,9 +866,9 @@ test("snapshot binding frames retain raw stdin and unset semantics while native 
   await writeFile(
     script,
     `const fs=require("node:fs");
-process.stdout.write(JSON.stringify({index:process.env.GIT_INDEX_FILE,dir:process.env.GIT_DIR??null,filtered:process.env.SNAPSHOT_USER_FILTERED??null,set:process.env.SNAPSHOT_USER_SET})+"\\n");
-process.stdout.write(fs.readFileSync(0));
-if(process.argv.includes("fail")){process.stderr.write("Synthetic Git failure detail.\\n");process.exitCode=17;}
+fs.writeSync(1, JSON.stringify({index:process.env.GIT_INDEX_FILE,dir:process.env.GIT_DIR??null,filtered:process.env.SNAPSHOT_USER_FILTERED??null,set:process.env.SNAPSHOT_USER_SET})+"\\n");
+fs.writeSync(1, fs.readFileSync(0));
+if(process.argv.includes("fail")){fs.writeSync(2, "Synthetic Git failure detail.\\n");process.exitCode=17;}
 `,
   );
   const index = join(root, "snapshot-index");
@@ -1029,7 +1028,10 @@ process.stdout.write(input);
     );
     initial("config", "filter.storage.required", "true");
     initial("config", "filter.storage.smudge", "cat");
-    await writeFile(join(checkout, ".gitattributes"), "data filter=storage\n");
+    await writeFile(
+      join(checkout, ".gitattributes"),
+      "data filter=storage -text\n",
+    );
     await writeFile(join(checkout, "app.ts"), "before\n");
     await writeFile(join(checkout, "data"), "Synthetic LFS payload\n");
     initial("add", ".");
@@ -1096,5 +1098,5 @@ process.stdout.write(input);
     );
     expect(await readFile(index)).toEqual(originalIndex);
   },
-  30_000,
+  nativeSnapshotTimeout,
 );
