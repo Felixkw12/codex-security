@@ -57,8 +57,10 @@ import { Cli, z } from "incur";
 import { formatCliHelp } from "./cli-help.js";
 import { scanLogsJson } from "./cli-scan-logs-json.js";
 import {
+  capturePatchGitAdministrationReferences,
   capturePatchGitControls,
   withPatchGitIndex,
+  type PatchGitAdministrationReference,
 } from "./patch-git-controls.js";
 import {
   ARTIFACT_EXPORT_FILENAMES,
@@ -1038,6 +1040,7 @@ type SkillThreadSource = Extract<
 interface SkillPermissions {
   readonly name: string;
   readonly readOnlyPaths: readonly string[];
+  readonly modelOnlyReadOnlyPaths?: readonly string[];
 }
 
 interface PatchSnapshotSandbox {
@@ -7785,6 +7788,7 @@ async function patchCommandContext(
   callerDirectory: string;
   directory: string;
   gitDirectory: string;
+  administrationReferences: readonly PatchGitAdministrationReference[];
   environment: NodeJS.ProcessEnv;
 }> {
   const gitPath = async (args: string[]) =>
@@ -7814,6 +7818,11 @@ async function patchCommandContext(
       ? {}
       : { GIT_WORK_TREE: repository }),
   };
+  const commonReference =
+    dependencies.environment["GIT_COMMON_DIR"] === undefined
+      ? undefined
+      : await gitPath(["--git-common-dir"]);
+  const administrationReferences: PatchGitAdministrationReference[] = [];
   // Resolve Git's own path semantics before a patch can remove the caller's cwd.
   for (const [name, args] of [
     ["GIT_COMMON_DIR", ["--git-common-dir"]],
@@ -7885,6 +7894,19 @@ async function patchCommandContext(
           : `${configurationDirectory.replaceAll(sep, "/")}/${value}`;
   }
 
+  if (commonReference !== undefined) {
+    // rev-parse returns this spelling relative to its original caller, unlike
+    // configuration paths interpreted after Git enters the worktree.
+    const path = isAbsolute(commonReference)
+      ? commonReference
+      : process.platform === "win32" && /^[a-z]:/iu.test(commonReference)
+        ? resolve(directory, commonReference)
+        : `${directory.replaceAll(sep, "/")}/${commonReference}`;
+    administrationReferences.push(
+      ...(await capturePatchGitAdministrationReferences(path)),
+    );
+  }
+
   for (const name of ["GH_CONFIG_DIR", "GLAB_CONFIG_DIR"]) {
     const value = dependencies.environment[name];
     if (value === undefined) continue;
@@ -7901,6 +7923,7 @@ async function patchCommandContext(
     callerDirectory: directory,
     directory: physicalDirectory,
     gitDirectory: await realpath(await gitPath(["--absolute-git-dir"])),
+    administrationReferences,
     environment,
   };
 }
@@ -10573,6 +10596,7 @@ async function runSkill(
         environmentValue(dependencies.environment, "GIT_DIR") === undefined,
         environmentValue(dependencies.environment, "GIT_COMMON_DIR") ===
           undefined,
+        options.patchGitContext?.administrationReferences,
       )
     : undefined;
   const patchPermissions =
@@ -10673,6 +10697,12 @@ async function runSkill(
                     permissions: {
                       name: patchPermissions,
                       readOnlyPaths: gitControls!.readOnlyPaths,
+                      ...(gitControls!.modelOnlyReadOnlyPaths.length === 0
+                        ? {}
+                        : {
+                            modelOnlyReadOnlyPaths:
+                              gitControls!.modelOnlyReadOnlyPaths,
+                          }),
                     },
                     snapshotStoragePaths: gitControls!.snapshotStoragePaths,
                   }),
@@ -10891,7 +10921,22 @@ export async function readSkillCommandOutput(
             },
           };
           appServer.onPermissions?.(profile, config as JsonObject);
-          startThread({ permissions: { [permissionProfile!]: profile } });
+          // Cache restrictions for the model do not change snapshot access.
+          startThread({
+            permissions: {
+              [permissionProfile!]: {
+                ...profile,
+                filesystem: {
+                  ...profile.filesystem,
+                  ...Object.fromEntries(
+                    (appServer.permissions.modelOnlyReadOnlyPaths ?? []).map(
+                      (path) => [path, { ".": "read" }],
+                    ),
+                  ),
+                },
+              },
+            },
+          });
         } else if (value["id"] === 4 && appServer.sandbox === "read-only") {
           const result = value["result"];
           const layers =

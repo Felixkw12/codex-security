@@ -1,7 +1,15 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  readFile,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
+import { capturePatchGitControls } from "../src/patch-git-controls.js";
 import {
   repositoryGit,
   runGitRepositoryCommand,
@@ -10,6 +18,62 @@ import {
 
 const fixtures = createTemporaryDirectories(true);
 afterEach(fixtures.cleanup);
+
+for (const mutation of [
+  "directory",
+  "file",
+  "retarget",
+  "fixed-directory",
+] as const) {
+  test(`retains include roles when optional storage is prepared: ${mutation}`, async () => {
+    const repository = await fixtures.create("patch-include-storage-");
+    const git = repositoryGit(repository);
+    git("init", "--initial-branch=main");
+    const target = join(repository, "cache-data");
+    const alias = join(repository, "cache");
+    await mkdir(target);
+    await symlink(
+      target,
+      alias,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    git(
+      "config",
+      mutation === "fixed-directory"
+        ? "include.path"
+        : "includeIf.onbranch:future-branch.path",
+      "../cache/objects",
+    );
+    git("config", "lfs.storage", "../cache");
+    const controls = await capturePatchGitControls(
+      repository,
+      async (_root, checkout, args, options) =>
+        runGitRepositoryCommand("git", args, checkout, options),
+      true,
+    );
+    expect(controls!.snapshotStoragePaths).toEqual([]);
+    expect(controls!.modelOnlyReadOnlyPaths).toContain(join(target, "objects"));
+    const objects = join(target, "objects");
+    if (mutation === "file")
+      await writeFile(objects, "[core]\n filemode = false\n");
+    else if (mutation === "retarget") {
+      const replacement = await fixtures.create(
+        "patch-include-storage-replacement-",
+      );
+      await rm(alias, { recursive: true });
+      await symlink(
+        replacement,
+        alias,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+    } else await mkdir(objects);
+    if (mutation === "directory") await controls!.validate();
+    else
+      await expect(controls!.validate()).rejects.toThrow(
+        "changed location during the patch",
+      );
+  });
+}
 
 for (const mode of [
   "ordinary edit",

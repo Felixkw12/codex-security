@@ -5,6 +5,8 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
+  readlink,
   realpath,
   rm,
   stat,
@@ -12,6 +14,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import {
+  basename,
   dirname,
   isAbsolute,
   join,
@@ -61,6 +64,14 @@ export interface PatchGitCommandOptions {
   readonly indexFile?: string;
   readonly input?: string | Uint8Array;
   readonly environment?: NodeJS.ProcessEnv;
+}
+
+export interface PatchGitAdministrationReference {
+  readonly path: string;
+  readonly canonical: string;
+  readonly dev: bigint;
+  readonly ino: bigint;
+  readonly root: string;
 }
 
 type RunGit = (
@@ -117,6 +128,7 @@ export async function withPatchGitIndex<T>(
 
 export interface PatchGitControls {
   readonly readOnlyPaths: readonly string[];
+  readonly modelOnlyReadOnlyPaths: readonly string[];
   readonly snapshotStoragePaths: readonly string[];
   validate(): Promise<void>;
 }
@@ -192,39 +204,39 @@ async function markerDirectories(
   directory: string,
   isGitDirectory: (path: string, contents?: Buffer | true) => Promise<boolean>,
   commonDirectory?: string,
+  rememberReference?: (path: string) => Promise<void>,
 ): Promise<string[] | undefined> {
   const marker = join(directory, ".git");
   const contents = await readGitMarker(marker);
   if (contents === undefined) return undefined;
   if (!(await isGitDirectory(marker, contents))) return undefined;
-  const gitDirectory = await (
+  const reference =
     contents === true
-      ? realControlPath(marker)
-      : realControlPath(
-          relativeFile(
-            directory,
-            controlPathText(contents)
-              .slice(8)
-              .replace(/[\r\n]+$/u, ""),
-          ),
-        )
-  ).catch(missing);
+      ? marker
+      : relativeFile(
+          directory,
+          controlPathText(contents)
+            .slice(8)
+            .replace(/[\r\n]+$/u, ""),
+        );
+  const gitDirectory = await realControlPath(reference).catch(missing);
   if (gitDirectory === undefined) return undefined;
   if (!(await stat(gitDirectory)).isDirectory()) return undefined;
+  await rememberReference?.(reference);
   if (commonDirectory !== undefined) return [gitDirectory, commonDirectory];
   const commonBytes = await readFile(join(gitDirectory, "commondir")).catch(
     missing,
   );
   const common =
     commonBytes === undefined ? undefined : controlPathText(commonBytes);
-  return common === undefined
-    ? [gitDirectory]
-    : [
-        gitDirectory,
-        await realControlPath(
-          relativeFile(gitDirectory, common.replace(/[\r\n]+$/u, "")),
-        ),
-      ];
+  if (common === undefined) return [gitDirectory];
+  const commonReference = relativeFile(
+    gitDirectory,
+    common.replace(/[\r\n]+$/u, ""),
+  );
+  const resolvedCommon = await realControlPath(commonReference);
+  await rememberReference?.(commonReference);
+  return [gitDirectory, resolvedCommon];
 }
 
 // Git permits include files and hook directories that do not exist yet.
@@ -240,6 +252,70 @@ async function canonicalPath(path: string): Promise<string> {
   if (parent === path) return path;
   // A missing intermediate component must not collapse into an existing file.
   return `${await canonicalPath(parent)}${path.slice(parent.length)}`;
+}
+
+async function directoryLinkEntry(
+  path: string,
+  identity: { dev: bigint; ino: bigint },
+): Promise<string> {
+  const parent = await canonicalPath(dirname(path));
+  const spelling = basename(path);
+  const names = await readdir(parent).catch((error: unknown) => {
+    // Traversal can be permitted without directory-list access.
+    if (
+      ["EACCES", "EPERM"].includes((error as NodeJS.ErrnoException).code ?? "")
+    )
+      return undefined;
+    throw error;
+  });
+  // Exact names remain distinct in case-sensitive directories.
+  if (names !== undefined && !names.includes(spelling)) {
+    for (const name of names) {
+      if (name.toLowerCase() !== spelling.toLowerCase()) continue;
+      const candidate = join(parent, name);
+      const metadata = await lstat(candidate, { bigint: true }).catch(missing);
+      if (metadata?.dev === identity.dev && metadata.ino === identity.ino)
+        return candidate;
+    }
+  }
+  return join(parent, spelling);
+}
+
+async function directoryLinks(path: string): Promise<string[]> {
+  const links = new Set<string>();
+  const inspected = new Set<string>();
+  const inspect = async (path: string): Promise<void> => {
+    const rootLength = parse(path).root.length;
+    path =
+      path.slice(0, rootLength) +
+      path.slice(rootLength).replace(sep === "\\" ? /[\\/]+$/u : /\/+$/u, "");
+    if (inspected.has(path)) return;
+    inspected.add(path);
+    // Reject filesystem loops before tracing individual links.
+    await canonicalPath(path);
+    for (let entry = path; dirname(entry) !== entry; entry = dirname(entry)) {
+      const metadata = await lstat(entry, { bigint: true }).catch(missing);
+      if (!metadata?.isSymbolicLink()) continue;
+      links.add(await directoryLinkEntry(entry, metadata));
+      // Link targets can contain additional directory links.
+      await inspect(relativeFile(dirname(entry), await readlink(entry)));
+    }
+  };
+  await inspect(path);
+  return [...links];
+}
+
+export async function capturePatchGitAdministrationReferences(
+  path: string,
+): Promise<PatchGitAdministrationReference[]> {
+  const root = await realControlPath(path);
+  const references: PatchGitAdministrationReference[] = [];
+  for (const link of await directoryLinks(path)) {
+    const canonical = await realControlPath(link);
+    const { dev, ino } = await stat(canonical, { bigint: true });
+    references.push({ path: link, canonical, dev, ino, root });
+  }
+  return references;
 }
 
 async function readableGitParent(
@@ -308,6 +384,7 @@ export async function capturePatchGitControls(
   run: RunGit,
   usesWorktreeMarker: boolean,
   usesCommonDirectoryMarker = true,
+  administrationReferences: readonly PatchGitAdministrationReference[] = [],
 ): Promise<PatchGitControls | undefined> {
   const runBytes = async (
     root: string,
@@ -453,6 +530,13 @@ export async function capturePatchGitControls(
     }
   };
   const administrationRoots = new Map<string, { dev: bigint; ino: bigint }>();
+  const administrationLinks = new Set<string>();
+  const rememberAdministrationReference = async (
+    path: string,
+  ): Promise<void> => {
+    for (const link of await directoryLinks(path))
+      administrationLinks.add(link);
+  };
   const remember = async (path: string): Promise<void> => {
     const metadata = await stat(path, { bigint: true });
     administrationRoots.set(path, { dev: metadata.dev, ino: metadata.ino });
@@ -465,9 +549,11 @@ export async function capturePatchGitControls(
       directory: boolean | undefined;
       readOnly: boolean;
       allowDirectoryChanges: boolean;
+      allowDirectoryCreation: boolean;
     }
   >();
   const snapshotStoragePaths = new Set<string>();
+  const modelOnlyReadOnlyPaths = new Set<string>();
   const inaccessibleIncludes = new Set<string>();
   const inaccessibleHooks = new Set<string>();
   const hookIsAvailable = async (path: string): Promise<boolean> => {
@@ -482,6 +568,8 @@ export async function capturePatchGitControls(
   const rememberControl = async (
     path: string,
     protectDirectory = true,
+    addReadPermission = true,
+    allowDirectoryCreation = false,
   ): Promise<void> => {
     const canonical = await canonicalPath(path);
     const metadata = await stat(canonical, { bigint: true }).catch(missing);
@@ -491,10 +579,49 @@ export async function capturePatchGitControls(
       canonical,
       identity: metadata && { dev: metadata.dev, ino: metadata.ino },
       directory,
-      readOnly: protectDirectory || !directory || previous?.readOnly === true,
+      readOnly:
+        previous?.readOnly === true ||
+        (addReadPermission && (protectDirectory || !directory)),
       allowDirectoryChanges:
         !protectDirectory && previous?.allowDirectoryChanges !== false,
+      allowDirectoryCreation:
+        (allowDirectoryCreation || !protectDirectory) &&
+        (previous === undefined ||
+          previous.allowDirectoryCreation ||
+          previous.allowDirectoryChanges),
     });
+  };
+  const canPrepareStorage = async (path: string): Promise<boolean> => {
+    for (const entry of await directoryLinks(path)) {
+      const reference = administrationReferences.find(
+        (reference) => reference.path === entry,
+      );
+      if (reference !== undefined) {
+        const canonical = await realControlPath(entry);
+        const identity = await stat(canonical, { bigint: true });
+        if (
+          canonical !== reference.canonical ||
+          identity.dev !== reference.dev ||
+          identity.ino !== reference.ino ||
+          !administrationRoots.has(reference.root)
+        )
+          throw new Error(
+            `Git administration reference changed during the patch: ${entry}`,
+          );
+        await rememberControl(entry, true, false);
+        administrationLinks.add(entry);
+      }
+      const parent = dirname(entry);
+      if (
+        inside(root, parent) &&
+        ![...administrationRoots.keys()].some((path) => inside(path, parent)) &&
+        !administrationLinks.has(entry)
+      ) {
+        await rememberControl(entry, true, false);
+        return false;
+      }
+    }
+    return true;
   };
   const rememberHook = async (path: string): Promise<void> => {
     if (await hookIsAvailable(path)) {
@@ -628,9 +755,12 @@ export async function capturePatchGitControls(
       "--path-format=absolute",
       argument,
     ]);
-    const path = await realControlPath(output.replace(/\n$/u, ""));
+    const selectedPath = output.replace(/\n$/u, "");
+    const path = await realControlPath(selectedPath);
     selectedDirectories.push(path);
     await remember(path);
+    for (const link of await directoryLinks(selectedPath))
+      administrationLinks.add(link);
   }
   const selectedCommonDirectory = usesCommonDirectoryMarker
     ? undefined
@@ -640,20 +770,30 @@ export async function capturePatchGitControls(
     ...(usesWorktreeMarker ? [] : ["--git-dir"]),
     ...(usesCommonDirectoryMarker ? [] : ["--git-common-dir"]),
   ]) {
-    await rememberControl(
-      relativeFile(
-        selectorDirectory,
-        (await runControl(root, root, ["rev-parse", argument])).replace(
-          /\n$/u,
-          "",
-        ),
+    const path = relativeFile(
+      selectorDirectory,
+      (await runControl(root, root, ["rev-parse", argument])).replace(
+        /\n$/u,
+        "",
       ),
     );
+    await rememberControl(path);
+    for (const link of await directoryLinks(path))
+      administrationLinks.add(link);
   }
   const selectedMarker = usesWorktreeMarker
-    ? await markerDirectories(root, isGitDirectory, selectedCommonDirectory)
+    ? await markerDirectories(
+        root,
+        isGitDirectory,
+        selectedCommonDirectory,
+        rememberAdministrationReference,
+      )
     : undefined;
+  if (selectedMarker !== undefined)
+    for (const link of await directoryLinks(join(root, ".git")))
+      administrationLinks.add(link);
   const discover = async (capture: boolean): Promise<void> => {
+    const pendingStoragePaths: string[] = [];
     const protectedRoots = capture
       ? []
       : (
@@ -706,6 +846,16 @@ export async function capturePatchGitControls(
         )
           continue;
         if (
+          canonical === expected.canonical &&
+          expected.allowDirectoryCreation &&
+          expected.identity === undefined &&
+          metadata?.isDirectory()
+        ) {
+          expected.identity = { dev: metadata.dev, ino: metadata.ino };
+          expected.directory = true;
+          expected.allowDirectoryCreation = false;
+        }
+        if (
           canonical !== expected.canonical ||
           (![...administrationRoots.keys()].some((root) =>
             inside(root, expected.canonical),
@@ -751,10 +901,15 @@ export async function capturePatchGitControls(
         const directories = await markerDirectories(
           checkout,
           (path, contents) => isGitDirectory(path, contents, true),
+          undefined,
+          capture ? rememberAdministrationReference : undefined,
         );
         if (directories === undefined) return;
-        if (capture) for (const path of directories) await remember(path);
-        else if (
+        if (capture) {
+          for (const path of directories) await remember(path);
+          for (const link of await directoryLinks(join(checkout, ".git")))
+            administrationLinks.add(link);
+        } else if (
           directories.some(
             (path) => !protectedRoots.some((root) => inside(root, path)),
           )
@@ -827,22 +982,7 @@ export async function capturePatchGitControls(
         const lfs = absolute
           ? configured
           : join(common.replace(/\n$/u, ""), configured);
-        for (const path of [join(lfs, "objects"), join(lfs, "tmp")]) {
-          try {
-            await mkdir(path, { recursive: true });
-            await rememberControl(path);
-            snapshotStoragePaths.add(controlPaths.get(path)!.canonical);
-          } catch (error) {
-            // Unavailable optional storage gets no extra snapshot permission.
-            // Git/LFS reports the failure if a snapshot actually uses it.
-            if (
-              !["EACCES", "EPERM", "EROFS"].includes(
-                (error as NodeJS.ErrnoException).code ?? "",
-              )
-            )
-              throw error;
-          }
-        }
+        pendingStoragePaths.push(join(lfs, "objects"), join(lfs, "tmp"));
       }
       let tracked: Buffer;
       let untracked: Buffer;
@@ -966,6 +1106,28 @@ export async function capturePatchGitControls(
       }
     };
     await visit(root);
+    for (const path of pendingStoragePaths) {
+      try {
+        if (!(await canPrepareStorage(path))) {
+          // Bind checkout links without preparing or granting their targets.
+          await rememberControl(path, true, false, true);
+          modelOnlyReadOnlyPaths.add(controlPaths.get(path)!.canonical);
+          continue;
+        }
+        await mkdir(path, { recursive: true });
+        await rememberControl(path);
+        snapshotStoragePaths.add(controlPaths.get(path)!.canonical);
+      } catch (error) {
+        // Unavailable optional storage gets no extra snapshot permission.
+        // Git/LFS reports the failure if a snapshot actually uses it.
+        if (
+          !["EACCES", "EPERM", "EROFS"].includes(
+            (error as NodeJS.ErrnoException).code ?? "",
+          )
+        )
+          throw error;
+      }
+    }
   };
   await discover(true);
   return {
@@ -979,6 +1141,7 @@ export async function capturePatchGitControls(
           .map(({ canonical }) => canonical),
       ]),
     ],
+    modelOnlyReadOnlyPaths: [...modelOnlyReadOnlyPaths],
     snapshotStoragePaths: [...snapshotStoragePaths],
     validate: () => discover(false),
   };

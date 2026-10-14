@@ -4743,11 +4743,14 @@ process.stdout.write(JSON.stringify({accepted,aliases,error}));`,
         ]);
         expect(granted.status, granted.stderr).toBe(0);
       }
+      const resolvedAliases: Record<string, string> = {};
       const descriptor = (path: string) => {
         const inspected = inspectWindowsTestAcl(
           [
             "$ErrorActionPreference = 'Stop'",
-            "Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:CODEX_SECURITY_TEST_ACL_PATH | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl",
+            "$sddl = Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:CODEX_SECURITY_TEST_ACL_PATH | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl",
+            "$localAdministrator = Microsoft.PowerShell.Utility\\ConvertFrom-SddlString -Sddl 'O:LAG:SYD:(A;;GA;;;SY)' | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty RawDescriptor | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Owner | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Value",
+            "Microsoft.PowerShell.Utility\\ConvertTo-Json -InputObject @($sddl, $localAdministrator) -Compress",
           ],
           {
             ...Object.fromEntries(
@@ -4766,7 +4769,12 @@ process.stdout.write(JSON.stringify({accepted,aliases,error}));`,
           },
         );
         expect(inspected.status, inspected.stderr).toBe(0);
-        return inspected.stdout.trim();
+        const [sddl, localAdministrator] = JSON.parse(inspected.stdout) as [
+          string,
+          string,
+        ];
+        resolvedAliases["LA"] = localAdministrator;
+        return sddl;
       };
       const nativeAcl = descriptor(cache);
       await requirePrivateSnapshotProfileHome(home);
@@ -4779,6 +4787,7 @@ process.stdout.write(JSON.stringify({accepted,aliases,error}));`,
       expect(
         inspectWindowsCredentialAcl(descriptor(profile), sid, {
           scope: "file",
+          resolvedAliases,
         }),
       ).toMatchObject({
         protected: true,
@@ -4793,15 +4802,19 @@ process.stdout.write(JSON.stringify({accepted,aliases,error}));`,
       ]);
       expect(nativeRead.status, nativeRead.stderr).toBe(0);
       expect(
-        inspectWindowsCredentialAcl(descriptor(profile), sid, { scope: "file" })
-          .untrustedPrincipals,
+        inspectWindowsCredentialAcl(descriptor(profile), sid, {
+          scope: "file",
+          resolvedAliases,
+        }).untrustedPrincipals,
       ).toEqual([]);
 
       await requirePrivateCredentialHome(await lstat(home), home);
       for (const path of [cache, auth]) {
         expect(
-          inspectWindowsCredentialAcl(descriptor(path), sid, { scope: "file" })
-            .untrustedPrincipals,
+          inspectWindowsCredentialAcl(descriptor(path), sid, {
+            scope: "file",
+            resolvedAliases,
+          }).untrustedPrincipals,
         ).toEqual([]);
       }
     },
