@@ -2030,37 +2030,77 @@ describe("scan and patch workflow", () => {
       "https://github.example.test/example/repository.git",
       { GITLAB_HOST: "gitlab.com" },
       "gh",
+      undefined,
     ],
-    ["https://gitlab.com/example/subgroup/repository.git", {}, "glab"],
-    ["git@gitlab.com:example/subgroup/repository.git", {}, "glab"],
-    ["ssh://git@gitlab.com:2222/example/subgroup/repository.git", {}, "glab"],
+    [
+      "https://gitlab.com/example/subgroup/repository.git",
+      {},
+      "glab",
+      undefined,
+    ],
+    [
+      "git@gitlab.com:example/subgroup/repository.git",
+      {},
+      "glab",
+      "ssh://git@gitlab.com/example/subgroup/repository.git",
+    ],
+    [
+      "gitlab.com:example/subgroup/repository.git",
+      {},
+      "glab",
+      "ssh://gitlab.com/example/subgroup/repository.git",
+    ],
+    [
+      "gitlab@gitlab.example.test:example/subgroup/repository.git",
+      { GITLAB_HOST: "gitlab.example.test" },
+      "glab",
+      "ssh://gitlab@gitlab.example.test/example/subgroup/repository.git",
+    ],
+    [
+      "ssh://git@gitlab.com:2222/example/subgroup/repository.git",
+      {},
+      "glab",
+      undefined,
+    ],
     [
       "git@gitlab.example.test:example/subgroup/repository.git",
       { GITLAB_HOST: "gitlab.example.test" },
       "glab",
+      "ssh://git@gitlab.example.test/example/subgroup/repository.git",
     ],
     [
       "https://gitlab.example.test/example/repository.git",
       { GITLAB_HOST: "https://gitlab.example.test" },
       "glab",
+      undefined,
     ],
     [
       "https://gitlab.example.test/example/repository.git",
       { GITLAB_URI: "https://gitlab.example.test" },
       "glab",
+      undefined,
     ],
     [
       "https://gitlab.example.test/example/repository.git",
       { GL_HOST: "gitlab.example.test" },
       "glab",
+      undefined,
     ],
-    ["https://gitlab.example.test/example/repository.git", {}, "gh"],
+    [
+      "git@[2001:db8::1]:example/repository.git",
+      { GITLAB_HOST: "https://[2001:db8::1]" },
+      "glab",
+      "ssh://git@[2001:db8::1]/example/repository.git",
+    ],
+    ["https://gitlab.example.test/example/repository.git", {}, "gh", undefined],
   ] as const)(
     "publishes saved-finding patches for origin %s with environment %j using %s",
-    async (origin, environment, client) => {
+    async (origin, environment, client, expectedSelector) => {
+      const selector = expectedSelector ?? origin;
       const repository = await fixtures.create("patch-provider-repository-");
       const git = repositoryGit(repository);
       git("init", "--initial-branch=main");
+
       const result = resultWithFindings(["high"]);
       const url =
         client === "glab"
@@ -2068,14 +2108,7 @@ describe("scan and patch workflow", () => {
           : "https://github.example.test/example/repository/pull/14";
       const publicationCommands: Array<readonly string[]> = [];
       const outcome = await runWorkflow(
-        [
-          "patch",
-          "--scan",
-          "scan-1",
-          "--assess-patch-risk",
-          "--create-pr",
-          "--json",
-        ],
+        ["patch", "--scan", "scan-1", "--create-pr", "--json"],
         {
           environment,
           onWorkbench: () => savedScan(result, "scan-1", repository),
@@ -2115,13 +2148,6 @@ describe("scan and patch workflow", () => {
             return args[1] === "create" ? url : command === "gh" ? "[]" : "";
           },
         },
-        {
-          configure: (current) => {
-            Object.assign(current, {
-              assessPatchRisk: async () => patchRiskAssessment(),
-            });
-          },
-        },
       );
 
       expect(outcome.exitCode, outcome.stderr).toBe(0);
@@ -2141,25 +2167,26 @@ describe("scan and patch workflow", () => {
             "--output",
             "json",
             "--jq",
-            ".[0] | select(. != null) | {url: .web_url, head: .sha}",
+            "map(select(.source_project_id == .target_project_id))[0] | select(. != null) | {url: .web_url, head: .sha}",
+
             "--repo",
-            origin,
+            selector,
           ],
           [
             "mr",
             "create",
             "--draft",
             "--head",
-            origin,
+            selector,
             "--source-branch",
             "codex-security/patch-scan-1",
             "--title",
             "fix: patch verified security findings",
             "--description",
-            expect.stringContaining(patchRiskSummary()),
+            ">>>\nApplies verified security fixes from a completed scan.",
             "--yes",
             "--repo",
-            origin,
+            selector,
           ],
         ]);
       }
@@ -2170,6 +2197,362 @@ describe("scan and patch workflow", () => {
         scanId: "scan-1",
         pullRequest: { branch: "codex-security/patch-scan-1", url },
       });
+    },
+  );
+
+  test.each(
+    (["github", "gitlab"] as const).flatMap((provider) =>
+      (["fresh", "resume", "resume CRLF", "resume embedded CR"] as const).map(
+        (mode) => [provider, mode] as const,
+      ),
+    ),
+  )(
+    "preserves Markdown and keeps %s quick actions advisory during %s publication",
+    async (provider, mode) => {
+      const repository = await fixtures.create(
+        "patch-quick-action-repository-",
+      );
+      const git = repositoryGit(repository);
+      git("init", "--initial-branch=main");
+      const gitlab = provider === "gitlab";
+      const resumed = mode !== "fresh";
+      const result = resultWithFindings(["high"]);
+      const summary = [
+        "### Regression examples",
+        "",
+        "/label ~example ``",
+        "Example `",
+        "/close",
+        "`",
+        "",
+        "/label ~reviewed",
+        "",
+        "```js",
+        "// Regression check",
+        "/^safe$/.test(value);",
+        "/close",
+        "```",
+        "",
+        "~~~~text",
+        "/srv/example",
+        "~~~",
+        "/close",
+        "~~~~~",
+        "",
+        "    /close",
+        "    /srv/example",
+        "",
+        "Inline `example",
+        "/close",
+        "` content.",
+        "",
+        "Example ``const path = `",
+        "/srv/example",
+        "`;``",
+        "/label ~after-inline",
+        "",
+        "Example ```literal `` and `",
+        "/close",
+        "` and `` end```.",
+        "",
+        "*Nested ``literal `",
+        "/close",
+        "` end`` emphasis.*",
+        "",
+        "Unmatched ` delimiter",
+        "/label ~after-unmatched",
+        "",
+        "> Quoted example",
+        "/close",
+        "",
+        "- List example",
+        "/close",
+        "",
+        "<div>",
+        "/close",
+        "</div>",
+        "",
+        "<img",
+        'src="/uploads/proof.png"',
+        "/>",
+        "",
+        'See <a href="',
+        '/docs">documentation</a>.',
+        "",
+        "$$",
+        "1",
+        "/2",
+        "$$",
+        "/label ~after-math",
+        "",
+        "Ratio $1+\\$",
+        "/2$ and $$1",
+        "/2$$.",
+        "",
+        "$$`",
+        "/2$$",
+        "/label ~after-math-backtick",
+        "`",
+        "",
+        "$ incomplete math",
+        "/label ~math-whitespace",
+        "$",
+        "",
+        "$1",
+        "/label ~math-digit$2",
+        "",
+        "$1",
+        "/label ~math-closing-space",
+        "$",
+        "",
+        "$``$",
+        "/label ~math-empty-code",
+        "`$",
+        "",
+        "$$$",
+        "/label ~math-triple",
+        "$$$",
+        "",
+        "$$",
+        "/label ~math-unclosed",
+        "",
+        "Text",
+        "<b>",
+        "/close",
+        "</b>",
+        "",
+        "<!--",
+        "/close",
+        "-->",
+        "",
+        ">>>",
+        "Multiline quote",
+        "/close",
+        ">>>>",
+        "",
+        ">>>>",
+        "Longer quote fence",
+        ">>>",
+        "/close",
+        ">>>>>",
+        "",
+        ">>>",
+        "```text",
+        ">>>>",
+        "/label ~after-quote",
+        "",
+        " /close",
+        "  /close",
+        "   /close",
+        "",
+        "Use /tmp/example.",
+        "",
+        "/assign @reviewer",
+        "",
+        "```text",
+        "/close",
+      ].join("\n");
+      let savedBody = `Synthetic saved report\n\n\t/close\n\n${summary}`;
+      if (mode === "resume CRLF")
+        savedBody = savedBody.replaceAll("\n", "\r\n");
+      if (mode === "resume embedded CR")
+        savedBody = "Synthetic saved report\n\n>\r>>\n/label ~example";
+      let publishedBody = "";
+      const outcome = await runWorkflow(
+        resumed
+          ? ["patch", "--resume-pr", "codex-security/patch-scan-1", "--json"]
+          : [
+              "patch",
+              "--scan",
+              "scan-1",
+              "--assess-patch-risk",
+              "--create-pr",
+              "--json",
+            ],
+        {
+          currentDirectory: repository,
+          onWorkbench: () => savedScan(result, "scan-1", repository),
+          onRepositoryCommand: (command, args, target, options) => {
+            expect(target).toBe(repository);
+            if (command === "git") {
+              const encoded = (value: string) =>
+                options?.encoding === "base64"
+                  ? Buffer.from(value).toString("base64")
+                  : value;
+              if (args.includes("--show-toplevel")) return encoded(repository);
+              if (
+                args[0] === "rev-parse" &&
+                args.some((argument) =>
+                  [
+                    "--absolute-git-dir",
+                    "--git-common-dir",
+                    "--git-path",
+                  ].includes(argument),
+                )
+              )
+                return encoded(git(...args));
+              if (args.includes("--cached")) return "";
+              if (args[0] === "config") {
+                if (args.at(-1)?.endsWith(".codexSecurityPatchCommit"))
+                  return "synthetic-commit";
+                if (
+                  args.includes("--get") &&
+                  args.at(-1)?.endsWith(".codexSecurityPatchPullRequestBody")
+                )
+                  return savedBody;
+                if (args[2]?.endsWith(".codexSecurityPatchPullRequestBody"))
+                  savedBody = args[3]!;
+              }
+              if (args[0] === "rev-parse" && args.includes("--verify"))
+                return "synthetic-commit";
+              return args[0] === "remote"
+                ? `https://${provider}.com/example/repository.git`
+                : args.includes("--name-only")
+                  ? "src/finding-1.ts\0"
+                  : "";
+            }
+            expect(command).toBe(gitlab ? "glab" : "gh");
+            if (args[1] === "list") return gitlab ? "" : "[]";
+            publishedBody =
+              args[args.indexOf(gitlab ? "--description" : "--body") + 1]!;
+            return "https://example.test/review/1";
+          },
+        },
+        {
+          configure: (current) => {
+            Object.assign(current, {
+              assessPatchRisk: async () => ({
+                report: `<!-- codex-security:patch-risk-summary:start -->\n${summary}\n<!-- codex-security:patch-risk-summary:end -->`,
+              }),
+            });
+          },
+        },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      const fence = mode === "resume embedded CR" ? ">>>>" : ">>>>>>";
+      expect(publishedBody).toBe(gitlab ? `${fence}\n${savedBody}` : savedBody);
+      if (!resumed)
+        expect(JSON.parse(outcome.stdout).patchRisk.report).toBe(summary);
+    },
+  );
+
+  test.each([
+    "fresh",
+    "existing destination",
+    "resume",
+    "different saved commit",
+  ] as const)(
+    "uses the GitLab project filter result before publishing: %s",
+    async (mode) => {
+      const hasExisting = mode !== "fresh";
+      const resumed = mode === "resume" || mode === "different saved commit";
+      const blocked =
+        mode === "existing destination" || mode === "different saved commit";
+      const repository = await fixtures.create(
+        "patch-gitlab-project-repository-",
+      );
+      const git = repositoryGit(repository);
+      git("init", "--initial-branch=main");
+      const commit = "synthetic-saved-commit";
+      const result = resultWithFindings(["high"]);
+      const origin = "ssh://git@gitlab.com/example/subgroup/repository.git";
+      const branch = "codex-security/patch-scan-1";
+      const url =
+        "https://gitlab.com/example/subgroup/repository/-/merge_requests/14";
+      const commands: string[] = [];
+      const outcome = await runWorkflow(
+        resumed
+          ? ["patch", "--resume-pr", branch, "--json"]
+          : ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+        {
+          currentDirectory: repository,
+          onWorkbench: () => savedScan(result, "scan-1", repository),
+          onRepositoryCommand: (command, args, target, options) => {
+            expect(target).toBe(repository);
+            if (command === "git") {
+              const encoded = (value: string) =>
+                options?.encoding === "base64"
+                  ? Buffer.from(value).toString("base64")
+                  : value;
+              if (args.includes("--show-toplevel")) return encoded(repository);
+              if (
+                args[0] === "rev-parse" &&
+                args.some((argument) =>
+                  [
+                    "--absolute-git-dir",
+                    "--git-common-dir",
+                    "--git-path",
+                  ].includes(argument),
+                )
+              )
+                return encoded(git(...args));
+              if (args.includes("--cached")) return "";
+              if (
+                args[0] === "config" &&
+                args.at(-1)?.endsWith(".codexSecurityPatchCommit")
+              )
+                return commit;
+              if (
+                args[0] === "config" &&
+                args.includes("--get") &&
+                args.at(-1)?.endsWith(".codexSecurityPatchPullRequestBody")
+              )
+                return "Synthetic saved report";
+              if (args[0] === "rev-parse" && args.includes("--verify"))
+                return commit;
+              if (args[0] === "remote") return origin;
+              if (args[0] === "push") {
+                expect(args).toEqual([
+                  "push",
+                  "--recurse-submodules=check",
+                  "--set-upstream",
+                  `--force-with-lease=refs/heads/${branch}:`,
+                  "origin",
+                  branch,
+                ]);
+                commands.push("push");
+              }
+              return args.includes("--name-only") ? "src/finding-1.ts\0" : "";
+            }
+            expect(command).toBe("glab");
+            commands.push(args[1]!);
+            expect(args[args.indexOf("--repo") + 1]).toBe(origin);
+            expect(args[args.indexOf("--source-branch") + 1]).toBe(branch);
+            if (args[1] === "list") {
+              // glab applies this filter to the branch-matched API response:
+              // fork merge requests must not count as this project's patch.
+              expect(args[args.indexOf("--jq") + 1]).toBe(
+                "map(select(.source_project_id == .target_project_id))[0] | select(. != null) | {url: .web_url, head: .sha}",
+              );
+              return hasExisting
+                ? JSON.stringify({
+                    url,
+                    head:
+                      mode === "different saved commit"
+                        ? "other-commit"
+                        : commit,
+                  })
+                : "";
+            }
+            expect(args[args.indexOf("--head") + 1]).toBe(origin);
+            return url;
+          },
+        },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(blocked ? 2 : 0);
+      if (blocked) {
+        expect(commands).toEqual(["list"]);
+        expect(outcome.stderr).toContain(
+          mode === "existing destination"
+            ? "already exists"
+            : "does not contain the saved patch commit",
+        );
+        return;
+      }
+      expect(commands).toEqual(
+        hasExisting ? ["list"] : ["list", "list", "push", "create"],
+      );
+      expect(JSON.parse(outcome.stdout).pullRequest).toEqual({ branch, url });
     },
   );
 

@@ -7424,9 +7424,9 @@ async function patchPublicationDestination(
           "--output",
           "json",
           "--jq",
-          ".[0] | select(. != null) | {url: .web_url, head: .sha}",
+          "map(select(.source_project_id == .target_project_id))[0] | select(. != null) | {url: .web_url, head: .sha}",
           "--repo",
-          remote,
+          gitlabPatchRepository(remote),
         ]
       : [
           "pr",
@@ -7864,6 +7864,7 @@ async function publishPatchBranch(
   try {
     const { remote, gitlab, command, existing } =
       await patchPublicationDestination(repository, branch, dependencies);
+    const gitlabRepository = gitlab ? gitlabPatchRepository(remote) : remote;
     let url = existing?.url;
     if (existing) {
       const commit = await run("git", [
@@ -7876,6 +7877,7 @@ async function publishPatchBranch(
           "The existing pull request does not contain the saved patch commit. Review it before publishing.",
         );
     }
+
     if (!url) {
       const configuredRecursion = (
         await run("git", ["config", "--list", "--name-only"])
@@ -7907,16 +7909,16 @@ async function publishPatchBranch(
               "create",
               "--draft",
               "--head",
-              remote,
+              gitlabRepository,
               "--source-branch",
               branch,
               "--title",
               PATCH_PR_TITLE,
               "--description",
-              body,
+              gitlabPatchDescription(body),
               "--yes",
               "--repo",
-              remote,
+              gitlabRepository,
             ]
           : [
               "pr",
@@ -7963,6 +7965,22 @@ function patchScpRemote(remote: string) {
     username: match[1] ?? "",
     pathname: match[3]!,
   };
+}
+
+function gitlabPatchRepository(remote: string): string {
+  if (remote.includes("://")) return remote;
+  const scp = patchScpRemote(remote)!;
+  return `ssh://${scp.username ? `${scp.username}@` : ""}${scp.hostname}/${scp.pathname}`;
+}
+
+function gitlabPatchDescription(body: string): string {
+  // GitLab ignores quick actions inside its native fenced blockquotes. Choose
+  // a fence the report cannot close after quick-action CR removal; preserve its
+  // original bytes and end the outer quote at EOF.
+  let fenceLength = 3;
+  for (const match of body.replaceAll("\r", "").matchAll(/^[ \t]*(>+)/gmu))
+    fenceLength = Math.max(fenceLength, match[1]!.length + 1);
+  return `${">".repeat(fenceLength)}\n${body}`;
 }
 
 function patchRemoteHost(remote: string): string | undefined {
