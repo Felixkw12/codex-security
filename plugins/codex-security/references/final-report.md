@@ -4,29 +4,6 @@ Follow `artifact-storage.md` for storing canonical results, supplementary docume
 
 Use this guidance when authoring canonical report semantics and returning the generated Codex Security report and review directives.
 
-## File-Authored Draft Assembly
-
-An explicitly SDK-owned scan without a bound semantic draft tool writes canonical files directly. Before the first write, assemble all three envelopes from the exact SDK-provided `CODEX_SECURITY_SCAN_ID`, scan metadata, findings, and coverage. Use the same assembly step for subsequent unsealed checkpoints from this run. Keep the supplied target and scope unchanged, and omit `scan.sealedAt` and `scan.artifacts`.
-
-File-authored coverage needs the full fields in `scan-contract.md`, including mode, inventory strategy, scope paths, and surface IDs. Compact workbench semantic coverage is not a file envelope. Use `examples/completed-scan/` and `schemas/` as shape references with this run's own evidence.
-
-Run this recipe with `plugin_dir`, `scan_dir`, `scan`, `findings`, and `coverage` set from the owning scan:
-
-```python
-import json
-import runpy
-from pathlib import Path
-
-build_scan_draft = runpy.run_path(str(Path(plugin_dir) / "scripts" / "scan_draft.py"))[
-    "build_scan_draft"
-]
-documents = build_scan_draft(scan=scan, findings=findings, coverage=coverage)
-for name, document in documents.items():
-    (Path(scan_dir) / name).write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
-```
-
-The helper carries `scan["id"]` into both artifact `scanId` fields. It does not read or repair existing artifacts, establish ownership, validate evidence, or seal results. Before returning control, verify all three written IDs match the SDK-provided identity. The SDK owns completion. This recipe does not enable a shell fallback when the required host or MCP is unavailable.
-
 ## Final Outputs
 
 The final readable output is a deterministic projection of `scan-manifest.json`, `findings.json`, and `coverage.json`:
@@ -45,7 +22,7 @@ Every scan mode uses the same final report pipeline. Workbench-owned Standard an
 
 For each finding, supply an evidence-supported lowercase vulnerability-family `ruleId`; `taxonomy: { category, cwe }` using its exact known CWEs; verified locations; and `provenance.source`, using `"local_plugin"` only when this plugin actually discovered the finding. Preserve genuine worker or source provenance and any existing canonical candidate identity in the finding extensions. A finding with no known CWE retains `cwe: []`; never invent a classification. Include optional `codeEvidence` only when its actual code is nonempty and every referenced evidence ID is present.
 
-For workbench-owned Standard scan drafts, including Deep worker results, and workbench-backed diff drafts, supply semantic coverage as `{ completeness, surfaces, explicitExclusions, deferred }`, with each surface using the actual `label` and one existing `disposition`. Mark coverage `partial` when a deferred item or `needs_follow_up` surface remains; preserve its real reason and supporting context. Each deferred item needs a meaningful reason; preserve any existing `id` or `candidateId`. Use each deferred `id` only once per draft. The draft response includes the saved coverage. Copy its deferred IDs in later updates and closures; the workbench assigns missing IDs before saving a checkpoint. Open questions may be nonempty strings or `{ question, followUpPrompt? }` objects. The workbench derives target and scope metadata, scope include and exclude paths, coverage mode and inventory strategy, finding identities and fingerprints, and IDs for new surfaces. Preserve saved surface IDs in updates; omit the other workbench-owned values and top-level coverage receipt references from the semantic draft.
+For Standard scan drafts, including Deep worker results, and diff drafts, supply semantic coverage as `{ completeness, surfaces, explicitExclusions, deferred }`, with each surface using the actual `label` and one existing `disposition`. Mark coverage `partial` when a deferred item or `needs_follow_up` surface remains; preserve its real reason and supporting context. Each deferred item needs a meaningful reason; preserve any existing `id` or `candidateId`. Use each deferred `id` only once per draft. The draft response includes the saved coverage. Copy its deferred IDs in later updates and closures; the workbench assigns missing IDs before saving a checkpoint. Open questions may be nonempty strings or `{ question, followUpPrompt? }` objects. The workbench derives target and scope metadata, scope include and exclude paths, coverage mode and inventory strategy, finding identities and fingerprints, and IDs for new surfaces. Preserve saved surface IDs in updates; omit the other workbench-owned values and top-level coverage receipt references from the semantic draft.
 
 To close a saved task, include `coverage.resolvedDeferred: [{ id, reason }]` in the final Standard or diff draft, using its saved ID and a completion reason. Update linked surfaces by saved ID and keep unfinished work in `deferred`. Tasks without saved IDs do not replace earlier work. Candidate-linked tasks require findings or terminal dispositions; redundant closure entries for those outcomes are ignored. Deep parents cannot close worker tasks. Original checkpoints remain unchanged. Report generation and sealing belong to completion, not deferred review work.
 
@@ -62,8 +39,6 @@ An MCP `-32602` input rejection, an `isError: true` result reporting `Input vali
 For any other required scan phase, canonical-artifact write, or on-disk existence check that fails before completion, stop the current response and surface the exact workflow blocker. Do not call completion with missing artifacts, return a final report or no-findings result, or satisfy a structured output schema. Leave the durable scan available for a later continuation instead of canceling or failing it solely because canonical assembly is blocked.
 
 If `complete_codex_security_scan` fails, stop the current response and surface the exact MCP or finalizer error. Do not retry completion in the same response, return a final report or no-findings result, or satisfy a structured output schema. Leave the durable scan available for a later continuation instead of canceling or failing it solely because completion failed.
-
-For legacy unregistered terminal artifacts missing findings or coverage `scanId`, follow [Incomplete Local Terminal Scans](scan-contract.md#incomplete-local-terminal-scans). Preserve the original directory unchanged and start a fresh scan through the current supported workflow. The assembly recipe is not a recovery path for that directory.
 
 Canonical report semantics live in these fields:
 

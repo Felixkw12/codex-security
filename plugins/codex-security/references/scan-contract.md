@@ -51,16 +51,11 @@ Recovery can add only checkpoints that pass the stopped-scan source-integrity ch
 
 ### Incomplete Local Terminal Scans
 
-An unregistered local terminal scan is not eligible for workbench recovery. If its manifest has a valid `scan.id`, but `findings.json` or `coverage.json` is missing `scanId`, finalization fails with `findings.scanId: must match manifest scan id` or `coverage.scanId: must match manifest scan id`. The manifest ID alone does not provide the trusted completion binding needed to reconstruct those envelopes.
+Older unregistered terminal scans, including plugin `v0.1.22`, can have a manifest `scan.id` but no `scanId` in findings or coverage. The finalizer rejects those files. Current managed scans get these IDs from their registered scan during draft saving and completion.
 
-For this unsealed state, including artifacts produced by plugin `v0.1.22`, the supported operator path is:
+Preserve the original directory unchanged as incomplete evidence. To obtain a completed report, start a fresh scan through the supported workflow with a new ID and output directory. This performs new model work and incurs normal usage charges.
 
-1. Preserve the entire original scan directory unchanged as incomplete evidence. Without a successful seal, its findings and coverage are not a completed-scan result, and absence of findings is inconclusive.
-2. Start a fresh scan through the normal scan workflow with a new scan ID and a new output directory. Keep the original directory separate from the new scan's inputs and outputs. Do not adopt its artifacts as newly completed results. The fresh scan performs new model work and incurs normal usage charges. It does not reuse the original scan's paid work automatically.
-
-There is no minimum compatible recovery version for this state: neither plugin `v0.1.22` nor the current workflow supports adopting this incomplete directory. Fixes to initial artifact assembly prevent new malformed envelopes and do not migrate old scans. Upgrading the plugin does not make it eligible for `recover-scan-results`. CLI `scans resume` requires a registered running Deep scan with compatible saved state, so it does not apply to this terminal directory. Do not manually insert IDs, invoke internal completion-binding APIs, register the directory as a workbench scan, or repeatedly run the finalizer to try to repair it. A later continuation does not by itself establish the missing binding.
-
-Current Standard and diff skills require their managed host context, except for explicitly SDK-owned scans. Do not restore the legacy shell fallback when that host is unavailable. SDK file-authored drafts use [File-Authored Draft Assembly](final-report.md#file-authored-draft-assembly), which binds all three canonical IDs before the first write and leaves completion to the SDK.
+No supported recovery command or plugin upgrade adopts this legacy directory. Workbench recovery requires a registered scan, and CLI `scans resume` requires a compatible running Deep scan. Do not insert IDs or invoke internal completion-binding APIs to make the old files pass validation. The manifest ID alone does not establish that binding.
 
 ## Target Snapshots
 
