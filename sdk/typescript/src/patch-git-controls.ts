@@ -5,6 +5,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   readlink,
   realpath,
   rm,
@@ -245,6 +246,33 @@ async function canonicalPath(path: string): Promise<string> {
   return `${await canonicalPath(parent)}${path.slice(parent.length)}`;
 }
 
+async function directoryLinkEntry(
+  path: string,
+  identity: { dev: bigint; ino: bigint },
+): Promise<string> {
+  const parent = await canonicalPath(dirname(path));
+  const spelling = basename(path);
+  const names = await readdir(parent).catch((error: unknown) => {
+    // Traversal can be permitted without directory-list access.
+    if (
+      ["EACCES", "EPERM"].includes((error as NodeJS.ErrnoException).code ?? "")
+    )
+      return undefined;
+    throw error;
+  });
+  // Exact names remain distinct in case-sensitive directories.
+  if (names !== undefined && !names.includes(spelling)) {
+    for (const name of names) {
+      if (name.toLowerCase() !== spelling.toLowerCase()) continue;
+      const candidate = join(parent, name);
+      const metadata = await lstat(candidate, { bigint: true }).catch(missing);
+      if (metadata?.dev === identity.dev && metadata.ino === identity.ino)
+        return candidate;
+    }
+  }
+  return join(parent, spelling);
+}
+
 async function directoryLinks(path: string): Promise<string[]> {
   const links = new Set<string>();
   const inspected = new Set<string>();
@@ -258,8 +286,9 @@ async function directoryLinks(path: string): Promise<string[]> {
     // Reject filesystem loops before tracing individual links.
     await canonicalPath(path);
     for (let entry = path; dirname(entry) !== entry; entry = dirname(entry)) {
-      if (!(await lstat(entry).catch(missing))?.isSymbolicLink()) continue;
-      links.add(join(await canonicalPath(dirname(entry)), basename(entry)));
+      const metadata = await lstat(entry, { bigint: true }).catch(missing);
+      if (!metadata?.isSymbolicLink()) continue;
+      links.add(await directoryLinkEntry(entry, metadata));
       // Link targets can contain additional directory links.
       await inspect(relativeFile(dirname(entry), await readlink(entry)));
     }
@@ -534,7 +563,10 @@ export async function capturePatchGitControls(
       allowDirectoryChanges:
         !protectDirectory && previous?.allowDirectoryChanges !== false,
       allowDirectoryCreation:
-        allowDirectoryCreation && previous?.allowDirectoryCreation !== false,
+        (allowDirectoryCreation || !protectDirectory) &&
+        (previous === undefined ||
+          previous.allowDirectoryCreation ||
+          previous.allowDirectoryChanges),
     });
   };
   const canPrepareStorage = async (path: string): Promise<boolean> => {
@@ -706,6 +738,7 @@ export async function capturePatchGitControls(
     for (const link of await directoryLinks(join(root, ".git")))
       administrationLinks.add(link);
   const discover = async (capture: boolean): Promise<void> => {
+    const pendingStoragePaths: string[] = [];
     const protectedRoots = capture
       ? []
       : (
@@ -894,28 +927,7 @@ export async function capturePatchGitControls(
         const lfs = absolute
           ? configured
           : join(common.replace(/\n$/u, ""), configured);
-        for (const path of [join(lfs, "objects"), join(lfs, "tmp")]) {
-          try {
-            if (!(await canPrepareStorage(path))) {
-              // Bind checkout links without preparing or granting their targets.
-              await rememberControl(path, true, false, true);
-              modelOnlyReadOnlyPaths.add(controlPaths.get(path)!.canonical);
-              continue;
-            }
-            await mkdir(path, { recursive: true });
-            await rememberControl(path);
-            snapshotStoragePaths.add(controlPaths.get(path)!.canonical);
-          } catch (error) {
-            // Unavailable optional storage gets no extra snapshot permission.
-            // Git/LFS reports the failure if a snapshot actually uses it.
-            if (
-              !["EACCES", "EPERM", "EROFS"].includes(
-                (error as NodeJS.ErrnoException).code ?? "",
-              )
-            )
-              throw error;
-          }
-        }
+        pendingStoragePaths.push(join(lfs, "objects"), join(lfs, "tmp"));
       }
       let tracked: Buffer;
       let untracked: Buffer;
@@ -1039,6 +1051,28 @@ export async function capturePatchGitControls(
       }
     };
     await visit(root);
+    for (const path of pendingStoragePaths) {
+      try {
+        if (!(await canPrepareStorage(path))) {
+          // Bind checkout links without preparing or granting their targets.
+          await rememberControl(path, true, false, true);
+          modelOnlyReadOnlyPaths.add(controlPaths.get(path)!.canonical);
+          continue;
+        }
+        await mkdir(path, { recursive: true });
+        await rememberControl(path);
+        snapshotStoragePaths.add(controlPaths.get(path)!.canonical);
+      } catch (error) {
+        // Unavailable optional storage gets no extra snapshot permission.
+        // Git/LFS reports the failure if a snapshot actually uses it.
+        if (
+          !["EACCES", "EPERM", "EROFS"].includes(
+            (error as NodeJS.ErrnoException).code ?? "",
+          )
+        )
+          throw error;
+      }
+    }
   };
   await discover(true);
   return {
