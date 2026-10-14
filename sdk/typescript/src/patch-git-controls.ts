@@ -277,23 +277,43 @@ async function directoryLinkEntry(
       if (metadata?.dev === identity.dev && metadata.ino === identity.ino)
         return candidate;
     }
+    let match: string | undefined;
+    for (const name of names) {
+      if (name.toLowerCase() === spelling.toLowerCase()) continue;
+      const candidate = join(parent, name);
+      const metadata = await lstat(candidate, { bigint: true }).catch(missing);
+      if (metadata?.dev !== identity.dev || metadata.ino !== identity.ino)
+        continue;
+      if (match !== undefined) return join(parent, spelling);
+      match = candidate;
+    }
+    if (match !== undefined) return match;
   }
   return join(parent, spelling);
+}
+
+function trimDirectorySeparators(path: string): string {
+  const rootLength = parse(path).root.length;
+  return (
+    path.slice(0, rootLength) +
+    path.slice(rootLength).replace(sep === "\\" ? /[\\/]+$/u : /\/+$/u, "")
+  );
 }
 
 async function directoryLinks(path: string): Promise<string[]> {
   const links = new Set<string>();
   const inspected = new Set<string>();
   const inspect = async (path: string): Promise<void> => {
-    const rootLength = parse(path).root.length;
-    path =
-      path.slice(0, rootLength) +
-      path.slice(rootLength).replace(sep === "\\" ? /[\\/]+$/u : /\/+$/u, "");
+    path = trimDirectorySeparators(path);
     if (inspected.has(path)) return;
     inspected.add(path);
     // Reject filesystem loops before tracing individual links.
     await canonicalPath(path);
-    for (let entry = path; dirname(entry) !== entry; entry = dirname(entry)) {
+    for (
+      let entry = path;
+      dirname(entry) !== entry;
+      entry = trimDirectorySeparators(dirname(entry))
+    ) {
       const metadata = await lstat(entry, { bigint: true }).catch(missing);
       if (!metadata?.isSymbolicLink()) continue;
       links.add(await directoryLinkEntry(entry, metadata));
