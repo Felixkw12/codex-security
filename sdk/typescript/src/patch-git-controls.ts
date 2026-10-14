@@ -617,6 +617,8 @@ export async function capturePatchGitControls(
   };
   const canPrepareStorage = async (path: string): Promise<boolean> => {
     for (const entry of await directoryLinks(path)) {
+      if (administrationLinks.has(entry))
+        await rememberControl(entry, true, false);
       const parent = dirname(entry);
       if (
         inside(root, parent) &&
