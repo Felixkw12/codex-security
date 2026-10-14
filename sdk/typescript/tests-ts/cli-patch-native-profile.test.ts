@@ -1,11 +1,19 @@
 import { afterEach, expect, test } from "bun:test";
 import { execFileSync, spawn } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  readFile,
+  realpath,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { PassThrough, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { readSkillCommandOutput } from "../src/cli.js";
+import { capturePatchGitControls } from "../src/patch-git-controls.js";
+import { runGitRepositoryCommand } from "./cli-patch-fixtures.js";
 import { patchSnapshotWindowsConfig } from "./support/patch-snapshot-environment.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
@@ -14,7 +22,10 @@ afterEach(fixtures.cleanup);
 
 type RpcMessage = Record<string, any>;
 
-async function resolvePatchProfile(configured: boolean) {
+async function resolvePatchProfile(
+  configured: boolean,
+  optionalStorage = false,
+) {
   const root = await fixtures.create("patch-native-profile-");
   const home = join(root, "home");
   const repository = join(root, "repository");
@@ -23,6 +34,28 @@ async function resolvePatchProfile(configured: boolean) {
     await mkdir(path, { recursive: true });
   execFileSync("git", ["init", "--quiet", repository]);
   const administration = join(repository, ".git");
+  let readOnlyPaths: readonly string[] = [administration];
+  if (optionalStorage) {
+    await symlink(
+      extra,
+      join(repository, "cache"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    execFileSync("git", ["config", "lfs.storage", "../cache"], {
+      cwd: repository,
+    });
+    const controls = await capturePatchGitControls(
+      repository,
+      async (_root, checkout, args, options) =>
+        runGitRepositoryCommand("git", args, checkout, options),
+      true,
+    );
+    expect(controls).toBeDefined();
+    expect(controls!.snapshotStoragePaths).toEqual([]);
+    readOnlyPaths = controls!.readOnlyPaths;
+    expect(readOnlyPaths).not.toContain(await realpath(extra));
+    await controls!.validate();
+  }
   const configBefore = await readFile(join(administration, "config"));
   const windows = patchSnapshotWindowsConfig();
   await writeFile(
@@ -164,7 +197,7 @@ glob_scan_max_depth = 8
       },
       permissions: {
         name: "codex_security_patch",
-        readOnlyPaths: [administration],
+        readOnlyPaths,
       },
     });
     expect(reader.error, stderr).toBe(stopped);
@@ -228,7 +261,9 @@ glob_scan_max_depth = 8
     expect(Object.keys(profiles)).toEqual([name]);
     expect(snapshotProfile).toEqual(profiles[name]);
     expect(profiles[name]!["filesystem"]).toEqual({
-      [administration]: { ".": "read" },
+      ...Object.fromEntries(
+        readOnlyPaths.map((path) => [path, { ".": "read" }]),
+      ),
       ...(configured ? { ":tmpdir": {}, ":slash_tmp": {} } : {}),
     });
     expect(await readFile(join(administration, "config"))).toEqual(
@@ -265,6 +300,10 @@ test("native patch profiles ignore inactive repository grants and remain isolate
   expect(first.name).not.toBe(second.name);
   expect(first.filesystem).not.toHaveProperty(second.administration);
   expect(second.filesystem).not.toHaveProperty(first.administration);
+}, 30_000);
+
+test("native patch profiles omit unavailable optional storage permissions", async () => {
+  await resolvePatchProfile(false, true);
 }, 30_000);
 
 test("a failed prepared snapshot prevents the model turn and preserves its diagnostic", async () => {

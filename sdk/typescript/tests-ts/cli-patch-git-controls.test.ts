@@ -7,6 +7,7 @@ import {
   symlink,
   mkdir,
   readFile,
+  readdir,
   realpath,
   rename,
   rm,
@@ -14,6 +15,7 @@ import {
 } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
 import { runCodexSkillCommand } from "../src/cli.js";
+import { capturePatchGitControls } from "../src/patch-git-controls.js";
 import { capture } from "./cli-fixtures.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import {
@@ -38,6 +40,188 @@ function patchReadOnlyPaths(args: readonly string[], permissions: unknown) {
 describe("patch Git administration", () => {
   const fixtures = createTemporaryDirectories(true);
   afterEach(fixtures.cleanup);
+
+  for (const location of [
+    "root",
+    "ancestor",
+    "objects",
+    "tmp",
+    "indirect-root",
+    "indirect-parent",
+  ] as const) {
+    // Windows junction creation normalizes ".." before storing its target.
+    test.skipIf(process.platform === "win32" && location === "indirect-parent")(
+      `leaves optional storage through checkout links unprepared: ${location}`,
+      async () => {
+        const repository = await fixtures.create("patch-storage-checkout-");
+        const target = await fixtures.create("patch-storage-target-");
+        const git = repositoryGit(repository);
+        git("init", "--initial-branch=main");
+        git("config", "user.name", "Synthetic User");
+        git("config", "user.email", "synthetic@example.test");
+        git(
+          "config",
+          "lfs.storage",
+          location === "ancestor" ? "../cache/storage" : "../cache",
+        );
+        await writeFile(join(repository, "app.txt"), "before\n");
+        const cache = join(repository, "cache");
+        if (location === "objects" || location === "tmp") await mkdir(cache);
+        const link =
+          location === "objects" || location === "tmp"
+            ? join(cache, location)
+            : cache;
+        const linkTarget =
+          location === "indirect-parent" ? join(target, "nested") : target;
+        if (location === "indirect-parent") await mkdir(linkTarget);
+        await symlink(
+          linkTarget,
+          link,
+          process.platform === "win32" ? "junction" : "dir",
+        );
+        if (location === "indirect-root" || location === "indirect-parent") {
+          const selection = await fixtures.create("patch-storage-selection-");
+          const alias = join(selection, "cache");
+          await symlink(
+            location === "indirect-parent"
+              ? `${cache}${sep}..${sep}storage`
+              : cache,
+            alias,
+            process.platform === "win32" ? "junction" : "dir",
+          );
+          git("config", "lfs.storage", alias);
+        }
+        git("add", ".");
+        git("commit", "-m", "Synthetic storage configuration");
+        const targetContents = await readdir(target);
+        const controls = await capturePatchGitControls(
+          repository,
+          async (_root, checkout, args, options) =>
+            runGitRepositoryCommand("git", args, checkout, options),
+          true,
+        );
+        const canonical = await realpath(target);
+        expect(controls).toBeDefined();
+        expect(
+          controls!.snapshotStoragePaths.every(
+            (path) =>
+              path !== canonical && !path.startsWith(`${canonical}${sep}`),
+          ),
+        ).toBe(true);
+        expect(
+          controls!.readOnlyPaths.every(
+            (path) =>
+              path !== canonical && !path.startsWith(`${canonical}${sep}`),
+          ),
+        ).toBe(true);
+        expect(await readdir(target)).toEqual(targetContents);
+        await controls!.validate();
+        const outcome = await runWorkflow(
+          ["patch", "Synthetic issue", "--json"],
+          {
+            currentDirectory: repository,
+            onRepositoryCommand: runGitRepositoryCommand,
+            onCodex: async (_args, output) => {
+              await writeFile(join(repository, "app.txt"), "after\n");
+              output?.stdout.write("Synthetic patch complete.\n");
+              return 0;
+            },
+          },
+        );
+        expect(outcome.exitCode, outcome.stderr).toBe(0);
+        expect(await readdir(target)).toEqual(targetContents);
+        const replacement = await fixtures.create("patch-storage-replacement-");
+        await rm(link, { recursive: true });
+        await symlink(
+          replacement,
+          link,
+          process.platform === "win32" ? "junction" : "dir",
+        );
+        await expect(controls!.validate()).rejects.toThrow(
+          "changed location during the patch",
+        );
+      },
+    );
+  }
+
+  for (const location of [
+    "external",
+    "external-alias",
+    "administration-alias",
+    "metadata-alias",
+    "checkout-alias",
+    "selected-git-dir",
+    "selected-common-dir",
+  ] as const) {
+    test(`preserves selected storage aliases outside checkout data: ${location}`, async () => {
+      const repository = await fixtures.create("patch-storage-selected-");
+      const external = await fixtures.create("patch-storage-external-");
+      const git = repositoryGit(repository);
+      git("init", "--initial-branch=main");
+      git("config", "user.name", "Synthetic User");
+      git("config", "user.email", "synthetic@example.test");
+      await writeFile(join(repository, "app.txt"), "before\n");
+      git("add", ".");
+      git("commit", "-m", "Synthetic selected storage");
+      const linkType = process.platform === "win32" ? "junction" : "dir";
+      let directory = repository;
+      const environment: NodeJS.ProcessEnv = {};
+      let storage = join(repository, ".git", "lfs");
+      if (location === "external") {
+        storage = external;
+        git("config", "lfs.storage", storage);
+      } else if (location === "external-alias") {
+        const alias = join(external, "alias");
+        const target = join(external, "target");
+        await mkdir(target);
+        await symlink(target, alias, linkType);
+        storage = join(alias, "storage");
+        git("config", "lfs.storage", storage);
+      } else if (location === "administration-alias") {
+        await symlink(external, storage, linkType);
+      } else if (location === "metadata-alias") {
+        const metadata = join(external, "metadata");
+        await rename(join(repository, ".git"), metadata);
+        await symlink(metadata, join(repository, ".git"), linkType);
+      } else if (location === "checkout-alias") {
+        directory = join(external, "checkout");
+        await symlink(repository, directory, linkType);
+      } else {
+        const metadata = join(repository, "administration");
+        if (location === "selected-git-dir") {
+          await rename(join(repository, ".git"), metadata);
+        }
+        const alias = join(repository, "administration-alias");
+        await symlink(
+          location === "selected-git-dir" ? metadata : join(repository, ".git"),
+          alias,
+          linkType,
+        );
+        environment[
+          location === "selected-git-dir" ? "GIT_DIR" : "GIT_COMMON_DIR"
+        ] = alias;
+        environment["GIT_WORK_TREE"] = repository;
+        storage = join(alias, "lfs");
+      }
+      const controls = await capturePatchGitControls(
+        directory,
+        async (_root, checkout, args, options) =>
+          runGitRepositoryCommand("git", args, checkout, {
+            ...options,
+            environment: { ...environment, ...options?.environment },
+          }),
+        location !== "selected-git-dir",
+        location !== "selected-common-dir",
+      );
+      expect(controls).toBeDefined();
+      for (const name of ["objects", "tmp"]) {
+        const path = await realpath(join(storage, name));
+        expect(controls!.snapshotStoragePaths).toContain(path);
+        expect(controls!.readOnlyPaths).toContain(path);
+      }
+      await controls!.validate();
+    });
+  }
 
   for (const active of [false, true]) {
     test.skipIf(process.platform === "win32")(
