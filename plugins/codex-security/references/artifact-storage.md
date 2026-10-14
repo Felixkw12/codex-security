@@ -54,3 +54,17 @@ End each shared threat model with these two lines:
 - `Version: <revision for an immutable Git tree; snapshot digest otherwise>`
 
 Completed/sealed scan files cannot be edited through the save tool. For later write-ups or hardening requests, use the standalone target collection and link those returned files separately. Preserve the original result and its references. Temporary cleanup must not remove retained files or recovery checkpoints. The save tool publishes running-scan files under the same completion lock as finalization; surface a stopped/sealed-scan rejection and preserve existing output.
+
+## Recovering older generated identities
+
+Older builds could save finding anchors or instances starting with `_`, `.` or `/`, then reject the next draft update. The generator fix prevents new invalid identities but does not migrate saved ones. Changing an identity also changes its derived finding identifiers and can collide with another finding.
+
+For an affected workbench-owned Standard scan:
+
+1. Back up the entire original scan directory, including checkpoints and evidence, before canceling. Read its `findings.json`, `coverage.json` and `scan-manifest.json`. Reconcile any additional accepted findings in checkpoints before proceeding.
+2. Use a build containing the fix. Cancel the affected scan with `cancel_codex_security_scan`. Cancellation republishes saved results and may repair invalid identities, so retain the backup. Call `start_codex_security_standard_scan` for the same target and scope and verify that it returns a new scan ID. Recheck findings if the repository changed.
+3. Copy every accepted finding into a new semantic draft. Remove host-generated `findingId`, `occurrenceId` and `fingerprints`. Keep valid identities exactly as saved. For each invalid anchor or instance, remove leading characters before the first lowercase letter or digit. If nothing remains, choose a stable value such as `recovered-1`. Give collisions within the same rule and anchor distinct valid instances. Keep an old-to-new identity mapping with the recovery evidence.
+4. Preserve the threat model and semantic coverage, including deferred work. Omit coverage's host-owned `documentType`, `schemaVersion`, `scanId`, `mode`, `includePaths`, `excludePaths`, `receiptRefs` and `inventoryStrategy`. Transfer referenced evidence through the artifact tools and update its paths. Submit with the new scan ID and claim, `complete: false` and partial coverage.
+5. Submit another draft update and check that every recovered finding and its evidence remains present. Continue the review from this new scan, retaining the original directory for reference.
+
+Do not rewrite checkpoint files or delete findings to make the old scan resume. SDK-owned scans and Deep worker outputs require recovery through their owning workflow.

@@ -78,6 +78,7 @@ try {
     await testParentToolList(bundle);
     await testClaimedParentArtifactOperations(bundle, runtimeLabel);
     await testSemanticScanDraftCompletion(bundle, runtimeLabel);
+    await testGeneratedFindingIdentities(bundle, runtimeLabel);
     await testCompactDiffScanCompletion(bundle, runtimeLabel);
     await testDiscoveryWorkerToolList(bundle);
     await testReducerWorkerToolList(bundle);
@@ -95,6 +96,79 @@ async function createScanFixture(label: string) {
   };
   await mkdir(path.join(repoRoot, "src"), { recursive: true });
   return { repoRoot, environment };
+}
+
+async function testGeneratedFindingIdentities(
+  bundle: string,
+  runtimeLabel: string,
+) {
+  const { repoRoot, environment } = await createScanFixture(
+    `identities-${runtimeLabel}`,
+  );
+  await writeFile(path.join(repoRoot, "src", "fixture.py"), "value = 1\n");
+  const client = await startClient(bundle, environment);
+  const call = toolCaller(client, `identity-owner-${runtimeLabel}`);
+  try {
+    const { scanId, scanDir, handoffClaimToken } = requireSuccessfulTool<{
+      scanId: string;
+      scanDir: string;
+      handoffClaimToken: string;
+    }>(
+      await call("start_codex_security_standard_scan", {
+        targetPath: repoRoot,
+      }),
+    );
+    const { identity: stableIdentity, ...base } = finding(
+      "stable._/anchor-",
+      "src/fixture.py",
+    );
+    const findings = [
+      { ...base, title: "_Unsafe archive_" },
+      { ...base, extensions: { candidateId: "report", reportId: "/report" } },
+      {
+        ...base,
+        identity: { ...stableIdentity, instance: "9valid._/instance-" },
+      },
+    ];
+    const draft = {
+      scanId,
+      handoffClaimToken,
+      complete: false,
+      findings,
+      coverage: { ...workerDraft([]).coverage, completeness: "partial" },
+    };
+    requireSuccessfulTool(
+      await call("record_codex_security_scan_draft", draft),
+    );
+    const saved = (await readJson(scanDir, "findings.json")).findings;
+    assert.deepEqual(
+      saved.map((item: { identity: unknown }) => item.identity),
+      [
+        { anchor: "unsafe-archive_" },
+        { anchor: "report", instance: "report" },
+        { ...stableIdentity, instance: "9valid._/instance-" },
+      ],
+    );
+    requireSuccessfulTool(
+      await call("record_codex_security_scan_draft", draft),
+    );
+    assert.deepEqual(
+      (await readJson(scanDir, "findings.json")).findings,
+      saved,
+    );
+    requireSuccessfulTool(
+      await call("record_codex_security_scan_draft", {
+        ...draft,
+        findings: [],
+      }),
+    );
+    assert.deepEqual(
+      (await readJson(scanDir, "findings.json")).findings,
+      saved,
+    );
+  } finally {
+    await client.close();
+  }
 }
 
 async function testCompactDiffScanCompletion(
