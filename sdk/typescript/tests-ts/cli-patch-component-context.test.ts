@@ -1,8 +1,15 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  readFile,
+  realpath,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { join, relative, sep } from "node:path";
 import { runRepositoryCommand } from "../src/cli.js";
 import {
+  completePatches,
   patchRiskAssessment,
   publicationRepository,
   repositoryGit,
@@ -487,3 +494,74 @@ for (const raw of [false, true]) {
     },
   );
 }
+
+test.each(["absolute", "relative"] as const)(
+  "preserves selected common-directory aliases across finding patches: %s",
+  async (selection) => {
+    const { directory, git } = await publicationRepository(fixtures);
+    await writeFile(join(directory, "src/finding-2.ts"), "original second\n");
+    git("add", ".");
+    git("commit", "-m", "Synthetic successive patch baseline");
+    const administration = await realpath(join(directory, ".git"));
+    const alias = join(directory, "administration-alias");
+    await symlink(
+      administration,
+      alias,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    git("config", "lfs.storage", join(alias, "lfs"));
+    const environment = {
+      GIT_COMMON_DIR: selection === "absolute" ? alias : "administration-alias",
+    };
+    const originalHead = git("rev-parse", "HEAD");
+    const originalIndex = await readFile(join(administration, "index"));
+    const result = resultWithFindings(["high", "high"]);
+    const grants: string[][] = [];
+    const boundCommonDirectories = new Set<string>();
+    const outcome = await runWorkflow(["patch", "--scan", "scan-1", "--json"], {
+      currentDirectory: directory,
+      environment,
+      onWorkbench: () => savedScan(result, "scan-1", directory),
+      onRepositoryCommand: (command, args, cwd, options) => {
+        const common = options?.environment?.["GIT_COMMON_DIR"];
+        if (common !== undefined) boundCommonDirectories.add(common);
+        return runGitRepositoryCommand(command, args, cwd, {
+          ...options,
+          environment: { ...environment, ...options?.environment },
+        });
+      },
+      onCodex: async (args, output) => {
+        grants.push([...(output!.appServer!.snapshotStoragePaths ?? [])]);
+        const findings = completePatches(args, output);
+        expect(findings).toHaveLength(1);
+        await writeFile(
+          join(directory, findings[0]!.locations[0]!.path),
+          `fixed ${grants.length}\n`,
+        );
+        return 0;
+      },
+    });
+    expect(outcome.exitCode, outcome.stderr).toBe(0);
+    expect(grants).toEqual(
+      [1, 2].map(() => [
+        join(administration, "lfs", "objects"),
+        join(administration, "lfs", "tmp"),
+      ]),
+    );
+    expect(boundCommonDirectories).toEqual(new Set([administration]));
+    expect(JSON.parse(outcome.stdout)).toMatchObject({
+      files: ["src/finding-1.ts", "src/finding-2.ts"],
+      filesChanged: 2,
+    });
+    expect(git("rev-parse", "HEAD")).toBe(originalHead);
+    expect(await readFile(join(administration, "index"))).toEqual(
+      originalIndex,
+    );
+    expect(await readFile(join(directory, "src/finding-1.ts"), "utf8")).toBe(
+      "fixed 1\n",
+    );
+    expect(await readFile(join(directory, "src/finding-2.ts"), "utf8")).toBe(
+      "fixed 2\n",
+    );
+  },
+);

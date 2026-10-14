@@ -65,6 +65,14 @@ export interface PatchGitCommandOptions {
   readonly environment?: NodeJS.ProcessEnv;
 }
 
+export interface PatchGitAdministrationReference {
+  readonly path: string;
+  readonly canonical: string;
+  readonly dev: bigint;
+  readonly ino: bigint;
+  readonly root: string;
+}
+
 type RunGit = (
   root: string,
   directory: string,
@@ -263,6 +271,19 @@ async function directoryLinks(path: string): Promise<string[]> {
   return [...links];
 }
 
+export async function capturePatchGitAdministrationReferences(
+  path: string,
+): Promise<PatchGitAdministrationReference[]> {
+  const root = await realControlPath(path);
+  const references: PatchGitAdministrationReference[] = [];
+  for (const link of await directoryLinks(path)) {
+    const canonical = await realControlPath(link);
+    const { dev, ino } = await stat(canonical, { bigint: true });
+    references.push({ path: link, canonical, dev, ino, root });
+  }
+  return references;
+}
+
 async function readableGitParent(
   checkout: string,
   path: Buffer,
@@ -329,6 +350,7 @@ export async function capturePatchGitControls(
   run: RunGit,
   usesWorktreeMarker: boolean,
   usesCommonDirectoryMarker = true,
+  administrationReferences: readonly PatchGitAdministrationReference[] = [],
 ): Promise<PatchGitControls | undefined> {
   const runBytes = async (
     root: string,
@@ -475,6 +497,12 @@ export async function capturePatchGitControls(
   };
   const administrationRoots = new Map<string, { dev: bigint; ino: bigint }>();
   const administrationLinks = new Set<string>();
+  const rememberAdministrationReference = async (
+    path: string,
+  ): Promise<void> => {
+    for (const link of await directoryLinks(path))
+      administrationLinks.add(link);
+  };
   const remember = async (path: string): Promise<void> => {
     const metadata = await stat(path, { bigint: true });
     administrationRoots.set(path, { dev: metadata.dev, ino: metadata.ino });
@@ -699,6 +727,21 @@ export async function capturePatchGitControls(
   if (selectedMarker !== undefined)
     for (const link of await directoryLinks(join(root, ".git")))
       administrationLinks.add(link);
+  for (const reference of administrationReferences) {
+    const canonical = await realControlPath(reference.path);
+    const identity = await stat(canonical, { bigint: true });
+    if (
+      canonical !== reference.canonical ||
+      identity.dev !== reference.dev ||
+      identity.ino !== reference.ino ||
+      !administrationRoots.has(reference.root)
+    )
+      throw new Error(
+        `Git administration reference changed during the patch: ${reference.path}`,
+      );
+    await rememberControl(reference.path, true, false);
+    await rememberAdministrationReference(reference.path);
+  }
   const discover = async (capture: boolean): Promise<void> => {
     const protectedRoots = capture
       ? []
