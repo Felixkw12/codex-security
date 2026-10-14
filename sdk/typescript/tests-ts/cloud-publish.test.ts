@@ -75,7 +75,7 @@ async function fixture(homeName = "home") {
 }
 
 describe("native Cloud publication", () => {
-  test("uploads complete artifact bytes with saved SCM identity and returns asynchronous stages", async () => {
+  test("uploads complete artifact bytes with saved SCM identity and confirms retention", async () => {
     const { scan, environment } = await fixture();
     const cloud = server();
     const result = await publishScanToCloud(scan, {
@@ -92,8 +92,7 @@ describe("native Cloud publication", () => {
     });
     expect(result.publication).toMatchObject({
       upload_status: "accepted",
-      materialization_status: "pending",
-      dedupe_status: "pending",
+      finalized_at: "2026-06-01T00:02:00Z",
     });
     expect(result.findingIds).toEqual([]);
     expect(cloud.calls.filter((item) => item.method === "PUT")).toHaveLength(4);
@@ -188,7 +187,7 @@ describe("native Cloud publication", () => {
       ),
     ).toHaveLength(1);
   });
-  test("republication of accepted content does not reupload or reset processing", async () => {
+  test("republication of accepted content does not reupload", async () => {
     const { scan, environment } = await fixture();
     const cloud = server({ accepted: true });
     await publishScanToCloud(scan, {
@@ -198,18 +197,18 @@ describe("native Cloud publication", () => {
     });
     expect(cloud.calls.map((item) => item.method)).toEqual(["GET", "POST"]);
   });
-  test("reports asynchronous finalization without claiming acceptance", async () => {
+  test("does not report success before artifact retention is confirmed", async () => {
     const { scan, environment } = await fixture();
     const cloud = server({ finalizeStatus: "finalizing" });
-    const result = await publishScanToCloud(scan, {
-      cloudEnvironment: "env-1",
-      environment,
-      fetch: cloud.fetch,
-    });
-    expect(result.publication?.upload_status).toBe("finalizing");
-    expect(result.publication?.finalized_at).toBeNull();
+    await expect(
+      publishScanToCloud(scan, {
+        cloudEnvironment: "env-1",
+        environment,
+        fetch: cloud.fetch,
+      }),
+    ).rejects.toThrow("resume finalization");
   });
-  test("replays finalizing publication without reupload while retention is progressing", async () => {
+  test("resumes finalizing publication without reupload", async () => {
     const { scan, environment } = await fixture();
     const cloud = server({ finalizing: true });
     const result = await publishScanToCloud(scan, {
@@ -217,14 +216,18 @@ describe("native Cloud publication", () => {
       environment,
       fetch: cloud.fetch,
     });
-    expect(result.publication?.upload_status).toBe("finalizing");
-    expect(cloud.calls.map((item) => item.method)).toEqual(["GET", "POST"]);
+    expect(result.publication?.upload_status).toBe("accepted");
+    expect(cloud.calls.map((item) => item.method)).toEqual([
+      "GET",
+      "POST",
+      "POST",
+    ]);
+    expect(cloud.calls.at(-1)?.url).toEndWith("/finalize");
   });
   test("repairs failed preacceptance retention with the same declared artifact bytes", async () => {
     const { scan, environment } = await fixture();
     const cloud = server({
       retentionFailed: true,
-      finalizeStatus: "finalizing",
     });
     const result = await publishScanToCloud(scan, {
       cloudEnvironment: "env-1",
@@ -232,20 +235,9 @@ describe("native Cloud publication", () => {
       fetch: cloud.fetch,
     });
     expect(result.publication?.imported_scan_id).toBe("import-1");
-    expect(result.publication?.upload_status).toBe("finalizing");
+    expect(result.publication?.upload_status).toBe("accepted");
     expect(cloud.calls.filter((item) => item.method === "PUT")).toHaveLength(4);
     expect(cloud.calls.at(-1)?.url).toEndWith("/finalize");
-  });
-  test("failed parsing retries from retained artifacts", async () => {
-    const { scan, environment } = await fixture();
-    const cloud = server({ accepted: true, failed: true });
-    await publishScanToCloud(scan, {
-      cloudEnvironment: "env-1",
-      environment,
-      fetch: cloud.fetch,
-    });
-    expect(cloud.calls.at(-1)?.url).toEndWith("/retry");
-    expect(cloud.calls.some((item) => item.method === "PUT")).toBe(false);
   });
   test("retains large evidence in the full findings artifact", async () => {
     const { scan, environment } = await fixture();
@@ -510,7 +502,7 @@ describe("native Cloud publication", () => {
       }),
     ).rejects.toThrow("ChatGPT login");
   });
-  test("allows artifact transfers beyond the metadata request deadline", async () => {
+  test("allows artifact upload and finalization beyond the metadata request deadline", async () => {
     const { scan, environment } = await fixture();
     const cloud = server();
     let elapsed = 0;
@@ -529,6 +521,7 @@ describe("native Cloud publication", () => {
         fetch: async (url, options) => {
           // A supported 64 MiB artifact takes about 54 seconds at 10 Mbps.
           if (options.method === "PUT") elapsed += 54_000;
+          if (url.endsWith("/finalize")) elapsed += 60_000;
           for (const deadline of deadlines) {
             if (deadline.at <= elapsed)
               deadline.controller.abort(

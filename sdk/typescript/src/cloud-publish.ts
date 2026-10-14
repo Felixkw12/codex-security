@@ -76,9 +76,9 @@ export interface CloudPublicationResult {
   scanId: string;
   /** Native publication does not return canonical finding IDs in this response. */
   findingIds: string[];
-  /** Number of findings in the submitted local artifact, before Cloud processing. */
+  /** Number of findings in the submitted local artifact. */
   findingCount: number;
-  /** Finalization/acceptance receipt; inspect stage statuses for processing completion. */
+  /** Confirms retention of the original scan artifacts, not Cloud finding creation. */
   publication?: ImportedScanReceipt;
   dryRun?: true;
   findings?: Finding[];
@@ -433,7 +433,6 @@ export async function publishScanToCloud(
     );
   const repairRetention =
     publication.upload_status === "finalizing" &&
-    publication.materialization_status === "failed" &&
     publication.failure_code === "artifact_retention_failed";
   if (publication.upload_status === "uploading" || repairRetention) {
     for (const artifact of artifacts) {
@@ -460,28 +459,23 @@ export async function publishScanToCloud(
         ),
       );
     }
+  }
+  if (publication.upload_status !== "accepted") {
     publication = receipt(
       await cloudRequest(
         `/${encodeURIComponent(publication.imported_scan_id)}/finalize`,
         dependencies,
         "POST",
-      ),
-    );
-  } else if (
-    publication.materialization_status === "failed" ||
-    publication.dedupe_status === "failed"
-  ) {
-    publication = receipt(
-      await cloudRequest(
-        `/${encodeURIComponent(publication.imported_scan_id)}/retry`,
-        dependencies,
-        "POST",
+        undefined,
+        "application/json",
+        // Retention uses the same 120-second storage window as uploads.
+        150_000,
       ),
     );
   }
-  if (!["accepted", "finalizing"].includes(publication.upload_status))
+  if (publication.upload_status !== "accepted")
     throw new CodexSecurityError(
-      "Cloud did not confirm finalization or acceptance. Repeat the same publication to resume.",
+      "Cloud did not confirm artifact retention. Repeat the same publication to resume finalization.",
     );
   return {
     scanId: scan.id,

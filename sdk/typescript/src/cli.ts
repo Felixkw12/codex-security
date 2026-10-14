@@ -3160,7 +3160,7 @@ export async function main(
                 ({ scanId, scanDir }) => scanId ?? scanDir,
               ),
             };
-            // Each scan has its own idempotent publication and processing receipt.
+            // Each scan has its own idempotent publication receipt.
             for (const {
               scanDir: directory,
               scanId,

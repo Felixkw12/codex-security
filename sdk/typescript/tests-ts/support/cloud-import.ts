@@ -22,7 +22,6 @@ export function nativeCloudServer(
     finalizing?: boolean;
     retentionFailed?: boolean;
     finalizeStatus?: "accepted" | "finalizing";
-    failed?: boolean;
     rejectPutOnce?: boolean;
   } = {},
 ) {
@@ -62,9 +61,6 @@ export function nativeCloudServer(
             : options.accepted
               ? "accepted"
               : "uploading",
-        materialization_status:
-          options.failed || options.retentionFailed ? "failed" : "pending",
-        dedupe_status: "pending",
         artifacts: create!.artifacts.map((item) => ({
           ...item,
           uploaded: Boolean(
@@ -75,10 +71,8 @@ export function nativeCloudServer(
         created_at: "2026-06-01T00:00:00Z",
         scan_started_at: create!.scan_started_at,
         scan_completed_at: create!.scan_completed_at,
-        finalized_at: null,
+        finalized_at: options.accepted ? "2026-06-01T00:02:00Z" : null,
         finalization_started_at: null,
-        materialization_completed_at: null,
-        finding_count: null,
         failure_code: options.retentionFailed
           ? "artifact_retention_failed"
           : null,
@@ -99,10 +93,14 @@ export function nativeCloudServer(
       );
       expect(contents.byteLength).toBe(artifact.size_bytes);
       artifact.uploaded = true;
-    } else if (url.endsWith("/finalize"))
+    } else if (url.endsWith("/finalize")) {
       publication!.upload_status = options.finalizeStatus ?? "accepted";
-    else if (url.endsWith("/retry"))
-      publication!.materialization_status = "pending";
+      publication!.finalized_at =
+        publication!.upload_status === "accepted"
+          ? "2026-06-01T00:02:00Z"
+          : null;
+      publication!.failure_code = null;
+    }
     return Response.json(publication);
   };
   return {

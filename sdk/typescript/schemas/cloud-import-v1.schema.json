@@ -330,16 +330,6 @@
           "title": "Upload Status",
           "type": "string"
         },
-        "materialization_status": {
-          "enum": ["pending", "processing", "completed", "failed"],
-          "title": "Materialization Status",
-          "type": "string"
-        },
-        "dedupe_status": {
-          "enum": ["pending", "processing", "completed", "failed"],
-          "title": "Dedupe Status",
-          "type": "string"
-        },
         "artifacts": {
           "items": {
             "$ref": "#/$defs/ImportedArtifactStatus"
@@ -387,29 +377,6 @@
           ],
           "title": "Finalized At"
         },
-        "materialization_completed_at": {
-          "anyOf": [
-            {
-              "format": "date-time",
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "Materialization Completed At"
-        },
-        "finding_count": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "Finding Count"
-        },
         "failure_code": {
           "anyOf": [
             {
@@ -438,15 +405,11 @@
         "connector_id",
         "repository_remote",
         "upload_status",
-        "materialization_status",
-        "dedupe_status",
         "artifacts",
         "created_at",
         "scan_started_at",
         "scan_completed_at",
         "finalized_at",
-        "materialization_completed_at",
-        "finding_count",
         "failure_code",
         "status_url"
       ],

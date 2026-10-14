@@ -35,9 +35,6 @@ export type TargetKind1 = "git_revision" | "git_worktree";
 export type ConnectorId1 = string | null;
 export type RepositoryRemote1 = string;
 export type UploadStatus = "uploading" | "finalizing" | "accepted" | "expired";
-export type MaterializationStatus =
-  "pending" | "processing" | "completed" | "failed";
-export type DedupeStatus = "pending" | "processing" | "completed" | "failed";
 export type Name1 =
   "findings.json" | "scan-manifest.json" | "coverage.json" | "report.md";
 export type Sha2561 = string;
@@ -50,8 +47,6 @@ export type ScanStartedAt1 = string;
 export type ScanCompletedAt1 = string;
 export type FinalizationStartedAt = string | null;
 export type FinalizedAt = string | null;
-export type MaterializationCompletedAt = string | null;
-export type FindingCount = number | null;
 export type FailureCode = string | null;
 export type StatusUrl = string;
 export type ProtocolVersion2 = 1;
@@ -103,16 +98,12 @@ export interface ImportedScanReceipt {
   connector_id: ConnectorId1;
   repository_remote: RepositoryRemote1;
   upload_status: UploadStatus;
-  materialization_status: MaterializationStatus;
-  dedupe_status: DedupeStatus;
   artifacts: Artifacts1;
   created_at: CreatedAt;
   scan_started_at: ScanStartedAt1;
   scan_completed_at: ScanCompletedAt1;
   finalization_started_at?: FinalizationStartedAt;
   finalized_at: FinalizedAt;
-  materialization_completed_at: MaterializationCompletedAt;
-  finding_count: FindingCount;
   failure_code: FailureCode;
   status_url: StatusUrl;
 }

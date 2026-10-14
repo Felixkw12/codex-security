@@ -974,21 +974,20 @@ supported report. Zero findings is valid. Each artifact is limited to 64 MiB and
 the combined publication to 128 MiB by the Cloud import protocol. Both limits are
 checked before credentials or network access for an explicit scan.
 
-A successful command can return while processing continues:
-
-- `publication.upload_status: finalizing`: finalization has started; the upload
-  has not yet been accepted.
-- `publication.upload_status: accepted`: artifact retention is complete. Inspect
-  `materialization_status` and `dedupe_status` before treating findings as processed.
-- `findingCount` is the local artifact count. `findingIds` is empty in native
-  publication receipts; it does not indicate whether findings were processed.
+A successful command returns `publication.upload_status: accepted`, confirming
+that the original artifacts are retained. Publication does not create Cloud
+findings or make the scan visible in Cloud scan history. `findingCount` is the
+local artifact count; `findingIds` is empty. The receipt's `imported_scan_id`
+identifies the stored publication, and `source_scan_id` identifies the local scan.
 
 `publication.status_url` is an authenticated machine API path relative to the
 Cloud origin used for publication, not a browser link. It requires the same
 ChatGPT account context as publication. To refresh the receipt or resume an
 interrupted upload, repeat the original publication command. Identical scan
-content returns the same publication and skips verified uploads; failed processing
-can be retried using retained artifacts. Canonical finding status is preserved.
+content returns the same publication and skips verified uploads. If finalization
+was interrupted, repeating the command resumes it. A `finalizing` receipt means
+artifact retention is still unconfirmed; the command reports an error until
+Cloud confirms acceptance.
 
 Unaccepted upload objects have a seven-day lifetime. An interrupted finalization
 may need the same local artifacts again; repeating publication repairs an explicit
