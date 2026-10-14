@@ -1035,6 +1035,7 @@ type SkillThreadSource = Extract<
 interface SkillPermissions {
   readonly name: string;
   readonly readOnlyPaths: readonly string[];
+  readonly modelOnlyReadOnlyPaths?: readonly string[];
 }
 
 interface PatchSnapshotSandbox {
@@ -9780,6 +9781,12 @@ async function runSkill(
                     permissions: {
                       name: patchPermissions,
                       readOnlyPaths: gitControls!.readOnlyPaths,
+                      ...(gitControls!.modelOnlyReadOnlyPaths.length === 0
+                        ? {}
+                        : {
+                            modelOnlyReadOnlyPaths:
+                              gitControls!.modelOnlyReadOnlyPaths,
+                          }),
                     },
                     snapshotStoragePaths: gitControls!.snapshotStoragePaths,
                   }),
@@ -9998,7 +10005,22 @@ export async function readSkillCommandOutput(
             },
           };
           appServer.onPermissions?.(profile, config as JsonObject);
-          startThread({ permissions: { [permissionProfile!]: profile } });
+          // Cache restrictions for the model do not change snapshot access.
+          startThread({
+            permissions: {
+              [permissionProfile!]: {
+                ...profile,
+                filesystem: {
+                  ...profile.filesystem,
+                  ...Object.fromEntries(
+                    (appServer.permissions.modelOnlyReadOnlyPaths ?? []).map(
+                      (path) => [path, { ".": "read" }],
+                    ),
+                  ),
+                },
+              },
+            },
+          });
         } else if (value["id"] === 4 && appServer.sandbox === "read-only") {
           const result = value["result"];
           const layers =

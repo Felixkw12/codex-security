@@ -4,6 +4,7 @@ import {
   mkdir,
   readFile,
   realpath,
+  rename,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -11,10 +12,13 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { PassThrough, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
-import { readSkillCommandOutput } from "../src/cli.js";
+import { readSkillCommandOutput, runRepositoryCommand } from "../src/cli.js";
 import { capturePatchGitControls } from "../src/patch-git-controls.js";
 import { runGitRepositoryCommand } from "./cli-patch-fixtures.js";
-import { patchSnapshotWindowsConfig } from "./support/patch-snapshot-environment.js";
+import {
+  patchSnapshotEnvironment,
+  patchSnapshotWindowsConfig,
+} from "./support/patch-snapshot-environment.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
 const fixtures = createTemporaryDirectories(true);
@@ -24,7 +28,8 @@ type RpcMessage = Record<string, any>;
 
 async function resolvePatchProfile(
   configured: boolean,
-  optionalStorage = false,
+  optionalStorage: false | "inside" | "outside" | "administration" = false,
+  existingStorage = false,
 ) {
   const root = await fixtures.create("patch-native-profile-");
   const home = join(root, "home");
@@ -35,16 +40,27 @@ async function resolvePatchProfile(
   execFileSync("git", ["init", "--quiet", repository]);
   const administration = join(repository, ".git");
   let readOnlyPaths: readonly string[] = [administration];
+  let modelOnlyReadOnlyPaths: readonly string[] = [];
+  let controls: Awaited<ReturnType<typeof capturePatchGitControls>>;
+  const storage =
+    optionalStorage === "inside"
+      ? join(repository, "cache-data")
+      : optionalStorage === "administration"
+        ? administration
+        : extra;
   if (optionalStorage) {
+    await mkdir(storage, { recursive: true });
+    if (existingStorage)
+      for (const part of ["objects", "tmp"]) await mkdir(join(storage, part));
     await symlink(
-      extra,
+      storage,
       join(repository, "cache"),
       process.platform === "win32" ? "junction" : "dir",
     );
     execFileSync("git", ["config", "lfs.storage", "../cache"], {
       cwd: repository,
     });
-    const controls = await capturePatchGitControls(
+    controls = await capturePatchGitControls(
       repository,
       async (_root, checkout, args, options) =>
         runGitRepositoryCommand("git", args, checkout, options),
@@ -53,7 +69,14 @@ async function resolvePatchProfile(
     expect(controls).toBeDefined();
     expect(controls!.snapshotStoragePaths).toEqual([]);
     readOnlyPaths = controls!.readOnlyPaths;
-    expect(readOnlyPaths).not.toContain(await realpath(extra));
+    modelOnlyReadOnlyPaths = controls!.modelOnlyReadOnlyPaths;
+    if (optionalStorage === "administration")
+      expect(readOnlyPaths).toContain(await realpath(storage));
+    else expect(readOnlyPaths).not.toContain(await realpath(storage));
+    expect(modelOnlyReadOnlyPaths).toEqual([
+      join(await realpath(storage), "objects"),
+      join(await realpath(storage), "tmp"),
+    ]);
     await controls!.validate();
   }
   const configBefore = await readFile(join(administration, "config"));
@@ -198,6 +221,7 @@ glob_scan_max_depth = 8
       permissions: {
         name: "codex_security_patch",
         readOnlyPaths,
+        modelOnlyReadOnlyPaths,
       },
     });
     expect(reader.error, stderr).toBe(stopped);
@@ -259,12 +283,21 @@ glob_scan_max_depth = 8
       RpcMessage
     >;
     expect(Object.keys(profiles)).toEqual([name]);
-    expect(snapshotProfile).toEqual(profiles[name]);
-    expect(profiles[name]!["filesystem"]).toEqual({
+    const snapshotFilesystem = {
       ...Object.fromEntries(
         readOnlyPaths.map((path) => [path, { ".": "read" }]),
       ),
       ...(configured ? { ":tmpdir": {}, ":slash_tmp": {} } : {}),
+    };
+    expect(snapshotProfile).toEqual({
+      ...profiles[name],
+      filesystem: snapshotFilesystem,
+    });
+    expect(profiles[name]!["filesystem"]).toEqual({
+      ...snapshotFilesystem,
+      ...Object.fromEntries(
+        modelOnlyReadOnlyPaths.map((path) => [path, { ".": "read" }]),
+      ),
     });
     expect(await readFile(join(administration, "config"))).toEqual(
       configBefore,
@@ -273,6 +306,12 @@ glob_scan_max_depth = 8
       name,
       administration,
       filesystem: profiles[name]!["filesystem"] as RpcMessage,
+      modelProfile: profiles[name]!,
+      snapshotProfile: snapshotProfile!,
+      repository,
+      home,
+      storage,
+      controls,
     };
   } finally {
     clearTimeout(timeout);
@@ -303,8 +342,87 @@ test("native patch profiles ignore inactive repository grants and remain isolate
 }, 30_000);
 
 test("native patch profiles omit unavailable optional storage permissions", async () => {
-  await resolvePatchProfile(false, true);
+  await resolvePatchProfile(false, "outside");
 }, 30_000);
+
+test("optional storage keeps overlapping Git administration protected in snapshots", async () => {
+  const context = await resolvePatchProfile(false, "administration");
+  const environment = patchSnapshotEnvironment(
+    await fixtures.create("patch-cache-overlap-"),
+    { ...process.env, CODEX_HOME: context.home },
+  );
+  const source = `const fs=require("node:fs");try{fs.writeFileSync(${JSON.stringify(join(context.storage, "objects", "synthetic"))},"changed");fs.writeSync(1,"allowed");}catch(error){fs.writeSync(1,error.code);}`;
+  const output = await runRepositoryCommand(
+    "git",
+    [
+      "-c",
+      `alias.inspect=!node -e '${source.replaceAll("'", "'\\''")}'`,
+      "inspect",
+    ],
+    context.repository,
+    {
+      sandbox: {
+        directory: context.repository,
+        environment,
+        profile: context.snapshotProfile,
+      },
+    },
+  );
+  expect(["EROFS", "EACCES", "EPERM"]).toContain(output);
+  await context.controls!.validate();
+}, 30_000);
+
+for (const location of ["inside", "outside"] as const) {
+  for (const existing of [false, true]) {
+    test(`optional cache keeps model protection and inherited snapshot access: ${location}, existing ${existing}`, async () => {
+      const context = await resolvePatchProfile(
+        location === "outside",
+        location,
+        existing,
+      );
+      const environment = patchSnapshotEnvironment(
+        await fixtures.create("patch-cache-temporary-"),
+        { ...process.env, CODEX_HOME: context.home },
+      );
+      const paths = [
+        join(context.storage, "objects"),
+        join(context.storage, "tmp"),
+      ];
+      const file = join(paths[0]!, "synthetic");
+      const inspect = (source: string, profile: RpcMessage) =>
+        runRepositoryCommand(
+          "git",
+          [
+            "-c",
+            `alias.inspect=!node -e '${source.replaceAll("'", "'\\''")}'`,
+            "inspect",
+          ],
+          context.repository,
+          {
+            sandbox: { directory: context.repository, environment, profile },
+          },
+        );
+      const snapshot = await inspect(
+        `const fs=require("node:fs");for(const path of ${JSON.stringify(paths)})fs.mkdirSync(path,{recursive:true});fs.writeFileSync(${JSON.stringify(file)},"unchanged");fs.writeSync(1,"prepared");`,
+        context.snapshotProfile,
+      );
+      expect(snapshot).toBe("prepared");
+      await context.controls!.validate();
+      const model = await inspect(
+        `const fs=require("node:fs");try{fs.writeFileSync(${JSON.stringify(file)},"changed");fs.writeSync(1,"allowed");}catch(error){fs.writeSync(1,error.code);}`,
+        context.modelProfile,
+      );
+      expect(["EROFS", "EACCES", "EPERM"]).toContain(model);
+      expect(await readFile(file, "utf8")).toBe("unchanged");
+      await context.controls!.validate();
+      await rename(paths[0]!, `${paths[0]}-previous`);
+      await mkdir(paths[0]!);
+      await expect(context.controls!.validate()).rejects.toThrow(
+        "changed location during the patch",
+      );
+    }, 30_000);
+  }
+}
 
 test("a failed prepared snapshot prevents the model turn and preserves its diagnostic", async () => {
   const stream = new PassThrough();

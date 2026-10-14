@@ -149,8 +149,10 @@ describe("patch Git administration", () => {
     "external-alias",
     "administration-alias",
     "metadata-alias",
+    "gitfile-alias",
     "checkout-alias",
     "selected-git-dir",
+    "selected-git-dir-trailing",
     "selected-common-dir",
   ] as const) {
     test(`preserves selected storage aliases outside checkout data: ${location}`, async () => {
@@ -183,23 +185,36 @@ describe("patch Git administration", () => {
         const metadata = join(external, "metadata");
         await rename(join(repository, ".git"), metadata);
         await symlink(metadata, join(repository, ".git"), linkType);
+      } else if (location === "gitfile-alias") {
+        const metadata = join(external, "metadata");
+        await rename(join(repository, ".git"), metadata);
+        const alias = join(repository, "administration-alias");
+        await symlink(metadata, alias, linkType);
+        await writeFile(
+          join(repository, ".git"),
+          "gitdir: administration-alias\n",
+        );
+        storage = join(alias, "lfs");
+        git("config", "lfs.storage", storage);
       } else if (location === "checkout-alias") {
         directory = join(external, "checkout");
         await symlink(repository, directory, linkType);
       } else {
         const metadata = join(repository, "administration");
-        if (location === "selected-git-dir") {
+        if (location !== "selected-common-dir") {
           await rename(join(repository, ".git"), metadata);
         }
         const alias = join(repository, "administration-alias");
         await symlink(
-          location === "selected-git-dir" ? metadata : join(repository, ".git"),
+          location !== "selected-common-dir"
+            ? metadata
+            : join(repository, ".git"),
           alias,
           linkType,
         );
         environment[
-          location === "selected-git-dir" ? "GIT_DIR" : "GIT_COMMON_DIR"
-        ] = alias;
+          location !== "selected-common-dir" ? "GIT_DIR" : "GIT_COMMON_DIR"
+        ] = location === "selected-git-dir-trailing" ? `${alias}${sep}` : alias;
         environment["GIT_WORK_TREE"] = repository;
         storage = join(alias, "lfs");
       }
@@ -210,7 +225,8 @@ describe("patch Git administration", () => {
             ...options,
             environment: { ...environment, ...options?.environment },
           }),
-        location !== "selected-git-dir",
+        location !== "selected-git-dir" &&
+          location !== "selected-git-dir-trailing",
         location !== "selected-common-dir",
       );
       expect(controls).toBeDefined();
