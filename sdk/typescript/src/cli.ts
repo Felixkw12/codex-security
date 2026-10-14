@@ -9650,6 +9650,10 @@ async function runSkill(
     ].join("\n");
   }
   const patch = skill === "fix-finding";
+  const selectedGitDirectory = environmentValue(
+    dependencies.environment,
+    "GIT_DIR",
+  );
   const gitControls = patch
     ? await capturePatchGitControls(
         directory,
@@ -9678,9 +9682,12 @@ async function runSkill(
               },
             },
           ),
-        environmentValue(dependencies.environment, "GIT_DIR") === undefined,
+        selectedGitDirectory === undefined,
         environmentValue(dependencies.environment, "GIT_COMMON_DIR") ===
           undefined,
+        selectedGitDirectory === undefined || isAbsolute(selectedGitDirectory)
+          ? selectedGitDirectory
+          : `${resolve(directory, parse(selectedGitDirectory).root)}${sep}${selectedGitDirectory.slice(parse(selectedGitDirectory).root.length)}`,
       )
     : undefined;
   const patchPermissions =

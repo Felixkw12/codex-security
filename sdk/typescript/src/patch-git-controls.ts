@@ -175,6 +175,23 @@ async function readGitMarker(
     : undefined;
 }
 
+export async function selectedGitFileReference(
+  marker: string,
+  gitDirectory: string,
+): Promise<string | undefined> {
+  const contents = await readGitMarker(marker);
+  if (contents === undefined || contents === true) return undefined;
+  const reference = relativeFile(
+    dirname(marker),
+    controlPathText(contents)
+      .slice(8)
+      .replace(/[\r\n]+$/u, ""),
+  );
+  return (await realControlPath(reference).catch(missing)) === gitDirectory
+    ? reference
+    : undefined;
+}
+
 function hasNoWorktree(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   const failure = error as Error & {
@@ -190,6 +207,25 @@ function hasNoWorktree(error: unknown): boolean {
     typeof diagnostic === "string" &&
     /fatal: this operation must be run in a work tree\r?\n$/u.test(diagnostic)
   );
+}
+
+async function readCommonDirectory(
+  gitDirectory: string,
+  rememberReference?: (path: string) => Promise<void>,
+): Promise<string | undefined> {
+  const commonBytes = await readFile(join(gitDirectory, "commondir")).catch(
+    missing,
+  );
+  const common =
+    commonBytes === undefined ? undefined : controlPathText(commonBytes);
+  if (common === undefined) return undefined;
+  const commonReference = relativeFile(
+    gitDirectory,
+    common.replace(/[\r\n]+$/u, ""),
+  );
+  const resolvedCommon = await realControlPath(commonReference);
+  await rememberReference?.(commonReference);
+  return resolvedCommon;
 }
 
 async function markerDirectories(
@@ -216,19 +252,8 @@ async function markerDirectories(
   if (!(await stat(gitDirectory)).isDirectory()) return undefined;
   await rememberReference?.(reference);
   if (commonDirectory !== undefined) return [gitDirectory, commonDirectory];
-  const commonBytes = await readFile(join(gitDirectory, "commondir")).catch(
-    missing,
-  );
-  const common =
-    commonBytes === undefined ? undefined : controlPathText(commonBytes);
-  if (common === undefined) return [gitDirectory];
-  const commonReference = relativeFile(
-    gitDirectory,
-    common.replace(/[\r\n]+$/u, ""),
-  );
-  const resolvedCommon = await realControlPath(commonReference);
-  await rememberReference?.(commonReference);
-  return [gitDirectory, resolvedCommon];
+  const common = await readCommonDirectory(gitDirectory, rememberReference);
+  return common === undefined ? [gitDirectory] : [gitDirectory, common];
 }
 
 // Git permits include files and hook directories that do not exist yet.
@@ -383,6 +408,7 @@ export async function capturePatchGitControls(
   run: RunGit,
   usesWorktreeMarker: boolean,
   usesCommonDirectoryMarker = true,
+  selectedGitDirectory?: string,
 ): Promise<PatchGitControls | undefined> {
   const runBytes = async (
     root: string,
@@ -754,6 +780,19 @@ export async function capturePatchGitControls(
         rememberAdministrationReference,
       )
     : undefined;
+  if (!usesWorktreeMarker && selectedGitDirectory !== undefined) {
+    const reference = await selectedGitFileReference(
+      selectedGitDirectory,
+      selectedDirectories[0]!,
+    );
+    if (reference !== undefined)
+      await rememberAdministrationReference(reference);
+  }
+  if (!usesWorktreeMarker && usesCommonDirectoryMarker)
+    await readCommonDirectory(
+      selectedDirectories[0]!,
+      rememberAdministrationReference,
+    );
   if (selectedMarker !== undefined)
     for (const link of await directoryLinks(join(root, ".git")))
       administrationLinks.add(link);
