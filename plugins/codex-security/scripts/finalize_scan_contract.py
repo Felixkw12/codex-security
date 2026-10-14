@@ -647,7 +647,9 @@ def _require_scan_local_file(scan_dir: Path, relative_path: str, context: str) -
     os.close(descriptor)
 
 
-def _require_derived_writeup_files(scan_dir: Path, findings: dict[str, Any]) -> None:
+def _require_derived_writeup_files(
+    scan_dir: Path, findings: dict[str, Any], warnings: list[str] | None = None
+) -> None:
     for index, finding in enumerate(findings.get("findings", [])):
         if not isinstance(finding, dict):
             continue
@@ -656,11 +658,19 @@ def _require_derived_writeup_files(scan_dir: Path, findings: dict[str, Any]) -> 
             continue
         report_path = writeup.get("reportPath")
         if isinstance(report_path, str):
-            _require_scan_local_file(
-                scan_dir,
-                report_path,
-                f"findings[{index}].writeup.reportPath",
-            )
+            try:
+                _require_scan_local_file(
+                    scan_dir,
+                    report_path,
+                    f"findings[{index}].writeup.reportPath",
+                )
+            except ContractError as exc:
+                if warnings is None:
+                    raise
+                finding.pop("writeup")
+                warning = f"Skipped unavailable writeup for finding {index + 1}: {exc}."
+                warnings.append(warning)
+                print(f"codex-security: warning: {warning}", file=sys.stderr)
 
 
 def _require_hardening_portfolio_file(scan_dir: Path, scan: dict[str, Any]) -> None:
@@ -2929,6 +2939,7 @@ def _prepare_scan_finalization(
     expected_coverage_mode: str | None = None,
     completion_binding: dict[str, Any] | None = None,
     completion_warnings: list[str] | None = None,
+    projection_warnings: list[str] | None = None,
     draft_documents: tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None = None,
     finding_scope: list[tuple[str, bool]] | None = None,
 ) -> PreparedScanFinalization:
@@ -3010,7 +3021,9 @@ def _prepare_scan_finalization(
     _validate_canonical_schemas_before_projection(
         manifest, findings_for_validation, coverage, schema_dir
     )
-    _require_derived_writeup_files(scan_dir, findings)
+    if projection_warnings is None:
+        projection_warnings = []
+    _require_derived_writeup_files(scan_dir, findings, None if was_sealed else projection_warnings)
     _require_hardening_portfolio_file(scan_dir, scan)
     if finding_scope is not None:
         # Accepted worker/reducer files remain immutable; only the new parent
@@ -3117,6 +3130,7 @@ def finalize_scan(
         schema_dir,
         expected_coverage_mode=expected_coverage_mode,
         completion_binding=completion_binding,
+        projection_warnings=projection_warnings,
     )
     return _write_prepared_scan_finalization(
         prepared, source_root, projection_warnings=projection_warnings

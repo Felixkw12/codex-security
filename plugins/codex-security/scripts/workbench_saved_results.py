@@ -41,7 +41,6 @@ from finalize_scan_contract import (
     write_scan_local_bytes,
     write_threat_model_projection_if_possible,
 )
-from report_projection import WRITEUP_REPORT_PATH_RE
 from workbench_constants import PHASES
 from workbench_target import committed_diff_snapshot_digest
 from workbench_validation import path_within_scope
@@ -655,93 +654,6 @@ def _retained_findings(finding: dict[str, Any]) -> Iterator[dict[str, Any]]:
                 for source in reversed(sources)
                 if isinstance(source, dict) and isinstance(source.get("finding"), dict)
             )
-
-
-def preserve_deep_writeups(
-    scan_dir: Path,
-    findings: dict[str, Any],
-    coverage: dict[str, Any],
-    workers: list[Any],
-    warnings: list[str],
-) -> None:
-    """Copy child evidence into the parent without changing accepted worker results."""
-    roots = {
-        worker["id"]: Path(worker["artifact_dir"])
-        for worker in workers
-        if worker["kind"] == "discovery"
-    }
-
-    def read(relative: str) -> bytes:
-        with os.fdopen(
-            open_scan_local_file_descriptor(scan_dir, relative, "Finding writeup"), "rb"
-        ) as handle:
-            return handle.read()
-
-    def transfer(report_path: str, owner: str) -> str:
-        report = Path(report_path)
-        source = roots[owner].relative_to(scan_dir) / report
-        contents = read(source.as_posix())
-        slug = f"{owner}-{report.stem}"
-        destination = Path("findings") / slug
-        directories = [scan_dir / source.parent]
-        while directories:
-            with os.scandir(directories.pop()) as entries:
-                for entry in entries:
-                    if entry.is_dir(follow_symlinks=False):
-                        directories.append(Path(entry.path))
-                    else:
-                        relative = Path(entry.path).relative_to(scan_dir)
-                        write_scan_local_bytes(
-                            scan_dir,
-                            (destination / relative.relative_to(source.parent)).as_posix(),
-                            read(relative.as_posix()),
-                        )
-        projected = (destination / f"{slug}.md").as_posix()
-        write_scan_local_bytes(scan_dir, projected, contents)
-        return projected
-
-    def preserve(finding: dict[str, Any], owner: str | None = None) -> None:
-        if not isinstance(finding, dict):
-            return
-        provenance = finding.get("provenance", {})
-        if not isinstance(provenance, dict):
-            return
-        owner = provenance.get("workerId", owner)
-        sources = provenance.get("sourceFindings", [])
-        writeup = finding.get("writeup")
-        if isinstance(writeup, dict):
-            report_path = writeup.get("reportPath")
-            try:
-                if not isinstance(report_path, str) or not WRITEUP_REPORT_PATH_RE.fullmatch(
-                    report_path
-                ):
-                    raise ContractError("Invalid finding writeup path")
-                owners = (
-                    [owner]
-                    if owner in roots
-                    else [
-                        source["id"].rsplit(":", 1)[0]
-                        for source in sources
-                        if source.get("finding", {}).get("writeup", {}).get("reportPath")
-                        == report_path
-                        and source["id"].rsplit(":", 1)[0] in roots
-                    ]
-                )
-                if owners and not report_path.startswith(f"findings/{owners[0]}-"):
-                    writeup["reportPath"] = transfer(report_path, owners[0])
-                else:
-                    read(report_path)
-            except (ContractError, OSError, ValueError) as exc:
-                finding.pop("writeup")
-                coverage["completeness"] = "partial"
-                warnings.append(f"Skipped unavailable finding writeup {report_path}: {exc}")
-        for source in sources:
-            preserve(source["finding"], source["id"].rsplit(":", 1)[0])
-        for previous in provenance.get("previousFindings", []):
-            preserve(previous, owner)
-
-    for finding in findings["findings"]:
-        preserve(finding)
 
 
 def _deferred_rows(coverage: dict[str, Any]) -> list[Any]:
@@ -2118,10 +2030,7 @@ def merge_saved_results(
         item = {"id": "scan-stopped", "reason": reason}
         if item not in coverage["deferred"]:
             coverage["deferred"].append(item)
-    document = {"findings": findings}
-    if workers:
-        preserve_deep_writeups(scan_dir, document, coverage, workers, warnings)
-    return manifest, document, coverage
+    return manifest, {"findings": findings}, coverage
 
 
 def coverage_for_comparison(db: Any, scan: Any) -> dict[str, Any]:

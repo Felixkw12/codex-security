@@ -667,19 +667,26 @@ The extraction root is not enforced.
     def test_finalize_requires_linked_writeup_to_be_regular_scan_local_file(self) -> None:
         report_path = "findings/archive-extraction/archive-extraction.md"
         self.findings["findings"][0]["writeup"] = {"reportPath": report_path}
-        self.write_scan()
-
-        with self.assertRaisesRegex(FINALIZER.ContractError, "expected a file inside"):
-            FINALIZER.finalize_scan(self.scan_dir)
-
         writeup_path = self.scan_dir / report_path
-        writeup_path.parent.mkdir(parents=True)
-        writeup_path.mkdir()
-        with self.assertRaisesRegex(FINALIZER.ContractError, "regular non-symlink file"):
-            FINALIZER.finalize_scan(self.scan_dir)
+        for state in ("missing", "directory"):
+            with self.subTest(state=state):
+                if state == "directory":
+                    writeup_path.mkdir(parents=True)
+                self.write_scan()
+                warnings = []
+                manifest, findings, coverage = FINALIZER.finalize_scan(
+                    self.scan_dir, projection_warnings=warnings
+                )
+                self.assertTrue(manifest["scan"]["sealedAt"])
+                self.assertEqual(len(findings["findings"]), 1)
+                self.assertNotIn("writeup", findings["findings"][0])
+                self.assertEqual(coverage, self.coverage)
+                self.assertEqual(len(warnings), 1)
+                self.assertIn("writeup", warnings[0])
 
         writeup_path.rmdir()
         writeup_path.write_text("# Archive extraction\n", encoding="utf-8")
+        self.write_scan()
         FINALIZER.finalize_scan(self.scan_dir)
         writeup_path.unlink()
         with self.assertRaisesRegex(FINALIZER.ContractError, "expected a file inside"):

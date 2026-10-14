@@ -184,83 +184,37 @@ def assert_published_aggregate(scan):
     assert (scan.scan_dir / "report.md").is_file()
 
 
-@pytest.mark.parametrize("writeup_state", ["available", "missing", "symlink"])
-@pytest.mark.parametrize("stopped", [False, True], ids=["complete", "failed"])
-def test_deep_publication_preserves_child_writeups(
-    workbench_api, workbench_db, publication_scan, writeup_state, stopped
+@pytest.mark.parametrize("writeup_location", ["parent", "child", "missing"])
+def test_deep_completion_does_not_require_optional_writeups(
+    workbench_api, workbench_db, publication_scan, writeup_location
 ):
     scan = publication_scan()
-    originals = []
-    for index in range(2):
-        result = add_worker(workbench_db, scan)
-        source = copy.deepcopy(scan.findings[0])
-        source["provenance"] = {"source": "local_plugin"}
-        source["writeup"] = {"reportPath": "findings/archive/archive.md"}
-        result.write_text(json.dumps(saved_draft(scan.scan_id, findings=[source])))
-        if writeup_state != "missing":
-            directory = result.parent / "findings/archive"
-            (directory / "poc").mkdir(parents=True)
-            (directory / "archive.md").write_text(f"# Review {index}\n\n[Proof](poc/proof.txt)\n")
-            if writeup_state == "symlink":
-                outside = scan.scan_dir.parent / "outside.txt"
-                outside.write_text("Evidence outside the scan must not be copied.\n")
-                try:
-                    (directory / "poc/proof.txt").symlink_to(outside)
-                except OSError:
-                    pytest.skip("Creating symlinks requires platform permission")
-            else:
-                (directory / "poc/proof.txt").write_text(f"Evidence {index}\n")
-        originals.append({"id": f"{result.parent.name}:0", "finding": source})
-    scan.findings[0]["writeup"] = copy.deepcopy(originals[0]["finding"]["writeup"])
-    scan.findings[0]["provenance"]["sourceFindings"] = originals
+    report_path = "findings/archive/archive.md"
+    scan.findings[0]["writeup"] = {"reportPath": report_path}
+    result = add_worker(workbench_db, scan)
+    result.write_text(json.dumps(saved_draft(scan.scan_id, findings=scan.findings)))
+    if writeup_location != "missing":
+        root = scan.scan_dir if writeup_location == "parent" else result.parent
+        report = root / report_path
+        report.parent.mkdir(parents=True)
+        report.write_text("# Optional finding write-up\n")
     (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": scan.findings}))
-    source_bytes = {
-        path: path.read_bytes() for path in (scan.scan_dir / "workers").rglob("*") if path.is_file()
-    }
+    child_bytes = result.read_bytes()
 
-    if stopped:
-        workbench_api["saved_results"].fail_scan(
-            SimpleNamespace(**workbench_api),
-            workbench_db,
-            Namespace(
-                scan_id=scan.scan_id,
-                message="Synthetic interruption",
-                claim_token=None,
-                cost_json=None,
-            ),
-        )
-    else:
-        completed = complete(workbench_api, workbench_db, scan)
-        assert completed["progress"]["status"] == "complete"
+    completed = complete(workbench_api, workbench_db, scan)
 
-    manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())["scan"]
-    assert manifest["sealedAt"]
-    assert manifest["status"] == ("failed" if stopped else "completed")
-    findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
-    assert findings
-    canonical = findings[0]
-    retained = [canonical, *(item["finding"] for item in canonical["provenance"]["sourceFindings"])]
-    if writeup_state != "available":
-        assert all("writeup" not in finding for finding in retained)
-        coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
-        assert coverage["completeness"] == "partial"
-        warnings = workbench_db.execute(
-            "SELECT completion_warnings_json FROM scans WHERE id = ?", (scan.scan_id,)
-        ).fetchone()[0]
-        assert "writeup" in warnings
-        assert not list((scan.scan_dir / "findings").glob("*/poc/proof.txt"))
-    else:
-        paths = [scan.scan_dir / finding["writeup"]["reportPath"] for finding in retained]
-        assert paths[0] == paths[1]
-        assert paths[1] != paths[2]
-        for index, report in enumerate(paths[1:]):
-            assert report.read_text() == f"# Review {index}\n\n[Proof](poc/proof.txt)\n"
-            assert (report.parent / "poc/proof.txt").read_text() == f"Evidence {index}\n"
-        if not stopped:
-            before = (scan.scan_dir / "findings.json").read_bytes()
-            complete(workbench_api, workbench_db, scan)
-            assert (scan.scan_dir / "findings.json").read_bytes() == before
-    assert all(path.read_bytes() == contents for path, contents in source_bytes.items())
+    assert completed["progress"]["status"] == "complete"
+    if writeup_location != "parent":
+        scan.findings[0].pop("writeup")
+        assert "writeup" in " ".join(completed["warnings"])
+        assert not (scan.scan_dir / "findings").exists()
+    if writeup_location != "missing":
+        assert report.read_text() == "# Optional finding write-up\n"
+    assert_published_aggregate(scan)
+    assert result.read_bytes() == child_bytes
+    sealed = (scan.scan_dir / "findings.json").read_bytes()
+    complete(workbench_api, workbench_db, scan)
+    assert (scan.scan_dir / "findings.json").read_bytes() == sealed
 
 
 @pytest.mark.parametrize("mode", ["standard", "deep", "deep-nested"])
