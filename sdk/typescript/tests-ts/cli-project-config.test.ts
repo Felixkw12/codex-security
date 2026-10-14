@@ -1260,7 +1260,7 @@ test.each(["yaml", "toon", "json"])(
     const missing = join(
       root,
       "a-directory-name-long-enough-to-make-yaml-fold-the-line",
-      "scan.yaml",
+      "nested\\scan.yaml",
     );
     const { stderr, runCli } = createCliTest(main);
     expect(
