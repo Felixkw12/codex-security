@@ -4,6 +4,8 @@ import {
   appendFile,
   chmod,
   cp,
+  link,
+  lstat,
   symlink,
   mkdir,
   readFile,
@@ -134,6 +136,94 @@ describe("patch Git administration", () => {
     });
   }
 
+  test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "keeps selected administration usable without parent directory listing",
+    async () => {
+      const repository = await fixtures.create(
+        "patch-traversable-administration-",
+      );
+      const external = await fixtures.create(
+        "patch-traversable-administration-target-",
+      );
+      const git = repositoryGit(repository);
+      git("init", "--initial-branch=main");
+      const metadata = join(external, "metadata");
+      await rename(join(repository, ".git"), metadata);
+      const parent = join(external, "selected");
+      await mkdir(parent);
+      const alias = join(parent, "administration");
+      await symlink(metadata, alias, "dir");
+      await chmod(parent, 0o111);
+      try {
+        await expect(readdir(parent)).rejects.toMatchObject({ code: "EACCES" });
+        const controls = await capturePatchGitControls(
+          repository,
+          async (_root, checkout, args, options) =>
+            runGitRepositoryCommand("git", args, checkout, {
+              ...options,
+              environment: {
+                GIT_DIR: alias,
+                GIT_WORK_TREE: repository,
+                ...options?.environment,
+              },
+            }),
+          false,
+        );
+        expect(controls!.snapshotStoragePaths).toEqual([
+          join(metadata, "lfs", "objects"),
+          join(metadata, "lfs", "tmp"),
+        ]);
+        await controls!.validate();
+      } finally {
+        await chmod(parent, 0o700);
+      }
+    },
+  );
+
+  test("distinguishes alternate administration spelling from separate entries", async () => {
+    const repository = await fixtures.create("patch-administration-case-");
+    const external = await fixtures.create("patch-administration-case-target-");
+    const git = repositoryGit(repository);
+    git("init", "--initial-branch=main");
+    const selected = join(repository, ".git");
+    const metadata = join(external, "metadata");
+    await rename(selected, metadata);
+    const linkType = process.platform === "win32" ? "junction" : "dir";
+    await symlink(metadata, selected, linkType);
+    const alternate = join(repository, ".GIT");
+    const sameEntry = await lstat(alternate).then(
+      () => true,
+      (error) => {
+        if (error.code === "ENOENT") return false;
+        throw error;
+      },
+    );
+    if (!sameEntry) {
+      if (process.platform === "win32")
+        await symlink(metadata, alternate, linkType);
+      else {
+        await link(selected, alternate);
+        expect((await lstat(alternate, { bigint: true })).ino).toBe(
+          (await lstat(selected, { bigint: true })).ino,
+        );
+      }
+    }
+    git("config", "lfs.storage", join(alternate, "lfs"));
+    const controls = await capturePatchGitControls(
+      repository,
+      async (_root, checkout, args, options) =>
+        runGitRepositoryCommand("git", args, checkout, options),
+      true,
+    );
+    const paths = [
+      join(metadata, "lfs", "objects"),
+      join(metadata, "lfs", "tmp"),
+    ];
+    expect(controls!.snapshotStoragePaths).toEqual(sameEntry ? paths : []);
+    expect(controls!.modelOnlyReadOnlyPaths).toEqual(sameEntry ? [] : paths);
+    await controls!.validate();
+  });
+
   for (const location of [
     "root",
     "ancestor",
@@ -243,6 +333,7 @@ describe("patch Git administration", () => {
     "administration-alias",
     "metadata-alias",
     "gitfile-alias",
+    "nested-administration",
     "checkout-alias",
     "selected-git-dir",
     "selected-git-dir-trailing",
@@ -288,6 +379,23 @@ describe("patch Git administration", () => {
           "gitdir: administration-alias\n",
         );
         storage = join(alias, "lfs");
+        git("config", "lfs.storage", storage);
+      } else if (location === "nested-administration") {
+        const child = join(repository, "child");
+        await mkdir(child);
+        const childGit = repositoryGit(child);
+        childGit("init", "--initial-branch=main");
+        childGit("config", "user.name", "Synthetic User");
+        childGit("config", "user.email", "synthetic@example.test");
+        await writeFile(join(child, "app.txt"), "child\n");
+        childGit("add", ".");
+        childGit("commit", "-m", "Synthetic child");
+        const metadata = join(repository, ".git", "child-administration");
+        await rename(join(child, ".git"), metadata);
+        await symlink(metadata, join(child, ".git"), linkType);
+        git("add", "child");
+        git("commit", "-m", "Synthetic selected child");
+        storage = join(child, ".git", "parent-lfs");
         git("config", "lfs.storage", storage);
       } else if (location === "checkout-alias") {
         directory = join(external, "checkout");
