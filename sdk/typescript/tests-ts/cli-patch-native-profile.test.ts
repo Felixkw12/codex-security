@@ -4,6 +4,7 @@ import {
   mkdir,
   lstat,
   readFile,
+  readdir,
   realpath,
   rename,
   symlink,
@@ -27,11 +28,30 @@ afterEach(fixtures.cleanup);
 
 type RpcMessage = Record<string, any>;
 
+interface PatchProfileContext {
+  name: string;
+  administration: string;
+  filesystem: RpcMessage;
+  modelProfile: RpcMessage;
+  snapshotProfile: RpcMessage;
+  repository: string;
+  home: string;
+  storage: string;
+  controls: Awaited<ReturnType<typeof capturePatchGitControls>>;
+}
+
 async function resolvePatchProfile(
   configured: boolean,
   optionalStorage: false | "inside" | "outside" | "administration" = false,
   existingStorage = false,
-) {
+  exercise?: (
+    context: PatchProfileContext,
+    inspectModel: (
+      source: string,
+      temporaryDirectory: string,
+    ) => Promise<string>,
+  ) => Promise<void>,
+): Promise<PatchProfileContext> {
   const root = await fixtures.create("patch-native-profile-");
   const home = join(root, "home");
   const repository = join(root, "repository");
@@ -303,7 +323,7 @@ glob_scan_max_depth = 8
     expect(await readFile(join(administration, "config"))).toEqual(
       configBefore,
     );
-    return {
+    const context: PatchProfileContext = {
       name,
       administration,
       filesystem: profiles[name]!["filesystem"] as RpcMessage,
@@ -314,6 +334,34 @@ glob_scan_max_depth = 8
       storage,
       controls,
     };
+    clearTimeout(timeout);
+    if (exercise) {
+      await rpc("config/value/write", {
+        keyPath: `permissions.${name}`,
+        value: context.modelProfile,
+        mergeStrategy: "replace",
+        filePath: join(home, "config.toml"),
+      });
+      await exercise(context, async (source, temporaryDirectory) => {
+        // Model tools and command/exec share native permission preparation.
+        const result = await rpc("command/exec", {
+          command: ["node", "-e", source],
+          cwd: repository,
+          permissionProfile: name,
+          env: {
+            TEMP: temporaryDirectory,
+            TMP: temporaryDirectory,
+            TMPDIR: temporaryDirectory,
+          },
+          timeoutMs: 30_000,
+        });
+        expect(result["exitCode"] as number, result["stderr"] as string).toBe(
+          0,
+        );
+        return result["stdout"] as string;
+      });
+    }
+    return context;
   } finally {
     clearTimeout(timeout);
     forwarding = false;
@@ -376,71 +424,92 @@ test("optional storage keeps overlapping Git administration protected in snapsho
 for (const location of ["inside", "outside"] as const) {
   for (const existing of [false, true]) {
     test(`optional cache keeps model protection and inherited snapshot access: ${location}, existing ${existing}`, async () => {
-      const context = await resolvePatchProfile(
+      await resolvePatchProfile(
         location === "outside",
         location,
         existing,
-      );
-      const environment = patchSnapshotEnvironment(
-        await fixtures.create("patch-cache-temporary-"),
-        { ...process.env, CODEX_HOME: context.home },
-      );
-      const paths = [
-        join(context.storage, "objects"),
-        join(context.storage, "tmp"),
-      ];
-      const file = join(paths[0]!, "synthetic");
-      const inspect = (source: string, profile: RpcMessage) =>
-        runRepositoryCommand(
-          "git",
-          [
-            "-c",
-            `alias.inspect=!node -e '${source.replaceAll("'", "'\\''")}'`,
-            "inspect",
-          ],
-          context.repository,
-          {
-            sandbox: { directory: context.repository, environment, profile },
-          },
-        );
-      if (!existing) {
-        for (const path of paths)
-          await expect(lstat(path)).rejects.toMatchObject({ code: "ENOENT" });
-        const beforeSnapshot = JSON.parse(
-          await inspect(
-            `const fs=require("node:fs");const attempts=${JSON.stringify(paths)}.map(path=>{let created=false,wrote=false,createError,writeError;try{created=fs.mkdirSync(path,{recursive:true})!==undefined;}catch(error){createError=error.code;}try{fs.writeFileSync(path+"/synthetic","changed");wrote=true;}catch(error){writeError=error.code;}return{created,wrote,createError,writeError};});fs.writeSync(1,JSON.stringify(attempts));`,
-            context.modelProfile,
-          ),
-        );
-        expect(beforeSnapshot).toEqual(
-          paths.map(() =>
-            expect.objectContaining({
-              created: false,
-              wrote: false,
-              writeError: expect.any(String),
-            }),
-          ),
-        );
-        for (const path of paths)
-          await expect(lstat(path)).rejects.toMatchObject({ code: "ENOENT" });
-      }
-      const snapshot = await inspect(
-        `const fs=require("node:fs");for(const path of ${JSON.stringify(paths)})fs.mkdirSync(path,{recursive:true});fs.writeFileSync(${JSON.stringify(file)},"unchanged");fs.writeSync(1,"prepared");`,
-        context.snapshotProfile,
-      );
-      expect(snapshot).toBe("prepared");
-      await context.controls!.validate();
-      const model = await inspect(
-        `const fs=require("node:fs");try{fs.writeFileSync(${JSON.stringify(file)},"changed");fs.writeSync(1,"allowed");}catch(error){fs.writeSync(1,error.code);}`,
-        context.modelProfile,
-      );
-      expect(["EROFS", "EACCES", "EPERM"]).toContain(model);
-      expect(await readFile(file, "utf8")).toBe("unchanged");
-      await context.controls!.validate();
-      await rename(paths[0]!, `${paths[0]}-previous`);
-      await mkdir(paths[0]!);
-      await expect(context.controls!.validate()).rejects.toThrow(
-        "changed location during the patch",
+        async (context, inspectModel) => {
+          const temporaryDirectory = await fixtures.create(
+            "patch-cache-temporary-",
+          );
+          const environment = patchSnapshotEnvironment(temporaryDirectory, {
+            ...process.env,
+            CODEX_HOME: context.home,
+          });
+          const paths = [
+            join(context.storage, "objects"),
+            join(context.storage, "tmp"),
+          ];
+          const file = join(paths[0]!, "synthetic");
+          const inspect = (source: string, profile: RpcMessage) =>
+            runRepositoryCommand(
+              "git",
+              [
+                "-c",
+                `alias.inspect=!node -e '${source.replaceAll("'", "'\\''")}'`,
+                "inspect",
+              ],
+              context.repository,
+              {
+                sandbox: {
+                  directory: context.repository,
+                  environment,
+                  profile,
+                },
+              },
+            );
+          if (!existing) {
+            for (const path of paths)
+              await expect(lstat(path)).rejects.toMatchObject({
+                code: "ENOENT",
+              });
+            const beforeSnapshot = JSON.parse(
+              await inspectModel(
+                `const fs=require("node:fs");const attempts=${JSON.stringify(paths)}.map(path=>{let created=false,childCreated=false,wrote=false,createError,childError,writeError;try{created=fs.mkdirSync(path,{recursive:true})!==undefined;}catch(error){createError=error.code;}try{fs.mkdirSync(path+"/synthetic-child");childCreated=true;}catch(error){childError=error.code;}try{fs.writeFileSync(path+"/synthetic","changed");wrote=true;}catch(error){writeError=error.code;}return{created,childCreated,wrote,createError,childError,writeError};});fs.writeSync(1,JSON.stringify(attempts));`,
+                temporaryDirectory,
+              ),
+            );
+            expect(beforeSnapshot).toEqual(
+              paths.map(() =>
+                expect.objectContaining({
+                  created: false,
+                  childCreated: false,
+                  wrote: false,
+                  childError: expect.any(String),
+                  writeError: expect.any(String),
+                }),
+              ),
+            );
+            for (const path of paths) {
+              if (process.platform === "win32") {
+                // Native ACL setup creates empty protected directory placeholders.
+                expect((await lstat(path)).isDirectory()).toBe(true);
+                expect(await readdir(path)).toEqual([]);
+              } else
+                await expect(lstat(path)).rejects.toMatchObject({
+                  code: "ENOENT",
+                });
+            }
+          }
+          const snapshot = await inspect(
+            `const fs=require("node:fs");for(const path of ${JSON.stringify(paths)})fs.mkdirSync(path,{recursive:true});fs.writeFileSync(${JSON.stringify(file)},"unchanged");fs.writeSync(1,"prepared");`,
+            context.snapshotProfile,
+          );
+          expect(snapshot).toBe("prepared");
+          await context.controls!.validate();
+          const model = await inspectModel(
+            `const fs=require("node:fs");try{fs.writeFileSync(${JSON.stringify(file)},"changed");fs.writeSync(1,"allowed");}catch(error){fs.writeSync(1,error.code);}`,
+            temporaryDirectory,
+          );
+          expect(["EROFS", "EACCES", "EPERM"]).toContain(model);
+          expect(await readFile(file, "utf8")).toBe("unchanged");
+          await context.controls!.validate();
+          await rename(paths[0]!, `${paths[0]}-previous`);
+          await mkdir(paths[0]!);
+          await expect(context.controls!.validate()).rejects.toThrow(
+            "changed location during the patch",
+          );
+        },
       );
     }, 30_000);
   }
