@@ -654,9 +654,10 @@ export async function capturePatchGitControls(
           throw new Error(
             `Git administration reference changed during the patch: ${entry}`,
           );
-        await rememberControl(entry, true, false);
         administrationLinks.add(entry);
       }
+      if (administrationLinks.has(entry))
+        await rememberControl(entry, true, false);
       const parent = dirname(entry);
       if (
         inside(root, parent) &&
