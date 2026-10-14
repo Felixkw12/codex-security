@@ -48,6 +48,7 @@ from finalize_scan_contract import (
     ContractError,
     RecoverableContractError,
     _prepare_scan_finalization,
+    _read_scan_local_json,
     _write_prepared_scan_finalization,
     finalize_scan,
     finding_candidate_id,
@@ -1547,6 +1548,21 @@ def complete_scan_locked(
             ):
                 raise RecoverableContractError(
                     "The latest saved scan draft is incomplete; continue the scan before completing it."
+                )
+            if scan["mode"] == "deep" and not already_sealed:
+                draft_documents = (
+                    current_manifest,
+                    _read_scan_local_json(scan_dir, ARTIFACTS["findings"], "Deep findings"),
+                    _read_scan_local_json(scan_dir, ARTIFACTS["coverage"], "Deep coverage"),
+                )
+                saved_results.preserve_deep_writeups(
+                    scan_dir,
+                    draft_documents[1],
+                    draft_documents[2],
+                    connection.execute(
+                        "SELECT * FROM deep_scan_workers WHERE scan_id = ?", (scan_id,)
+                    ).fetchall(),
+                    warnings,
                 )
             prepared = _prepare_scan_finalization(
                 scan_dir,
