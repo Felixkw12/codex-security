@@ -930,15 +930,22 @@ describe("independent Cloud destination authorization", () => {
     };
   }
 
-  test("an unregistered manifest cannot silently select even one authorized destination", async () => {
-    const { scan, environment } = await fixture();
-    const cloud = server();
-    await expect(
-      publishScanToCloud(scan, { environment, fetch: cloud.fetch }),
-    ).rejects.toThrow("independently selected Cloud repository");
-    expect(cloud.calls.map((item) => item.method)).toEqual(["GET"]);
-    expect(cloud.calls[0]!.url).toEndWith("/destinations");
-  });
+  test.each([false, true])(
+    "a scan cannot silently select even one authorized destination (saved: %s)",
+    async (saved) => {
+      const { scan, environment } = await fixture();
+      const cloud = server();
+      await expect(
+        publishScanToCloud(scan, {
+          environment,
+          fetch: cloud.fetch,
+          ...(saved ? { savedScan: await savedRecord(scan) } : {}),
+        }),
+      ).rejects.toThrow("independently selected Cloud repository");
+      expect(cloud.calls.map((item) => item.method)).toEqual(["GET"]);
+      expect(cloud.calls[0]!.url).toEndWith("/destinations");
+    },
+  );
 
   test("an explicit multi-repository environment does not authorize manifest-selected routing", async () => {
     const { scan, environment } = await fixture();
@@ -983,31 +990,45 @@ describe("independent Cloud destination authorization", () => {
     expect(cloud.calls.map((item) => item.method)).toEqual(["GET"]);
   });
 
-  test("interactive external publication uses an explicit repository choice", async () => {
-    const { scan, environment } = await fixture();
-    const cloud = server();
-    let prompted = false;
-    await publishScanToCloud(scan, {
-      environment,
-      fetch: cloud.fetch,
-      selectDestination: async (choices) => {
-        prompted = true;
-        return choices[0]!;
-      },
-    });
-    expect(prompted).toBe(true);
-    expect(cloud.create?.repository_id).toBe(destination.repository_id);
-  });
+  test.each([false, true])(
+    "interactive publication uses an explicit repository choice (saved: %s)",
+    async (saved) => {
+      const { scan, environment } = await fixture();
+      const cloud = server();
+      let prompted = false;
+      await publishScanToCloud(scan, {
+        environment,
+        fetch: cloud.fetch,
+        ...(saved ? { savedScan: await savedRecord(scan) } : {}),
+        selectDestination: async (choices) => {
+          prompted = true;
+          return choices[0]!;
+        },
+      });
+      expect(prompted).toBe(true);
+      expect(cloud.create?.repository_id).toBe(destination.repository_id);
+    },
+  );
 
-  test("a completed workbench record retains automatic matching", async () => {
+  test("saved repository provenance cannot override an independently chosen destination", async () => {
     const { scan, environment } = await fixture();
-    const cloud = server();
-    await publishScanToCloud(scan, {
-      environment,
-      fetch: cloud.fetch,
-      savedScan: await savedRecord(scan),
-    });
-    expect(cloud.create?.repository_id).toBe(destination.repository_id);
+    const other = {
+      ...destination,
+      repository_id: "repo-2",
+      repository_full_name: "example/other",
+      repository_remote: "https://github.com/example/other",
+    };
+    const cloud = server({ destinations: [destination, other] });
+    await expect(
+      publishScanToCloud(scan, {
+        environment,
+        fetch: cloud.fetch,
+        cloudEnvironment: "env-1",
+        savedScan: await savedRecord(scan),
+        selectDestination: async () => other,
+      }),
+    ).rejects.toThrow("does not match the independently selected");
+    expect(cloud.calls.map((item) => item.method)).toEqual(["GET"]);
   });
 
   test.each(["directory", "remote", "repositoryPath", "status"])(

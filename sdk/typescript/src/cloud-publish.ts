@@ -171,12 +171,8 @@ async function cloudRequest(
 
 export async function listCloudDestinations(
   dependencies: CloudPublicationDependencies = {},
-  repositoryRemote?: string,
 ): Promise<ImportDestination[]> {
-  const payload = await cloudRequest(
-    `/destinations${repositoryRemote === undefined ? "" : `?repository_remote=${encodeURIComponent(repositoryRemote)}`}`,
-    dependencies,
-  );
+  const payload = await cloudRequest("/destinations", dependencies);
   if (!validateDestinations(payload) || payload.protocol_version !== 1)
     throw new CodexSecurityError(
       "Cloud returned an incompatible destination discovery response.",
@@ -325,68 +321,55 @@ export async function publishScanToCloud(
       dryRun: true,
       findings: contract.findings.findings,
     };
-  const destinations = await listCloudDestinations(
-    dependencies,
-    dependencies.savedScan === undefined ? undefined : scan.target.remote!,
+  const destinations = await listCloudDestinations(dependencies);
+  // Saved provenance and artifacts describe a repository; they do not authorize selecting it.
+  const choices = destinations.filter(
+    (item) =>
+      dependencies.cloudEnvironment === undefined ||
+      item.environment_id === dependencies.cloudEnvironment,
   );
+  if (choices.length === 0)
+    throw new CodexSecurityError(
+      "No existing authorized Cloud destination matches the selected environment.",
+    );
   let destination: ImportDestination;
-  if (dependencies.savedScan !== undefined) {
-    destination = await selectCloudDestination(
-      destinations.filter(
-        (item) =>
-          cloudRepositoryIdentity(item.repository_remote) === repository,
-      ),
-      dependencies,
-    );
-  } else {
-    // Artifact contents describe a repository; they do not authorize selecting it.
-    const choices = destinations.filter(
+  if (dependencies.cloudEnvironment !== undefined && choices.length === 1) {
+    destination = choices[0]!;
+  } else if (
+    dependencies.selectEnvironment !== undefined &&
+    new Set(choices.map((item) => item.environment_id)).size ===
+      choices.length &&
+    dependencies.selectDestination === undefined
+  ) {
+    const selected = await dependencies.selectEnvironment(choices);
+    const match = choices.find((item) => item.environment_id === selected);
+    if (!match)
+      throw new CodexSecurityError(
+        "The selected Cloud repository is not an authorized destination.",
+      );
+    destination = match;
+  } else if (dependencies.selectDestination !== undefined) {
+    const selected = await dependencies.selectDestination(choices);
+    const match = choices.find(
       (item) =>
-        dependencies.cloudEnvironment === undefined ||
-        item.environment_id === dependencies.cloudEnvironment,
+        item.environment_id === selected.environment_id &&
+        item.repository_id === selected.repository_id &&
+        item.connector_id === selected.connector_id,
     );
-    if (choices.length === 0)
+    if (!match)
       throw new CodexSecurityError(
-        "No existing authorized Cloud destination matches the selected environment.",
+        "The selected Cloud repository is not an authorized destination.",
       );
-    if (dependencies.cloudEnvironment !== undefined && choices.length === 1) {
-      destination = choices[0]!;
-    } else if (
-      dependencies.selectEnvironment !== undefined &&
-      new Set(choices.map((item) => item.environment_id)).size ===
-        choices.length &&
-      dependencies.selectDestination === undefined
-    ) {
-      const selected = await dependencies.selectEnvironment(choices);
-      const match = choices.find((item) => item.environment_id === selected);
-      if (!match)
-        throw new CodexSecurityError(
-          "The selected Cloud repository is not an authorized destination.",
-        );
-      destination = match;
-    } else if (dependencies.selectDestination !== undefined) {
-      const selected = await dependencies.selectDestination(choices);
-      const match = choices.find(
-        (item) =>
-          item.environment_id === selected.environment_id &&
-          item.repository_id === selected.repository_id &&
-          item.connector_id === selected.connector_id,
-      );
-      if (!match)
-        throw new CodexSecurityError(
-          "The selected Cloud repository is not an authorized destination.",
-        );
-      destination = match;
-    } else {
-      throw new CodexSecurityError(
-        "External scan artifacts require an independently selected Cloud repository. Specify --cloud-environment for an environment with one repository, or use an interactive terminal.",
-      );
-    }
-    if (cloudRepositoryIdentity(destination.repository_remote) !== repository)
-      throw new CodexSecurityError(
-        "The scan repository does not match the independently selected Cloud destination. No artifacts were uploaded.",
-      );
+    destination = match;
+  } else {
+    throw new CodexSecurityError(
+      "Scan publication requires an independently selected Cloud repository. Specify --cloud-environment for an environment with one repository, or use an interactive terminal.",
+    );
   }
+  if (cloudRepositoryIdentity(destination.repository_remote) !== repository)
+    throw new CodexSecurityError(
+      "The scan repository does not match the independently selected Cloud destination. No artifacts were uploaded.",
+    );
   const request: CreateImportedScan = {
     ...content,
     environment_id: destination.environment_id,
