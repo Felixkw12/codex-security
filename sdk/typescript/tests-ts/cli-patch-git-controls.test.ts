@@ -238,24 +238,45 @@ describe("patch Git administration", () => {
       await chmod(parent, 0o111);
       try {
         await expect(readdir(parent)).rejects.toMatchObject({ code: "EACCES" });
-        const controls = await capturePatchGitControls(
-          repository,
-          async (_root, checkout, args, options) =>
-            runGitRepositoryCommand("git", args, checkout, {
-              ...options,
-              environment: {
-                GIT_DIR: alias,
-                GIT_WORK_TREE: repository,
-                ...options?.environment,
-              },
-            }),
-          false,
+        // Exercise traversal in the package's documented Node runtime.
+        const result = execFileSync(
+          "node",
+          [
+            "--experimental-strip-types",
+            "--input-type=module",
+            "-e",
+            `
+import { execFileSync } from "node:child_process";
+const { capturePatchGitControls } = await import(process.argv[1]);
+const repository = process.argv[2];
+const alias = process.argv[3];
+const controls = await capturePatchGitControls(repository, async (_root, checkout, args, options) => {
+  const result = execFileSync("git", args, {
+    cwd: checkout,
+    input: options?.input,
+    env: {
+      ...process.env,
+      GIT_DIR: alias,
+      GIT_WORK_TREE: repository,
+      ...(options?.indexFile === undefined ? {} : { GIT_INDEX_FILE: options.indexFile }),
+      ...options?.environment,
+    },
+  });
+  return result.toString(options?.encoding === "base64" ? "base64" : "utf8");
+}, false);
+await controls.validate();
+console.log(JSON.stringify(controls.snapshotStoragePaths));
+`,
+            new URL("../src/patch-git-controls.ts", import.meta.url).href,
+            repository,
+            alias,
+          ],
+          { encoding: "utf8" },
         );
-        expect(controls!.snapshotStoragePaths).toEqual([
+        expect(JSON.parse(result)).toEqual([
           join(metadata, "lfs", "objects"),
           join(metadata, "lfs", "tmp"),
         ]);
-        await controls!.validate();
       } finally {
         await chmod(parent, 0o700);
       }
@@ -281,7 +302,7 @@ describe("patch Git administration", () => {
       },
     );
     if (!sameEntry) {
-      if (process.platform === "win32")
+      if (process.platform !== "linux")
         await symlink(metadata, alternate, linkType);
       else {
         await link(selected, alternate);
@@ -306,83 +327,87 @@ describe("patch Git administration", () => {
     await controls!.validate();
   });
 
-  for (const sibling of ["none", "same target", "hardlink"] as const) {
+  for (const sibling of ["none", "same target", "same identity"] as const) {
     const name = `recognizes a unique alternate administration entry with sibling: ${sibling}`;
-    test.skipIf(process.platform === "win32" && sibling === "hardlink")(
-      name,
-      async () => {
-        if (runTestInSubprocess(fileURLToPath(import.meta.url), name)) return;
-        const repository = await fixtures.create("patch-alternate-entry-");
-        const external = await fixtures.create("patch-alternate-entry-target-");
-        const git = repositoryGit(repository);
-        git("init", "--initial-branch=main");
-        const metadata = join(external, "metadata");
-        await rename(join(repository, ".git"), metadata);
-        const selected = join(repository, "SelectedAdministration");
-        const alternate = join(repository, "SELECT~1");
-        const linkType = process.platform === "win32" ? "junction" : "dir";
-        await symlink(metadata, selected, linkType);
-        const other = join(repository, "OtherAdministration");
-        if (sibling === "hardlink") await link(selected, other);
-        else if (sibling === "same target")
-          await symlink(metadata, other, linkType);
-        const environment = { GIT_DIR: selected, GIT_WORK_TREE: repository };
-        await runGitRepositoryCommand(
-          "git",
-          ["config", "lfs.storage", join(alternate, "lfs")],
+    test(name, async () => {
+      if (runTestInSubprocess(fileURLToPath(import.meta.url), name)) return;
+      const repository = await fixtures.create("patch-alternate-entry-");
+      const external = await fixtures.create("patch-alternate-entry-target-");
+      const git = repositoryGit(repository);
+      git("init", "--initial-branch=main");
+      const metadata = join(external, "metadata");
+      await rename(join(repository, ".git"), metadata);
+      const selected = join(repository, "SelectedAdministration");
+      const alternate = join(repository, "SELECT~1");
+      const linkType = process.platform === "win32" ? "junction" : "dir";
+      await symlink(metadata, selected, linkType);
+      const other = join(repository, "OtherAdministration");
+      if (sibling !== "none") await symlink(metadata, other, linkType);
+      const environment = { GIT_DIR: selected, GIT_WORK_TREE: repository };
+      await runGitRepositoryCommand(
+        "git",
+        ["config", "lfs.storage", join(alternate, "lfs")],
+        repository,
+        { environment },
+      );
+      const original = { ...filesystem };
+      const translate = (path: unknown) =>
+        typeof path === "string" &&
+        (path === alternate || path.startsWith(`${alternate}${sep}`))
+          ? `${selected}${path.slice(alternate.length)}`
+          : path;
+      // Model a filesystem lookup alias that is not a separate directory entry.
+      const methods = Object.fromEntries(
+        (["stat", "lstat", "realpath", "readlink", "mkdir"] as const).map(
+          (method) => [
+            method,
+            (...args: unknown[]) => {
+              let path = translate(args[0]);
+              // Model equal link identities without platform-specific hard links.
+              if (
+                method === "lstat" &&
+                sibling === "same identity" &&
+                path === other
+              )
+                path = selected;
+              return Reflect.apply(original[method], original, [
+                path,
+                ...args.slice(1),
+              ]);
+            },
+          ],
+        ),
+      );
+      const modeled = { ...original, ...methods };
+      mock.module("node:fs/promises", () => ({
+        ...modeled,
+        default: modeled,
+      }));
+      try {
+        const controls = await capturePatchGitControls(
           repository,
-          { environment },
+          async (_root, checkout, args, options) =>
+            runGitRepositoryCommand("git", args, checkout, {
+              ...options,
+              environment: { ...environment, ...options?.environment },
+            }),
+          false,
         );
-        const original = { ...filesystem };
-        const translate = (path: unknown) =>
-          typeof path === "string" &&
-          (path === alternate || path.startsWith(`${alternate}${sep}`))
-            ? `${selected}${path.slice(alternate.length)}`
-            : path;
-        // Model a filesystem lookup alias that is not a separate directory entry.
-        const methods = Object.fromEntries(
-          (["stat", "lstat", "realpath", "readlink", "mkdir"] as const).map(
-            (method) => [
-              method,
-              (...args: unknown[]) =>
-                Reflect.apply(original[method], original, [
-                  translate(args[0]),
-                  ...args.slice(1),
-                ]),
-            ],
-          ),
+        const paths = [
+          join(await realpath(metadata), "lfs", "objects"),
+          join(await realpath(metadata), "lfs", "tmp"),
+        ];
+        expect(controls!.snapshotStoragePaths).toEqual(
+          sibling === "same identity" ? [] : paths,
         );
-        const modeled = { ...original, ...methods };
+        await controls!.validate();
+      } finally {
         mock.module("node:fs/promises", () => ({
-          ...modeled,
-          default: modeled,
+          ...original,
+          default: original,
         }));
-        try {
-          const controls = await capturePatchGitControls(
-            repository,
-            async (_root, checkout, args, options) =>
-              runGitRepositoryCommand("git", args, checkout, {
-                ...options,
-                environment: { ...environment, ...options?.environment },
-              }),
-            false,
-          );
-          const paths = [
-            join(await realpath(metadata), "lfs", "objects"),
-            join(await realpath(metadata), "lfs", "tmp"),
-          ];
-          expect(controls!.snapshotStoragePaths).toEqual(
-            sibling === "hardlink" ? [] : paths,
-          );
-          await controls!.validate();
-        } finally {
-          mock.module("node:fs/promises", () => ({
-            ...original,
-            default: original,
-          }));
-        }
-      },
-    );
+      }
+    });
   }
 
   for (const location of [

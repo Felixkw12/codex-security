@@ -526,7 +526,8 @@ test.each(["absolute", "relative"] as const)(
       onWorkbench: () => savedScan(result, "scan-1", directory),
       onRepositoryCommand: (command, args, cwd, options) => {
         const common = options?.environment?.["GIT_COMMON_DIR"];
-        if (common !== undefined) boundCommonDirectories.add(common);
+        if (common !== undefined)
+          boundCommonDirectories.add(common.replaceAll(sep, "/"));
         return runGitRepositoryCommand(command, args, cwd, {
           ...options,
           environment: { ...environment, ...options?.environment },
@@ -550,7 +551,9 @@ test.each(["absolute", "relative"] as const)(
         join(administration, "lfs", "tmp"),
       ]),
     );
-    expect(boundCommonDirectories).toEqual(new Set([administration]));
+    expect(boundCommonDirectories).toEqual(
+      new Set([administration.replaceAll(sep, "/")]),
+    );
     expect(JSON.parse(outcome.stdout)).toMatchObject({
       files: ["src/finding-1.ts", "src/finding-2.ts"],
       filesChanged: 2,
