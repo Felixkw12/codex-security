@@ -59,6 +59,7 @@ import { scanLogsJson } from "./cli-scan-logs-json.js";
 import {
   capturePatchGitAdministrationReferences,
   capturePatchGitControls,
+  selectedGitFileReference,
   withPatchGitIndex,
   type PatchGitAdministrationReference,
 } from "./patch-git-controls.js";
@@ -7801,6 +7802,9 @@ async function patchCommandContext(
       )
     ).replace(/\n$/u, "");
   const gitDirectory = await gitPath(["--git-dir"]);
+  const canonicalGitDirectory = await realpath(
+    await gitPath(["--absolute-git-dir"]),
+  );
   const physicalDirectory = await realpath(directory);
   const gitDirectoryBase =
     dependencies.environment["GIT_DIR"] === undefined
@@ -7823,6 +7827,23 @@ async function patchCommandContext(
       ? undefined
       : await gitPath(["--git-common-dir"]);
   const administrationReferences: PatchGitAdministrationReference[] = [];
+  const selectedGitDirectory = environmentValue(
+    dependencies.environment,
+    "GIT_DIR",
+  );
+  if (selectedGitDirectory !== undefined) {
+    const marker = isAbsolute(selectedGitDirectory)
+      ? selectedGitDirectory
+      : `${resolve(directory, parse(selectedGitDirectory).root)}${sep}${selectedGitDirectory.slice(parse(selectedGitDirectory).root.length)}`;
+    const reference = await selectedGitFileReference(
+      marker,
+      canonicalGitDirectory,
+    );
+    if (reference !== undefined)
+      administrationReferences.push(
+        ...(await capturePatchGitAdministrationReferences(reference)),
+      );
+  }
   // Resolve Git's own path semantics before a patch can remove the caller's cwd.
   for (const [name, args] of [
     ["GIT_COMMON_DIR", ["--git-common-dir"]],
@@ -7922,7 +7943,7 @@ async function patchCommandContext(
     root: await realpath(repository),
     callerDirectory: directory,
     directory: physicalDirectory,
-    gitDirectory: await realpath(await gitPath(["--absolute-git-dir"])),
+    gitDirectory: canonicalGitDirectory,
     administrationReferences,
     environment,
   };
@@ -10525,6 +10546,10 @@ async function runSkill(
     ].join("\n");
   }
   const patch = skill === "fix-finding";
+  const selectedGitDirectory = environmentValue(
+    dependencies.environment,
+    "GIT_DIR",
+  );
   const gitControls = patch
     ? await capturePatchGitControls(
         directory,
@@ -10593,9 +10618,15 @@ async function runSkill(
             },
           );
         },
-        environmentValue(dependencies.environment, "GIT_DIR") === undefined,
+        selectedGitDirectory === undefined,
         environmentValue(dependencies.environment, "GIT_COMMON_DIR") ===
           undefined,
+        options.patchGitContext !== undefined ||
+          selectedGitDirectory === undefined
+          ? undefined
+          : isAbsolute(selectedGitDirectory)
+            ? selectedGitDirectory
+            : `${resolve(directory, parse(selectedGitDirectory).root)}${sep}${selectedGitDirectory.slice(parse(selectedGitDirectory).root.length)}`,
         options.patchGitContext?.administrationReferences,
       )
     : undefined;

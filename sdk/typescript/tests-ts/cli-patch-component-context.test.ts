@@ -1,8 +1,10 @@
 import { afterEach, expect, test } from "bun:test";
 import {
+  cp,
   mkdir,
   readFile,
   realpath,
+  rm,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -565,3 +567,206 @@ test.each(["absolute", "relative"] as const)(
     );
   },
 );
+
+for (const selection of [
+  "absolute",
+  "removed marker directory",
+  "linked file in removed marker directory",
+  "common override",
+] as const) {
+  test(`preserves selected Git-file aliases across finding patches: ${selection}`, async () => {
+    const { directory, git } = await publicationRepository(fixtures);
+    await writeFile(join(directory, "src/finding-2.ts"), "original second\n");
+    await writeFile(
+      join(directory, ".gitignore"),
+      "component/\nadmin-alias\ncommon-alias\nselected.git\n",
+    );
+    git("add", ".");
+    git("commit", "-m", "Synthetic successive Git-file baseline");
+    const administration = await realpath(join(directory, ".git"));
+    const alias = join(directory, "admin-alias");
+    const linkType = process.platform === "win32" ? "junction" : "dir";
+    await symlink(administration, alias, linkType);
+    const component = join(directory, "component");
+    await mkdir(component);
+    const removeMarker = selection.includes("removed marker directory");
+    const markerDirectory = removeMarker ? component : directory;
+    const marker = join(markerDirectory, "selected.git");
+    const contents = `gitdir: ${removeMarker ? "../" : ""}admin-alias\n`;
+    if (selection === "linked file in removed marker directory") {
+      const support = await fixtures.create("patch-selected-file-source-");
+      await mkdir(join(support, "nested"));
+      await cp(administration, join(support, "admin-alias"), {
+        recursive: true,
+      });
+      const source = join(support, "nested", "source.git");
+      await writeFile(source, contents);
+      await symlink(source, marker, "file");
+    } else {
+      await writeFile(marker, contents);
+    }
+    let common = administration;
+    let storageAlias = alias;
+    if (selection === "common override") {
+      common = join(
+        await fixtures.create("patch-selected-common-"),
+        "metadata",
+      );
+      await cp(administration, common, { recursive: true });
+      storageAlias = join(directory, "common-alias");
+      await symlink(common, storageAlias, linkType);
+    }
+    const environment = {
+      GIT_DIR: selection === "absolute" ? marker : relative(directory, marker),
+      GIT_WORK_TREE: directory,
+      ...(selection === "common override"
+        ? { GIT_COMMON_DIR: storageAlias }
+        : {}),
+    };
+    const selectedGit = (args: string[]) =>
+      runGitRepositoryCommand("git", args, directory, {
+        directory,
+        environment,
+      });
+    expect(await selectedGit(["rev-parse", "--absolute-git-dir"])).toBe(
+      administration,
+    );
+    await selectedGit(["config", "lfs.storage", join(storageAlias, "lfs")]);
+    const originalHead = git("rev-parse", "HEAD");
+    const originalIndex = await readFile(join(administration, "index"));
+    const result = resultWithFindings(["high", "high"]);
+    const grants: string[][] = [];
+    const boundCommonDirectories = new Set<string>();
+    const outcome = await runWorkflow(["patch", "--scan", "scan-1", "--json"], {
+      currentDirectory: directory,
+      environment,
+      onWorkbench: () => savedScan(result, "scan-1", directory),
+      onRepositoryCommand: (command, args, cwd, options) => {
+        const value = options?.environment?.["GIT_COMMON_DIR"];
+        if (value !== undefined) boundCommonDirectories.add(value);
+        return runGitRepositoryCommand(command, args, cwd, {
+          ...options,
+          environment: { ...environment, ...options?.environment },
+        });
+      },
+      onCodex: async (args, output) => {
+        grants.push([...(output!.appServer!.snapshotStoragePaths ?? [])]);
+        const findings = completePatches(args, output);
+        expect(findings).toHaveLength(1);
+        await writeFile(
+          join(directory, findings[0]!.locations[0]!.path),
+          `fixed ${grants.length}\n`,
+        );
+        if (removeMarker && grants.length === 1)
+          await rm(component, { recursive: true });
+        return 0;
+      },
+    });
+    expect(outcome.exitCode, outcome.stderr).toBe(0);
+    expect(grants).toEqual(
+      [1, 2].map(() => [
+        join(common, "lfs", "objects"),
+        join(common, "lfs", "tmp"),
+      ]),
+    );
+    expect(boundCommonDirectories).toEqual(
+      new Set(selection === "common override" ? [common] : []),
+    );
+    expect(JSON.parse(outcome.stdout)).toMatchObject({
+      files: ["src/finding-1.ts", "src/finding-2.ts"],
+      filesChanged: 2,
+    });
+    expect(git("rev-parse", "HEAD")).toBe(originalHead);
+    expect(await readFile(join(administration, "index"))).toEqual(
+      originalIndex,
+    );
+    expect(await readFile(join(directory, "src/finding-1.ts"), "utf8")).toBe(
+      "fixed 1\n",
+    );
+    expect(await readFile(join(directory, "src/finding-2.ts"), "utf8")).toBe(
+      "fixed 2\n",
+    );
+  });
+}
+
+for (const linked of [false, true]) {
+  test(`retains selected Git-file storage after removing its caller (linked marker: ${linked})`, async () => {
+    const { directory, git } = await publicationRepository(fixtures);
+    const component = join(directory, "component");
+    await mkdir(component);
+    await writeFile(join(component, "app.ts"), "original component\n");
+    await writeFile(
+      join(directory, ".gitignore"),
+      "admin-alias\ncomponent/selected.git\n",
+    );
+    git("add", ".");
+    git("commit", "-m", "Synthetic Git-file caller baseline");
+    const administration = await realpath(join(directory, ".git"));
+    const alias = join(directory, "admin-alias");
+    await symlink(
+      administration,
+      alias,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    git("config", "lfs.storage", join(alias, "lfs"));
+    const marker = join(component, "selected.git");
+    const contents = "gitdir: ../admin-alias\n";
+    if (linked) {
+      const support = await fixtures.create("patch-removed-marker-source-");
+      await mkdir(join(support, "nested"));
+      await cp(administration, join(support, "admin-alias"), {
+        recursive: true,
+      });
+      const source = join(support, "nested", "source.git");
+      await writeFile(source, contents);
+      await symlink(source, marker, "file");
+    } else {
+      await writeFile(marker, contents);
+    }
+    const environment = { GIT_DIR: "selected.git", GIT_WORK_TREE: directory };
+    const originalHead = git("rev-parse", "HEAD");
+    const originalIndex = await readFile(join(administration, "index"));
+    let turns = 0;
+    const outcome = await runWorkflow(
+      ["patch", "Synthetic component issue", "--assess-patch-risk", "--json"],
+      {
+        currentDirectory: component,
+        environment,
+        onRepositoryCommand: (command, args, cwd, options) =>
+          runGitRepositoryCommand(command, args, cwd, {
+            ...options,
+            environment: { ...environment, ...options?.environment },
+          }),
+        onCodex: async (_args, output) => {
+          turns++;
+          if (output!.appServer!.prompt.includes("immutable patch artifact")) {
+            expect(output!.appServer!.directory).toBe(directory);
+            output!.stdout.write(patchRiskAssessment().report);
+          } else {
+            expect(output!.appServer!.snapshotStoragePaths).toEqual([
+              join(administration, "lfs", "objects"),
+              join(administration, "lfs", "tmp"),
+            ]);
+            expect(output!.appServer!.directory).toBe(component);
+            await rm(component, { recursive: true });
+            await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
+            output!.stdout.write("Synthetic component patch.\n");
+          }
+          return 0;
+        },
+      },
+    );
+    expect(outcome.exitCode, outcome.stderr).toBe(0);
+    expect(turns).toBe(2);
+    expect(git("rev-parse", "HEAD")).toBe(originalHead);
+    expect(await readFile(join(administration, "index"))).toEqual(
+      originalIndex,
+    );
+    expect(await readFile(join(directory, "src/finding-1.ts"), "utf8")).toBe(
+      "fixed\n",
+    );
+    await expect(readFile(join(component, "app.ts"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+}
