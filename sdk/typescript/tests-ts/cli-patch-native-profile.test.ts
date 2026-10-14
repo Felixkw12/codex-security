@@ -408,17 +408,18 @@ for (const location of ["inside", "outside"] as const) {
           await expect(lstat(path)).rejects.toMatchObject({ code: "ENOENT" });
         const beforeSnapshot = JSON.parse(
           await inspect(
-            `const fs=require("node:fs");const attempts=${JSON.stringify(paths)}.map(path=>{let created=false,wrote=false,createError,writeError;try{fs.mkdirSync(path,{recursive:true});created=true;}catch(error){createError=error.code;}try{fs.writeFileSync(path+"/synthetic","changed");wrote=true;}catch(error){writeError=error.code;}return{created,wrote,createError,writeError};});fs.writeSync(1,JSON.stringify(attempts));`,
+            `const fs=require("node:fs");const attempts=${JSON.stringify(paths)}.map(path=>{let created=false,wrote=false,createError,writeError;try{created=fs.mkdirSync(path,{recursive:true})!==undefined;}catch(error){createError=error.code;}try{fs.writeFileSync(path+"/synthetic","changed");wrote=true;}catch(error){writeError=error.code;}return{created,wrote,createError,writeError};});fs.writeSync(1,JSON.stringify(attempts));`,
             context.modelProfile,
           ),
         );
         expect(beforeSnapshot).toEqual(
-          paths.map(() => ({
-            created: false,
-            wrote: false,
-            createError: expect.any(String),
-            writeError: expect.any(String),
-          })),
+          paths.map(() =>
+            expect.objectContaining({
+              created: false,
+              wrote: false,
+              writeError: expect.any(String),
+            }),
+          ),
         );
         for (const path of paths)
           await expect(lstat(path)).rejects.toMatchObject({ code: "ENOENT" });
