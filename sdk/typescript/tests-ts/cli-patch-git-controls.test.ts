@@ -111,6 +111,7 @@ describe("patch Git administration", () => {
             }),
           true,
           false,
+          undefined,
           references,
         );
       const controls = await capture();
