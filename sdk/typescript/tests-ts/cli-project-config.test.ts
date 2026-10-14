@@ -23,6 +23,23 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures(
 );
 afterEach(cleanup);
 
+test("a long framework error keeps the missing path with --format yaml", async () => {
+  const root = await temporaryDirectory();
+  const missing = join(
+    root,
+    "a-directory-name-long-enough-to-make-yaml-fold-the-line",
+    "scan.yaml",
+  );
+  const { stderr, runCli } = createCliTest(main);
+  expect(
+    await runCli(
+      ["info", "-c", missing, "--format", "yaml"],
+      dependencies({ currentDirectory: root }),
+    ),
+  ).toBe(2);
+  expect(stderr.text()).toContain(missing);
+});
+
 const cliClientFactory =
   (deps: NonNullable<ConstructorParameters<typeof CodexSecurity>[1]>) =>
   (config: CodexSecurityConfig) =>

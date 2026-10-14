@@ -1,5 +1,6 @@
 import { stripVTControlCharacters } from "node:util";
 import { describe, expect, test } from "bun:test";
+import { Formatter } from "incur";
 import { main } from "../src/cli.js";
 import { CodexSecurityError, OutputDirectoryError } from "../src/errors.js";
 import {
@@ -13,6 +14,25 @@ import { throwing } from "./support/errors.js";
 import { createCliTest } from "./support/cli-run.js";
 
 describe("CLI diagnostics", () => {
+  test.each(["yaml", "toon", "json", "jsonl", "md"] as const)(
+    "preserves multiline framework diagnostics with --format %s",
+    async (format) => {
+      const message =
+        'Cannot read configuration: "scan.yaml"\nReason: missing # file';
+      const deps = dependencies();
+      deps.currentDirectory = throwing(message);
+      const { stdout, stderr, runCli } = createCliTest(main);
+
+      expect(await runCli(["info", "--format", format], deps)).toBe(2);
+      expect(stdout.text()).toBe("");
+      const expected =
+        format === "yaml" || format === "toon"
+          ? message
+          : Formatter.format({ code: "UNKNOWN", message }, format);
+      expect(stderr.text()).toBe(`codex-security: ${expected}\n`);
+    },
+  );
+
   test.each([
     {
       command: "policy",
