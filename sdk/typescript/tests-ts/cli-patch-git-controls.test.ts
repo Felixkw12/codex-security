@@ -136,6 +136,85 @@ describe("patch Git administration", () => {
     });
   }
 
+  for (const replacement of [false, true]) {
+    test(`binds prepared cache directories before the patch turn (replacement: ${replacement})`, async () => {
+      const repository = await fixtures.create("patch-prepared-cache-");
+      const storage = join(repository, "cache-data");
+      await mkdir(storage);
+      await symlink(
+        storage,
+        join(repository, "cache"),
+        process.platform === "win32" ? "junction" : "dir",
+      );
+      const git = repositoryGit(repository);
+      git("init", "--initial-branch=main");
+      git("config", "user.name", "Synthetic User");
+      git("config", "user.email", "synthetic@example.test");
+      const filter = join(repository, "clean.cjs");
+      await writeFile(
+        filter,
+        'const fs=require("node:fs");for(const path of ["cache/objects","cache/tmp"])fs.mkdirSync(path,{recursive:true});fs.writeFileSync("cache/objects/prepared","ready");fs.writeSync(1,fs.readFileSync(0));\n',
+      );
+      await writeFile(join(repository, ".gitignore"), "cache/\ncache-data/\n");
+      await writeFile(
+        join(repository, ".gitattributes"),
+        "data filter=synthetic -text\n",
+      );
+      await writeFile(join(repository, "data"), "original\n");
+      await writeFile(join(repository, "app.ts"), "before\n");
+      git("config", "lfs.storage", "../cache");
+      git(
+        "config",
+        "filter.synthetic.clean",
+        `node ${JSON.stringify(filter.replaceAll("\\", "/"))}`,
+      );
+      git("config", "filter.synthetic.required", "true");
+      git("add", "app.ts", "data", ".gitattributes", "clean.cjs", ".gitignore");
+      git("commit", "-m", "Synthetic cache preparation baseline");
+      for (const name of ["objects", "tmp"])
+        await rm(join(storage, name), { recursive: true });
+      await writeFile(join(repository, "data"), "updated\n");
+      const index = await readFile(join(repository, ".git", "index"));
+      const head = git("rev-parse", "HEAD");
+      let patched = false;
+      const outcome = await runWorkflow(
+        ["patch", "Synthetic issue", "--external-sandbox", "--json"],
+        {
+          currentDirectory: repository,
+          onRepositoryCommand: runGitRepositoryCommand,
+          onCodex: async (_args, output) => {
+            patched = true;
+            expect(output!.appServer!.externalSandbox).toBe(true);
+            expect(
+              await readFile(join(storage, "objects", "prepared"), "utf8"),
+            ).toBe("ready");
+            if (replacement) {
+              for (const name of ["objects", "tmp"]) {
+                await rename(join(storage, name), join(storage, `${name}-old`));
+                await mkdir(join(storage, name));
+              }
+            }
+            await writeFile(join(repository, "app.ts"), "after\n");
+            output!.stdout.write("Synthetic patch complete.\n");
+            return 0;
+          },
+        },
+      );
+      expect(patched).toBe(true);
+      expect(outcome.exitCode, outcome.stderr).toBe(replacement ? 2 : 0);
+      if (replacement)
+        expect(JSON.parse(outcome.stdout).error.message).toContain(
+          "changed location during the patch",
+        );
+      else expect(JSON.parse(outcome.stdout).files).toContain("app.ts");
+      expect(await readFile(join(repository, "app.ts"), "utf8")).toBe(
+        "after\n",
+      );
+      expect(await readFile(join(repository, ".git", "index"))).toEqual(index);
+      expect(git("rev-parse", "HEAD")).toBe(head);
+    });
+  }
+
   test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
     "keeps selected administration usable without parent directory listing",
     async () => {

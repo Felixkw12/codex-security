@@ -10706,9 +10706,15 @@ async function runSkill(
                     },
                     snapshotStoragePaths: gitControls!.snapshotStoragePaths,
                   }),
-              ...(options.onBeforeTurn === undefined
+              ...(options.onBeforeTurn === undefined &&
+              gitControls === undefined
                 ? {}
-                : { onBeforeTurn: options.onBeforeTurn }),
+                : {
+                    async onBeforeTurn(signal?: AbortSignal) {
+                      await options.onBeforeTurn?.(signal);
+                      if (!signal?.aborted) await gitControls?.validate();
+                    },
+                  }),
               ...(options.onEvent === undefined
                 ? {}
                 : { onEvent: options.onEvent }),
