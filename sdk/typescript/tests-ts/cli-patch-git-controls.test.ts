@@ -1,6 +1,6 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, mock, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import {
+import filesystem, {
   appendFile,
   chmod,
   cp,
@@ -16,10 +16,12 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { runCodexSkillCommand } from "../src/cli.js";
 import { capturePatchGitControls } from "../src/patch-git-controls.js";
 import { capture } from "./cli-fixtures.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
+import { runTestInSubprocess } from "./support/test-subprocess.js";
 import {
   repositoryGit,
   runGitRepositoryCommand,
@@ -210,6 +212,85 @@ describe("patch Git administration", () => {
     await controls!.validate();
   });
 
+  for (const sibling of ["none", "same target", "hardlink"] as const) {
+    const name = `recognizes a unique alternate administration entry with sibling: ${sibling}`;
+    test.skipIf(process.platform === "win32" && sibling === "hardlink")(
+      name,
+      async () => {
+        if (runTestInSubprocess(fileURLToPath(import.meta.url), name)) return;
+        const repository = await fixtures.create("patch-alternate-entry-");
+        const external = await fixtures.create("patch-alternate-entry-target-");
+        const git = repositoryGit(repository);
+        git("init", "--initial-branch=main");
+        const metadata = join(external, "metadata");
+        await rename(join(repository, ".git"), metadata);
+        const selected = join(repository, "SelectedAdministration");
+        const alternate = join(repository, "SELECT~1");
+        const linkType = process.platform === "win32" ? "junction" : "dir";
+        await symlink(metadata, selected, linkType);
+        const other = join(repository, "OtherAdministration");
+        if (sibling === "hardlink") await link(selected, other);
+        else if (sibling === "same target")
+          await symlink(metadata, other, linkType);
+        const environment = { GIT_DIR: selected, GIT_WORK_TREE: repository };
+        await runGitRepositoryCommand(
+          "git",
+          ["config", "lfs.storage", join(alternate, "lfs")],
+          repository,
+          { environment },
+        );
+        const original = { ...filesystem };
+        const translate = (path: unknown) =>
+          typeof path === "string" &&
+          (path === alternate || path.startsWith(`${alternate}${sep}`))
+            ? `${selected}${path.slice(alternate.length)}`
+            : path;
+        // Model a filesystem lookup alias that is not a separate directory entry.
+        const methods = Object.fromEntries(
+          (["stat", "lstat", "realpath", "readlink", "mkdir"] as const).map(
+            (method) => [
+              method,
+              (...args: unknown[]) =>
+                Reflect.apply(original[method], original, [
+                  translate(args[0]),
+                  ...args.slice(1),
+                ]),
+            ],
+          ),
+        );
+        const modeled = { ...original, ...methods };
+        mock.module("node:fs/promises", () => ({
+          ...modeled,
+          default: modeled,
+        }));
+        try {
+          const controls = await capturePatchGitControls(
+            repository,
+            async (_root, checkout, args, options) =>
+              runGitRepositoryCommand("git", args, checkout, {
+                ...options,
+                environment: { ...environment, ...options?.environment },
+              }),
+            false,
+          );
+          const paths = [
+            join(await realpath(metadata), "lfs", "objects"),
+            join(await realpath(metadata), "lfs", "tmp"),
+          ];
+          expect(controls!.snapshotStoragePaths).toEqual(
+            sibling === "hardlink" ? [] : paths,
+          );
+          await controls!.validate();
+        } finally {
+          mock.module("node:fs/promises", () => ({
+            ...original,
+            default: original,
+          }));
+        }
+      },
+    );
+  }
+
   for (const location of [
     "root",
     "ancestor",
@@ -217,6 +298,7 @@ describe("patch Git administration", () => {
     "tmp",
     "indirect-root",
     "indirect-parent",
+    "indirect-separators",
   ] as const) {
     // Windows junction creation normalizes ".." before storing its target.
     test.skipIf(process.platform === "win32" && location === "indirect-parent")(
@@ -243,18 +325,26 @@ describe("patch Git administration", () => {
         const linkTarget =
           location === "indirect-parent" ? join(target, "nested") : target;
         if (location === "indirect-parent") await mkdir(linkTarget);
+        if (location === "indirect-separators")
+          await mkdir(join(target, "storage"));
         await symlink(
           linkTarget,
           link,
           process.platform === "win32" ? "junction" : "dir",
         );
-        if (location === "indirect-root" || location === "indirect-parent") {
+        if (
+          location === "indirect-root" ||
+          location === "indirect-parent" ||
+          location === "indirect-separators"
+        ) {
           const selection = await fixtures.create("patch-storage-selection-");
           const alias = join(selection, "cache");
           await symlink(
             location === "indirect-parent"
               ? `${cache}${sep}..${sep}storage`
-              : cache,
+              : location === "indirect-separators"
+                ? `${cache}${sep}${sep}storage`
+                : cache,
             alias,
             process.platform === "win32" ? "junction" : "dir",
           );
@@ -284,6 +374,8 @@ describe("patch Git administration", () => {
           ),
         ).toBe(true);
         expect(await readdir(target)).toEqual(targetContents);
+        if (location === "indirect-separators")
+          expect(await readdir(join(target, "storage"))).toEqual([]);
         await controls!.validate();
         const outcome = await runWorkflow(
           ["patch", "Synthetic issue", "--json"],
@@ -299,6 +391,8 @@ describe("patch Git administration", () => {
         );
         expect(outcome.exitCode, outcome.stderr).toBe(0);
         expect(await readdir(target)).toEqual(targetContents);
+        if (location === "indirect-separators")
+          expect(await readdir(join(target, "storage"))).toEqual([]);
         const replacement = await fixtures.create("patch-storage-replacement-");
         await rm(link, { recursive: true });
         await symlink(
@@ -323,6 +417,7 @@ describe("patch Git administration", () => {
     "checkout-alias",
     "selected-git-dir",
     "selected-git-dir-trailing",
+    "selected-git-dir-separators",
     "selected-common-dir",
   ] as const) {
     test(`preserves selected storage aliases outside checkout data: ${location}`, async () => {
@@ -383,6 +478,20 @@ describe("patch Git administration", () => {
         git("commit", "-m", "Synthetic selected child");
         storage = join(child, ".git", "parent-lfs");
         git("config", "lfs.storage", storage);
+      } else if (location === "selected-git-dir-separators") {
+        const metadata = join(external, "metadata");
+        await rename(join(repository, ".git"), metadata);
+        const alias = join(repository, "administration-alias");
+        await symlink(external, alias, linkType);
+        environment["GIT_DIR"] = `${alias}${sep}${sep}metadata`;
+        environment["GIT_WORK_TREE"] = repository;
+        storage = join(alias, "metadata", "lfs");
+        await runGitRepositoryCommand(
+          "git",
+          ["config", "lfs.storage", storage],
+          repository,
+          { environment },
+        );
       } else if (location === "checkout-alias") {
         directory = join(external, "checkout");
         await symlink(repository, directory, linkType);
@@ -413,7 +522,8 @@ describe("patch Git administration", () => {
             environment: { ...environment, ...options?.environment },
           }),
         location !== "selected-git-dir" &&
-          location !== "selected-git-dir-trailing",
+          location !== "selected-git-dir-trailing" &&
+          location !== "selected-git-dir-separators",
         location !== "selected-common-dir",
       );
       expect(controls).toBeDefined();
