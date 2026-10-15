@@ -266,9 +266,10 @@ scenario("ID-008", async (t) => {
   );
 });
 
-scenario("ID-009", async (t) => {
+test("profile updates cannot grant administrator privileges", async (t) => {
   const { login } = await app(t);
   const alex = await login("alex");
+  const original = (await alex("/api/me")).body;
   assert.equal(
     (
       await alex("/api/invoices/inv-north-1/approve", {
@@ -280,10 +281,21 @@ scenario("ID-009", async (t) => {
   );
   const profile = await alex("/api/profile", {
     method: "PATCH",
-    body: { name: "Alex", role: "admin" },
+    body: {
+      name: "Alex Updated",
+      role: "admin",
+      workspaceId: "cedar",
+      profile: { role: "admin" },
+      extra: "unrecognized",
+    },
   });
   assert.equal(profile.status, 200);
-  assert.equal((await alex("/api/me")).body.profile.role, "admin");
+  const expected = {
+    ...original,
+    profile: { name: "Alex Updated", role: "member" },
+  };
+  assert.deepEqual(profile.body, expected);
+  assert.deepEqual((await alex("/api/me")).body, expected);
   assert.equal(
     (
       await alex("/api/invoices/inv-north-1/approve", {
@@ -291,8 +303,50 @@ scenario("ID-009", async (t) => {
         body: {},
       })
     ).status,
-    200,
+    403,
   );
+  assert.equal(
+    (
+      await alex("/api/import-policy", {
+        method: "PATCH",
+        body: { maxAmountCents: 200_000 },
+      })
+    ).status,
+    403,
+  );
+});
+
+test("profile updates preserve omitted fields and ignore unsupported properties", async (t) => {
+  const { login } = await app(t);
+  for (const account of ["alex", "jules"]) {
+    const request = await login(account);
+    const original = (await request("/api/me")).body;
+    for (const body of [
+      {},
+      { role: account === "alex" ? "admin" : "member" },
+      { name: null },
+      { name: 42 },
+      { name: { role: "admin" } },
+      JSON.parse(
+        '{"__proto__":{"role":"admin"},"constructor":{"role":"admin"}}',
+      ),
+    ]) {
+      const response = await request("/api/profile", { method: "PATCH", body });
+      assert.equal(response.status, 200);
+      assert.deepEqual(response.body, original);
+      assert.deepEqual((await request("/api/me")).body, original);
+    }
+    const renamed = await request("/api/profile", {
+      method: "PATCH",
+      body: { name: "Updated Name" },
+    });
+    assert.equal(renamed.status, 200);
+    assert.deepEqual(renamed.body, {
+      ...original,
+      profile: { ...original.profile, name: "Updated Name" },
+    });
+    assert.deepEqual((await request("/api/me")).body, renamed.body);
+  }
 });
 
 scenario("ID-010", async (t) => {
@@ -323,15 +377,15 @@ scenario("ID-010", async (t) => {
   );
 });
 
-test("manifest accounts for all ten separately exercised scenarios", () => {
-  assert.equal(manifest.findings.length, 10);
+test("manifest accounts for all nine separately exercised scenarios", () => {
+  assert.equal(manifest.findings.length, 9);
   assert.deepEqual(
     new Set(manifest.findings.map((finding) => finding.id)),
     registered,
   );
   assert.equal(
     new Set(manifest.findings.map((finding) => finding.category)).size,
-    10,
+    9,
   );
 });
 
@@ -547,7 +601,11 @@ test("new app instances reset invoices, credentials, profiles, and import polici
   const alex = await first.login("alex");
   const jules = await first.login("jules");
   const token = (await alex("/api/support-report")).body.connector.accessToken;
-  await alex("/api/profile", { method: "PATCH", body: { role: "admin" } });
+  const renamed = await alex("/api/profile", {
+    method: "PATCH",
+    body: { name: "Alex Updated" },
+  });
+  assert.equal(renamed.body.profile.name, "Alex Updated");
   await alex("/api/invoices/inv-north-1", {
     method: "PATCH",
     body: { amountCents: 1 },
@@ -558,7 +616,10 @@ test("new app instances reset invoices, credentials, profiles, and import polici
   });
   const second = await app(t);
   const fresh = await second.login("alex");
-  assert.equal((await fresh("/api/me")).body.profile.role, "member");
+  assert.deepEqual((await fresh("/api/me")).body.profile, {
+    name: "Alex",
+    role: "member",
+  });
   assert.equal(
     (await fresh("/api/invoices/inv-north-1")).body.amountCents,
     48_500,

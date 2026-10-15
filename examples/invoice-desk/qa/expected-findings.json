@@ -76,14 +76,6 @@
       "boundary": "A document authorized for one workspace creates an invoice in another."
     },
     {
-      "id": "ID-009",
-      "category": "Mass assignment",
-      "cwe": ["CWE-915"],
-      "title": "Profile updates can change the caller's administrative role",
-      "locations": [{ "path": "accounts.mjs", "symbol": "updateProfile" }],
-      "boundary": "A member acquires administrator-only approval privileges."
-    },
-    {
       "id": "ID-010",
       "category": "Stored HTML injection",
       "cwe": ["CWE-79"],
