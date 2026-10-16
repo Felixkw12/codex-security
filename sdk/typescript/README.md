@@ -546,7 +546,7 @@ Install OSV-Scanner separately on PATH, then run:
 ```bash
 cs scan dependencies . --max-cost 5
 cs scan dependencies /path/to/repository --json
-cs scan dependencies . --verbose --json > dependency-result.json
+cs scan dependencies . --verbose
 ```
 
 Omit the repository to assess the current directory. The command saves scanner

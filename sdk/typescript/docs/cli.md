@@ -1868,8 +1868,13 @@ checkpoint is saved. All progress goes to stderr, including with `--json`:
 
 ```bash
 cs scan dependencies . --verbose --show-cost --json \
-  > dependency-result.json 2> dependency-progress.log
+  > /path/outside/repository/dependency-result.json \
+  2> /path/outside/repository/dependency-progress.log
 ```
+
+Choose an existing directory outside the scanned repository for redirected
+files. A growing progress log inside the repository changes the source snapshot
+and can interrupt assessment.
 
 ### Supported dependency inputs
 
