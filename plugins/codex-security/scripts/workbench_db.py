@@ -442,6 +442,20 @@ def requested_scan_paths(scan: sqlite3.Row) -> list[str]:
     return [scan["scope"]]
 
 
+def requested_scan_file_paths(scan: sqlite3.Row) -> list[str]:
+    # Older scans did not record path kinds. Retain their lexical scope semantics
+    # rather than infer the original target from a possibly changed checkout.
+    if scan["recipe_json"] is None:
+        return []
+    recipe = json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json)
+    return recipe.get("scopeFilePaths", [])
+
+
+def requested_finding_scope(scan: sqlite3.Row) -> list[tuple[str, bool]]:
+    files = {PurePosixPath(path) for path in requested_scan_file_paths(scan)}
+    return [(path, PurePosixPath(path) in files) for path in requested_scan_paths(scan)]
+
+
 def scan_contract(scan: sqlite3.Row) -> dict[str, Any]:
     target = Path(scan["target_path"])
     target_contract = {
@@ -463,6 +477,7 @@ def scan_contract(scan: sqlite3.Row) -> dict[str, Any]:
         "scope": {
             "requiredExcludePaths": [],
             "requestedPath": scan["scope"],
+            "filePaths": requested_scan_file_paths(scan),
             **(
                 {"requiredIncludePaths": requested_scan_paths(scan)}
                 if scan["mode"] != "diff"
@@ -786,10 +801,7 @@ def save_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -> 
                 scope,
                 args.mode,
                 user_context_argument(args),
-                diff_target["kind"] if diff_target else None,
-                diff_target["baseRevision"] if diff_target else None,
-                diff_target["headRevision"] if diff_target else None,
-                diff_target.get("contentDigest") if diff_target else None,
+                *scan_diff_identity(diff_target or None),
                 timestamp,
                 workspace["id"],
             ),
@@ -1329,12 +1341,11 @@ def budget_exhausted_draft(
         manifest = {
             "scan": {
                 "target": target,
-                "scope": {"limitations": [warning], "validationMode": "incomplete"},
+                "scope": {"limitations": [warning]},
             }
         }
         findings = {"findings": []}
         coverage = {
-            "completeness": "partial",
             "inventoryStrategy": (
                 "scoped_path" if expected_coverage_mode(scan) == "scoped_path" else "repository"
             ),
@@ -1420,7 +1431,7 @@ def budget_exhausted_draft(
                 "reason": "Validation was deferred because the scan reached its cost limit.",
             }
         )
-    coverage["completeness"] = "partial"
+    coverage.pop("completeness", None)
     for name, payload in (
         ("findings.json", findings),
         ("coverage.json", coverage),
@@ -1541,18 +1552,33 @@ def complete_scan_locked(
                 scan_dir,
                 expected_coverage_mode=expected_coverage_mode(scan),
                 completion_binding=completion_binding,
-                completion_warnings=warnings if scan["mode"] != "deep" else None,
+                recover_unsealed=scan["mode"] != "deep",
+                allow_missing_writeups=True,
                 draft_documents=draft_documents,
-                finding_scope=requested_scan_paths(scan) if scan["mode"] == "deep" else None,
+                finding_scope=requested_finding_scope(scan) if scan["mode"] == "deep" else None,
             )
+        warnings.extend(warning for warning in prepared.warnings if warning not in warnings)
         add_warning()
+        if prepared.warnings:
+            # Save the explanation before publication removes the broken reference,
+            # so a retry after failed publication retains it.
+            with connection:
+                connection.execute(
+                    "UPDATE scans SET completion_warnings_json = ? WHERE id = ? AND status = 'running'",
+                    (json.dumps(warnings), scan_id),
+                )
         wrote = True
         manifest, findings, _ = _write_prepared_scan_finalization(
             prepared, projection_warnings=warnings
         )
     except ContractError as exc:
-        if wrote or (
+        # Only a coordinator-selected parent is fenced for output-write replay.
+        selected_deep_parent = scan["mode"] == "deep" and deep_scan.require_deep_scan_run(
+            connection, scan_id
+        )["manifest_path"] == str(scan_dir / ARTIFACTS["manifest"])
+        if (wrote and not selected_deep_parent) or (
             scan["mode"] == "deep"
+            and not wrote
             and not already_sealed
             and not isinstance(exc, RecoverableContractError)
         ):
@@ -1644,14 +1670,7 @@ def complete_scan_locked(
     return context
 
 
-def register_cli_scan(
-    connection: sqlite3.Connection,
-    args: argparse.Namespace,
-    *,
-    before_archive: Callable[[], None] | None = None,
-) -> dict[str, Any]:
-    repository = require_target(args.repository)
-    require_scannable_target(repository)
+def require_cli_scan_directory(repository: Path, args: argparse.Namespace) -> Path:
     scan_dir = require_canonical_scan_directory(Path(args.scan_dir).expanduser())
     if scan_dir == repository or repository in scan_dir.parents or scan_dir in repository.parents:
         raise SystemExit(
@@ -1661,7 +1680,21 @@ def register_cli_scan(
         scan_dir.iterdir(), None
     ) is not None:
         raise SystemExit("The scan artifact directory must be empty before the scan starts.")
+    return scan_dir
 
+
+def register_cli_scan(
+    connection: sqlite3.Connection,
+    args: argparse.Namespace,
+    *,
+    before_archive: Callable[[], None] | None = None,
+) -> dict[str, Any]:
+    repository = require_target(args.repository)
+    require_scannable_target(repository)
+    scan_dir = None
+    if not args.archive_existing or args.archived_scan_dir is not None:
+        # Preserve early output rejection when this call will not move the directory.
+        scan_dir = require_cli_scan_directory(repository, args)
     user_context = None
     workflow_id = None
     if args.registration_json_stdin:
@@ -1674,6 +1707,10 @@ def register_cli_scan(
     recipe = parse_scan_recipe(recipe_json, repository)
     requested_target = recipe["target"]
     paths = requested_target["paths"]
+    # Capture host-observed kinds once; resumes and publication use the saved recipe.
+    recipe.pop("scopeFilePaths", None)
+    if file_paths := [path for path in paths if (repository / path).is_file()]:
+        recipe["scopeFilePaths"] = file_paths
     scope = paths[0] if len(paths) == 1 else "."
     diff_target = None
     if requested_target["kind"] in {"refs", "working_tree"}:
@@ -1712,6 +1749,10 @@ def register_cli_scan(
 
     connection.execute("BEGIN IMMEDIATE")
     try:
+        if scan_dir is None:
+            # Host archiving temporarily removes the output directory. Wait for
+            # the existing writer before inspecting its replacement.
+            scan_dir = require_cli_scan_directory(repository, args)
         with archive_scan(
             connection,
             args,
@@ -2084,12 +2125,7 @@ def request_finding_remediation_action(
         occurrence = require_occurrence(connection, args.occurrence_id)
         require_finding_open(connection, occurrence["id"])
         scan = require_scan(connection, occurrence["scan_id"])
-        current = connection.execute(
-            "SELECT * FROM finding_remediation_attempts WHERE request_id = ?",
-            (request_id,),
-        ).fetchone()
-        if current is None or current["occurrence_id"] != occurrence["id"]:
-            raise SystemExit("Codex Security finding remediation request not found.")
+        current = remediation_state.require_request(connection, request_id, occurrence)
         if current["pending_action"] is not None:
             if (
                 current["pending_action"] == args.action
@@ -2157,12 +2193,7 @@ def claim_finding_remediation_resend(
         timestamp = now()
         occurrence = require_occurrence(connection, args.occurrence_id)
         require_finding_open(connection, occurrence["id"])
-        current = connection.execute(
-            "SELECT * FROM finding_remediation_attempts WHERE request_id = ?",
-            (request_id,),
-        ).fetchone()
-        if current is None or current["occurrence_id"] != occurrence["id"]:
-            raise SystemExit("Codex Security finding remediation request not found.")
+        current = remediation_state.require_request(connection, request_id, occurrence)
         if current["pending_action"] is None:
             raise SystemExit("This remediation attempt does not have a pending host request.")
         if current["pending_action_claim_token"] == action_token:
@@ -2172,7 +2203,6 @@ def claim_finding_remediation_resend(
             return result
         delivered_at = current["pending_action_delivered_at"]
         if delivered_at is not None:
-            claimed_token = action_token
             updated = connection.execute(
                 """
                 UPDATE finding_remediation_attempts
@@ -2195,7 +2225,6 @@ def claim_finding_remediation_resend(
                 "This remediation worker is still within its execution lease. Retry later."
             )
         else:
-            claimed_token = action_token
             updated = connection.execute(
                 """
                 UPDATE finding_remediation_attempts
@@ -2221,7 +2250,7 @@ def claim_finding_remediation_resend(
         if updated.rowcount != 1:
             raise SystemExit(unavailable)
     result = scan_context(connection, occurrence["scan_id"])
-    result["actionToken"] = claimed_token
+    result["actionToken"] = action_token
     return result
 
 
@@ -2281,12 +2310,7 @@ def set_finding_remediation(
         occurrence = require_occurrence(connection, args.occurrence_id)
         require_finding_open(connection, occurrence["id"])
         scan = require_scan(connection, occurrence["scan_id"])
-        current = connection.execute(
-            "SELECT * FROM finding_remediation_attempts WHERE request_id = ?",
-            (request_id,),
-        ).fetchone()
-        if current is None or current["occurrence_id"] != occurrence["id"]:
-            raise SystemExit("Codex Security finding remediation request not found.")
+        current = remediation_state.require_request(connection, request_id, occurrence)
         if current["version"] != args.expected_version:
             raise SystemExit(
                 "This remediation request changed. Refresh it before recording an update."
@@ -2780,13 +2804,10 @@ def scan_result(
         "status": "canceled" if scan["canceled_at"] else scan["status"],
         "updatedAt": progress["updated_at"],
     }
+    review_updated_at = ""
     if independent_reviews is not None:
-        progress_result["independentReviews"] = {
-            "active": independent_reviews["active"],
-            "completed": independent_reviews["completed"],
-            "maximum": independent_reviews["maximum"],
-            "consolidating": independent_reviews["consolidating"],
-        }
+        review_updated_at = str(independent_reviews.pop("updatedAt"))
+        progress_result["independentReviews"] = independent_reviews
     relations = scan_history.finding_relations(
         connection, scan["id"], (row["id"] for row in occurrence_rows)
     )
@@ -2831,7 +2852,7 @@ def scan_result(
         "updatedAt": max(
             scan["updated_at"],
             progress["updated_at"],
-            str(independent_reviews["updatedAt"]) if independent_reviews is not None else "",
+            review_updated_at,
             finding_management_updated_at(connection, scan["id"]) or "",
         ),
         "userContext": scan["user_context"],
@@ -3135,8 +3156,7 @@ def finding_remediation_result(
     row = connection.execute(
         """
         SELECT remediation.request_id, remediation.state, remediation.version,
-            remediation.base_revision, remediation.base_content_digest,
-            remediation.applied_content_digest, remediation.pending_action,
+            remediation.base_revision, remediation.pending_action,
             remediation.pending_action_claimed_at, remediation.pending_action_claim_token,
             remediation.pending_action_delivered_at,
             remediation.patch_path, remediation.patch_digest, remediation.summary,

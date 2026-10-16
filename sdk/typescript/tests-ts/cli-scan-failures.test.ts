@@ -51,11 +51,12 @@ function expectFailure(
   fullOutput: boolean,
   code: string,
   message: string,
+  data?: unknown,
 ) {
   const result = JSON.parse(text);
   if (fullOutput) {
     expect(result).toMatchObject({ ok: false, error: { code, message } });
-    expect(result).not.toHaveProperty("data");
+    expect(result.data).toEqual(data);
   } else {
     expect(result).toEqual({ status: "failed", code, message });
   }
@@ -239,7 +240,9 @@ test.each(commands)(
       for (const fullOutput of [false, true]) {
         const stdout = capture();
         const signals = new FakeSignals();
+        const result = fakeResult();
         const deps = dependencies({
+          result,
           signals,
           onRun: () => signals.emit(signal),
         });
@@ -252,7 +255,13 @@ test.each(commands)(
             deps,
           ),
         ).toBe(exitCode);
-        expectFailure(stdout.text(), fullOutput, "SCAN_FAILED", message);
+        expectFailure(
+          stdout.text(),
+          fullOutput,
+          "SCAN_FAILED",
+          message,
+          fullOutput ? result.toJSON() : undefined,
+        );
       }
     }
   },
