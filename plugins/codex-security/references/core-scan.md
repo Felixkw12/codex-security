@@ -25,10 +25,6 @@ Resolve one working native local search command before scanning and pass its ver
 
 Prefer quoted interpreter `-c` programs or pipes when shell heredocs or here-strings require unavailable temporary storage. When analysis needs files, use only the managed temporary staging already authorized by the assigned workflow (`artifact-storage.md`). Keep target source read-only and do not widen permissions. Check command exit status and tool errors, including MCP `isError`, before parsing successful JSON output; an error or truncated preview is not a JSON document. Code mode is a fresh JavaScript isolate: use only its documented globals and tools, not assumed Node.js APIs or `structuredClone`. When available, use `load`/`store` for serializable state between cells, with `null` for absent values.
 
-## File Review Accounting
-
-Include `coverage.reviewedFiles` in semantic draft checkpoints and the final result. Copy the baseline and investigators' `reviewed_files` claims and add files you investigated yourself. Include only repository-relative files within the requested scope that were investigated beyond searches or excerpts, not every inventoried file or finding location. Use `[]` when no files were reviewed; omit the field when file accounting is unavailable. The draft writer validates paths and preserves and deduplicates checkpoint claims; the Deep coordinator combines accepted workers' lists. These are model-reported review claims, not independently observed file access or proof of thorough review.
-
 ## Secrets Exposed in Source
 
 Review the authorized current source offline for embedded credentials and private keys. Inspect literals and their context in code, configuration, documentation, tests, examples, and inactive code; do not restrict this review to executable paths or production files. Assign this review to the baseline auditor, or do it yourself when delegation is unavailable, and reconcile it with the existing source coverage.

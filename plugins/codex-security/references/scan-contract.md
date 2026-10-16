@@ -121,12 +121,6 @@ For Standard and diff scans, record:
 - explicit exclusions
 - deferred work
 
-`reviewedFiles` is an optional, sorted, unique list of repository-relative paths the model reports investigating beyond searches or excerpts. The semantic draft writer validates claims against the host-generated source inventory and requested scope before saving them. Diff inventories include deleted files from the base revision. Checkpoints retain earlier claims; later omissions or empty lists do not erase them. Deep scans use the union from accepted workers, without asking the reducer to reconstruct it. If any accepted worker omits its list, or no worker is accepted, the aggregate omits the field rather than presenting partial accounting as complete.
-
-An omitted `reviewedFiles` means file accounting is unavailable; `[]` means no files were reported reviewed. Older and imported results may omit it. Consumers can derive a count from the list's length when present. It is not a record of observed file access, proof of thorough review, or a coverage percentage. The inventory contains eligible paths, not evidence that they were reviewed.
-
-Stopped-scan recovery retains claims from saved source-review checkpoints, including unfinished workers, separately from the successful Deep scan's accepted-worker union. The manifest's stopped status still applies; retained file claims do not establish a completed review.
-
 `mode` records the requested scan workflow:
 
 | Mode              | Meaning                                                       |
