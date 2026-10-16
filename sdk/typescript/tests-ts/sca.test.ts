@@ -32,6 +32,7 @@ import {
 } from "../src/index.js";
 import type { OsvScanResult } from "../src/sca-osv.js";
 import type { ScaResult, TriageFinding } from "../src/sca-types.js";
+import * as runtime from "../src/runtime.js";
 import {
   codexSecurityCredentialHome,
   executablePathForSpawn,
@@ -2167,35 +2168,47 @@ test("zero-match inventory completes even when a source snapshot is unavailable"
 });
 
 test("dependency source snapshots preserve per-scan process environment, protected root, and cancellation", async () => {
-  const controller = new AbortController();
-  const {
-    client,
-    repository,
-    outputDir,
-    sourceCalls,
-    pythonResolutions,
-    environment,
-  } = await fixture({ workbenchSnapshot: true });
-  await using security = client;
-  const result = await security.scanDependencies({
-    repositoryPath: repository,
-    outputDir,
-    signal: controller.signal,
-  });
-  expect(result.status).toBe("completed");
-  expect(sourceCalls).toHaveLength(2);
-  expect(pythonResolutions[0]).toMatchObject({
-    environment,
-    protectedRoot: repository,
-  });
-  for (const call of sourceCalls) {
-    expect(call.environment).toEqual(environment);
-    expect(call.signal).toBe(pythonResolutions[0]!.signal);
-    expect(call.signal!.aborted).toBe(false);
+  const python = spyOn(runtime, "resolvePluginPython");
+  try {
+    const controller = new AbortController();
+    const {
+      client,
+      repository,
+      outputDir,
+      sourceCalls,
+      pythonResolutions,
+      environment,
+    } = await fixture({ workbenchSnapshot: true });
+    await using security = client;
+    const result = await security.scanDependencies({
+      repositoryPath: repository,
+      outputDir,
+      signal: controller.signal,
+    });
+    expect(result.status).toBe("completed");
+    expect(sourceCalls).toHaveLength(2);
+    expect(pythonResolutions[0]).toMatchObject({
+      environment,
+      protectedRoot: repository,
+    });
+    expect(python).toHaveBeenCalledWith(
+      expect.objectContaining({
+        configuredPath: sourceCalls[0]!.python,
+        environment,
+        protectedRoot: repository,
+      }),
+    );
+    for (const call of sourceCalls) {
+      expect(call.environment).toEqual(environment);
+      expect(call.signal).toBe(pythonResolutions[0]!.signal);
+      expect(call.signal!.aborted).toBe(false);
+    }
+    controller.abort("synthetic cancellation");
+    expect(sourceCalls[0]!.signal!.aborted).toBe(true);
+    expect(sourceCalls[1]!.signal!.aborted).toBe(true);
+  } finally {
+    python.mockRestore();
   }
-  controller.abort("synthetic cancellation");
-  expect(sourceCalls[0]!.signal!.aborted).toBe(true);
-  expect(sourceCalls[1]!.signal!.aborted).toBe(true);
 });
 
 test.each(["xdg", "explicit"] as const)(

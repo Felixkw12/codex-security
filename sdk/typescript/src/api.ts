@@ -900,6 +900,7 @@ export class CodexSecurity {
                 input,
               ),
             python,
+            inputs.protectedRoot,
           );
         }
         return await sourceWorkflow.sourceSnapshot(inputs.repository);
