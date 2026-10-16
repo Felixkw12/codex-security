@@ -1036,10 +1036,17 @@ export class CodexSecurity {
           }
           throw error;
         }
-        result.packageContexts = await dependencyPackageContexts(
-          result,
-          signal,
-        );
+        try {
+          result.packageContexts = await dependencyPackageContexts(
+            result,
+            signal,
+          );
+        } catch (error) {
+          throwIfAborted(signal, outputDir);
+          result.diagnostics.push(
+            `Installed dependency context unavailable: ${errorMessage(error)}`,
+          );
+        }
       }
       if (result.matches.length === 0) reportProgress({ phase: "saving" });
       if (canSave) await saveDependencyScan(result);
@@ -1084,7 +1091,7 @@ export class CodexSecurity {
             ? session.modelProvider
             : "openai";
         const providerConfiguration = isRecord(providers)
-          ? providers[provider]
+          ? (providers[provider] ?? null)
           : null;
         const configurationDigest = workflowDigest({
           model,

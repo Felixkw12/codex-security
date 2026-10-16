@@ -3063,3 +3063,62 @@ test("retains native rollout fallback for a first assessment without SDK usage",
   expect(result.model.costPending).toBe(false);
   expect(result.model.cost?.inputTokens).toBe(1000);
 });
+
+test.each([false, true])(
+  "unrelated provider definitions do not invalidate continuation (initially present: %s)",
+  async (initiallyPresent) => {
+    const unrelated = {
+      "synthetic.unused": {
+        name: "Unused synthetic provider",
+        base_url: "https://unused.example.invalid/v1",
+        wire_api: "responses",
+        requires_openai_auth: true,
+      },
+    };
+    const f = await fixture({
+      turns: ["completed", "malformed"],
+      codexOverrides: initiallyPresent ? { model_providers: unrelated } : {},
+    });
+    await using security = f.client;
+    const options = { repositoryPath: f.repository, outputDir: f.outputDir };
+    const initial = await security.scanDependencies(options);
+    if (initiallyPresent)
+      delete security.config.codexOverrides!["model_providers"];
+    else security.config.codexOverrides!["model_providers"] = unrelated;
+    const result = await security.scanDependencies(options);
+    expect(result.status).toBe("completed");
+    expect(result.assessmentContext?.configurationDigest).toBe(
+      initial.assessmentContext?.configurationDigest,
+    );
+    expect(result.assessments[0]).toEqual(initial.assessments[0]);
+    expect(f.calls.scanner).toBe(1);
+    expect(f.turns).toHaveLength(3);
+  },
+);
+
+test("malformed optional package metadata preserves inventory and assessment", async () => {
+  const f = await fixture();
+  await using security = f.client;
+  await writeFile(
+    join(f.repository, "package.json"),
+    JSON.stringify({
+      name: "synthetic-project",
+      dependencies: { ["synthetic\u0000name"]: "1.0.0" },
+    }),
+  );
+  let observed: ScaResult | undefined;
+  const result = await security.scanDependencies({
+    repositoryPath: f.repository,
+    outputDir: f.outputDir,
+    onInventory: (inventory) => {
+      observed = inventory;
+    },
+  });
+  expect(observed?.matches).toHaveLength(1);
+  expect(result.status).toBe("completed");
+  expect(result.assessments[0]!.status).toBe("completed");
+  expect(result.diagnostics.join("\n")).toContain(
+    "Installed dependency context unavailable:",
+  );
+  expect(result.assessmentContext?.sourceDigest).toBeString();
+});
