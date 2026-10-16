@@ -1270,7 +1270,7 @@ describe("CLI", () => {
     expect(text).toContain("CODEX SECURITY");
     expect(text).toContain("SCAN HISTORY");
     expect(text).toContain("juice-shop");
-    for (const heading of ["DATE", "EXECUTION", "FINDINGS", "MODE", "SCAN"]) {
+    for (const heading of ["DATE", "STATUS", "FINDINGS", "MODE", "SCAN"]) {
       expect(text).toContain(heading);
     }
     expect(text).toContain("failed-scan");
@@ -3151,7 +3151,7 @@ describe("CLI", () => {
     expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
     expect(stderr.text()).toContain("Preparing scan");
     expect(stderr.text()).toContain("Running scan");
-    expect(stderr.text()).toContain("Scan finished");
+    expect(stderr.text()).toContain("Scan complete");
     expect(captured.config).toEqual({
       pluginPath: "plugin.zip",
       pythonPath: "/managed/python",
@@ -3223,7 +3223,7 @@ describe("CLI", () => {
       'codex-security: debug: cost.updated model="gpt-5.6-sol"',
     );
     expect(stderr.text()).toContain(
-      'codex-security: debug: scan.completed coverage="complete" findings=1',
+      "codex-security: debug: scan.completed findings=1",
     );
     expect(stderr.text()).toContain(
       "codex-security: debug: runtime.cleanup.started",
@@ -4192,7 +4192,7 @@ describe("CLI", () => {
 
     expect(await runCli(["scan"], dependencies({ result }))).toBe(0);
     expect(stdout.text()).toBe("");
-    expect(stderr.text()).toContain("Scan finished · 12345678");
+    expect(stderr.text()).toContain("Scan complete · 12345678");
     expect(stderr.text()).toContain(`scans show ${result.manifest.scan.id}`);
     expect(stderr.text()).toContain(`scans logs ${result.manifest.scan.id}`);
     expect(stderr.text()).toContain(
@@ -4201,7 +4201,6 @@ describe("CLI", () => {
         "",
         "  FINDINGS  1 (1 high)",
         "  SCOPE     repository: .",
-        "  COVERAGE  complete for requested scope",
         "  ELAPSED   6m 37s",
         "  TOKENS    unavailable uncached input, 200 cache reads, unavailable cache writes, 30 output, 1,280 total",
         "  RESULTS   /tmp/scan",
@@ -4301,7 +4300,7 @@ describe("CLI", () => {
     }
   });
 
-  test("reports a changed target before incomplete coverage in full-output errors", async () => {
+  test("reports a changed target even with legacy coverage in full-output errors", async () => {
     const warning =
       "Completed findings no longer describe the selected source tree.";
     const message =
@@ -4653,7 +4652,7 @@ describe("CLI", () => {
     expect(stderr.text()).toContain(
       "FINDINGS  4 (1 critical, 2 high, 1 informational)",
     );
-    expect(stderr.text()).toContain("COVERAGE  complete");
+
     expect(stderr.text()).toContain("ELAPSED   1s");
     expect(stderr.text()).toContain(
       "TOKENS    unavailable uncached input, 200 cache reads, unavailable cache writes, 30 output, 1,280 total",
@@ -4849,8 +4848,7 @@ describe("CLI", () => {
       "Worker delegation unavailable during file review; continuing without delegated workers.",
     );
     expect(stdout.text()).toBe("");
-    expect(stderr.text()).toContain("FINDINGS  0");
-    expect(stderr.text()).toContain("COVERAGE  complete for requested scope");
+    expect(stderr.text()).toContain("FINDINGS  0\n");
   });
 
   test("validates a dry run without starting a scan", async () => {
@@ -5028,397 +5026,105 @@ describe("CLI", () => {
     expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
   });
 
-  test("does not pass a policy when coverage is incomplete", async () => {
-    for (const completeness of ["partial", "unknown"] as const) {
+  test.each([undefined, "partial", "unknown"] as const)(
+    "evaluates findings independently of legacy coverage %s",
+    async (completeness) => {
       const result = fakeResult(["high"], completeness);
-      const { stdout, stderr, runCli } = createCliTest(main);
-
-      expect(
-        await runCli(
-          ["scan", "--json", "--fail-on-severity", "critical"],
-          dependencies({ result }),
-        ),
-      ).toBe(2);
-      expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
-      expect(stderr.text()).toContain(
-        `Cannot evaluate the failure policy: coverage is ${completeness}`,
-      );
-    }
-  });
-
-  test("evaluates complete scoped scans against their requested scope", async () => {
-    for (const paths of [
-      ["src/parser.ts"],
-      ["src/parser"],
-      ["src", "src/parser.ts", "tests"],
-    ]) {
-      for (const policy of [false, true]) {
-        const result = fakeResult(["high"]);
-        result.manifest.scan.scope.includePaths = paths;
-        result.manifest.scan.scope.validationMode = "static source review";
-        result.manifest.scan.scope.limitations = [
-          "Runtime testing was not requested.",
-        ];
-        Object.assign(result.coverage, {
-          mode: "scoped_path",
-          inventoryStrategy: "scoped_path",
-          includePaths: paths,
-          openQuestions: [
-            { question: "Consider a separate deployment review." },
-          ],
-        });
-        const stdout = capture();
-        const stderr = capture();
-        const exit = await main(
-          [
-            "scan",
-            "--json",
-            ...paths.flatMap((path) => ["--path", path]),
-            ...(policy ? ["--fail-on-severity", "high"] : []),
-          ],
-          stdout.stream,
-          stderr.stream,
-          dependencies({ result }),
+      result.coverage.deferred.push({
+        id: "review-note",
+        reason: "Optional runtime reproduction was unavailable.",
+      });
+      for (const [threshold, expected] of [
+        [undefined, 0],
+        ["critical", 0],
+        ["high", 1],
+      ] as const) {
+        const { stdout, stderr, runCli } = createCliTest(main);
+        expect(
+          await runCli(
+            [
+              "scan",
+              "--json",
+              "--full-output",
+              ...(threshold === undefined
+                ? []
+                : ["--fail-on-severity", threshold]),
+            ],
+            dependencies({ result }),
+          ),
+        ).toBe(expected);
+        const envelope = JSON.parse(stdout.text());
+        expect(envelope.ok).toBe(true);
+        expect(envelope.data.coverage.deferred).toEqual(
+          result.coverage.deferred,
         );
-        expect(exit).toBe(policy ? 1 : 0);
-        expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
-        expect(stderr.text()).toContain(`scoped paths: ${paths.join(", ")}`);
-        expect(stderr.text()).toContain("complete for requested scope");
+        expect(envelope).not.toHaveProperty("error");
         expect(stderr.text()).not.toContain(
           "Cannot evaluate the failure policy",
         );
       }
-    }
-  });
+    },
+  );
 
-  test("includes canonical exclusions in a complete scan summary", async () => {
-    const result = fakeResult();
-    Object.assign(result.manifest.scan.scope, {
-      includePaths: ["src"],
-      excludePaths: ["src/vendor"],
-    });
-    Object.assign(result.coverage, {
-      mode: "scoped_path",
-      inventoryStrategy: "scoped_path",
-      includePaths: ["src"],
-      excludePaths: ["src/vendor"],
-      explicitExclusions: [
-        { pattern: "src/vendor", reason: "Excluded dependency source." },
-        { pattern: "src/generated/**", reason: "Excluded generated source." },
-      ],
-    });
-    const stdout = capture();
-    const stderr = capture();
-    expect(
-      await main(
-        ["scan", "--path", "src", "--json"],
-        stdout.stream,
-        stderr.stream,
-        dependencies({ result }),
-      ),
-    ).toBe(0);
-    expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
-    expect(stderr.text()).toContain(
-      "scoped paths: src; excluding src/vendor, src/generated/**",
-    );
-    expect(stderr.text()).toContain("complete for requested scope");
-  });
-
-  test("quotes and escapes untrusted paths in human scope summaries", async () => {
-    const path = "src; excluding tests\u2028COVERAGE forged";
-    const result = fakeResult();
-    result.manifest.scan.scope.includePaths = [path];
-    Object.assign(result.coverage, {
-      mode: "scoped_path",
-      inventoryStrategy: "scoped_path",
-      includePaths: [path],
-      excludePaths: ["vendor\u0085\u2029forged"],
-    });
-    const stdout = capture();
-    const stderr = capture();
-    expect(
-      await main(
-        ["scan", "--path", path, "--json"],
-        stdout.stream,
-        stderr.stream,
-        dependencies({ result }),
-      ),
-    ).toBe(0);
-    expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
-    expect(stderr.text()).not.toMatch(/[\u0085\u2028\u2029]/u);
-    expect(stderr.text()).toContain(
-      '"src; excluding tests\\u2028COVERAGE forged"',
-    );
-    expect(stderr.text()).toContain('"vendor\\u0085\\u2029forged"');
-  });
-
-  test("does not promote incomplete coverage merely because paths were selected", async () => {
-    for (const completeness of ["partial", "unknown"] as const) {
-      const result = fakeResult(["high"], completeness);
-      result.manifest.scan.scope.includePaths = ["src/parser"];
-      Object.assign(result.coverage, {
-        mode: "scoped_path",
-        inventoryStrategy: "scoped_path",
-        includePaths: ["src/parser"],
-        deferred: [
-          {
-            id: "source-review",
-            reason: "Requested source remains unreviewed.",
-          },
-        ],
-      });
-      const stdout = capture();
-      const stderr = capture();
+  test.each(["failed", "canceled", "interrupted"] as const)(
+    "does not accept a %s manifest as a completed scan",
+    async (status) => {
+      const result = fakeResult(["high"]);
+      result.manifest.scan.status = status;
+      const { stdout, runCli } = createCliTest(main);
       expect(
-        await main(
-          ["scan", "--path", "src/parser", "--json"],
-          stdout.stream,
-          stderr.stream,
+        await runCli(
+          ["scan", "--json", "--full-output", "--fail-on-severity", "high"],
           dependencies({ result }),
         ),
       ).toBe(2);
-      expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
-      expect(stderr.text()).toContain(
-        `${completeness} for the requested scope`,
-      );
-    }
-  });
-
-  test("does not report an incomplete scan as successful without a policy", async () => {
-    for (const completeness of ["partial", "unknown"] as const) {
-      const result = fakeResult(["high"], completeness);
-      const { stdout, stderr, runCli } = createCliTest(main);
-
-      expect(await runCli(["scan", "--json"], dependencies({ result }))).toBe(
-        2,
-      );
-      expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
-      expect(stderr.text()).toContain(
-        `Scan coverage is ${completeness} for the requested scope; see the report for unfinished work.`,
-      );
-    }
-  });
-
-  test.each(["partial", "unknown"] as const)(
-    "marks %s coverage as a full-output error and keeps the scan results",
-    async (completeness) => {
-      const result = fakeResult(["high"], completeness);
-      for (const format of [
-        ["--json"],
-        ["--format", "json"],
-        ["--format", "jsonl"],
-      ]) {
-        for (const policy of [false, true]) {
-          const stdout = capture();
-          const stderr = capture();
-          expect(
-            await main(
-              [
-                "scan",
-                ".",
-                ...format,
-                "--full-output",
-                ...(policy ? ["--fail-on-severity", "critical"] : []),
-              ],
-              stdout.stream,
-              stderr.stream,
-              dependencies({ result }),
-            ),
-          ).toBe(2);
-          const envelope = JSON.parse(stdout.text());
-          const message = policy
-            ? `Cannot evaluate the failure policy: coverage is ${completeness} for the requested scope.`
-            : `Scan coverage is ${completeness} for the requested scope; see the report for unfinished work.`;
-          expect(envelope).toMatchObject({
-            ok: false,
-            error: { code: "SCAN_FAILED", message },
-            data: JSON.parse(JSON.stringify(result.toJSON())),
-            meta: { command: "scan" },
-          });
-          expect(stderr.text()).toContain(message);
-          if (format.includes("jsonl"))
-            expect(stdout.text().trim().split("\n")).toHaveLength(1);
-        }
-      }
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        ok: false,
+        error: { code: "SCAN_FAILED" },
+        data: { manifest: { scan: { status } }, findings: result.findings },
+      });
     },
   );
 
   test.each(["rerun", "resume"] as const)(
-    "reports incomplete %s coverage in the full-output error envelope",
+    "%s retains findings and scope notes in a successful full-output result",
     async (command) => {
-      for (const completeness of ["partial", "unknown"] as const) {
-        for (const format of ["json", "jsonl"]) {
-          const result = fakeResult(["high"], completeness);
-          const stdout = capture();
-          const stderr = capture();
-          const recipe = {
-            repository: "/original/repository",
-            target: { kind: "repository", paths: [] },
-            mode: command === "resume" ? "deep" : "standard",
-            config: {},
-          };
-          expect(
-            await main(
-              [
-                "scans",
-                command,
-                "scan-original",
-                "--format",
-                format,
-                "--full-output",
-              ],
-              stdout.stream,
-              stderr.stream,
-              dependencies({
-                result,
-                onWorkbench: (args): JsonObject =>
-                  args[0] === "get-cli-scan-resume"
-                    ? {
-                        scanId: "scan-original",
-                        scanDir: "/tmp/saved-scan",
-                        recipe,
-                      }
-                    : args[0] === "get-scan-recipe"
-                      ? { recipe }
-                      : {},
-              }),
-            ),
-          ).toBe(2);
-          const message = `Scan coverage is ${completeness} for the requested scope; see the report for unfinished work.`;
-          expect(JSON.parse(stdout.text())).toMatchObject({
-            ok: false,
-            error: { code: "SCAN_FAILED", message },
-            data: JSON.parse(JSON.stringify(result.toJSON())),
-          });
-          expect(stderr.text()).toContain(message);
-          if (format === "jsonl")
-            expect(stdout.text().trim().split("\n")).toHaveLength(1);
-        }
-      }
-    },
-  );
-
-  test.each(["rerun", "resume"] as const)(
-    "matches the %s full-output error schema to filtered data",
-    async (command) => {
-      const schemaOutput = capture();
-      expect(
-        await main(
-          ["scans", command, "--schema", "--format", "json"],
-          schemaOutput.stream,
-          capture().stream,
-          dependencies(),
-        ),
-      ).toBe(0);
-      const schema = JSON.parse(schemaOutput.text()).output.anyOf.find(
-        (variant: { properties?: { ok?: { const?: boolean } } }) =>
-          variant.properties?.ok?.const === false,
-      );
-      expect(schema.properties.data).toEqual({});
-      expect(schema.required).toEqual(["ok", "error", "meta"]);
-
-      const result = fakeResult(["high"], "partial");
+      const result = fakeResult(["high"]);
+      result.coverage.deferred.push({
+        id: "runtime-note",
+        reason: "Optional runtime reproduction was unavailable.",
+      });
+      const { stdout, runCli } = createCliTest(main);
       const recipe = {
         repository: "/original/repository",
         target: { kind: "repository", paths: [] },
         mode: command === "resume" ? "deep" : "standard",
         config: {},
       };
-      for (const format of ["json", "jsonl"]) {
-        for (const [filter, expected] of [
-          ["cost", null],
-          ["sarifPath", null],
-          ["warnings", undefined],
-          ["threadId", result.threadId],
-          [
-            "findings",
-            {
-              findings: JSON.parse(JSON.stringify(result.toJSON()["findings"])),
-            },
-          ],
-        ] as const) {
-          const output = capture();
-          expect(
-            await main(
-              [
-                "scans",
-                command,
-                "scan-original",
-                "--format",
-                format,
-                "--full-output",
-                "--filter-output",
-                filter,
-              ],
-              output.stream,
-              capture().stream,
-              dependencies({
-                result,
-                onWorkbench: () => ({
-                  scanId: "scan-original",
-                  scanDir: "/tmp/saved-scan",
-                  recipe,
-                }),
-              }),
-            ),
-          ).toBe(2);
-          const envelope = JSON.parse(output.text());
-          expect(envelope).toMatchObject({
-            ok: false,
-            error: { code: "SCAN_FAILED" },
-            meta: expect.any(Object),
-          });
-          if (expected === undefined)
-            expect(envelope).not.toHaveProperty("data");
-          else expect(envelope.data).toEqual(expected);
-        }
-      }
+      expect(
+        await runCli(
+          ["scans", command, "scan-original", "--json", "--full-output"],
+          dependencies({
+            result,
+            onWorkbench: (args): JsonObject =>
+              args[0] === "get-cli-scan-resume"
+                ? {
+                    scanId: "scan-original",
+                    scanDir: "/tmp/saved-scan",
+                    recipe,
+                  }
+                : args[0] === "get-scan-recipe"
+                  ? { recipe }
+                  : {},
+          }),
+        ),
+      ).toBe(0);
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        ok: true,
+        data: { findings: result.findings, coverage: result.coverage },
+      });
     },
   );
-
-  test("preserves full-output token controls and the completed findings-policy envelope", async () => {
-    const partial = fakeResult(["high"], "partial");
-    const page = capture();
-    expect(
-      await main(
-        ["scan", "--json", "--full-output", "--token-limit", "1"],
-        page.stream,
-        capture().stream,
-        dependencies({ result: partial }),
-      ),
-    ).toBe(2);
-    expect(JSON.parse(page.text())).toMatchObject({
-      ok: false,
-      error: { code: "SCAN_FAILED" },
-      data: expect.any(String),
-      meta: { nextOffset: 1 },
-    });
-    const count = capture();
-    expect(
-      await main(
-        ["scan", "--json", "--full-output", "--token-count"],
-        count.stream,
-        capture().stream,
-        dependencies({ result: partial }),
-      ),
-    ).toBe(2);
-    expect(JSON.parse(count.text())).toBeNumber();
-    const complete = fakeResult(["high"]);
-    const blocked = capture();
-    expect(
-      await main(
-        ["scan", "--json", "--full-output", "--fail-on-severity", "high"],
-        blocked.stream,
-        capture().stream,
-        dependencies({ result: complete }),
-      ),
-    ).toBe(1);
-    expect(JSON.parse(blocked.text())).toMatchObject({
-      ok: true,
-      data: JSON.parse(JSON.stringify(complete.toJSON())),
-    });
-    expect(JSON.parse(blocked.text())).not.toHaveProperty("error");
-  });
 
   test("reports SDK errors without a stack trace", async () => {
     const { stdout, stderr, runCli } = createCliTest(main);

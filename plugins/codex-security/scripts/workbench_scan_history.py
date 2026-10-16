@@ -196,7 +196,6 @@ def coverage_summary_for_history(
         key: coverage[key]
         for key in (
             "mode",
-            "completeness",
             "includePaths",
             "excludePaths",
             "explicitExclusions",
@@ -605,7 +604,6 @@ def compare_scans(
         backfill_finding_details(connection, before)
         backfill_finding_details(connection, after)
     after_coverage = read_coverage(after)
-    comparable = after_coverage.get("completeness") == "complete"
     before_findings = _scan_findings(connection, before["id"])
     after_findings = _scan_findings(connection, after["id"])
     matches = json.loads(cached["result_json"]) if cached is not None else None
@@ -625,7 +623,10 @@ def compare_scans(
         else {}
     )
     findings: list[dict[str, Any]] = []
-    summary = {status: 0 for status in ("new", "persisting", "resolved", "reopened", "unknown")}
+    summary = {
+        status: 0
+        for status in ("new", "persisting", "resolved", "not_observed", "reopened", "unknown")
+    }
 
     for previous_rows, current_rows, match_reason in groups:
         previous = (
@@ -675,9 +676,6 @@ def compare_scans(
         elif uncertain_reason is not None:
             status = "unknown"
             item["reason"] = uncertain_reason
-        elif not comparable:
-            status = "unknown"
-            item["reason"] = "The later scan has incomplete coverage."
         elif not all(
             scan_covers_path(
                 after,
@@ -689,8 +687,14 @@ def compare_scans(
         ):
             status = "unknown"
             item["reason"] = "The affected path was excluded or outside the later scope."
-        else:
+        elif all(
+            row["triage_status"] == "closed" and row["close_reason"] == "already_fixed"
+            for row in previous_rows
+        ):
             status = "resolved"
+        else:
+            status = "not_observed"
+            item["reason"] = "Not observed in the later scan; remediation has not been verified."
         if len(previous_rows) == 1:
             item["beforeOccurrenceId"] = previous["id"]
         elif previous_rows:
@@ -711,8 +715,6 @@ def compare_scans(
     result = {
         "afterScanId": after["id"],
         "beforeScanId": before["id"],
-        "comparable": comparable,
-        "coverage": {"afterCompleteness": after_coverage.get("completeness")},
         "findings": findings,
         "repository": before["target_path"],
         "summary": summary,
@@ -1248,11 +1250,7 @@ def scan_covers_path(
     path: str | None,
     coverage: dict[str, Any],
 ) -> bool:
-    if (
-        scan["status"] != "complete"
-        or scan["target_id"] != target_id
-        or coverage.get("completeness") != "complete"
-    ):
+    if scan["status"] != "complete" or scan["target_id"] != target_id:
         return False
     if not isinstance(path, str) or not path:
         return False

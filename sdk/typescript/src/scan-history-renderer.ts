@@ -27,6 +27,7 @@ const STATUS_STYLES: Record<string, { color: number; icon: string }> = {
   reopened: { color: 31, icon: "↻" },
   new: { color: 31, icon: "+" },
   persisting: { color: 33, icon: "●" },
+  not_observed: { color: 36, icon: "○" },
   not_rescanned: { color: 36, icon: "○" },
   unknown: { color: 35, icon: "?" },
 };
@@ -92,7 +93,6 @@ export function renderScanHistory(
     const available = width - indent - 2;
     let line = "";
     let lineWidth = 0;
-    // Scope paths arrive as whole entries because whitespace can be part of a filename.
     const words =
       typeof value === "string" ? clean(value).split(/\s+/) : value.map(clean);
     for (const word of words) {
@@ -226,7 +226,7 @@ export function renderScanHistory(
     );
     if (wide) {
       lines.push(
-        `  ${strong("SCAN".padEnd(36))} ${strong("DATE".padEnd(10))} ${strong("MODE".padEnd(8))}${multipleRepositories ? ` ${strong("REPOSITORY".padEnd(18))}` : ""} ${strong("FINDINGS")} ${strong("EXECUTION")}`,
+        `  ${strong("SCAN".padEnd(36))} ${strong("DATE".padEnd(10))} ${strong("MODE".padEnd(8))}${multipleRepositories ? ` ${strong("REPOSITORY".padEnd(18))}` : ""} ${strong("FINDINGS")} ${strong("STATUS")}`,
       );
     }
     for (const scan of scans) {
@@ -234,7 +234,7 @@ export function renderScanHistory(
       const complete = status === "complete";
       const statusColor = complete ? 32 : status === "running" ? 36 : 31;
       const statusLabel = paint(
-        complete ? "✓ FINISHED" : `● ${status.toUpperCase()}`,
+        `${complete ? "✓" : "●"} ${status.toUpperCase()}`,
         statusColor,
       );
       const started = clean(scan["startedAt"]).slice(0, 10);
@@ -269,7 +269,7 @@ export function renderScanHistory(
       status === "complete" ? 32 : status === "running" ? 36 : 31;
     lines.push(
       `  ${strong(clean(basename(result["targetPath"] as string)))}  ${accent("·")}  ${clean(result["scanId"])}`,
-      `  ${paint(status === "complete" ? "✓ FINISHED" : `● ${status.toUpperCase()}`, statusColor)}  ${accent("·")}  ${clean(result["mode"])}`,
+      `  ${paint(`${status === "complete" ? "✓" : "●"} ${status.toUpperCase()}`, statusColor)}  ${accent("·")}  ${clean(result["mode"])}`,
     );
     if (typeof result["startedAt"] === "string") {
       lines.push(`  ${strong("STARTED")}  ${clean(result["startedAt"])}`);
@@ -283,11 +283,6 @@ export function renderScanHistory(
         11,
         `  ${strong("SCOPE")}  `,
       );
-      lines.push(
-        `  ${strong("COVERAGE")}  ${canonicalCoverage.completeness} for requested scope`,
-      );
-    } else if (status === "complete") {
-      lines.push(`  ${strong("COVERAGE")}  not available`);
     }
     if (result["failureMessage"]) {
       wrap(String(result["failureMessage"]), 11, `  ${paint("ERROR", 31)}  `);
@@ -363,7 +358,7 @@ export function renderScanHistory(
       ];
       if (parts.length > 0) {
         lines.push(
-          `  ${strong("REVIEW PROGRESS")}  ${parts.join(`  ${accent("·")}  `)}`,
+          `  ${strong("COVERAGE")}  ${parts.join(`  ${accent("·")}  `)}`,
         );
       }
     }
@@ -434,12 +429,6 @@ export function renderScanHistory(
     lines.push(
       `  ${clean(result["beforeScanId"]).slice(0, 8)} → ${clean(result["afterScanId"]).slice(0, 8)}`,
     );
-    const coverage = (result["coverage"] as JsonObject)["afterCompleteness"];
-    if (coverage !== "complete") {
-      lines.push(
-        `  ${paint(`⚠ Follow-up coverage is ${clean(coverage)}; resolved findings cannot be confirmed.`, 33)}`,
-      );
-    }
     const findings = (result["findings"] as JsonObject[]).map((entry) =>
       entry["status"] === "unknown" &&
       entry["reason"] ===

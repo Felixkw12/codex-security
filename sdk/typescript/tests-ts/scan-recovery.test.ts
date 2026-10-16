@@ -7,30 +7,17 @@ import { runNodePython } from "./support/python-probe.js";
 import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { readJson } from "./support/json.js";
-
-type Finding = Record<string, unknown> & {
-  ruleId: string;
-  identity: { anchor: string; instance?: string };
-  summary: string;
-  severity: { level: string; changeConditions?: unknown };
-  confidence: { level: string };
-  locations: Array<{ path: string }>;
-  codeEvidence?: Array<{
-    id: string;
-    label: string;
-    path: string;
-    startLine: number;
-    code: string;
-    explanation: string;
-  }>;
-  writeup?: unknown;
-  remediationTests?: unknown;
-  preventiveControls?: unknown;
-};
+import { main } from "../src/cli.js";
+import { ScanInterruptedError } from "../src/errors.js";
+import { dependencies, fakeSecurity } from "./cli-fixtures.js";
+import { createCliTest } from "./support/cli-run.js";
 
 type FindingsDocument = {
-  scanId: string;
-  findings: Array<Finding | null>;
+  findings: Array<{
+    identity: { anchor: string };
+    summary: string;
+    writeup?: { reportPath: string };
+  }>;
 };
 
 type CoverageSurface = Record<string, unknown> & {
@@ -42,7 +29,6 @@ type CoverageSurface = Record<string, unknown> & {
 
 type CoverageDocument = Record<string, unknown> & {
   scanId: string;
-  completeness: string;
   inventoryStrategy: string;
   surfaces: CoverageSurface[] | Record<string, unknown>;
   explicitExclusions: unknown;
@@ -53,27 +39,6 @@ type ScanSummary = {
   findingCount: number;
   progress: { status: string };
   warnings: string[];
-};
-
-type SarifDocument = {
-  runs: Array<{
-    automationDetails: { id: string };
-    properties: {
-      codexSecurityCoverageCompleteness?: string;
-      codexSecurityCoverageMode?: string;
-      codexSecurityIncludePaths?: string[];
-      codexSecurityExcludePaths?: string[];
-      codexSecurityExplicitExclusions?: unknown[];
-    };
-    results: Array<{ properties: { severity: string } }>;
-    invocations?: Array<{
-      executionSuccessful: boolean;
-      toolExecutionNotifications?: Array<{
-        level: string;
-        message: { text: string };
-      }>;
-    }>;
-  }>;
 };
 
 type ScanFixture = Awaited<ReturnType<typeof startDraftScan>>;
@@ -98,13 +63,7 @@ async function workbench(
 
 async function startDraftScan(
   repositoryKind: "directory" | "clean" | "dirty" | "nested" = "directory",
-  {
-    paths,
-    recipeFromStdin = false,
-  }: {
-    paths?: readonly string[];
-    recipeFromStdin?: boolean;
-  } = {},
+  recipeFromStdin = false,
 ) {
   const root = await temporaryDirectory();
   const python =
@@ -166,7 +125,7 @@ async function startDraftScan(
     config: {},
     mode: "standard",
     repository: target,
-    target: { kind: paths ? "paths" : "repository", paths: paths ?? [] },
+    target: { kind: "repository", paths: [] },
   });
   const registration = await workbench(
     fixture,
@@ -225,242 +184,130 @@ async function completeScan(fixture: ScanFixture): Promise<ScanSummary> {
   return result["scan"] as unknown as ScanSummary;
 }
 
-describe("malformed scan artifact recovery", () => {
-  test("seals complete scoped reviews with optional follow-up and exports their scope", async () => {
-    const fixture = await startDraftScan("directory", {
-      paths: ["src", "src/extract.py"],
-    });
-    const manifestPath = join(fixture.scanDir, "scan-manifest.json");
-    const manifest = await readJson<{
-      scan: { scope: Record<string, unknown> };
-    }>(manifestPath);
-    Object.assign(manifest.scan.scope, {
-      validationMode: "static source review",
-      runtimeStatus: "not requested",
-      limitations: ["Live testing was outside the requested review."],
-    });
-    await writeJson(manifestPath, manifest);
-    const coveragePath = join(fixture.scanDir, "coverage.json");
-    const coverage = await readJson<CoverageDocument>(coveragePath);
-    coverage["openQuestions"] = [
-      { question: "Consider a separate deployment review." },
-    ];
-    coverage.explicitExclusions = [
-      {
-        pattern: "src/generated/**",
-        reason: "Generated source was excluded by policy.",
-      },
-    ];
-    await writeJson(coveragePath, coverage);
-
-    const completed = await completeScan(fixture);
-    expect(completed.progress.status).toBe("complete");
-    expect(await readJson<CoverageDocument>(coveragePath)).toMatchObject({
-      completeness: "complete",
-      mode: "scoped_path",
-      includePaths: ["src", "src/extract.py"],
-      openQuestions: coverage["openQuestions"],
-    });
-    const report = await readFile(join(fixture.scanDir, "report.md"), "utf8");
-    expect(report).toContain("Consider a separate deployment review.");
-    const sarif = await readJson<SarifDocument>(
-      join(fixture.scanDir, "exports", "results.sarif"),
-    );
-    expect(sarif.runs[0]).toMatchObject({
-      automationDetails: { id: fixture.scanId },
-      properties: {
-        codexSecurityCoverageMode: "scoped_path",
-        codexSecurityCoverageCompleteness: "complete",
-        codexSecurityIncludePaths: ["src", "src/extract.py"],
-        codexSecurityExcludePaths: [],
-        codexSecurityExplicitExclusions: coverage.explicitExclusions,
-      },
-    });
-    expect(sarif.runs[0]?.invocations).toEqual([{ executionSuccessful: true }]);
-
-    const history = await workbench(fixture, [
-      "get-scan",
-      "--scan-id",
-      fixture.scanId,
-    ]);
-    expect(history["scan"]).toMatchObject({
-      coverage: {
-        mode: "scoped_path",
-        completeness: "complete",
-        includePaths: ["src", "src/extract.py"],
-        excludePaths: [],
-        explicitExclusions: coverage.explicitExclusions,
-      },
-    });
-    expect(history["workspace"]).not.toHaveProperty("results.coverage");
-    for (const artifactPath of [coveragePath, manifestPath]) {
-      const sealed = await readFile(artifactPath, "utf8");
-      for (const modified of [`${sealed}\n`, "{}\n"]) {
-        await writeFile(artifactPath, modified);
-        try {
-          const unavailable = await workbench(fixture, [
-            "get-scan",
+describe("scan publication and artifact recovery", () => {
+  test.each(["scan", "rerun", "resume"] as const)(
+    "%s full-output includes sealed findings after execution throws",
+    async (command) => {
+      const fixture = await startDraftScan();
+      const message = "Synthetic execution failure after finding discovery.";
+      const recipe = {
+        repository: fixture.repository,
+        target: { kind: "repository", paths: [] },
+        mode: command === "resume" ? "deep" : "standard",
+        config: {},
+      };
+      const deps = dependencies({
+        currentDirectory: fixture.repository,
+        onWorkbench: () => ({
+          scanId: fixture.scanId,
+          scanDir: fixture.scanDir,
+          recipe,
+        }),
+      });
+      deps.createSecurity = () =>
+        fakeSecurity(async (_repository, options) => {
+          options?.onScanRegistered?.(fixture);
+          await workbench(fixture, [
+            "fail-scan",
             "--scan-id",
             fixture.scanId,
+            "--message",
+            message,
           ]);
-          expect(
-            (unavailable["scan"] as Record<string, unknown>)["coverage"],
-          ).toBeUndefined();
-          expect(await readFile(artifactPath, "utf8")).toBe(modified);
-        } finally {
-          await writeFile(artifactPath, sealed);
-        }
-      }
-    }
-  });
-
-  test("reads sealed history coverage without loading unrelated findings", async () => {
-    const fixture = await startDraftScan("directory", { paths: ["src"] });
-    await completeScan(fixture);
-    await writeFile(join(fixture.scanDir, "findings.json"), "not available\n");
-    const history = await workbench(fixture, [
-      "get-scan",
-      "--scan-id",
-      fixture.scanId,
-    ]);
-    expect(history["scan"]).toMatchObject({
-      coverage: {
-        mode: "scoped_path",
-        completeness: "complete",
-        includePaths: ["src"],
-        excludePaths: [],
-      },
-    });
-  });
-
-  test("keeps saved history when scan directory resolution finds a symlink loop", () => {
-    const python = Bun.which("python3") ?? Bun.which("python");
-    expect(python).not.toBeNull();
-    const script = [
-      "import argparse, json, pathlib, runpy, sys",
-      "from unittest import mock",
-      "namespace = runpy.run_path(str(pathlib.Path(sys.argv[1]) / 'scripts' / 'workbench_db.py'))",
-      "get_scan = namespace['get_scan']",
-      "args = argparse.Namespace(scan_id='scan-1', occurrence_id=None)",
-      "context = {'scan': {'progress': {'status': 'complete'}, 'findingCount': 2}}",
-      "scan = {'seal_manifest_digest': 'sealed', 'scan_dir': 'scan'}",
-      "resolve = mock.Mock(side_effect=RuntimeError('Symlink loop'))",
-      "with mock.patch.dict(get_scan.__globals__, {'scan_context': lambda *_: context, 'require_scan': lambda *_: scan, 'require_canonical_scan_directory': resolve}):",
-      "    result = get_scan(None, args)",
-      "resolve.assert_called_once_with(pathlib.Path('scan'))",
-      "print(json.dumps(result))",
-    ].join("\n");
-    const result = spawnSync(python!, ["-I", "-B", "-c", script, PLUGIN_ROOT], {
-      encoding: "utf8",
-    });
-    expect(result.status, result.stderr).toBe(0);
-    expect(JSON.parse(result.stdout)).toEqual({
-      scan: { progress: { status: "complete" }, findingCount: 2 },
-    });
-  });
-
-  test("does not attach completed coverage to an earlier running status", () => {
-    const python = Bun.which("python3") ?? Bun.which("python");
-    expect(python).not.toBeNull();
-    const script = [
-      "import argparse, json, pathlib, runpy, sys",
-      "from unittest import mock",
-      "namespace = runpy.run_path(str(pathlib.Path(sys.argv[1]) / 'scripts' / 'workbench_db.py'))",
-      "get_scan = namespace['get_scan']",
-      "args = argparse.Namespace(scan_id='scan-1', occurrence_id=None)",
-      "coverage = {'completeness': 'complete'}",
-      "def read_status(status):",
-      "    context = {'scan': {'progress': {'status': status}}}",
-      "    with mock.patch.dict(get_scan.__globals__, {'scan_context': lambda *_: context, 'require_scan': lambda *_: {'status': 'complete'}, 'coverage_summary_for_history': lambda _: coverage}):",
-      "        return get_scan(None, args)",
-      "print(json.dumps([read_status('running'), read_status('complete')]))",
-    ].join("\n");
-    const result = spawnSync(python!, ["-I", "-B", "-c", script, PLUGIN_ROOT], {
-      encoding: "utf8",
-    });
-    expect(result.status, result.stderr).toBe(0);
-    expect(JSON.parse(result.stdout)).toEqual([
-      { scan: { progress: { status: "running" } } },
-      {
-        scan: {
-          progress: { status: "complete" },
-          coverage: { completeness: "complete" },
-        },
-      },
-    ]);
-  });
-
-  test.each(["deferred", "surface"] as const)(
-    "keeps an in-scope %s blocker separate from optional follow-up",
-    async (kind) => {
-      const fixture = await startDraftScan("directory", { paths: ["src"] });
-      const coveragePath = join(fixture.scanDir, "coverage.json");
-      const coverage = await readJson<CoverageDocument>(coveragePath);
-      const blocker =
-        "An essential in-scope source question remains unresolved.";
-      const optionalQuestion = "Consider a separate deployment review.";
-      coverage["openQuestions"] = [{ question: optionalQuestion }];
-      if (kind === "deferred") {
-        coverage.deferred = [
-          {
-            id: "source-review",
-            reason: blocker,
-            paths: ["src/extract.py"],
-          },
-        ];
-      } else {
-        Object.assign((coverage.surfaces as CoverageSurface[])[0]!, {
-          disposition: "needs_follow_up",
-          notes: blocker,
+          throw command === "resume"
+            ? new ScanInterruptedError(message, fixture.scanDir)
+            : new Error(message);
         });
-      }
-      await writeJson(coveragePath, coverage);
-      await completeScan(fixture);
-
-      expect(
-        (await readJson<CoverageDocument>(coveragePath)).completeness,
-      ).toBe("partial");
-      const report = await readFile(join(fixture.scanDir, "report.md"), "utf8");
-      const blockerPosition = report.indexOf(blocker);
-      const optionalPosition = report.indexOf(optionalQuestion);
-      expect(blockerPosition).toBeGreaterThan(0);
-      expect(optionalPosition).toBeGreaterThan(blockerPosition);
-      const history = await workbench(fixture, [
-        "get-scan",
-        "--scan-id",
-        fixture.scanId,
-      ]);
-      expect(history["scan"]).toMatchObject({
-        coverage: { completeness: "partial" },
-      });
-      const sarif = await readJson<SarifDocument>(
-        join(fixture.scanDir, "exports", "results.sarif"),
-      );
-      const invocation = sarif.runs[0]!.invocations![0]!;
-      expect(invocation.executionSuccessful).toBe(false);
-      const warnings = invocation.toolExecutionNotifications!.map(
-        ({ message }) => message.text,
-      );
-      expect(warnings.some((warning) => warning.includes(blocker))).toBe(true);
-      expect(
-        warnings.some((warning) => warning.includes(optionalQuestion)),
-      ).toBe(false);
-      if (kind === "surface") {
+      const args =
+        command === "scan" ? ["scan"] : ["scans", command, fixture.scanId];
+      const expectedError = { code: "SCAN_FAILED", message };
+      for (const output of ["full", "filtered", "ordinary"] as const) {
+        if (command === "scan" && output === "filtered") continue;
+        const cli = createCliTest(main);
         expect(
-          warnings.some((warning) =>
-            warning.includes(
-              (coverage.surfaces as CoverageSurface[])[0]!.label,
-            ),
+          await cli.runCli(
+            [
+              ...args,
+              "--format",
+              command === "resume" ? "jsonl" : "json",
+              ...(output === "ordinary" ? [] : ["--full-output"]),
+              ...(output === "filtered"
+                ? ["--filter-output", "findings.findings"]
+                : []),
+            ],
+            deps,
           ),
-        ).toBe(true);
+        ).toBe(2);
+        const envelope = JSON.parse(cli.stdout.text());
+        if (output === "ordinary") {
+          expect(envelope).toEqual({ status: "failed", ...expectedError });
+        } else {
+          expect(envelope).toMatchObject({ ok: false, error: expectedError });
+          if (output === "filtered") {
+            expect(Object.keys(envelope.data)).toEqual(["findings"]);
+            expect(envelope.data.findings.findings).toHaveLength(1);
+            expect(envelope.data.findings.findings[0].summary).toBeTruthy();
+          } else {
+            expect(envelope.data).toMatchObject({
+              manifest: { scan: { id: fixture.scanId, status: "failed" } },
+              scanDir: fixture.scanDir,
+              reportPath: join(fixture.scanDir, "report.md"),
+            });
+            expect(envelope.data.findings.findings).toHaveLength(1);
+            expect(envelope.data.coverage.deferred.length).toBeGreaterThan(0);
+            expect(envelope.data).not.toHaveProperty("turn");
+          }
+        }
+        expect(cli.stderr.text()).toContain(message);
       }
     },
   );
 
+  test.each(["unregistered", "unsealed", "malformed", "different-scan"])(
+    "full-output preserves the execution error with %s saved artifacts",
+    async (artifactState) => {
+      const fixture = await startDraftScan();
+      const message = "Synthetic scanner failure.";
+      if (artifactState !== "unsealed") {
+        await workbench(fixture, [
+          "fail-scan",
+          "--scan-id",
+          fixture.scanId,
+          "--message",
+          message,
+        ]);
+      }
+      if (artifactState === "malformed")
+        await writeFile(join(fixture.scanDir, "findings.json"), "invalid");
+      const deps = dependencies({ currentDirectory: fixture.repository });
+      deps.createSecurity = () =>
+        fakeSecurity(async (_repository, options) => {
+          options?.onOutputDirReady?.(fixture.scanDir);
+          if (artifactState !== "unregistered")
+            options?.onScanRegistered?.({
+              ...fixture,
+              scanId:
+                artifactState === "different-scan"
+                  ? "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+                  : fixture.scanId,
+            });
+          throw new Error(message);
+        });
+      const cli = createCliTest(main);
+      expect(await cli.runCli(["scan", "--json", "--full-output"], deps)).toBe(
+        2,
+      );
+      expect(JSON.parse(cli.stdout.text())).toMatchObject({
+        ok: false,
+        error: { code: "SCAN_FAILED", message },
+      });
+      expect(JSON.parse(cli.stdout.text())).not.toHaveProperty("data");
+      expect(cli.stderr.text()).toContain(message);
+    },
+  );
+
   test("registers a Unicode scan recipe delivered through stdin", async () => {
-    const fixture = await startDraftScan("directory", {
-      recipeFromStdin: true,
-    });
+    const fixture = await startDraftScan("directory", true);
     expect(fixture.registration).toMatchObject({
       scanDir: fixture.scanDir,
       targetRevision: "unversioned",
@@ -851,113 +698,13 @@ describe("malformed scan artifact recovery", () => {
     });
   });
 
-  test("normalizes finding identities and persists recovery warnings", async () => {
+  test("preserves missing-writeup warnings across prepared scan completion", async () => {
     const fixture = await startDraftScan();
     const path = join(fixture.scanDir, "findings.json");
     const document = await readJson<FindingsDocument>(path);
-    const finding = document.findings[0]!;
-    finding.ruleId = "Path Traversal: Archive Extraction";
-    finding.identity.anchor = "Archive Entry Write Without Containment";
-    finding.identity.instance = "User Input #1";
-    await writeJson(path, document);
-
-    const completed = await completeScan(fixture);
-
-    expect(completed.progress.status).toBe("complete");
-    expect(completed.findingCount).toBe(1);
-    expect(completed.warnings).toEqual([
-      "Recovered finding 1: normalized rule identifier, semantic anchor, instance.",
-    ]);
-    const recovered = (await readJson<FindingsDocument>(path)).findings[0]!;
-    expect(recovered.ruleId).toBe("path-traversal-archive-extraction");
-    expect(recovered.identity).toEqual({
-      anchor: "archive-entry-write-without-containment",
-      instance: "user-input-1",
-    });
-    const saved = await workbench(fixture, [
-      "get-scan",
-      "--scan-id",
-      fixture.scanId,
-    ]);
-    expect((saved["scan"] as unknown as ScanSummary).warnings).toEqual(
-      completed.warnings,
-    );
-  });
-
-  test.each(
-    (["rootCause", "root_cause"] as const).flatMap((section) =>
-      (["evidenceRefs", "evidence_refs"] as const).flatMap((refsKey) =>
-        [true, false].map((includeEvidence) => ({
-          section,
-          refsKey,
-          includeEvidence,
-        })),
-      ),
-    ),
-  )(
-    "recovers $section refs $refsKey with evidence catalog: $includeEvidence",
-    async ({ section, refsKey, includeEvidence }) => {
-      const fixture = await startDraftScan();
-      const path = join(fixture.scanDir, "findings.json");
-      const document = await readJson<FindingsDocument>(path);
-      const finding = document.findings[0]!;
-      if (includeEvidence) {
-        finding.codeEvidence = [
-          {
-            id: "canonical-source",
-            label: "Synthetic source",
-            path: "src/extract.py",
-            startLine: 41,
-            code: "canonical_source()",
-            explanation: "Synthetic evidence for reference recovery.",
-          },
-        ];
-        finding["code_evidence"] = [
-          { id: "legacy-source", code: "legacy_source()" },
-        ];
-      }
-      finding[section] = {
-        summary: "The destination is not constrained to the extraction root.",
-        [refsKey]: ["legacy-source", "src/extract.py:41", "canonical-source"],
-      };
-      await writeJson(path, document);
-      const original = await readFile(path, "utf8");
-
-      const strict = runNodePython(fixture.python, [
-        join(PLUGIN_ROOT, "scripts", "finalize_scan_contract.py"),
-        "--scan-dir",
-        fixture.scanDir,
-      ]);
-      expect(strict.status).not.toBe(0);
-      expect(strict.stderr).toContain("unknown code-evidence ids");
-      expect(await readFile(path, "utf8")).toBe(original);
-
-      const completed = await completeScan(fixture);
-
-      expect(completed.progress.status).toBe("complete");
-      expect(completed.findingCount).toBe(1);
-      expect(completed.warnings).toEqual([
-        "Recovered finding 1: normalized legacy finding details.",
-      ]);
-      const recovered = (await readJson<FindingsDocument>(path)).findings[0]!;
-      expect(recovered[section]).toEqual({
-        summary: "The destination is not constrained to the extraction root.",
-        [refsKey]: includeEvidence ? ["legacy-source", "canonical-source"] : [],
-      });
-      expect(recovered.codeEvidence).toEqual(finding.codeEvidence);
-      expect(recovered["code_evidence"]).toEqual(finding["code_evidence"]);
-      const coverage = await readJson<CoverageDocument>(
-        join(fixture.scanDir, "coverage.json"),
-      );
-      expect(coverage.completeness).toBe("complete");
-    },
-  );
-
-  test("preserves recovery warnings across prepared scan completion", async () => {
-    const fixture = await startDraftScan();
-    const path = join(fixture.scanDir, "findings.json");
-    const document = await readJson<FindingsDocument>(path);
-    document.findings[0]!.identity.anchor = "Archive Entry Without Containment";
+    document.findings[0]!.writeup = {
+      reportPath: "findings/missing/missing.md",
+    };
     await writeJson(path, document);
 
     const prepared = await workbench(fixture, [
@@ -965,10 +712,14 @@ describe("malformed scan artifact recovery", () => {
       "--scan-id",
       fixture.scanId,
     ]);
-    const warning = "Recovered finding 1: normalized semantic anchor.";
-
-    expect((prepared["scan"] as ScanSummary).progress.status).toBe("running");
-    expect((prepared["scan"] as ScanSummary).warnings).toEqual([warning]);
+    const preparedScan = prepared["scan"] as ScanSummary;
+    expect(preparedScan.progress.status).toBe("running");
+    expect(preparedScan.warnings).toHaveLength(1);
+    const warning = preparedScan.warnings[0]!;
+    expect(warning).toStartWith("Skipped missing writeup for finding 1:");
+    const preparedFindings = (await readJson<FindingsDocument>(path)).findings;
+    expect(preparedFindings).toHaveLength(1);
+    expect(preparedFindings[0]).not.toHaveProperty("writeup");
     const completion = await workbench(fixture, [
       "complete-scan",
       "--scan-id",
@@ -976,6 +727,7 @@ describe("malformed scan artifact recovery", () => {
     ]);
     const completed = completion["scan"] as ScanSummary;
     expect(completed.progress.status).toBe("complete");
+    expect(completed.findingCount).toBe(1);
     expect(completed.warnings).toEqual([warning]);
     expect(completion["targetWarnings"]).toEqual([]);
     const saved = await workbench(fixture, [
@@ -986,406 +738,39 @@ describe("malformed scan artifact recovery", () => {
     expect((saved["scan"] as ScanSummary).warnings).toEqual([warning]);
   });
 
-  test("normalizes severity change-condition lists without losing findings", async () => {
+  test("rejects malformed findings without changing the draft and accepts a corrected retry", async () => {
     const fixture = await startDraftScan();
     const path = join(fixture.scanDir, "findings.json");
     const document = await readJson<FindingsDocument>(path);
-    document.findings[0]!.severity.changeConditions = [
-      "Raise if the vulnerable path becomes internet-reachable.",
-      "Lower if the input is constrained before parsing.",
-    ];
-    await writeJson(path, document);
-
-    const completed = await completeScan(fixture);
-
-    expect(completed.progress.status).toBe("complete");
-    expect(completed.findingCount).toBe(1);
-    expect(completed.warnings).toEqual([
-      "Recovered finding 1: normalized severity change conditions.",
-    ]);
-    const recovered = (await readJson<FindingsDocument>(path)).findings[0]!;
-    expect(recovered.severity.changeConditions).toBe(
-      "Raise if the vulnerable path becomes internet-reachable. " +
-        "Lower if the input is constrained before parsing.",
-    );
-    const coverage = await readJson<CoverageDocument>(
-      join(fixture.scanDir, "coverage.json"),
-    );
-    expect(coverage.completeness).toBe("complete");
-  });
-
-  test("rejects severity change-condition lists with malformed entries", async () => {
-    const fixture = await startDraftScan();
-    const path = join(fixture.scanDir, "findings.json");
-    const document = await readJson<FindingsDocument>(path);
-    const valid = document.findings[0]!;
-
-    for (const [anchor, conditions] of [
-      ["empty-severity-conditions", []],
-      ["blank-severity-condition", ["  "]],
-      ["mixed-severity-conditions", ["Valid condition.", 1]],
-      ["surrogate-severity-condition", ["\uD800"]],
-    ] as const) {
-      const finding = structuredClone(valid);
-      finding.identity.anchor = anchor;
-      finding.severity.changeConditions = conditions;
-      document.findings.push(finding);
-    }
-    await writeJson(path, document);
-
-    const completed = await completeScan(fixture);
-
-    expect(completed.findingCount).toBe(1);
-    expect(completed.warnings).toHaveLength(4);
-    expect(
-      completed.warnings.every((warning) =>
-        warning.includes("severity.changeConditions"),
-      ),
-    ).toBe(true);
-  });
-
-  test("keeps valid findings and skips malformed or duplicate findings", async () => {
-    const fixture = await startDraftScan();
-    const path = join(fixture.scanDir, "findings.json");
-    const document = await readJson<FindingsDocument>(path);
-    const valid = document.findings[0]!;
-    const missingSummary = structuredClone(valid);
-    missingSummary.identity.anchor = "missing-summary";
-    missingSummary.summary = "";
-    const unsafeLocation = structuredClone(valid);
-    unsafeLocation.identity.anchor = "unsafe-location";
-    unsafeLocation.locations[0]!.path = "../outside.py";
-    const missingIdentity = structuredClone(valid);
-    delete (missingIdentity as Partial<Finding>).identity;
-    const invalidEvidenceId = structuredClone(valid);
-    invalidEvidenceId.identity.anchor = "invalid-evidence-id";
-    invalidEvidenceId.codeEvidence = [
-      {
-        id: "src/extract.py:41",
-        label: "Synthetic source",
-        path: "src/extract.py",
-        startLine: 41,
-        code: "synthetic_source()",
-        explanation: "The evidence identifier is intentionally malformed.",
-      },
-    ];
-    invalidEvidenceId["rootCause"] = {
-      summary: "Synthetic root cause.",
-      evidenceRefs: ["src/extract.py:41"],
-    };
-    document.findings.push(
-      missingSummary,
-      unsafeLocation,
-      missingIdentity,
-      invalidEvidenceId,
-      structuredClone(valid),
-      null,
-    );
-    await writeJson(path, document);
-
-    const completed = await completeScan(fixture);
-
-    expect(completed.progress.status).toBe("complete");
-    expect(completed.findingCount).toBe(1);
-    expect(completed.warnings).toHaveLength(6);
-    expect(
-      completed.warnings.every((warning) =>
-        warning.startsWith("Skipped malformed finding"),
-      ),
-    ).toBe(true);
-    for (const reason of [
-      "summary",
-      "safe repository-relative",
-      "identity",
-      "codeEvidence[0].id",
-      "duplicate logical finding",
-      "expected an object",
-    ]) {
-      expect(
-        completed.warnings.some((warning) => warning.includes(reason)),
-      ).toBe(true);
-    }
-    expect((await readJson<FindingsDocument>(path)).findings).toHaveLength(1);
-    const coverage = await readJson<CoverageDocument>(
-      join(fixture.scanDir, "coverage.json"),
-    );
-    expect(coverage.completeness).toBe("partial");
-    expect((coverage.surfaces as CoverageSurface[])[0]?.disposition).toBe(
-      "needs_follow_up",
-    );
-    expect(coverage.deferred).toHaveLength(5);
-  });
-
-  test.each([
-    {
-      name: "severity ascending",
-      candidates: [
-        ["informational", "high", 1],
-        ["critical", "high", 1],
-      ],
-      expected: ["critical", "high", 1],
-    },
-    {
-      name: "severity descending",
-      candidates: [
-        ["critical", "high", 1],
-        ["informational", "high", 1],
-      ],
-      expected: ["critical", "high", 1],
-    },
-    {
-      name: "confidence ascending",
-      candidates: [
-        ["critical", "low", 1],
-        ["critical", "high", 1],
-      ],
-      expected: ["critical", "high", 1],
-    },
-    {
-      name: "confidence descending",
-      candidates: [
-        ["critical", "high", 1],
-        ["critical", "low", 1],
-      ],
-      expected: ["critical", "high", 1],
-    },
-    {
-      name: "evidence ascending",
-      candidates: [
-        ["critical", "high", 1],
-        ["critical", "high", 2],
-      ],
-      expected: ["critical", "high", 2],
-    },
-    {
-      name: "evidence descending",
-      candidates: [
-        ["critical", "high", 2],
-        ["critical", "high", 1],
-      ],
-      expected: ["critical", "high", 2],
-    },
-  ] as const)(
-    "retains the strongest duplicate finding with $name input order",
-    async ({ name, candidates, expected }) => {
-      const fixture = await startDraftScan();
-      const path = join(fixture.scanDir, "findings.json");
-      const document = await readJson<FindingsDocument>(path);
-      const baseline = document.findings[0]!;
-      document.findings = candidates.map(([severity, confidence, count]) => {
-        const finding = structuredClone(baseline);
-        finding.severity.level = severity;
-        finding.confidence.level = confidence;
-        finding.codeEvidence = Array.from({ length: count }, (_, index) => ({
-          id: `evidence-${index + 1}`,
-          label: "Archive extraction",
-          path: "src/extract.py",
-          startLine: 1,
-          code: "# fixture",
-          explanation: "The archive entry reaches a filesystem write.",
-        }));
-        return finding;
-      });
-      await writeJson(path, document);
-
-      const completed = await completeScan(fixture);
-
-      expect(completed.progress.status, name).toBe("complete");
-      expect(completed.findingCount, name).toBe(1);
-      expect(completed.warnings, name).toHaveLength(1);
-      expect(completed.warnings[0], name).toContain(
-        "duplicate logical finding",
-      );
-      const recovered = (await readJson<FindingsDocument>(path)).findings[0]!;
-      expect(
-        [
-          recovered.severity.level,
-          recovered.confidence.level,
-          recovered.codeEvidence?.length,
-        ],
-        name,
-      ).toEqual([...expected]);
-      const coverage = await readJson<CoverageDocument>(
-        join(fixture.scanDir, "coverage.json"),
-      );
-      expect(coverage.completeness, name).toBe("complete");
-      expect(
-        await readFile(join(fixture.scanDir, "report.md"), "utf8"),
-        name,
-      ).not.toContain("### No findings");
-      const sarif = await readJson<SarifDocument>(
-        join(fixture.scanDir, "exports", "results.sarif"),
-      );
-      expect(sarif.runs[0]?.results[0]?.properties.severity, name).toBe(
-        "critical",
-      );
-    },
-  );
-
-  test("completes scans when every draft finding is malformed", async () => {
-    const fixture = await startDraftScan();
-    const path = join(fixture.scanDir, "findings.json");
-    const document = await readJson<FindingsDocument>(path);
+    const valid = structuredClone(document);
     document.findings[0]!.summary = "";
     await writeJson(path, document);
-
-    const completed = await completeScan(fixture);
-
-    expect(completed.progress.status).toBe("complete");
-    expect(completed.findingCount).toBe(0);
-    expect(completed.warnings).toHaveLength(1);
-    expect(completed.warnings[0]).toContain("summary");
-    expect((await readJson<FindingsDocument>(path)).findings).toEqual([]);
-    const coverage = await readJson<CoverageDocument>(
-      join(fixture.scanDir, "coverage.json"),
+    const artifactPaths = [
+      "scan-manifest.json",
+      "findings.json",
+      "coverage.json",
+      "report.md",
+    ].map((name) => join(fixture.scanDir, name));
+    const original = await Promise.all(
+      artifactPaths.map((name) => readFile(name)),
     );
-    expect(coverage.completeness).toBe("partial");
-    expect((coverage.surfaces as CoverageSurface[])[0]?.disposition).toBe(
-      "needs_follow_up",
-    );
-    expect(coverage.deferred).toEqual([
-      { id: "discarded-finding-1", reason: completed.warnings[0] },
+
+    await expect(completeScan(fixture)).rejects.toThrow("invalid findings");
+
+    expect(
+      await Promise.all(artifactPaths.map((name) => readFile(name))),
+    ).toEqual(original);
+    const pending = await workbench(fixture, [
+      "get-scan",
+      "--scan-id",
+      fixture.scanId,
     ]);
-    const report = await readFile(join(fixture.scanDir, "report.md"), "utf8");
-    expect(report).toContain("Skipped malformed finding 1");
-    const sarif = await readJson<SarifDocument>(
-      join(fixture.scanDir, "exports", "results.sarif"),
-    );
-    expect(sarif.runs[0]?.properties.codexSecurityCoverageCompleteness).toBe(
-      "partial",
-    );
-    expect(sarif.runs[0]?.invocations).toEqual([
-      {
-        executionSuccessful: false,
-        toolExecutionNotifications: expect.arrayContaining([
-          { level: "warning", message: { text: completed.warnings[0]! } },
-        ]),
-      },
-    ]);
+    expect((pending["scan"] as ScanSummary).progress.status).toBe("running");
+    await writeJson(path, valid);
+    expect((await completeScan(fixture)).findingCount).toBe(1);
   });
 
-  test("keeps findings while removing invalid or duplicate writeups", async () => {
-    const fixture = await startDraftScan();
-    const path = join(fixture.scanDir, "findings.json");
-    const document = await readJson<FindingsDocument>(path);
-    const valid = document.findings[0]!;
-    const reportPath = "findings/linked-writeup/linked-writeup.md";
-    await mkdir(join(fixture.scanDir, "findings", "linked-writeup"), {
-      recursive: true,
-    });
-    await writeFile(join(fixture.scanDir, reportPath), "# Verified finding\n");
-
-    for (const [anchor, writeup] of [
-      ["linked-writeup", { reportPath }],
-      ["duplicate-writeup", { reportPath }],
-      ["missing-writeup", { reportPath: "findings/missing/missing.md" }],
-      ["unsafe-writeup", { reportPath: "../outside.md" }],
-      ["invalid-writeup", "not an object"],
-    ] as const) {
-      const finding = structuredClone(valid);
-      finding.identity.anchor = anchor;
-      finding.writeup = writeup;
-      document.findings.push(finding);
-    }
-    await writeJson(path, document);
-
-    const completed = await completeScan(fixture);
-
-    expect(completed.progress.status).toBe("complete");
-    expect(completed.findingCount).toBe(6);
-    expect(completed.warnings).toHaveLength(4);
-    expect(
-      completed.warnings.every((warning) =>
-        warning.startsWith("Skipped malformed writeup for finding"),
-      ),
-    ).toBe(true);
-    expect(completed.warnings.join("\n")).not.toContain("../outside.md");
-    const recovered = (await readJson<FindingsDocument>(path)).findings;
-    expect(
-      recovered.find((finding) => finding?.identity.anchor === "linked-writeup")
-        ?.writeup,
-    ).toEqual({ reportPath });
-    for (const anchor of [
-      "duplicate-writeup",
-      "missing-writeup",
-      "unsafe-writeup",
-      "invalid-writeup",
-    ]) {
-      expect(
-        recovered.find((finding) => finding?.identity.anchor === anchor),
-      ).not.toHaveProperty("writeup");
-    }
-  });
-
-  test("keeps findings while removing malformed remediation guidance", async () => {
-    const fixture = await startDraftScan();
-    const path = join(fixture.scanDir, "findings.json");
-    const document = await readJson<FindingsDocument>(path);
-    const valid = document.findings[0]!;
-
-    const cases: Array<
-      [string, "remediationTests" | "preventiveControls", unknown]
-    > = [
-      [
-        "valid-remediation-tests",
-        "remediationTests",
-        ["Add a regression test."],
-      ],
-      ["prose-remediation-tests", "remediationTests", "Add a regression test."],
-      [
-        "object-remediation-tests",
-        "remediationTests",
-        [{ description: "Add a regression test." }],
-      ],
-      [
-        "prose-preventive-controls",
-        "preventiveControls",
-        "Centralize validation.",
-      ],
-    ];
-    for (const [anchor, field, value] of cases) {
-      const finding = structuredClone(valid);
-      finding.identity.anchor = anchor;
-      finding[field] = value;
-      document.findings.push(finding);
-    }
-    await writeJson(path, document);
-
-    const completed = await completeScan(fixture);
-
-    expect(completed.progress.status).toBe("complete");
-    expect(completed.findingCount).toBe(5);
-    expect(completed.warnings).toHaveLength(3);
-    expect(
-      completed.warnings.filter((warning) =>
-        warning.startsWith("Skipped malformed remediationTests for finding"),
-      ),
-    ).toHaveLength(2);
-    expect(
-      completed.warnings.filter((warning) =>
-        warning.startsWith("Skipped malformed preventiveControls for finding"),
-      ),
-    ).toHaveLength(1);
-    const recovered = (await readJson<FindingsDocument>(path)).findings;
-    expect(
-      recovered.find(
-        (finding) => finding?.identity.anchor === "valid-remediation-tests",
-      )?.remediationTests,
-    ).toEqual(["Add a regression test."]);
-    for (const [anchor, field] of [
-      ["prose-remediation-tests", "remediationTests"],
-      ["object-remediation-tests", "remediationTests"],
-      ["prose-preventive-controls", "preventiveControls"],
-    ] as const) {
-      const finding = recovered.find(
-        (candidate) => candidate?.identity.anchor === anchor,
-      );
-      expect(finding).toBeDefined();
-      expect(finding).not.toHaveProperty(field);
-    }
-  });
-
-  test("keeps verified coverage receipts and downgrades invalid coverage", async () => {
+  test("keeps verified coverage receipts and records invalid references", async () => {
     const fixture = await startDraftScan();
     const path = join(fixture.scanDir, "coverage.json");
     const document = await readJson<CoverageDocument>(path);
@@ -1415,7 +800,6 @@ describe("malformed scan artifact recovery", () => {
     ).toBe(true);
     expect(completed.warnings.join("\n")).not.toContain("../outside.json");
     const recovered = await readJson<CoverageDocument>(path);
-    expect(recovered.completeness).toBe("partial");
     expect((recovered.surfaces as CoverageSurface[])[0]).toMatchObject({
       disposition: "needs_follow_up",
       receiptRefs: [receipt],
@@ -1428,11 +812,10 @@ describe("malformed scan artifact recovery", () => {
     );
   });
 
-  test("downgrades malformed coverage collections without claiming completeness", async () => {
+  test("recovers malformed coverage collections", async () => {
     const fixture = await startDraftScan();
     const path = join(fixture.scanDir, "coverage.json");
     const document = await readJson<CoverageDocument>(path);
-    document.completeness = "finished";
     document.surfaces = { id: "not-an-array" };
     document.explicitExclusions = null;
     document.deferred = "later";
@@ -1441,10 +824,9 @@ describe("malformed scan artifact recovery", () => {
     const completed = await completeScan(fixture);
 
     expect(completed.progress.status).toBe("complete");
-    expect(completed.warnings).toHaveLength(4);
+    expect(completed.warnings).toHaveLength(3);
     const recovered = await readJson<CoverageDocument>(path);
     expect(recovered).toMatchObject({
-      completeness: "partial",
       surfaces: [],
       explicitExclusions: [],
       deferred: [],
@@ -1478,24 +860,6 @@ describe("malformed scan artifact recovery", () => {
         (await readJson<{ scan: { hardening?: unknown } }>(path)).scan,
       ).not.toHaveProperty("hardening");
     }
-  });
-
-  test("keeps direct finalization strict unless recovery is explicitly enabled", async () => {
-    const fixture = await startDraftScan();
-    const path = join(fixture.scanDir, "findings.json");
-    const document = await readJson<FindingsDocument>(path);
-    document.findings[0]!.identity.anchor = "Invalid Anchor";
-    await writeJson(path, document);
-
-    const strict = runNodePython(fixture.python, [
-      join(PLUGIN_ROOT, "scripts", "finalize_scan_contract.py"),
-      "--scan-dir",
-      fixture.scanDir,
-    ]);
-
-    expect(strict.status).not.toBe(0);
-    expect(strict.stderr).toContain("stable lowercase semantic slug");
-    expect((await completeScan(fixture)).findingCount).toBe(1);
   });
 
   test("refuses to repair scan-wide coverage contract violations", async () => {

@@ -116,7 +116,7 @@ connection.execute('INSERT INTO scan_comparison_matches VALUES (?, ?, ?, ?)',
 comparison = history.compare_scans(
     connection, argparse.Namespace(before_scan_id='before', after_scan_id='after'),
     require_scan=lambda db, scan: db.execute('SELECT * FROM scans WHERE id = ?', (scan,)).fetchone(),
-    read_coverage=lambda _: {'completeness': 'complete'}, include_matching_inputs=True)
+    read_coverage=lambda _: {}, include_matching_inputs=True)
 print(json.dumps(comparison['matchingInputs']))
 `,
     join(tmpdir(), "codex-security-legacy-repositories"),
@@ -170,7 +170,7 @@ def save(value):
         connection, argparse.Namespace(before_scan_id='before', after_scan_id='after', matches_json=json.dumps(value)),
         now=lambda: '2026-01-01T00:00:00Z',
         require_scan=lambda db, scan: db.execute('SELECT * FROM scans WHERE id = ?', (scan,)).fetchone(),
-        read_coverage=lambda _: {'completeness': 'complete', 'includePaths': ['src'],
+        read_coverage=lambda _: {'includePaths': ['src'],
                                  'excludePaths': [], 'explicitExclusions': []})
 def snapshot():
     return (connection.execute('SELECT result_json FROM scan_comparisons').fetchone()[0],
@@ -205,7 +205,14 @@ print(json.dumps({'summary': accepted['summary'],
       join(tmpdir(), "codex-security-validation-fixture"),
     ),
   ).toEqual({
-    summary: { new: 1, persisting: 2, reopened: 0, resolved: 1, unknown: 0 },
+    summary: {
+      new: 1,
+      persisting: 2,
+      reopened: 0,
+      resolved: 0,
+      not_observed: 1,
+      unknown: 0,
+    },
     related: [
       ["a2", "y"],
       ["c", "z"],
@@ -465,7 +472,7 @@ payload = {
 }
 def cache():
     connection.execute('INSERT OR REPLACE INTO scan_comparisons VALUES (?, ?, ?)', ('before', 'after', json.dumps(payload)))
-coverage = {'completeness': 'complete', 'includePaths': ['src'],
+coverage = {'includePaths': ['src'],
             'excludePaths': ['src/excluded.py'], 'explicitExclusions': []}
 def compare():
     return history.compare_scans(
@@ -513,7 +520,7 @@ print(json.dumps({'uncertain': uncertain, 'excluded': excluded, 'resolved': reso
       ],
     },
     excluded: { summary: { new: 1, resolved: 0, unknown: 1 } },
-    resolved: { summary: { new: 1, resolved: 1, unknown: 0 } },
+    resolved: { summary: { new: 1, resolved: 0, not_observed: 1, unknown: 0 } },
     linked: {
       summary: { new: 0, persisting: 0, reopened: 1, resolved: 0, unknown: 0 },
       findings: [
@@ -713,60 +720,6 @@ print(json.dumps({'withLinks': with_links, 'withoutLinks': collect_history()}))
       unlinked: { linked: [], first: "5", bounds: ["unlinked"] },
     },
   });
-});
-
-test("resolves missing findings only inside a complete later scope", async () => {
-  const python = await resolvePluginPython();
-  const probe = [
-    "import argparse, json, sqlite3, sys",
-    "sys.path.insert(0, sys.argv[1])",
-    "import workbench_scan_history as history",
-    "db = sqlite3.connect(':memory:')",
-    "db.row_factory = sqlite3.Row",
-    "db.executescript('''",
-    "CREATE TABLE scan_comparisons (before_scan_id TEXT, after_scan_id TEXT, result_json TEXT);",
-    "CREATE TABLE scan_comparison_matches (before_occurrence_id TEXT, after_occurrence_id TEXT, before_scan_id TEXT, after_scan_id TEXT);",
-    "CREATE TABLE finding_occurrences (id TEXT, finding_id TEXT, scan_id TEXT, severity TEXT, title TEXT);",
-    "CREATE TABLE finding_triage (occurrence_id TEXT, status TEXT, close_reason TEXT);",
-    "CREATE TABLE finding_locations (occurrence_id TEXT, relative_path TEXT, role TEXT, sort_order INTEGER);",
-    "''')",
-    "scans = {name: {'id': name, 'status': 'complete', 'target_id': 'target', 'target_path': '/synthetic/repository'} for name in ('before', 'after')}",
-    "paths = ['src/parser/input.ts', 'src/parser-other/input.ts', 'src/parser/generated/code.ts', 'src/parser/test_fixture.ts']",
-    "for index, path in enumerate(paths):",
-    "    key = str(index)",
-    "    db.execute('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?, ?)', (key, key, 'before', 'high', 'Synthetic finding'))",
-    "    db.execute('INSERT INTO finding_locations VALUES (?, ?, ?, ?)', (key, path, 'root_control', 0))",
-    "coverage = {'mode': 'scoped_path', 'completeness': 'complete', 'includePaths': ['src/parser'], 'excludePaths': ['src/parser/generated'], 'explicitExclusions': [{'pattern': 'src/parser/test_*', 'reason': 'Excluded test fixtures'}]}",
-    "args = argparse.Namespace(before_scan_id='before', after_scan_id='after')",
-    "def compare():",
-    "    result = history.compare_scans(db, args, require_scan=lambda _, key: scans[key], read_coverage=lambda _: coverage)",
-    "    return {item['path']: item['status'] for item in result['findings']}",
-    "complete = compare()",
-    "coverage['completeness'] = 'partial'",
-    "print(json.dumps({'complete': complete, 'partial': compare()}))",
-  ].join("\n");
-  const result = await runCodexCommand(
-    { command: python },
-    ["-I", "-B", "-", join(PLUGIN_ROOT, "scripts")],
-    process.env,
-    probe,
-    AbortSignal.timeout(10_000),
-  );
-  expect(result.exitCode, result.stderr).toBe(0);
-  expect(result.stderr).toBe("");
-  const output = JSON.parse(result.stdout);
-  expect(output.complete).toEqual({
-    "src/parser/input.ts": "resolved",
-    "src/parser-other/input.ts": "unknown",
-    "src/parser/generated/code.ts": "unknown",
-    "src/parser/test_fixture.ts": "unknown",
-  });
-  expect(Object.values(output.partial)).toEqual([
-    "unknown",
-    "unknown",
-    "unknown",
-    "unknown",
-  ]);
 });
 
 test("loads oversized comparison matches from stdin", async () => {
