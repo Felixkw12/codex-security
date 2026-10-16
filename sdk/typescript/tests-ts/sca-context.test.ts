@@ -4,6 +4,7 @@ import {
   chmod,
   mkdir,
   realpath,
+  rename,
   rm,
   symlink,
   writeFile,
@@ -133,6 +134,27 @@ test("does not attribute a different installed version to a scanner match", asyn
     (await dependencyPackageContexts(result))[0]!.installedPath,
   ).toBeNull();
 });
+
+test.each(["project", "parent", "leaf"] as const)(
+  "a linked %s manifest preserves installed source and transitive resolution",
+  async (kind) => {
+    const { repository, result, parent, leaf } = await fixture();
+    const path = { project: repository, parent, leaf }[kind];
+    const metadata = join(repository, "metadata");
+    await mkdir(metadata);
+    const manifest = join(path, "package.json");
+    const target = join(metadata, `${kind}.json`);
+    await rename(manifest, target);
+    await symlink(target, manifest, "file");
+
+    const [context] = await dependencyPackageContexts(result);
+    expect(join(repository, context!.installedPath!)).toBe(leaf);
+    expect(context!.manifestPath).toBe("package.json");
+    expect(
+      context!.dependencyChain.map((item) => join(repository, item.path)),
+    ).toEqual([repository, parent, leaf]);
+  },
+);
 
 test("repository package links do not authorize reading a dependency outside the target", async () => {
   const { root, repository, result } = await fixture();

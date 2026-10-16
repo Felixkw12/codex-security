@@ -2762,11 +2762,65 @@ test("continues saved matching after authentication becomes available", async ()
   expect(initial.assessmentContext?.sourceDigest).toBeString();
   expect(initial.assessmentContext?.configurationDigest).toBeNull();
   expect(f.turns).toHaveLength(0);
+  const savedPath = join(f.outputDir, "sca-result.json");
+  const checkpoint = await readFile(savedPath, "utf8");
+  const blocked = await security.scanDependencies(options);
+  expect(blocked.status).toBe("partial");
+  expect(blocked.matches).toEqual(initial.matches);
+  expect(blocked.assessments).toEqual(initial.assessments);
+  expect(blocked.diagnostics.at(-1)).toContain(
+    "synthetic authentication unavailable",
+  );
+  expect(await readFile(savedPath, "utf8")).toBe(checkpoint);
   fixtureOptions.runtimeError = false;
   const result = await security.scanDependencies(options);
   expect(result.status).toBe("completed");
   expect(f.calls.scanner).toBe(1);
   expect(f.turns).toHaveLength(1);
+});
+
+test("continuation setup failure returns completed assessments without changing the checkpoint", async () => {
+  const f = await fixture({ turns: ["completed", "malformed"] });
+  await using security = f.client;
+  const options = { repositoryPath: f.repository, outputDir: f.outputDir };
+  const initial = await security.scanDependencies(options);
+  expect(initial.status).toBe("partial");
+  expect(initial.assessments[0]!.status).toBe("completed");
+  const savedPath = join(f.outputDir, "sca-result.json");
+  const checkpoint = await readFile(savedPath, "utf8");
+  await using blockedClient = new TestClient(security.config, {
+    environment: f.environment,
+    sourceSnapshot: async () => ({
+      repository: f.repository,
+      revision: initial.repository.revision,
+      content: await readFile(join(f.repository, "usage.txt"), "utf8"),
+    }),
+    prepareRuntime: async () => {
+      throw new Error("synthetic authentication unavailable");
+    },
+    runOsvScan: async () => {
+      throw new Error("Matching must not repeat during continuation");
+    },
+  });
+
+  const blocked = await blockedClient.scanDependencies(options);
+  expect(blocked.status).toBe("partial");
+  expect(blocked.assessments).toEqual(initial.assessments);
+  expect(blocked.matches).toEqual(initial.matches);
+  expect(blocked.scanner).toEqual(initial.scanner);
+  expect(blocked.model).toEqual(initial.model);
+  expect(blocked.diagnostics.at(-1)).toContain(
+    "synthetic authentication unavailable",
+  );
+  expect(await readFile(savedPath, "utf8")).toBe(checkpoint);
+  expect(f.calls.scanner).toBe(1);
+  expect(f.turns).toHaveLength(2);
+
+  const completed = await security.scanDependencies(options);
+  expect(completed.status).toBe("completed");
+  expect(completed.assessments[0]).toEqual(initial.assessments[0]);
+  expect(f.calls.scanner).toBe(1);
+  expect(f.turns).toHaveLength(3);
 });
 
 test("continuation rejects linked lock directories before recovery writes", async () => {

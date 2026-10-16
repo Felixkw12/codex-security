@@ -1093,12 +1093,27 @@ export class CodexSecurity {
           };
           await saveDependencyScan(result);
         }
-        const session = await this.#prepareSession(
-          inputs,
-          options,
-          signal,
-          temporaryRoot,
-        );
+        let session: PreparedSession;
+        try {
+          session = await this.#prepareSession(
+            inputs,
+            options,
+            signal,
+            temporaryRoot,
+          );
+        } catch (error) {
+          if (!continuing) throw error;
+          throwIfAborted(signal, outputDir);
+          // Setup failed before configuration validation; retain the checkpoint.
+          return {
+            ...result,
+            status: "partial",
+            diagnostics: [
+              ...result.diagnostics,
+              `Static assessment: ${errorMessage(error)}`,
+            ],
+          };
+        }
         const { runtime } = session;
         const { model, reasoningEffort } = scanModelConfiguration(
           session.effectiveConfig,

@@ -17,7 +17,9 @@ async function readPackage(
   project = false,
 ): Promise<Package | null> {
   try {
-    const canonical = await realpath(join(path, "package.json"));
+    const directory = await realpath(path);
+    if (relativePathIsOutside(relative(repository, directory))) return null;
+    const canonical = await realpath(join(directory, "package.json"));
     if (relativePathIsOutside(relative(repository, canonical))) return null;
     if (!(await stat(canonical)).isFile()) return null;
     const manifest: unknown = JSON.parse(await readFile(canonical, "utf8"));
@@ -27,7 +29,7 @@ async function readPackage(
     )
       return null;
     return {
-      path: dirname(canonical),
+      path: directory,
       name:
         typeof manifest["name"] === "string"
           ? manifest["name"]
