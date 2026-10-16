@@ -12,6 +12,7 @@ import re
 import sqlite3
 import stat
 import sys
+import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -895,6 +896,42 @@ def preserve_parent_head_on_error(scan_dir: Path) -> Iterator[None]:
         raise
 
 
+def _validate_reviewed_files(
+    paths: list[str], binding: dict[str, Any], source_root: Path | None, source_scope: str
+) -> None:
+    scope = binding["scope"]
+    for path in paths:
+        if not any(path_within_scope(path, include) for include in scope["includePaths"]) or any(
+            path_within_scope(path, exclude) for exclude in scope["excludePaths"]
+        ):
+            raise ContractError(f"reviewedFiles path {path!r} is outside the requested scope")
+    if not paths or source_root is None:
+        return
+
+    from generate_in_scope_files import generate_diff_in_scope_files, generate_in_scope_files
+
+    with tempfile.TemporaryDirectory() as directory:
+        output = Path(directory) / "inventory.txt"
+        mode = binding["coverageMode"]
+        if mode in {"working_tree", "commit", "branch_diff"}:
+            target = binding["target"]
+            generate_diff_in_scope_files(
+                source_root,
+                target["baseRevision"],
+                target["headRevision"],
+                "local-patch" if mode == "working_tree" else "revisions",
+                output,
+            )
+        else:
+            generate_in_scope_files(source_root, source_scope, output)
+        inventory = {
+            os.fsdecode(path).removeprefix("./") for path in output.read_bytes().splitlines()
+        }
+    for path in paths:
+        if path not in inventory:
+            raise ContractError(f"reviewedFiles path {path!r} is not in the source inventory")
+
+
 def merge_saved_results(
     scan_dir: Path,
     scan_id: str,
@@ -904,6 +941,8 @@ def merge_saved_results(
     *,
     stopped: bool,
     reason: str,
+    source_root: Path | None = None,
+    source_scope: str = ".",
     frozen_source_digests: dict[str, str] | None = None,
     allow_frozen_legacy_parent: bool = False,
     frozen_model_source: str | None = None,
@@ -1382,9 +1421,12 @@ def merge_saved_results(
             for relative, draft, owner in all_sources
             if relative not in reducer_paths and draft["coverage"]
         ]
-        if deep_review and any(owner is not None for owner, _ in file_sources):
+        discovery_workers = [worker for worker in workers if worker["kind"] == "discovery"]
+        if discovery_workers:
             file_sources = [(owner, source) for owner, source in file_sources if owner is not None]
-        reviewed_by_owner: dict[str | None, set[str] | None] = {}
+        reviewed_by_owner: dict[str | None, set[str] | None] = {
+            worker["id"]: None for worker in discovery_workers
+        }
         for owner, source in file_sources:
             reviewed_by_owner.setdefault(owner, None)
             if "reviewedFiles" not in source:
@@ -1405,9 +1447,15 @@ def merge_saved_results(
             )
         coverage.pop("reviewedFiles", None)
         if reviewed_by_owner and all(paths is not None for paths in reviewed_by_owner.values()):
-            coverage["reviewedFiles"] = sorted(
+            reviewed_files = sorted(
                 {path for paths in reviewed_by_owner.values() for path in paths}
             )
+            try:
+                _validate_reviewed_files(reviewed_files, binding, source_root, source_scope)
+            except (OSError, ValueError) as exc:
+                warnings.append(f"Could not retain reviewed file accounting: {exc}")
+            else:
+                coverage["reviewedFiles"] = reviewed_files
     for relative, draft, owner in all_sources:
         order = source_order[relative]
         for item in deferred_rows[relative]:
@@ -2117,6 +2165,8 @@ def preserve_deep_deadline_draft(db: Any, connection: Any, scan: Any) -> Iterato
                 ).fetchall(),
                 warnings,
                 stopped=True,
+                source_root=Path(scan["target_path"]),
+                source_scope=scan["scope"],
                 reason=(
                     "The configured discovery time limit elapsed before any source review completed. "
                     "Saved findings and pending review were preserved without a completed reduction."
@@ -2300,6 +2350,8 @@ def preserve_scan_results_locked(
         ).fetchall(),
         warnings,
         stopped=True,
+        source_root=Path(scan["target_path"]),
+        source_scope=scan["scope"],
         reason=(
             f"Scan {outcome}; saved findings and pending review were preserved. "
             f"{scan['failure_message'] or ''}"
