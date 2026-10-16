@@ -1,8 +1,4 @@
-import {
-  spawn,
-  type ChildProcessWithoutNullStreams,
-  type SpawnOptionsWithoutStdio,
-} from "node:child_process";
+import { spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -19,6 +15,7 @@ import {
   executablePathForSpawn,
   expandHome,
   resolveCodexCommand,
+  type StartCodex,
 } from "../runtime.js";
 import { CODEX_SECURITY_THREAD_SOURCES } from "../thread-source.js";
 import { VERSION } from "../version.js";
@@ -77,12 +74,6 @@ class ReviewAttemptError extends Error {
     super(message);
   }
 }
-
-type StartCodex = (
-  command: string,
-  args: readonly string[],
-  options: SpawnOptionsWithoutStdio & { stdio: ["pipe", "pipe", "pipe"] },
-) => ChildProcessWithoutNullStreams;
 
 interface Message {
   id?: string | number;
