@@ -2671,7 +2671,7 @@ test.each([
     await expect(security.scanDependencies(options)).rejects.toThrow(
       change === "source"
         ? "source changed"
-        : "model, effort, provider, or skill changed",
+        : "model, effort, provider, instructions, or skill changed",
     );
     expect(await readFile(join(f.outputDir, "sca-result.json"), "utf8")).toBe(
       checkpoint,
@@ -3122,3 +3122,46 @@ test("malformed optional package metadata preserves inventory and assessment", a
   );
   expect(result.assessmentContext?.sourceDigest).toBeString();
 });
+
+test.each([false, true])(
+  "changed developer instructions reject continuation (profile: %s)",
+  async (profile) => {
+    const overrides = (instructions: string): JsonObject =>
+      profile
+        ? {
+            profile: "synthetic-assessment",
+            profiles: {
+              "synthetic-assessment": { developer_instructions: instructions },
+            },
+          }
+        : { developer_instructions: instructions };
+    const f = await fixture({
+      turns: ["completed", "malformed"],
+      codexOverrides: overrides("Synthetic original assessment instructions."),
+    });
+    await using security = f.client;
+    const options = { repositoryPath: f.repository, outputDir: f.outputDir };
+    const initial = await security.scanDependencies(options);
+    expect(initial.assessments[0]!.status).toBe("completed");
+    expect(f.captured.codex?.config?.["developer_instructions"]).toBe(
+      "Synthetic original assessment instructions.",
+    );
+    const checkpoint = await readFile(
+      join(f.outputDir, "sca-result.json"),
+      "utf8",
+    );
+    Object.assign(
+      security.config.codexOverrides!,
+      overrides("Synthetic changed assessment instructions."),
+    );
+    await expect(security.scanDependencies(options)).rejects.toThrow(
+      "instructions, or skill changed",
+    );
+    expect(await readFile(join(f.outputDir, "sca-result.json"), "utf8")).toBe(
+      checkpoint,
+    );
+    expect(f.turns).toHaveLength(2);
+    expect(f.calls.model).toBe(1);
+    expect(f.calls.scanner).toBe(1);
+  },
+);

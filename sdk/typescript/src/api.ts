@@ -1096,6 +1096,8 @@ export class CodexSecurity {
         const configurationDigest = workflowDigest({
           model,
           reasoningEffort,
+          developerInstructions:
+            resolvedConfig["developer_instructions"] ?? null,
           provider,
           providerConfiguration,
           endpoint:
@@ -1126,7 +1128,7 @@ export class CodexSecurity {
               configurationDigest
           )
             throw new CodexSecurityError(
-              "Dependency assessment model, effort, provider, or skill changed. Use the original settings or start a new run.",
+              "Dependency assessment model, effort, provider, instructions, or skill changed. Use the original settings or start a new run.",
             );
           if (options.maxCostUsd !== undefined && previousUsageUnknown)
             throw new CodexSecurityError(
