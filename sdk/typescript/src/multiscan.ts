@@ -678,6 +678,8 @@ export async function acquireScanOutputLock(
     await mkdir(path, { mode: 0o700 });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    if (!(await lstat(path)).isDirectory())
+      throw new Error("Scan output lock must be a real directory.");
     const existing = await inspectLock(path);
     if (!existing.stale) {
       throw new Error(`A ${ownerDescription} is already running.`);

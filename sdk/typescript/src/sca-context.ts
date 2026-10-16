@@ -41,6 +41,8 @@ async function readPackage(
     if (
       (error as NodeJS.ErrnoException).code === "ENOENT" ||
       (error as NodeJS.ErrnoException).code === "ENOTDIR" ||
+      (error as NodeJS.ErrnoException).code === "EISDIR" ||
+      (error as NodeJS.ErrnoException).code === "ELOOP" ||
       error instanceof SyntaxError
     )
       return null;

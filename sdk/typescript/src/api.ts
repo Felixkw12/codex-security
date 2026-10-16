@@ -945,7 +945,7 @@ export class CodexSecurity {
           throw new CodexSecurityError(
             "This dependency run has no source checkpoint for continuation. Start a new run in a new output directory.",
           );
-        if (result.assessments.every((item) => item.status === "completed"))
+        if (result.status === "completed")
           throw new CodexSecurityError(
             "All advisory assessments are already complete. Start a new run in a new output directory to refresh matching.",
           );
@@ -1036,11 +1036,6 @@ export class CodexSecurity {
           }
           throw error;
         }
-        if (!("error" in source))
-          result.assessmentContext = {
-            sourceDigest: source.digest,
-            configurationDigest: null,
-          };
         result.packageContexts = await dependencyPackageContexts(
           result,
           signal,
@@ -1070,10 +1065,17 @@ export class CodexSecurity {
         const contract = await dependencyTriageContract(
           runtime.plugin.pluginRoot,
         );
+        const providers = resolveCodexProfile(session.effectiveConfig)[
+          "model_providers"
+        ];
         const configurationDigest = workflowDigest({
           model,
           reasoningEffort,
           provider: session.modelProvider,
+          providerConfiguration:
+            isRecord(providers) && typeof session.modelProvider === "string"
+              ? providers[session.modelProvider]
+              : null,
           skill: contract.skillDigest,
           workflow: "focused-dependency-assessment-v1",
         });
@@ -1131,7 +1133,6 @@ export class CodexSecurity {
         }
         result.model.model = model;
         result.model.skillDigest = contract.skillDigest;
-        result.assessmentContext!.configurationDigest = configurationDigest;
         await saveDependencyScan(result);
         const command = this.#codexCommand();
         const mcpServers = await disabledMcpServers(
@@ -1205,9 +1206,11 @@ export class CodexSecurity {
             result!.diagnostics.push(`Cost tracking: ${errorMessage(error)}`);
         };
         let attemptedTurn = false;
+        let interruptedTurn = false;
         const verifyCost = (cost: Readonly<ScanCost> | null): void => {
           if (!attemptedTurn) return;
-          result!.model.costPending = cost === null || previousUsageUnknown;
+          result!.model.costPending =
+            cost === null || previousUsageUnknown || interruptedTurn;
           if (cost !== null) reportCost(cost);
           else {
             result!.model.costUsd = null;
@@ -1266,11 +1269,15 @@ export class CodexSecurity {
             throw new CodexSecurityError(
               `Source changed before dependency assessment (original revision ${String(source.revision)}, current revision ${String(initialCheck.revision)}). Rerun the dependency scan.`,
             );
+          result.assessmentContext = {
+            sourceDigest: source.digest,
+            configurationDigest,
+          };
+          await saveDependencyScan(result);
           const threads = new Map<
             string,
             ReturnType<typeof codex.startThread>
           >();
-          const threadUsage = new Map<string, ScanTokenUsage>();
           for (const match of prioritizedDependencyMatches(result)) {
             const index = result.assessments.findIndex(
               (item) => item.matchId === match.id,
@@ -1284,7 +1291,7 @@ export class CodexSecurity {
               threads.set(match.componentId, thread);
             }
             let assessment: ScaAssessment;
-            let usageObserved = false;
+            let turnCompleted = false;
             await writeDependencyArtifact(
               outputDir,
               "sca-assessment-input.json",
@@ -1322,25 +1329,9 @@ export class CodexSecurity {
                   throwIfAborted(signal, outputDir);
                 },
               });
+              turnCompleted = turn.status === "completed";
               const usage = tokenUsage(turn.usage);
-              if (turn.threadId !== null && usage !== null) {
-                usageObserved = true;
-                const previous = threadUsage.get(turn.threadId);
-                if (previous) {
-                  for (const key of [
-                    "input_tokens",
-                    "cached_input_tokens",
-                    "cache_write_input_tokens",
-                    "output_tokens",
-                    "reasoning_output_tokens",
-                    "total_tokens",
-                  ] as const)
-                    usage[key] += previous[key];
-                  if (previous.cache_write_input_tokens_reported === false)
-                    usage.cache_write_input_tokens_reported = false;
-                }
-                threadUsage.set(turn.threadId, usage);
-              }
+              // Native receipts already contain the cumulative thread usage.
               tracker.recordUsage(usage, turn.threadId);
               result.model.threadId = turn.threadId;
               if (turn.threadId !== null)
@@ -1356,7 +1347,10 @@ export class CodexSecurity {
               })[0]!;
             } catch (error) {
               // A later turn cannot supply the missing usage of an interrupted turn.
-              if (!usageObserved) threads.delete(match.componentId);
+              if (!turnCompleted) {
+                interruptedTurn = true;
+                threads.delete(match.componentId);
+              }
               throwIfAborted(signal, outputDir);
               const message = errorMessage(error);
               const failure = classifyConnectionFailure(message);

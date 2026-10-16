@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdir, realpath, symlink, writeFile } from "node:fs/promises";
+import { mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { dependencyPackageContexts } from "../src/sca-context.js";
 import { discoverScaInputs, initialOsvScanResult } from "../src/sca-osv.js";
@@ -235,3 +235,18 @@ test("invalid optional Cargo metadata does not prevent lockfile matching", async
   expect(discovered.localReferences).toHaveLength(1);
   expect(discovered.firstPartyPackages).toHaveLength(0);
 });
+
+test.each(["directory", "cyclic link"] as const)(
+  "unreadable optional npm manifest (%s) leaves matching evidence usable",
+  async (kind) => {
+    const { repository, result } = await fixture();
+    const manifest = join(repository, "package.json");
+    await rm(manifest);
+    if (kind === "directory") await mkdir(manifest);
+    else await symlink("package.json", manifest, "file");
+    const contexts = await dependencyPackageContexts(result);
+    expect(contexts[0]!.installedPath).toBeNull();
+    expect(contexts[0]!.limitations).not.toHaveLength(0);
+    expect(result.matches).toHaveLength(3);
+  },
+);
