@@ -534,21 +534,23 @@ describe("CLI", () => {
   );
 
   test.each(
-    ["failure", "SIGINT", "SIGTERM"].flatMap((signal) =>
-      (
-        [
-          ["json", false],
-          ["json", true],
-          ["jsonl", true],
-        ] as const
-      ).map(
-        ([format, fullOutput]) =>
-          [signal, format, fullOutput ? "full" : "plain"] as const,
-      ),
+    ["failure", "failure with cleanup failure", "SIGINT", "SIGTERM"].flatMap(
+      (signal) =>
+        (
+          [
+            ["json", false],
+            ["json", true],
+            ["jsonl", true],
+          ] as const
+        ).map(
+          ([format, fullOutput]) =>
+            [signal, format, fullOutput ? "full" : "plain"] as const,
+        ),
     ),
   )(
     "retains completed assessments and stops patching after validation %s (%s, %s)",
     async (signal, format, outputMode) => {
+      const validationFailed = signal.startsWith("failure");
       const fullOutput = outputMode === "full";
       const root = await mkdtemp(join(tmpdir(), "scan-validation-partial-"));
       const repository = join(root, "repository");
@@ -561,8 +563,7 @@ describe("CLI", () => {
       const failureMessage = `Second assessment failed: ${SYNTHETIC_CREDENTIALS}`;
       let validations = 0;
       let commands = 0;
-      const exitCode =
-        signal === "failure" ? 2 : signal === "SIGINT" ? 130 : 143;
+      const exitCode = validationFailed ? 2 : signal === "SIGINT" ? 130 : 143;
       try {
         expect(
           await main(
@@ -594,7 +595,7 @@ describe("CLI", () => {
                 expect(
                   await readFile(join(scanDir, "validation.md"), "utf8"),
                 ).toContain("Completed first assessment.");
-                if (signal === "failure") throw new Error(failureMessage);
+                if (validationFailed) throw new Error(failureMessage);
                 signals.emit(signal);
                 abort!.throwIfAborted();
                 throw new Error("unreachable");
@@ -602,6 +603,10 @@ describe("CLI", () => {
               onCodex: () => {
                 commands += 1;
                 return 0;
+              },
+              onClose: () => {
+                if (signal === "failure with cleanup failure")
+                  throw new Error("Synthetic runtime cleanup failure.");
               },
             }),
           ),
@@ -611,10 +616,9 @@ describe("CLI", () => {
         const output = JSON.parse(stdout.text());
         if (fullOutput) {
           expect(output.ok).toBe(false);
-          const message =
-            signal === "failure"
-              ? failureMessage
-              : `Validation interrupted. Completed scan output was kept at ${scanDir}.`;
+          const message = validationFailed
+            ? failureMessage
+            : `Validation interrupted. Completed scan output was kept at ${scanDir}.`;
           expect(output.error).toEqual({ code: "SCAN_FAILED", message });
           expect(stderr.text()).toContain(message);
         }
@@ -624,7 +628,7 @@ describe("CLI", () => {
             status: "failed",
             findings: 1,
             reportPath: join(scanDir, "validation.md"),
-            ...(signal === "failure" ? {} : { exitCode }),
+            ...(validationFailed ? {} : { exitCode }),
           },
         });
         const report = await readFile(join(scanDir, "validation.md"), "utf8");

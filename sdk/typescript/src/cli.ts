@@ -1336,7 +1336,8 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
         input,
       );
     } finally {
-      if (workspace !== undefined) await cleanupSdkDirectory(workspace);
+      if (workspace !== undefined)
+        await cleanupSdkDirectory(workspace).catch(() => undefined);
     }
   },
   matchFindings: (input, options) =>
@@ -9071,7 +9072,7 @@ async function executeScan(
           diagnostic("runtime.cleanup.failed", {
             classification: classifyConnectionFailure(error),
           });
-          if (!failed) {
+          if (!failed && validationError === undefined) {
             failed = true;
             failure = error;
           }

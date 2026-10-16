@@ -12,6 +12,7 @@ import { strToU8, zipSync } from "fflate";
 import { describe, expect, mock, spyOn, test } from "bun:test";
 import { main } from "../src/cli.js";
 import { CodexSecurity } from "../src/api.js";
+import * as runtime from "../src/runtime.js";
 import {
   environmentWithGit,
   resolvePluginPython,
@@ -560,8 +561,13 @@ test("empty scan validation preserves knowledge-base Git exclusions", async () =
   }
 });
 
-for (const kind of ["directory", "zip"] as const) {
-  const name = `empty scan validation uses the selected ${kind} plugin workbench`;
+for (const { kind, cleanupFails, workbenchFails } of [
+  { kind: "directory", cleanupFails: false, workbenchFails: false },
+  { kind: "zip", cleanupFails: false, workbenchFails: false },
+  { kind: "zip", cleanupFails: true, workbenchFails: false },
+  { kind: "zip", cleanupFails: true, workbenchFails: true },
+] as const) {
+  const name = `empty scan validation uses the selected ${kind} plugin workbench (cleanup fails: ${cleanupFails}, workbench fails: ${workbenchFails})`;
   test(name, async () => {
     if (runTestInSubprocess(import.meta.path, name)) return;
     const root = await temporaryDirectory("empty-custom-plugin-", true);
@@ -599,6 +605,7 @@ from pathlib import Path
 record=json.loads((Path(__file__).parent.parent / "saved-scan.json").read_text())
 assert sys.argv[1:] == ["get-scan", "--scan-id", record["scanId"], "--check-target"], sys.argv
 Path(${JSON.stringify(marker)}).write_text(json.dumps({"script":str(Path(__file__).resolve()),"python":sys.executable,"state":os.environ.get("CODEX_SECURITY_STATE_DIR")}))
+if ${workbenchFails ? "True" : "False"}: raise RuntimeError("Synthetic target check failure.")
 print(json.dumps({"scan":{"targetPath":record["targetPath"]}}))
 `,
     };
@@ -620,6 +627,16 @@ print(json.dumps({"scan":{"targetPath":record["targetPath"]}}))
     const scan = spyOn(CodexSecurity.prototype, "run").mockResolvedValue(
       result,
     );
+    const originalCleanup = runtime.cleanupSdkDirectory;
+    let cleanupPath: string | undefined;
+    const cleanup = spyOn(runtime, "cleanupSdkDirectory").mockImplementation(
+      async (path) => {
+        cleanupPath = path;
+        if (cleanupFails)
+          throw new Error("Synthetic temporary plugin cleanup failure.");
+        await originalCleanup(path);
+      },
+    );
     try {
       const cli = createCliTest(main);
       const code = await cli.runCli(
@@ -635,11 +652,15 @@ print(json.dumps({"scan":{"targetPath":record["targetPath"]}}))
         ],
         undefined,
       );
-      expect(code, cli.stderr.text()).toBe(0);
-      expect(JSON.parse(cli.stdout.text()).validation).toEqual({
-        status: "complete",
-        findings: 0,
-      });
+      expect(code, cli.stderr.text()).toBe(workbenchFails ? 2 : 0);
+      const validation = JSON.parse(cli.stdout.text()).validation;
+      if (workbenchFails)
+        expect(validation).toMatchObject({
+          status: "failed",
+          findings: 0,
+          message: expect.stringContaining("Synthetic target check failure."),
+        });
+      else expect(validation).toEqual({ status: "complete", findings: 0 });
       const observed = JSON.parse(await readFile(marker, "utf8"));
       expect(observed.state).toBe(state);
       expect(await realpath(observed.python)).toBe(
@@ -655,12 +676,15 @@ print(json.dumps({"scan":{"targetPath":record["targetPath"]}}))
         expect(await realpath(observed.script)).toBe(
           await realpath(join(plugin, "scripts", "workbench_db.py")),
         );
-      else
+      else if (!cleanupFails)
         expect(
           await readFile(observed.script, "utf8").catch(() => null),
         ).toBeNull();
       expect(scan).toHaveBeenCalledTimes(1);
+      expect(cleanupPath).toBeDefined();
     } finally {
+      cleanup.mockRestore();
+      if (cleanupPath !== undefined) await originalCleanup(cleanupPath);
       scan.mockRestore();
       for (const [name, value] of Object.entries(previous)) {
         if (value === undefined) delete process.env[name];
