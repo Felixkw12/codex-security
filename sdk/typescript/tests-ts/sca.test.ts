@@ -165,6 +165,7 @@ function triage(): TriageFinding {
 async function fixture(
   options: {
     matched?: boolean;
+    severities?: string[];
     turns?: (
       | "completed"
       | "truncated"
@@ -270,6 +271,7 @@ process.exit(child.status ?? 1);
     else await writeFile(sourcePath, "synthetic changed source context");
   };
   const calls = { runtime: 0, model: 0, scanner: 0 };
+  let threadCount = 0;
   const captured: {
     codex?: CodexOptions;
     thread?: ThreadOptions;
@@ -375,6 +377,7 @@ process.exit(child.status ?? 1);
           result.matches = options.turns.map((_, index) => ({
             ...result.matches[0]!,
             id: `match-${index + 1}`,
+            severity: options.severities?.[index] ?? null,
           }));
         if (options.advisoryDetails !== undefined)
           result.matches[0]!.sourceAdvisories[0]!["details"] =
@@ -412,7 +415,8 @@ process.exit(child.status ?? 1);
         );
         expect(saved.matches).toHaveLength(options.turns?.length ?? 1);
         expect(saved.status).toBe("partial");
-        expect(saved.assessments[0].status).toBe("not_started");
+        if (calls.runtime === 1)
+          expect(saved.assessments[0].status).toBe("not_started");
         if (options.runtimeError)
           throw new Error("synthetic authentication unavailable");
         return { ...preparedRuntime(codexHome), environment };
@@ -430,6 +434,8 @@ process.exit(child.status ?? 1);
         return {
           startThread: (thread) => {
             captured.thread = thread;
+            const threadId =
+              ++threadCount === 1 ? "sca-thread" : `sca-thread-${threadCount}`;
             return {
               id: null,
               async runStreamed(prompt) {
@@ -446,17 +452,16 @@ process.exit(child.status ?? 1);
                 const behavior = options.turns?.[turnNumber - 1];
                 const finding = {
                   ...triage(),
-                  input_id: `match-${turnNumber}`,
+                  input_id: JSON.parse(
+                    String(prompt).match(/Assess only match ("[^"\n]+")/)![1]!,
+                  ),
                   triage_item_id: `triage-${behavior === "duplicate_id" ? 1 : turnNumber}`,
                 };
                 return {
                   events: (async function* (): AsyncGenerator<ThreadEvent> {
                     yield {
                       type: "thread.started",
-                      thread_id:
-                        turnNumber === 1
-                          ? "sca-thread"
-                          : `sca-thread-${turnNumber}`,
+                      thread_id: threadId,
                     };
                     if (options.commandActivity) {
                       for (const status of [
@@ -2278,7 +2283,7 @@ test("unrelated Git reference changes retain all dependency assessments", async 
     repositoryPath: repository,
     outputDir,
   });
-  expect(sourceCalls).toHaveLength(3);
+  expect(sourceCalls).toHaveLength(4);
   expect(result.status).toBe("completed");
   expect(result.assessments.map(({ status }) => status)).toEqual([
     "completed",
@@ -2383,7 +2388,7 @@ test("dependency source snapshots preserve per-scan process environment, protect
       signal: controller.signal,
     });
     expect(result.status).toBe("completed");
-    expect(sourceCalls).toHaveLength(2);
+    expect(sourceCalls).toHaveLength(3);
     expect(pythonResolutions[0]).toMatchObject({
       environment,
       protectedRoot: repository,
@@ -2488,7 +2493,11 @@ test.each(["completed", "malformed", "truncated"] as const)(
       outputDir: f.outputDir,
     });
     expect(result.assessments.map((assessment) => assessment.threadId)).toEqual(
-      ["sca-thread", "sca-thread-2", "sca-thread-3"],
+      [
+        "sca-thread",
+        "sca-thread",
+        middle === "truncated" ? "sca-thread-2" : "sca-thread",
+      ],
     );
     expect(result.assessments.map((assessment) => assessment.status)).toEqual([
       "completed",
@@ -2496,10 +2505,184 @@ test.each(["completed", "malformed", "truncated"] as const)(
       "completed",
     ]);
     expect(f.turns[1]!.evidence.assessments[0]!.threadId).toBe("sca-thread");
-    expect(f.turns[2]!.evidence.assessments[1]!.threadId).toBe("sca-thread-2");
+    expect(f.turns[2]!.evidence.assessments[1]!.threadId).toBe("sca-thread");
     const saved = JSON.parse(
       await readFile(join(f.outputDir, "sca-result.json"), "utf8"),
     );
     expect(saved.assessments).toEqual(result.assessments);
+  },
+);
+
+test("prioritizes severity, reuses a package thread, and supplies focused evidence", async () => {
+  const f = await fixture({
+    turns: ["completed", "completed", "completed"],
+    severities: ["LOW", "CRITICAL", "HIGH"],
+  });
+  await using security = f.client;
+  const inventories: Readonly<ScaResult>[] = [];
+  let modelCallsAtInventory: number | undefined;
+  const result = await security.scanDependencies({
+    repositoryPath: f.repository,
+    outputDir: f.outputDir,
+    onInventory: (inventory) => {
+      inventories.push(inventory);
+      modelCallsAtInventory = f.calls.model;
+      // Observers receive detached data and cannot alter the scan.
+      inventory.matches[0]!.severity = "observer-only";
+      throw new Error("synthetic inventory observer failure");
+    },
+  });
+  expect(result.status).toBe("completed");
+  expect(inventories).toHaveLength(1);
+  expect(modelCallsAtInventory).toBe(0);
+  expect(result.matches[0]!.severity).toBe("LOW");
+  expect(
+    f.turns.map((turn) =>
+      JSON.parse(turn.prompt.match(/Assess only match ("[^"\n]+")/)![1]!),
+    ),
+  ).toEqual(["match-2", "match-3", "match-1"]);
+  expect(new Set(result.assessments.map((item) => item.threadId)).size).toBe(1);
+  const evidence = JSON.parse(
+    await readFile(join(f.outputDir, "sca-assessment-input.json"), "utf8"),
+  );
+  expect(evidence.match.id).toBe("match-1");
+  expect(
+    evidence.earlierAssessments.map(
+      (item: { matchId: string }) => item.matchId,
+    ),
+  ).toEqual(["match-2", "match-3"]);
+  expect(evidence).not.toHaveProperty("components");
+  expect(evidence).not.toHaveProperty("matches");
+});
+
+test("continues a budget-stopped run without repeating matching or completed assessments", async () => {
+  const f = await fixture({ turns: ["completed", "completed", "completed"] });
+  await using security = f.client;
+  const options = { repositoryPath: f.repository, outputDir: f.outputDir };
+  const perTurn = estimateScanCost("gpt-5.6-sol", {
+    input_tokens: 1000,
+    cached_input_tokens: 0,
+    cache_write_input_tokens: 0,
+    output_tokens: 1000,
+    reasoning_output_tokens: 0,
+  })!.estimatedUsd;
+  await expect(
+    security.scanDependencies({ ...options, maxCostUsd: perTurn * 1.5 }),
+  ).rejects.toBeInstanceOf(ScanCostLimitExceededError);
+  const savedPath = join(f.outputDir, "sca-result.json");
+  const checkpoint = await readFile(savedPath, "utf8");
+  const prior: ScaResult = JSON.parse(checkpoint);
+  await expect(
+    security.scanDependencies({ ...options, maxCostUsd: perTurn * 1.5 }),
+  ).rejects.toBeInstanceOf(ScanCostLimitExceededError);
+  expect(await readFile(savedPath, "utf8")).toBe(checkpoint);
+  const costs: number[] = [];
+  const result = await security.scanDependencies({
+    ...options,
+    maxCostUsd: perTurn * 3.5,
+    onCost: (cost) => {
+      costs.push(cost.estimatedUsd);
+    },
+  });
+  expect(result.status).toBe("completed");
+  expect(result.assessments.slice(0, 2)).toEqual(prior.assessments.slice(0, 2));
+  expect(f.calls.scanner).toBe(1);
+  expect(f.turns).toHaveLength(3);
+  expect(costs[0]).toBeCloseTo(perTurn * 2);
+  expect(result.model.costUsd).toBeCloseTo(perTurn * 3);
+  expect(result.model.cost?.inputTokens).toBe(3000);
+  expect(result.model.cost?.estimatedUsdRange?.max).toBeGreaterThan(
+    result.model.costUsd!,
+  );
+});
+
+test.each(["source", "configuration"] as const)(
+  "refuses continuation after changed %s and preserves saved artifacts",
+  async (change) => {
+    const f = await fixture({ turns: ["completed", "malformed"] });
+    await using security = f.client;
+    const options = { repositoryPath: f.repository, outputDir: f.outputDir };
+    await security.scanDependencies(options);
+    if (change === "source")
+      await writeFile(join(f.repository, "usage.txt"), "changed source");
+    else
+      Object.assign(security.config.codexOverrides!, {
+        model_reasoning_effort: "low",
+      });
+    const checkpoint = await readFile(
+      join(f.outputDir, "sca-result.json"),
+      "utf8",
+    );
+    await expect(security.scanDependencies(options)).rejects.toThrow(
+      change === "source"
+        ? "source changed"
+        : "model, effort, provider, or skill changed",
+    );
+    expect(await readFile(join(f.outputDir, "sca-result.json"), "utf8")).toBe(
+      checkpoint,
+    );
+    expect(f.turns).toHaveLength(2);
+    expect(f.calls.scanner).toBe(1);
+  },
+);
+
+test("rejects concurrent assessment of the same output directory", async () => {
+  const f = await fixture();
+  await using security = f.client;
+  await using competitor = new TestClient({}, { environment: f.environment });
+  let concurrent: Promise<unknown> | undefined;
+  const options = { repositoryPath: f.repository, outputDir: f.outputDir };
+  const result = await security.scanDependencies({
+    ...options,
+    onInventory: () => {
+      concurrent = competitor
+        .scanDependencies(options)
+        .catch((error: unknown) => error);
+    },
+  });
+  expect(result.status).toBe("completed");
+  expect(await concurrent).toMatchObject({
+    message: "A dependency scan is already running.",
+  });
+  expect(f.calls.scanner).toBe(1);
+});
+
+test.each([false, true])(
+  "continuation preserves unknown prior spend (pending checkpoint: %s)",
+  async (pending) => {
+    const f = await fixture({ turns: ["completed", "truncated"] });
+    await using security = f.client;
+    const options = { repositoryPath: f.repository, outputDir: f.outputDir };
+    await security.scanDependencies(options);
+    const path = join(f.outputDir, "sca-result.json");
+    if (pending) {
+      const checkpoint: ScaResult = JSON.parse(await readFile(path, "utf8"));
+      checkpoint.model.costPending = true;
+      const priorCost = estimateScanCost("gpt-5.6-sol", {
+        input_tokens: 1000,
+        output_tokens: 1000,
+      })!;
+      checkpoint.model.cost = { ...priorCost };
+      checkpoint.model.costUsd = priorCost.estimatedUsd;
+      await writeFile(path, JSON.stringify(checkpoint));
+    }
+    const original = await readFile(path, "utf8");
+    await expect(
+      security.scanDependencies({ ...options, maxCostUsd: 10 }),
+    ).rejects.toThrow("earlier assessment usage is unavailable");
+    expect(await readFile(path, "utf8")).toBe(original);
+    const costs: unknown[] = [];
+    const result = await security.scanDependencies({
+      ...options,
+      onCost: (cost) => {
+        costs.push(cost);
+      },
+    });
+    expect(result.status).toBe("completed");
+    expect(result.model.costUsd).toBeNull();
+    expect(result.model.cost).toBeUndefined();
+    expect(costs).toHaveLength(0);
+    expect(f.calls.scanner).toBe(1);
+    expect(f.turns).toHaveLength(3);
   },
 );

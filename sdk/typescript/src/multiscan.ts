@@ -208,7 +208,7 @@ export async function runMultiscan(
   }
   const output = await ensureOutputDirectory(requestedOutput);
   await requireSecureOutputAncestry(output);
-  const unlock = await acquireLock(output);
+  const unlock = await acquireScanOutputLock(output);
   try {
     const result = await runCampaign(resolvedOptions, tasks, output);
     return (await realpath(requestedOutput).catch(() => undefined)) === output
@@ -668,7 +668,10 @@ async function appendReceipt(path: string, receipt: string): Promise<void> {
   }
 }
 
-async function acquireLock(output: string): Promise<() => Promise<void>> {
+export async function acquireScanOutputLock(
+  output: string,
+  ownerDescription = "multiscan supervisor",
+): Promise<() => Promise<void>> {
   const path = join(output, ".lock");
   const ownerPath = join(path, "owner.json");
   try {
@@ -677,11 +680,11 @@ async function acquireLock(output: string): Promise<() => Promise<void>> {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     const existing = await inspectLock(path);
     if (!existing.stale) {
-      throw new Error("A multiscan supervisor is already running.");
+      throw new Error(`A ${ownerDescription} is already running.`);
     }
     const stale = await recoverLock(output, path, existing.owner);
     try {
-      return await acquireLock(output);
+      return await acquireScanOutputLock(output, ownerDescription);
     } finally {
       await rm(stale, { recursive: true, force: true });
     }

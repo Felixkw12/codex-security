@@ -1,5 +1,11 @@
 import { posix, win32 } from "node:path";
 import type { ScaComponent, ScaMatch, ScaResult } from "./sca-types.js";
+import {
+  dependencyAssessmentSummary,
+  dependencyCostSummary,
+  dependencyInventorySummary,
+  prioritizedDependencyMatches,
+} from "./sca-summary.js";
 
 export interface ScaMatchCorrelation {
   baseMatchIds: string[];
@@ -93,7 +99,12 @@ export function renderScaReport(result: ScaResult): string {
     result.matches.length === 0
       ? "Model assessment: **not run** (no advisory matches to assess)."
       : `Model assessments: **${assessmentCounts.completed} completed**, **${assessmentCounts.failed} failed**, **${assessmentCounts.cancelled} cancelled**, **${assessmentCounts.not_started} not started**.`,
-    `Model cost (USD): **${result.model.costUsd ?? "unavailable"}**.`,
+    `Assessment outcomes: **${dependencyAssessmentSummary(result)}**.`,
+    `Estimated model cost: **${dependencyCostSummary(result)}**. This is a token-cost estimate, not a billing total.`,
+    "## Affected packages",
+    bullets(dependencyInventorySummary(result), "No advisory matches."),
+  ];
+  const coverageSections = [
     `Repository: ${code(result.repository.path)}. Revision: ${code(result.repository.revision ?? "unknown")}. Working tree: ${result.repository.dirty === null ? "unknown" : result.repository.dirty ? "modified" : "clean"}.`,
     `Scanner: ${code(result.scanner.name)} ${code(result.scanner.version ?? "unknown")}. Advisory mode: ${result.scanner.advisoryMode}. Completed: ${result.scanner.completedAt || "not completed"}.`,
     "## Coverage",
@@ -106,7 +117,7 @@ export function renderScaReport(result: ScaResult): string {
     ),
   ];
   if (result.coverage.configFiles.length) {
-    sections.push(
+    coverageSections.push(
       "OSV configuration was applied. The inventory and matches reflect configured exclusions; suppressed package counts are unavailable.",
       bullets(
         result.coverage.configFiles.map(
@@ -117,7 +128,7 @@ export function renderScaReport(result: ScaResult): string {
     );
   }
   if (result.coverage.limitations.length)
-    sections.push(bullets(result.coverage.limitations, ""));
+    coverageSections.push(bullets(result.coverage.limitations, ""));
   if (result.matches.length === 0) {
     sections.push(
       result.coverage.status === "complete"
@@ -126,28 +137,29 @@ export function renderScaReport(result: ScaResult): string {
     );
   }
   if (result.diagnostics.length)
-    sections.push("## Diagnostics", bullets(result.diagnostics, ""));
-  sections.push(
-    "## Observed components",
-    bullets(
-      result.components.map(
-        (component) =>
-          `${code(component.name)} ${code(component.version ?? "unresolved version")} (${component.ecosystem ?? "unknown ecosystem"}), ${code(component.sourcePath)}${component.dependencyGroups.length ? `; dependency groups: ${component.dependencyGroups.join(", ")}` : ""}.`,
-      ),
-      "No components were reported.",
-    ),
-  );
-  for (const match of result.matches) {
+    coverageSections.push("## Diagnostics", bullets(result.diagnostics, ""));
+  for (const match of prioritizedDependencyMatches(result)) {
     const component = componentFor(result, match);
     const assessment = assessments.get(match.id);
     const triage =
       assessment?.status === "completed" ? assessment.triage : null;
+    const context = result.packageContexts?.find(
+      (item) => item.componentId === component.id,
+    );
     sections.push(
       `## ${code(component.name)} ${code(component.version ?? "unresolved version")}`,
       `Match: ${code(match.id)}. Source dependency file: ${code(component.sourcePath)}.`,
       `Advisories and aliases: ${identifiers(match).map(code).join(", ")}. Source severity: ${match.severity ?? "not supplied"}.`,
       `Candidate fixed versions from advisories: ${match.fixedVersions.length ? match.fixedVersions.map(code).join(", ") : "none supplied"}. Compatibility and resolution are not verified.`,
-      "Introduction chain and direct/transitive classification: unknown from scanner evidence.",
+      context?.dependencyChain.length
+        ? `Observed local introduction chain: ${context.dependencyChain.map((entry) => `${code(entry.name)} ${code(entry.version)}`).join(" → ")}. This is not deployment or reachability proof.`
+        : "Introduction chain and direct/transitive classification: unknown from scanner evidence.",
+      ...(context?.installedPath
+        ? [
+            `Installed source: ${code(context.installedPath)}.`,
+            ...context.limitations,
+          ]
+        : []),
       `Application assessment: **${assessment?.status ?? "not_started"}**${triage ? `; **${triage.verdict}** (${triage.confidence} confidence)` : ""}. Scope: static review of the current repository context.`,
     );
     if (assessment?.error)
@@ -172,6 +184,15 @@ export function renderScaReport(result: ScaResult): string {
       );
   }
   sections.push(
+    ...coverageSections,
+    "## Observed components",
+    bullets(
+      result.components.map(
+        (component) =>
+          `${code(component.name)} ${code(component.version ?? "unresolved version")} (${component.ecosystem ?? "unknown ecosystem"}), ${code(component.sourcePath)}${component.dependencyGroups.length ? `; dependency groups: ${component.dependencyGroups.join(", ")}` : ""}.`,
+      ),
+      "No components were reported.",
+    ),
     "## Retained evidence",
     `Scanner JSON: ${code(result.scanner.rawOutputPath)}. Scanner diagnostics: ${code(result.scanner.stderrPath)}.`,
   );

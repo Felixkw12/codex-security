@@ -288,7 +288,7 @@ describe("SCA report", () => {
       const result = fixture();
       result.model.costUsd = cost;
       expect(renderScaReport(result)).toContain(
-        `Model cost (USD): **${cost === null ? "unavailable" : cost}**`,
+        cost === null ? "unavailable" : `$${cost.toFixed(2)}`,
       );
     },
   );
