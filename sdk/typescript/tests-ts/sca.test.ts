@@ -1419,7 +1419,13 @@ test("dependency triage disables inherited MCP servers and keeps the linked nati
   expect(result.status).toBe("completed");
   const options = f.captured.codex!;
   expect(options.env!["CODEX_HOME"]).toBe(f.codexHome);
-  expect(parseToml(options.configOverrides![0]!)).toEqual({
+  expect(
+    parseToml(
+      options.configOverrides!.find((value) =>
+        value.startsWith("mcp_servers="),
+      )!,
+    ),
+  ).toEqual({
     mcp_servers: {
       "synthetic.inherited": { enabled: false },
       "synthetic.configured": {

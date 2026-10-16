@@ -6296,7 +6296,7 @@ export async function main(
             outcome = { exitCode: 2, error: message };
           }
           if (
-            outcome.error === undefined &&
+            outcome.data !== undefined &&
             format === "toon" &&
             !argv.some((argument) => OUTPUT_OPTION.test(argument))
           ) {
@@ -6555,7 +6555,7 @@ async function runDependencyScan(
   return {
     exitCode,
     data: { ...result },
-    ...(message === undefined ? {} : { coverageError: message }),
+    ...(message === undefined ? {} : { error: message }),
   };
 }
 
