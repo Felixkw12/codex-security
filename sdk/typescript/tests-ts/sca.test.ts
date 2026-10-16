@@ -2286,7 +2286,7 @@ test("unrelated Git reference changes retain all dependency assessments", async 
     repositoryPath: repository,
     outputDir,
   });
-  expect(sourceCalls).toHaveLength(4);
+  expect(sourceCalls).toHaveLength(5);
   expect(result.status).toBe("completed");
   expect(result.assessments.map(({ status }) => status)).toEqual([
     "completed",
@@ -2349,8 +2349,8 @@ test.each([1, 2] as const)(
     expect(result.diagnostics.join("\n")).toContain(
       "synthetic source snapshot unavailable",
     );
-    expect(calls.runtime).toBe(snapshotErrorAt === 1 ? 0 : 1);
-    expect(calls.model).toBe(snapshotErrorAt === 1 ? 0 : 1);
+    expect(calls.runtime).toBe(0);
+    expect(calls.model).toBe(0);
     expect(
       JSON.parse(await readFile(join(outputDir, "sca-result.json"), "utf8")),
     ).toEqual(result);
@@ -2391,7 +2391,7 @@ test("dependency source snapshots preserve per-scan process environment, protect
       signal: controller.signal,
     });
     expect(result.status).toBe("completed");
-    expect(sourceCalls).toHaveLength(3);
+    expect(sourceCalls).toHaveLength(4);
     expect(pythonResolutions[0]).toMatchObject({
       environment,
       protectedRoot: repository,
@@ -2601,7 +2601,7 @@ test("continues a budget-stopped run without repeating matching or completed ass
   );
 });
 
-test.each(["source", "configuration", "provider"] as const)(
+test.each(["source", "configuration", "provider", "endpoint"] as const)(
   "refuses continuation after changed %s and preserves saved artifacts",
   async (change) => {
     const provider = {
@@ -2612,10 +2612,13 @@ test.each(["source", "configuration", "provider"] as const)(
     };
     const f = await fixture({
       turns: ["completed", "malformed"],
-      codexOverrides: {
-        model_provider: "synthetic.provider",
-        model_providers: { "synthetic.provider": provider },
-      },
+      codexOverrides:
+        change === "endpoint"
+          ? { openai_base_url: "https://provider.example.invalid/v1" }
+          : {
+              model_provider: "synthetic.provider",
+              model_providers: { "synthetic.provider": provider },
+            },
     });
     await using security = f.client;
     const options = { repositoryPath: f.repository, outputDir: f.outputDir };
@@ -2625,6 +2628,10 @@ test.each(["source", "configuration", "provider"] as const)(
     else if (change === "configuration")
       Object.assign(security.config.codexOverrides!, {
         model_reasoning_effort: "low",
+      });
+    else if (change === "endpoint")
+      Object.assign(security.config.codexOverrides!, {
+        openai_base_url: "https://changed.example.invalid/v1",
       });
     else
       Object.assign(security.config.codexOverrides!, {
@@ -2722,6 +2729,23 @@ test("source drift during inventory does not create a resumable checkpoint", asy
   expect(f.calls.scanner).toBe(1);
 });
 
+test("continues saved matching after authentication becomes available", async () => {
+  const fixtureOptions = { runtimeError: true };
+  const f = await fixture(fixtureOptions);
+  await using security = f.client;
+  const options = { repositoryPath: f.repository, outputDir: f.outputDir };
+  const initial = await security.scanDependencies(options);
+  expect(initial.status).toBe("partial");
+  expect(initial.assessmentContext?.sourceDigest).toBeString();
+  expect(initial.assessmentContext?.configurationDigest).toBeNull();
+  expect(f.turns).toHaveLength(0);
+  fixtureOptions.runtimeError = false;
+  const result = await security.scanDependencies(options);
+  expect(result.status).toBe("completed");
+  expect(f.calls.scanner).toBe(1);
+  expect(f.turns).toHaveLength(1);
+});
+
 test("continuation rejects linked lock directories before recovery writes", async () => {
   const f = await fixture();
   await using security = f.client;
@@ -2781,6 +2805,53 @@ test("historical thread cost cannot verify a later interrupted turn", async () =
     security.scanDependencies({ ...options, maxCostUsd: 10 }),
   ).rejects.toThrow("earlier assessment usage is unavailable");
   expect(await readFile(savedPath, "utf8")).toBe(saved);
+  expect(f.turns).toHaveLength(2);
+});
+
+test("an unverified reused turn stops budget-limited work before another assessment", async () => {
+  const f = await fixture({ turns: ["completed", "truncated", "completed"] });
+  await using security = f.client;
+  const originalRefresh = ScanCostTracker.prototype.refresh;
+  const refresh = spyOn(
+    ScanCostTracker.prototype,
+    "refresh",
+  ).mockImplementation(async function (this: ScanCostTracker) {
+    const snapshot = await originalRefresh.call(this);
+    return {
+      ...snapshot,
+      cost:
+        snapshot.cost ??
+        estimateScanCost("gpt-5.6-sol", {
+          input_tokens: 1000,
+          cache_write_input_tokens: 0,
+          output_tokens: 1000,
+        }),
+    };
+  });
+  try {
+    const failure = await security
+      .scanDependencies({
+        repositoryPath: f.repository,
+        outputDir: f.outputDir,
+        maxCostUsd: 10,
+      })
+      .catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(ScanInterruptedError);
+    expect((failure as ScanInterruptedError).cause).toMatchObject({
+      message: "Could not verify the dependency assessment cost limit.",
+    });
+  } finally {
+    refresh.mockRestore();
+  }
+  const saved: ScaResult = JSON.parse(
+    await readFile(join(f.outputDir, "sca-result.json"), "utf8"),
+  );
+  expect(saved.model.costPending).toBe(true);
+  expect(saved.assessments.map((item) => item.status)).toEqual([
+    "completed",
+    "failed",
+    "cancelled",
+  ]);
   expect(f.turns).toHaveLength(2);
 });
 

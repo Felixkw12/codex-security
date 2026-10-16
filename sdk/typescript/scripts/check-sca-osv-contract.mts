@@ -966,6 +966,13 @@ snapshots:
     "synthetic-local-root",
   );
   assertEcosystemFacts(cargoRoot, ecosystemFixtures.cargo, "1.2.0");
+  const cargoRegistry = await scan("cargo-registry-optional-manifest", {
+    "Cargo.toml": "invalid manifest [",
+    "Cargo.lock": ecosystemFixtures.cargo.content("9.0.0"),
+  });
+  assert.equal(cargoRegistry.status, "completed");
+  assert.equal(cargoRegistry.coverage.status, "complete");
+  assert.equal(cargoRegistry.matches.length, 0);
 
   for (const version of ["1.2.0", "9.0.0"]) {
     const sourceOnlyComposer = await scan(`composer-source-only-${version}`, {

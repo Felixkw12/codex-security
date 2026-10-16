@@ -1,4 +1,4 @@
-import { readFile, realpath } from "node:fs/promises";
+import { readFile, realpath, stat } from "node:fs/promises";
 import { basename, dirname, join, relative } from "node:path";
 import { isRecord } from "./record.js";
 import { relativePathIsOutside } from "./targets.js";
@@ -19,6 +19,7 @@ async function readPackage(
   try {
     const canonical = await realpath(join(path, "package.json"));
     if (relativePathIsOutside(relative(repository, canonical))) return null;
+    if (!(await stat(canonical)).isFile()) return null;
     const manifest: unknown = JSON.parse(await readFile(canonical, "utf8"));
     if (
       !isRecord(manifest) ||

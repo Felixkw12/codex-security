@@ -1051,6 +1051,18 @@ export class CodexSecurity {
       try {
         reportProgress({ phase: "preparing_assessment" });
         if ("error" in source) throw source.error;
+        if (!continuing) {
+          const inventorySource = await sourceSnapshot();
+          if (inventorySource.digest !== source.digest)
+            throw new CodexSecurityError(
+              `Source changed during dependency inventory (original revision ${String(source.revision)}, current revision ${String(inventorySource.revision)}). Rerun the dependency scan.`,
+            );
+          result.assessmentContext = {
+            sourceDigest: source.digest,
+            configurationDigest: null,
+          };
+          await saveDependencyScan(result);
+        }
         const session = await this.#prepareSession(
           inputs,
           options,
@@ -1065,17 +1077,21 @@ export class CodexSecurity {
         const contract = await dependencyTriageContract(
           runtime.plugin.pluginRoot,
         );
-        const providers = resolveCodexProfile(session.effectiveConfig)[
-          "model_providers"
-        ];
+        const resolvedConfig = resolveCodexProfile(session.effectiveConfig);
+        const providers = resolvedConfig["model_providers"];
+        const provider =
+          typeof session.modelProvider === "string"
+            ? session.modelProvider
+            : "openai";
         const configurationDigest = workflowDigest({
           model,
           reasoningEffort,
-          provider: session.modelProvider,
-          providerConfiguration:
-            isRecord(providers) && typeof session.modelProvider === "string"
-              ? providers[session.modelProvider]
-              : null,
+          provider,
+          providerConfiguration: isRecord(providers)
+            ? providers[provider]
+            : null,
+          endpoint:
+            provider === "openai" ? resolvedConfig["openai_base_url"] : null,
           skill: contract.skillDigest,
           workflow: "focused-dependency-assessment-v1",
         });
@@ -1133,6 +1149,7 @@ export class CodexSecurity {
         }
         result.model.model = model;
         result.model.skillDigest = contract.skillDigest;
+        result.assessmentContext!.configurationDigest = configurationDigest;
         await saveDependencyScan(result);
         const command = this.#codexCommand();
         const mcpServers = await disabledMcpServers(
@@ -1215,13 +1232,13 @@ export class CodexSecurity {
           else {
             result!.model.costUsd = null;
             delete result!.model.cost;
-            if (options.maxCostUsd !== undefined)
-              budgetController.abort(
-                new CodexSecurityError(
-                  "Could not verify the dependency assessment cost limit.",
-                ),
-              );
           }
+          if (result!.model.costPending && options.maxCostUsd !== undefined)
+            budgetController.abort(
+              new CodexSecurityError(
+                "Could not verify the dependency assessment cost limit.",
+              ),
+            );
         };
         const tracker = new ScanCostTracker({
           codexHome: runtime.codexHome,
@@ -1269,11 +1286,6 @@ export class CodexSecurity {
             throw new CodexSecurityError(
               `Source changed before dependency assessment (original revision ${String(source.revision)}, current revision ${String(initialCheck.revision)}). Rerun the dependency scan.`,
             );
-          result.assessmentContext = {
-            sourceDigest: source.digest,
-            configurationDigest,
-          };
-          await saveDependencyScan(result);
           const threads = new Map<
             string,
             ReturnType<typeof codex.startThread>

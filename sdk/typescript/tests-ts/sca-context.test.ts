@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { dependencyPackageContexts } from "../src/sca-context.js";
@@ -250,3 +251,29 @@ test.each(["directory", "cyclic link"] as const)(
     expect(result.matches).toHaveLength(3);
   },
 );
+
+test.skipIf(process.platform === "win32")(
+  "ignores a FIFO package manifest without waiting for a writer",
+  async () => {
+    const { leaf, result } = await fixture();
+    const manifest = join(leaf, "package.json");
+    await rm(manifest);
+    execFileSync("mkfifo", [manifest]);
+    const contexts = await dependencyPackageContexts(result);
+    expect(contexts[0]!.installedPath).toBeNull();
+    expect(contexts[0]!.limitations).not.toHaveLength(0);
+  },
+);
+
+test("registry-only Cargo matching does not depend on optional manifest parsing", async () => {
+  const repository = await create("dependency-cargo-context-");
+  await writeFile(join(repository, "Cargo.toml"), "invalid manifest [");
+  await writeFile(
+    join(repository, "Cargo.lock"),
+    'version=4\n[[package]]\nname="synthetic-registry-package"\nversion="0.1.0"\nsource="registry+https://github.com/rust-lang/crates.io-index"\n',
+  );
+  const discovered = await discoverScaInputs(repository);
+  expect(discovered.inputs[0]!.status).toBe("scanned");
+  expect(discovered.localReferences).toHaveLength(0);
+  expect(discovered.diagnostics).toEqual([]);
+});

@@ -663,7 +663,12 @@ export async function discoverScaInputs(
         );
         input.status = inspected.status;
         input.reason = inspected.reason;
-        if (additional === "cargo") {
+        if (
+          additional === "cargo" &&
+          inspected.references.some(
+            (reference) => reference.resolution === "workspace-or-path",
+          )
+        ) {
           const manifestPath = join(dirname(path), "Cargo.toml");
           const metadata = await lstat(manifestPath).catch(
             (error: NodeJS.ErrnoException) => {
