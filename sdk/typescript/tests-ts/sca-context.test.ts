@@ -347,3 +347,22 @@ test
     }
   },
 );
+
+test("resolves a project's published alias through its dependency edge", async () => {
+  const { repository, result } = await fixture();
+  await packageAt(repository, "synthetic-project", "1.0.0", {
+    baseline: "npm:synthetic-project@1.0.0",
+  });
+  const installed = join(repository, "node_modules/baseline");
+  await packageAt(installed, "synthetic-project", "1.0.0");
+  Object.assign(result.components[0]!, {
+    name: "synthetic-project",
+    version: "1.0.0",
+  });
+  const [context] = await dependencyPackageContexts(result);
+  expect(join(repository, context!.installedPath!)).toBe(installed);
+  expect(context!.dependencyChain).toHaveLength(2);
+  expect(context!.dependencyChain[0]!.path).toBe(".");
+  expect(join(repository, context!.dependencyChain[1]!.path)).toBe(installed);
+  expect(context!.dependencyGroups).toEqual(["runtime"]);
+});

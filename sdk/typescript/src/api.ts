@@ -1230,11 +1230,11 @@ export class CodexSecurity {
             result!.diagnostics.push(`Cost tracking: ${errorMessage(error)}`);
         };
         let attemptedTurn = false;
-        let interruptedTurn = false;
+        let unverifiedTurn = false;
         const verifyCost = (cost: Readonly<ScanCost> | null): void => {
           if (!attemptedTurn) return;
           result!.model.costPending =
-            cost === null || previousUsageUnknown || interruptedTurn;
+            cost === null || previousUsageUnknown || unverifiedTurn;
           if (cost !== null) reportCost(cost);
           else {
             result!.model.costUsd = null;
@@ -1305,6 +1305,7 @@ export class CodexSecurity {
             throwIfAborted(signal, outputDir);
             reportAssessment(match);
             let thread = threads.get(match.componentId);
+            const reusedThread = thread !== undefined;
             if (thread === undefined) {
               thread = codex.startThread(threadOptions);
               threads.set(match.componentId, thread);
@@ -1350,6 +1351,11 @@ export class CodexSecurity {
               });
               turnCompleted = turn.status === "completed";
               const usage = tokenUsage(turn.usage);
+              if (reusedThread && usage === null) {
+                // A rollout can still contain only the preceding turn's usage.
+                unverifiedTurn = true;
+                threads.delete(match.componentId);
+              }
               // Native receipts already contain the cumulative thread usage.
               tracker.recordUsage(usage, turn.threadId);
               result.model.threadId = turn.threadId;
@@ -1367,7 +1373,7 @@ export class CodexSecurity {
             } catch (error) {
               // A later turn cannot supply the missing usage of an interrupted turn.
               if (!turnCompleted) {
-                interruptedTurn = true;
+                unverifiedTurn = true;
                 threads.delete(match.componentId);
               }
               throwIfAborted(signal, outputDir);

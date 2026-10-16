@@ -53,6 +53,7 @@ import { TestClient } from "./support/api-client.js";
 import { preparedRuntime } from "./support/api-events.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { writeSession } from "./support/usage-rollout.js";
 
 const { create: temporaryDirectory, cleanup } = createTemporaryDirectories();
 afterEach(cleanup);
@@ -169,6 +170,7 @@ async function fixture(
     severities?: string[];
     turns?: (
       | "completed"
+      | "missing_usage"
       | "truncated"
       | "malformed"
       | "cancelled"
@@ -534,14 +536,18 @@ process.exit(child.status ?? 1);
                     };
                     yield {
                       type: "turn.completed",
-                      usage: {
-                        input_tokens: 1000 * threadTurns,
-                        cached_input_tokens: 0,
-                        cache_write_input_tokens: 0,
-                        output_tokens: 1000 * threadTurns,
-                        reasoning_output_tokens: 0,
-                      },
-                    };
+                      ...(behavior === "missing_usage"
+                        ? {}
+                        : {
+                            usage: {
+                              input_tokens: 1000 * threadTurns,
+                              cached_input_tokens: 0,
+                              cache_write_input_tokens: 0,
+                              output_tokens: 1000 * threadTurns,
+                              reasoning_output_tokens: 0,
+                            },
+                          }),
+                    } as ThreadEvent;
                   })(),
                 };
               },
@@ -2989,3 +2995,71 @@ test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
     }
   },
 );
+
+test.each([false, true])(
+  "missing usage on a completed reused turn remains unverified (budgeted: %s)",
+  async (budgeted) => {
+    const f = await fixture({
+      turns: ["completed", "missing_usage", "completed"],
+    });
+    await using security = f.client;
+    await writeSession(f.codexHome, "sca-thread", {
+      input_tokens: 1000,
+      output_tokens: 1000,
+    });
+    const options = { repositoryPath: f.repository, outputDir: f.outputDir };
+    if (budgeted) {
+      const failure = await security
+        .scanDependencies({ ...options, maxCostUsd: 1 })
+        .catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(ScanInterruptedError);
+      expect((failure as ScanInterruptedError).cause).toMatchObject({
+        message: "Could not verify the dependency assessment cost limit.",
+      });
+    } else {
+      const result = await security.scanDependencies(options);
+      expect(result.status).toBe("completed");
+      expect(
+        result.assessments.every((item) => item.status === "completed"),
+      ).toBe(true);
+      expect(result.assessments[2]!.threadId).not.toBe(
+        result.assessments[1]!.threadId,
+      );
+    }
+    const checkpointPath = join(f.outputDir, "sca-result.json");
+    const serialized = await readFile(checkpointPath, "utf8");
+    const checkpoint: ScaResult = JSON.parse(serialized);
+    expect(checkpoint.model.costPending).toBe(true);
+    expect(f.turns).toHaveLength(budgeted ? 2 : 3);
+    if (budgeted) {
+      expect(checkpoint.model.cost?.inputTokens).toBe(1000);
+      expect(checkpoint.assessments.map((item) => item.status)).toEqual([
+        "completed",
+        "completed",
+        "cancelled",
+      ]);
+      await expect(
+        security.scanDependencies({ ...options, maxCostUsd: 10 }),
+      ).rejects.toThrow("earlier assessment usage is unavailable");
+      expect(await readFile(checkpointPath, "utf8")).toBe(serialized);
+      expect(f.turns).toHaveLength(2);
+    }
+  },
+);
+
+test("retains native rollout fallback for a first assessment without SDK usage", async () => {
+  const f = await fixture({ turns: ["missing_usage"] });
+  await using security = f.client;
+  await writeSession(f.codexHome, "sca-thread", {
+    input_tokens: 1000,
+    output_tokens: 1000,
+  });
+  const result = await security.scanDependencies({
+    repositoryPath: f.repository,
+    outputDir: f.outputDir,
+    maxCostUsd: 1,
+  });
+  expect(result.status).toBe("completed");
+  expect(result.model.costPending).toBe(false);
+  expect(result.model.cost?.inputTokens).toBe(1000);
+});

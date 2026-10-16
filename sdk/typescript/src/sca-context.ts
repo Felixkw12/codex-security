@@ -156,6 +156,7 @@ export async function dependencyPackageContexts(
           (item) => item.componentId === component.id,
         )!;
         if (
+          chain.length > 0 &&
           context.installedPath === null &&
           component.name === pkg.name &&
           component.version === pkg.version

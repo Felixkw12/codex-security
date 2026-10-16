@@ -1817,6 +1817,8 @@ restoring the original source or starting a new run. A completed run, a legacy
 run without a continuation checkpoint, or an unrelated nonempty directory is
 not reusable. Omit `--output-dir` or choose a new directory to refresh advisory
 matching. The command rejects concurrent use of the same artifact directory.
+With `--max-cost`, assessment stops if the latest usage cannot be verified,
+even when earlier cost estimates are available. Completed results remain saved.
 If earlier model usage is unavailable, a cost-limited continuation cannot
 verify cumulative spend and is rejected; without a limit its total cost remains
 explicitly unavailable.
