@@ -1372,6 +1372,42 @@ def merge_saved_results(
     coverage_schema = _read_json(
         Path(__file__).resolve().parent.parent / "schemas" / "coverage.schema.json"
     )["properties"]
+    deep_review = bool(workers) or binding["coverageMode"] == "deep_repository"
+    if stopped or not deep_review:
+        # A successful Deep parent keeps the coordinator's accepted-worker union.
+        # Recovery retains claims from saved source reviews, including unfinished
+        # checkpoints, without treating a reducer as another source review.
+        file_sources = [
+            (owner, draft["coverage"])
+            for relative, draft, owner in all_sources
+            if relative not in reducer_paths and draft["coverage"]
+        ]
+        if deep_review and any(owner is not None for owner, _ in file_sources):
+            file_sources = [(owner, source) for owner, source in file_sources if owner is not None]
+        reviewed_by_owner: dict[str | None, set[str] | None] = {}
+        for owner, source in file_sources:
+            reviewed_by_owner.setdefault(owner, None)
+            if "reviewedFiles" not in source:
+                continue
+            try:
+                _validate_schema_node(
+                    source["reviewedFiles"],
+                    coverage_schema["reviewedFiles"],
+                    "coverage.reviewedFiles",
+                )
+            except ContractError as exc:
+                warnings.append(f"Could not retain reviewed file accounting: {exc}")
+                continue
+            if reviewed_by_owner[owner] is None:
+                reviewed_by_owner[owner] = set()
+            reviewed_by_owner[owner].update(
+                path.removeprefix("./") for path in source["reviewedFiles"]
+            )
+        coverage.pop("reviewedFiles", None)
+        if reviewed_by_owner and all(paths is not None for paths in reviewed_by_owner.values()):
+            coverage["reviewedFiles"] = sorted(
+                {path for paths in reviewed_by_owner.values() for path in paths}
+            )
     for relative, draft, owner in all_sources:
         order = source_order[relative]
         for item in deferred_rows[relative]:
