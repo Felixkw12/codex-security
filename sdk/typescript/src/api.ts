@@ -1116,11 +1116,34 @@ export class CodexSecurity {
         const providerConfiguration = isRecord(providers)
           ? (providers[provider] ?? null)
           : null;
+        const instructionFile = async (key: string) => {
+          const configuredPath = resolvedConfig[key];
+          if (typeof configuredPath !== "string") return null;
+          // Runtime path overrides are relative to the assessment cwd.
+          const expandedPath =
+            configuredPath === "~" ||
+            configuredPath.startsWith("~/") ||
+            (process.platform === "win32" && configuredPath.startsWith("~\\"))
+              ? expandHome(configuredPath, runtime.environment)
+              : configuredPath;
+          const path = resolve(outputDir, expandedPath);
+          return { path, contents: (await readFile(path, "utf8")).trim() };
+        };
+        const compactPrompt = resolvedConfig["compact_prompt"];
         const configurationDigest = workflowDigest({
           model,
           reasoningEffort,
-          developerInstructions:
-            resolvedConfig["developer_instructions"] ?? null,
+          instructions: {
+            developer: resolvedConfig["developer_instructions"] ?? null,
+            model:
+              (await instructionFile("model_instructions_file")) ??
+              resolvedConfig["instructions"] ??
+              null,
+            compact:
+              typeof compactPrompt === "string" && compactPrompt.trim()
+                ? compactPrompt.trim()
+                : await instructionFile("experimental_compact_prompt_file"),
+          },
           provider,
           providerConfiguration,
           endpoint:

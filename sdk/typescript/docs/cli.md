@@ -1822,7 +1822,8 @@ cs scan dependencies . --output-dir /path/outside/repository/dependency-results 
 Continuation retains completed assessments and scanner facts, and retries only
 unfinished or failed assessments. It verifies the original source snapshot
 (including dirty and ignored files), model, reasoning effort, provider,
-developer instructions, and assessment skill before updating results.
+developer, model, and compaction instructions (including selected file paths
+and contents), and assessment skill before updating results.
 A changed branch or source requires
 restoring the original source or starting a new run. A completed run, a legacy
 run without a continuation checkpoint, or an unrelated nonempty directory is

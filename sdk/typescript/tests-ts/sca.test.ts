@@ -7,6 +7,7 @@ import {
   readFile,
   readdir,
   realpath,
+  rm,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -3123,45 +3124,150 @@ test("malformed optional package metadata preserves inventory and assessment", a
   expect(result.assessmentContext?.sourceDigest).toBeString();
 });
 
-test.each([false, true])(
-  "changed developer instructions reject continuation (profile: %p)",
-  async (profile) => {
-    const overrides = (instructions: string): JsonObject =>
-      profile
-        ? {
-            profile: "synthetic-assessment",
-            profiles: {
-              "synthetic-assessment": { developer_instructions: instructions },
-            },
-          }
-        : { developer_instructions: instructions };
+test.each(
+  ["developer_instructions", "instructions", "compact_prompt"].flatMap((key) =>
+    [false, true].map((profile) => [key, profile] as const),
+  ),
+)("changed %s reject continuation (profile: %p)", async (key, profile) => {
+  const overrides = (instructions: string): JsonObject =>
+    profile
+      ? {
+          profile: "synthetic-assessment",
+          profiles: {
+            "synthetic-assessment": { [key]: instructions },
+          },
+        }
+      : { [key]: instructions };
+  const f = await fixture({
+    turns: ["completed", "malformed"],
+    codexOverrides: overrides("Synthetic original assessment instructions."),
+  });
+  await using security = f.client;
+  const options = { repositoryPath: f.repository, outputDir: f.outputDir };
+  const initial = await security.scanDependencies(options);
+  expect(initial.assessments[0]!.status).toBe("completed");
+  expect(f.captured.codex?.config?.[key]).toBe(
+    "Synthetic original assessment instructions.",
+  );
+  const checkpoint = await readFile(
+    join(f.outputDir, "sca-result.json"),
+    "utf8",
+  );
+  Object.assign(
+    security.config.codexOverrides!,
+    overrides("Synthetic changed assessment instructions."),
+  );
+  await expect(security.scanDependencies(options)).rejects.toThrow(
+    "instructions, or skill changed",
+  );
+  expect(await readFile(join(f.outputDir, "sca-result.json"), "utf8")).toBe(
+    checkpoint,
+  );
+  expect(f.turns).toHaveLength(2);
+  expect(f.calls.model).toBe(1);
+  expect(f.calls.scanner).toBe(1);
+});
+
+test.each([
+  ["model_instructions_file", "path", "absolute"],
+  ["model_instructions_file", "contents", "relative"],
+  ["model_instructions_file", "missing", "home"],
+  ["experimental_compact_prompt_file", "path", "relative"],
+  ["experimental_compact_prompt_file", "contents", "home"],
+  ["experimental_compact_prompt_file", "missing", "absolute"],
+] as const)(
+  "%s binds %s changes with %s paths before continuing",
+  async (key, change, pathKind) => {
     const f = await fixture({
       turns: ["completed", "malformed"],
-      codexOverrides: overrides("Synthetic original assessment instructions."),
+      homeVariable: process.platform === "win32" ? "USERPROFILE" : "HOME",
+      codexOverrides: {
+        profile: "synthetic-assessment",
+        profiles: { "synthetic-assessment": {} },
+      },
     });
     await using security = f.client;
+    await mkdir(f.selectedUserHome, { recursive: true });
+    const original = join(f.selectedUserHome, "original instructions.md");
+    const changed = join(f.selectedUserHome, "changed instructions.md");
+    const contents = "Synthetic original assessment instructions.";
+    await writeFile(original, contents);
+    await writeFile(changed, contents);
+    const configuredPath = (path: string) =>
+      pathKind === "home"
+        ? `~/${basename(path)}`
+        : pathKind === "relative"
+          ? relative(f.outputDir, path)
+          : path;
+    const profile = (security.config.codexOverrides!["profiles"] as JsonObject)[
+      "synthetic-assessment"
+    ] as JsonObject;
+    profile[key] = configuredPath(original);
     const options = { repositoryPath: f.repository, outputDir: f.outputDir };
     const initial = await security.scanDependencies(options);
-    expect(initial.assessments[0]!.status).toBe("completed");
-    expect(f.captured.codex?.config?.["developer_instructions"]).toBe(
-      "Synthetic original assessment instructions.",
-    );
-    const checkpoint = await readFile(
-      join(f.outputDir, "sca-result.json"),
-      "utf8",
-    );
-    Object.assign(
-      security.config.codexOverrides!,
-      overrides("Synthetic changed assessment instructions."),
-    );
+    expect(initial.assessments.map((item) => item.status)).toEqual([
+      "completed",
+      "failed",
+    ]);
+    expect(f.captured.codex?.config?.[key]).toBe(configuredPath(original));
+    const checkpointPath = join(f.outputDir, "sca-result.json");
+    const checkpoint = await readFile(checkpointPath, "utf8");
+    if (change === "path") profile[key] = configuredPath(changed);
+    else if (change === "contents")
+      await writeFile(original, "Synthetic changed assessment instructions.");
+    else await rm(original);
     await expect(security.scanDependencies(options)).rejects.toThrow(
-      "instructions, or skill changed",
+      change === "missing" ? "ENOENT" : "instructions, or skill changed",
     );
-    expect(await readFile(join(f.outputDir, "sca-result.json"), "utf8")).toBe(
-      checkpoint,
-    );
+    expect(await readFile(checkpointPath, "utf8")).toBe(checkpoint);
     expect(f.turns).toHaveLength(2);
     expect(f.calls.model).toBe(1);
     expect(f.calls.scanner).toBe(1);
+
+    profile[key] = configuredPath(original);
+    await writeFile(original, ` ${contents} `);
+    const resumed = await security.scanDependencies(options);
+    expect(resumed.status).toBe("completed");
+    expect(resumed.assessmentContext?.configurationDigest).toBe(
+      initial.assessmentContext?.configurationDigest,
+    );
+    expect(resumed.assessments[0]).toEqual(initial.assessments[0]);
+    expect(f.turns).toHaveLength(3);
+    expect(f.calls.scanner).toBe(1);
   },
 );
+
+test("overridden instruction defaults do not invalidate continuation", async () => {
+  const instructionsRoot = await temporaryDirectory("synthetic-instructions-");
+  const modelFile = join(instructionsRoot, "model.md");
+  const compactFile = join(instructionsRoot, "compact.md");
+  await writeFile(modelFile, "Synthetic selected model instructions.");
+  await writeFile(compactFile, "Synthetic unused compaction instructions.");
+  const f = await fixture({
+    turns: ["completed", "malformed"],
+    codexOverrides: {
+      model_instructions_file: modelFile,
+      instructions: "Synthetic unused model instructions.",
+      compact_prompt: "Synthetic selected compaction instructions.",
+      experimental_compact_prompt_file: compactFile,
+    },
+  });
+  await using security = f.client;
+  const options = { repositoryPath: f.repository, outputDir: f.outputDir };
+  const initial = await security.scanDependencies(options);
+  expect(initial.assessments[0]!.status).toBe("completed");
+  security.config.codexOverrides!["instructions"] =
+    "Synthetic changed unused model instructions.";
+  await writeFile(
+    compactFile,
+    "Synthetic changed unused compaction instructions.",
+  );
+  const resumed = await security.scanDependencies(options);
+  expect(resumed.status).toBe("completed");
+  expect(resumed.assessmentContext?.configurationDigest).toBe(
+    initial.assessmentContext?.configurationDigest,
+  );
+  expect(resumed.assessments[0]).toEqual(initial.assessments[0]);
+  expect(f.turns).toHaveLength(3);
+  expect(f.calls.scanner).toBe(1);
+});
