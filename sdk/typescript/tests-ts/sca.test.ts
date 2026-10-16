@@ -2878,7 +2878,7 @@ test("an unverified reused turn stops budget-limited work before another assessm
 });
 
 test.each([false, true])(
-  "continuation preserves unknown prior spend (pending checkpoint: %s)",
+  "continuation preserves unknown prior spend (pending checkpoint: %p)",
   async (pending) => {
     const f = await fixture({ turns: ["completed", "truncated"] });
     await using security = f.client;
@@ -2997,7 +2997,7 @@ test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
 );
 
 test.each([false, true])(
-  "missing usage on a completed reused turn remains unverified (budgeted: %s)",
+  "missing usage on a completed reused turn remains unverified (budgeted: %p)",
   async (budgeted) => {
     const f = await fixture({
       turns: ["completed", "missing_usage", "completed"],
@@ -3065,7 +3065,7 @@ test("retains native rollout fallback for a first assessment without SDK usage",
 });
 
 test.each([false, true])(
-  "unrelated provider definitions do not invalidate continuation (initially present: %s)",
+  "unrelated provider definitions do not invalidate continuation (initially present: %p)",
   async (initiallyPresent) => {
     const unrelated = {
       "synthetic.unused": {
@@ -3124,7 +3124,7 @@ test("malformed optional package metadata preserves inventory and assessment", a
 });
 
 test.each([false, true])(
-  "changed developer instructions reject continuation (profile: %s)",
+  "changed developer instructions reject continuation (profile: %p)",
   async (profile) => {
     const overrides = (instructions: string): JsonObject =>
       profile
