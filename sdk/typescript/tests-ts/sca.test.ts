@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import * as childProcess from "node:child_process";
 import {
   chmod,
@@ -32,6 +33,12 @@ import {
 } from "../src/index.js";
 import type { OsvScanResult } from "../src/sca-osv.js";
 import type { ScaResult, TriageFinding } from "../src/sca-types.js";
+import type {
+  DependencyScanProgress,
+  ScanActivity,
+  ScanCost,
+  ScanTokenUsage,
+} from "../src/index.js";
 import * as runtime from "../src/runtime.js";
 import {
   codexSecurityCredentialHome,
@@ -357,6 +364,7 @@ process.exit(child.status ?? 1);
         : { sourceSnapshot }),
       runOsvScan: async (input) => {
         calls.scanner++;
+        input.onProgress?.({ phase: "discovering" });
         expect(input.environment).toEqual(environment);
         if (options.changeSourceAt === "scanner") await changeSource();
         if (options.abortAt === "scanner")
@@ -1534,6 +1542,141 @@ test("dependency triage preserves scanner evidence when MCP configuration cannot
   );
 });
 
+test("dependency observers report saved assessments, activity, usage, and total cost", async () => {
+  const f = await fixture({ turns: ["completed", "malformed", "completed"] });
+  await using security = f.client;
+  const progress: DependencyScanProgress[] = [];
+  const persisted: ScaResult[] = [];
+  const activity: ScanActivity[] = [];
+  const costs: Readonly<ScanCost>[] = [];
+  const usage: Readonly<ScanTokenUsage>[] = [];
+  const directories: string[] = [];
+  const errors: unknown[] = [];
+  const result = await security.scanDependencies({
+    repositoryPath: f.repository,
+    outputDir: f.outputDir,
+    onProgress(event) {
+      progress.push(event);
+      if (event.phase === "assessing" && event.current === null)
+        persisted.push(
+          JSON.parse(
+            readFileSync(join(f.outputDir, "sca-result.json"), "utf8"),
+          ),
+        );
+    },
+    onActivity: (event) => {
+      activity.push(event);
+    },
+    onCost: (cost) => {
+      costs.push(cost);
+    },
+    onUsage: (tokens) => {
+      usage.push(tokens);
+    },
+    onOutputDirReady: (directory) => {
+      directories.push(directory);
+    },
+    onObserverError: (_observer, error) => {
+      errors.push(error);
+    },
+  });
+  expect(errors).toEqual([]);
+  expect(result.status).toBe("partial");
+  expect(directories).toEqual([f.outputDir]);
+  expect(progress[0]).toEqual({ phase: "preparing" });
+  expect(progress).toContainEqual({ phase: "discovering" });
+  expect(progress.at(-1)).toEqual({ phase: "saving" });
+  const assessments = progress.filter((event) => event.phase === "assessing");
+  expect(
+    assessments.map((event) => [
+      event.assessmentsCompleted,
+      event.assessmentsFailed,
+      event.current?.matchId ?? null,
+    ]),
+  ).toEqual([
+    [0, 0, "match-1"],
+    [1, 0, null],
+    [1, 0, "match-2"],
+    [1, 1, null],
+    [1, 1, "match-3"],
+    [2, 1, null],
+  ]);
+  expect(assessments.every((event) => event.assessmentsTotal === 3)).toBe(true);
+  expect(assessments[0]!.current?.advisoryIds).toEqual(
+    result.matches[0]!.advisoryIds,
+  );
+  expect(
+    persisted.map((snapshot) =>
+      snapshot.assessments.map((item) => item.status),
+    ),
+  ).toEqual([
+    ["completed", "not_started", "not_started"],
+    ["completed", "failed", "not_started"],
+    ["completed", "failed", "completed"],
+  ]);
+  expect(persisted[0]!.assessments[0]!.verdict).toBe("needs_review");
+  expect(activity.some((event) => event.kind === "message")).toBe(true);
+  expect(costs.at(-1)?.estimatedUsd).toBe(result.model.costUsd!);
+  expect(costs.at(-1)!.estimatedUsd).toBeGreaterThan(0);
+  expect(usage.at(-1)?.input_tokens).toBe(3000);
+});
+
+test("throwing, rejecting, and pending observers do not interrupt dependency work", async () => {
+  const f = await fixture();
+  await using security = f.client;
+  const errors: string[] = [];
+  const result = await security.scanDependencies({
+    repositoryPath: f.repository,
+    outputDir: f.outputDir,
+    onProgress() {
+      throw new Error("progress unavailable");
+    },
+    onActivity: async () => {
+      throw new Error("activity unavailable");
+    },
+    onCost() {
+      throw new Error("cost unavailable");
+    },
+    onOutputDirReady: async () => {
+      throw new Error("output observer unavailable");
+    },
+    onUsage: () => new Promise<void>(() => {}),
+    onObserverError(observer) {
+      errors.push(observer);
+      throw new Error("error observer unavailable");
+    },
+  });
+  expect(result.status).toBe("completed");
+  expect(new Set(errors)).toEqual(
+    new Set(["onProgress", "onActivity", "onCost", "onOutputDirReady"]),
+  );
+});
+
+test("zero-match scans finish progress without starting model observers", async () => {
+  const f = await fixture({ matched: false });
+  await using security = f.client;
+  const events: string[] = [];
+  const result = await security.scanDependencies({
+    repositoryPath: f.repository,
+    outputDir: f.outputDir,
+    onProgress: (event) => {
+      events.push(event.phase);
+    },
+    onActivity: () => {
+      events.push("activity");
+    },
+    onCost: () => {
+      events.push("cost");
+    },
+    onUsage: () => {
+      events.push("usage");
+    },
+  });
+  expect(result.status).toBe("completed");
+  expect(events).toEqual(["preparing", "discovering", "saving"]);
+  expect(f.calls.model).toBe(0);
+});
+
 test("large advisory records stay readable without exceeding Codex's input limit", async () => {
   const advisoryDetails = "Synthetic advisory detail. ".repeat(50_000);
   const f = await fixture({ advisoryDetails });
@@ -1753,6 +1896,7 @@ test.each(["scanner", "model"] as const)(
   "cancellation at %s preserves facts and existing interruption error",
   async (abortAt) => {
     const controller = new AbortController();
+    const progress: DependencyScanProgress[] = [];
     const { client, repository, outputDir } = await fixture({
       controller,
       abortAt,
@@ -1763,6 +1907,9 @@ test.each(["scanner", "model"] as const)(
         repositoryPath: repository,
         outputDir,
         signal: controller.signal,
+        onProgress: (event) => {
+          progress.push(event);
+        },
       });
       throw new Error("expected interruption");
     } catch (error) {
@@ -1775,6 +1922,13 @@ test.each(["scanner", "model"] as const)(
     expect(saved.status).toBe("partial");
     expect(saved.matches).toHaveLength(1);
     expect(saved.assessments[0]!.status).toBe("cancelled");
+    expect(progress.at(-1)).toEqual({ phase: "saving" });
+    expect(
+      progress.some(
+        (event) =>
+          event.phase === "assessing" && event.assessmentsCompleted > 0,
+      ),
+    ).toBe(false);
   },
 );
 
@@ -1786,6 +1940,10 @@ test("requested cost limit interrupts while retaining completed evidence", async
       repositoryPath: repository,
       outputDir,
       maxCostUsd: 0.000001,
+      onCost: async () => {
+        throw new Error("cost observer unavailable");
+      },
+      onProgress: () => new Promise<void>(() => {}),
     }),
   ).rejects.toBeInstanceOf(ScanCostLimitExceededError);
   const saved = JSON.parse(
