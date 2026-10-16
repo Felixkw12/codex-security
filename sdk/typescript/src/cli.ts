@@ -8426,7 +8426,7 @@ async function executeScan(
   let auth: ScanAuthMode | undefined = arguments_.auth;
   let patchAnalyticsOverride: string | undefined;
   let validation: Record<string, unknown> | undefined;
-  let validationExitCode = 0;
+  let validationError: string | undefined;
   let patchServiceTier: JsonValue | undefined;
   let selectedAuthentication: ScanAuthentication | null = null;
   let repository = "";
@@ -8983,8 +8983,8 @@ async function executeScan(
             }
             validation = { status: "complete", findings: 0 };
           } catch (error) {
-            validationExitCode = 2;
             const message = errorMessage(error);
+            validationError = message;
             validation = { status: "failed", findings: 0, message };
             errorOutput.write(
               `codex-security: Validation failed: ${diagnosticValue(message)}\n`,
@@ -9043,8 +9043,8 @@ async function executeScan(
               progress?.stage(`Finding validation saved to ${reportPath}`);
             } catch {}
           } catch (error) {
-            validationExitCode = 2;
             const message = errorMessage(error);
+            validationError = message;
             validation = { ...validation, status: "failed", message };
             errorOutput.write(
               `codex-security: Validation failed: ${diagnosticValue(message)}\n`,
@@ -9111,11 +9111,11 @@ async function executeScan(
     });
     if (result !== null && arguments_.validate) {
       const exitCode = requestedSignal === "SIGINT" ? 130 : 143;
-      errorOutput.write(
-        `codex-security: Validation interrupted. Completed scan output was kept at ${errorMessage(result.scanDir)}.\n`,
-      );
+      const message = `Validation interrupted. Completed scan output was kept at ${errorMessage(result.scanDir)}.`;
+      errorOutput.write(`codex-security: ${message}\n`);
       return {
         exitCode,
+        error: message,
         data: {
           ...result.toJSON(),
           validation: { ...validation, status: "failed", exitCode },
@@ -9273,8 +9273,8 @@ async function executeScan(
       ...(error === undefined ? {} : { error }),
     };
   };
-  if (validationExitCode !== 0) {
-    return finishResult(validationExitCode);
+  if (validationError !== undefined) {
+    return finishResult(2, validationError);
   }
   if (targetWarnings.length > 0) {
     const message =

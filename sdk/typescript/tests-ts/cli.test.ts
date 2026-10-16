@@ -533,9 +533,23 @@ describe("CLI", () => {
     },
   );
 
-  test.each(["failure", "SIGINT", "SIGTERM"])(
-    "retains completed assessments and stops patching after validation %s",
-    async (signal) => {
+  test.each(
+    ["failure", "SIGINT", "SIGTERM"].flatMap((signal) =>
+      (
+        [
+          ["json", false],
+          ["json", true],
+          ["jsonl", true],
+        ] as const
+      ).map(
+        ([format, fullOutput]) =>
+          [signal, format, fullOutput ? "full" : "plain"] as const,
+      ),
+    ),
+  )(
+    "retains completed assessments and stops patching after validation %s (%s, %s)",
+    async (signal, format, outputMode) => {
+      const fullOutput = outputMode === "full";
       const root = await mkdtemp(join(tmpdir(), "scan-validation-partial-"));
       const repository = join(root, "repository");
       const scanDir = join(root, "scan");
@@ -543,6 +557,8 @@ describe("CLI", () => {
       await mkdir(scanDir);
       const signals = new FakeSignals();
       const stdout = capture();
+      const stderr = capture();
+      const failureMessage = `Second assessment failed: ${SYNTHETIC_CREDENTIALS}`;
       let validations = 0;
       let commands = 0;
       const exitCode =
@@ -550,9 +566,17 @@ describe("CLI", () => {
       try {
         expect(
           await main(
-            ["scan", ".", "--validate", "--patch", "--json"],
+            [
+              "scan",
+              ".",
+              "--validate",
+              "--patch",
+              "--format",
+              format,
+              ...(fullOutput ? ["--full-output"] : []),
+            ],
             stdout.stream,
-            capture().stream,
+            stderr.stream,
             dependencies({
               signals,
               result: scanResultAt(scanDir, ["high", "low"]),
@@ -570,8 +594,7 @@ describe("CLI", () => {
                 expect(
                   await readFile(join(scanDir, "validation.md"), "utf8"),
                 ).toContain("Completed first assessment.");
-                if (signal === "failure")
-                  throw new Error("Second assessment failed.");
+                if (signal === "failure") throw new Error(failureMessage);
                 signals.emit(signal);
                 abort!.throwIfAborted();
                 throw new Error("unreachable");
@@ -585,7 +608,17 @@ describe("CLI", () => {
         ).toBe(exitCode);
         expect(validations).toBe(2);
         expect(commands).toBe(0);
-        expect(JSON.parse(stdout.text())).toMatchObject({
+        const output = JSON.parse(stdout.text());
+        if (fullOutput) {
+          expect(output.ok).toBe(false);
+          const message =
+            signal === "failure"
+              ? failureMessage
+              : `Validation interrupted. Completed scan output was kept at ${scanDir}.`;
+          expect(output.error).toEqual({ code: "SCAN_FAILED", message });
+          expect(stderr.text()).toContain(message);
+        }
+        expect(fullOutput ? output.data : output).toMatchObject({
           manifest: { scan: { status: "completed" } },
           validation: {
             status: "failed",
