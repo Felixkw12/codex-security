@@ -2601,7 +2601,13 @@ test("continues a budget-stopped run without repeating matching or completed ass
   );
 });
 
-test.each(["source", "configuration", "provider", "endpoint"] as const)(
+test.each([
+  "source",
+  "configuration",
+  "provider",
+  "endpoint",
+  "environment endpoint",
+] as const)(
   "refuses continuation after changed %s and preserves saved artifacts",
   async (change) => {
     const provider = {
@@ -2615,15 +2621,25 @@ test.each(["source", "configuration", "provider", "endpoint"] as const)(
       codexOverrides:
         change === "endpoint"
           ? { openai_base_url: "https://provider.example.invalid/v1" }
-          : {
-              model_provider: "synthetic.provider",
-              model_providers: { "synthetic.provider": provider },
-            },
+          : change === "environment endpoint"
+            ? {}
+            : {
+                model_provider: "synthetic.provider",
+                model_providers: { "synthetic.provider": provider },
+              },
     });
     await using security = f.client;
+    if (change === "environment endpoint")
+      Object.assign(f.environment, {
+        OPENAI_BASE_URL: "https://provider.example.invalid/v1",
+      });
     const options = { repositoryPath: f.repository, outputDir: f.outputDir };
     await security.scanDependencies(options);
-    if (change === "source")
+    if (change === "environment endpoint")
+      Object.assign(f.environment, {
+        OPENAI_BASE_URL: "https://changed.example.invalid/v1",
+      });
+    else if (change === "source")
       await writeFile(join(f.repository, "usage.txt"), "changed source");
     else if (change === "configuration")
       Object.assign(security.config.codexOverrides!, {
@@ -2892,5 +2908,84 @@ test.each([false, true])(
     expect(costs).toHaveLength(0);
     expect(f.calls.scanner).toBe(1);
     expect(f.turns).toHaveLength(3);
+  },
+);
+
+test.each(["built-in", "custom provider"] as const)(
+  "continuation ignores an environment endpoint overridden by %s configuration",
+  async (kind) => {
+    const endpoint = "https://configured.example.invalid/v1";
+    const f = await fixture({
+      turns: ["completed", "malformed"],
+      codexOverrides:
+        kind === "built-in"
+          ? { openai_base_url: endpoint }
+          : {
+              model_provider: "synthetic.provider",
+              model_providers: {
+                "synthetic.provider": {
+                  name: "Synthetic provider",
+                  base_url: endpoint,
+                  wire_api: "responses",
+                  requires_openai_auth: true,
+                },
+              },
+            },
+    });
+    await using security = f.client;
+    Object.assign(f.environment, {
+      OPENAI_BASE_URL: "https://ignored.example.invalid/v1",
+    });
+    const options = { repositoryPath: f.repository, outputDir: f.outputDir };
+    const initial = await security.scanDependencies(options);
+    Object.assign(f.environment, {
+      OPENAI_BASE_URL: "https://changed.example.invalid/v1",
+    });
+    const result = await security.scanDependencies(options);
+    expect(result.status, result.diagnostics.join("\n")).toBe("completed");
+    expect(result.assessments[0]).toEqual(initial.assessments[0]);
+    expect(f.turns).toHaveLength(3);
+    expect(f.calls.scanner).toBe(1);
+  },
+);
+
+test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+  "unreadable optional installed metadata preserves inventory and continuation",
+  async () => {
+    const f = await fixture({ turns: ["malformed", "completed"] });
+    await using security = f.client;
+    await writeFile(
+      join(f.repository, "package.json"),
+      JSON.stringify({
+        name: "synthetic-project",
+        dependencies: { "synthetic-package": "1.0.0" },
+      }),
+    );
+    const installed = join(f.repository, "node_modules/synthetic-package");
+    await mkdir(installed, { recursive: true });
+    const manifest = join(installed, "package.json");
+    await writeFile(
+      manifest,
+      JSON.stringify({ name: "synthetic-package", version: "1.0.0" }),
+    );
+    await chmod(manifest, 0o000);
+    try {
+      let observed: ScaResult | undefined;
+      const options = { repositoryPath: f.repository, outputDir: f.outputDir };
+      const initial = await security.scanDependencies({
+        ...options,
+        onInventory: (inventory) => {
+          observed = inventory;
+        },
+      });
+      expect(observed?.matches).toHaveLength(2);
+      expect(initial.assessmentContext?.sourceDigest).toBeString();
+      expect(initial.packageContexts?.[0]?.installedPath).toBeNull();
+      const result = await security.scanDependencies(options);
+      expect(result.status).toBe("completed");
+      expect(f.calls.scanner).toBe(1);
+    } finally {
+      await chmod(manifest, 0o600);
+    }
   },
 );

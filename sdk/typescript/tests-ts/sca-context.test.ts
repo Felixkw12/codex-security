@@ -1,6 +1,13 @@
 import { afterEach, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { dependencyPackageContexts } from "../src/sca-context.js";
 import { discoverScaInputs, initialOsvScanResult } from "../src/sca-osv.js";
@@ -277,3 +284,66 @@ test("registry-only Cargo matching does not depend on optional manifest parsing"
   expect(discovered.localReferences).toHaveLength(0);
   expect(discovered.diagnostics).toEqual([]);
 });
+
+test("an outside package link does not invent a chain through a hoisted copy", async () => {
+  const { root, repository, result, parent, leaf } = await fixture();
+  const external = join(root, "external-leaf");
+  await packageAt(external, "@synthetic/leaf", "9.0.0");
+  const nearerLink = join(dirname(parent), "@synthetic/leaf");
+  await rm(nearerLink);
+  await symlink(
+    external,
+    nearerLink,
+    process.platform === "win32" ? "junction" : "dir",
+  );
+  await mkdir(join(repository, "node_modules/@synthetic"));
+  await symlink(
+    leaf,
+    join(repository, "node_modules/@synthetic/leaf"),
+    process.platform === "win32" ? "junction" : "dir",
+  );
+  await packageAt(
+    join(repository, "node_modules/synthetic-dev"),
+    "synthetic-dev",
+    "1.0.0",
+    { "@synthetic/leaf": "3.0.0" },
+  );
+  await writeFile(
+    join(repository, "package.json"),
+    JSON.stringify({
+      name: "synthetic-project",
+      version: "1.0.0",
+      dependencies: { "synthetic-parent": "2.0.0" },
+      devDependencies: { "synthetic-dev": "1.0.0" },
+    }),
+  );
+  const [context] = await dependencyPackageContexts(result);
+  expect(context!.dependencyChain.map((item) => item.name)).toEqual([
+    "synthetic-project",
+    "synthetic-dev",
+    "@synthetic/leaf",
+  ]);
+  expect(context!.dependencyGroups).toEqual(["dev"]);
+});
+
+test
+  .skipIf(process.platform === "win32" || process.getuid?.() === 0)
+  .each(["project", "installed"] as const)(
+  "permission-denied optional %s manifest leaves advisory evidence usable",
+  async (kind) => {
+    const { repository, leaf, result } = await fixture();
+    const manifest = join(
+      kind === "project" ? repository : leaf,
+      "package.json",
+    );
+    await chmod(manifest, 0o000);
+    try {
+      const [context] = await dependencyPackageContexts(result);
+      expect(context!.installedPath).toBeNull();
+      expect(context!.limitations).not.toHaveLength(0);
+      expect(result.matches).toHaveLength(3);
+    } finally {
+      await chmod(manifest, 0o600);
+    }
+  },
+);

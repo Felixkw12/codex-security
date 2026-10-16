@@ -1083,15 +1083,22 @@ export class CodexSecurity {
           typeof session.modelProvider === "string"
             ? session.modelProvider
             : "openai";
+        const providerConfiguration = isRecord(providers)
+          ? providers[provider]
+          : null;
         const configurationDigest = workflowDigest({
           model,
           reasoningEffort,
           provider,
-          providerConfiguration: isRecord(providers)
-            ? providers[provider]
-            : null,
+          providerConfiguration,
           endpoint:
-            provider === "openai" ? resolvedConfig["openai_base_url"] : null,
+            provider === "openai"
+              ? (resolvedConfig["openai_base_url"] ??
+                (process.platform === "win32"
+                  ? environmentValue(runtime.environment, "OPENAI_BASE_URL")
+                  : runtime.environment["OPENAI_BASE_URL"]) ??
+                null)
+              : null,
           skill: contract.skillDigest,
           workflow: "focused-dependency-assessment-v1",
         });

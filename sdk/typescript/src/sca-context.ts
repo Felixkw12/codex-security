@@ -1,4 +1,4 @@
-import { readFile, realpath, stat } from "node:fs/promises";
+import { lstat, readFile, realpath, stat } from "node:fs/promises";
 import { basename, dirname, join, relative } from "node:path";
 import { isRecord } from "./record.js";
 import { relativePathIsOutside } from "./targets.js";
@@ -44,6 +44,8 @@ async function readPackage(
       (error as NodeJS.ErrnoException).code === "ENOTDIR" ||
       (error as NodeJS.ErrnoException).code === "EISDIR" ||
       (error as NodeJS.ErrnoException).code === "ELOOP" ||
+      (error as NodeJS.ErrnoException).code === "EACCES" ||
+      (error as NodeJS.ErrnoException).code === "EPERM" ||
       error instanceof SyntaxError
     )
       return null;
@@ -61,8 +63,17 @@ async function resolvePackage(
     const modules = join(directory, "node_modules");
     const candidate = join(modules, name);
     if (relativePathIsOutside(relative(modules, candidate))) return null;
-    const found = await readPackage(candidate, repository);
-    if (found !== null) return found;
+    try {
+      await lstat(candidate);
+      // A nearer installed package shadows hoisted copies even when its
+      // manifest cannot be inspected within this repository.
+      return await readPackage(candidate, repository);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "EACCES" || code === "EPERM" || code === "ELOOP")
+        return null;
+      if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
+    }
     const parent = dirname(directory);
     if (parent === directory) break;
     directory = parent;
