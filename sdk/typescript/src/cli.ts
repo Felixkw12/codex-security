@@ -6526,12 +6526,12 @@ async function runDependencyScan(
     return diagnosticValue(
       [
         summary,
+        `last event ${seconds}s`,
         ...(showCost
           ? [
-              `est. ${cost === null ? "cost unavailable" : formatUsd(cost.estimatedUsd)}${options.maxCostUsd === undefined ? "" : ` / ${formatUsd(options.maxCostUsd)}`}`,
+              `est. ${cost === null ? "n/a" : formatUsd(cost.estimatedUsd)}${options.maxCostUsd === undefined ? "" : `/${formatUsd(options.maxCostUsd)}`}`,
             ]
           : []),
-        `last event ${seconds}s ago`,
         activity ?? detail,
       ]
         .filter((part) => part !== undefined)

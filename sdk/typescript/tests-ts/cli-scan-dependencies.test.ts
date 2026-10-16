@@ -1,5 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { stripVTControlCharacters } from "node:util";
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { main } from "../src/cli.js";
 import {
@@ -163,7 +164,7 @@ describe("scan dependencies CLI", () => {
         );
         now = 5_000;
         redraw();
-        expect(stderr.text()).toContain("last event 3s ago");
+        expect(stderr.text()).toContain("last event 3s");
         options.onCost?.(cost);
         options.onActivity?.({
           id: "match-3:tool",
@@ -174,7 +175,7 @@ describe("scan dependencies CLI", () => {
         });
         now = 6_000;
         redraw();
-        expect(stderr.text()).toContain("last event 1s ago");
+        expect(stderr.text()).toContain("last event 1s");
         expect(stderr.text()).toContain(`est. ${formatUsd(cost.estimatedUsd)}`);
         expect(stderr.text()).toContain(
           "Tool running: rg token=SYNTHETIC_VALUE",
@@ -212,6 +213,50 @@ describe("scan dependencies CLI", () => {
     });
     captured!.onOutputDirReady?.("late output");
     expect(stderr.text()).toBe(finished);
+  });
+
+  test("80-column progress retains the quiet duration and requested cost limit", async () => {
+    const { stderr, runCli } = createCliTest(main, { stderr: true });
+    Object.assign(stderr.stream, { columns: 80 });
+    let now = 0;
+    let redraw = () => {};
+    const deps = dependencies({
+      onScanDependencies: async (options) => {
+        options.onProgress?.({
+          phase: "assessing",
+          assessmentsTotal: 4,
+          assessmentsCompleted: 1,
+          assessmentsFailed: 1,
+          current: null,
+        });
+        const checkLine = (seconds: number, expectedCost: string) => {
+          now += seconds * 1000;
+          redraw();
+          const line = stripVTControlCharacters(
+            stderr.text().split("\r").at(-1)!,
+          );
+          expect(line).toContain(`last event ${seconds}s`);
+          expect(line).toContain(`est. ${expectedCost}/$5.00`);
+          expect(line.length).toBeLessThan(80);
+        };
+        checkLine(600, "n/a");
+        const cost = estimateScanCost("gpt-5.6-sol", {
+          input_tokens: 1000,
+          output_tokens: 1000,
+        })!;
+        options.onCost?.(cost, 5);
+        checkLine(600, formatUsd(cost.estimatedUsd));
+        return dependencyResult();
+      },
+    });
+    deps.now = () => now;
+    deps.setInterval = (callback) => {
+      redraw = callback;
+      return fakeInterval(callback);
+    };
+    expect(
+      await runCli(["scan", "dependencies", "--max-cost", "5"], deps),
+    ).toBe(0);
   });
 
   test.each([false, true])(
