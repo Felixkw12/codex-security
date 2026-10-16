@@ -6,6 +6,7 @@ export type DependencyScanProgress =
       inputsTotal: number;
       /** OSV invocations that have finished, including failed invocations. */
       inputsProcessed: number;
+      /** Failed selected inputs, including failures before an invocation starts. */
       inputsFailed: number;
       currentInput: string | null;
       components: number;

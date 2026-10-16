@@ -216,6 +216,45 @@ test.each(["throw", "reject", "pending"] as const)(
   },
 );
 
+test.each(["missing", "version", "invocation"] as const)(
+  "matching progress includes inputs that fail before processing: %s",
+  async (failure) => {
+    const { repository, output, root } = await setup();
+    await mkdir(join(repository, "nested"));
+    await writeFile(join(repository, "package-lock.json"), npmLock());
+    await writeFile(join(repository, "nested", "package-lock.json"), npmLock());
+    const progress: DependencyScanProgress[] = [];
+    const result = await runOsvScan(
+      {
+        repositoryPath: repository,
+        outputDir: output,
+        onProgress: (event) => {
+          progress.push(event);
+        },
+      },
+      {
+        executable:
+          failure === "missing"
+            ? join(root, "missing-scanner")
+            : process.execPath,
+        runProcess: async (_executable, argv) => {
+          if (failure === "version" || argv[0] !== "--version")
+            throw new Error("synthetic scanner failure");
+          return { stdout: "2.6.0", stderr: "", exitCode: 0 };
+        },
+      },
+    );
+    expect(result.status).toBe("failed");
+    expect(progress.at(-1)).toMatchObject({
+      phase: "matching",
+      inputsTotal: 2,
+      inputsProcessed: failure === "invocation" ? 1 : 0,
+      inputsFailed: 2,
+      currentInput: null,
+    });
+  },
+);
+
 async function initializedSubmodule(
   repository: string,
   path = "vendor/library",

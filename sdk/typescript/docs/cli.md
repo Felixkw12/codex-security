@@ -1916,6 +1916,8 @@ after the result is saved. A `needs_review` verdict is a completed assessment.
 `onActivity` reports observed Codex activity; `onUsage` and `onCost` report model
 usage and estimated cost across assessment turns. `onOutputDirReady` reports
 the output directory after its initial checkpoint is saved.
+Activity IDs are scoped to their advisory match, so separate assessment turns
+can be displayed without overwriting earlier activity.
 These observers are optional, are not awaited, and cannot gate work. Exceptions
 and rejected promises are passed to `onObserverError` without stopping the scan.
 Events are observations, not a durable log or a promise of future progress.

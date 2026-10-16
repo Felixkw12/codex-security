@@ -1130,7 +1130,10 @@ export class CodexSecurity {
                     event,
                     inputs.repository,
                   ))
-                    onActivity(activity);
+                    onActivity({
+                      ...activity,
+                      id: `${match.id}:${activity.id}`,
+                    });
                   throwIfAborted(signal, outputDir);
                 },
               });

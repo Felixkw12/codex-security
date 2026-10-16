@@ -1132,7 +1132,7 @@ export async function runOsvScan(
       phase: "matching",
       inputsTotal: selected.length,
       inputsProcessed: processed.size,
-      inputsFailed: [...processed].filter((input) => input.status === "failed")
+      inputsFailed: selected.filter((input) => input.status === "failed")
         .length,
       currentInput,
       components: result.components.length,

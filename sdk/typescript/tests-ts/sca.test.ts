@@ -184,6 +184,7 @@ async function fixture(
     missing?: boolean;
     error?: string;
     malformed?: boolean;
+    commandActivity?: boolean;
     runtimeError?: boolean;
     controller?: AbortController;
     abortAt?: "source" | "revision" | "scanner" | "model";
@@ -457,6 +458,25 @@ process.exit(child.status ?? 1);
                           ? "sca-thread"
                           : `sca-thread-${turnNumber}`,
                     };
+                    if (options.commandActivity) {
+                      for (const status of [
+                        "in_progress",
+                        "completed",
+                      ] as const)
+                        yield {
+                          type:
+                            status === "in_progress"
+                              ? "item.started"
+                              : "item.completed",
+                          item: {
+                            id: "command",
+                            type: "command_execution",
+                            command: "rg synthetic .",
+                            aggregated_output: "",
+                            status,
+                          },
+                        };
+                    }
                     if (behavior === "cancelled") {
                       options.controller!.abort("cancel during later triage");
                       throw new Error("interrupted");
@@ -1543,7 +1563,10 @@ test("dependency triage preserves scanner evidence when MCP configuration cannot
 });
 
 test("dependency observers report saved assessments, activity, usage, and total cost", async () => {
-  const f = await fixture({ turns: ["completed", "malformed", "completed"] });
+  const f = await fixture({
+    turns: ["completed", "malformed", "completed"],
+    commandActivity: true,
+  });
   await using security = f.client;
   const progress: DependencyScanProgress[] = [];
   const persisted: ScaResult[] = [];
@@ -1615,7 +1638,23 @@ test("dependency observers report saved assessments, activity, usage, and total 
     ["completed", "failed", "completed"],
   ]);
   expect(persisted[0]!.assessments[0]!.verdict).toBe("needs_review");
-  expect(activity.some((event) => event.kind === "message")).toBe(true);
+  expect(
+    activity
+      .filter((event) => event.kind === "message")
+      .map((event) => event.id),
+  ).toEqual(["match-1:message", "match-2:message", "match-3:message"]);
+  expect(
+    activity
+      .filter((event) => event.kind === "command")
+      .map((event) => [event.id, event.status]),
+  ).toEqual([
+    ["match-1:command", "running"],
+    ["match-1:command", "completed"],
+    ["match-2:command", "running"],
+    ["match-2:command", "completed"],
+    ["match-3:command", "running"],
+    ["match-3:command", "completed"],
+  ]);
   expect(costs.at(-1)?.estimatedUsd).toBe(result.model.costUsd!);
   expect(costs.at(-1)!.estimatedUsd).toBeGreaterThan(0);
   expect(usage.at(-1)?.input_tokens).toBe(3000);
