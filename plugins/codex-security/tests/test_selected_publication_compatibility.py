@@ -107,6 +107,18 @@ def assert_legacy_finding_published(scan, expected):
     assert "return synthetic_input;" in report
 
 
+def assert_completed_preparation(api, connection, scan, *, accepted):
+    files = {path: path.read_bytes() for path in scan.scan_dir.rglob("*") if path.is_file()}
+    state = "\n".join(connection.iterdump())
+    completion = Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None)
+    prepared = api["complete_scan"](connection, completion, prepare_only=True)
+    assert prepared["acceptedFindings"] is accepted
+    completed = api["complete_scan"](connection, completion)
+    assert "acceptedFindings" not in completed
+    assert {path: path.read_bytes() for path in scan.scan_dir.rglob("*") if path.is_file()} == files
+    assert "\n".join(connection.iterdump()) == state
+
+
 @pytest.mark.parametrize("workflow", ["deep-scan-mcp/v1", "deep-security-scan/v1"])
 @pytest.mark.parametrize("capped", [False, True])
 def test_legacy_v1_accepted_findings_publish_and_resume_completion(
@@ -159,11 +171,47 @@ def test_legacy_v1_accepted_findings_publish_and_resume_completion(
         is None
     )
     sealed = {path: path.read_bytes() for path in scan.scan_dir.rglob("*") if path.is_file()}
-    workbench_api["complete_scan"](
-        workbench_db, Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None)
-    )
+    assert_completed_preparation(workbench_api, workbench_db, scan, accepted=True)
     assert {path: path.read_bytes() for path in sealed} == sealed
     assert accepted.read_bytes() == accepted_bytes
+
+
+@pytest.mark.parametrize(
+    "workflow", ["deep-scan-mcp/v1", "deep-security-scan/v1", "deep-security-scan/v2"]
+)
+@pytest.mark.parametrize("damage", ["accepted-source", "sealed-findings"])
+def test_completed_preparation_rejects_changed_accepted_or_sealed_artifacts(
+    workbench_api, workbench_db, publication_scan, workflow, damage
+):
+    scan = publication_scan()
+    legacy_finding(scan)
+    if workflow.endswith("/v2"):
+        accepted = selected_publication(workbench_api, workbench_db, scan)
+    else:
+        _, accepted, _ = accept_reducer(workbench_db, scan)
+        with workbench_db:
+            workbench_db.execute("UPDATE deep_scan_runs SET workflow_version = ?", (workflow,))
+        staged = stage_publication(
+            scan, generation=3, result_path=accepted, title=scan.findings[0]["title"]
+        )
+        workbench_api["saved_results"].write_scan_draft(
+            workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, staged
+        )
+    completion = Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None)
+    workbench_api["complete_scan"](workbench_db, completion)
+    if damage == "accepted-source":
+        accepted.write_bytes(accepted.read_bytes() + b"\n")
+        expected_error = "changed after acceptance"
+    else:
+        findings = scan.scan_dir / "findings.json"
+        findings.write_bytes(findings.read_bytes() + b"\n")
+        expected_error = "sealed artifact changed"
+    files = {path: path.read_bytes() for path in scan.scan_dir.rglob("*") if path.is_file()}
+    state = "\n".join(workbench_db.iterdump())
+    with pytest.raises(SystemExit, match=expected_error):
+        workbench_api["complete_scan"](workbench_db, completion, prepare_only=True)
+    assert {path: path.read_bytes() for path in scan.scan_dir.rglob("*") if path.is_file()} == files
+    assert "\n".join(workbench_db.iterdump()) == state
 
 
 def test_legacy_v1_authority_uses_reducer_sequence_instead_of_completion_order(
@@ -318,7 +366,7 @@ def test_selected_historical_findings_resume_across_interrupted_sealing(
     workbench_api["complete_scan"](workbench_db, completion)
     assert_legacy_finding_published(scan, expected)
     sealed = {p: p.read_bytes() for p in scan.scan_dir.rglob("*") if p.is_file()}
-    workbench_api["complete_scan"](workbench_db, completion)
+    assert_completed_preparation(workbench_api, workbench_db, scan, accepted=True)
     assert {p: p.read_bytes() for p in sealed} == sealed
     assert accepted.read_bytes() == accepted_bytes
     assert (
@@ -384,6 +432,10 @@ def test_new_producers_still_reject_legacy_finding_fields(
         prepare_only=True,
     )
     assert prepared["acceptedFindings"] is False
+    workbench_api["complete_scan"](
+        workbench_db, Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None)
+    )
+    assert_completed_preparation(workbench_api, workbench_db, scan, accepted=False)
 
 
 def test_zero_result_selection_does_not_admit_legacy_findings(
@@ -667,6 +719,7 @@ def test_selected_zero_discovery_deadline_preserves_the_published_draft(
     workbench_api["complete_scan"](workbench_db, completion)
     assert workbench_db.execute("SELECT status FROM scans").fetchone()[0] == "complete"
     sealed = {path: path.read_bytes() for path in scan.scan_dir.rglob("*.json")}
+    assert_completed_preparation(workbench_api, workbench_db, scan, accepted=False)
     deep.finish_deep_scan(workbench_db, finish)
     workbench_api["complete_scan"](workbench_db, completion)
     assert {path: path.read_bytes() for path in scan.scan_dir.rglob("*.json")} == sealed

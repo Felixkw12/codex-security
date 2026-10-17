@@ -145,9 +145,15 @@ const cases: {
   cancellationFault?: "status-read" | "deep-state-read" | "cancel-response";
   historicalFindings?: boolean;
   changedHistoricalFollowUp?: boolean;
+  completeBeforePreparation?: boolean;
 }[] = [
   ...outcomes.map((outcome) => ({ outcome })),
   { outcome: "restart", historicalFindings: true },
+  {
+    outcome: "restart",
+    historicalFindings: true,
+    completeBeforePreparation: true,
+  },
   { outcome: "completed", historicalFindings: true },
   {
     outcome: "completed",
@@ -230,6 +236,7 @@ for (const {
   resumeStatusFault,
   historicalFindings,
   changedHistoricalFollowUp,
+  completeBeforePreparation,
 } of cases) {
   const resumedStop = outcome.includes("-resumed-");
   const restart = outcome.startsWith("restart") || resumedStop;
@@ -244,7 +251,7 @@ for (const {
   const name =
     outcome === "followup-canceled"
       ? "SDK preserves a selected aggregate when its follow-up is canceled"
-      : `SDK handles selected aggregate: ${outcome}${budgetCompletionFault ? ` (budget completion ${budgetCompletionFault})` : ""}${cancellationFault ? ` (cancellation ${cancellationFault})` : ""}${statusReadFault ? " (selection status unavailable)" : ""}${resumeStatusFault ? ` (resume status ${resumeStatusFault})` : ""}${initialResumeUsage ? " (initial resume cost)" : ""}${unpricedUsage ? " (unpriced remainder)" : ""}${historicalFindings ? " (historical findings)" : ""}${changedHistoricalFollowUp ? " (changed follow-up)" : ""}`;
+      : `SDK handles selected aggregate: ${outcome}${budgetCompletionFault ? ` (budget completion ${budgetCompletionFault})` : ""}${cancellationFault ? ` (cancellation ${cancellationFault})` : ""}${statusReadFault ? " (selection status unavailable)" : ""}${resumeStatusFault ? ` (resume status ${resumeStatusFault})` : ""}${initialResumeUsage ? " (initial resume cost)" : ""}${unpricedUsage ? " (unpriced remainder)" : ""}${historicalFindings ? " (historical findings)" : ""}${changedHistoricalFollowUp ? " (changed follow-up)" : ""}${completeBeforePreparation ? " (concurrent completion)" : ""}`;
   const runCase = async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -273,6 +280,8 @@ for (const {
     let publicationFails = restart && !statusReadFault;
     let selectionReadLost = false;
     let resumeStatusInjected = false;
+    let completedBeforePreparation = false;
+    let concurrentlyCompletedArtifacts: Buffer<ArrayBuffer>[] | undefined;
     const resumeStatusError = new Error(
       "Synthetic selected resume status unavailable",
     );
@@ -396,6 +405,32 @@ for (const {
             if (args[0] === "get-cli-scan-resume")
               originalResumeSignal = options.signal;
             commands.push(args[0]!);
+            if (
+              completeBeforePreparation &&
+              resumedStartup &&
+              !completedBeforePreparation &&
+              args[0] === "prepare-scan-completion"
+            ) {
+              // Another resume can complete after registration, before this call acquires its lock.
+              completedBeforePreparation = true;
+              await runWorkbench(options, ["complete-scan", ...args.slice(1)]);
+              const saved = await runWorkbench(options, [
+                "get-scan",
+                "--scan-id",
+                scanId,
+              ]);
+              expect(saved["scan"]).toMatchObject({
+                progress: { status: "complete" },
+              });
+              concurrentlyCompletedArtifacts = await Promise.all(
+                [
+                  "scan-manifest.json",
+                  "findings.json",
+                  "coverage.json",
+                  "report.md",
+                ].map((name) => readFile(join(scanDir, name))),
+              );
+            }
             if (
               args[0] === "get-deep-scan" &&
               resumedStartup &&
@@ -1218,6 +1253,19 @@ for (const {
         ...(restart ? { resumeScanId: scanId, outputDir: scanDir } : {}),
       });
       expect(result.threadId).toBe(threadId);
+      if (completeBeforePreparation) {
+        expect(completedBeforePreparation).toBe(true);
+        expect(
+          await Promise.all(
+            [
+              "scan-manifest.json",
+              "findings.json",
+              "coverage.json",
+              "report.md",
+            ].map((name) => readFile(join(scanDir, name))),
+          ),
+        ).toEqual(concurrentlyCompletedArtifacts!);
+      }
       if (recoveryBudget)
         expect(commands).toContain("complete-budget-exhausted-scan");
       if (outcome === "restart-changed-target")

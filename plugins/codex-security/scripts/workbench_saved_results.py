@@ -98,12 +98,15 @@ def refresh_completed_scan(
     connection: sqlite3.Connection,
     scan: sqlite3.Row,
     cost_json: str | None,
+    *,
+    prepare_only: bool = False,
 ) -> dict[str, Any]:
     warnings = json.loads(scan["completion_warnings_json"])
     scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
     db.require_recorded_manifest_digest(scan, scan_dir)
     db.verify_manifest_binding(scan, db.read_json_object(scan_dir / db.ARTIFACTS["manifest"]))
     try:
+        accepted = prepare_only and has_verified_selected_result(db, connection, scan)
         manifest, _, coverage = finalize_scan(
             scan_dir,
             expected_coverage_mode=db.expected_coverage_mode(scan),
@@ -122,7 +125,10 @@ def refresh_completed_scan(
                 "UPDATE scans SET completion_warnings_json = ? WHERE id = ?",
                 (json.dumps(warnings), scan["id"]),
             )
-    return db.completed_scan_context(connection, scan["id"], coverage)
+    context = db.completed_scan_context(connection, scan["id"], coverage)
+    if prepare_only:
+        context["acceptedFindings"] = accepted
+    return context
 
 
 def validate_sealed_budget_draft(

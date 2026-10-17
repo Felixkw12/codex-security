@@ -1481,7 +1481,7 @@ def complete_scan_locked(
     if scan["status"] == "complete":
         deep_scan.find_supported_deep_scan_run(connection, scan_id)
         return saved_results.refresh_completed_scan(
-            _WORKBENCH_DB_CONTEXT, connection, scan, cost_json
+            _WORKBENCH_DB_CONTEXT, connection, scan, cost_json, prepare_only=prepare_only
         )
     if scan["status"] != "running":
         raise SystemExit("Only a running scan can be completed.")
