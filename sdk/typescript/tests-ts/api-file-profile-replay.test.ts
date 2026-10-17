@@ -298,9 +298,15 @@ test.each([
   },
 );
 
-test.each(["rerun", "resume"] as const)(
-  "saved registration retains explicit file-profile settings through CLI %s",
-  async (command) => {
+test.each(
+  (["rerun", "resume"] as const).flatMap((command) =>
+    (["inherited", "explicit", "empty", "null"] as const).map(
+      (skills) => [command, skills] as const,
+    ),
+  ),
+)(
+  "saved registration retains file-profile settings through CLI %s with %s skills",
+  async (command, skills) => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const home = join(root, "home");
@@ -321,7 +327,9 @@ test.each(["rerun", "resume"] as const)(
       agents: {
         reviewer: { config_file: "file-reviewer.toml", description: version },
       },
-      skills: { config: [{ path: "file-skill", enabled: true }] },
+      skills: {
+        config: [{ path: "file-skill", enabled: version === "first" }],
+      },
       model_instructions_file: "file-instructions.md",
       model_catalog_json: "file-catalog.json",
       features: { view_image: true },
@@ -337,11 +345,20 @@ test.each(["rerun", "resume"] as const)(
       },
       otel: { exporter: "none" },
       agents: { reviewer: { config_file: "caller-reviewer.toml" } },
-      skills: { config: [{ path: "caller-skill", enabled: false }] },
       model_instructions_file: null,
       model_catalog_json: "../caller-catalog.json",
       features: { view_image: false, shell_tool: false },
     };
+    if (skills !== "inherited")
+      explicit["skills"] =
+        skills === "null"
+          ? null
+          : {
+              config:
+                skills === "empty"
+                  ? []
+                  : [{ path: "caller-skill", enabled: false }],
+            };
     const environment = {
       CODEX_HOME: home,
       CODEX_SECURITY_STATE_DIR: join(root, "state"),
@@ -408,12 +425,22 @@ test.each(["rerun", "resume"] as const)(
             description: "reloaded",
           },
         },
-        skills: {
-          config: [{ path: join(scanDir, "caller-skill"), enabled: false }],
-        },
         model_catalog_json: resolve(scanDir, "../caller-catalog.json"),
         features: { view_image: false, shell_tool: false },
       });
+      expect(restored["skills"]).toEqual(
+        skills === "inherited"
+          ? { config: [{ path: join(home, "file-skill"), enabled: false }] }
+          : skills === "explicit"
+            ? {
+                config: [
+                  { path: join(scanDir, "caller-skill"), enabled: false },
+                ],
+              }
+            : skills === "empty"
+              ? { config: [] }
+              : undefined,
+      );
       expect(restored).not.toHaveProperty("model_instructions_file");
       const workerResult = execFileSync(
         Bun.which("node")!,

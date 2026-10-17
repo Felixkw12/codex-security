@@ -2077,7 +2077,7 @@ export class CodexSecurity {
         !(isRecord(inlineProfiles) && isRecord(inlineProfiles[profileName]))
       ) {
         recipeConfig["profile"] = profileName;
-        resolveSkillPaths(recipeConfig, scanDir);
+        delete recipeConfig["skills"];
         // Reload inherited file settings, retaining explicit refinements omitted
         // from the readable recipe in the existing private replay snapshot.
         delete recipeConfig["model_providers"];
