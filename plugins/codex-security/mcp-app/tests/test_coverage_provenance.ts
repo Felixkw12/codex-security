@@ -19,7 +19,7 @@ for (const resume of [false, true]) {
           stopBeforeDraft: outcome === "no parent",
         });
         const coverage = await readFixtureCoverage(scanDir);
-        assert.equal(coverage.completeness, "partial");
+        assert.equal("completeness" in coverage, false);
         assert.equal(coverage.reviews.length, 3);
         assert.deepEqual(
           coverage.surfaces.map((surface) => surface.label),
@@ -88,7 +88,7 @@ for (const resume of [false, true]) {
 }
 
 for (const resume of [false, true]) {
-  test(`unknown coverage survives ${resume ? "resumed" : "live"} subsequent clean review`, async () => {
+  test(`legacy coverage preserves exclusions through ${resume ? "resumed" : "live"} subsequent review`, async () => {
     const root = await mkdtemp(path.join(tmpdir(), "unknown-coverage-"));
     try {
       const { scanDir } = await publishCoverageFixture(root, "unknown", {
@@ -96,11 +96,8 @@ for (const resume of [false, true]) {
         continueAfterResume: resume,
       });
       const coverage = await readFixtureCoverage(scanDir);
-      assert.equal(coverage.completeness, "unknown");
-      assert.deepEqual(
-        coverage.reviews.map((review) => review.completeness),
-        ["unknown", "complete", "complete"],
-      );
+      assert.equal("completeness" in coverage, false);
+      assert.equal(coverage.reviews.length, 3);
       assert.equal(coverage.explicitExclusions.length, 3);
     } finally {
       await rm(root, { recursive: true, force: true });

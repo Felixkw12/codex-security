@@ -1015,7 +1015,6 @@ for (const disposition of ["rejected", "not_applicable"]) {
           }
           const sources = await readDeepReductionSources(f.reducer);
           const coverage = sources.discoveries[0].coverage;
-          assert.equal(coverage.completeness, "complete");
           assert.deepEqual(coverage.deferred, []);
           assert.equal(coverage.surfaces.length, 1);
           assert.equal(coverage.surfaces[0].disposition, disposition);

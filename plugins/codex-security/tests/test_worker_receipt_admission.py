@@ -31,9 +31,7 @@ def test_unselected_pending_checkpoint_links_to_accepted_worker_surface(
     surfaces = (
         [{**surface, "id": "other", "label": "Other boundary"}, surface] if reordered else [surface]
     )
-    accepted = saved_draft(
-        "identity-scan", surfaces=surfaces, complete=True, completeness="partial"
-    )
+    accepted = saved_draft("identity-scan", surfaces=surfaces, complete=True)
     worker = save_worker(tmp_path, saved, "reviewer", [], accepted)
     output = tmp_path / "reviewer"
     result_path = output / "result.json"

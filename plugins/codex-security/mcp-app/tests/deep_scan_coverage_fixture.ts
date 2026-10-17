@@ -54,7 +54,6 @@ interface ProjectedRecord {
   provenance: { workerId: string; attempt: number; candidateId?: string };
 }
 interface PublishedCoverage {
-  completeness: string;
   surfaces: (ProjectedRecord & {
     id: string;
     label: string;
@@ -73,7 +72,7 @@ interface PublishedCoverage {
     question: string;
     followUpPrompt?: string;
   })[];
-  reviews: { workerId: string; attempt: number; completeness: string }[];
+  reviews: { workerId: string; attempt: number }[];
 }
 export async function readFixtureCoverage(
   scanDir: string,
@@ -1046,10 +1045,6 @@ runpy.run_path(sys.argv[0], run_name="__main__")
     assert.equal(await readFile(file, "utf8"), bytes);
   if (firstCheckpointReceipt) {
     const coverage = await readFixtureCoverage(run.scanDir);
-    assert.equal(
-      coverage.completeness,
-      stopAfterDraft || stopBeforeDraft ? "partial" : "complete",
-    );
     assert.deepEqual(
       coverage.deferred.map((row) => row.id),
       stopAfterDraft || stopBeforeDraft ? ["scan-stopped"] : [],
@@ -1131,13 +1126,11 @@ runpy.run_path(sys.argv[0], run_name="__main__")
         ["Archived receipt.\n", "Synthetic review evidence.\n"].sort(),
       );
     }
-    assert.equal(coverage.completeness, "complete");
     assert.deepEqual(coverage.deferred, []);
     return { scanDir: run.scanDir, threadId, terminal };
   }
   if (closeRetriedSurface) {
     const coverage = await readFixtureCoverage(run.scanDir);
-    assert.equal(coverage.completeness, "complete");
     assert.deepEqual(coverage.deferred, []);
     assert.equal(coverage.surfaces.length, 1);
     const surface = coverage.surfaces[0];
@@ -1208,7 +1201,6 @@ runpy.run_path(sys.argv[0], run_name="__main__")
         prior.every((surface) => surface.candidateId === item.candidateId),
       );
     }
-    assert.equal(coverage.completeness, "partial");
     assert.deepEqual(
       pending.map((item) => item.reason).sort(),
       [
