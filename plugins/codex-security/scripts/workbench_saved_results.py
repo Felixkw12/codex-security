@@ -1479,6 +1479,8 @@ def merge_saved_results(
     )
     # Links use source-local IDs until all retained surfaces receive their final IDs.
     coverage_sources: dict[int, tuple[dict[str, Any], list[str]]] = {}
+    source_owners = {relative: owner for relative, _, owner in all_sources}
+    retained_surface_rows: set[int] = set()
     for relative, draft, _ in all_sources:
         for field in ("surfaces", "deferred"):
             rows = draft["coverage"].get(field)
@@ -1493,6 +1495,8 @@ def merge_saved_results(
             if isinstance(rows, list) and isinstance(originals, list):
                 for row, original in zip(rows, originals):
                     _inherit_coverage_sources(row, [original], coverage_sources)
+                if field == "surfaces":
+                    retained_surface_rows.update(id(original) for original in originals)
 
     def retain_coverage_row(output: list[Any], item: Any, *originals: Any) -> Any:
         for retained in output:
@@ -1502,6 +1506,8 @@ def merge_saved_results(
             retained = copy.deepcopy(item)
             output.append(retained)
         _inherit_coverage_sources(retained, [item, *originals], coverage_sources)
+        if output is coverage.get("surfaces"):
+            retained_surface_rows.update(id(original) for original in (item, *originals))
         if any(id(original) in canonical_rows for original in (item, *originals)):
             canonical_rows.add(id(retained))
         return retained
@@ -2220,6 +2226,8 @@ def merge_saved_results(
                     )
                     if existing is not None:
                         _inherit_coverage_sources(existing, [original_item], coverage_sources)
+                        if field == "surfaces":
+                            retained_surface_rows.add(id(original_item))
                         continue
                 retain_coverage_row(output, item, original_item)
 
@@ -2238,6 +2246,7 @@ def merge_saved_results(
         identities[key] = variant
     recovered_worker_ids = {worker_id for _, _, worker_id in sources if worker_id is not None}
     surface_positions: dict[str, int] = {}
+    resolved_surface_targets: dict[tuple[str | None, str], list[str]] = {}
 
     def remember_surface_id(item: dict[str, Any], local_id: str) -> None:
         final_id = item["id"]
@@ -2246,6 +2255,13 @@ def merge_saved_results(
             targets = surface_ids_by_source.setdefault((relative, local_id), [])
             if final_id not in targets:
                 targets.append(final_id)
+            candidate_id = item.get("candidateId")
+            if isinstance(candidate_id, str):
+                key = (source_owners[relative], candidate_id)
+                if key in resolved and resolved[key] == item.get("disposition"):
+                    targets = resolved_surface_targets.setdefault(key, [])
+                    if final_id not in targets:
+                        targets.append(final_id)
 
     for field in ("surfaces", "explicitExclusions", "deferred"):
         used: set[str] = set()
@@ -2282,10 +2298,22 @@ def merge_saved_results(
                     if field == "deferred" and isinstance(surface_id, str):
                         for relative in coverage_sources.get(id(item), (item, []))[1]:
                             source_key = (relative, surface_id)
-                            declared |= source_key in surface_ids_by_source
-                            for target in surface_ids_by_source.get(source_key, []):
-                                if target not in targets:
-                                    targets.append(target)
+                            history_keys = [source_key]
+                            if source_key not in surface_ids_by_source:
+                                # A deferred-only checkpoint can refer to an earlier
+                                # observation from this logical worker, including retries.
+                                # Reused IDs can denote several retained observations.
+                                history_keys = [
+                                    (historical, surface_id)
+                                    for historical, _, owner in all_sources
+                                    if owner == source_owners[relative]
+                                    and source_order[historical] <= source_order[relative]
+                                ]
+                            for key in history_keys:
+                                declared |= key in surface_ids_by_source
+                                for target in surface_ids_by_source.get(key, []):
+                                    if target not in targets:
+                                        targets.append(target)
                     if targets:
                         targets.sort(key=surface_positions.__getitem__)
                         for target in targets:
@@ -2318,6 +2346,25 @@ def merge_saved_results(
                 remember_surface_id(item, local_id)
         if preserve_canonical_parent and isinstance(items, list):
             coverage[field] = normalized_items
+        if field == "surfaces":
+            # Candidate resolution replaces pending surfaces independently of generic
+            # tasks. Preserve their original links, even when the outcome changes ID
+            # or a distinct retained surface shares the old source-local ID.
+            for relative, draft, owner in all_sources:
+                originals = draft["coverage"].get("surfaces", [])
+                for original in originals if isinstance(originals, list) else []:
+                    if (
+                        not isinstance(original, dict)
+                        or id(original) in retained_surface_rows
+                        or original.get("disposition") != "needs_follow_up"
+                        or not isinstance(local_id := original.get("id"), str)
+                        or not isinstance(candidate_id := original.get("candidateId"), str)
+                    ):
+                        continue
+                    targets = surface_ids_by_source.setdefault((relative, local_id), [])
+                    for target in resolved_surface_targets.get((owner, candidate_id), []):
+                        if target not in targets:
+                            targets.append(target)
     coverage.pop("completeness", None)
     if stopped:
         if not isinstance(coverage.get("deferred"), list):

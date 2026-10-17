@@ -1261,7 +1261,8 @@ def _recover_unsealed_coverage(
                     raise ContractError(f"{context}: expected an object")
                 if field == "surfaces":
                     surface_id = _require_str(item, "id", context)
-                    _require_str(item, "label", context)
+                    if worker_draft:
+                        _require_str(item, "label", context)
                     if surface_id in surface_ids and not worker_draft:
                         raise ContractError(f"{context}.id: duplicate surface id")
                     disposition = item.get("disposition")
@@ -1314,7 +1315,8 @@ def _recover_unsealed_coverage(
                 _validate_schema_node(item, item_schema, context)
                 if field == "resolvedDeferred":
                     _validate_resolved_deferred({"resolvedDeferred": [item]})
-                _require_safe_json_value(item, context)
+                if worker_draft:
+                    _require_safe_json_value(item, context)
             except ContractError as exc:
                 warnings.append(f"Skipped malformed {label} {index + 1}: {exc}.")
                 discarded_fields.add(field)
@@ -1349,7 +1351,8 @@ def _recover_unsealed_coverage(
                 "coverage.resolvedDeferred",
             )
             _validate_resolved_deferred(coverage)
-            _require_safe_json_value(coverage["resolvedDeferred"], "coverage.resolvedDeferred")
+            if worker_draft:
+                _require_safe_json_value(coverage["resolvedDeferred"], "coverage.resolvedDeferred")
         except ContractError as exc:
             coverage.pop("resolvedDeferred")
             warnings.append(f"Skipped malformed resolved deferred work: {exc}.")

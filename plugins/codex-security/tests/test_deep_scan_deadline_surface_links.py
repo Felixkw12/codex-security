@@ -426,3 +426,178 @@ def test_deadline_dropped_legacy_surface_does_not_rebind_its_pending_task(
         for warning in completed["warnings"]
     )
     assert {path: path.read_bytes() for path in originals} == originals
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "fork"), reason="Crash boundary uses a forked workbench process."
+)
+@pytest.mark.parametrize(
+    "history",
+    ["parent-collision", "current-checkpoints", "retry-checkpoints", "coalesced-history"],
+)
+def test_deadline_inherited_surface_links_follow_historical_observations(
+    workbench_api, workbench_db, deadline_scan, tmp_path, history
+):
+    scan = deadline_scan
+    worker_id, output = canceled_discovery_output(
+        workbench_db, scan, attempt=2 if history == "retry-checkpoints" else 1
+    )
+    archived = output.parent / "attempts" / "attempt-01"
+    first_output = archived if history == "retry-checkpoints" else output
+    earlier = write_checkpoint(
+        first_output / "checkpoints",
+        saved_draft(scan.scan_id, surfaces=[surface("Earlier observation")]),
+    )
+    os.utime(earlier, ns=(100, 100))
+    expected_labels = {"Earlier observation"}
+    if history != "parent-collision":
+        newer = write_checkpoint(
+            output / "checkpoints",
+            saved_draft(scan.scan_id, surfaces=[surface("Newer observation")]),
+        )
+        os.utime(newer, ns=(200, 200))
+        expected_labels.add("Newer observation")
+    inherited_task = pending("history-review", "Review the inherited surface.")
+    unknown_task = pending("unknown-review", "Review an unresolved reference.", "not-declared")
+    deferred_only = write_checkpoint(
+        output / "checkpoints",
+        saved_draft(scan.scan_id, deferred=[inherited_task, unknown_task]),
+    )
+    os.utime(deferred_only, ns=(300, 300))
+    if history == "coalesced-history":
+        # The merged checkpoint copies a task whose earlier raw source inherited history.
+        selected = write_checkpoint(
+            output / "checkpoints",
+            saved_draft(
+                scan.scan_id,
+                surfaces=[surface("Newer observation")],
+                deferred=[inherited_task, unknown_task],
+            ),
+        )
+        os.utime(selected, ns=(400, 400))
+        head = output / "checkpoint-head.json"
+        head.write_text(json.dumps({"checkpoint": selected.name}))
+        os.utime(head, ns=(410, 410))
+    if history == "current-checkpoints":
+        # An interrupted later write cannot identify an earlier task's target.
+        future = write_checkpoint(
+            output / "checkpoints",
+            saved_draft(scan.scan_id, surfaces=[surface("Later observation")]),
+        )
+        os.utime(future, ns=(400, 400))
+    canonical_id = f"{worker_id}/entry" if history == "parent-collision" else "parent-entry"
+    canonical_surface = surface("Canonical parent", canonical_id)
+    canonical_task = pending("parent-review", "Parent review remains.", canonical_id)
+    scan.coverage.update(surfaces=[canonical_surface], deferred=[canonical_task])
+    (scan.scan_dir / "coverage.json").write_text(json.dumps(scan.coverage))
+    originals = {path: path.read_bytes() for path in output.parent.rglob("*") if path.is_file()}
+    database = tmp_path / "historical-links.db"
+    with sqlite3.connect(database) as connection:
+        workbench_db.backup(connection)
+
+    publications = []
+    for hash_seed in (1, 17, 83):
+        interrupt_in_fresh_python(database, scan, hash_seed)
+        publications.append(json.loads((scan.scan_dir / "coverage.json").read_text()))
+    with sqlite3.connect(database) as connection:
+        connection.row_factory = sqlite3.Row
+        finish(workbench_api, connection, scan, terminal_reason="capped")
+        completed = complete(workbench_api, connection, scan)
+
+    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    assert completed["progress"]["status"] == "complete"
+    assert all(publication == coverage for publication in publications)
+    assert canonical_surface in coverage["surfaces"]
+    assert canonical_task in coverage["deferred"]
+    worker_surfaces = [row for row in coverage["surfaces"] if row.get("workerId") == worker_id]
+    historical = [row for row in worker_surfaces if row["label"] in expected_labels]
+    assert {row["label"] for row in historical} == expected_labels
+    assert len(historical) == len(expected_labels)
+    if history == "current-checkpoints":
+        assert any(row["label"] == "Later observation" for row in worker_surfaces)
+    tasks = [row for row in coverage["deferred"] if row.get("workerId") == worker_id]
+    inherited = next(row for row in tasks if row["reason"] == inherited_task["reason"])
+    unknown = next(row for row in tasks if row["reason"] == unknown_task["reason"])
+    assert inherited["surfaceIds"] == [row["id"] for row in historical]
+    assert unknown["surfaceIds"] == [f"{worker_id}/not-declared"]
+    assert {path: path.read_bytes() for path in originals} == originals
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "fork"), reason="Crash boundary uses a forked workbench process."
+)
+@pytest.mark.parametrize(
+    ("changed_surface_id", "legacy_duplicate_id"),
+    [(False, False), (True, False), (True, True)],
+    ids=["same-id", "changed-id", "legacy-duplicate-id"],
+)
+def test_deadline_candidate_supersession_preserves_independent_surface_links(
+    workbench_api, workbench_db, deadline_scan, tmp_path, changed_surface_id, legacy_duplicate_id
+):
+    scan = deadline_scan
+    worker_id, output = canceled_discovery_output(workbench_db, scan)
+    canonical_id = f"{worker_id}/entry"
+    canonical_surface = surface("Canonical parent", canonical_id)
+    canonical_task = pending("parent-review", "Parent review remains.", canonical_id)
+    scan.coverage.update(surfaces=[canonical_surface], deferred=[canonical_task])
+    (scan.scan_dir / "coverage.json").write_text(json.dumps(scan.coverage))
+    independent = pending("independent-review", "Review another caller.")
+    candidate_surface = {**surface("Candidate review"), "candidateId": "candidate"}
+    earlier_surfaces = [candidate_surface]
+    if legacy_duplicate_id:
+        # Legacy artifacts may reuse an ID for a candidate and an independent observation.
+        earlier_surfaces.append(surface("Independent observation"))
+    earlier = write_checkpoint(
+        output / "checkpoints",
+        saved_draft(scan.scan_id, surfaces=earlier_surfaces, deferred=[independent]),
+    )
+    os.utime(earlier, ns=(100, 100))
+    outcome_id = "outcome" if changed_surface_id else "entry"
+    outcome = {
+        **surface("Candidate reviewed", outcome_id, "rejected"),
+        "candidateId": "candidate",
+    }
+    raw_checkpoint = write_checkpoint(
+        output / "checkpoints", saved_draft(scan.scan_id, complete=True, surfaces=[outcome])
+    )
+    os.utime(raw_checkpoint, ns=(200, 200))
+    # The selected merged checkpoint retains independent work before result publication.
+    selected = write_checkpoint(
+        output / "checkpoints",
+        saved_draft(scan.scan_id, complete=True, surfaces=[outcome], deferred=[independent]),
+    )
+    os.utime(selected, ns=(210, 210))
+    head = output / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": selected.name}))
+    os.utime(head, ns=(220, 220))
+    originals = {path: path.read_bytes() for path in output.rglob("*") if path.is_file()}
+    database = tmp_path / "candidate-links.db"
+    with sqlite3.connect(database) as connection:
+        workbench_db.backup(connection)
+
+    publications = []
+    for hash_seed in (1, 17, 83):
+        interrupt_in_fresh_python(database, scan, hash_seed)
+        publications.append(json.loads((scan.scan_dir / "coverage.json").read_text()))
+    with sqlite3.connect(database) as connection:
+        connection.row_factory = sqlite3.Row
+        finish(workbench_api, connection, scan, terminal_reason="capped")
+        completed = complete(workbench_api, connection, scan)
+
+    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    assert completed["progress"]["status"] == "complete"
+    assert all(publication == coverage for publication in publications)
+    assert canonical_surface in coverage["surfaces"]
+    assert canonical_task in coverage["deferred"]
+    retained = [row for row in coverage["surfaces"] if row.get("workerId") == worker_id]
+    assert len(retained) == (2 if legacy_duplicate_id else 1)
+    outcome = next(row for row in retained if row["label"] == "Candidate reviewed")
+    assert outcome["disposition"] == "rejected"
+    if legacy_duplicate_id:
+        observation = next(row for row in retained if row["label"] == "Independent observation")
+        assert observation["disposition"] == "needs_follow_up"
+    assert all(row["id"] != canonical_id for row in retained)
+    tasks = [row for row in coverage["deferred"] if row.get("workerId") == worker_id]
+    assert len(tasks) == 1 and tasks[0]["reason"] == independent["reason"]
+    assert tasks[0]["surfaceIds"] == [row["id"] for row in retained]
+    assert {path: path.read_bytes() for path in originals} == originals
