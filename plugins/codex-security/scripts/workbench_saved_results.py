@@ -29,6 +29,7 @@ from finalize_scan_contract import (
     _read_scan_local_json,
     _read_scan_local_json_bytes,
     _read_scan_local_json_with_metadata,
+    _recover_unsealed_coverage,
     _recover_unsealed_findings,
     _remove_scan_local_file_if_exists,
     _require_portable_relative_path,
@@ -1085,6 +1086,7 @@ def merge_saved_results(
         if latest_reducer not in frozen_source_digests:
             latest_reducer = None
 
+    discarded_by_source: dict[str, list[str]] = {}
     for relative, worker_id in paths.items():
         try:
             draft, digest, observed = _read_saved_result(
@@ -1100,26 +1102,36 @@ def merge_saved_results(
                 continue
             if preserve_canonical_parent and worker_id is not None:
                 # Recover imported records without relaxing canonical parent validation.
+                directory = Path(relative).parent
+                if directory.name == "checkpoints":
+                    directory = directory.parent
                 recovered_findings = []
                 for index, finding in enumerate(draft["findings"]):
                     _ensure_finding_identity(finding)
                     recovered = {"scanId": scan_id, "findings": [finding]}
                     source_warnings: list[str] = []
-                    _recover_unsealed_findings(
+                    discarded = _recover_unsealed_findings(
                         {"scan": {"id": scan_id, "target": binding["target"]}},
                         recovered,
                         Path(__file__).resolve().parent.parent / "schemas",
-                        scan_dir,
+                        scan_dir / directory,
                         source_warnings,
                     )
+                    if discarded:
+                        discarded_by_source.setdefault(relative, []).extend(discarded)
+                    for recovered_finding in recovered["findings"]:
+                        writeup = recovered_finding.pop("writeup", None)
+                        if writeup is not None:
+                            source_warnings.append(
+                                "Retained worker writeup at "
+                                f"{directory.as_posix()}/{writeup['reportPath']}; "
+                                "the parent report renders this finding inline."
+                            )
                     recovered_findings.extend(recovered["findings"])
                     warnings.extend(
                         f"{relative} finding {index + 1}: {warning}" for warning in source_warnings
                     )
                 draft["findings"] = recovered_findings
-                directory = Path(relative).parent
-                if directory.name == "checkpoints":
-                    directory = directory.parent
                 for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions"):
                     rows = draft["coverage"].get(field)
                     if not isinstance(rows, list):
@@ -1266,6 +1278,31 @@ def merge_saved_results(
                     row["id"] = identity
                     reserved.add(identity)
 
+    if preserve_canonical_parent:
+        for relative, draft, worker_id in sources:
+            if worker_id is None:
+                continue
+            for field in ("surfaces", "explicitExclusions", "deferred"):
+                rows = draft["coverage"].get(field)
+                for row in rows if isinstance(rows, list) else []:
+                    if isinstance(row, dict):
+                        row.setdefault("id", _saved_coverage_id(row))
+                        if field == "surfaces":
+                            row.setdefault("receiptRefs", [])
+            source_warnings = []
+            _recover_unsealed_coverage(
+                draft["coverage"],
+                Path(__file__).resolve().parent.parent / "schemas",
+                scan_dir,
+                source_warnings,
+                discarded_by_source.get(relative, []),
+                # Reconcile local IDs and valid outcomes against worker history below.
+                worker_draft=True,
+            )
+            for row in draft["coverage"]["deferred"]:
+                row["workerId"] = worker_id
+            warnings.extend(f"{relative}: {warning}" for warning in source_warnings)
+
     if parent is None and not sources:
         return None
     if (
@@ -1347,11 +1384,15 @@ def merge_saved_results(
             {"question": item.strip()} if isinstance(item, str) else item
             for item in coverage["openQuestions"]
         ]
+    # Closure reconciliation can reuse original parent rows instead of their copies.
     canonical_rows = (
         {
             id(item)
+            for parent_coverage in (coverage, parent["coverage"])
             for field in ("surfaces", "explicitExclusions", "deferred")
-            for item in (coverage.get(field) if isinstance(coverage.get(field), list) else [])
+            for item in (
+                parent_coverage.get(field) if isinstance(parent_coverage.get(field), list) else []
+            )
         }
         if parent_is_canonical
         else set()
@@ -1684,6 +1725,7 @@ def merge_saved_results(
             worker_id is not None
             and relative in selected_observations
             and draft.get("complete") is not False
+            and relative not in discarded_by_source
         ):
             order = source_order[relative]
             selected_terminal_orders[worker_id] = max(
@@ -1691,7 +1733,11 @@ def merge_saved_results(
             )
     terminal_worker_orders: dict[str | None, tuple[int, int]] = {}
     for relative, draft, worker_id in sources:
-        if relative in current_results and draft.get("complete") is not False:
+        if (
+            relative in current_results
+            and draft.get("complete") is not False
+            and relative not in discarded_by_source
+        ):
             order = source_order[relative]
             terminal_worker_orders[worker_id] = max(
                 terminal_worker_orders.get(worker_id, order), order
@@ -2035,7 +2081,9 @@ def merge_saved_results(
     for field in ("surfaces", "explicitExclusions", "deferred"):
         used: set[str] = set()
         items = coverage.setdefault(field, [])
+        normalized_items = []
         for item in items if isinstance(items, list) else []:
+            normalized_items.append(item)
             if not isinstance(item, dict):
                 continue
             if id(item) in canonical_rows:
@@ -2058,11 +2106,20 @@ def merge_saved_results(
                         f"{worker_id}/{surface_id}" if isinstance(surface_id, str) else surface_id
                         for surface_id in item["surfaceIds"]
                     ]
+                if item in normalized_items[:-1]:
+                    # A previous finish may have published files before its DB commit.
+                    normalized_items.pop()
+                    continue
             if item["id"] in used:
                 item["id"] = f"{item['id']}-{_digest(item)[:16]}"
+            if preserve_canonical_parent and item in normalized_items[:-1]:
+                normalized_items.pop()
+                continue
             used.add(item["id"])
             if field == "surfaces":
                 item.setdefault("receiptRefs", [])
+        if preserve_canonical_parent and isinstance(items, list):
+            coverage[field] = normalized_items
     coverage.pop("completeness", None)
     if stopped:
         if not isinstance(coverage.get("deferred"), list):
@@ -2152,6 +2209,12 @@ def preserve_deep_deadline_draft(
         if not workers:
             yield
             return
+        _prepare_scan_finalization(
+            scan_dir,
+            expected_coverage_mode=db.expected_coverage_mode(scan),
+            completion_binding=binding,
+            allow_missing_writeups=True,
+        )
     with preserve_parent_head_on_error(scan_dir):
         try:
             documents = merge_saved_results(
@@ -2186,7 +2249,7 @@ def preserve_deep_deadline_draft(
                 scan_dir,
                 expected_coverage_mode=db.expected_coverage_mode(scan),
                 completion_binding=binding,
-                recover_unsealed=True,
+                recover_unsealed=not preserve_reduction,
                 allow_missing_writeups=preserve_reduction,
                 draft_documents=documents,
             )

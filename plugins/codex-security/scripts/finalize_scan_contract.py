@@ -1217,6 +1217,8 @@ def _recover_unsealed_coverage(
     scan_dir: Path,
     warnings: list[str],
     discarded_findings: list[str],
+    *,
+    worker_draft: bool = False,
 ) -> None:
     schema = _read_json(schema_dir / "coverage.schema.json")
     properties = _require_dict(schema, "properties", "coverage.schema")
@@ -1249,7 +1251,7 @@ def _recover_unsealed_coverage(
                     raise ContractError(f"{context}: expected an object")
                 if field == "surfaces":
                     surface_id = _require_str(item, "id", context)
-                    if surface_id in surface_ids:
+                    if surface_id in surface_ids and not worker_draft:
                         raise ContractError(f"{context}.id: duplicate surface id")
                     disposition = item.get("disposition")
                     surface_recovered = False
@@ -1310,6 +1312,13 @@ def _recover_unsealed_coverage(
 
     if discarded_findings:
         for surface in coverage["surfaces"]:
+            if (
+                worker_draft
+                and surface.get("candidateId")
+                and surface["disposition"] in {"rejected", "not_applicable"}
+            ):
+                # A valid explicit outcome can still resolve that worker's history.
+                continue
             surface["disposition"] = "needs_follow_up"
         coverage["deferred"].extend(
             {"id": f"discarded-finding-{index}", "reason": warning}
