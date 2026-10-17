@@ -1145,8 +1145,9 @@ def test_recovery_excludes_unaccepted_reducer_review_summaries(
                 "scanId": scan.scan_id,
                 "complete": True,
                 "findings": scan.findings,
-                "coverage": {
-                    **scan.coverage,
+                "sourceCoverage": {
+                    "surfaces": scan.coverage["surfaces"],
+                    "deferred": scan.coverage["deferred"],
                     "reviews": [imported_review],
                     "explicitExclusions": [exclusion],
                 },
@@ -1186,7 +1187,7 @@ def test_recovery_excludes_unaccepted_reducer_review_summaries(
         assert reducer.read_bytes() == original
     else:
         assert json.loads(reducer.read_text())["sourceCoverage"]["reviews"] == [
-            {"workerId": worker_id, "attempt": 1, "completeness": "complete"}
+            {"workerId": worker_id, "attempt": 1}
         ]
     saved = workbench_api["saved_results"]
     context = workbench_api["_WORKBENCH_DB_CONTEXT"]
@@ -1210,15 +1211,13 @@ def test_recovery_excludes_unaccepted_reducer_review_summaries(
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
     assert len(findings) == 1
     assert findings[0]["summary"] == scan.findings[0]["summary"]
+    assert not any(
+        all(row.get(key) == value for key, value in exclusion.items())
+        for row in coverage["explicitExclusions"]
+    )
     if interrupted_reducer:
-        assert any(
-            all(row.get(key) == value for key, value in exclusion.items())
-            for row in coverage["explicitExclusions"]
-        )
         assert reducer.read_bytes() == original
-    assert coverage["reviews"] == [
-        {"workerId": worker_id, "attempt": 1, "completeness": "complete"}
-    ]
+    assert coverage["reviews"] == [{"workerId": worker_id, "attempt": 1}]
     assert imported_review not in coverage["reviews"]
     assert imported_review["workerId"] not in (scan.scan_dir / "report.md").read_text()
     saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))
