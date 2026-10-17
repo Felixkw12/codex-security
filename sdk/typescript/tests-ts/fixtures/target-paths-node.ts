@@ -10,7 +10,8 @@ const root = process.argv[2]!;
 const entry = join(root, "entry");
 const repository = join(root, "physical", "repository");
 const sibling = join(entry, "repository");
-await mkdir(sibling, { recursive: true, mode: 0o700 });
+await mkdir(join(sibling, "scope"), { recursive: true, mode: 0o700 });
+await writeFile(join(sibling, "app.ts"), "export const sibling = true;\n");
 await mkdir(join(root, "physical", "child"), { recursive: true, mode: 0o700 });
 await mkdir(join(repository, "components", "child"), {
   recursive: true,
