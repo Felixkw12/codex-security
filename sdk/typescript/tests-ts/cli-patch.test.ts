@@ -3915,6 +3915,12 @@ describe("patch change tracking", () => {
     ),
   )("restores the complete index after %s fails for %s", async (hook, file) => {
     const { directory, git } = await publicationRepository();
+    git(
+      "config",
+      "--local",
+      "core.hooksPath",
+      join(directory, ".git", "hooks"),
+    );
     await writeFile(join(directory, "other.ts"), "original\n");
     await writeFile(join(directory, "hidden.ts"), "hidden original\n");
     git("add", ".");
