@@ -31,6 +31,7 @@ from finalize_scan_contract import (
     _read_scan_local_json_with_metadata,
     _recover_unsealed_findings,
     _remove_scan_local_file_if_exists,
+    _require_portable_relative_path,
     _validate_completion_binding,
     _validate_resolved_deferred,
     _validate_schema_node,
@@ -1097,6 +1098,51 @@ def merge_saved_results(
             if _checkpoint_head_directory(relative) is not None:
                 saved_heads[relative] = draft["checkpoint"]
                 continue
+            if preserve_canonical_parent and worker_id is not None:
+                # Recover imported records without relaxing canonical parent validation.
+                recovered_findings = []
+                for index, finding in enumerate(draft["findings"]):
+                    _ensure_finding_identity(finding)
+                    recovered = {"scanId": scan_id, "findings": [finding]}
+                    source_warnings: list[str] = []
+                    _recover_unsealed_findings(
+                        {"scan": {"id": scan_id, "target": binding["target"]}},
+                        recovered,
+                        Path(__file__).resolve().parent.parent / "schemas",
+                        scan_dir,
+                        source_warnings,
+                    )
+                    recovered_findings.extend(recovered["findings"])
+                    warnings.extend(
+                        f"{relative} finding {index + 1}: {warning}" for warning in source_warnings
+                    )
+                draft["findings"] = recovered_findings
+                directory = Path(relative).parent
+                if directory.name == "checkpoints":
+                    directory = directory.parent
+                for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions"):
+                    rows = draft["coverage"].get(field)
+                    if not isinstance(rows, list):
+                        continue
+                    for index, row in enumerate(rows):
+                        if field == "openQuestions" and isinstance(row, str):
+                            row = rows[index] = {"question": row}
+                        if not isinstance(row, dict):
+                            continue
+                        row["workerId"] = worker_id
+                        refs = row.get("receiptRefs")
+                        if not isinstance(refs, list):
+                            continue
+                        for ref_index, ref in enumerate(refs):
+                            if not isinstance(ref, str):
+                                continue
+                            try:
+                                normalized = _require_portable_relative_path(ref, "receiptRef")
+                            except ContractError:
+                                # Keep malformed references for the finalizer's diagnostics.
+                                continue
+                            if normalized.startswith("artifacts/"):
+                                refs[ref_index] = f"{directory.as_posix()}/{normalized}"
             # Recovery expects coverage, but reducer results only contain findings
             # and context. Add an empty value after hashing the original result.
             sources.append((relative, {"coverage": {}, **draft}, worker_id))
@@ -1985,6 +2031,7 @@ def merge_saved_results(
             finding.setdefault("provenance", {})["preservedIdentity"] = copy.deepcopy(identity)
             identity["instance"] = f"{identity.get('instance', 'saved')}-{variant[:16]}"
         identities[key] = variant
+    recovered_worker_ids = {worker_id for _, _, worker_id in sources if worker_id is not None}
     for field in ("surfaces", "explicitExclusions", "deferred"):
         used: set[str] = set()
         items = coverage.setdefault(field, [])
@@ -1999,6 +2046,18 @@ def merge_saved_results(
             if not isinstance(item["id"], str):
                 # Preserve malformed rows for per-record recovery, including frozen replay.
                 continue
+            if (
+                preserve_canonical_parent
+                and isinstance(worker_id := item.get("workerId"), str)
+                and worker_id in recovered_worker_ids
+            ):
+                # Resolve worker-local candidate/deferred history before scoping IDs.
+                item["id"] = f"{worker_id}/{item['id']}"
+                if isinstance(item.get("surfaceIds"), list):
+                    item["surfaceIds"] = [
+                        f"{worker_id}/{surface_id}" if isinstance(surface_id, str) else surface_id
+                        for surface_id in item["surfaceIds"]
+                    ]
             if item["id"] in used:
                 item["id"] = f"{item['id']}-{_digest(item)[:16]}"
             used.add(item["id"])
@@ -2128,6 +2187,7 @@ def preserve_deep_deadline_draft(
                 expected_coverage_mode=db.expected_coverage_mode(scan),
                 completion_binding=binding,
                 recover_unsealed=True,
+                allow_missing_writeups=preserve_reduction,
                 draft_documents=documents,
             )
             warnings.extend(prepared.warnings)
