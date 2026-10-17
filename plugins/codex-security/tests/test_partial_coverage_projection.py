@@ -136,7 +136,7 @@ def test_missing_projection_keeps_surface_links_and_independent_reviews(
         assert recovered["warnings"]
     else:
         assert len(by_surface_id) == worker_count * len(worker_surfaces)
-    assert coverage["completeness"] == "partial"
+    assert "completeness" not in coverage
     assert all(path.read_bytes() == data for path, data in originals.items())
     published = (scan.scan_dir / "coverage.json").read_bytes()
     saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))

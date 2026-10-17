@@ -341,7 +341,7 @@ for (const inaccessibleAttempt of [0, 1, 2]) {
               ["task-2", 2, "synthetic-worker"],
             ],
       );
-      assert.equal(coverage.completeness, "partial");
+      assert.equal(coverage.completeness, undefined);
     } finally {
       t.mock.restoreAll();
       await rm(f.root, { recursive: true, force: true });

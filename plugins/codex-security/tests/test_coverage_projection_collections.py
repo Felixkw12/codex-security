@@ -159,7 +159,7 @@ def test_reviewed_missing_deferred_recovers_malformed_worker_surfaces(
     assert recovered["resultsRecoveryNeeded"] is False
     coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
     assert isinstance(coverage["surfaces"], list)
-    assert coverage["completeness"] == "partial"
+    assert "completeness" not in coverage
     pending = [item for item in coverage["deferred"] if item.get("reason") == deferred["reason"]]
     if "links" in case:
         # The existing finalizer drops invalid deferred links and reports them.

@@ -269,7 +269,7 @@ def test_stopped_recovery_preserves_accepted_coverage_without_worker_id_collisio
 
     assert stopped["progress"]["status"] == "failed"
     coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
-    assert coverage["completeness"] == "partial"
+    assert "completeness" not in coverage
     assert coverage["mode"] == ("scoped_path" if scope != "." else "deep_repository")
     assert coverage["inventoryStrategy"] == ("scoped_path" if scope != "." else "repository")
     assert len(coverage["deferred"]) == 2, json.dumps(coverage)
@@ -388,7 +388,7 @@ def test_stopped_recovery_keeps_unmerged_coverage_after_accepted_review(
     )
 
     coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
-    assert coverage["completeness"] == "partial"
+    assert "completeness" not in coverage
     assert coverage["reviews"] == reviews
     if pending_state == "merged":
         retained = next(
@@ -626,7 +626,7 @@ def test_partial_parent_projection_keeps_only_missing_worker_records(
     )["scan"]
     assert recovered["resultsRecoveryNeeded"] is False
     coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
-    assert coverage["completeness"] == "partial"
+    assert "completeness" not in coverage
     assert sorted(
         item["reason"] for item in coverage["deferred"] if item["id"] != "scan-stopped"
     ) == sorted(item["reason"] for item in pending)
@@ -714,7 +714,7 @@ def test_standard_recovery_keeps_distinct_candidate_with_descriptive_provenance(
     assert recovered["findingCount"] == 1
     coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
     assert deferred in coverage["deferred"]
-    assert coverage["completeness"] == "partial"
+    assert "completeness" not in coverage
     assert checkpoint.read_bytes() == original
     published = {
         name: (scan.scan_dir / name).read_bytes()

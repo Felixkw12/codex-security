@@ -633,10 +633,11 @@ for (const reopen of [false, true]) {
         JSON.stringify(workerDraft([], { complete: true })),
       );
       const saved = await readArchivedWorkerCheckpoints(f.workerContext, true);
-      assert.deepEqual(
-        saved[0].input.coverage,
-        (reopen ? pending : closed).coverage,
-      );
+      const expectedCoverage: Record<string, unknown> = {
+        ...(reopen ? pending : closed).coverage,
+      };
+      delete expectedCoverage.completeness;
+      assert.deepEqual(saved[0].input.coverage, expectedCoverage);
       await validateDiscoveryArtifacts(
         { workersRoot: path.dirname(f.workerRoot) },
         f.resultPath,

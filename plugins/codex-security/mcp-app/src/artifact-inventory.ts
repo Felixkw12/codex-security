@@ -2,8 +2,6 @@ import { execFile as nodeExecFile } from "node:child_process";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import * as z from "zod/v4";
-import commonSchema from "../../schemas/definitions/artifact-common.schema.json";
-import reviewItemsSchema from "../../schemas/tools/review-items.schema.json";
 import {
   artifactDestination,
   paginateArtifactRows,
@@ -11,10 +9,7 @@ import {
   type ArtifactContext,
   type ArtifactPage,
 } from "./artifact-io.js";
-import {
-  loadArtifactZodSchema,
-  type SchemaDocument,
-} from "./artifact-schema-loader.js";
+import { artifactSchemaDocuments } from "./artifact-contracts.js";
 import {
   missingPythonHelperMessage,
   resolvePythonCommand,
@@ -23,31 +18,16 @@ import { decodeUtf8 } from "./helpers/utf8.js";
 import { decodePosixBytes } from "./helpers/posix-path.js";
 
 const execFile = promisify(nodeExecFile);
-const documents = [commonSchema, reviewItemsSchema] as SchemaDocument[];
 const inventoryComponents = ["artifacts", "02_discovery", "in_scope_files.txt"];
 const label = "review_items";
 
-export interface ReviewItem {
-  path: string;
-}
-
-export const prepareReviewItemsInputSchema = loadArtifactZodSchema(
-  documents,
-  reviewItemsSchema.$id,
-  "prepareInput",
-) as z.ZodType<{ scanId: string; handoffClaimToken?: string }>;
-
-export const reviewItemsReaderInputSchema = loadArtifactZodSchema(
-  documents,
-  reviewItemsSchema.$id,
-  "reviewItemsInput",
-) as z.ZodType<{ scanId: string; handoffClaimToken?: string } & ArtifactPage>;
-
-const reviewItemSchema = loadArtifactZodSchema(
-  documents,
-  reviewItemsSchema.$id,
-  "reviewItem",
-) as z.ZodType<ReviewItem>;
+const definitions = artifactSchemaDocuments["tools/review-items"].$defs;
+export type ReviewItem = z.infer<typeof definitions.reviewItem>;
+export const {
+  prepareInput: prepareReviewItemsInputSchema,
+  reviewItemsInput: reviewItemsReaderInputSchema,
+  reviewItem: reviewItemSchema,
+} = definitions;
 
 /** Build the selected repository or diff inventory from host-bound scan context. */
 export async function prepareCodexSecurityReviewItems(
@@ -74,6 +54,7 @@ export async function prepareCodexSecurityReviewItems(
     "generate_in_scope_files.py",
   );
   const arguments_ = [
+    "-B",
     helper,
     "--repo",
     context.repoRoot,

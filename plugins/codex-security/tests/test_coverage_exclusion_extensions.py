@@ -58,7 +58,7 @@ def test_recovery_preserves_exclusion_id_extensions(
     assert recovered["resultsRecoveryNeeded"] is False
     coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
     assert coverage["explicitExclusions"] == [projected]
-    assert coverage["completeness"] == "partial"
+    assert "completeness" not in coverage
     assert result.read_bytes() == original
     published = (scan.scan_dir / "coverage.json").read_bytes()
     saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))

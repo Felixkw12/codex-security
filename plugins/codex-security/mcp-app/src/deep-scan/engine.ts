@@ -1,6 +1,5 @@
 import { createScanArtifactContext } from "../artifact-context.js";
 import { recordCodexSecurityScanDraftViaWorkbench } from "../artifact-scan-draft.js";
-import type { JsonObject } from "../types.js";
 import { CodexSdkWorkerExecutor } from "./executor.js";
 import type { DeepWorkerParentSandbox } from "./parent-sandbox.js";
 import {
@@ -70,7 +69,7 @@ export function startDeepScanEngine(options: {
           runWorkbench,
           signal,
           publication,
-          draft.coverage.resolvedDeferred as JsonObject[] | undefined,
+          draft.coverage.resolvedDeferred,
         );
       },
       onStopped: async (stopped) => {

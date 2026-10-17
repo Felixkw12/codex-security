@@ -67,7 +67,6 @@ try {
   const shared = finding("shared", "src/shared.ts");
   const independent = finding("independent", "src/independent.ts");
   const rejectedCoverage = {
-    completeness: "partial",
     surfaces: [
       {
         label: "SQL route",
@@ -108,7 +107,6 @@ try {
     id: "worker-002",
     result: workerDraft([shared, independent], {
       scope: { summary: "Shared and independent request handling." },
-      coverage: { ...workerDraft([]).coverage, completeness: "unknown" },
     }),
   });
   const originalWorkerArtifacts = await Promise.all(
@@ -187,8 +185,8 @@ try {
       previous: null,
     },
   );
-  assert.equal(inputs.discoveries[0].coverage.completeness, "partial");
-  assert.equal(inputs.discoveries[1].coverage.completeness, "unknown");
+  assert.equal(inputs.discoveries[0].coverage.completeness, undefined);
+  assert.equal(inputs.discoveries[1].coverage.completeness, undefined);
   assert.deepEqual(
     await getModelInputs(context),
     {
@@ -460,14 +458,9 @@ try {
   await recordCodexSecurityDeepReduction(nextContext, merged);
   const preservedEnrichment = await readJson(nextOutputRoot, "result.json");
   assert.equal(
-    Object.hasOwn(preservedEnrichment, "coverage"),
-    false,
-    "a subsequent accepted reduction omits the previous reducer's legacy coverage",
-  );
-  assert.equal(
     await readFile(path.join(outputRoot, "result.json"), "utf8"),
     previousArtifact,
-    "the original previous reduction remains available without rewriting its coverage",
+    "the original previous reduction remains unchanged",
   );
   assert.equal(
     preservedEnrichment.findings[0].provenance.previousFindings[0].summary,
@@ -515,7 +508,7 @@ try {
 
   for (const invalidCoverage of [
     undefined,
-    { ...workerDraft([]).coverage, completeness: "outdated" },
+    { ...workerDraft([]).coverage, deferred: "invalid" },
   ]) {
     await writeJson(first.resultPath, {
       ...first.result,
@@ -523,7 +516,7 @@ try {
     });
     await assert.rejects(
       getCodexSecurityDeepReducerInputs(context),
-      /coverage|completeness/,
+      /coverage/,
       "Standard worker coverage remains required and validated before projection",
     );
   }

@@ -116,7 +116,7 @@ def test_recovery_preserves_descriptive_provenance(
     if field == "deferred":
         actual = [record for record in actual if record.get("id") != "scan-stopped"]
         assert actual[0]["surfaceIds"] == [coverage["surfaces"][0]["id"]]
-    assert coverage["completeness"] == "partial"
+    assert "completeness" not in coverage
     assert result.read_bytes() == original
     saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))
     assert (scan.scan_dir / "coverage.json").read_bytes() == published
@@ -213,7 +213,7 @@ def test_malformed_saved_completeness_preserves_other_valid_coverage(
         ],
     }
     if missing_completeness:
-        source.pop("completeness")
+        source.pop("completeness", None)
     result.write_text(
         json.dumps({"scanId": scan.scan_id, "complete": True, "findings": [], "coverage": source})
     )
@@ -237,7 +237,7 @@ def test_malformed_saved_completeness_preserves_other_valid_coverage(
     assert not recovered["resultsRecoveryNeeded"]
     coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
     assert any(row["label"] == "Retained evidence" for row in coverage["surfaces"])
-    assert coverage["completeness"] == "partial"
+    assert "completeness" not in coverage
     assert result.read_bytes() == original
 
 
@@ -1633,7 +1633,7 @@ def test_reconstructed_retry_surface_compares_receipt_bytes(
     if receipt_state == "shared-archive-missing":
         assert retained["receiptRefs"] == []
         assert retained["disposition"] == "needs_follow_up"
-        assert coverage["completeness"] == "partial"
+        assert "completeness" not in coverage
     else:
         assert retained["receiptRefs"] == [
             (
