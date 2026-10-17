@@ -26,6 +26,7 @@ import {
   join,
   relative,
   resolve,
+  sep,
   win32,
 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -2059,6 +2060,15 @@ describe("CodexSecurity orchestration", () => {
         "fast",
       ],
     ];
+    const originalScenarios = structuredClone(scenarios);
+    const bundledSkillNames = (
+      await readdir(join(PLUGIN_ROOT, "skills"), {
+        withFileTypes: true,
+      })
+    )
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort();
     let started = 0;
     const allStarted = Promise.withResolvers<void>();
     const configPaths = new Set<string>();
@@ -2174,31 +2184,59 @@ describe("CodexSecurity orchestration", () => {
                     windows,
                   );
                   expect(options.config?.["windows"]).toEqual(windows);
-                  for (const key of ["skills", "otel"]) {
-                    expect(options.config?.[key] as unknown).toEqual(
-                      resolveCodexProfile(overrides)[key],
-                    );
-                    const expected = structuredClone(
-                      resolveCodexProfile(overrides)[key],
-                    );
-                    if (key === "otel" && index === 1) {
-                      const exporter = (expected as JsonObject)[
-                        "exporter"
-                      ] as JsonObject;
-                      const exporterSettings = exporter[
-                        "otlp-http"
-                      ] as JsonObject;
-                      const tls = exporterSettings["tls"] as JsonObject;
-                      for (const field of [
-                        "ca-certificate",
-                        "client-certificate",
-                        "client-private-key",
-                      ]) {
-                        tls[field] = join(scanDir, tls[field] as string);
-                      }
-                    }
-                    expect(workerConfig[key] as unknown).toEqual(expected);
+                  const requestedSkills =
+                    (
+                      selected["skills"] as
+                        | { config: { path: string; enabled: boolean }[] }
+                        | undefined
+                    )?.config ?? [];
+                  const effectiveSkills = options.config?.["skills"] as {
+                    config: { path: string; enabled: boolean }[];
+                  };
+                  const requestedPaths = new Set(
+                    requestedSkills.map((entry) => entry.path),
+                  );
+                  const cachedSkills = effectiveSkills.config.filter(
+                    (entry) => !requestedPaths.has(entry.path),
+                  );
+                  expect(effectiveSkills.config).toEqual([
+                    ...requestedSkills,
+                    ...cachedSkills,
+                  ]);
+                  expect(
+                    cachedSkills
+                      .map((entry) => basename(dirname(entry.path)))
+                      .sort(),
+                  ).toEqual(bundledSkillNames);
+                  for (const entry of cachedSkills) {
+                    expect(entry.enabled).toBe(false);
+                    expect(basename(entry.path)).toBe("SKILL.md");
+                    expect(
+                      relative(options.env!["CODEX_HOME"]!, entry.path),
+                    ).toStartWith(join("plugins", "cache") + sep);
                   }
+                  expect(workerConfig["skills"]).toEqual(effectiveSkills);
+                  expect(options.config?.["otel"] as unknown).toEqual(
+                    selected["otel"],
+                  );
+                  const expectedOtel = structuredClone(selected["otel"]);
+                  if (index === 1) {
+                    const exporter = (expectedOtel as JsonObject)[
+                      "exporter"
+                    ] as JsonObject;
+                    const exporterSettings = exporter[
+                      "otlp-http"
+                    ] as JsonObject;
+                    const tls = exporterSettings["tls"] as JsonObject;
+                    for (const field of [
+                      "ca-certificate",
+                      "client-certificate",
+                      "client-private-key",
+                    ]) {
+                      tls[field] = join(scanDir, tls[field] as string);
+                    }
+                  }
+                  expect(workerConfig["otel"]).toEqual(expectedOtel);
                   for (const key of [
                     "cli_auth_credentials_store",
                     "forced_login_method",
@@ -2330,6 +2368,7 @@ describe("CodexSecurity orchestration", () => {
       expect(started).toBe(scenarios.length);
       expect(configPaths.size).toBe(scenarios.length);
       expect(deepConfigPaths.size).toBe(scenarios.length);
+      expect(scenarios).toEqual(originalScenarios);
     } finally {
       allStarted.resolve();
       await Promise.all(clients.map((client) => client.close()));
