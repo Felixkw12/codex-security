@@ -32,7 +32,9 @@ function completeResult(fixture: Fixture) {
 
 test("authentic source evidence matches all four vulnerability families", () => {
   const fixture = createFixture();
-  const report = gradeResult(completeResult(fixture), fixture);
+  const result = completeResult(fixture);
+  result.findings[1].locations[0].role = "sink";
+  const report = gradeResult(result, fixture);
   assert.equal(report.passed, true);
   assert.equal(report.recall, 1);
   assert.equal(report.expectedCount, 4);
@@ -86,7 +88,7 @@ test("duplicate reports cannot increase recall", () => {
   assert.equal(report.duplicateFindings, 1);
 });
 
-test("a different CWE or source line does not earn a gold match", () => {
+test("a different CWE, source line, or non-primary role does not earn a gold match", () => {
   const fixture = createFixture();
   const alterations: Array<(finding: FixtureFinding) => void> = [
     (finding) => {
@@ -101,6 +103,14 @@ test("a different CWE or source line does not earn a gold match", () => {
     (finding) => {
       finding.locations[0].role = "supporting";
     },
+    (finding) => {
+      finding.locations[0].role = "supporting_context";
+      finding.locations.unshift({
+        path: "README.md",
+        startLine: 1,
+        role: "root_control",
+      });
+    },
   ];
   for (const alter of alterations) {
     const result = completeResult(fixture);
@@ -110,6 +120,7 @@ test("a different CWE or source line does not earn a gold match", () => {
     assert.equal(report.unmatchedFindings.length, 1);
     assert.equal(report.needsAdjudication, true);
     assert.equal(report.safeControlFindings, 0);
+    assert.deepEqual(report.evidenceErrors, []);
   }
 });
 

@@ -48,20 +48,23 @@ function overlaps(location: SourceLocation, expected: SourceCase) {
   );
 }
 
-function primaryLocation(location: SourceLocation) {
-  return !/^(supporting|support|context|consumer|expected_control)$/u.test(
-    location.role ?? "",
-  );
-}
-
-function matches(finding: Finding, expected: SourceCase, fixture: Fixture) {
+function matches(
+  finding: Finding,
+  expected: SourceCase,
+  fixture: Fixture,
+  requirePrimaryRole: boolean,
+) {
   return (
     finding.taxonomy.cwe.some((cwe) =>
       expected.cwes.includes(String(cwe).trim().toUpperCase()),
     ) &&
     finding.locations.some(
       (location) =>
-        primaryLocation(location) &&
+        (requirePrimaryRole
+          ? /^(root_control|sink)$/u.test(location.role ?? "")
+          : !/^(supporting|support|context|consumer|expected_control)$/u.test(
+              location.role ?? "",
+            )) &&
         validRange(location, fixture) &&
         overlaps(location, expected),
     )
@@ -128,7 +131,7 @@ export function gradeResult(result: Result, fixture: Fixture) {
     }
     evidenceErrors.push(...evidence.errors);
     const candidates = fixture.positives.filter((expected) =>
-      matches(finding, expected, fixture),
+      matches(finding, expected, fixture, true),
     );
     const matched = candidates.filter((expected) => {
       const grounded = evidence.ranges.some((range) =>
@@ -147,7 +150,7 @@ export function gradeResult(result: Result, fixture: Fixture) {
       matchCounts.set(expected.id, matchCounts.get(expected.id)! + 1);
     }
     const controls = fixture.controls.filter((expected) =>
-      matches(finding, expected, fixture),
+      matches(finding, expected, fixture, false),
     );
     if (controls.length) {
       safeControlDetails.push({

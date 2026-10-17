@@ -75,9 +75,11 @@ scan archival, cleanup, and grading, but not subsequent evaluator JSON writing.
 A canonical scan that misses a bug still completed successfully. The runner
 exits nonzero for execution failures, not low recall.
 
-The grader counts unique gold cases with matching CWE, non-supporting source
-location, and authentic source evidence. It consumes the production contract's
-repository-relative POSIX paths. Duplicates do not increase recall.
+The grader counts unique gold cases with matching CWE, a `root_control` or
+`sink` source location, and authentic source evidence. Other or missing roles
+do not earn automatic recall; unmatched findings require adjudication. It
+consumes the production contract's repository-relative POSIX paths. Duplicates
+do not increase recall.
 Safe-control overlaps, unmatched findings, and citation errors are separate
 signals; overlaps and unmatched findings require adjudication, not automatic
 false-positive labels. Free-text location roles can flag benign context
