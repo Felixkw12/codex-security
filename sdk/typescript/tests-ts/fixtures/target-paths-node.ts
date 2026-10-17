@@ -74,6 +74,33 @@ try {
       await realpath(repository),
     );
   }
+  for (const home of [undefined, ""]) {
+    if (home === undefined) delete process.env["HOME"];
+    else process.env["HOME"] = home;
+    try {
+      for (const requested of [
+        "~/entry/link/../repository",
+        "~\\entry\\link\\..\\repository",
+        "~\\\\entry\\link\\..\\repository",
+      ]) {
+        const fallback = createCliTest(main);
+        assert.equal(
+          await fallback.runCli(["policy", requested, "--dry-run", "--json"], {
+            ...dependencies({ currentDirectory: root }),
+            createPolicySecurity: localClient,
+          }),
+          0,
+          fallback.stderr.text(),
+        );
+        assert.equal(
+          JSON.parse(fallback.stdout.text()).repository,
+          await realpath(repository),
+        );
+      }
+    } finally {
+      process.env["HOME"] = root;
+    }
+  }
   const planned = createCliTest(main);
   assert.equal(
     await planned.runCli(

@@ -910,6 +910,72 @@ describe("multiscan", () => {
     },
   );
 
+  testPosix.each([
+    ["repository", "../source"],
+    ["repository ancestor", "../source/src/.."],
+    ["terminal alias", "../alias"],
+    ["ancestor alias", "../alias/src/.."],
+  ])(
+    "resumes the same campaign with %s parent traversal",
+    async (selection, relativePath) => {
+      const paths = await fixture();
+      const source = await repository(paths.root, "source");
+      const alias = join(paths.root, "alias");
+      await symlink(source.path, alias);
+      const input = join(paths.root, "inventory", "repositories.csv");
+      await mkdir(dirname(input));
+      const original = selection.startsWith("repository") ? source.path : alias;
+      const inventory = (path: string) =>
+        `id,repository,revision\nresume,${path},${source.revision}\n`;
+      await writeFile(input, inventory(original));
+      const security = client(mock(completeRun));
+      const settings = options({ ...paths, input }, security);
+      expect(await runMultiscan(settings)).toMatchObject({
+        completed: 1,
+        failed: 0,
+      });
+      const manifestPath = join(paths.output, "manifest.json");
+      const manifest = await readFile(manifestPath, "utf8");
+      expect(JSON.parse(manifest).tasks[0].repository).toBe(original);
+
+      await writeFile(input, inventory(relativePath));
+      expect(await runMultiscan(settings)).toMatchObject({
+        completed: 1,
+        failed: 0,
+        skipped: 1,
+      });
+      expect(await readFile(manifestPath, "utf8")).toBe(manifest);
+      await rm(source.path, { recursive: true });
+      expect(await runMultiscan(settings)).toMatchObject({
+        completed: 1,
+        failed: 0,
+        skipped: 1,
+      });
+      expect(await readFile(manifestPath, "utf8")).toBe(manifest);
+      expect(security.run).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  testPosix.each(["missing", "file", "file-link"])(
+    "does not collapse a %s parent component into another repository",
+    async (component) => {
+      const paths = await fixture();
+      const source = await repository(paths.root, "entry/repository");
+      const file = join(paths.root, "entry", "file");
+      await writeFile(file, "Synthetic file.\n");
+      await symlink(file, join(paths.root, "entry", "file-link"));
+      await writeFile(
+        paths.input,
+        `id,repository,revision\ninvalid,entry/${component}/../repository,${source.revision}\n`,
+      );
+      const security = client(mock(completeRun));
+      expect(
+        await runMultiscan(options(paths, security, { maxAttempts: 1 })),
+      ).toMatchObject({ completed: 0, failed: 1 });
+      expect(security.run).not.toHaveBeenCalled();
+    },
+  );
+
   test("parses quoted CSV fields, embedded delimiters, and Windows line endings", async () => {
     const paths = await fixture();
     const source = await repository(paths.root, "comma, quoted");

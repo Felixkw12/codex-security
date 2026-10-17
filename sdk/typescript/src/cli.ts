@@ -270,6 +270,7 @@ import {
   abortable,
   DiffTarget,
   resolveRepositoryPath,
+  resolveTargetPath,
   enclosingGitWorktreeRoots,
   UNSUPPORTED_GIT_ENVIRONMENT,
   type ScanTarget,
@@ -959,10 +960,15 @@ export function resolveCliPath(directory: string, value: string): AbsolutePath {
 }
 
 function resolveCliRepositoryPath(value: string, directory: string): string {
-  return resolveRepositoryPath(
-    value.startsWith("~\\") ? value.replaceAll("\\", "/") : value,
-    directory,
-  );
+  if (value === "~") value = expandHome("~");
+  else if (value.startsWith("~/") || value.startsWith("~\\")) {
+    const home = expandHome("~");
+    const suffix = value.startsWith("~\\")
+      ? value.slice(2).split("\\").filter(Boolean).join(sep)
+      : value.slice(2);
+    value = home === "" ? suffix : `${home}${sep}${suffix}`;
+  }
+  return resolveTargetPath(value, directory);
 }
 
 interface ScanArguments extends ResolvedScanSettings {

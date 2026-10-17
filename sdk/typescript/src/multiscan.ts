@@ -1,7 +1,7 @@
 import { notify } from "./value.js";
 import { execFile as execFileCallback } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { realpathSync } from "node:fs";
+import { lstatSync, realpathSync, statSync } from "node:fs";
 import {
   lstat,
   mkdir,
@@ -62,7 +62,7 @@ const LOCK_HEARTBEAT_MS = 5_000;
 const WINDOWS_DEVICE_PATH_NAME =
   /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu;
 
-type MultiscanTask = ReturnType<typeof parseInventory>[number];
+type MultiscanTask = ReturnType<typeof parseInventory>["tasks"][number];
 
 interface MultiscanReceipt extends MultiscanTask {
   status: "completed" | "failed";
@@ -143,7 +143,7 @@ export async function runMultiscan(
   if (!Number.isSafeInteger(options.maxAttempts) || options.maxAttempts < 1) {
     throw new Error("Multiscan max attempts must be a positive integer.");
   }
-  const tasks = parseInventory(
+  const { tasks, repositorySources } = parseInventory(
     await readFile(options.inputPath, "utf8"),
     dirname(resolveTargetPath(options.inputPath)),
     options.mode,
@@ -167,7 +167,7 @@ export async function runMultiscan(
       [options.postScanPrompt, options.postScanPromptFile],
     ].some(([inline, file]) => inline === undefined && file !== undefined)
   ) {
-    for (const repository of new Set(tasks.map((task) => task.repository))) {
+    for (const repository of new Set(repositorySources.values())) {
       if (!isAbsolute(repository)) continue;
       try {
         repositories.push(await realpath(repository));
@@ -212,7 +212,12 @@ export async function runMultiscan(
   await requireSecureOutputAncestry(output);
   const unlock = await acquireLock(output);
   try {
-    const result = await runCampaign(resolvedOptions, tasks, output);
+    const result = await runCampaign(
+      resolvedOptions,
+      tasks,
+      repositorySources,
+      output,
+    );
     return (await realpath(requestedOutput).catch(() => undefined)) === output
       ? { ...result, resultsPath: join(requestedOutput, "results.jsonl") }
       : result;
@@ -224,6 +229,7 @@ export async function runMultiscan(
 async function runCampaign(
   options: MultiscanOptions,
   tasks: MultiscanTask[],
+  repositorySources: ReadonlyMap<string, string>,
   output: string,
 ): Promise<MultiscanResult> {
   const ledger = join(output, "results.jsonl");
@@ -479,6 +485,7 @@ async function runCampaign(
             protectedRoot = checkout;
             await checkoutRevision(
               task,
+              repositorySources.get(task.id)!,
               checkout,
               options.signal,
               options.githubHost,
@@ -1089,7 +1096,8 @@ function parseInventory(
   if (rows.length === 0)
     throw new Error("Multiscan CSV must contain at least one repository.");
   const seen = new Set<string>();
-  return rows.map((fields) => {
+  const repositorySources = new Map<string, string>();
+  const tasks = rows.map((fields) => {
     if (fields.length !== headers.length) {
       throw new Error("Multiscan CSV rows must match their header columns.");
     }
@@ -1126,15 +1134,25 @@ function parseInventory(
     ) {
       throw new Error("Multiscan scope must stay inside its repository.");
     }
+    const sourceRepository = normalizeRepository(get("repository"), directory);
+    repositorySources.set(id, sourceRepository);
+    // Completed campaigns retain their identities when sources are unavailable.
+    // Filesystem access always uses the original source path.
+    const repository =
+      process.platform !== "win32" && isAbsolute(sourceRepository)
+        ? (normalizeRepositoryParents(sourceRepository) ??
+          resolve(sourceRepository))
+        : sourceRepository;
     return {
       id,
-      repository: normalizeRepository(get("repository"), directory),
+      repository,
       revision,
       mode: mode as ScanMode,
       ...(scope ? { scope } : {}),
       ...(prompt ? { prompt } : {}),
     };
   });
+  return { tasks, repositorySources };
 }
 
 function normalizeRepository(repository: string, directory: string): string {
@@ -1175,8 +1193,33 @@ function normalizeRepository(repository: string, directory: string): string {
   return repository;
 }
 
+function normalizeRepositoryParents(path: string): string | undefined {
+  if (!path.split("/").includes("..")) return path;
+  let parent = "/";
+  try {
+    for (const part of path.split("/").filter(Boolean)) {
+      if (part !== "..") {
+        parent = join(parent, part);
+        continue;
+      }
+      // Preserve campaign path identities unless traversal follows a symlink.
+      let metadata = lstatSync(parent);
+      if (metadata.isSymbolicLink()) {
+        parent = realpathSync.native(parent);
+        metadata = statSync(parent);
+      }
+      if (!metadata.isDirectory()) return undefined;
+      parent = dirname(parent);
+    }
+    return parent;
+  } catch {
+    return undefined;
+  }
+}
+
 async function checkoutRevision(
   task: MultiscanTask,
+  sourceRepository: string,
   path: string,
   signal?: AbortSignal,
   githubHost?: string,
@@ -1222,7 +1265,7 @@ async function checkoutRevision(
     "--no-tags",
     "--depth=1",
     "--",
-    task.repository,
+    sourceRepository,
     task.revision,
   );
   await git("checkout", "--quiet", "--detach", "FETCH_HEAD");
