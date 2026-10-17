@@ -17,7 +17,7 @@ env:
 
 jobs:
   runner:
-    name: windows-latest / hook boundary diagnostic
+    name: windows-latest / optional cache transition diagnostic
     runs-on: windows-latest
     timeout-minutes: 240
     env:
@@ -59,7 +59,7 @@ jobs:
         id: windows-temp
         shell: pwsh
         run: ./sdk/typescript/scripts/prepare-windows-test-root.ps1
-      - name: Test snapshot hook protection
+      - name: Test optional cache permission transition
         env:
           CODEX_SECURITY_TEST_TIMEOUT_MS: "120000"
           TEMP: ${{ steps.windows-temp.outputs.path || runner.temp }}
@@ -68,13 +68,13 @@ jobs:
         run: |
           pnpm --dir sdk/typescript run build:plugin
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node --experimental-strip-types sdk/typescript/scripts/run-ci-tests.mts 1/7 --seed=1 --test-name-pattern '^snapshot filters can write LFS data while overlapping hooks stay protected:' --reporter-outfile=reports/runner-windows-hook-boundary.xml
+          node --experimental-strip-types sdk/typescript/scripts/run-ci-tests.mts 5/7 --seed=1 --test-name-pattern '^optional cache keeps model protection and inherited snapshot access:' --reporter-outfile=reports/runner-windows-cache-transition.xml
       - name: Upload runner report
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: runner-windows-hook-boundary
+          name: runner-windows-cache-transition
           overwrite: true
-          path: sdk/typescript/reports/runner-windows-hook-boundary.xml
+          path: sdk/typescript/reports/runner-windows-cache-transition.xml
           if-no-files-found: error
           retention-days: 14

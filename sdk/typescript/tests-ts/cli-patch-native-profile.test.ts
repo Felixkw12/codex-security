@@ -1,4 +1,6 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
+import * as childProcess from "node:child_process";
+import { readFileSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
 import {
   mkdir,
@@ -40,6 +42,127 @@ interface PatchProfileContext {
   controls: Awaited<ReturnType<typeof capturePatchGitControls>>;
 }
 
+async function cacheTransitionAcls(context: PatchProfileContext) {
+  if (process.platform !== "win32") return undefined;
+  try {
+    let capabilities:
+      | {
+          workspace: string;
+          readonly: string;
+          workspace_by_cwd: Record<string, string>;
+          writable_root_by_path: Record<string, string>;
+        }
+      | undefined;
+    let capabilityError: string | undefined;
+    try {
+      capabilities = JSON.parse(
+        await readFile(join(context.home, "cap_sid"), "utf8"),
+      );
+    } catch (error) {
+      capabilityError = String(error);
+    }
+    const storage = await realpath(context.storage);
+    const paths = [
+      await realpath(context.repository),
+      storage,
+      join(storage, "objects"),
+      join(storage, "tmp"),
+    ];
+    const states = await Promise.all(
+      [...paths, join(storage, "objects", "synthetic")].map(async (path) => {
+        try {
+          const value = await lstat(path);
+          return {
+            path,
+            file: value.isFile(),
+            directory: value.isDirectory(),
+            symbolicLink: value.isSymbolicLink(),
+            size: value.size,
+          };
+        } catch (error) {
+          return { path, observationError: String(error) };
+        }
+      }),
+    );
+    const observation = Buffer.from(
+      JSON.stringify({
+        paths,
+        capabilitySids: capabilities
+          ? [
+              capabilities.workspace,
+              capabilities.readonly,
+              ...Object.values(capabilities.workspace_by_cwd),
+              ...Object.values(capabilities.writable_root_by_path),
+            ]
+          : [],
+      }),
+    ).toString("base64");
+    // Preserve order and masks only for capabilities generated in this fixture's home.
+    const script = `$ErrorActionPreference = "Stop"
+$observation = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${observation}')) | ConvertFrom-Json
+Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+public static class SnapshotAclReader {
+  [DllImport("advapi32.dll", EntryPoint = "GetFileSecurityW", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+  [return: MarshalAs(UnmanagedType.Bool)]
+  private static extern bool GetFileSecurity(string path, uint information, [Out] byte[] descriptor, uint length, out uint needed);
+  public static byte[] Read(string path) {
+    uint needed;
+    bool result = GetFileSecurity(path, 4, null, 0, out needed);
+    int error = Marshal.GetLastWin32Error();
+    if (!result && error != 122) throw new Win32Exception(error);
+    byte[] descriptor = new byte[needed];
+    if (!GetFileSecurity(path, 4, descriptor, needed, out needed)) throw new Win32Exception(Marshal.GetLastWin32Error());
+    return descriptor;
+  }
+}
+'@
+$rows = @()
+foreach ($target in $observation.paths) {
+  try {
+    $descriptor = [System.Security.AccessControl.RawSecurityDescriptor]::new([SnapshotAclReader]::Read($target), 0)
+    $entries = @()
+    for ($ordinal = 0; $ordinal -lt $descriptor.DiscretionaryAcl.Count; $ordinal++) {
+      $ace = $descriptor.DiscretionaryAcl[$ordinal]
+      if ($ace -is [System.Security.AccessControl.KnownAce] -and $observation.capabilitySids -contains $ace.SecurityIdentifier.Value) {
+        $entries += [ordered]@{ ordinal = $ordinal; type = $ace.AceType.ToString(); flags = $ace.AceFlags.ToString(); mask = $ace.AccessMask; sid = $ace.SecurityIdentifier.Value }
+      }
+    }
+    $rows += [ordered]@{ path = $target; protected = ($descriptor.ControlFlags -band [System.Security.AccessControl.ControlFlags]::DiscretionaryAclProtected) -ne 0; nullDacl = $null -eq $descriptor.DiscretionaryAcl; entries = $entries }
+  } catch {
+    $rows += [ordered]@{ path = $target; observationError = $_.Exception.Message; nativeErrorCode = $_.Exception.GetBaseException().NativeErrorCode }
+  }
+}
+ConvertTo-Json -InputObject $rows -Depth 8 -Compress
+`;
+    const output = execFileSync(
+      "powershell.exe",
+      [
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-EncodedCommand",
+        Buffer.from(script, "utf16le").toString("base64"),
+      ],
+      {
+        encoding: "utf8",
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    return {
+      capabilities,
+      capabilityError,
+      states,
+      paths: JSON.parse(output),
+    };
+  } catch (error) {
+    return { observationError: String(error) };
+  }
+}
+
 async function resolvePatchProfile(
   configured: boolean,
   optionalStorage: false | "inside" | "outside" | "administration" = false,
@@ -51,6 +174,7 @@ async function resolvePatchProfile(
       temporaryDirectory: string,
     ) => Promise<string>,
   ) => Promise<void>,
+  observations?: RpcMessage[],
 ): Promise<PatchProfileContext> {
   const root = await fixtures.create("patch-native-profile-");
   const home = join(root, "home");
@@ -137,6 +261,25 @@ glob_scan_max_depth = 8
   const nativeCli = fileURLToPath(
     new URL("../node_modules/@openai/codex/bin/codex.js", import.meta.url),
   );
+  if (observations) {
+    let canonicalHome = home;
+    try {
+      canonicalHome = await realpath(home);
+    } catch (error) {
+      observations.push({
+        phase: "home-observation-error",
+        error: String(error),
+      });
+    }
+    observations.push({
+      phase: "fixture",
+      home,
+      canonicalHome,
+      repository,
+      administration,
+      storage,
+    });
+  }
   const child = spawn("node", [nativeCli, "app-server"], {
     cwd: repository,
     env: {
@@ -184,8 +327,34 @@ glob_scan_max_depth = 8
   const rpc = (method: string, params: RpcMessage) =>
     new Promise<RpcMessage>((resolve, reject) => {
       const id = ++nextId;
-      pending.set(id, { resolve, reject });
-      child.stdin.write(`${JSON.stringify({ id, method, params })}\n`);
+      const serialized = `${JSON.stringify({ id, method, params })}\n`;
+      if (method === "command/exec")
+        observations?.push({ phase: "model-request", serialized });
+      pending.set(id, {
+        resolve(value) {
+          if (method === "command/exec")
+            observations?.push({
+              phase: "model-result",
+              id,
+              result: {
+                exitCode: value["exitCode"],
+                stdout: value["stdout"],
+                stderr: value["stderr"],
+              },
+            });
+          resolve(value);
+        },
+        reject(error) {
+          if (method === "command/exec")
+            observations?.push({
+              phase: "model-error",
+              id,
+              error: String(error),
+            });
+          reject(error);
+        },
+      });
+      child.stdin.write(serialized);
     });
   const stopped = "Synthetic stop before model execution";
   let snapshotsPrepared = false;
@@ -334,6 +503,19 @@ glob_scan_max_depth = 8
       storage,
       controls,
     };
+    observations?.push({
+      phase: "profiles",
+      name,
+      modelProfile: context.modelProfile,
+      snapshotProfile: context.snapshotProfile,
+      readOnlyPaths,
+      modelOnlyReadOnlyPaths,
+      snapshotStoragePaths: controls?.snapshotStoragePaths,
+      selectedThread: {
+        activePermissionProfile: selected["activePermissionProfile"],
+        sandbox: selected["sandbox"],
+      },
+    });
     clearTimeout(timeout);
     if (exercise) {
       await rpc("config/value/write", {
@@ -367,6 +549,7 @@ glob_scan_max_depth = 8
     forwarding = false;
     stream.destroy();
     lines.close();
+    observations?.push({ phase: "app-server-stderr", stderr });
     child.stdin.end();
     const shutdown = setTimeout(() => child.kill(), 3000);
     await closed;
@@ -424,93 +607,182 @@ test("optional storage keeps overlapping Git administration protected in snapsho
 for (const location of ["inside", "outside"] as const) {
   for (const existing of [false, true]) {
     test(`optional cache keeps model protection and inherited snapshot access: ${location}, existing ${existing}`, async () => {
-      await resolvePatchProfile(
-        location === "outside",
-        location,
-        existing,
-        async (context, inspectModel) => {
-          const temporaryDirectory = await fixtures.create(
-            "patch-cache-temporary-",
-          );
-          const environment = patchSnapshotEnvironment(temporaryDirectory, {
-            ...process.env,
-            CODEX_HOME: context.home,
-          });
-          const paths = [
-            join(context.storage, "objects"),
-            join(context.storage, "tmp"),
-          ];
-          const file = join(paths[0]!, "synthetic");
-          const inspect = (source: string, profile: RpcMessage) =>
-            runRepositoryCommand(
-              "git",
-              [
-                "-c",
-                `alias.inspect=!node -e '${source.replaceAll("'", "'\\''")}'`,
-                "inspect",
-              ],
-              context.repository,
-              {
-                sandbox: {
-                  directory: context.repository,
-                  environment,
-                  profile,
-                },
-              },
-            );
-          if (!existing) {
-            for (const path of paths)
-              await expect(lstat(path)).rejects.toMatchObject({
-                code: "ENOENT",
-              });
-            const beforeSnapshot = JSON.parse(
-              await inspectModel(
-                `const fs=require("node:fs");const attempts=${JSON.stringify(paths)}.map(path=>{let created=false,childCreated=false,wrote=false,createError,childError,writeError;try{created=fs.mkdirSync(path,{recursive:true})!==undefined;}catch(error){createError=error.code;}try{fs.mkdirSync(path+"/synthetic-child");childCreated=true;}catch(error){childError=error.code;}try{fs.writeFileSync(path+"/synthetic","changed");wrote=true;}catch(error){writeError=error.code;}return{created,childCreated,wrote,createError,childError,writeError};});fs.writeSync(1,JSON.stringify(attempts));`,
-                temporaryDirectory,
+      const observations: RpcMessage[] = [];
+      const originalSpawn = childProcess.spawn;
+      const observer = spyOn(childProcess, "spawn").mockImplementation(((
+        ...input: Parameters<typeof originalSpawn>
+      ) => {
+        const [command, args, options] = input;
+        const fixture = observations.find(
+          (item) => item["phase"] === "fixture",
+        );
+        if (
+          fixture &&
+          [fixture["home"], fixture["canonicalHome"]].includes(
+            options?.env?.["CODEX_HOME"],
+          )
+        ) {
+          try {
+            const profileIndex = args?.indexOf("--permission-profile") ?? -1;
+            const profile =
+              profileIndex < 0 ? undefined : args?.[profileIndex + 1];
+            observations.push({
+              phase: "native-spawn",
+              command,
+              args,
+              cwd: options?.cwd,
+              baseConfig: readFileSync(
+                join(fixture["home"], "config.toml"),
+                "utf8",
               ),
+              ...(profile
+                ? {
+                    namedConfig: readFileSync(
+                      join(fixture["home"], `${profile}.config.toml`),
+                      "utf8",
+                    ),
+                  }
+                : {}),
+            });
+          } catch (error) {
+            observations.push({
+              phase: "native-spawn",
+              command,
+              args,
+              cwd: options?.cwd,
+              observationError: String(error),
+            });
+          }
+        }
+        return originalSpawn(...input);
+      }) as typeof originalSpawn);
+      try {
+        await resolvePatchProfile(
+          location === "outside",
+          location,
+          existing,
+          async (context, inspectModel) => {
+            const temporaryDirectory = await fixtures.create(
+              "patch-cache-temporary-",
             );
-            expect(beforeSnapshot).toEqual(
-              paths.map(() =>
-                expect.objectContaining({
-                  created: false,
-                  childCreated: false,
-                  wrote: false,
-                  childError: expect.any(String),
-                  writeError: expect.any(String),
-                }),
-              ),
-            );
-            for (const path of paths) {
-              if (process.platform === "win32") {
-                // Native ACL setup creates empty protected directory placeholders.
-                expect((await lstat(path)).isDirectory()).toBe(true);
-                expect(await readdir(path)).toEqual([]);
-              } else
+            const environment = patchSnapshotEnvironment(temporaryDirectory, {
+              ...process.env,
+              CODEX_HOME: context.home,
+            });
+            const paths = [
+              join(context.storage, "objects"),
+              join(context.storage, "tmp"),
+            ];
+            const file = join(paths[0]!, "synthetic");
+            let modelCommands = 0;
+            const inspectModelObserved = async (
+              source: string,
+              temporary: string,
+            ) => {
+              try {
+                return await inspectModel(source, temporary);
+              } finally {
+                modelCommands++;
+                if (existing || modelCommands === 1)
+                  observations.push({
+                    phase: "model-complete",
+                    modelCommands,
+                    acls: await cacheTransitionAcls(context),
+                  });
+              }
+            };
+            const inspect = async (source: string, profile: RpcMessage) => {
+              const stderr: Buffer[] = [];
+              try {
+                return await runRepositoryCommand(
+                  "git",
+                  [
+                    "-c",
+                    `alias.inspect=!node -e '${source.replaceAll("'", "'\\''")}'`,
+                    "inspect",
+                  ],
+                  context.repository,
+                  {
+                    sandbox: {
+                      directory: context.repository,
+                      environment,
+                      profile,
+                    },
+                    onStderr(chunk) {
+                      stderr.push(Buffer.from(chunk));
+                    },
+                  },
+                );
+              } finally {
+                observations.push({
+                  phase: "snapshot-complete",
+                  stderr: Buffer.concat(stderr).toString("utf8"),
+                  acls: await cacheTransitionAcls(context),
+                });
+              }
+            };
+            if (!existing) {
+              for (const path of paths)
                 await expect(lstat(path)).rejects.toMatchObject({
                   code: "ENOENT",
                 });
+              const beforeSnapshot = JSON.parse(
+                await inspectModelObserved(
+                  `const fs=require("node:fs");const attempts=${JSON.stringify(paths)}.map(path=>{let created=false,childCreated=false,wrote=false,createError,childError,writeError;try{created=fs.mkdirSync(path,{recursive:true})!==undefined;}catch(error){createError=error.code;}try{fs.mkdirSync(path+"/synthetic-child");childCreated=true;}catch(error){childError=error.code;}try{fs.writeFileSync(path+"/synthetic","changed");wrote=true;}catch(error){writeError=error.code;}return{created,childCreated,wrote,createError,childError,writeError};});fs.writeSync(1,JSON.stringify(attempts));`,
+                  temporaryDirectory,
+                ),
+              );
+              expect(beforeSnapshot).toEqual(
+                paths.map(() =>
+                  expect.objectContaining({
+                    created: false,
+                    childCreated: false,
+                    wrote: false,
+                    childError: expect.any(String),
+                    writeError: expect.any(String),
+                  }),
+                ),
+              );
+              for (const path of paths) {
+                if (process.platform === "win32") {
+                  // Native ACL setup creates empty protected directory placeholders.
+                  expect((await lstat(path)).isDirectory()).toBe(true);
+                  expect(await readdir(path)).toEqual([]);
+                } else
+                  await expect(lstat(path)).rejects.toMatchObject({
+                    code: "ENOENT",
+                  });
+              }
             }
-          }
-          const snapshot = await inspect(
-            `const fs=require("node:fs");for(const path of ${JSON.stringify(paths)})fs.mkdirSync(path,{recursive:true});fs.writeFileSync(${JSON.stringify(file)},"unchanged");fs.writeSync(1,"prepared");`,
-            context.snapshotProfile,
-          );
-          expect(snapshot).toBe("prepared");
-          await context.controls!.validate();
-          const model = await inspectModel(
-            `const fs=require("node:fs");try{fs.writeFileSync(${JSON.stringify(file)},"changed");fs.writeSync(1,"allowed");}catch(error){fs.writeSync(1,error.code);}`,
-            temporaryDirectory,
-          );
-          expect(["EROFS", "EACCES", "EPERM"]).toContain(model);
-          expect(await readFile(file, "utf8")).toBe("unchanged");
-          await context.controls!.validate();
-          await rename(paths[0]!, `${paths[0]}-previous`);
-          await mkdir(paths[0]!);
-          await expect(context.controls!.validate()).rejects.toThrow(
-            "changed location during the patch",
-          );
-        },
-      );
+            const snapshot = await inspect(
+              `const fs=require("node:fs");for(const path of ${JSON.stringify(paths)})fs.mkdirSync(path,{recursive:true});fs.writeFileSync(${JSON.stringify(file)},"unchanged");fs.writeSync(1,"prepared");`,
+              context.snapshotProfile,
+            );
+            expect(snapshot).toBe("prepared");
+            await context.controls!.validate();
+            const model = await inspectModelObserved(
+              `const fs=require("node:fs");try{fs.writeFileSync(${JSON.stringify(file)},"changed");fs.writeSync(1,"allowed");}catch(error){fs.writeSync(1,error.code);}`,
+              temporaryDirectory,
+            );
+            expect(["EROFS", "EACCES", "EPERM"]).toContain(model);
+            expect(await readFile(file, "utf8")).toBe("unchanged");
+            await context.controls!.validate();
+            await rename(paths[0]!, `${paths[0]}-previous`);
+            await mkdir(paths[0]!);
+            await expect(context.controls!.validate()).rejects.toThrow(
+              "changed location during the patch",
+            );
+          },
+          observations,
+        );
+      } finally {
+        observer.mockRestore();
+        console.log(
+          JSON.stringify({
+            optionalCacheTransition: { location, existing, observations },
+          }),
+        );
+      }
     }, 30_000);
   }
 }
