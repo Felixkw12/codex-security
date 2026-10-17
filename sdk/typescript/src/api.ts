@@ -751,8 +751,8 @@ export class CodexSecurity {
     });
     type ScanMetadata = Pick<
       ScanResultOptions,
-      "threadId" | "turnResult" | "sarifPath" | "repositoryFindings" | "cost"
-    >;
+      "threadId" | "turnResult" | "sarifPath" | "repositoryFindings"
+    > & { cost?: Readonly<ScanCost> | null };
     if (state.scanId && state.scanDir) {
       await workflow.protectArtifacts(state.scanDir);
       let metadata = state.stages.scan.result as ScanMetadata | undefined;
@@ -782,6 +782,7 @@ export class CodexSecurity {
           ...contract,
           scanDir: state.scanDir,
           ...metadata,
+          observedCost: metadata.cost,
           threatModelPath: await readThreatModelPath(state.scanDir, {
             pythonPath: this.config.pythonPath,
             protectedRoot: local.protectedRoot,
@@ -2645,7 +2646,7 @@ export class CodexSecurity {
       );
       result = new ScanResult({
         ...result,
-        cost: completionCost,
+        observedCost: completionCost,
         ...(directDeepScan
           ? {
               turnResult: {
@@ -2727,6 +2728,7 @@ export class CodexSecurity {
           checkOpen();
           result = new ScanResult({
             ...result,
+            observedCost: result.cost,
             threatModelPath: isDeepStrictEqual(
               result.threatModel,
               followUpResult.threatModel,
@@ -2920,7 +2922,7 @@ export class CodexSecurity {
           }
           return new ScanResult({
             ...result,
-            cost: snapshot?.cost ?? failure.cost,
+            observedCost: snapshot?.cost ?? failure.cost,
           });
         } catch {}
       }

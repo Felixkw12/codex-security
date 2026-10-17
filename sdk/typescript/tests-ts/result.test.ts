@@ -75,13 +75,41 @@ describe("ScanResult", () => {
           model: "gpt-5.6-sol",
           usage: { input_tokens: 1_100_000, output_tokens: 0 },
         },
-        cost,
+        observedCost: cost,
       });
       expect(result.cost).toBe(cost);
       expect(result.toJSON()["cost"]).toEqual(cost);
-      expect(new ScanResult({ ...result }).cost).toBe(cost);
+      expect(
+        new ScanResult({ ...result, observedCost: result.cost }).cost,
+      ).toBe(cost);
     },
   );
+
+  test("recomputes the cost when a copied result replaces its turn metadata", () => {
+    const original = new ScanResult({
+      manifest,
+      findings,
+      coverage,
+      scanDir: "/scan",
+      threadId: "thread",
+      turnResult: {
+        model: "gpt-5.6-sol",
+        usage: { input_tokens: 1_000_000, output_tokens: 0 },
+      },
+    });
+    expect(original.cost?.estimatedUsd).toBe(4);
+    const repriced = new ScanResult({
+      ...original,
+      turnResult: { ...original.turnResult, model: "gpt-5.6-luna" },
+    });
+    expect(repriced.cost?.estimatedUsd).toBe(0.2);
+    const unpriced = new ScanResult({
+      ...original,
+      turnResult: { ...original.turnResult, model: "synthetic-unpriced-model" },
+    });
+    expect(unpriced.cost).toBeNull();
+    expect(original.cost?.estimatedUsd).toBe(4);
+  });
 
   test("rejects an unknown threshold with or without findings", () => {
     for (const levels of [[], ["high"]] satisfies SeverityLevel[][]) {
