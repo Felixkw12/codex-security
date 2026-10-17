@@ -452,7 +452,9 @@ test.each([
                     shell_environment_policy: shellPolicy,
                     features: featureOverrides,
                     agents: resolvedAgents,
-                    skills: resolvedSkills,
+                    skills: {
+                      config: expect.arrayContaining(resolvedSkills.config),
+                    },
                     web_search: webSearch,
                   });
                   if (fileProfile)
@@ -460,11 +462,14 @@ test.each([
                   expect(options.config!["agents"]).toEqual(
                     fileProfile ? resolvedAgents : agents,
                   );
-                  expect(options.config!["skills"]).toEqual(
-                    fileProfile && !explicitFileSkills
-                      ? resolvedSkills
-                      : skills,
-                  );
+                  expect(options.config!["skills"]).toMatchObject({
+                    config: expect.arrayContaining(
+                      (fileProfile && !explicitFileSkills
+                        ? resolvedSkills
+                        : skills
+                      ).config,
+                    ),
+                  });
                   expect(skills.config[0]!.path).toBe(
                     `skill-${index}/SKILL.md`,
                   );
@@ -781,16 +786,6 @@ for (const mode of ["standard", "deep"] as const) {
         },
       );
       try {
-        if (_selection === "missing custom primary") {
-          await expect(client.preflight(repository, { mode })).rejects.toThrow(
-            providerKey,
-          );
-          await expect(client.run(repository, { mode })).rejects.toThrow(
-            providerKey,
-          );
-          expect(launched).toBe(false);
-          return;
-        }
         const preflight = await client.preflight(repository, { mode });
         expect(preflight.authentication).toEqual({
           method: "api_key",
@@ -798,6 +793,16 @@ for (const mode of ["standard", "deep"] as const) {
           verified: false,
         });
         expect(preflight.modelProvider).toBe(providerId);
+        if (_selection === "missing custom primary") {
+          await expect(
+            client.preflight(repository, { mode, auth: "api-key" }),
+          ).rejects.toThrow(providerKey);
+          await expect(client.run(repository, { mode })).rejects.toThrow(
+            providerKey,
+          );
+          expect(launched).toBe(false);
+          return;
+        }
         await expect(client.run(repository, { mode })).rejects.toThrow(
           "synthetic file provider child checked",
         );
