@@ -59,6 +59,19 @@ async function waitFor(check: () => boolean): Promise<void> {
 
 afterEach(cleanup);
 
+let costModuleBundle: Promise<string> | undefined;
+function bundledCostModule(): Promise<string> {
+  costModuleBundle ??= Bun.build({
+    entrypoints: [fileURLToPath(new URL("../src/cost.ts", import.meta.url))],
+    target: "node",
+    format: "esm",
+  }).then((built) => {
+    expect(built.success).toBe(true);
+    return built.outputs[0]!.text();
+  });
+  return costModuleBundle;
+}
+
 async function workerSessionFixture() {
   const home = await codexHome();
   const usage = { input_tokens: 100, output_tokens: 10 };
@@ -1739,14 +1752,8 @@ test("cost-only tracking does not retain unrelated marker-free message history",
   } finally {
     await file.close();
   }
-  const built = await Bun.build({
-    entrypoints: [fileURLToPath(new URL("../src/cost.ts", import.meta.url))],
-    target: "node",
-    format: "esm",
-  });
-  expect(built.success).toBe(true);
   const module = join(root, "cost.mjs");
-  await writeFile(module, await built.outputs[0]!.text());
+  await writeFile(module, await bundledCostModule());
   const { stdout } = await promisify(execFile)(
     "node",
     [
@@ -1768,14 +1775,8 @@ test("cost-only tracking does not retain unrelated marker-free message history",
 
 test("does not retain completed command payloads when native logs are absent", async () => {
   const root = await codexHome();
-  const built = await Bun.build({
-    entrypoints: [fileURLToPath(new URL("../src/cost.ts", import.meta.url))],
-    target: "node",
-    format: "esm",
-  });
-  expect(built.success).toBe(true);
   const module = join(root, "cost.mjs");
-  await writeFile(module, await built.outputs[0]!.text());
+  await writeFile(module, await bundledCostModule());
   const { stdout } = await promisify(execFile)(
     "node",
     [
