@@ -9,7 +9,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { dependencyPackageContexts } from "../src/sca-context.js";
 import { discoverScaInputs, initialOsvScanResult } from "../src/sca-osv.js";
 import { dependencyScanResult } from "../src/sca.js";
@@ -134,6 +134,57 @@ test("does not attribute a different installed version to a scanner match", asyn
     (await dependencyPackageContexts(result))[0]!.installedPath,
   ).toBeNull();
 });
+
+test.each(["npm", "pnpm"] as const)(
+  "%s workspace importer supplies the manifest, installed source, and introduction chain",
+  async (manager) => {
+    const { repository, result, leaf } = await fixture();
+    await packageAt(repository, "synthetic-workspace", "1.0.0");
+    const workspace = join(repository, "packages/app");
+    await packageAt(workspace, "synthetic-app", "1.0.0");
+    await writeFile(
+      join(workspace, "package.json"),
+      JSON.stringify({
+        name: "synthetic-app",
+        version: "1.0.0",
+        private: true,
+        devDependencies: { "synthetic-parent": "2.0.0" },
+      }),
+    );
+    const lockfile = manager === "npm" ? "package-lock.json" : "pnpm-lock.yaml";
+    result.components[0]!.sourcePath = lockfile;
+    await writeFile(
+      join(repository, lockfile),
+      manager === "npm"
+        ? JSON.stringify({
+            lockfileVersion: 3,
+            packages: {
+              "": { name: "synthetic-workspace", version: "1.0.0" },
+              "packages/app": {
+                name: "synthetic-app",
+                version: "1.0.0",
+                devDependencies: { "synthetic-parent": "2.0.0" },
+              },
+              "node_modules/synthetic-parent": { version: "2.0.0" },
+            },
+          })
+        : "lockfileVersion: '9.0'\nimporters:\n  .: {}\n  packages/app:\n    devDependencies:\n      synthetic-parent:\n        specifier: 2.0.0\n        version: 2.0.0\n",
+    );
+    const [context] = await dependencyPackageContexts(result);
+    expect(context).toMatchObject({
+      manifestPath: relative(repository, join(workspace, "package.json")),
+      projectName: "synthetic-app",
+      private: true,
+      installedPath: relative(repository, leaf),
+      dependencyGroups: ["dev"],
+    });
+    expect(context!.dependencyChain.map((item) => item.name)).toEqual([
+      "synthetic-app",
+      "synthetic-parent",
+      "@synthetic/leaf",
+    ]);
+  },
+);
 
 test.each(["project", "parent", "leaf"] as const)(
   "a linked %s manifest preserves installed source and transitive resolution",
@@ -312,7 +363,7 @@ test("an outside package link does not invent a chain through a hoisted copy", a
   const external = join(root, "external-leaf");
   await packageAt(external, "@synthetic/leaf", "9.0.0");
   const nearerLink = join(dirname(parent), "@synthetic/leaf");
-  await rm(nearerLink);
+  await rm(nearerLink, { recursive: true });
   await symlink(
     external,
     nearerLink,

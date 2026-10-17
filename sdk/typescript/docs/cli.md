@@ -1825,7 +1825,8 @@ cs scan dependencies . --output-dir /path/outside/repository/dependency-results 
 
 Continuation retains completed assessments and scanner facts, and retries only
 unfinished or failed assessments. It verifies the original source snapshot
-(including dirty and ignored files), model, reasoning effort, provider,
+(including dirty and ignored files), model, reasoning effort, other native
+`model_*` settings (such as verbosity and context limits), provider,
 developer, model, and compaction instructions (including selected file paths
 and contents), and assessment skill before updating results.
 A changed branch or source requires
@@ -2011,7 +2012,9 @@ severity with explicit development-only use as a secondary scheduling hint.
 Advisories for the same package occurrence reuse a Codex thread. Each turn reads
 focused evidence instead of the entire component inventory. When available,
 local npm/pnpm package manifests and exact installed versions provide an
-observed introduction chain and a source path, including ignored `node_modules`.
+observed introduction chain and a source path, including ignored `node_modules`
+and workspace importers recorded in the lockfile. Update handoffs retain these
+observed chains and their limitations.
 This does not install or execute dependencies, establish a complete graph, or
 prove deployment or attacker reachability. Other ecosystems still use static
 repository evidence and report the automatic source-resolution limitation.

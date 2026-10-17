@@ -1,5 +1,6 @@
 import { lstat, readFile, realpath, stat } from "node:fs/promises";
 import { basename, dirname, join, relative } from "node:path";
+import { parse as parseYaml } from "yaml";
 import { isRecord } from "./record.js";
 import { relativePathIsOutside } from "./targets.js";
 import type { ScaPackageContext, ScaResult } from "./sca-types.js";
@@ -83,6 +84,32 @@ async function resolvePackage(
   return null;
 }
 
+async function workspacePaths(
+  file: string,
+  repository: string,
+): Promise<string[]> {
+  try {
+    const path = await realpath(join(repository, file));
+    if (relativePathIsOutside(relative(repository, path))) return [];
+    if (!(await stat(path)).isFile()) return [];
+    const content = await readFile(path, "utf8");
+    const pnpm = basename(file) === "pnpm-lock.yaml";
+    const lock: unknown = pnpm ? parseYaml(content) : JSON.parse(content);
+    if (!isRecord(lock)) return [];
+    const projects = lock[pnpm ? "importers" : "packages"];
+    if (!isRecord(projects)) return [];
+    return Object.entries(projects)
+      .filter(
+        ([path, value]) =>
+          isRecord(value) && !path.split(/[\\/]/u).includes("node_modules"),
+      )
+      .map(([path]) => join(dirname(join(repository, file)), path));
+  } catch {
+    // Optional workspace metadata can be absent or unreadable independently of installed source.
+    return [];
+  }
+}
+
 /** Resolve installed npm evidence without importing code, installing, or using the network. */
 export async function dependencyPackageContexts(
   result: ScaResult,
@@ -110,11 +137,16 @@ export async function dependencyPackageContexts(
   );
   for (const file of files) {
     signal?.throwIfAborted();
-    const project = await readPackage(
+    const projects: Package[] = [];
+    for (const path of new Set([
       dirname(join(repository, file)),
-      repository,
-      true,
-    );
+      ...(await workspacePaths(file, repository)),
+    ])) {
+      signal?.throwIfAborted();
+      const project = await readPackage(path, repository, true);
+      if (project !== null) projects.push(project);
+    }
+    const project = projects[0];
     const selected = components.filter(
       (component) =>
         component.sourcePath === file && component.ecosystem === "npm",
@@ -123,7 +155,7 @@ export async function dependencyPackageContexts(
       const context = contexts.find(
         (item) => item.componentId === component.id,
       )!;
-      if (project !== null) {
+      if (project !== undefined) {
         context.manifestPath = relative(
           repository,
           join(project.path, "package.json"),
@@ -133,16 +165,21 @@ export async function dependencyPackageContexts(
         context.private = project.manifest["private"] === true;
       }
     }
-    if (project === null) continue;
     const queue: {
       pkg: Package;
+      project: Package;
       chain: ScaPackageContext["dependencyChain"];
       groups: string[];
-    }[] = [{ pkg: project, chain: [], groups: [] }];
+    }[] = projects.map((project) => ({
+      pkg: project,
+      project,
+      chain: [],
+      groups: [],
+    }));
     const visited = new Set<string>();
     for (let index = 0; index < queue.length; index++) {
       signal?.throwIfAborted();
-      const { pkg, chain, groups } = queue[index]!;
+      const { pkg, project, chain, groups } = queue[index]!;
       if (visited.has(pkg.path)) continue;
       visited.add(pkg.path);
       const current = [
@@ -164,6 +201,13 @@ export async function dependencyPackageContexts(
           component.version === pkg.version
         ) {
           context.installedPath = relative(repository, pkg.path);
+          context.manifestPath = relative(
+            repository,
+            join(project.path, "package.json"),
+          );
+          context.projectName =
+            typeof project.manifest["name"] === "string" ? project.name : null;
+          context.private = project.manifest["private"] === true;
           context.dependencyChain = current;
           context.dependencyGroups = [
             ...new Set([...context.dependencyGroups, ...groups]),
@@ -179,7 +223,7 @@ export async function dependencyPackageContexts(
       )
         break;
       const fields =
-        index === 0
+        chain.length === 0
           ? ["dependencies", "optionalDependencies", "devDependencies"]
           : ["dependencies", "optionalDependencies", "peerDependencies"];
       for (const field of fields) {
@@ -190,9 +234,10 @@ export async function dependencyPackageContexts(
           if (dependency !== null && !visited.has(dependency.path))
             queue.push({
               pkg: dependency,
+              project,
               chain: current,
               groups:
-                index === 0
+                chain.length === 0
                   ? [
                       field === "devDependencies"
                         ? "dev"

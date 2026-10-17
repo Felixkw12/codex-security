@@ -1131,6 +1131,7 @@ export class CodexSecurity {
         const providerConfiguration = isRecord(providers)
           ? (providers[provider] ?? null)
           : null;
+        const assessmentConfig = policyCodexConfig(session.sessionConfig);
         const instructionFile = async (key: string) => {
           const configuredPath = resolvedConfig[key];
           if (typeof configuredPath !== "string") return null;
@@ -1142,12 +1143,21 @@ export class CodexSecurity {
               ? expandHome(configuredPath, runtime.environment)
               : configuredPath;
           const path = resolve(outputDir, expandedPath);
+          assessmentConfig[key] = path;
           return { path, contents: (await readFile(path, "utf8")).trim() };
         };
         const compactPrompt = resolvedConfig["compact_prompt"];
         const configurationDigest = workflowDigest({
           model,
           reasoningEffort,
+          modelSettings: Object.fromEntries(
+            Object.entries(resolvedConfig).filter(
+              ([key]) =>
+                key.startsWith("model_") &&
+                key !== "model_providers" &&
+                key !== "model_instructions_file",
+            ),
+          ),
           instructions: {
             developer: resolvedConfig["developer_instructions"] ?? null,
             model:
@@ -1249,7 +1259,7 @@ export class CodexSecurity {
           options.auth,
           undefined,
           {
-            ...policyCodexConfig(session.sessionConfig),
+            ...assessmentConfig,
             default_permissions: SCA_PERMISSION_PROFILE,
           },
           [`mcp_servers=${inlineToml(mcpServers)}`],

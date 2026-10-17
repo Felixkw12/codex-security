@@ -3225,6 +3225,48 @@ test.each(
 });
 
 test.each([
+  ["model_verbosity", "low", "high"],
+  ["model_context_window", 16000, 32000],
+  ["model_auto_compact_token_limit", 8000, 12000],
+  ["model_reasoning_summary", "detailed", "none"],
+] as const)(
+  "continuation binds effective %s",
+  async (key, original, changed) => {
+    const f = await fixture({
+      turns: ["completed", "malformed"],
+      codexOverrides: {
+        profile: "synthetic-assessment",
+        profiles: { "synthetic-assessment": { [key]: original } },
+      },
+    });
+    await using security = f.client;
+    const options = { repositoryPath: f.repository, outputDir: f.outputDir };
+    const initial = await security.scanDependencies(options);
+    expect(initial.assessments[0]).toMatchObject({
+      status: "completed",
+      error: null,
+    });
+    expect(f.captured.codex?.config?.[key]).toBe(original);
+    const checkpointPath = join(f.outputDir, "sca-result.json");
+    const checkpoint = await readFile(checkpointPath, "utf8");
+    const profile = (security.config.codexOverrides!["profiles"] as JsonObject)[
+      "synthetic-assessment"
+    ] as JsonObject;
+    profile[key] = changed;
+    await expect(security.scanDependencies(options)).rejects.toThrow(
+      "Use the original settings or start a new run",
+    );
+    expect(await readFile(checkpointPath, "utf8")).toBe(checkpoint);
+    expect(f.turns).toHaveLength(2);
+    profile[key] = original;
+    const resumed = await security.scanDependencies(options);
+    expect(resumed.status).toBe("completed");
+    expect(resumed.assessments[0]).toEqual(initial.assessments[0]);
+    expect(f.calls.scanner).toBe(1);
+  },
+);
+
+test.each([
   ["model_instructions_file", "path", "absolute"],
   ["model_instructions_file", "contents", "relative"],
   ["model_instructions_file", "missing", "home"],
@@ -3261,11 +3303,15 @@ test.each([
     profile[key] = configuredPath(original);
     const options = { repositoryPath: f.repository, outputDir: f.outputDir };
     const initial = await security.scanDependencies(options);
+    expect(initial.assessments[0]).toMatchObject({
+      status: "completed",
+      error: null,
+    });
     expect(initial.assessments.map((item) => item.status)).toEqual([
       "completed",
       "failed",
     ]);
-    expect(f.captured.codex?.config?.[key]).toBe(configuredPath(original));
+    expect(f.captured.codex?.config?.[key]).toBe(original);
     const checkpointPath = join(f.outputDir, "sca-result.json");
     const checkpoint = await readFile(checkpointPath, "utf8");
     if (change === "path") profile[key] = configuredPath(changed);
