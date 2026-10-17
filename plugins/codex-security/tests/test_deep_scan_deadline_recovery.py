@@ -259,12 +259,34 @@ def test_worker_writeups_remain_bound_to_their_source_directory(
 @pytest.mark.skipif(
     not hasattr(os, "fork"), reason="Crash boundary uses a forked workbench process."
 )
-@pytest.mark.parametrize("colliding_ids", [False, True], ids=["distinct-ids", "legacy-collision"])
 @pytest.mark.parametrize(
-    "parent_closure", [False, True], ids=["no-parent-closure", "parent-closure"]
+    ("colliding_ids", "parent_closure", "reviewed", "worker_like_id"),
+    [
+        (False, False, False, False),
+        (True, False, False, False),
+        (False, True, False, False),
+        (True, True, False, False),
+        (False, True, True, False),
+        (False, True, True, True),
+    ],
+    ids=[
+        "pending",
+        "legacy-collision",
+        "parent-closure",
+        "parent-closure-with-collision",
+        "reviewed-surface",
+        "reviewed-surface-with-worker-like-id",
+    ],
 )
 def test_deadline_recovery_is_idempotent_after_crash_before_commit(
-    workbench_api, workbench_db, deadline_scan, tmp_path, colliding_ids, parent_closure
+    workbench_api,
+    workbench_db,
+    deadline_scan,
+    tmp_path,
+    colliding_ids,
+    parent_closure,
+    reviewed,
+    worker_like_id,
 ):
     scan = deadline_scan
     if parent_closure:
@@ -277,11 +299,12 @@ def test_deadline_recovery_is_idempotent_after_crash_before_commit(
     connection.row_factory = sqlite3.Row
     workbench_db.backup(connection)
     worker_id, output = canceled_discovery_output(connection, scan)
+    surface_id = f"{worker_id}/entry" if worker_like_id else "entry"
     surfaces = [
         {
-            "id": "entry",
+            "id": surface_id,
             "label": "Worker review",
-            "disposition": "needs_follow_up",
+            "disposition": "no_issue_found" if reviewed else "needs_follow_up",
             "receiptRefs": [],
         }
     ]
@@ -292,8 +315,12 @@ def test_deadline_recovery_is_idempotent_after_crash_before_commit(
         saved_draft(
             scan.scan_id,
             surfaces=surfaces,
-            findings=[worker_finding(scan, "saved-before-crash"), copy.deepcopy(scan.findings[0])],
-            deferred=[{"id": "review", "reason": "Review pending.", "surfaceIds": ["entry"]}],
+            findings=[]
+            if reviewed
+            else [worker_finding(scan, "saved-before-crash"), copy.deepcopy(scan.findings[0])],
+            deferred=[]
+            if reviewed
+            else [{"id": "review", "reason": "Review pending.", "surfaceIds": [surface_id]}],
         ),
     )
     connection.close()
@@ -321,6 +348,9 @@ def test_deadline_recovery_is_idempotent_after_crash_before_commit(
     assert len([row for row in before["surfaces"] if row.get("workerId") == worker_id]) == len(
         surfaces
     )
+    if reviewed:
+        assert before["surfaces"][0]["id"] == f"{worker_id}/{surface_id}"
+    assert len([row for row in before["deferred"] if row["id"] == "scan-deadline"]) == 1
     with sqlite3.connect(database) as connection:
         connection.row_factory = sqlite3.Row
         assert (
@@ -340,7 +370,4 @@ def test_deadline_recovery_is_idempotent_after_crash_before_commit(
             if finding["provenance"].get("previousFindings") == []:
                 finding["provenance"].pop("previousFindings")
     assert findings_after == findings_before
-    for field in ("surfaces", "deferred"):
-        assert [row for row in after[field] if row.get("workerId") == worker_id] == [
-            row for row in before[field] if row.get("workerId") == worker_id
-        ]
+    assert after == before

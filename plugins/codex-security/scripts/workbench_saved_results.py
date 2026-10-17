@@ -33,6 +33,7 @@ from finalize_scan_contract import (
     _recover_unsealed_findings,
     _remove_scan_local_file_if_exists,
     _require_portable_relative_path,
+    _require_safe_json_value,
     _validate_completion_binding,
     _validate_resolved_deferred,
     _validate_schema_node,
@@ -745,6 +746,7 @@ def _generic_surface_updates(
     surface_schema: dict[str, Any],
     deferred_rows: dict[str, list[Any]],
     ambiguous_deferred: set[tuple[str | None, str]],
+    canonical_rows: set[int],
 ) -> tuple[set[int], list[dict[str, Any]]]:
     if not closed_deferred and not reopened_generic:
         return set(), []
@@ -855,6 +857,8 @@ def _generic_surface_updates(
             )
             if update not in updates:
                 updates.append(update)
+                if id(latest_surface) in canonical_rows:
+                    canonical_rows.add(id(update))
     return replaced, updates
 
 
@@ -1102,6 +1106,26 @@ def merge_saved_results(
                 continue
             if preserve_canonical_parent and worker_id is not None:
                 # Recover imported records without relaxing canonical parent validation.
+                if "threatModel" in draft:
+                    try:
+                        model = draft["threatModel"]
+                        if isinstance(model, dict):
+                            model = {**model, "origin": "recovered"}
+                        schema = _read_json(
+                            Path(__file__).resolve().parent.parent
+                            / "schemas"
+                            / "scan-manifest.schema.json"
+                        )
+                        _validate_schema_node(
+                            model,
+                            schema["properties"]["scan"]["properties"]["threatModel"],
+                            "threatModel",
+                            schema,
+                        )
+                        _require_safe_json_value(model, "threatModel")
+                    except ContractError as exc:
+                        draft.pop("threatModel")
+                        warnings.append(f"{relative}: Skipped malformed threat model: {exc}.")
                 directory = Path(relative).parent
                 if directory.name == "checkpoints":
                     directory = directory.parent
@@ -1278,6 +1302,7 @@ def merge_saved_results(
                     row["id"] = identity
                     reserved.add(identity)
 
+    discarded_coverage_sources: set[str] = set()
     if preserve_canonical_parent:
         for relative, draft, worker_id in sources:
             if worker_id is None:
@@ -1290,7 +1315,7 @@ def merge_saved_results(
                         if field == "surfaces":
                             row.setdefault("receiptRefs", [])
             source_warnings = []
-            _recover_unsealed_coverage(
+            discarded_fields = _recover_unsealed_coverage(
                 draft["coverage"],
                 Path(__file__).resolve().parent.parent / "schemas",
                 scan_dir,
@@ -1299,6 +1324,13 @@ def merge_saved_results(
                 # Reconcile local IDs and valid outcomes against worker history below.
                 worker_draft=True,
             )
+            if discarded_fields & {
+                "surfaces",
+                "explicitExclusions",
+                "deferred",
+                "resolvedDeferred",
+            }:
+                discarded_coverage_sources.add(relative)
             for row in draft["coverage"]["deferred"]:
                 row["workerId"] = worker_id
             warnings.extend(f"{relative}: {warning}" for warning in source_warnings)
@@ -1388,7 +1420,9 @@ def merge_saved_results(
     canonical_rows = (
         {
             id(item)
-            for parent_coverage in (coverage, parent["coverage"])
+            for parent_coverage in (
+                (coverage, parent["coverage"]) if preserve_canonical_parent else (coverage,)
+            )
             for field in ("surfaces", "explicitExclusions", "deferred")
             for item in (
                 parent_coverage.get(field) if isinstance(parent_coverage.get(field), list) else []
@@ -1644,6 +1678,7 @@ def merge_saved_results(
         coverage_schema["surfaces"]["items"],
         deferred_rows,
         ambiguous_deferred,
+        canonical_rows,
     )
     replaced_rows = {
         "surfaces": replaced_surfaces,
@@ -1726,12 +1761,14 @@ def merge_saved_results(
             and relative in selected_observations
             and draft.get("complete") is not False
             and relative not in discarded_by_source
+            and relative not in discarded_coverage_sources
         ):
             order = source_order[relative]
             selected_terminal_orders[worker_id] = max(
                 selected_terminal_orders.get(worker_id, order), order
             )
     terminal_worker_orders: dict[str | None, tuple[int, int]] = {}
+    terminal_coverage_orders: dict[str | None, tuple[int, int]] = {}
     for relative, draft, worker_id in sources:
         if (
             relative in current_results
@@ -1742,6 +1779,10 @@ def merge_saved_results(
             terminal_worker_orders[worker_id] = max(
                 terminal_worker_orders.get(worker_id, order), order
             )
+            if relative not in discarded_coverage_sources:
+                terminal_coverage_orders[worker_id] = max(
+                    terminal_coverage_orders.get(worker_id, order), order
+                )
     for relative, draft, worker_id in all_sources:
         worker_result_order = terminal_worker_orders.get(worker_id)
         selected_coverage_superseded = worker_id in selected_terminal_orders and (
@@ -1771,14 +1812,27 @@ def merge_saved_results(
                 or source_order[relative] < worker_result_order
             )
         )
+        worker_coverage_order = terminal_coverage_orders.get(worker_id)
+        coverage_superseded = (
+            superseded
+            if worker_id is None
+            else (
+                relative not in current_results
+                and worker_coverage_order is not None
+                and (
+                    relative not in selected_observations
+                    or source_order[relative] < worker_coverage_order
+                )
+            )
+        )
         # A failed result write can leave pending work outside the accepted result.
         accepted_order = (
             (0, parent_modified)
             if worker_id is None and parent is not None
-            else worker_result_order
+            else worker_coverage_order
         )
         retain_pending = (
-            superseded
+            coverage_superseded
             and (worker_id in headed_workers or (worker_id is None and parent_heads))
             and accepted_order is not None
             and source_order[relative] >= accepted_order
@@ -1789,7 +1843,12 @@ def merge_saved_results(
             and not stopped
             and all(valid_finding(finding) for finding in (parent["findings"] if parent else []))
         )
-        if skip_superseded_findings and not selected_candidates and not retain_pending:
+        if (
+            skip_superseded_findings
+            and coverage_superseded
+            and not selected_candidates
+            and not retain_pending
+        ):
             continue
         if (
             not skip_superseded_findings
@@ -1967,10 +2026,10 @@ def merge_saved_results(
                 continue
             finding_positions[key] = len(findings)
             findings.append(finding)
-        if superseded and not selected_candidates and not retain_pending:
+        if coverage_superseded and not selected_candidates and not retain_pending:
             continue
         for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions"):
-            if superseded and field not in {"surfaces", "explicitExclusions", "deferred"}:
+            if coverage_superseded and field not in {"surfaces", "explicitExclusions", "deferred"}:
                 continue
             items = draft["coverage"].get(field, [])
             if field == "deferred":
@@ -1995,7 +2054,7 @@ def merge_saved_results(
                 ):
                     continue
                 # A selected outcome must retain its evidence even if its result write failed.
-                if superseded and not (
+                if coverage_superseded and not (
                     isinstance(item, dict)
                     and (
                         (field == "deferred" and retain_pending)
@@ -2144,9 +2203,11 @@ def coverage_for_comparison(db: Any, scan: Any) -> dict[str, Any]:
     return prepared.coverage
 
 
-def _snapshot_published_outputs(scan_dir: Path) -> dict[str, tuple[bytes, os.stat_result] | None]:
+def _snapshot_published_outputs(
+    scan_dir: Path, relative_paths: tuple[str, ...] = _PUBLISHED_OUTPUTS
+) -> dict[str, tuple[bytes, os.stat_result] | None]:
     snapshots: dict[str, tuple[bytes, os.stat_result] | None] = {}
-    for relative in _PUBLISHED_OUTPUTS:
+    for relative in relative_paths:
         descriptor = -1
         try:
             descriptor = open_scan_local_file_descriptor(
@@ -2191,7 +2252,6 @@ def preserve_deep_deadline_draft(
 ) -> Iterator[None]:
     """Recover unfinished reviews at a settled Deep deadline without sealing the parent."""
     scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
-    snapshots = _snapshot_published_outputs(scan_dir)
     warnings = json.loads(scan["completion_warnings_json"])
     binding = db.workbench_completion_binding(scan, db.now())
     workers = connection.execute(
@@ -2215,6 +2275,9 @@ def preserve_deep_deadline_draft(
             completion_binding=binding,
             allow_missing_writeups=True,
         )
+    snapshots = _snapshot_published_outputs(
+        scan_dir, ("findings.json", "coverage.json", "scan-manifest.json")
+    )
     with preserve_parent_head_on_error(scan_dir):
         try:
             documents = merge_saved_results(
@@ -2233,15 +2296,15 @@ def preserve_deep_deadline_draft(
             if documents is None:
                 raise ContractError("Deep Scan deadline has no saved parent draft.")
             if preserve_reduction:
-                documents[2]["deferred"].append(
-                    {
-                        "id": "scan-deadline",
-                        "reason": (
-                            "The configured discovery time limit elapsed. Saved findings and "
-                            "pending work from unfinished source reviews were preserved."
-                        ),
-                    }
-                )
+                marker = {
+                    "id": "scan-deadline",
+                    "reason": (
+                        "The configured discovery time limit elapsed. Saved findings and "
+                        "pending work from unfinished source reviews were preserved."
+                    ),
+                }
+                if marker not in documents[2]["deferred"]:
+                    documents[2]["deferred"].append(marker)
             documents[0]["scan"].pop("complete", None)
             # Validate recovered evidence against the current finding contract,
             # scope, source lineage, and receipts before admitting this draft.
