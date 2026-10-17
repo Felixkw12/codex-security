@@ -3825,7 +3825,7 @@ export async function main(
               knowledgeBasePaths: options.knowledgeBase,
               failureSeverity: options.failOnSeverity,
               maxCostUsd: options.maxCost,
-              codexOverrides: parseCodexOverrides(
+              codexOverrides: parseScanCodexOverrides(
                 options.codex,
                 options.model,
                 options.effort,
@@ -4420,7 +4420,7 @@ export async function main(
               ...pickScanSettings({ ...options, workers: undefined }),
               knowledgeBasePaths: options.knowledgeBase,
               maxCostUsd: options.maxCost,
-              codexOverrides: parseCodexOverrides(
+              codexOverrides: parseScanCodexOverrides(
                 options.codex,
                 options.model,
                 options.effort,
@@ -4736,7 +4736,7 @@ export async function main(
             config: {
               codexOverrides: mergeCodexOverrides(
                 resolved.config.codexOverrides,
-                parseCodexOverrides(
+                parseScanCodexOverrides(
                   options.codex,
                   options.model,
                   options.effort,
@@ -10089,6 +10089,21 @@ export function parseCodexOverrides(
       );
     }
   }
+  requireExternalProviderModel(
+    mergeCodexOverrides(defaults ?? {}, result),
+    provider,
+  );
+  return result;
+}
+
+function parseScanCodexOverrides(
+  values: readonly string[],
+  model?: string,
+  effort?: ModelCliOptions["effort"],
+  provider?: "openai" | "amazon-bedrock" | ExternalModelProvider,
+  defaults?: JsonObject,
+): JsonObject {
+  const result = parseCodexOverrides(values, model, effort, provider, defaults);
   const effective = mergeCodexOverrides(defaults ?? {}, result);
   requireExternalProviderModel(effective, scanModelProvider(effective));
   return result;

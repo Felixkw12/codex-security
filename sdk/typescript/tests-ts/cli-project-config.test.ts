@@ -1534,20 +1534,3 @@ test.each(["yaml", "toon", "json"])(
     expect(message).toContain(missing);
   },
 );
-
-test.each(["openrouter", "fireworks", "amazon-bedrock"])(
-  "requires a model for native %s provider overrides outside scan",
-  (provider) => {
-    for (const values of [
-      [`model_provider="${provider}"`],
-      ['profile="review"', `profiles.review.model_provider="${provider}"`],
-    ]) {
-      expect(() => parseCodexOverrides(values)).toThrow(
-        `--model is required when using --provider ${provider}`,
-      );
-      expect(
-        parseCodexOverrides([...values, 'model="synthetic-model"']),
-      ).toHaveProperty("model", "synthetic-model");
-    }
-  },
-);
