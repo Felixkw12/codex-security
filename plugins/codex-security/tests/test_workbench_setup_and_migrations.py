@@ -90,8 +90,10 @@ EXPECTED_MIGRATIONS = [
     (45, "separate local and service embedding caches"),
     (46, "invalidate local embeddings when finding bodies change"),
     (47, "snapshot deep scan discovery context"),
-    (48, "persist repository identities"),
-    (49, "stabilize Linux repository generations"),
+    (48, "share finding issue receipts across trackers"),
+    (49, "index finding issue receipt ownership"),
+    (50, "persist repository identities"),
+    (51, "stabilize Linux repository generations"),
 ]
 
 
@@ -322,6 +324,22 @@ def test_sqlite_snapshot_includes_uncheckpointed_wal_rows(tmp_path: Path) -> Non
             [sys.executable, str(SNAPSHOT_SCRIPT), str(source), str(snapshot)],
             check=True,
         )
+    with sqlite3.connect(snapshot) as connection:
+        assert connection.execute("SELECT value FROM records").fetchone() == ("sealed",)
+
+
+@pytest.mark.native_windows
+@pytest.mark.skipif(os.name != "nt", reason="requires Win32 extended-length paths")
+def test_sqlite_snapshot_reads_windows_extended_length_source(tmp_path: Path) -> None:
+    source = tmp_path / "source.sqlite3"
+    snapshot = tmp_path / "snapshot.sqlite3"
+    with sqlite3.connect(source) as connection:
+        connection.execute("CREATE TABLE records (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO records VALUES ('sealed')")
+    subprocess.run(
+        [sys.executable, str(SNAPSHOT_SCRIPT), "\\\\?\\" + str(source), str(snapshot)],
+        check=True,
+    )
     with sqlite3.connect(snapshot) as connection:
         assert connection.execute("SELECT value FROM records").fetchone() == ("sealed",)
 
@@ -1211,7 +1229,7 @@ def test_workbench_reconciles_monorepo_migration_lineage() -> None:
     ]
     assert (
         connection.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'finding_publications'"
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'finding_issue_receipts'"
         ).fetchone()
         is not None
     )
@@ -1219,13 +1237,11 @@ def test_workbench_reconciles_monorepo_migration_lineage() -> None:
         row[0]
         for row in connection.execute(
             "SELECT name FROM sqlite_master WHERE type = 'index' "
-            "AND tbl_name = 'finding_publications'"
+            "AND tbl_name = 'finding_issue_receipts'"
         )
     } >= {
-        "finding_publications_by_scan",
-        "finding_publications_by_finding",
-        "finding_publications_team_only_occurrence",
-        "finding_publications_team_only_external_issue",
+        "finding_issue_receipts_by_finding",
+        "finding_issue_receipts_by_destination_issue",
     }
     assert [
         row["name"]
@@ -1237,6 +1253,69 @@ def test_workbench_reconciles_monorepo_migration_lineage() -> None:
         for row in connection.execute("PRAGMA table_info(deep_scan_runs)")
         if row["name"] == "publication_error_message"
     ] == ["publication_error_message"]
+
+
+def test_workbench_indexes_issue_ownership_without_changing_existing_receipts() -> None:
+    connection, apply_migrations = create_historical_database(49)
+    with closing(connection):
+        timestamp = "2026-01-01T00:00:00Z"
+        connection.executemany(
+            "INSERT INTO finding_issue_receipts (scan_id, finding_id, occurrence_id, "
+            "destination_key, external_id, external_url, operation, readback_json, "
+            "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    f"scan-{index}",
+                    f"finding-{index}",
+                    f"occurrence-{index}",
+                    f"destination-{index % 2}",
+                    f"ISSUE-{index}",
+                    f"https://issues.example.test/browse/ISSUE-{index}",
+                    "create",
+                    '{"status":"verified"}',
+                    timestamp,
+                    timestamp,
+                )
+                for index in range(256)
+            ],
+        )
+        connection.commit()
+        receipts = connection.execute("SELECT * FROM finding_issue_receipts ORDER BY id").fetchall()
+        history = connection.execute("SELECT * FROM schema_migrations ORDER BY version").fetchall()
+
+        apply_migrations(connection)
+        apply_migrations(connection)
+
+        assert (
+            connection.execute("SELECT * FROM finding_issue_receipts ORDER BY id").fetchall()
+            == receipts
+        )
+        assert (
+            connection.execute(
+                "SELECT * FROM schema_migrations WHERE version < 49 ORDER BY version"
+            ).fetchall()
+            == history
+        )
+        query = (
+            "SELECT 1 FROM finding_issue_receipts WHERE destination_key = ? "
+            "AND external_id = ? AND finding_id != ? LIMIT 1"
+        )
+        parameters = ("destination-1", "ISSUE-129", "another-finding")
+        plan = connection.execute("EXPLAIN QUERY PLAN " + query, parameters).fetchall()
+        assert any(
+            row[3].startswith("SEARCH ")
+            and "COVERING INDEX finding_issue_receipts_by_destination_issue" in row[3]
+            for row in plan
+        ), [tuple(row) for row in plan]
+        assert connection.execute(query, parameters).fetchone()[0] == 1
+        assert (
+            connection.execute(query, ("destination-1", "ISSUE-129", "finding-129")).fetchone()
+            is None
+        )
+        assert (
+            connection.execute(query, ("destination-0", "ISSUE-129", "another-finding")).fetchone()
+            is None
+        )
 
 
 def test_workbench_creates_single_final_schema(tmp_path: Path) -> None:
@@ -2676,7 +2755,7 @@ def test_repository_identity_upgrade_keeps_named_scan_history(installed: str) ->
                 for row in connection.execute("SELECT * FROM schema_migrations")
             }
             assert migrations["editable scan names"][0] == 42
-            assert migrations["persist repository identities"][0] == 48
+            assert migrations["persist repository identities"][0] == 50
             for name, timestamp in timestamps.items():
                 assert migrations[name][1] == timestamp
 
@@ -2712,7 +2791,7 @@ def test_correcting_aliased_workspace_setup_retains_target(tmp_path: Path, spell
         )
 
 
-@pytest.mark.parametrize("before_version", [48, 49])
+@pytest.mark.parametrize("before_version", [50, 51])
 @pytest.mark.parametrize("with_scan", [False, True])
 def test_identity_migrations_skip_unavailable_historical_git(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, before_version: int, with_scan: bool
@@ -2733,7 +2812,7 @@ def test_identity_migrations_skip_unavailable_historical_git(
         "VALUES (?, ?, ?, ?, ?)",
         (workspace_id, target_id, historical, timestamp, timestamp),
     )
-    old_identity = "repository_sha256_" + "1" * 64 if before_version == 49 else None
+    old_identity = "repository_sha256_" + "1" * 64 if before_version == 51 else None
     if old_identity is not None:
         connection.execute("UPDATE security_targets SET repository_identity = ?", (old_identity,))
     if with_scan:
@@ -2745,7 +2824,7 @@ def test_identity_migrations_skip_unavailable_historical_git(
             (workspace_id, target_id, historical, timestamp, timestamp, timestamp),
         )
     apply_migrations(connection)
-    assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 49
+    assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 51
     assert tuple(
         connection.execute(
             "SELECT id, current_path, repository_identity FROM security_targets"
@@ -2818,7 +2897,7 @@ def test_identity_migration_excludes_all_history_and_caller_git(
         initialize_git_repository(repository)
     state = tmp_path / "state"
     state.mkdir(mode=0o700)
-    connection, _ = create_historical_database(48)
+    connection, _ = create_historical_database(50)
     timestamp = "2026-08-01T00:00:00Z"
     destination = tmp_path / "destination"
     if executable_source.startswith("redirected-"):
@@ -2924,7 +3003,7 @@ def test_identity_migrations_keep_healthy_targets_when_another_path_is_unavailab
     repository = tmp_path / "healthy"
     initialize_git_repository(repository)
     connection, apply_migrations = create_historical_database(
-        48 if migration == "pre-release" else 49
+        50 if migration == "pre-release" else 51
     )
     import workbench_target as target
     import workbench_target_state as state
@@ -2938,7 +3017,7 @@ def test_identity_migrations_keep_healthy_targets_when_another_path_is_unavailab
     if migration == "pre-release":
         connection.execute("ALTER TABLE security_targets ADD COLUMN repository_identity TEXT")
         connection.execute(
-            "INSERT INTO schema_migrations VALUES (48, 'persist repository identities', ?)",
+            "INSERT INTO schema_migrations VALUES (50, 'persist repository identities', ?)",
             (timestamp,),
         )
     missing = tmp_path / "unavailable" / "old-checkout"

@@ -795,7 +795,7 @@ with sqlite3.connect(sys.argv[2]) as database:
 `,
       fileURLToPath(new URL("../../scripts", import.meta.url)),
       databasePath,
-      String(through ?? 49),
+      String(through ?? 51),
     ],
     { encoding: "utf8" },
   );
@@ -830,8 +830,13 @@ test("Node initialization leaves repository migration semantics to the Python co
     "partial43",
     "current43",
     "current44",
+    "current48",
+    "current49",
   ] as const) {
     await t.test(fixture, async () => {
+      const currentVersion = fixture.startsWith("current")
+        ? Number(fixture.slice("current".length))
+        : undefined;
       const directory = await temporary.create("workbench-repository-upgrade-");
       const databasePath = join(directory, "workbench.sqlite3");
       const database = new DatabaseSync(databasePath);
@@ -846,7 +851,9 @@ test("Node initialization leaves repository migration semantics to the Python co
                 ? 30
                 : fixture === "main43"
                   ? 43
-                  : 42),
+                  : currentVersion !== undefined && currentVersion >= 48
+                    ? 47
+                    : 42),
         ),
       );
       insertScan(database);
@@ -870,19 +877,22 @@ test("Node initialization leaves repository migration semantics to the Python co
           )
           .run(fixture === "legacy30" ? 30 : 31);
       database.close();
-      if (fixture === "current43" || fixture === "current44") {
+      if (currentVersion !== undefined) {
         const current = new DatabaseSync(databasePath);
         applyMigrations(
           current,
-          historicalRepositoryMigrations.filter(
-            (item) => item.version <= (fixture === "current43" ? 43 : 44),
-          ),
+          historicalRepositoryMigrations
+            .map((item) => ({
+              ...item,
+              version: item.version + (currentVersion >= 48 ? 5 : 0),
+            }))
+            .filter((item) => item.version <= currentVersion),
         );
         assert.equal(
           current
             .prepare("SELECT MAX(version) AS version FROM schema_migrations")
             .get()?.version,
-          fixture === "current43" ? 43 : 44,
+          currentVersion,
         );
         current.exec(
           "UPDATE scans SET completion_sequence=77,repository_generation='synthetic-generation'; UPDATE security_targets SET repository_identity='synthetic-generation'",
@@ -901,12 +911,13 @@ test("Node initialization leaves repository migration semantics to the Python co
       pythonMigrations(controlPath);
       await databaseInfo(directory);
       const initialized = new DatabaseSync(databasePath);
+      assertMigrationNames(initialized, 48, 49);
       const identity = initialized
         .prepare("SELECT * FROM security_targets")
         .get()?.repository_identity;
       assert.equal(
         identity,
-        fixture === "current43" || fixture === "current44"
+        currentVersion !== undefined
           ? "synthetic-generation"
           : fixture === "main42" || fixture === "main43"
             ? undefined
@@ -917,7 +928,7 @@ test("Node initialization leaves repository migration semantics to the Python co
           .prepare("PRAGMA table_info(scans)")
           .all()
           .some((row) => row.name === "repository_generation"),
-        fixture === "current43" || fixture === "current44",
+        currentVersion !== undefined,
       );
       const beforeRepeat = storedRows(initialized);
       initialized.close();
@@ -941,12 +952,12 @@ test("Node initialization leaves repository migration semantics to the Python co
           actual
             .prepare("SELECT MAX(version) AS version FROM schema_migrations")
             .get()?.version,
-          49,
+          51,
         );
         assert.equal(
           actual.prepare("SELECT completion_sequence FROM scans").get()
             ?.completion_sequence,
-          fixture === "current43" || fixture === "current44" ? 77 : 1,
+          currentVersion !== undefined ? 77 : 1,
         );
         assert.deepEqual(actual.prepare("PRAGMA foreign_key_check").all(), []);
       } finally {
@@ -961,11 +972,11 @@ test("Node repository migration-label collisions roll back without changing stor
   for (const [name, setup] of [
     [
       "identity destination",
-      "UPDATE schema_migrations SET name='persist repository identities' WHERE version=31; INSERT INTO schema_migrations VALUES(48,'persist repository identities','original')",
+      "UPDATE schema_migrations SET name='persist repository identities' WHERE version=31; INSERT INTO schema_migrations VALUES(50,'persist repository identities','original')",
     ],
     [
       "generation destination",
-      "UPDATE schema_migrations SET name='stabilize Linux repository generations' WHERE version=44; INSERT INTO schema_migrations VALUES(49,'occupied destination','retained')",
+      "UPDATE schema_migrations SET name='stabilize Linux repository generations' WHERE version=44; INSERT INTO schema_migrations VALUES(51,'occupied destination','retained')",
     ],
     [
       "identity collision after generation relocation",
@@ -1105,13 +1116,13 @@ with sqlite3.connect(sys.argv[2]) as connection:
   );
   assert.equal(
     initialized
-      .prepare("SELECT name FROM schema_migrations WHERE version=48")
+      .prepare("SELECT name FROM schema_migrations WHERE version=50")
       .get()?.name,
     "persist repository identities",
   );
   assert.equal(
     initialized
-      .prepare("SELECT name FROM schema_migrations WHERE version=49")
+      .prepare("SELECT name FROM schema_migrations WHERE version=51")
       .get(),
     undefined,
   );
@@ -1134,7 +1145,7 @@ with sqlite3.connect(sys.argv[2]) as connection:
             mode=None, status=None, query=None, limit=None, offset=0)
         scans = history.list_scans(connection, args)['scans']
         assert [scan['scanId'] for scan in scans] == ['scan'], (repository, scans)
-    assert connection.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 49
+    assert connection.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 51
 `,
       scripts,
       databasePath,

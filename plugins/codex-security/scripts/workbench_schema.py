@@ -76,7 +76,7 @@ def apply_migrations(
                 repair_thread_scoped_workspaces_migration(connection)
             elif version == 16:
                 should_backfill_targets = repair_stable_targets_migration(connection)
-            elif version == 48:
+            elif version == 50:
                 should_backfill_targets = (
                     repair_repository_identity_migration(connection)
                     or version not in applied
@@ -95,7 +95,7 @@ def apply_migrations(
                     connection.execute(statement)
                 if version == 38:
                     migrate_finding_workflow_results(connection)
-                elif version == 49:
+                elif version == 51:
                     from workbench_target_state import upgrade_linux_repository_generations
 
                     upgrade_linux_repository_generations(connection)
@@ -295,7 +295,7 @@ def repair_repository_identity_migration(connection: sqlite3.Connection) -> bool
     if (
         "repository_identity" in columns
         and connection.execute(
-            "SELECT 1 FROM schema_migrations WHERE version = 48 AND name = ?",
+            "SELECT 1 FROM schema_migrations WHERE version = 50 AND name = ?",
             ("persist repository identities",),
         ).fetchone()
         is not None
@@ -307,7 +307,7 @@ def repair_repository_identity_migration(connection: sqlite3.Connection) -> bool
         from workbench_target_state import normalize_pre_release_repository_identities
 
         normalize_pre_release_repository_identities(connection)
-    migration_sql = next(sql for version, _, sql in MIGRATIONS if version == 48)
+    migration_sql = next(sql for version, _, sql in MIGRATIONS if version == 50)
     for statement in sql_statements(migration_sql):
         if statement.startswith(("ALTER TABLE security_targets", "ALTER TABLE scans")):
             add_migration_column(connection, statement)
