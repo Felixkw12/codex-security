@@ -448,6 +448,7 @@ def _read_rollout_usage(
     previous_cache_writes_reported = True
     boundary_reached = False
     legacy_usage = _empty_token_usage()
+    completed_legacy_usage = _empty_token_usage()
     response_usage: dict[str, int] | None = None
     observed_response_usage = _empty_token_usage()
     response_ids: set[str] = set()
@@ -526,6 +527,8 @@ def _read_rollout_usage(
                 _add_token_usage(
                     total, response_usage if response_usage is not None else legacy_usage
                 )
+                if response_usage is None:
+                    _add_token_usage(completed_legacy_usage, legacy_usage)
                 legacy_usage = _empty_token_usage()
                 response_usage = None
                 if payload.get("turn_id") != current_turn_id:
@@ -648,13 +651,22 @@ def _read_rollout_usage(
                 if refines_classification
                 else delta["inputTokens"]
             )
-            delta["cacheWriteInputTokens"] = min(
-                delta["cacheWriteInputTokens"], cache_write_capacity
+            # Late cumulative cache details can classify an earlier legacy turn.
+            completed_capacity = (
+                completed_legacy_usage["inputTokens"]
+                - completed_legacy_usage["cachedInputTokens"]
+                - completed_legacy_usage["cacheWriteInputTokens"]
+                if refines_classification and response_usage is None
+                else 0
             )
-            delta["cachedInputTokens"] = min(
-                delta["cachedInputTokens"],
-                max(0, cache_write_capacity - delta["cacheWriteInputTokens"]),
-            )
+            for key in ("cacheWriteInputTokens", "cachedInputTokens"):
+                current = min(delta[key], cache_write_capacity)
+                completed = min(delta[key] - current, completed_capacity)
+                delta[key] = current
+                cache_write_capacity -= current
+                completed_capacity -= completed
+                completed_legacy_usage[key] += completed
+                total[key] += completed
             delta["reasoningOutputTokens"] = min(
                 delta["reasoningOutputTokens"], delta["outputTokens"]
             )

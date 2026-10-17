@@ -809,6 +809,73 @@ def test_completion_retains_cache_write_baseline_across_omissions(
     }
 
 
+@pytest.mark.parametrize("previous_native", [False, True])
+@pytest.mark.parametrize("current_native", [False, True])
+def test_legacy_cache_refinement_survives_turn_boundaries(
+    tmp_path: Path, previous_native: bool, current_native: bool
+) -> None:
+    started = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
+    initial = _token_event(started, 100, 10)
+    initial["payload"]["info"]["total_token_usage"].pop("cache_write_input_tokens")
+    refined = _token_event(started, 100, 10, cached_input_tokens=20)
+    refined["payload"]["info"]["total_token_usage"]["cache_write_input_tokens"] = 30
+    later = _token_event(started, 150, 20, cached_input_tokens=20)
+    later["payload"]["info"]["total_token_usage"]["cache_write_input_tokens"] = 30
+    events = [
+        _event(started, "event_msg", {"type": "task_started", "turn_id": "previous"}),
+        initial,
+    ]
+    if previous_native:
+        events.append(
+            _response_event(
+                started,
+                "scan-parent",
+                "previous",
+                100,
+                10,
+                turn_id="previous",
+                cached_input_tokens=7,
+            )
+        )
+    events.extend(
+        [
+            _event(started, "event_msg", {"type": "task_started", "turn_id": "current"}),
+            refined,
+        ]
+    )
+    if current_native:
+        events.append(
+            _response_event(
+                started,
+                "scan-parent",
+                "current",
+                50,
+                10,
+                turn_id="current",
+                cached_input_tokens=5,
+            )
+        )
+    events.append(later)
+    parent = _rollout(tmp_path, "scan-parent", events)
+    helper = runpy.run_path(
+        str(Path(__file__).resolve().parents[1] / "scripts/workbench_scan_usage.py")
+    )
+
+    usage, warnings = helper["_read_rollout_usage"](
+        helper["RolloutSession"]("scan-parent", None, parent),
+        started_at=started,
+        completed_at=started,
+    )
+
+    assert usage == _counts(
+        150,
+        (7 if previous_native else 20) + (5 if current_native else 0),
+        20,
+        cache_write_input_tokens=0 if previous_native else 30,
+    )
+    assert warnings == set()
+
+
 def test_completion_excludes_separately_inherited_worker_snapshots(tmp_path: Path) -> None:
     fixture = _start_scan(tmp_path)
     counted = fixture.started_at + timedelta(microseconds=1)
