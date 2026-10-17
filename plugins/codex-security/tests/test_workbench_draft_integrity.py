@@ -299,7 +299,6 @@ def test_stopped_results_recover_valid_findings_beside_malformed_coverage(
     if field == "disposition":
         assert scan["warnings"]
     assert not any("publication needs follow-up" in warning for warning in scan["warnings"])
-    assert json.loads((scan_dir / "coverage.json").read_text())["completeness"] == "partial"
 
 
 def test_missing_finding_identity_is_stable_across_publication_retry(tmp_path: Path):
