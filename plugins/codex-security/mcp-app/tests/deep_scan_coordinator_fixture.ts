@@ -1,3 +1,4 @@
+import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
 import { readJson, writeJson } from "./support/json.ts";
 import type { CoordinatorOptions } from "../src/deep-scan/coordinator.js";
 import type {
@@ -310,7 +311,6 @@ export class FakeStore {
           scanId: this.run.scanId,
           findings: [],
           coverage: {
-            completeness: "partial",
             surfaces: [],
             explicitExclusions: [],
             deferred: [],
@@ -671,7 +671,7 @@ export function standardScanDraft(
   scanId: string,
   candidateId: string | undefined,
   workerLabel: string,
-) {
+): ScanDraftInput {
   return {
     scanId,
     threatModel: { summary: `Independent threat model for ${workerLabel}.` },
@@ -699,7 +699,6 @@ export function standardScanDraft(
         ]
       : [],
     coverage: {
-      completeness: "complete",
       surfaces: [
         {
           label: "Fixture query",

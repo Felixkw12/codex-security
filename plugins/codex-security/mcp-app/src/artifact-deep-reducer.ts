@@ -1,19 +1,11 @@
 import { dirname, join, posix, relative, sep } from "node:path";
-import type { ZodType } from "zod/v4";
-import commonSchema from "../../schemas/definitions/artifact-common.schema.json";
-import reducerSchema from "../../schemas/tools/deep-reducer.schema.json";
-import scanDraftSchema from "../../schemas/tools/scan-draft.schema.json";
 import type { ArtifactContext } from "./artifact-context.js";
-import type { DeepReducerPageInput } from "./artifact-deep-reducer-pages.js";
 import {
   parsePersistedScanDraft,
   retainRecordedReceiptOwnership,
   saveScanDraftCheckpoint,
 } from "./artifact-scan-draft.js";
-import {
-  loadArtifactZodSchema,
-  type SchemaDocument,
-} from "./artifact-schema-loader.js";
+import { artifactSchemaDocuments } from "./artifact-contracts.js";
 import { saveThreatModelDocument } from "./threat-model-document.js";
 import {
   createDeepScanArtifacts,
@@ -31,23 +23,9 @@ import {
   type DeepReductionSources,
 } from "./deep-scan/artifact-validation.js";
 
-const schemaDocuments = [
-  commonSchema,
-  scanDraftSchema,
-  reducerSchema,
-] as SchemaDocument[];
-
-export const deepReducerInputsInputSchema = loadArtifactZodSchema(
-  schemaDocuments,
-  reducerSchema.$id,
-  "reducerInputs",
-) as ZodType<DeepReducerPageInput>;
-
-export const deepReductionInputSchema = loadArtifactZodSchema(
-  schemaDocuments,
-  reducerSchema.$id,
-  "reductionInput",
-) as ZodType<DeepReductionInput>;
+const reducerDefinitions = artifactSchemaDocuments["tools/deep-reducer"].$defs;
+export const deepReducerInputsInputSchema = reducerDefinitions.reducerInputs;
+export { deepReductionInputSchema } from "./deep-scan/artifact-validation.js";
 
 /** Read the findings and scan context assigned to this reducer. */
 export async function getCodexSecurityDeepReducerInputs(
@@ -179,8 +157,7 @@ export async function recordCodexSecurityDeepReduction(
 }> {
   return withLogicalReducerErrors(context, async () => {
     const bound = bindDeepReducer(context);
-    const submitted = deepReductionInputSchema.parse(input);
-    let reduction = parseDeepReduction(submitted);
+    let reduction = parseDeepReduction(input);
     if (reduction.complete === false)
       throw new Error(
         "Deep reduction is only a checkpoint, not a complete result.",
@@ -267,7 +244,7 @@ async function readPreviousReduction(
     await readJsonObject(previousReducerResultPath),
     "The previous accepted Deep reduction",
     bound.scanId,
-    (value) => parseDeepReduction(value, true),
+    parseDeepReduction,
     " has an invalid Standard scan result: ",
     " belongs to a different scan.",
   );

@@ -28,6 +28,7 @@ export async function testSuccessfulDeepCoveragePreservesWorkerReviewStatus() {
   };
   executor.run = async (request) => {
     const outcome = await run(request);
+    if (request.kind !== "discovery") return outcome;
     const resultPath = path.join(request.artifactContext!.root, "result.json");
     const draft = await readJson(resultPath);
     draft.coverage = {
@@ -52,14 +53,18 @@ export async function testSuccessfulDeepCoveragePreservesWorkerReviewStatus() {
   assert.equal(terminal?.status, "succeeded", terminal?.error);
   assert.equal(completed.length, 1);
   const coverage = completed[0].coverage;
-  assert.equal(coverage.completeness, "partial");
+  assert.equal(coverage.completeness, undefined);
   assert.equal((coverage.deferred as JsonObject[]).length, 2);
   assert.equal((coverage.surfaces as JsonObject[]).length, 4);
-  const reviews = coverage.reviews as { completeness: string }[];
+  const reviews = coverage.reviews as { workerId: string }[];
   assert.equal(reviews.length, 2);
   assert.deepEqual(
-    new Set(reviews.map((review) => review.completeness)),
-    new Set(["partial", "unknown"]),
+    new Set(reviews.map((review) => review.workerId)),
+    new Set(
+      [...store.workers.values()]
+        .filter((worker) => worker.kind === "discovery")
+        .map((worker) => worker.id),
+    ),
   );
   for (const item of coverage.deferred as JsonObject[]) {
     const provenance = item.provenance as { workerId: string; attempt: number };

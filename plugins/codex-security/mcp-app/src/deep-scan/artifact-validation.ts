@@ -1,12 +1,15 @@
 import { createHash } from "node:crypto";
 import { posix } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import type { JsonObject } from "../types.js";
+import { artifactSchemaDocuments } from "../artifact-contracts.js";
+import { projectArtifactToolSchema } from "../artifact-schema-loader.js";
 import {
   parsePersistedScanDraft,
-  parseScanDraft,
   preserveFindingDetails,
   saveScanDraftCheckpoint,
   scanFindingIdentity,
+  validateFindingSemantics,
   type ScanDraftInput,
 } from "../artifact-scan-draft.js";
 import {
@@ -20,6 +23,9 @@ export type DeepReductionInput = Omit<ScanDraftInput, "coverage"> & {
   /** Host-owned accepted coverage, omitted from the legacy persisted reducer format. */
   sourceCoverage?: ScanDraftInput["coverage"];
 };
+export const deepReductionInputSchema = projectArtifactToolSchema(
+  artifactSchemaDocuments["tools/deep-reducer"].$defs.reductionInput,
+);
 
 export interface DeepReductionSources {
   discoveries: {
@@ -50,26 +56,9 @@ export function deepReductionForPersistence(
   return persisted;
 }
 
-/**
- * Check reducer findings with the Standard scan validator.
- * It requires coverage, so add an empty value and remove it after validation.
- */
-export function parseDeepReduction(
-  input: Record<string, unknown>,
-  persisted = false,
-): DeepReductionInput {
-  const standard = {
-    ...input,
-    coverage: {
-      completeness: "complete",
-      surfaces: [],
-      explicitExclusions: [],
-      deferred: [],
-    },
-  };
-  const { coverage: _coverage, ...parsed } = persisted
-    ? parsePersistedScanDraft(standard)
-    : parseScanDraft(standard as unknown as ScanDraftInput);
+export function parseDeepReduction(input: unknown): DeepReductionInput {
+  const parsed = deepReductionInputSchema.parse(input);
+  validateFindingSemantics(parsed.findings);
   return parsed;
 }
 
@@ -118,7 +107,7 @@ export async function validateReducerArtifacts(
     await readJsonObject(resultPath),
     reducerId,
     expectedScanId,
-    (value) => parseDeepReduction(value, true),
+    parseDeepReduction,
   );
   if (result.complete === false)
     throw new Error(
@@ -132,7 +121,7 @@ export async function validateReducerArtifacts(
       await readJsonObject(previousReducerResultPath),
       "Previous successful reducer",
       result.scanId,
-      (value) => parseDeepReduction(value, true),
+      parseDeepReduction,
     );
   }
 
@@ -220,7 +209,7 @@ export function reconcileDeepReduction(
     const sourceValues = [
       ...discoveries.map((discovery) => discovery.result[field]),
       previous?.[field],
-    ].filter((value): value is Record<string, unknown> => value !== undefined);
+    ].filter((value) => value !== undefined);
     if (
       sourceValues.some((value) => !isDeepStrictEqual(sourceValues[0], value))
     ) {
@@ -229,7 +218,7 @@ export function reconcileDeepReduction(
       );
     }
     if (sourceValues[0] !== undefined) {
-      result[field] = structuredClone(sourceValues[0]);
+      Object.assign(result, { [field]: structuredClone(sourceValues[0]) });
     }
   }
   return result;
@@ -245,7 +234,6 @@ export function aggregateSourceCoverage(
     ...discoveries.map((source) => source.coverage ?? unknownSourceCoverage()),
   ];
   const result: ScanDraftInput["coverage"] = {
-    completeness: "complete",
     surfaces: [],
     explicitExclusions: [],
     deferred: [],
@@ -264,23 +252,11 @@ export function aggregateSourceCoverage(
     if (entries.length || field !== "openQuestions")
       result[field] = structuredClone(entries);
   }
-  if (
-    sources.some((source) => source.completeness === "partial") ||
-    (result.deferred as unknown[]).length > 0 ||
-    (result.surfaces as Record<string, unknown>[]).some(
-      (surface) => surface.disposition === "needs_follow_up",
-    )
-  ) {
-    result.completeness = "partial";
-  } else if (sources.some((source) => source.completeness === "unknown")) {
-    result.completeness = "unknown";
-  }
   return result;
 }
 
 function unknownSourceCoverage(): ScanDraftInput["coverage"] {
   return {
-    completeness: "unknown",
     surfaces: [],
     explicitExclusions: [],
     deferred: [],
@@ -300,14 +276,14 @@ export function projectDiscoveryCoverage(
     ...(worker.attempt === undefined ? {} : { attempt: worker.attempt }),
   };
   const prefix = `${worker.id}-attempt-${worker.attempt ?? "unknown"}`;
-  const surfaces = coverage.surfaces as Record<string, unknown>[];
+  const surfaces = coverage.surfaces;
   const surfaceIds = new Map<unknown, string>();
   for (const [index, surface] of surfaces.entries()) {
     if (!surfaceIds.has(surface.id)) {
       surfaceIds.set(surface.id, `${prefix}-surface-${index + 1}`);
     }
   }
-  const project = (item: Record<string, unknown>) => {
+  const project = <T extends Record<string, unknown>>(item: T): T => {
     const result = structuredClone(item);
     const descriptions = result.provenance;
     const projected =
@@ -324,22 +300,25 @@ export function projectDiscoveryCoverage(
       "scanReceiptRefs",
     ])
       delete projected[key];
-    result.provenance = {
-      ...projected,
-      ...provenance,
-      ...(item.id === undefined ? {} : { sourceId: item.id }),
-      ...(item.candidateId === undefined
-        ? {}
-        : { candidateId: item.candidateId }),
-    };
+    Object.assign(result, {
+      provenance: {
+        ...projected,
+        ...provenance,
+        ...(item.id === undefined ? {} : { sourceId: item.id }),
+        ...(item.candidateId === undefined
+          ? {}
+          : { candidateId: item.candidateId }),
+      },
+    });
     if (typeof item.candidateId === "string") {
-      result.candidateId = `${prefix}-candidate-${createHash("sha256").update(item.candidateId).digest("hex")}`;
+      Object.assign(result, {
+        candidateId: `${prefix}-candidate-${createHash("sha256").update(item.candidateId).digest("hex")}`,
+      });
     }
     return result;
   };
   return {
-    completeness: coverage.completeness,
-    reviews: [{ ...provenance, completeness: coverage.completeness }],
+    reviews: [provenance],
     surfaces: surfaces.map((surface, index) => ({
       ...project(surface),
       id: `${prefix}-surface-${index + 1}`,
@@ -353,28 +332,22 @@ export function projectDiscoveryCoverage(
             : `${artifactPrefix}/${ref}`,
         ),
     })),
-    explicitExclusions: (
-      coverage.explicitExclusions as Record<string, unknown>[]
-    ).map(project),
-    deferred: (coverage.deferred as Record<string, unknown>[]).map(
-      (item, index) => ({
-        ...project(item),
-        id: `${prefix}-deferred-${index + 1}`,
-        ...(item.surfaceIds === undefined
-          ? {}
-          : {
-              surfaceIds: (item.surfaceIds as string[]).map(
-                (id) => surfaceIds.get(id) ?? id,
-              ),
-            }),
-      }),
-    ),
+    explicitExclusions: coverage.explicitExclusions.map(project),
+    deferred: coverage.deferred.map((item, index) => ({
+      ...project(item),
+      id: `${prefix}-deferred-${index + 1}`,
+      ...(item.surfaceIds === undefined
+        ? {}
+        : {
+            surfaceIds: (item.surfaceIds as string[]).map(
+              (id) => surfaceIds.get(id) ?? id,
+            ),
+          }),
+    })),
     ...(coverage.openQuestions === undefined
       ? {}
       : {
-          openQuestions: (
-            coverage.openQuestions as (string | Record<string, unknown>)[]
-          ).map((question) =>
+          openQuestions: coverage.openQuestions.map((question) =>
             project(typeof question === "string" ? { question } : question),
           ),
         }),
