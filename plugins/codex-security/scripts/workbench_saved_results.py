@@ -30,6 +30,7 @@ from finalize_scan_contract import (
     _read_scan_local_json,
     _read_scan_local_json_bytes,
     _read_scan_local_json_with_metadata,
+    _recover_unsealed_coverage,
     _recover_unsealed_findings,
     _remove_scan_local_file_if_exists,
     _require_portable_relative_path,
@@ -2514,11 +2515,23 @@ def preserve_deep_deadline_draft(
             )
             return None
         documents[0]["scan"].pop("complete", None)
+        # A capped deadline can retain interrupted records even though its
+        # completion binding requires strict validation of completed findings.
+        expected_coverage_mode = db.expected_coverage_mode(scan)
+        _populate_unsealed_manifest_envelope(documents[0], documents[0]["scan"], binding)
+        _populate_unsealed_artifact_envelope(*documents, binding)
+        if expected_coverage_mode == "deep_repository":
+            documents[2]["inventoryStrategy"] = "repository"
+        schema_dir = Path(__file__).resolve().parent.parent / "schemas"
+        discarded_findings = _recover_unsealed_findings(
+            documents[0], documents[1], schema_dir, scan_dir, warnings
+        )
+        _recover_unsealed_coverage(documents[2], schema_dir, scan_dir, warnings, discarded_findings)
         # Reuse stopped-result recovery's per-record validation, scope checks,
         # source lineage, and receipt validation before admitting this draft.
         prepared = _prepare_scan_finalization(
             scan_dir,
-            expected_coverage_mode=db.expected_coverage_mode(scan),
+            expected_coverage_mode=expected_coverage_mode,
             completion_binding=binding,
             recover_unsealed=True,
             draft_documents=documents,

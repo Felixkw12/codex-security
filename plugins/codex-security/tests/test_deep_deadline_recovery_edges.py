@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 import signal
@@ -126,6 +127,46 @@ def assert_retained_finding(scan: SimpleNamespace):
     assert len(findings) == 1
     assert findings[0]["ruleId"] == scan.finding["ruleId"]
     assert findings[0]["identity"] == scan.finding["identity"]
+
+
+@pytest.mark.parametrize("canonical", [False, True])
+def test_deadline_recovers_partial_worker_findings_before_completion(tmp_path, canonical):
+    scan = deadline_fixture(tmp_path, "valid")
+    if canonical:
+        canonical_parent(scan, saved_draft(scan.scan_id))
+    head = next(scan.directory.glob("artifacts/**/checkpoint-head.json"))
+    selected = head.parent / "checkpoints" / json.loads(head.read_text())["checkpoint"]
+    draft = json.loads(selected.read_text())
+    partial = copy.deepcopy(scan.finding)
+    partial["ruleId"] = "synthetic.partial"
+    partial["identity"] = {"anchor": "partial"}
+    partial["provenance"]["candidateId"] = "partial-candidate"
+    partial.pop("severity")
+    draft["findings"].append(partial)
+    checkpoint = write_checkpoint(head.parent / "checkpoints", draft)
+    head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+    source_bytes = {path: path.read_bytes() for path in (selected, checkpoint, head)}
+
+    terminal = finish(scan, canonical=canonical)["deepScan"]
+    assert terminal["status"] == "succeeded"
+    assert terminal["terminalReason"] == "capped"
+    assert_retained_finding(scan)
+    warnings = get_scan(scan.state, scan.scan_id)["scan"]["warnings"]
+    assert any("severity" in warning for warning in warnings)
+    coverage = json.loads((scan.directory / "coverage.json").read_text())
+    assert any("severity" in row["reason"] for row in coverage["deferred"])
+    assert all(path.read_bytes() == contents for path, contents in source_bytes.items())
+    run_workbench(
+        scan.state,
+        "complete-scan",
+        "--scan-id",
+        scan.scan_id,
+        environment=scan.environment,
+    )
+    manifest = json.loads((scan.directory / "scan-manifest.json").read_text())
+    assert manifest["scan"]["status"] == "completed"
+    assert "sealedAt" in manifest["scan"]
+    assert_retained_finding(scan)
 
 
 @pytest.mark.parametrize("checkpoint_kind", ["empty", "valid", "invalid"])
