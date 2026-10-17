@@ -363,6 +363,13 @@ async function testPrepareDoesNotWritePluginBytecode() {
     recursive: true,
     filter: (file) => path.basename(file) !== "__pycache__",
   });
+  await cp(
+    path.join(fixture.scan.pluginRoot, "mcp"),
+    path.join(pluginRoot, "mcp"),
+    {
+      recursive: true,
+    },
+  );
   await fixture.writeRepositoryFile("example.py", "value = 1\n");
   const result = await inventory.prepareCodexSecurityReviewItems({
     ...fixture.scan,
