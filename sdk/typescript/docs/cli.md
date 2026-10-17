@@ -1788,6 +1788,10 @@ namespaces do not need it. The legacy Landlock fallback is unsupported.
 See the [Docker guide](https://github.com/openai/codex-security/blob/main/docker/README.md)
 for deployment and source-build instructions.
 
+### Hosted Standard scan
+
+`codex-security scan --host` runs one versioned JSON-RPC invocation with an explicit host executor. Use it alone; it never performs local inference. See [the hosted scan protocol](hosted-scans.md) for input, filesystem, artifact, usage, and cancellation requirements.
+
 ## Dependency assessment (SCA MVP)
 
 `cs scan dependencies [repository]` and the SDK's `scanDependencies()` run an
@@ -1986,6 +1990,3 @@ See [local, CI, comparison, and handoff examples](../../../examples/sca/README.m
 and the [evaluation harness](../../../evals/triage-finding/sca/README.md).
 Dependency assessment uses a separate command and SDK result contract; existing
 source-scan modes keep their current behavior.
-### Hosted Standard scan
-
-`codex-security scan --host` runs one versioned JSON-RPC invocation with an explicit host executor. Use it alone; it never performs local inference. See [the hosted scan protocol](hosted-scans.md) for input, filesystem, artifact, usage, and cancellation requirements.
