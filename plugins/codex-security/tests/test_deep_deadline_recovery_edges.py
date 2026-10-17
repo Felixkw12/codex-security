@@ -140,7 +140,7 @@ def test_coordinator_deadline_preserves_only_usable_worker_checkpoints(
     if checkpoint_kind == "valid":
         assert_retained_finding(scan)
         coverage = json.loads((scan.directory / "coverage.json").read_text())
-        assert coverage["completeness"] == "partial"
+        assert "completeness" not in coverage
         assert any(row.get("id", "").endswith("/review") for row in coverage["deferred"])
         manifest = json.loads((scan.directory / "scan-manifest.json").read_text())
         assert "sealedAt" not in manifest["scan"]

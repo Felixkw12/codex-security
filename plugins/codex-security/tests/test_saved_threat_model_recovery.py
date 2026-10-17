@@ -83,16 +83,16 @@ def test_invalid_optional_context_does_not_block_findings_or_frozen_replay(
             tmp_path,
             expected_coverage_mode="deep_repository",
             completion_binding=binding,
-            completion_warnings=warnings,
+            recover_unsealed=True,
             draft_documents=documents,
         )
-        assert len(prepared[3]["findings"]) == 1
-        assert prepared[3]["findings"][0]["provenance"]["workerId"] == "invalid-context"
+        assert len(prepared.findings["findings"]) == 1
+        assert prepared.findings["findings"][0]["provenance"]["workerId"] == "invalid-context"
         assert any("Skipped malformed saved threat model" in warning for warning in warnings)
         if with_fallback:
-            assert prepared[2]["scan"]["threatModel"] == {**fallback, "origin": "recovered"}
+            assert prepared.manifest["scan"]["threatModel"] == {**fallback, "origin": "recovered"}
             assert selected == ["artifacts/deep_discovery/workers/valid-context/output/result.json"]
         else:
-            assert "threatModel" not in prepared[2]["scan"]
+            assert "threatModel" not in prepared.manifest["scan"]
             assert selected == []
     assert all(path.read_bytes() == contents for path, contents in originals.items())
