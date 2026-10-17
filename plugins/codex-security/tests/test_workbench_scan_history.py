@@ -1285,7 +1285,12 @@ def test_uncertain_semantic_scan_matches_stay_separate(tmp_path: Path) -> None:
         current["occurrenceId"]: "open",
     }
     create_cli_scan(state_dir, root, repository, finding=False)
-    assert run_workbench(state_dir, "list-global-findings")["findings"] == []
+    findings = run_workbench(state_dir, "list-global-findings")["findings"]
+    assert {finding["occurrenceId"]: finding["status"] for finding in findings} == {
+        previous["occurrenceId"]: "closed",
+        current["occurrenceId"]: "open",
+    }
+    assert all(finding["confirmedInLatestScan"] is False for finding in findings)
 
 
 def test_semantic_scan_comparison_replaces_cached_matches_atomically(tmp_path: Path) -> None:
