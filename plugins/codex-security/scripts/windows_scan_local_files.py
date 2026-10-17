@@ -421,7 +421,9 @@ def _canonical_scan_directory(scan_dir: Path) -> tuple[Path, tuple[int, int]]:
     return canonical, (expected.st_dev, expected.st_ino)
 
 
-def _open_directory(path: Path, *, missing_ok: bool = False) -> _OwnedHandle | None:
+def _open_directory(
+    path: Path, *, missing_ok: bool = False, missing_is_path_error: bool = True
+) -> _OwnedHandle | None:
     try:
         handle = _create_file(
             path,
@@ -432,7 +434,9 @@ def _open_directory(path: Path, *, missing_ok: bool = False) -> _OwnedHandle | N
             missing_ok=missing_ok,
         )
     except WindowsScanLocalFileError as exc:
-        if exc.errno not in {*_MISSING_ERRORS, _ERROR_DIRECTORY}:
+        if exc.errno != _ERROR_DIRECTORY and not (
+            missing_is_path_error and exc.errno in _MISSING_ERRORS
+        ):
             raise
         raise _invalid_path(path, f"could not open scan-local directory: {exc}") from exc
     if handle is not None:
@@ -459,6 +463,7 @@ def _locked_parent(
     relative_path: str,
     *,
     create: bool,
+    missing_is_path_error: bool = True,
     expected_root_identity: tuple[int, int] | None = None,
 ) -> Iterator[tuple[Path, str]]:
     """Hold non-deletable handles for every directory in the absolute target path."""
@@ -493,7 +498,9 @@ def _locked_parent(
         current_path = root_path
         for component in parts[:-1]:
             current_path /= component
-            child_handle = _open_directory(current_path, missing_ok=create)
+            child_handle = _open_directory(
+                current_path, missing_ok=create, missing_is_path_error=missing_is_path_error
+            )
             if child_handle is None:
                 _create_directory(current_path)
                 child_handle = _open_directory(current_path)
@@ -523,7 +530,10 @@ def open_read_fd_with_path(scan_dir: Path, relative_path: str, context: str) -> 
     """Return the descriptor and its filename while the verified parents are held."""
 
     try:
-        with _locked_parent(scan_dir, relative_path, create=False) as (parent_path, leaf_name):
+        with _locked_parent(scan_dir, relative_path, create=False, missing_is_path_error=False) as (
+            parent_path,
+            leaf_name,
+        ):
             path = parent_path / leaf_name
             handle = _create_file(
                 path,
