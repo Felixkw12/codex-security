@@ -1,11 +1,14 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
+import * as childProcess from "node:child_process";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import {
   chmod,
   lstat,
   mkdir,
   readFile,
+  readdir,
   realpath,
   rename,
   symlink,
@@ -1042,62 +1045,151 @@ process.stdout.write(input);
       await fixtures.create("patch-storage-temp-"),
       { ...process.env, CODEX_HOME: home },
     );
-    const result = await runWorkflow(["patch", "Synthetic issue", "--json"], {
-      currentDirectory: repository,
-      environment,
-      manualCodexPreparation: true,
-      onCodex: async (_args, output) => {
-        capturedHookReadOnly =
-          output!.appServer!.permissions!.readOnlyPaths.includes(canonicalHook);
-        output!.appServer!.onPermissions!({
-          directory: repository,
-          environment,
-          snapshotStoragePaths: output!.appServer!.snapshotStoragePaths,
-          profile: {
-            extends: ":workspace",
-            network: { enabled: false },
-            workspace_roots: {},
-            filesystem: Object.fromEntries(
-              output!.appServer!.permissions!.readOnlyPaths.map((path) => [
-                path,
-                { ".": "read" },
-              ]),
-            ),
-          },
-        });
-        await output!.appServer!.onBeforeTurn?.();
-        await writeFile(join(checkout, "app.ts"), "after\n");
-        output!.stdout.write("Synthetic patch complete.\n");
-        return 0;
-      },
-      onRepositoryCommand: (command, args, cwd, options) => {
-        const filesystem = options?.sandbox?.profile["filesystem"] as
-          Record<string, unknown> | undefined;
-        if (filesystem) {
-          snapshotRules.push({
+    const launches: unknown[] = [];
+    const nativeCommands: unknown[] = [];
+    const canonicalHome = await realpath(home);
+    const originalSpawn = childProcess.spawn;
+    const spawn = spyOn(childProcess, "spawn").mockImplementation(((
+      ...input: Parameters<typeof originalSpawn>
+    ) => {
+      const [command, args, options] = input;
+      if (
+        [home, canonicalHome].includes(options?.env?.["CODEX_HOME"] ?? "") &&
+        args?.includes("sandbox") &&
+        args.includes("--permission-profile")
+      ) {
+        const profile = args[args.indexOf("--permission-profile") + 1]!;
+        try {
+          launches.push({
+            command,
             args,
-            hook: filesystem[canonicalHook] ?? null,
-            temporary: filesystem[canonicalTemporary] ?? null,
+            baseConfig: readFileSync(join(home, "config.toml"), "utf8"),
+            namedConfig: readFileSync(
+              join(home, `${profile}.config.toml`),
+              "utf8",
+            ),
           });
+        } catch (error) {
+          launches.push({ command, args, observationError: String(error) });
         }
-        return runRepositoryCommand(command, args, cwd, {
-          ...options,
-          environment: { ...environment, ...options?.environment },
-        });
-      },
-    });
-    expect(result.exitCode, result.stderr).toBe(0);
-    expect(JSON.parse(result.stdout).files).toContain(
-      mode === "nested" ? "child/app.ts" : "app.ts",
-    );
-    expect(
-      await readFile(hook, "utf8"),
-      JSON.stringify({ canonicalHook, capturedHookReadOnly, snapshotRules }),
-    ).toBe(hookContents);
-    expect(await readFile(join(objects, "payload"), "utf8")).toBe(
-      "Synthetic LFS payload\n",
-    );
-    expect(await readFile(index)).toEqual(originalIndex);
+      }
+      return originalSpawn(...input);
+    }) as typeof originalSpawn);
+    const hookSetupLog = async () => {
+      if (process.platform !== "win32") return [];
+      try {
+        const directory = join(home, ".sandbox");
+        const files = (await readdir(directory)).filter((file) =>
+          /^sandbox\.\d{4}-\d{2}-\d{2}\.log$/u.test(file),
+        );
+        return await Promise.all(
+          files.map(async (file) => ({
+            file,
+            lines: (await readFile(join(directory, file), "utf8"))
+              .split(/\r?\n/u)
+              .filter(
+                (line) =>
+                  line.includes("applied deny ACE to protect ") &&
+                  [hook, canonicalHook].some(
+                    (path) =>
+                      line.endsWith(path) ||
+                      line.endsWith(path.replaceAll("\\", "/")),
+                  ),
+              ),
+          })),
+        );
+      } catch (error) {
+        return { observationError: String(error) };
+      }
+    };
+    try {
+      const result = await runWorkflow(["patch", "Synthetic issue", "--json"], {
+        currentDirectory: repository,
+        environment,
+        manualCodexPreparation: true,
+        onCodex: async (_args, output) => {
+          capturedHookReadOnly =
+            output!.appServer!.permissions!.readOnlyPaths.includes(
+              canonicalHook,
+            );
+          output!.appServer!.onPermissions!({
+            directory: repository,
+            environment,
+            snapshotStoragePaths: output!.appServer!.snapshotStoragePaths,
+            profile: {
+              extends: ":workspace",
+              network: { enabled: false },
+              workspace_roots: {},
+              filesystem: Object.fromEntries(
+                output!.appServer!.permissions!.readOnlyPaths.map((path) => [
+                  path,
+                  { ".": "read" },
+                ]),
+              ),
+            },
+          });
+          await output!.appServer!.onBeforeTurn?.();
+          await writeFile(join(checkout, "app.ts"), "after\n");
+          output!.stdout.write("Synthetic patch complete.\n");
+          return 0;
+        },
+        onRepositoryCommand: async (command, args, cwd, options) => {
+          const filesystem = options?.sandbox?.profile["filesystem"] as
+            Record<string, unknown> | undefined;
+          if (filesystem) {
+            snapshotRules.push({
+              args,
+              hook: filesystem[canonicalHook] ?? null,
+              temporary: filesystem[canonicalTemporary] ?? null,
+            });
+          }
+          const stderr: Buffer[] = [];
+          const before = options?.sandbox ? await hookSetupLog() : undefined;
+          try {
+            return await runRepositoryCommand(command, args, cwd, {
+              ...options,
+              environment: { ...environment, ...options?.environment },
+              onStderr: (chunk) => {
+                if (options?.sandbox) stderr.push(Buffer.from(chunk));
+                options?.onStderr?.(chunk);
+              },
+            });
+          } finally {
+            if (options?.sandbox)
+              nativeCommands.push({
+                args,
+                stderr: Buffer.concat(stderr).toString("utf8"),
+                hookSetupBefore: before,
+                hookSetupAfter: await hookSetupLog(),
+              });
+          }
+        },
+      });
+      expect(result.exitCode, result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout).files).toContain(
+        mode === "nested" ? "child/app.ts" : "app.ts",
+      );
+      expect(
+        await readFile(hook, "utf8"),
+        JSON.stringify({ canonicalHook, capturedHookReadOnly, snapshotRules }),
+      ).toBe(hookContents);
+      expect(await readFile(join(objects, "payload"), "utf8")).toBe(
+        "Synthetic LFS payload\n",
+      );
+      expect(await readFile(index)).toEqual(originalIndex);
+    } finally {
+      spawn.mockRestore();
+      console.log(
+        JSON.stringify({
+          mode,
+          canonicalHook,
+          capturedHookReadOnly,
+          snapshotRules,
+          launches,
+          nativeCommands,
+        }),
+      );
+    }
   },
   nativeSnapshotTimeout,
 );
