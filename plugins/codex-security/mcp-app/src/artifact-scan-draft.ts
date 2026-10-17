@@ -65,6 +65,13 @@ interface SavedScanDraft {
   attempt?: string;
 }
 
+interface PreservedScanDraft {
+  input: ScanDraftInput;
+  previousDigest?: string;
+  checkpoint?: ScanDraftInput;
+  inferredIdentityFindings?: WeakSet<JsonObject>;
+}
+
 /** Stage a parent draft, then publish it under the workbench completion lock. */
 export async function recordCodexSecurityScanDraftViaWorkbench(
   context: ArtifactContext,
@@ -86,7 +93,7 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
     signal?.throwIfAborted();
     // Deep results replace findings and coverage while retaining an omitted model.
     // Do not merge older review work into them.
-    const preserved = finalDeepDraft
+    const preserved: PreservedScanDraft = finalDeepDraft
       ? await preserveDeepThreatModel(context, parsed)
       : await preserveScanDraft(context, parsed, false);
     const reconciled = preserved.input;
@@ -112,7 +119,11 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
             trustedScope.filePaths as string[] | undefined,
           )
         : reconciled.findings;
-    const findings = buildFindings(scopedFindings, context.mode);
+    const findings = buildFindings(
+      scopedFindings,
+      context.mode,
+      preserved.inferredIdentityFindings,
+    );
     const coverage = buildCoverage(
       context,
       contract,
@@ -341,6 +352,7 @@ async function preserveScanDraft(
   input: ScanDraftInput;
   previousDigest: string;
   checkpoint?: ScanDraftInput;
+  inferredIdentityFindings: WeakSet<JsonObject>;
 }> {
   const currentCheckpointName = scanDraftCheckpointName(input);
   const requiresClosureValidation = resolvedDeferred(input.coverage).length > 0;
@@ -392,6 +404,7 @@ async function preserveScanDraft(
     input: reconciled.input,
     previousDigest: previousState.digest,
     checkpoint: reconciled.acceptProgress ? undefined : reconciled.input,
+    inferredIdentityFindings: reconciled.inferredIdentityFindings,
   };
 }
 
@@ -400,7 +413,12 @@ function reconcileScanDraft(
   savedSources: SavedScanDraft[],
   requestedClosures = resolvedDeferred(input.coverage),
   terminalReplacesHistory = false,
-): { input: ScanDraftInput; acceptProgress: boolean } {
+  inferredIdentityFindings = new WeakSet<JsonObject>(),
+): {
+  input: ScanDraftInput;
+  acceptProgress: boolean;
+  inferredIdentityFindings: WeakSet<JsonObject>;
+} {
   let result = structuredClone(input);
   const retainedFinal =
     input.complete === false
@@ -491,6 +509,8 @@ function reconcileScanDraft(
         retainedFinal.input,
         savedSources.slice(retainedIndex),
         [],
+        false,
+        inferredIdentityFindings,
       ).input;
   }
   const metadata = retainedFinal?.input ?? result;
@@ -630,7 +650,11 @@ function reconcileScanDraft(
             [pending.candidate],
           );
         if (isObject(pending.finding))
-          preserveFindingDetails(finding, pending.finding);
+          preserveFindingDetails(
+            finding,
+            pending.finding,
+            inferredIdentityFindings,
+          );
       } else {
         const candidateRow = candidateRows.find(
           (item) =>
@@ -705,13 +729,13 @@ function reconcileScanDraft(
       });
       if (new Set(inferredIdentities).size === 1) {
         for (const current of inferredMatches)
-          preserveFindingDetails(current, finding);
+          preserveFindingDetails(current, finding, inferredIdentityFindings);
       } else if (
         matches.length === 1 &&
         source.findings.filter((current) => sameSavedFinding(current, finding))
           .length === 1
       ) {
-        preserveFindingDetails(matches[0]!, finding);
+        preserveFindingDetails(matches[0]!, finding, inferredIdentityFindings);
       } else {
         if (!matches.some((current) => containsSavedFinding(current, finding)))
           result.findings.push(structuredClone(finding));
@@ -777,7 +801,7 @@ function reconcileScanDraft(
   }
   result.coverage.deferred = normalizeDeferred(result.coverage.deferred);
   result.coverage.surfaces = normalizeSurfaces(result.coverage.surfaces);
-  return { input: result, acceptProgress };
+  return { input: result, acceptProgress, inferredIdentityFindings };
 }
 
 function completedCandidateIds(
@@ -1355,11 +1379,7 @@ async function readPreviousScanDocuments(context: ArtifactContext) {
 async function preserveDeepThreatModel(
   context: ArtifactContext,
   input: ScanDraftInput,
-): Promise<{
-  input: ScanDraftInput;
-  previousDigest?: string;
-  checkpoint?: ScanDraftInput;
-}> {
+): Promise<PreservedScanDraft> {
   if (input.threatModel !== undefined) return { input };
   const { contents, digest } = await readPreviousScanDocuments(context);
   const previous =
@@ -1584,6 +1604,7 @@ function withoutPreviousFindings(finding: JsonObject): JsonObject {
 export function preserveFindingDetails(
   current: JsonObject,
   previous: JsonObject,
+  inferredIdentityFindings?: WeakSet<JsonObject>,
 ): void {
   const provenance = requireObject(
     current.provenance,
@@ -1597,6 +1618,7 @@ export function preserveFindingDetails(
     findingIdentitySchema.safeParse(previous.identity).success
   ) {
     current.identity = structuredClone(previous.identity);
+    inferredIdentityFindings?.add(current);
     if (
       provenance.preservedIdentity === undefined &&
       oldProvenance.preservedIdentity !== undefined
@@ -2272,7 +2294,11 @@ function strongerFinding(current: JsonObject, previous: JsonObject): boolean {
   );
 }
 
-function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
+function buildFindings(
+  findings: JsonObject[],
+  mode?: string,
+  inferredIdentityFindings?: WeakSet<JsonObject>,
+): JsonObject[] {
   const identified = identifyFindings(findings);
   const anchors = identified.map(
     (finding) => (finding.identity as JsonObject).anchor,
@@ -2328,7 +2354,8 @@ function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
   for (const [index, finding] of findings.entries()) {
     const key = candidateKeys[index];
     if (!key || finding.identity === undefined) continue;
-    explicitCounts.set(key, (explicitCounts.get(key) ?? 0) + 1);
+    if (!inferredIdentityFindings?.has(finding))
+      explicitCounts.set(key, (explicitCounts.get(key) ?? 0) + 1);
     const previous = candidateIdentities.get(key);
     candidateIdentities.set(
       key,

@@ -28,6 +28,8 @@ for (const mode of ["standard", "diff"]) {
     "stronger inferred",
     "stronger explicit",
     "more evidence",
+    "repeated inferred",
+    "repeated mixed",
     "explicit duplicates",
   ]) {
     test(`${mode}: normal completion after candidate identity reuse, ${variant}`, async (t) => {
@@ -155,20 +157,27 @@ for (const mode of ["standard", "diff"]) {
       const observations =
         variant === "explicit duplicates"
           ? [explicit, structuredClone(explicit)]
-          : variant === "reversed"
-            ? [explicit, generated]
-            : [generated, explicit];
-      await recordCodexSecurityScanDraftViaWorkbench(
-        context,
-        {
-          scanId: scan.scanId,
-          handoffClaimToken: claim,
-          complete: true,
-          findings: observations,
-          coverage: { surfaces: [], explicitExclusions: [], deferred: [] },
-        },
-        runWorkbench,
-      );
+          : variant === "repeated inferred"
+            ? [generated, structuredClone(generated)]
+            : variant === "reversed"
+              ? [explicit, generated]
+              : [generated, explicit];
+      const writes =
+        variant.startsWith("repeated") || variant === "explicit duplicates"
+          ? 2
+          : 1;
+      for (let attempt = 0; attempt < writes; attempt += 1)
+        await recordCodexSecurityScanDraftViaWorkbench(
+          context,
+          {
+            scanId: scan.scanId,
+            handoffClaimToken: claim,
+            complete: true,
+            findings: observations,
+            coverage: { surfaces: [], explicitExclusions: [], deferred: [] },
+          },
+          runWorkbench,
+        );
       const complete = () =>
         runWorkbench([
           "complete-scan",
@@ -184,7 +193,15 @@ for (const mode of ["standard", "diff"]) {
       await complete();
       const { findings } = await readJson(scan.scanDir, "findings.json");
       assert.equal(findings.length, 1);
-      assert.deepEqual(findings[0].identity, explicit.identity);
+      assert.deepEqual(
+        findings[0].identity,
+        variant === "repeated inferred"
+          ? {
+              anchor: "synthetic-review-finding",
+              instance: "synthetic-review-finding",
+            }
+          : explicit.identity,
+      );
       assert.equal(
         findings[0].severity.level,
         variant.startsWith("stronger") ? "high" : "low",
