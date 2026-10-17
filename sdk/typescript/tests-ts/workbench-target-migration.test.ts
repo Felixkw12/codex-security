@@ -261,10 +261,13 @@ print(json.dumps({
             "SELECT version, name FROM schema_migrations WHERE version IN (29, 30)"
         )
     },
-    "teamOnlyPublicationIndexes": sorted(
+    "hasLegacyPublicationTable": connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'finding_publications'"
+    ).fetchone() is not None,
+    "issueReceiptIndexes": sorted(
         row["name"]
-        for row in connection.execute("PRAGMA index_list(finding_publications)")
-        if row["name"].startswith("finding_publications_team_only_") and row["unique"]
+        for row in connection.execute("PRAGMA index_list(finding_issue_receipts)")
+        if row["name"].startswith("finding_issue_receipts_")
     ),
     "repositoryIdentityColumnIsNullable": not bool(
         columns["repository_identity"]["notnull"]
@@ -456,7 +459,8 @@ describe("stable workbench target migration", () => {
       completionSequenceTriggers: string[];
       targetIdentity: string | null;
       targetId: string;
-      teamOnlyPublicationIndexes: string[];
+      hasLegacyPublicationTable: boolean;
+      issueReceiptIndexes: string[];
     };
     expect(result).toEqual({
       backfillCalls: scenario.startsWith("pre-release-identity-version")
@@ -488,9 +492,10 @@ describe("stable workbench target migration", () => {
           ? "synthetic-identity"
           : null,
       targetId: "target-existing",
-      teamOnlyPublicationIndexes: [
-        "finding_publications_team_only_external_issue",
-        "finding_publications_team_only_occurrence",
+      hasLegacyPublicationTable: false,
+      issueReceiptIndexes: [
+        "finding_issue_receipts_by_destination_issue",
+        "finding_issue_receipts_by_finding",
       ],
     });
   });
