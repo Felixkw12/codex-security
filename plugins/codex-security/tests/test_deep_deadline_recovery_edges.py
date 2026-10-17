@@ -127,10 +127,17 @@ def assert_retained_finding(scan: SimpleNamespace):
     assert len(findings) == 1
     assert findings[0]["ruleId"] == scan.finding["ruleId"]
     assert findings[0]["identity"] == scan.finding["identity"]
+    assert findings[0]["severity"] == scan.finding["severity"]
 
 
 @pytest.mark.parametrize("canonical", [False, True])
-def test_deadline_recovers_partial_worker_findings_before_completion(tmp_path, canonical):
+@pytest.mark.parametrize("same_identity", [False, True])
+@pytest.mark.parametrize(
+    ("field", "value"), [("severity", None), ("code_evidence", []), ("root_cause", None)]
+)
+def test_deadline_recovers_partial_worker_findings_before_completion(
+    tmp_path, canonical, same_identity, field, value
+):
     scan = deadline_fixture(tmp_path, "valid")
     if canonical:
         canonical_parent(scan, saved_draft(scan.scan_id))
@@ -138,10 +145,15 @@ def test_deadline_recovers_partial_worker_findings_before_completion(tmp_path, c
     selected = head.parent / "checkpoints" / json.loads(head.read_text())["checkpoint"]
     draft = json.loads(selected.read_text())
     partial = copy.deepcopy(scan.finding)
-    partial["ruleId"] = "synthetic.partial"
-    partial["identity"] = {"anchor": "partial"}
-    partial["provenance"]["candidateId"] = "partial-candidate"
-    partial.pop("severity")
+    if not same_identity:
+        partial["ruleId"] = "synthetic.partial"
+        partial["identity"] = {"anchor": "partial"}
+        partial["provenance"]["candidateId"] = "partial-candidate"
+    if field == "severity":
+        partial.pop(field)
+    else:
+        partial[field] = value
+        partial["severity"]["level"] = "critical"
     draft["findings"].append(partial)
     checkpoint = write_checkpoint(head.parent / "checkpoints", draft)
     head.write_text(json.dumps({"checkpoint": checkpoint.name}))
@@ -152,9 +164,9 @@ def test_deadline_recovers_partial_worker_findings_before_completion(tmp_path, c
     assert terminal["terminalReason"] == "capped"
     assert_retained_finding(scan)
     warnings = get_scan(scan.state, scan.scan_id)["scan"]["warnings"]
-    assert any("severity" in warning for warning in warnings)
+    assert any(field in warning for warning in warnings)
     coverage = json.loads((scan.directory / "coverage.json").read_text())
-    assert any("severity" in row["reason"] for row in coverage["deferred"])
+    assert any(field in row["reason"] for row in coverage["deferred"])
     assert all(path.read_bytes() == contents for path, contents in source_bytes.items())
     run_workbench(
         scan.state,

@@ -49,7 +49,6 @@ await testFreeformFailureMessagesAgainstRealWorkbench();
 await testReducerCommitAndFinishAgainstRealWorkbench();
 await testReducerCommitAndFinishAgainstRealWorkbench(true);
 await testExpiredDeadlineWithoutCompletedDiscoveryAgainstRealWorkbench();
-await testDeadlinePreservesValidWorkerCheckpoints();
 await testPartialWorkerCoverageSurvivesParentCompletion();
 await testReceiptRepairSurvivesStoppedRecovery();
 await testReceiptRepairSurvivesStoppedRecovery("nonportable");

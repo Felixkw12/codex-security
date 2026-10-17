@@ -1195,6 +1195,7 @@ def merge_saved_results(
     selected_model_source: list[str] | None = None,
     project_worker_coverage: bool = False,
     created_paths: set[str] | None = None,
+    current_contract: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None:
     """Read only bound parent/worker files; return an unsealed loss-preserving union."""
     initial_warnings = set(warnings)
@@ -1671,6 +1672,7 @@ def merge_saved_results(
             Path(__file__).resolve().parent.parent / "schemas",
             scan_dir,
             [],
+            current_contract=current_contract,
         )
         return bool(document["findings"])
 
@@ -2500,6 +2502,7 @@ def preserve_deep_deadline_draft(
             stopped=True,
             project_worker_coverage=True,
             created_paths=created_paths,
+            current_contract=True,
             reason=(
                 "The configured discovery time limit elapsed before any source review completed. "
                 "Saved findings and pending review were preserved without a completed reduction."
@@ -2524,7 +2527,7 @@ def preserve_deep_deadline_draft(
             documents[2]["inventoryStrategy"] = "repository"
         schema_dir = Path(__file__).resolve().parent.parent / "schemas"
         discarded_findings = _recover_unsealed_findings(
-            documents[0], documents[1], schema_dir, scan_dir, warnings
+            documents[0], documents[1], schema_dir, scan_dir, warnings, current_contract=True
         )
         _recover_unsealed_coverage(documents[2], schema_dir, scan_dir, warnings, discarded_findings)
         # Reuse stopped-result recovery's per-record validation, scope checks,
