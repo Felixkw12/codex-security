@@ -1139,13 +1139,6 @@ async function testOpenAiCredentialsReachWorker() {
           ? path.join(fixture.root, "tools", "python3")
           : "python3",
       PYTHONUTF8: "1",
-      CODEX_MCP_NODE_PATH: path.join(fixture.root, "selected node", "node"),
-      CODEX_BROWSER_USE_NODE_PATH: path.join(
-        fixture.root,
-        "browser node",
-        "node",
-      ),
-      CODEX_ELECTRON_RESOURCES_PATH: path.join(fixture.root, "app resources"),
       LD_LIBRARY_PATH:
         (process.env.LD_LIBRARY_PATH === undefined
           ? ""
