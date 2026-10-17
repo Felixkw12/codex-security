@@ -479,6 +479,7 @@ def _indexed_active_findings(
         scan, coverage = coverage_by_scan_id[scan_id]
         return (
             coverage is not None
+            and coverage.get("completeness", "complete") == "complete"
             and not coverage.get("deferred")
             and not any(
                 surface.get("disposition") == "needs_follow_up"

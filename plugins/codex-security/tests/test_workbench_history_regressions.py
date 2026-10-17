@@ -1857,8 +1857,19 @@ def test_current_semantic_alias_excludes_superseded_checkout_verification(tmp_pa
         assert result["returncode"] == 0, result["stderr"]
 
 
-@pytest.mark.parametrize("scope", ["scoped", "diff", "deferred", "follow_up"])
-def test_newer_alias_keeps_verification_without_full_location_coverage(tmp_path, scope):
+@pytest.mark.parametrize(
+    "scope",
+    [
+        "scoped",
+        "diff",
+        "deferred",
+        "follow_up",
+        "legacy_partial",
+        "legacy_unknown",
+        "legacy_complete",
+    ],
+)
+def test_newer_alias_verification_uses_location_and_review_coverage(tmp_path, scope):
     state, root, repository = tmp_path / "state", tmp_path / "scans", tmp_path / "repository"
     initialize_git_repository(repository)
     (repository / "src").mkdir()
@@ -1943,6 +1954,18 @@ def test_newer_alias_keeps_verification_without_full_location_coverage(tmp_path,
             )
         coverage_path.write_text(json.dumps(coverage))
     subprocess.run([sys.executable, str(FINALIZER), "--scan-dir", str(directory)], check=True)
+    if scope.startswith("legacy_"):
+        coverage_path = directory / "coverage.json"
+        coverage = json.loads(coverage_path.read_text())
+        coverage["completeness"] = scope.removeprefix("legacy_")
+        coverage_path.write_text(json.dumps(coverage))
+        manifest_path = directory / "scan-manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        artifact = next(
+            item for item in manifest["scan"]["artifacts"] if item["path"] == "coverage.json"
+        )
+        artifact["sha256"] = hashlib.sha256(coverage_path.read_bytes()).hexdigest()
+        manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     run_workbench(state, "complete-scan", "--scan-id", second["scanId"])
     second_id = run_workbench(state, "get-scan", "--scan-id", second["scanId"])["scan"]["findings"][
         0
@@ -1959,13 +1982,13 @@ def test_newer_alias_keeps_verification_without_full_location_coverage(tmp_path,
         "already_fixed",
         check=False,
     )
-    assert result["returncode"] != 0 and "Working-tree contents changed" in result["stderr"]
-    assert (
-        run_workbench(state, "get-scan", "--scan-id", first["scanId"])["scan"]["findings"][0][
-            "status"
-        ]
-        == "open"
-    )
+    if scope == "legacy_complete":
+        assert result["returncode"] == 0, result["stderr"]
+    else:
+        assert result["returncode"] != 0 and "Working-tree contents changed" in result["stderr"]
+    assert run_workbench(state, "get-scan", "--scan-id", first["scanId"])["scan"]["findings"][0][
+        "status"
+    ] == ("closed" if scope == "legacy_complete" else "open")
 
 
 @pytest.mark.parametrize("action", ["read", "reopen", "false_positive", "already_fixed"])
