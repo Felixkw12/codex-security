@@ -2573,6 +2573,7 @@ def preserve_deep_deadline_draft(db: Any, connection: Any, scan: Any) -> Iterato
                     (scan["id"],),
                 ).fetchall(),
                 warnings,
+                finding_scope=db.requested_finding_scope(scan),
                 stopped=True,
                 reason=(
                     "The configured discovery time limit elapsed before any source review completed. "
