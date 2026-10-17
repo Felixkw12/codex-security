@@ -842,6 +842,73 @@ def test_tied_parent_checkpoint_keeps_identityless_semantic_rows(tmp_path: Path,
     assert any(row["label"] == "Semantic review" and row["id"] for row in coverage["surfaces"])
 
 
+@pytest.mark.parametrize("checkpoint_stronger", [False, True])
+@pytest.mark.parametrize("canonical_duplicate", [False, True])
+def test_tied_parent_completion_coalesces_only_distinct_observations(
+    tmp_path: Path, checkpoint_stronger: bool, canonical_duplicate: bool
+):
+    state, home, scan_dir, scan_id = draft_fixture(tmp_path)
+    path = scan_dir / "findings.json"
+    document = json.loads(path.read_text())
+    original = document["findings"][0]
+    sibling = copy.deepcopy(original)
+    sibling["identity"]["anchor"] = "independent-archive-write"
+    document["findings"].append(sibling)
+    checkpoint_finding = copy.deepcopy(original)
+    checkpoint_finding["severity"]["level"] = "critical" if checkpoint_stronger else "low"
+    checkpoint_finding["summary"] = "Updated synthetic observation."
+    if canonical_duplicate:
+        duplicate = copy.deepcopy(original)
+        duplicate["summary"] = "Repeated canonical observation."
+        document["findings"].append(duplicate)
+    path.write_text(json.dumps(document))
+    checkpoint = write_checkpoint(
+        scan_dir / "checkpoints",
+        saved_draft(scan_id, findings=[checkpoint_finding], complete=True),
+    )
+    head = scan_dir / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+    for saved in (
+        checkpoint,
+        head,
+        path,
+        scan_dir / "coverage.json",
+        scan_dir / "scan-manifest.json",
+    ):
+        os.utime(saved, ns=(200, 200))
+
+    result = run_workbench(
+        state,
+        "complete-scan",
+        "--scan-id",
+        scan_id,
+        check=not canonical_duplicate,
+        environment={"CODEX_HOME": str(home)},
+    )
+
+    if canonical_duplicate:
+        assert result["returncode"] != 0
+        assert "duplicate occurrence identity" in result["stderr"]
+        assert json.loads(path.read_text()) == document
+        return
+    scan = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]
+    assert scan["progress"]["status"] == "complete"
+    findings = json.loads(path.read_text())["findings"]
+    assert [finding["identity"] for finding in findings] == [
+        original["identity"],
+        sibling["identity"],
+    ]
+    retained = findings[0]
+    strongest = checkpoint_finding if checkpoint_stronger else original
+    previous = original if checkpoint_stronger else checkpoint_finding
+    assert retained["severity"]["level"] == strongest["severity"]["level"]
+    assert retained["identity"] == original["identity"]
+    assert any(
+        item["summary"] == previous["summary"]
+        for item in retained["provenance"]["previousFindings"]
+    )
+
+
 @pytest.mark.parametrize("separate_workers", [False, True])
 def test_stopped_worker_candidates_remain_distinct(tmp_path: Path, separate_workers: bool):
     state, home, scan_dir, scan_id = draft_fixture(

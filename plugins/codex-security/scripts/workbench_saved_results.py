@@ -944,6 +944,7 @@ def merge_saved_results(
     parent: dict[str, Any] | None = None
     parent_manifest: dict[str, Any] | None = None
     parent_is_canonical = False
+    parent_has_duplicate_findings = False
     parent_modified = 0
     if frozen_source_digests is None or allow_frozen_legacy_parent:
         try:
@@ -951,6 +952,18 @@ def merge_saved_results(
             # Without an accepted head, file-authored coverage is a full replacement.
             parent_modified = (scan_dir / "coverage.json").lstat().st_mtime_ns
             parent_is_canonical = True
+            parent_fingerprints = []
+            for finding in parent["findings"]:
+                if not isinstance(finding, dict):
+                    continue
+                try:
+                    parent_fingerprints.append(_fingerprint(binding["target"]["targetId"], finding))
+                except ContractError:
+                    # Malformed or implicit identities still reach the finalizer.
+                    continue
+            parent_has_duplicate_findings = len(parent_fingerprints) != len(
+                set(parent_fingerprints)
+            )
         except (ContractError, OSError, ValueError) as exc:
             if not stopped:
                 raise
@@ -1193,6 +1206,7 @@ def merge_saved_results(
                 parent = draft
                 parent_modified = modified
                 parent_is_canonical = False
+                parent_has_duplicate_findings = False
             elif modified == parent_modified and draft != parent:
                 parent = _merge_tied_parent_observations(parent, draft)
                 parent_is_canonical = False
@@ -2134,8 +2148,8 @@ def merge_saved_results(
                 findings.append(finding)
                 continue
             key = _finding_key(finding)
-            if relative == "parent":
-                # Preserve accepted checkpoint row order after source validation.
+            if relative == "parent" and parent_has_duplicate_findings:
+                # Preserve invalid canonical duplicates for strict completion validation.
                 position = candidate_position_key(finding, key)
                 finding_positions.setdefault(position, len(findings))
                 register_parent_finding(finding, position)
@@ -2148,7 +2162,13 @@ def merge_saved_results(
                 if worker_id and candidate_id
                 else None
             )
-            if (
+            if relative == "parent":
+                # Tied observations share their first position and retained history.
+                key = candidate_position_key(finding, key)
+                register_parent_finding(finding, key)
+                mapped_key = None
+                historical_contents = set()
+            elif (
                 candidate_key in canonical_candidates
                 and represented_candidates[candidate_key] is not None
                 and represented.get(key) is None
