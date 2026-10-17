@@ -190,7 +190,7 @@ def create_cli_scan(
     repository: Path,
     *,
     complete: bool = True,
-    completeness: str = "complete",
+    follow_up: bool = False,
     extra_anchors: tuple[str, ...] = (),
     finding: bool = True,
     identity_anchor: str = "archive-entry-write-without-containment",
@@ -265,10 +265,9 @@ def create_cli_scan(
                 additional["title"] += f" ({index})"
                 findings["findings"].append(additional)
         findings_path.write_text(json.dumps(findings))
-    if completeness != "complete":
+    if follow_up:
         coverage_path = scan_dir / "coverage.json"
         coverage = json.loads(coverage_path.read_text())
-        coverage["completeness"] = completeness
         coverage["surfaces"][0]["disposition"] = "needs_follow_up"
         coverage["deferred"] = [
             {"id": "unreviewed-path", "reason": "Review incomplete", "paths": ["src/extract.py"]}
@@ -836,7 +835,6 @@ def test_cli_scan_comparison_tracks_stable_findings_without_copying_triage(tmp_p
         after,
         confirmed_match(inputs["before"][0]["occurrenceId"], inputs["after"][0]["occurrenceId"]),
     )
-    assert persisted["comparable"] is True
     assert persisted["summary"]["persisting"] == 1
     occurrence = persisted["findings"][0]["beforeOccurrenceId"]
     set_triage(state_dir, occurrence, "closed", "--close-reason", "already_fixed")
@@ -845,7 +843,10 @@ def test_cli_scan_comparison_tracks_stable_findings_without_copying_triage(tmp_p
     assert reopened["findings"][0]["triage"] == {"closeReason": None, "status": "open"}
 
     resolved = compare_scan_pair(state_dir, after, fixed)
-    assert resolved["summary"]["resolved"] == 1
+    assert resolved["summary"]["not_observed"] == 1
+    after_occurrence = persisted["findings"][0]["afterOccurrenceId"]
+    set_triage(state_dir, after_occurrence, "closed", "--close-reason", "already_fixed")
+    assert compare_scan_pair(state_dir, after, fixed)["summary"]["resolved"] == 1
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         assert connection.execute("SELECT COUNT(*) FROM findings").fetchone() == (1,)
         assert connection.execute("SELECT COUNT(*) FROM finding_occurrences").fetchone() == (2,)
@@ -1319,7 +1320,7 @@ def test_semantic_scan_comparison_caches_matches_and_exposes_related_findings(
     baseline = compare_scan_pair(state_dir, before, after, "--include-matching-inputs")
     assert baseline["matchingCached"] is False
     assert baseline["summary"]["new"] == 1
-    assert baseline["summary"]["resolved"] == 1
+    assert baseline["summary"]["not_observed"] == 1
     unmatched = get_scan(state_dir, before["scanId"])["scan"]["findings"][0]
     assert "knownSince" not in unmatched
     assert "knownScanIds" not in unmatched
@@ -1346,6 +1347,7 @@ def test_semantic_scan_comparison_caches_matches_and_exposes_related_findings(
         "new": 0,
         "persisting": 1,
         "resolved": 0,
+        "not_observed": 0,
         "reopened": 0,
         "unknown": 0,
     }
@@ -1561,7 +1563,7 @@ def test_semantic_scan_comparison_replaces_cached_matches_atomically(tmp_path: P
     save_scan_matches(state_dir, before, after, confirmed_match(previous, current))
     compared = save_scan_matches(state_dir, before, after)
 
-    assert compared["summary"]["resolved"] == 1
+    assert compared["summary"]["not_observed"] == 1
     assert compared["summary"]["new"] == 1
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         assert connection.execute("SELECT COUNT(*) FROM scan_comparisons").fetchone() == (1,)
@@ -1632,7 +1634,7 @@ def test_semantic_scan_comparison_accepts_linked_git_worktrees(tmp_path: Path) -
 
     compared = compare_scan_pair(state_dir, before, after, "--include-matching-inputs")
     assert compared["summary"]["persisting"] == 1
-    assert compared["summary"]["new"] == compared["summary"]["resolved"] == 0
+    assert compared["summary"]["new"] == compared["summary"]["not_observed"] == 0
     assert "identical locations" in compared["findings"][0]["matchReason"]
 
     saved = save_scan_matches(
@@ -1685,7 +1687,7 @@ def test_semantic_scan_comparison_accepts_matching_git_origins(tmp_path: Path) -
 
     compared = compare_scan_pair(state_dir, before, after, "--include-matching-inputs")
     assert compared["summary"]["new"] == 1
-    assert compared["summary"]["resolved"] == 1
+    assert compared["summary"]["not_observed"] == 1
 
     saved = save_scan_matches(state_dir, before, after)
     assert saved["summary"]["new"] == 1
@@ -1735,7 +1737,7 @@ def test_semantic_scan_comparison_rejects_unknown_overlapping_and_uncertain_grou
         assert connection.execute("SELECT COUNT(*) FROM scan_comparisons").fetchone() == (0,)
 
 
-def test_cli_scan_comparison_requires_complete_matching_path_coverage(tmp_path: Path) -> None:
+def test_cli_scan_comparison_distinguishes_absence_from_out_of_scope(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     repository = tmp_path / "repository"
     (repository / "src").mkdir(parents=True)
@@ -1743,7 +1745,7 @@ def test_cli_scan_comparison_requires_complete_matching_path_coverage(tmp_path: 
     root = tmp_path / "results"
     original = create_cli_scan(state_dir, root, repository, paths=["src"])
     partial = create_cli_scan(
-        state_dir, root, repository, finding=False, completeness="partial", paths=["src"]
+        state_dir, root, repository, finding=False, follow_up=True, paths=["src"]
     )
     other_scope = create_cli_scan(state_dir, root, repository, finding=False, paths=["tests"])
     deep = create_cli_scan(state_dir, root, repository, mode="deep")
@@ -1760,7 +1762,8 @@ def test_cli_scan_comparison_requires_complete_matching_path_coverage(tmp_path: 
             "--after-scan-id",
             later["scanId"],
         )
-        assert compared["summary"]["unknown"] == 1
+        expected = "not_observed" if later is partial else "unknown"
+        assert compared["summary"][expected] == 1
         assert compared["summary"]["resolved"] == 0
 
 
