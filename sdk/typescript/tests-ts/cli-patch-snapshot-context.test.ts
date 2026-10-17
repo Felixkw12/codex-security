@@ -993,6 +993,7 @@ test.each(["standard", "nested", "worktree", "configured"] as const)(
     await writeFile(hook, hookContents, { mode: 0o755 });
     const canonicalHook = await realpath(hook);
     const canonicalTemporary = await realpath(temporary);
+    const canonicalGitDirectory = await realpath(join(checkout, ".git"));
     let capturedHookReadOnly: boolean | undefined;
     const snapshotRules: {
       args: readonly string[];
@@ -1075,7 +1076,7 @@ process.stdout.write(input);
       }
       return originalSpawn(...input);
     }) as typeof originalSpawn);
-    const hookSetupLog = async () => {
+    const protectedSetupLog = async () => {
       if (process.platform !== "win32") return [];
       try {
         const directory = join(home, ".sandbox");
@@ -1090,7 +1091,7 @@ process.stdout.write(input);
               .filter(
                 (line) =>
                   line.includes("applied deny ACE to protect ") &&
-                  [hook, canonicalHook].some(
+                  [hook, canonicalHook, canonicalGitDirectory].some(
                     (path) =>
                       line.endsWith(path) ||
                       line.endsWith(path.replaceAll("\\", "/")),
@@ -1098,6 +1099,69 @@ process.stdout.write(input);
               ),
           })),
         );
+      } catch (error) {
+        return { observationError: String(error) };
+      }
+    };
+    const protectedAcls = async () => {
+      if (process.platform !== "win32") return undefined;
+      try {
+        const capabilities = JSON.parse(
+          await readFile(join(home, "cap_sid"), "utf8"),
+        ) as {
+          workspace: string;
+          readonly: string;
+          workspace_by_cwd: Record<string, string>;
+          writable_root_by_path: Record<string, string>;
+        };
+        const observation = Buffer.from(
+          JSON.stringify({
+            paths: [canonicalGitDirectory, canonicalTemporary, canonicalHook],
+            capabilitySids: [
+              capabilities.workspace,
+              capabilities.readonly,
+              ...Object.values(capabilities.workspace_by_cwd),
+              ...Object.values(capabilities.writable_root_by_path),
+            ],
+          }),
+        ).toString("base64");
+        // Preserve order and masks only for capabilities generated in this fixture's home.
+        const script = `$observation = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${observation}')) | ConvertFrom-Json
+$rows = @()
+foreach ($target in $observation.paths) {
+  $acl = Get-Acl -LiteralPath $target -ErrorAction Stop
+  $descriptor = [System.Security.AccessControl.RawSecurityDescriptor]::new($acl.GetSecurityDescriptorBinaryForm(), 0)
+  $entries = @()
+  for ($ordinal = 0; $ordinal -lt $descriptor.DiscretionaryAcl.Count; $ordinal++) {
+    $ace = $descriptor.DiscretionaryAcl[$ordinal]
+    if ($ace -is [System.Security.AccessControl.KnownAce] -and $observation.capabilitySids -contains $ace.SecurityIdentifier.Value) {
+      $entries += [ordered]@{ ordinal = $ordinal; type = $ace.AceType.ToString(); flags = $ace.AceFlags.ToString(); mask = $ace.AccessMask; sid = $ace.SecurityIdentifier.Value }
+    }
+  }
+  $rows += [ordered]@{ path = $target; protected = $acl.AreAccessRulesProtected; entries = $entries }
+}
+ConvertTo-Json -InputObject $rows -Depth 8 -Compress
+`;
+        const output = execFileSync(
+          "powershell.exe",
+          [
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-EncodedCommand",
+            Buffer.from(script, "utf16le").toString("base64"),
+          ],
+          {
+            encoding: "utf8",
+            windowsHide: true,
+            stdio: ["ignore", "pipe", "pipe"],
+          },
+        );
+        return {
+          capabilities,
+          paths: JSON.parse(output),
+          hookContents: await readFile(hook, "utf8"),
+        };
       } catch (error) {
         return { observationError: String(error) };
       }
@@ -1144,7 +1208,9 @@ process.stdout.write(input);
             });
           }
           const stderr: Buffer[] = [];
-          const before = options?.sandbox ? await hookSetupLog() : undefined;
+          const before = options?.sandbox
+            ? await protectedSetupLog()
+            : undefined;
           try {
             return await runRepositoryCommand(command, args, cwd, {
               ...options,
@@ -1159,8 +1225,9 @@ process.stdout.write(input);
               nativeCommands.push({
                 args,
                 stderr: Buffer.concat(stderr).toString("utf8"),
-                hookSetupBefore: before,
-                hookSetupAfter: await hookSetupLog(),
+                protectedSetupBefore: before,
+                protectedSetupAfter: await protectedSetupLog(),
+                protectedAclsAfter: await protectedAcls(),
               });
           }
         },
@@ -1183,6 +1250,7 @@ process.stdout.write(input);
         JSON.stringify({
           mode,
           canonicalHook,
+          canonicalGitDirectory,
           capturedHookReadOnly,
           snapshotRules,
           launches,
