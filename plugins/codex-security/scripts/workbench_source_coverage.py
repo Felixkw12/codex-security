@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import copy
 import sqlite3
 from pathlib import Path
@@ -97,3 +98,7 @@ def retain_unmerged_review_coverage(
             "reason": "This accepted discovery was not merged before the scan reached its cost limit.",
         },
     )
+
+
+if __name__ == "__main__":
+    argparse.ArgumentParser(description=__doc__).parse_args()
