@@ -231,9 +231,8 @@ test("registered sealed campaign reuse does not need report Python", async () =>
   expect(value.runs()).toBe(1);
 });
 
-test.each([false, true])(
-  "concurrent campaigns retain independent invocation authority with recovery=%s",
-  async (recovery) => {
+for (const recovery of [false, true]) {
+  test(`concurrent campaigns retain independent invocation authority with recovery=${recovery}`, async () => {
     const ambientState = process.env["CODEX_SECURITY_STATE_DIR"];
     const values = await Promise.all([fixture(), fixture()]);
     const run = () =>
@@ -258,8 +257,8 @@ test.each([false, true])(
     expect(recovered).toBe(recovery ? 2 : 0);
     expect(values.map((value) => value.runs())).toEqual([1, 1]);
     expect(process.env["CODEX_SECURITY_STATE_DIR"]).toBe(ambientState);
-  },
-);
+  });
+}
 
 for (const registerOnly of [false, true]) {
   for (const retargeted of [false, true]) {
@@ -386,67 +385,64 @@ test("registered campaign reuses equivalent staged knowledge sources", async () 
   expect(value.runs()).toBe(1);
 });
 
-test.each(
-  (["prompt", "configuration", "legacy", "seal"] as const).flatMap((kind) =>
-    [false, true].map((recovery) => [kind, recovery] as const),
-  ),
-)(
-  "registered campaign rejects editable %s reuse authority with recovery=%s",
-  async (kind, recovery) => {
-    const value = await fixture();
-    expect(await runMultiscan(value.options)).toMatchObject({
-      completed: 1,
-      skipped: 0,
-    });
-    if (recovery)
-      value.options.recoverScan = async () => {
-        throw new Error("Unverified settings must not reach recovery.");
-      };
-    const manifestPath = join(value.options.outputDir, "manifest.json");
-    const campaign = JSON.parse(await readFile(manifestPath, "utf8"));
-    if (kind === "prompt") {
-      value.options.scanPrompt = "Different requested instructions.";
-      campaign.scanPrompt = value.options.scanPrompt;
-    } else if (kind === "configuration") {
-      value.options.config.codexOverrides = { analytics: { enabled: false } };
-      const { workflowDigest } = await import("../src/finding-workflow.js");
-      campaign.configurationDigest = workflowDigest({
-        scanOptions: value.options.scanOptionsByMode,
-        codex: value.options.config.codexOverrides,
-        pluginPath: value.options.config.pluginPath,
-        pythonPath: value.options.config.pythonPath,
+for (const kind of ["prompt", "configuration", "legacy", "seal"] as const) {
+  for (const recovery of [false, true]) {
+    test(`registered campaign rejects editable ${kind} reuse authority with recovery=${recovery}`, async () => {
+      const value = await fixture();
+      expect(await runMultiscan(value.options)).toMatchObject({
+        completed: 1,
+        skipped: 0,
       });
-    } else if (kind === "legacy") {
-      const database = new Database(join(value.state, "workbench.sqlite3"));
-      try {
-        database.run(
-          "UPDATE scans SET recipe_json = json_remove(recipe_json, '$.scanRequestDigest')",
+      if (recovery)
+        value.options.recoverScan = async () => {
+          throw new Error("Unverified settings must not reach recovery.");
+        };
+      const manifestPath = join(value.options.outputDir, "manifest.json");
+      const campaign = JSON.parse(await readFile(manifestPath, "utf8"));
+      if (kind === "prompt") {
+        value.options.scanPrompt = "Different requested instructions.";
+        campaign.scanPrompt = value.options.scanPrompt;
+      } else if (kind === "configuration") {
+        value.options.config.codexOverrides = { analytics: { enabled: false } };
+        const { workflowDigest } = await import("../src/finding-workflow.js");
+        campaign.configurationDigest = workflowDigest({
+          scanOptions: value.options.scanOptionsByMode,
+          codex: value.options.config.codexOverrides,
+          pluginPath: value.options.config.pluginPath,
+          pythonPath: value.options.config.pythonPath,
+        });
+      } else if (kind === "legacy") {
+        const database = new Database(join(value.state, "workbench.sqlite3"));
+        try {
+          database.run(
+            "UPDATE scans SET recipe_json = json_remove(recipe_json, '$.scanRequestDigest')",
+          );
+        } finally {
+          database.close();
+        }
+      } else {
+        const path = join(
+          value.options.outputDir,
+          "artifacts/repo/attempt-1/scan-manifest.json",
         );
-      } finally {
-        database.close();
+        const scan = JSON.parse(await readFile(path, "utf8"));
+        scan.scan.extensions = { syntheticChanged: true };
+        await writeFile(path, JSON.stringify(scan, null, 2) + "\n");
+        // The bundle is still internally sealed, but no longer the registered manifest bytes.
+        await loadContract(
+          join(value.options.outputDir, "artifacts/repo/attempt-1"),
+          { pluginRoot },
+        );
       }
-    } else {
-      const path = join(
-        value.options.outputDir,
-        "artifacts/repo/attempt-1/scan-manifest.json",
-      );
-      const scan = JSON.parse(await readFile(path, "utf8"));
-      scan.scan.extensions = { syntheticChanged: true };
-      await writeFile(path, JSON.stringify(scan, null, 2) + "\n");
-      // The bundle is still internally sealed, but no longer the registered manifest bytes.
-      await loadContract(
-        join(value.options.outputDir, "artifacts/repo/attempt-1"),
-        { pluginRoot },
-      );
-    }
-    await writeFile(manifestPath, JSON.stringify(campaign, null, 2) + "\n");
-    expect(await runMultiscan(value.options)).toMatchObject({
-      completed: 1,
-      skipped: 0,
+      await writeFile(manifestPath, JSON.stringify(campaign, null, 2) + "\n");
+      expect(await runMultiscan(value.options)).toMatchObject({
+        completed: 1,
+        skipped: 0,
+      });
+      expect(value.runs()).toBe(2);
     });
-    expect(value.runs()).toBe(2);
-  },
-);
+  }
+}
 
 test("SDK registration records the same complete request identity used by campaign reuse", async () => {
   const root = await temporaryDirectory();
