@@ -2046,7 +2046,11 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               selectedProvider.provider !== undefined &&
               selectedProvider.providerConfig
             ) {
-              assert.equal(invocation.argv.includes("--profile"), false);
+              assertFlagPair(
+                invocation.argv,
+                "--profile",
+                selectedProvider.nativeProfile!,
+              );
               assert.deepEqual(
                 invocation.thread.params.config.model_providers,
                 {

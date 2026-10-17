@@ -178,6 +178,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       const diagnostics: CodexWorkerDiagnostic[] = [];
       const result = await runAppServerWorker({
         codexPath,
+        nativeProfile: runtimeSettings.nativeProfile,
         environment: {
           ...childEnv,
           CODEX_INTERNAL_ORIGINATOR_OVERRIDE:

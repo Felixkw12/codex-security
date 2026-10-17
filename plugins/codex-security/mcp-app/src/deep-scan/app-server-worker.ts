@@ -14,6 +14,7 @@ import { DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID } from "./permission-profile-pre
 
 interface WorkerThreadOptions {
   codexPath: string;
+  nativeProfile?: string;
   environment: Record<string, string>;
   configOverrides: readonly string[];
   providerConfigOverrides?: readonly string[];
@@ -39,6 +40,9 @@ export async function runAppServerWorker(
         ? "daybreakRed"
         : options.cyberAccessProgram;
   const args = [
+    ...(options.nativeProfile === undefined
+      ? []
+      : ["--profile", options.nativeProfile]),
     ...options.configOverrides.flatMap((value) => ["--config", value]),
     ...(options.providerConfigOverrides ?? []).flatMap((value) => [
       "--config",

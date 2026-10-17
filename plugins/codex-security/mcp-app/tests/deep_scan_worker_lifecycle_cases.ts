@@ -4,6 +4,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 import { mock } from "node:test";
+import { assertFlagPair } from "./assertions.ts";
 import { readJson } from "./support/json.ts";
 import type { createFakeCodexFixture } from "./deep_scan_native_fixture.ts";
 import type { CodexSdkWorkerExecutor as WorkerExecutor } from "../src/deep-scan/executor.js";
@@ -175,7 +176,9 @@ export function createWorkerLifecycleCases({
       clearTimeout(timeout);
       const invocation = await readJson(fixture.markerPath);
       childPid ??= invocation.pid;
-      assert.equal(invocation.argv.includes("--profile"), false);
+      if (kind === undefined)
+        assert.equal(invocation.argv.includes("--profile"), false);
+      else assertFlagPair(invocation.argv, "--profile", "completion_fixture");
       assert.equal(invocation.thread.method === "thread/resume", resumed);
       assertConfigOverrides(invocation.argv, {
         drain_session_records: undefined,

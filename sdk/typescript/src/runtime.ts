@@ -1595,6 +1595,7 @@ export async function resolveScanSessionPaths(
 ): Promise<ReadonlyMap<string, string>> {
   const source = [
     "import json, os, sqlite3, sys",
+    "from datetime import datetime, timezone",
     "from pathlib import Path",
     "sys.path.insert(0, sys.argv[1])",
     "import workbench_scan_usage as usage",
@@ -1614,7 +1615,8 @@ export async function resolveScanSessionPaths(
     "database = usage._codex_state_database()",
     "if database is None: raise RuntimeError('Codex session ownership is unavailable.')",
     "warnings = set()",
-    "sessions, missing = usage._discover_rollout_sessions(database, roots, warnings)",
+    "# Exact thread ownership uses the stored graph without directory or time-window discovery.",
+    "sessions, missing = usage._discover_rollout_sessions(database, roots, warnings, worker_directories=set(), started_at=datetime.min.replace(tzinfo=timezone.utc), completed_at=None)",
     "if missing or warnings or not any(session.thread_id == sys.argv[3] for session in sessions):",
     "    raise RuntimeError('Scan session ownership is incomplete.')",
     "print(json.dumps([[str(session.path), session.thread_id] for session in sessions], allow_nan=False))",
