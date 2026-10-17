@@ -2617,7 +2617,9 @@ async function testExternalProviderCredentialsReachWorker() {
       const launches: {
         args: readonly string[];
         environment: NodeJS.ProcessEnv;
+        markerPath: string;
       }[] = [];
+      let launchIndex = 0;
       try {
         for (const [name, value] of Object.entries(environment))
           restoreEnv(name, value);
@@ -2626,9 +2628,17 @@ async function testExternalProviderCredentialsReachWorker() {
           args: readonly string[],
           options: SpawnOptions,
         ) => {
-          if (args[0] === "exec")
-            launches.push({ args, environment: { ...options.env } });
-          return originalSpawn(command, args, options);
+          const markerPath = path.join(
+            fixture.root,
+            `provider-${launchIndex++}.json`,
+          );
+          const environment = {
+            ...options.env,
+            FAKE_CODEX_MARKER: markerPath,
+            FAKE_CODEX_PREFLIGHT_MARKER: markerPath,
+          };
+          launches.push({ args, environment, markerPath });
+          return originalSpawn(command, args, { ...options, env: environment });
         }) as typeof childProcess.spawn;
         syncBuiltinESMExports();
         const executor = new CodexSdkWorkerExecutor({
@@ -2644,8 +2654,9 @@ async function testExternalProviderCredentialsReachWorker() {
                 resumeThreadId,
               }),
             );
-            assert.equal(launches.length, 1);
-            const launch = launches[0];
+            const workerLaunches = await recordedWorkerLaunches(launches);
+            assert.equal(workerLaunches.length, 1);
+            const launch = workerLaunches[0];
             assert.equal(launch.environment[key], selectedKey);
             assert.equal(launch.environment.OPENAI_API_KEY, undefined);
             assert.equal(launch.environment.CODEX_API_KEY, undefined);
@@ -2655,7 +2666,7 @@ async function testExternalProviderCredentialsReachWorker() {
               "mcp_servers.codex-security.enabled": false,
             });
             assert.equal(
-              launch.args.includes("resume"),
+              launch.invocation.thread.method === "thread/resume",
               resumeThreadId !== undefined,
             );
             await writeFile(
