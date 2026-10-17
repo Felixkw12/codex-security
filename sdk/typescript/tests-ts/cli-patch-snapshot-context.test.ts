@@ -988,6 +988,14 @@ test.each(["standard", "nested", "worktree", "configured"] as const)(
     const hook = join(temporary, "post-index-change");
     const hookContents = "#!/bin/sh\nexit 0\n";
     await writeFile(hook, hookContents, { mode: 0o755 });
+    const canonicalHook = await realpath(hook);
+    const canonicalTemporary = await realpath(temporary);
+    let capturedHookReadOnly: boolean | undefined;
+    const snapshotRules: {
+      args: readonly string[];
+      hook: unknown;
+      temporary: unknown;
+    }[] = [];
     initial("config", "core.hooksPath", temporary);
     const clean = join(root, "clean.cjs");
     await writeFile(
@@ -1039,6 +1047,8 @@ process.stdout.write(input);
       environment,
       manualCodexPreparation: true,
       onCodex: async (_args, output) => {
+        capturedHookReadOnly =
+          output!.appServer!.permissions!.readOnlyPaths.includes(canonicalHook);
         output!.appServer!.onPermissions!({
           directory: repository,
           environment,
@@ -1060,17 +1070,30 @@ process.stdout.write(input);
         output!.stdout.write("Synthetic patch complete.\n");
         return 0;
       },
-      onRepositoryCommand: (command, args, cwd, options) =>
-        runRepositoryCommand(command, args, cwd, {
+      onRepositoryCommand: (command, args, cwd, options) => {
+        const filesystem = options?.sandbox?.profile["filesystem"] as
+          Record<string, unknown> | undefined;
+        if (filesystem) {
+          snapshotRules.push({
+            args,
+            hook: filesystem[canonicalHook] ?? null,
+            temporary: filesystem[canonicalTemporary] ?? null,
+          });
+        }
+        return runRepositoryCommand(command, args, cwd, {
           ...options,
           environment: { ...environment, ...options?.environment },
-        }),
+        });
+      },
     });
     expect(result.exitCode, result.stderr).toBe(0);
     expect(JSON.parse(result.stdout).files).toContain(
       mode === "nested" ? "child/app.ts" : "app.ts",
     );
-    expect(await readFile(hook, "utf8")).toBe(hookContents);
+    expect(
+      await readFile(hook, "utf8"),
+      JSON.stringify({ canonicalHook, capturedHookReadOnly, snapshotRules }),
+    ).toBe(hookContents);
     expect(await readFile(join(objects, "payload"), "utf8")).toBe(
       "Synthetic LFS payload\n",
     );
