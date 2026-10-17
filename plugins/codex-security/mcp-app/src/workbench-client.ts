@@ -66,6 +66,7 @@ async function executeWorkbench(
     "complete-scan",
     "export-findings",
     "finish-deep-scan",
+    "finding-issues",
     "get-scan",
     "get-deep-scan",
     "get-workspace",
@@ -88,7 +89,8 @@ async function executeWorkbench(
   const execution = execFileAsync(
     pythonCommand,
     [
-      ...(options.isolatedPython ? ["-I", "-X", "utf8", "-B"] : []),
+      ...(options.isolatedPython ? ["-I", "-X", "utf8"] : []),
+      "-B",
       "-c",
       WORKBENCH_PYTHON,
       workbenchScriptPath(),
@@ -98,10 +100,7 @@ async function executeWorkbench(
       windowsHide: true,
       env: process.env,
       encoding: "utf8" as const,
-      // Local artifacts and accepted finding pages can exceed a fixed byte buffer.
-      maxBuffer: ["read-artifact", "list-findings"].includes(args[0] ?? "")
-        ? Infinity
-        : 4 * 1024 * 1024,
+      maxBuffer: Infinity,
       timeout,
     },
   );
