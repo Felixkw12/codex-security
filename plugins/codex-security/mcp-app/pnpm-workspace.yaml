@@ -6,6 +6,3 @@ trustLockfile: true
 
 allowBuilds:
   esbuild: false
-
-patchedDependencies:
-  toml-eslint-parser@1.0.3: patches/toml-eslint-parser@1.0.3.patch

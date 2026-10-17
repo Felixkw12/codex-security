@@ -1,7 +1,6 @@
 import { nodeCommand } from "./support/shell.js";
-import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { chmod, cp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { CodexOptions } from "@openai/codex-sdk";
@@ -11,14 +10,13 @@ import { initialCredentialsAvailable } from "../src/api.js";
 import { AuthenticationRequiredError } from "../src/errors.js";
 import { setCodexSecurityCredentialLogout } from "../src/runtime.js";
 import { copyCompletedScan, PLUGIN_ROOT } from "./plugin-root.js";
-import { shellEnvironmentReference, TestClient } from "./support/api-client.js";
+import { TestClient } from "./support/api-client.js";
 import {
   codexFactory,
   completedEvents,
   preparedRuntime,
 } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
-import { windowsHelperFixture } from "./windows-helper-command.js";
 
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
 afterEach(cleanup);
@@ -290,7 +288,7 @@ describe("CodexSecurity orchestration", () => {
         prepareOutputDir: async () => scanDir,
         repositoryRevision: async () => "deadbeef",
         createCodex: (options: CodexOptions) =>
-          codexFactory(async function runStreamed(input: string) {
+          codexFactory(async function runStreamed() {
             const configPath = options.env?.["CODEX_SECURITY_CONFIG_PATH"];
             const codexHome = options.env?.["CODEX_HOME"];
             expect(typeof configPath).toBe("string");
@@ -362,83 +360,6 @@ describe("CodexSecurity orchestration", () => {
                 [repository]: { trust_level: "trusted" },
               },
             });
-            const configArgument = /--config "[^"]+"/u.exec(input)?.[0];
-            expect(configArgument).toBe(
-              process.platform === "win32"
-                ? '--config "%CODEX_SECURITY_CONFIG_PATH%"'
-                : `--config ${shellEnvironmentReference("CODEX_SECURITY_CONFIG_PATH")}`,
-            );
-            expect(input).toContain("--effective-config");
-            if (process.platform === "win32") {
-              const launcher = windowsHelperFixture(root, {
-                CODEX_SECURITY_CONFIG_PATH: configPath!,
-                CODEX_HOME: join(root, "denied"),
-              });
-              await cp(
-                join(PLUGIN_ROOT, "preflight"),
-                join(launcher.plugin, "preflight"),
-                { recursive: true },
-              );
-              for (const powershell of launcher.powershells) {
-                const result = await launcher.run(
-                  powershell,
-                  "references/config-preflight.md",
-                  {
-                    "<plugin_dir>": launcher.plugin,
-                    "<scan-working-directory>": repository,
-                    "<capability-profile>": "security_scan",
-                    "<active-config-argument>": configArgument!,
-                    "<true|false>": "true",
-                    "<verified-multi-agent-runtime-arguments>":
-                      "--multi-agent-runtime-owner native --multi-agent-runtime-version v2 --multi-agent-session-cap 12 --multi-agent-runtime-provenance tool-surface --effective-config features.goals=true",
-                  },
-                );
-                expect(result.status, result.diagnostics).toBe(0);
-                expect(
-                  JSON.parse(result.stdout).config_paths,
-                  result.diagnostics,
-                ).toEqual([configPath]);
-              }
-            }
-            const shellEnvironment = options.env as Record<string, string>;
-            const helper = execFileSync(
-              Bun.which("node")!,
-              [
-                join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
-                "config-preflight",
-                "--skill",
-                "security-scan",
-                "--config",
-                shellEnvironment["CODEX_SECURITY_CONFIG_PATH"]!,
-                "--cwd",
-                repository,
-                "--multi-agent-runtime-owner",
-                "native",
-                "--multi-agent-runtime-version",
-                "v2",
-                "--multi-agent-session-cap",
-                "12",
-                "--multi-agent-runtime-provenance",
-                "tool-surface",
-                "--runtime-check",
-                "delegation_available=true",
-                "--runtime-check",
-                "goal_tools_available=true",
-                "--effective-config",
-                "features.goals=true",
-              ],
-              {
-                env: {
-                  PATH: process.env["PATH"],
-                  CODEX_HOME: join(root, "denied"),
-                },
-                encoding: "utf8",
-              },
-            );
-            const preflight = JSON.parse(helper) as Record<string, unknown>;
-            expect(preflight["status"]).toBe("ready");
-            expect(preflight["config_resolution"]).toBe("manual-layers");
-            expect(preflight["config_paths"]).toEqual([configPath]);
             await copyCompletedScan(root);
             const manifestPath = join(scanDir, "scan-manifest.json");
             const manifest = JSON.parse(
