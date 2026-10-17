@@ -477,11 +477,19 @@ def _indexed_active_findings(
                         raise
             coverage_by_scan_id[scan_id] = scan, coverage
         scan, coverage = coverage_by_scan_id[scan_id]
-        return coverage is not None and scan_history.scan_covers_path(
-            {**dict(scan), "target_id": representative["indexed_target_id"]},
-            target_id=finding["indexed_target_id"],
-            path=finding["location_path"],
-            coverage=coverage,
+        return (
+            coverage is not None
+            and not coverage.get("deferred")
+            and not any(
+                surface.get("disposition") == "needs_follow_up"
+                for surface in coverage.get("surfaces", [])
+            )
+            and scan_history.scan_covers_path(
+                {**dict(scan), "target_id": representative["indexed_target_id"]},
+                target_id=finding["indexed_target_id"],
+                path=finding["location_path"],
+                coverage=coverage,
+            )
         )
 
     combined = []

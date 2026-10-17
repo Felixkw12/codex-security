@@ -1299,7 +1299,8 @@ def compare_scans(
             status = "unknown"
             item["reason"] = "The affected path was excluded or outside the later scope."
         elif all(
-            row["triage_status"] == "closed" and row["close_reason"] == "already_fixed"
+            previous_triage[row["id"]]["status"] == "closed"
+            and previous_triage[row["id"]].get("closeReason") == "already_fixed"
             for row in previous_rows
         ):
             status = "resolved"

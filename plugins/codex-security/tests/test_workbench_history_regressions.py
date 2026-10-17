@@ -1857,7 +1857,7 @@ def test_current_semantic_alias_excludes_superseded_checkout_verification(tmp_pa
         assert result["returncode"] == 0, result["stderr"]
 
 
-@pytest.mark.parametrize("scope", ["scoped", "diff"])
+@pytest.mark.parametrize("scope", ["scoped", "diff", "deferred", "follow_up"])
 def test_newer_alias_keeps_verification_without_full_location_coverage(tmp_path, scope):
     state, root, repository = tmp_path / "state", tmp_path / "scans", tmp_path / "repository"
     initialize_git_repository(repository)
@@ -1881,13 +1881,13 @@ def test_newer_alias_keeps_verification_without_full_location_coverage(tmp_path,
     (repository / "src/extract.py").write_text(
         "changed vulnerable\n" if scope == "diff" else "vulnerable\n"
     )
-    path = "src/extract.py" if scope == "diff" else "src/other.py"
+    path = "src/other.py" if scope == "scoped" else "src/extract.py"
     second = create_cli_scan(
         state,
         root,
         repository,
         complete=False,
-        paths=None if scope == "diff" else [path],
+        paths=[path] if scope == "scoped" else None,
         target={"kind": "working_tree", "paths": [], "base": revision, "head": revision}
         if scope == "diff"
         else None,
@@ -1902,7 +1902,7 @@ def test_newer_alias_keeps_verification_without_full_location_coverage(tmp_path,
         repository,
         identity_anchor="current-alias",
         relative_path=path,
-        include_paths=None if scope == "diff" else [path],
+        include_paths=[path] if scope == "scoped" else None,
         target_kind="git_diff" if scope == "diff" else "git_revision",
         target_revision=revision,
         diff_base_revision=revision if scope == "diff" else None,
@@ -1910,9 +1910,38 @@ def test_newer_alias_keeps_verification_without_full_location_coverage(tmp_path,
         snapshot_digest=row["diff_content_digest"]
         if scope == "diff"
         else row["target_snapshot_digest"],
-        coverage_mode="working_tree" if scope == "diff" else "scoped_path",
-        inventory_strategy="diff" if scope == "diff" else "scoped_path",
+        coverage_mode="working_tree"
+        if scope == "diff"
+        else "scoped_path"
+        if scope == "scoped"
+        else "repository",
+        inventory_strategy="diff"
+        if scope == "diff"
+        else "scoped_path"
+        if scope == "scoped"
+        else "repository",
     )
+    if scope in {"deferred", "follow_up"}:
+        coverage_path = directory / "coverage.json"
+        coverage = json.loads(coverage_path.read_text())
+        if scope == "deferred":
+            coverage["deferred"].append(
+                {
+                    "id": "synthetic-follow-up",
+                    "reason": "Synthetic unfinished review.",
+                    "paths": ["src/extract.py"],
+                }
+            )
+        else:
+            coverage["surfaces"].append(
+                {
+                    "id": "synthetic-follow-up",
+                    "label": "Synthetic unfinished review",
+                    "disposition": "needs_follow_up",
+                    "receiptRefs": [],
+                }
+            )
+        coverage_path.write_text(json.dumps(coverage))
     subprocess.run([sys.executable, str(FINALIZER), "--scan-dir", str(directory)], check=True)
     run_workbench(state, "complete-scan", "--scan-id", second["scanId"])
     second_id = run_workbench(state, "get-scan", "--scan-id", second["scanId"])["scan"]["findings"][
@@ -2085,6 +2114,41 @@ def test_scope_expansion_skips_same_target_pairs_but_keeps_linked_comparisons(
             )
         assert targets == expected
         assert same.call_count == (1 if linked else 0)
+
+
+def test_comparison_uses_inherited_fixed_decision_in_linked_checkout(linked_history):
+    state, root, repository, linked, revision = linked_history
+    before = create_cli_scan(
+        state, root, repository, identity_anchor="original-alias", target_revision=revision
+    )
+    related = create_cli_scan(
+        state, root, linked, identity_anchor="linked-alias", target_revision=revision
+    )
+    occurrences = [
+        run_workbench(state, "get-scan", "--scan-id", scan["scanId"])["scan"]["findings"][0][
+            "occurrenceId"
+        ]
+        for scan in (before, related)
+    ]
+    run_workbench(
+        state,
+        "set-finding-triage",
+        "--occurrence-id",
+        occurrences[0],
+        "--status",
+        "closed",
+        "--close-reason",
+        "already_fixed",
+    )
+    save_scan_matches(state, before, related, confirmed_match(*occurrences))
+    inherited = run_workbench(state, "get-scan", "--scan-id", related["scanId"])["scan"][
+        "findings"
+    ][0]
+    assert inherited["status"] == "closed"
+    after = create_cli_scan(state, root, linked, finding=False, target_revision=revision)
+    comparison = compare_scan_pair(state, related, after)
+    assert comparison["summary"]["resolved"] == 1
+    assert comparison["summary"]["not_observed"] == 0
 
 
 @pytest.mark.parametrize("reason", ["false_positive", "already_fixed"])
