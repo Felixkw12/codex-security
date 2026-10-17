@@ -1,5 +1,9 @@
 import { readJson, writeJsonLine as writeResult } from "./support/json.ts";
 import { finding, scanId, workerDraft as draft } from "./scan-draft-fixture.ts";
+import {
+  legacyAcceptedFinding,
+  legacyRawDiscoveryFinding,
+} from "./legacy-accepted-finding.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import assert from "node:assert/strict";
 import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
@@ -22,11 +26,68 @@ try {
   await testReducerValidation(root);
   await testEmptyDiscoveryAndReduction(root);
   await testLongDeferredCandidateRecovery(root);
+  await testAcceptedHistoricalFindings(root);
 } finally {
   await rm(root, { recursive: true, force: true });
 }
 
 console.log("deep scan artifact validation tests passed");
+
+async function testAcceptedHistoricalFindings(root: string) {
+  const current = finding("historical-checkpoint", "fixture.py");
+  const legacy = legacyAcceptedFinding(current);
+  const { artifacts, ...worker } = await createWorker(
+    path.join(root, "accepted-history"),
+    "worker-history",
+    draft([legacyRawDiscoveryFinding(current)]),
+  );
+  const workerBytes = await readFile(worker.resultPath, "utf8");
+  await assert.rejects(
+    validateDiscoveryArtifacts(artifacts, worker.resultPath, scanId),
+  );
+  const recovered = await validateDiscoveryArtifacts(
+    artifacts,
+    worker.resultPath,
+    scanId,
+    true,
+    true,
+  );
+  assert.deepEqual(recovered.findings, [legacy]);
+  assert.equal(await readFile(worker.resultPath, "utf8"), workerBytes);
+
+  const artifactDir = path.join(artifacts.dedupRoot, "dedup-history", "output");
+  const resultPath = path.join(artifactDir, "result.json");
+  await mkdir(artifactDir, { recursive: true });
+  await writeResult(resultPath, reduction([legacy]));
+  const input = {
+    artifacts,
+    artifactDir,
+    resultPath,
+    reducerId: "dedup-history",
+  };
+  const previousBytes = await readFile(resultPath, "utf8");
+  await assert.rejects(validateReducerArtifacts(input, scanId));
+  assert.deepEqual(
+    (await validateReducerArtifacts({ ...input, accepted: true }, scanId))
+      .result.findings,
+    [legacy],
+  );
+  assert.equal(await readFile(resultPath, "utf8"), previousBytes);
+
+  const currentPath = path.join(artifactDir, "current.json");
+  await writeResult(currentPath, reduction([current]));
+  const next = await validateReducerArtifacts(
+    {
+      ...input,
+      resultPath: currentPath,
+      previousReducerResultPath: resultPath,
+    },
+    scanId,
+  );
+  assert.equal(next.newFindings, 0);
+  assert.deepEqual(next.result.findings, [current]);
+  assert.equal(await readFile(resultPath, "utf8"), previousBytes);
+}
 
 async function testDiscoveryValidation(root: string) {
   const result = draft([finding("shared", "src/a.js")], {

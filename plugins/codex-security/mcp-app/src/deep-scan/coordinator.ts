@@ -1263,6 +1263,7 @@ export class DeepScanCoordinator {
         resultPath,
         this.state.scanId,
         this.state.workflowVersion === "deep-security-scan/v2",
+        true,
       );
       recovered.push({
         id: worker.id,
@@ -1348,6 +1349,7 @@ export class DeepScanCoordinator {
           artifactDir: worker.artifactDir,
           resultPath,
           reducerId: worker.id,
+          accepted: true,
           previousReducerResultPath: claim
             ? claim.previousResultPath
             : latestResultPath,

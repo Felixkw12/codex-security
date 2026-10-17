@@ -20,7 +20,6 @@ type CompletedResult = {
     })[];
   };
   coverage: Record<string, unknown> & {
-    completeness: string;
     surfaces: { disposition: string }[];
     deferred: unknown[];
     explicitExclusions: unknown[];
@@ -1166,7 +1165,6 @@ async function assertCompletionCoverageAndReplay(
   coverage: CompletedResult["coverage"],
 ) {
   const expected = {
-    completeness: coverage.completeness,
     surfaceCount: coverage.surfaces.length,
     deferredCount: coverage.deferred.length,
     explicitExclusionCount: coverage.explicitExclusions.length,
@@ -1186,23 +1184,9 @@ async function assertCompletionCoverageAndReplay(
     assert.equal(structured.scan.progress.status, "complete");
     const content = (result.content as TextContent[])[0];
     assert.equal(content.type, "text");
-    assert.match(
+    assert.equal(
       content.text,
-      new RegExp(`Canonical coverage: ${expected.completeness}\\b`),
-    );
-    assert.match(
-      content.text,
-      new RegExp(`\\b${expected.surfaceCount} surfaces\\b`),
-    );
-    assert.match(
-      content.text,
-      new RegExp(`\\b${expected.deferredCount} deferred items\\b`),
-    );
-    assert.match(
-      content.text,
-      new RegExp(
-        `\\b${expected.explicitExclusionCount} explicit exclusions\\b`,
-      ),
+      "Validated and indexed the completed Codex Security scan.",
     );
     assert.deepEqual(structured.coverageSummary, expected);
     assert.deepEqual(structured.scan.usage, scan.usage);

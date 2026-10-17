@@ -47,7 +47,11 @@ from finalize_scan_contract import (
 from workbench_constants import PHASES
 from workbench_source_coverage import retain_unmerged_review_coverage
 from workbench_target import committed_diff_snapshot_digest
-from workbench_validation import path_within_scope
+from workbench_validation import (
+    has_verified_selected_result,
+    latest_publication_reducer,
+    path_within_scope,
+)
 
 _PUBLISHED_OUTPUTS = (
     "findings.json",
@@ -2981,7 +2985,7 @@ def require_selected_publication(db: Any, connection: Any, scan: Any, prepared: 
 
 def _require_current_deep_publication(
     db: Any, connection: Any, scan: Any, draft: dict[str, Any]
-) -> None:
+) -> bool:
     scan_id = scan["id"]
     run = connection.execute(
         "SELECT * FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
@@ -2994,7 +2998,7 @@ def _require_current_deep_publication(
         and draft["manifest"]["scan"].get("complete") is False
         and (run is None or run["status"] == "running")
     ):
-        return
+        return False
     if run is None:
         run = db.deep_scan.require_deep_scan_run(connection, scan_id)
     # Finished discovery-only runs hand remaining publication back to the parent.
@@ -3004,24 +3008,26 @@ def _require_current_deep_publication(
         and run["status"] != "running"
         and run["manifest_path"] != str(Path(scan["scan_dir"]) / "scan-manifest.json")
     ):
-        return
+        return False
     db.deep_scan.require_current_coordinator(
         run,
         argparse.Namespace(
             coordinator_generation=publication.get("coordinatorGeneration") if publication else None
         ),
     )
+    accepted_findings = False
     if selection is not None:
         if publication is None:
             raise SystemExit("Deep Scan publication requires its committed selection.")
         scan = db.require_scan(connection, scan_id)
-        _require_selected_result(scan, selection)
+        accepted_findings = has_verified_selected_result(db, connection, scan)
         if "publicationSha256" in selection:
             prepared = _prepare_scan_finalization(
                 Path(scan["scan_dir"]),
                 expected_coverage_mode=db.expected_coverage_mode(scan),
                 completion_binding=db.workbench_completion_binding(scan, db.now()),
                 draft_documents=(draft["manifest"], draft["findings"], draft["coverage"]),
+                accepted_findings=accepted_findings,
             )
             require_selected_publication(db, connection, scan, prepared)
         selected_result = (
@@ -3037,28 +3043,15 @@ def _require_current_deep_publication(
                 Path(scan["scan_dir"]) / "scan-manifest.json"
             ):
                 raise SystemExit("Deep Scan is terminal; drafts cannot replace its publication.")
-            return
+            return False
 
-        # Publication follows the coordinator's durable reducer sequence. Stopped
-        # legacy recovery separately retains its completion-time source ordering.
-        def reducer_order(worker: Any) -> tuple[int, str]:
-            match = re.fullmatch(r"dedup-([0-9]+)", Path(worker["prompt_path"]).parent.name)
-            return (int(match[1]) if match else 0, worker["id"])
-
-        reducer = max(
-            (
-                worker
-                for worker in _saved_workers(connection, scan_id)
-                if worker["kind"] == "dedup"
-                and worker["status"] == "succeeded"
-                and worker["result_manifest_path"]
-            ),
-            key=reducer_order,
-            default=None,
-        )
+        reducer = latest_publication_reducer(db, connection, scan_id)
         selected_result = reducer["result_manifest_path"] if reducer is not None else None
     if publication["resultPath"] != selected_result:
         raise SystemExit("Deep Scan aggregate belongs to a superseded publication selection.")
+    if selection is None:
+        accepted_findings = has_verified_selected_result(db, connection, scan, reducer=reducer)
+    return accepted_findings
 
 
 def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
@@ -3117,8 +3110,9 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             is not None
         )
         run = None
+        accepted_findings = False
         if scan["mode"] == "deep" and not checkpoint_only:
-            _require_current_deep_publication(db, connection, scan, draft)
+            accepted_findings = _require_current_deep_publication(db, connection, scan, draft)
             run = db.deep_scan.find_supported_deep_scan_run(connection, scan_id)
         if checkpoint_contents is not None:
             checkpoint_digest = hashlib.sha256(checkpoint_contents).hexdigest()
@@ -3165,6 +3159,7 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
                 expected_coverage_mode=db.expected_coverage_mode(scan),
                 completion_binding=binding,
                 draft_documents=(manifest, findings, coverage),
+                accepted_findings=accepted_findings,
             )
             record_selected_publication(db, connection, scan, prepared)
         # Accepted Standard drafts are evidence of review or report assembly,

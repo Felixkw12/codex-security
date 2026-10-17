@@ -180,9 +180,9 @@ async function testDeepScanDetachedCompletion(mode: string) {
       `
 import sqlite3, sys
 with sqlite3.connect(sys.argv[1]) as connection:
-    connection.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL)")
+    connection.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL, cwd TEXT, created_at INTEGER)")
     connection.execute("CREATE TABLE thread_spawn_edges (parent_thread_id TEXT NOT NULL, child_thread_id TEXT NOT NULL)")
-    connection.execute("INSERT INTO threads VALUES (?, ?)", (sys.argv[2], sys.argv[3]))
+    connection.execute("INSERT INTO threads (id, rollout_path) VALUES (?, ?)", (sys.argv[2], sys.argv[3]))
 `,
       path.join(codexHome, "state_5.sqlite"),
       threadId,

@@ -6,6 +6,8 @@ import type { JsonObject } from "../types.js";
 import { artifactSchemaDocuments } from "../artifact-contracts.js";
 import { projectArtifactToolSchema } from "../artifact-schema-loader.js";
 import {
+  parseAcceptedDeepScanDraft,
+  parseAcceptedDiscoveryDraft,
   parsePersistedScanDraft,
   preserveFindingDetails,
   saveScanDraftCheckpoint,
@@ -122,14 +124,14 @@ export function parseDeepReduction(
   };
   const parsed = persisted
     ? (({ coverage: _coverage, ...draft }) => draft)(
-        parsePersistedScanDraft(standard),
+        parseAcceptedDeepScanDraft(standard),
       )
     : deepReductionInputSchema.parse(submitted);
-  validateFindingSemantics(parsed.findings);
+  validateFindingSemantics(parsed.findings, persisted);
   if (persisted && sourceCoverage !== undefined) {
     return {
       ...parsed,
-      sourceCoverage: parsePersistedScanDraft({
+      sourceCoverage: parseAcceptedDeepScanDraft({
         ...standard,
         coverage: sourceCoverage,
       }).coverage,
@@ -144,12 +146,14 @@ export async function validateDiscoveryArtifacts(
   resultPath: string,
   expectedScanId: string,
   validateWriteups = true,
+  accepted = false,
 ): Promise<ScanDraftInput> {
   const result = await readDiscoveryAuditDraft(
     artifacts,
     resultPath,
     expectedScanId,
     validateWriteups,
+    accepted,
   );
   if (result.complete === false)
     throw new Error(
@@ -163,13 +167,14 @@ export async function readDiscoveryAuditDraft(
   resultPath: string,
   expectedScanId: string,
   validateWriteups = true,
+  accepted = false,
 ): Promise<ScanDraftInput> {
   await requireRegularFile(resultPath, artifacts.workersRoot);
   const result = parseStoredScanDraft(
     await readJsonObject(resultPath),
     "Standard scan worker",
     expectedScanId,
-    parsePersistedScanDraft,
+    accepted ? parseAcceptedDiscoveryDraft : parsePersistedScanDraft,
   );
   if (result.complete !== false && validateWriteups)
     await validateWriteupFiles(artifacts, result);
@@ -208,6 +213,7 @@ export async function validateReducerArtifacts(
     previousReducerResultPath?: string;
     sources?: DeepReductionSources;
     persistSourceCoverage?: boolean;
+    accepted?: boolean;
   },
   expectedScanId?: string,
 ): Promise<ReducerArtifactValidation> {
@@ -224,7 +230,7 @@ export async function validateReducerArtifacts(
     await readJsonObject(resultPath),
     reducerId,
     expectedScanId,
-    parseDeepReduction,
+    (value) => parseDeepReduction(value, input.accepted),
   );
   if (result.complete === false)
     throw new Error(
@@ -238,7 +244,7 @@ export async function validateReducerArtifacts(
       await readJsonObject(previousReducerResultPath),
       "Previous successful reducer",
       result.scanId,
-      parseDeepReduction,
+      (value) => parseDeepReduction(value, true),
     );
   }
 

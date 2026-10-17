@@ -20,7 +20,9 @@ const bundle = await build({
   stdin: {
     contents: `export * from "./src/deep-scan/finalization.ts";
       export * from "./src/deep-scan/artifacts.ts";
-      export * from "./src/artifact-scan-draft.ts";`,
+      export * from "./src/artifact-scan-draft.ts";
+      export { parseDeepReduction } from "./src/deep-scan/artifact-validation.ts";
+      export { legacyAcceptedFinding } from "./tests/legacy-accepted-finding.ts";`,
     resolveDir: path.resolve(import.meta.dirname, ".."),
   },
   bundle: true,
@@ -34,10 +36,58 @@ const {
   readSelectedDeepScanDraft,
   createDeepScanArtifacts,
   saveScanDraftCheckpoint,
+  parseDeepReduction,
+  parseScanDraft,
+  legacyAcceptedFinding,
 } = await import(
   `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
 );
 const scanId = "4e7b4acb-ac80-4d68-98cd-3d5ac5581cd1";
+
+for (const rootCause of ["object", "text"]) {
+  test(`replays accepted legacy finding details with ${rootCause} root cause`, async () => {
+    const scanDir = await realpath(
+      await mkdtemp(path.join(tmpdir(), "selected-legacy-finding-")),
+    );
+    try {
+      const finding = legacyAcceptedFinding();
+      if (rootCause === "text") finding.root_cause = "Synthetic root cause";
+      const saved = {
+        scanId,
+        findings: [finding],
+        sourceCoverage: { surfaces: [], explicitExclusions: [], deferred: [] },
+      };
+      const contents = JSON.stringify(saved);
+      const selected = path.join(scanDir, "selected.json");
+      await writeFile(selected, contents);
+      const draft = await readSelectedDeepScanDraft(
+        createDeepScanArtifacts(scanDir),
+        scanId,
+        {
+          version: 1,
+          resultPath: "selected.json",
+          resultSha256: createHash("sha256").update(contents).digest("hex"),
+          terminalReason: "capped",
+          omittedWorkerIds: [],
+          selectedAt: "2030-01-01T00:00:00Z",
+        },
+      );
+      assert.deepEqual(draft.findings, saved.findings);
+      assert.equal(await readFile(selected, "utf8"), contents);
+      assert.throws(() => parseScanDraft(draft));
+      assert.throws(() => parseDeepReduction(saved));
+
+      const invalid = structuredClone(saved);
+      invalid.findings[0].attackPath.dataFlow.evidence_refs = ["missing"];
+      assert.throws(
+        () => parseDeepReduction(invalid, true),
+        /attackPath\.dataFlow\.evidence_refs.*existing code-evidence IDs/,
+      );
+    } finally {
+      await rm(scanDir, { recursive: true, force: true });
+    }
+  });
+}
 
 for (const mode of ["normal", "symlink", "swapped", "changed", "canceled"]) {
   test(`selected reducer read preserves accepted-file boundary: ${mode}`, async (t) => {

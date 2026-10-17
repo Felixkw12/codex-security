@@ -130,6 +130,7 @@ from workbench_validation import (
     require_uuid,
     sqlite_busy,
     user_context_argument,
+    validate_completed_scan_artifacts,
 )
 
 FINDING_ARTIFACT_DIRECTORIES_LIMIT = 80
@@ -1263,8 +1264,10 @@ def complete_budget_exhausted_scan(
         draft_documents = None
         sealed_replay = False
         try:
+            accepted_findings = saved_results.has_verified_selected_result(
+                _WORKBENCH_DB_CONTEXT, connection, scan
+            )
             if selection is not None:
-                saved_results._require_selected_result(scan, selection)
                 if "publicationSha256" in selection:
                     draft_documents = tuple(
                         saved_results._read_scan_local_json(scan_dir, name, name)
@@ -1279,6 +1282,7 @@ def complete_budget_exhausted_scan(
                         expected_coverage_mode=expected_coverage_mode(scan),
                         completion_binding=workbench_completion_binding(scan, now(), manifest),
                         draft_documents=None if sealed else draft_documents,
+                        accepted_findings=accepted_findings,
                     )
                     saved_results.require_selected_publication(
                         _WORKBENCH_DB_CONTEXT, connection, scan, validated
@@ -1299,6 +1303,7 @@ def complete_budget_exhausted_scan(
                         accepted_result=accepted,
                         unmerged_workers=unmerged,
                         draft_documents=draft_documents,
+                        accepted_findings=accepted_findings or accepted is not None,
                     ),
                 )
             else:
@@ -1309,6 +1314,7 @@ def complete_budget_exhausted_scan(
                     warning,
                     unmerged_workers=deep_scan.budget_unmerged_workers(connection, scan_id),
                     draft_documents=draft_documents,
+                    accepted_findings=accepted_findings,
                 )
                 if selection is not None:
                     if sealed_replay:
@@ -1422,6 +1428,7 @@ def budget_exhausted_draft(
     accepted_result: dict[str, Any] | None = None,
     unmerged_workers: list[sqlite3.Row] = (),
     draft_documents: tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None = None,
+    accepted_findings: bool = False,
 ) -> PreparedScanFinalization:
     documents = saved_results.budget_exhausted_draft(
         _WORKBENCH_DB_CONTEXT,
@@ -1443,6 +1450,7 @@ def budget_exhausted_draft(
         completion_binding=workbench_completion_binding(scan, now(), manifest),
         draft_documents=None if sealed else documents,
         finding_scope=requested_finding_scope(scan),
+        accepted_findings=accepted_findings,
     )
 
 
@@ -1456,21 +1464,6 @@ def completed_scan_context(
         "explicitExclusionCount": len(coverage.get("explicitExclusions", [])),
     }
     return context
-
-
-def validate_completed_scan_artifacts(scan: sqlite3.Row) -> None:
-    scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
-    require_recorded_manifest_digest(scan, scan_dir)
-    verify_manifest_binding(scan, read_json_object(scan_dir / ARTIFACTS["manifest"]))
-    try:
-        manifest = _prepare_scan_finalization(
-            scan_dir,
-            expected_coverage_mode=expected_coverage_mode(scan),
-        )[2]
-    except ContractError as exc:
-        raise SystemExit(str(exc)) from exc
-    verify_manifest_binding(scan, manifest)
-    published_manifest_digest(scan_dir, manifest)
 
 
 def complete_scan_locked(
@@ -1582,6 +1575,9 @@ def complete_scan_locked(
                     draft_documents=draft_documents,
                     finding_scope=requested_finding_scope(scan) if scan["mode"] == "deep" else None,
                     require_complete=True,
+                    accepted_findings=saved_results.has_verified_selected_result(
+                        _WORKBENCH_DB_CONTEXT, connection, scan
+                    ),
                 )
             if prepared[2]["scan"].get("complete") is False:
                 raise RecoverableContractError(
@@ -3500,7 +3496,7 @@ def main(
             ):
                 scan = require_scan(connection, result["deepScan"]["scanId"])
                 if scan["status"] == "complete":
-                    validate_completed_scan_artifacts(scan)
+                    validate_completed_scan_artifacts(_WORKBENCH_DB_CONTEXT, scan)
         elif args.command == "get-deep-scan":
             result = deep_scan.get_deep_scan(connection, args)
         elif args.command == "claim-deep-scan-coordinator":

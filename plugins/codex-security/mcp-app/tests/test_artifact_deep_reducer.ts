@@ -2,6 +2,10 @@ import { readJson, writeJson } from "./support/json.ts";
 import { sourceReferences } from "./support/source-references.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import { finding, scanId, workerDraft } from "./scan-draft-fixture.ts";
+import {
+  legacyAcceptedFinding,
+  legacyRawDiscoveryFinding,
+} from "./legacy-accepted-finding.ts";
 import assert from "node:assert/strict";
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -74,6 +78,7 @@ assert.equal(
 
 const root = await temporaryDirectory("codex-security-deep-reducer-", true);
 try {
+  await testHistoricalAssignedInputs(root);
   const scanRoot = path.join(root, "scan");
   const workersRoot = path.join(
     scanRoot,
@@ -198,8 +203,8 @@ try {
       previous: null,
     },
   );
-  assert.equal(inputs.discoveries[0]!.coverage!.completeness, "partial");
-  assert.equal(inputs.discoveries[1]!.coverage!.completeness, "unknown");
+  assert.equal(inputs.discoveries[0]!.coverage!.completeness, undefined);
+  assert.equal(inputs.discoveries[1]!.coverage!.completeness, undefined);
   assert.deepEqual(
     await getModelInputs(context),
     {
@@ -530,6 +535,63 @@ try {
 }
 
 console.log("artifact deep reducer tests passed");
+
+async function testHistoricalAssignedInputs(root: string) {
+  const scanRoot = path.join(root, "historical");
+  const workersRoot = path.join(
+    scanRoot,
+    "artifacts",
+    "deep_discovery",
+    "workers",
+  );
+  const dedupRoot = path.join(scanRoot, "artifacts", "deep_discovery", "dedup");
+  const current = finding("historical-checkpoint", "fixture.py");
+  const legacy = legacyAcceptedFinding(current);
+  const worker = await createWorker({
+    workersRoot,
+    label: "discovery-history",
+    id: "worker-history",
+    result: workerDraft([legacyRawDiscoveryFinding(current)]),
+  });
+  const output = path.join(dedupRoot, "dedup-history", "output");
+  await mkdir(output, { recursive: true });
+  const previousReducerResultPath = path.join(output, "previous.json");
+  await writeJson(previousReducerResultPath, reduction([legacy]));
+  const context = {
+    root: output,
+    repoRoot: root,
+    scanId,
+    layout: "reducer" as const,
+    deepReducer: {
+      scanRoot,
+      claimedWorkers: [worker],
+      previousReducerResultPath,
+    },
+  };
+  const sourceBytes = await readFile(worker.resultPath, "utf8");
+  const previousBytes = await readFile(previousReducerResultPath, "utf8");
+  const sources = await readDeepReductionSources(context);
+  assert.deepEqual(
+    sources.discoveries[0].result.findings[0].root_cause,
+    legacy.root_cause,
+  );
+  assert.deepEqual(sources.previous!.findings[0], legacy);
+  await assert.rejects(
+    recordCodexSecurityDeepReduction(context, reduction([legacy])),
+  );
+  await recordCodexSecurityDeepReduction(context, reduction([current]));
+  const saved = await readJson(path.join(output, "result.json"));
+  assert.equal(saved.findings[0].root_cause, undefined);
+  assert.deepEqual(
+    saved.findings[0].provenance.sourceFindings[0].finding.root_cause,
+    legacy.root_cause,
+  );
+  assert.equal(await readFile(worker.resultPath, "utf8"), sourceBytes);
+  assert.equal(
+    await readFile(previousReducerResultPath, "utf8"),
+    previousBytes,
+  );
+}
 
 async function createWorker({
   workersRoot,

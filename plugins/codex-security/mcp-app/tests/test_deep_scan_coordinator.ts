@@ -1,4 +1,8 @@
 import { testSelectedFinalizationOwner } from "./deep_scan_selected_finalization_cases.ts";
+import {
+  legacyAcceptedFinding,
+  legacyRawDiscoveryFinding,
+} from "./legacy-accepted-finding.ts";
 import { readJson, writeJson } from "./support/json.ts";
 import type { CoordinatorOptions } from "../src/deep-scan/coordinator.js";
 import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
@@ -3148,11 +3152,12 @@ async function testResumedManifestPreservesCompletedReducer(
   includeUnstartedReducer = false,
   removeHistoricalPrompts = true,
   includePaths?: string[],
+  historicalFindings = false,
 ) {
   const fixture = await fixtureRun({
     workers: 2,
     stopAfterNoNew: 2,
-    maxDiscoveryRuns: 3,
+    maxDiscoveryRuns: historicalFindings ? 2 : 3,
   });
   fixture.run.includePaths = includePaths;
   const store = new FakeStore(fixture.run);
@@ -3162,7 +3167,11 @@ async function testResumedManifestPreservesCompletedReducer(
     store,
     new FakeExecutor({
       blockDiscoveryAfterCalls: 2,
-      discoveryCandidateId: includePaths ? "scope-candidate" : undefined,
+      discoveryCandidateId: includePaths
+        ? "scope-candidate"
+        : historicalFindings
+          ? "historical-checkpoint"
+          : undefined,
     }),
     { run: store.run },
   );
@@ -3214,6 +3223,17 @@ async function testResumedManifestPreservesCompletedReducer(
   const acceptedWorkers = store.run.persistedWorkers!.filter(
     (worker) => worker.status === "succeeded",
   );
+  if (historicalFindings) {
+    for (const worker of acceptedWorkers) {
+      const result = await readJson(worker.resultManifestPath!);
+      result.findings = result.findings.map(
+        worker.kind === "discovery"
+          ? legacyRawDiscoveryFinding
+          : legacyAcceptedFinding,
+      );
+      await writeJson(worker.resultManifestPath!, result);
+    }
+  }
   const acceptedResults = await Promise.all(
     acceptedWorkers.map((worker) =>
       readFile(worker.resultManifestPath!, "utf8"),
@@ -4365,6 +4385,12 @@ try {
   await testResumedManifestPreservesCompletedReducer(false, false);
   await testResumedManifestPreservesCompletedReducer();
   await testResumedManifestPreservesCompletedReducer(true);
+  await testResumedManifestPreservesCompletedReducer(
+    false,
+    true,
+    undefined,
+    true,
+  );
   await testResumedManifestPreservesCompletedReducer(false, true, [
     "api",
     "background jobs",

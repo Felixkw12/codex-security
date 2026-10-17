@@ -14,9 +14,13 @@ import {
   readArtifactTextWithMetadata,
   replaceArtifactJson,
 } from "./artifact-io.js";
-import { artifactSchemaDocuments } from "./artifact-contracts.js";
+import {
+  acceptedDeepScanDraftInputSchema,
+  artifactSchemaDocuments,
+} from "./artifact-contracts.js";
 import { projectArtifactToolSchema } from "./artifact-schema-loader.js";
 import { saveThreatModelDocument } from "./threat-model-document.js";
+import { normalizeAcceptedDiscoveryFinding } from "./accepted-discovery-normalization.js";
 
 const draftDefinitions = artifactSchemaDocuments["tools/scan-draft"].$defs;
 export const scanDraftInputSchema = projectArtifactToolSchema(
@@ -34,7 +38,8 @@ const canonicalFileScanDraftInputSchema = fileScanDraftInputSchema.extend({
   }),
 });
 export const completedScanInputSchema = draftDefinitions.completedScanInput;
-export type ScanDraftInput = z.infer<typeof scanDraftInputSchema>;
+// Host drafts include accepted historical findings as well as current inputs.
+export type ScanDraftInput = z.infer<typeof acceptedDeepScanDraftInputSchema>;
 type DraftCoverage = ScanDraftInput["coverage"];
 export type CompletedScanInput = z.infer<typeof completedScanInputSchema>;
 
@@ -79,7 +84,9 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
   signal?: AbortSignal,
   publication?: DeepScanPublication,
 ): Promise<ScanDraftResult> {
-  const parsed = parseScanDraft(input);
+  const parsed = publication
+    ? normalizeParsedScanDraft(parseAcceptedDeepScanDraft(input))
+    : parseScanDraft(input);
   requireBoundScan(context, parsed, true);
   const finalDeepDraft = context.mode === "deep" && parsed.complete !== false;
   if (finalDeepDraft && resolvedDeferred(parsed.coverage).length > 0) {
@@ -1263,10 +1270,12 @@ async function preserveDeepThreatModel(
     input:
       previous?.threatModel === undefined
         ? input
-        : scanDraftInputSchema.parse({
+        : {
             ...input,
-            threatModel: previous.threatModel,
-          }),
+            ...scanDraftInputSchema.pick({ threatModel: true }).parse({
+              threatModel: previous.threatModel,
+            }),
+          },
     previousDigest: digest,
   };
 }
@@ -1840,7 +1849,10 @@ function parseCanonicalCheckpoint(
 }
 
 export function parseScanDraft(input: unknown): ScanDraftInput {
-  const parsed = parsePersistedScanDraft(input);
+  return normalizeParsedScanDraft(parsePersistedScanDraft(input));
+}
+
+function normalizeParsedScanDraft(parsed: ScanDraftInput): ScanDraftInput {
   const deferredIds = new Set<string>();
   const ambiguousIds = ambiguousGenericDeferredIds([parsed]);
   for (const row of parsed.coverage.deferred) {
@@ -1875,6 +1887,25 @@ export function parsePersistedScanDraft(
   validateFindingSemantics(parsed.findings);
   delete parsed.coverage.completeness;
   return parsed;
+}
+
+/** Replay host-accepted Deep findings while preserving their original details. */
+export function parseAcceptedDeepScanDraft(input: unknown): ScanDraftInput {
+  const parsed = acceptedDeepScanDraftInputSchema.parse(input);
+  validateFindingSemantics(parsed.findings, true);
+  delete parsed.coverage.completeness;
+  return parsed;
+}
+
+/** Replay the read contract used when the raw discovery bytes were accepted. */
+export function parseAcceptedDiscoveryDraft(input: unknown): ScanDraftInput {
+  const compatible = structuredClone(input);
+  if (isObject(compatible) && Array.isArray(compatible.findings)) {
+    for (const finding of compatible.findings) {
+      if (isObject(finding)) normalizeAcceptedDiscoveryFinding(finding);
+    }
+  }
+  return parseAcceptedDeepScanDraft(compatible);
 }
 
 function parsePersistedCheckpoint(
@@ -2276,7 +2307,10 @@ function inventoryStrategy(
   return "repository";
 }
 
-export function validateFindingSemantics(findings: JsonObject[]): void {
+export function validateFindingSemantics(
+  findings: JsonObject[],
+  accepted = false,
+): void {
   for (const [findingIndex, finding] of findings.entries()) {
     const severity = finding.severity as JsonObject;
     if (
@@ -2302,25 +2336,30 @@ export function validateFindingSemantics(findings: JsonObject[]): void {
     }
 
     const evidenceIds = new Set<string>();
-    for (const [evidenceIndex, evidence] of (
-      (finding.codeEvidence as JsonObject[] | undefined) ?? []
-    ).entries()) {
-      const id = evidence.id as string;
-      if (evidenceIds.has(id)) {
-        throw new Error(
-          `scan draft: findings[${findingIndex}].codeEvidence[${evidenceIndex}].id ` +
-            `duplicates ${id}.`,
-        );
-      }
-      evidenceIds.add(id);
-      if (
-        typeof evidence.endLine === "number" &&
-        evidence.endLine < (evidence.startLine as number)
-      ) {
-        throw new Error(
-          `scan draft: findings[${findingIndex}].codeEvidence[${evidenceIndex}].endLine ` +
-            "must not precede startLine.",
-        );
+    const catalogs = accepted
+      ? ["codeEvidence", "code_evidence"]
+      : ["codeEvidence"];
+    for (const catalog of catalogs) {
+      for (const [evidenceIndex, evidence] of (
+        (finding[catalog] as JsonObject[] | undefined) ?? []
+      ).entries()) {
+        const id = evidence.id as string;
+        if (evidenceIds.has(id)) {
+          throw new Error(
+            `scan draft: findings[${findingIndex}].${catalog}[${evidenceIndex}].id ` +
+              `duplicates ${id}.`,
+          );
+        }
+        evidenceIds.add(id);
+        if (
+          typeof evidence.endLine === "number" &&
+          evidence.endLine < (evidence.startLine as number)
+        ) {
+          throw new Error(
+            `scan draft: findings[${findingIndex}].${catalog}[${evidenceIndex}].endLine ` +
+              "must not precede startLine.",
+          );
+        }
       }
     }
 
@@ -2329,8 +2368,12 @@ export function validateFindingSemantics(findings: JsonObject[]): void {
       ["validation", finding.validation],
       ["attackPath", finding.attackPath],
     ];
+    if (accepted) referencedSections.push(["root_cause", finding.root_cause]);
     if (isObject(finding.attackPath)) {
-      for (const sectionName of ["dataflow", "reachability"]) {
+      const names = accepted
+        ? ["dataflow", "dataFlow", "data_flow", "reachability"]
+        : ["dataflow", "reachability"];
+      for (const sectionName of names) {
         referencedSections.push([
           `attackPath.${sectionName}`,
           finding.attackPath[sectionName],
@@ -2339,16 +2382,21 @@ export function validateFindingSemantics(findings: JsonObject[]): void {
     }
     for (const [sectionName, section] of referencedSections) {
       if (!isObject(section)) continue;
-      const references = section.evidenceRefs;
-      if (references === undefined) continue;
-      if (
-        !Array.isArray(references) ||
-        references.some((reference) => !evidenceIds.has(reference))
-      ) {
-        throw new Error(
-          `scan draft: findings[${findingIndex}].${sectionName}.evidenceRefs ` +
-            "must refer to that finding's existing code-evidence IDs.",
-        );
+      const fields = accepted
+        ? ["evidenceRefs", "evidence_refs"]
+        : ["evidenceRefs"];
+      for (const field of fields) {
+        const references = section[field];
+        if (references === undefined) continue;
+        if (
+          !Array.isArray(references) ||
+          references.some((reference) => !evidenceIds.has(reference))
+        ) {
+          throw new Error(
+            `scan draft: findings[${findingIndex}].${sectionName}.${field} ` +
+              "must refer to that finding's existing code-evidence IDs.",
+          );
+        }
       }
     }
   }

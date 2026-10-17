@@ -1,7 +1,7 @@
 import { dirname, join, relative, sep } from "node:path";
 import type { ArtifactContext } from "./artifact-context.js";
 import {
-  parsePersistedScanDraft,
+  parseAcceptedDiscoveryDraft,
   saveScanDraftCheckpoint,
 } from "./artifact-scan-draft.js";
 import { artifactSchemaDocuments } from "./artifact-contracts.js";
@@ -58,7 +58,7 @@ export async function readDeepReductionSources(
           await readJsonObject(worker.resultPath),
           "Accepted Standard worker " + worker.id,
           bound.scanId,
-          parsePersistedScanDraft,
+          parseAcceptedDiscoveryDraft,
           " has an invalid Standard scan result: ",
           " belongs to a different scan.",
         );

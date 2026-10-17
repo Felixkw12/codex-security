@@ -18,6 +18,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { buildServer } from "./build-server.ts";
 import { importModule } from "./import-module.ts";
+import { legacyAcceptedFinding } from "./legacy-accepted-finding.ts";
 import type {
   DeepScanRunState,
   DeepScanWorkerMutation,
@@ -42,11 +43,24 @@ type HostModule = Pick<
   Pick<
     typeof import("../src/artifact-scan-draft.ts"),
     "recordCodexSecurityScanDraftViaWorkbench"
+  > &
+  Pick<
+    typeof import("../src/deep-scan/finalization.ts"),
+    "readSelectedDeepScanDraft"
+  > &
+  Pick<
+    typeof import("../src/deep-scan/artifacts.ts"),
+    "createDeepScanArtifacts"
+  > &
+  Pick<
+    typeof import("../src/deep-scan/artifact-validation.ts"),
+    "parseDeepReduction" | "deepReductionToScanDraft"
   >;
 type ToolResult = Awaited<ReturnType<Client["callTool"]>>;
 interface FixturePaths {
   target?: string;
   scanRoot?: string;
+  maxDiscoveryRuns?: number;
 }
 type Scenario = readonly [
   label: string,
@@ -91,6 +105,9 @@ const host = (await importModule({
       'export { DeepScanCoordinator } from "./src/deep-scan/coordinator.ts";',
       'export { createScanArtifactContext } from "./src/artifact-context.ts";',
       'export { recordCodexSecurityScanDraftViaWorkbench } from "./src/artifact-scan-draft.ts";',
+      'export { readSelectedDeepScanDraft } from "./src/deep-scan/finalization.ts";',
+      'export { createDeepScanArtifacts } from "./src/deep-scan/artifacts.ts";',
+      'export { parseDeepReduction, deepReductionToScanDraft } from "./src/deep-scan/artifact-validation.ts";',
     ].join("\n"),
     resolveDir: mcpAppRoot,
   },
@@ -101,7 +118,125 @@ const {
   DeepScanCoordinator,
   createScanArtifactContext,
   recordCodexSecurityScanDraftViaWorkbench,
+  readSelectedDeepScanDraft,
+  createDeepScanArtifacts,
+  parseDeepReduction,
+  deepReductionToScanDraft,
 } = host;
+
+for (const version of [
+  "deep-security-scan/v2",
+  "deep-security-scan/v1",
+  "deep-scan-mcp/v1",
+]) {
+  test(`historical accepted findings survive ${version} publication and public completion`, async (t) => {
+    const fixture = await createFixture(t, { maxDiscoveryRuns: 4 }, version);
+    const { run, store, call, runWorkbench } = fixture;
+    const legacy = legacyAcceptedFinding();
+    const threatModel = {
+      summary: "Previously recorded synthetic threat model",
+    };
+    assertSuccess(
+      await call("record_codex_security_scan_draft", {
+        ...partial(run, "previous-review"),
+        threatModel,
+      }),
+    );
+    const claimed = await store.claimCoordinator({
+      scanId: run.scanId,
+      threadId: owner,
+    });
+    // Seed the accepted worker records and bytes produced by the earlier contract.
+    const results = await commitReducers(
+      fixture,
+      [1, 2],
+      [highId, lowId],
+      undefined,
+      {
+        findings: [legacy],
+        omitThreatModel: true,
+      },
+    );
+    const manifestPath = path.join(run.scanDir, "scan-manifest.json");
+    let publicationRun = await store.get(run.scanId, owner);
+    const acceptedReducer = publicationRun.persistedWorkers?.find(
+      (worker) => worker.id === lowId,
+    );
+    let resultPath =
+      acceptedReducer?.acceptedResultPath ??
+      acceptedReducer?.resultManifestPath;
+    assert.ok(resultPath);
+    let draft: ScanDraftInput;
+    if (version === "deep-security-scan/v2") {
+      publicationRun = await store.selectFinalization({
+        scanId: run.scanId,
+        coordinatorGeneration: claimed.run.coordinatorGeneration,
+        reason: "capped",
+        manifestPath,
+        resultPath: results[1],
+        omittedWorkerIds: [],
+      });
+      assert.ok(publicationRun.finalizationInput?.resultPath);
+      resultPath = path.resolve(
+        run.scanDir,
+        publicationRun.finalizationInput.resultPath,
+      );
+      draft = await readSelectedDeepScanDraft(
+        createDeepScanArtifacts(run.scanDir),
+        run.scanId,
+        publicationRun.finalizationInput,
+      );
+    } else {
+      draft = deepReductionToScanDraft(
+        parseDeepReduction(
+          JSON.parse(await readFile(resultPath, "utf8")),
+          true,
+        ),
+      );
+    }
+    const original = await readFile(resultPath, "utf8");
+    assert.deepEqual(draft.findings, [legacy]);
+    assertToolError(await call("record_codex_security_scan_draft", draft));
+    const context = await createScanArtifactContext(run.scanId, runWorkbench, {
+      requireRunning: true,
+    });
+    await recordCodexSecurityScanDraftViaWorkbench(
+      context,
+      draft,
+      runWorkbench,
+      undefined,
+      {
+        coordinatorGeneration: publicationRun.coordinatorGeneration,
+        resultPath,
+      },
+    );
+    await store.finish({
+      scanId: run.scanId,
+      reason: "capped",
+      manifestPath,
+      omittedWorkerIds: [],
+    });
+    assertSuccess(
+      await call("complete_codex_security_scan", { scanId: run.scanId }),
+    );
+    const saved = JSON.parse(
+      await readFile(path.join(run.scanDir, "findings.json"), "utf8"),
+    );
+    for (const field of [
+      "rootCause",
+      "root_cause",
+      "codeEvidence",
+      "code_evidence",
+      "validation",
+      "attackPath",
+    ] as const) {
+      assert.deepEqual(saved.findings[0][field], legacy[field]);
+    }
+    assert.equal(await readFile(resultPath, "utf8"), original);
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    assert.deepEqual(manifest.scan.threatModel, threatModel);
+  });
+}
 
 test("public partial drafts retain checkpoints after coordinator adoption", async (t) => {
   const fixture = await createFixture(t);
@@ -724,6 +859,14 @@ async function createFixture(
     }).filter((entry): entry is [string, string] => entry[1] !== undefined),
   );
   delete environment.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
+  if (paths.maxDiscoveryRuns !== undefined) {
+    const directory = path.join(environment.CODEX_HOME, "codex-security");
+    await mkdir(directory, { recursive: true });
+    await writeFile(
+      path.join(directory, "config.toml"),
+      `[deep_scan]\nmax_discovery_runs = ${paths.maxDiscoveryRuns}\n`,
+    );
+  }
   const instant = new Date().toISOString();
   let now = instant;
   const runWorkbench = async (
@@ -798,8 +941,13 @@ async function commitReducers(
   offsets: readonly [number, number],
   ids: readonly [string, string],
   reducerLabels?: readonly [string, string],
+  historical?: {
+    findings: Record<string, unknown>[];
+    omitThreatModel: boolean;
+  },
 ) {
   const { run, store } = fixture;
+  const findings = historical?.findings ?? [];
   const results = [];
   for (let batch = 0; batch < 2; batch++) {
     const workerIds = [];
@@ -819,7 +967,7 @@ async function commitReducers(
       const resultManifestPath = path.join(artifact.artifactDir, "result.json");
       await writeFile(
         resultManifestPath,
-        JSON.stringify({ scanId: run.scanId, findings: [], coverage }),
+        JSON.stringify({ scanId: run.scanId, findings, coverage }),
       );
       await store.updateWorker({
         ...update,
@@ -846,8 +994,10 @@ async function commitReducers(
       resultManifestPath,
       JSON.stringify({
         scanId: run.scanId,
-        findings: [],
-        threatModel: { summary: label },
+        findings,
+        ...(historical?.omitThreatModel
+          ? {}
+          : { threatModel: { summary: label } }),
       }),
     );
     fixture.setTime(offsets[batch]);
@@ -855,7 +1005,7 @@ async function commitReducers(
       id,
       scanId: run.scanId,
       resultManifestPath,
-      newFindings: 0,
+      newFindings: batch === 0 ? findings.length : 0,
     });
     fixture.setTime(0);
     results.push(resultManifestPath);

@@ -51,6 +51,76 @@ def sqlite_busy(error: sqlite3.OperationalError) -> bool:
 path_within_scope = finalizer.path_within_scope
 
 
+def latest_publication_reducer(db: Any, connection: Any, scan_id: str) -> Any | None:
+    # Publication follows the durable reducer sequence, not completion timestamps.
+    def reducer_order(worker: Any) -> tuple[int, str]:
+        match = re.fullmatch(r"dedup-([0-9]+)", Path(worker["prompt_path"]).parent.name)
+        return (int(match[1]) if match else 0, worker["id"])
+
+    return max(
+        (
+            worker
+            for worker in db.saved_results._saved_workers(connection, scan_id)
+            if worker["kind"] == "dedup"
+            and worker["status"] == "succeeded"
+            and worker["result_manifest_path"]
+        ),
+        key=reducer_order,
+        default=None,
+    )
+
+
+def has_verified_selected_result(
+    db: Any, connection: Any, scan: Any, *, reducer: Any = None
+) -> bool:
+    """Verify persisted Deep publication authority before using the artifact read contract."""
+    if scan["mode"] != "deep":
+        return False
+    run = db.deep_scan.find_supported_deep_scan_run(connection, scan["id"])
+    selection = db.deep_scan.deep_scan_finalization_input(run) if run is not None else None
+    try:
+        if selection is not None:
+            db.saved_results._require_selected_result(scan, selection)
+            return selection["resultPath"] is not None
+        if run is None or run["workflow_version"] not in {
+            "deep-scan-mcp/v1",
+            "deep-security-scan/v1",
+        }:
+            return False
+        if reducer is None:
+            reducer = latest_publication_reducer(db, connection, scan["id"])
+        accepted = reducer["accepted_result_path"] if reducer is not None else None
+        digests = db.saved_results._accepted_source_digests(connection, scan["id"])
+        if accepted is None or accepted not in digests:
+            return False
+        scan_dir = Path(scan["scan_dir"])
+        db.saved_results._read_saved_result(
+            scan_dir,
+            Path(accepted).relative_to(scan_dir).as_posix(),
+            scan["id"],
+            kind="dedup",
+            accepted_source_digests=digests,
+        )
+    except (finalizer.ContractError, ValueError) as exc:
+        raise finalizer.RecoverableContractError(str(exc)) from exc
+    return True
+
+
+def validate_completed_scan_artifacts(db: Any, scan: sqlite3.Row) -> None:
+    scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
+    db.require_recorded_manifest_digest(scan, scan_dir)
+    db.verify_manifest_binding(scan, db.read_json_object(scan_dir / db.ARTIFACTS["manifest"]))
+    try:
+        manifest = db._prepare_scan_finalization(
+            scan_dir,
+            expected_coverage_mode=db.expected_coverage_mode(scan),
+        )[2]
+    except db.ContractError as exc:
+        raise SystemExit(str(exc)) from exc
+    db.verify_manifest_binding(scan, manifest)
+    db.published_manifest_digest(scan_dir, manifest)
+
+
 def require_close_note(close_reason: str | None, note: str | None) -> None:
     if note is None and close_reason == "false_positive":
         raise SystemExit("Explain why this finding is a false positive.")
