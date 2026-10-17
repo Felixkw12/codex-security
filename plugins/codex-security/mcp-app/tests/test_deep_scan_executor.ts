@@ -1,4 +1,10 @@
-import { fakeCodexSource } from "./support/fake-codex-source.ts";
+import {
+  fakeCodexSource,
+  workerGitEnvironment,
+  expectedGitEnvironment,
+  restoreEnv,
+  nativeConfigOverrides,
+} from "./support/fake-codex-source.ts";
 import { readJson, writeJson } from "./support/json.ts";
 import { randomUUID } from "node:crypto";
 import { loadWorkbenchProcess } from "./support/workbench-process.ts";
@@ -1421,45 +1427,7 @@ async function testWorkerRuntimeSettings() {
         "python",
       );
       process.env.PYTHON = python;
-      const gitEnvironment = {
-        NODE_OPTIONS: "--no-warnings",
-        NODE_DEBUG: "synthetic-ambient-debug",
-        NODE_EXTRA_CA_CERTS: path.join(fixture.root, "ambient-ca.pem"),
-        CODEX_MCP_NODE_PATH: path.join(fixture.root, "inherited node"),
-        HOME: path.join(fixture.root, "inherited home"),
-        PATH: [
-          path.join(fixture.root, "selected tools"),
-          "../selected tools",
-          "",
-        ].join(path.delimiter),
-        CODEX_SECURITY_GIT: path.join(fixture.root, "selected tools", "git"),
-        GIT_SSH_COMMAND: "synthetic-ssh --fixture",
-        GIT_CONFIG_GLOBAL: path.join(fixture.root, "operator.gitconfig"),
-      };
-      const expectedGitEnvironment = (
-        nodePath: string,
-        environment?: {
-          HOME: string;
-          PATH: string;
-          NODE_OPTIONS: string;
-          NODE_DEBUG: string;
-          NODE_EXTRA_CA_CERTS: string;
-          CODEX_MCP_NODE_PATH: string;
-        },
-      ) => ({
-        ...gitEnvironment,
-        CODEX_MCP_NODE_PATH: nodePath,
-        ...(environment === undefined
-          ? {}
-          : {
-              HOME: environment.HOME,
-              PATH: environment.PATH,
-              NODE_OPTIONS: environment.NODE_OPTIONS,
-              NODE_DEBUG: environment.NODE_DEBUG,
-              NODE_EXTRA_CA_CERTS: environment.NODE_EXTRA_CA_CERTS,
-              CODEX_MCP_NODE_PATH: environment.CODEX_MCP_NODE_PATH,
-            }),
-      });
+      const gitEnvironment = workerGitEnvironment(fixture.root);
       await writeFile(gitEnvironment.NODE_EXTRA_CA_CERTS, rootCertificates[0]!);
       Object.assign(process.env, gitEnvironment);
       const configPath = path.join(fixture.root, "active [scan] config.toml");
@@ -2223,6 +2191,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             assert.deepEqual(
               invocation.gitEnvironment,
               expectedGitEnvironment(
+                gitEnvironment,
                 nodePaths[index],
                 selectedProvider.environment,
               ),
@@ -2318,6 +2287,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             assert.deepEqual(
               preflight.gitEnvironment,
               expectedGitEnvironment(
+                gitEnvironment,
                 nodePaths[workerConfigurations.indexOf(selectedProvider)],
                 selectedProvider.environment,
               ),
@@ -3896,17 +3866,6 @@ function assertWorkerSubagentPolicy(
         }),
   });
   assert.equal(args.includes("features.multi_agent_v2.enabled=true"), false);
-}
-
-function restoreEnv(name: string, value: string | undefined) {
-  if (value === undefined) delete process.env[name];
-  else process.env[name] = value;
-}
-
-function nativeConfigOverrides(args: readonly string[]) {
-  return args.flatMap((arg, index) =>
-    arg === "--config" || arg === "-c" ? [args[index + 1]] : [],
-  );
 }
 
 function assertConfigOverrides(

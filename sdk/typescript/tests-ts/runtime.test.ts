@@ -507,17 +507,21 @@ describe("plugin runtime preparation", () => {
 
       const scopes = join(root, "scopes.json");
       await writeFile(scopes, JSON.stringify(["source.ts:synthetic-stream"]));
-      const scopeInput = runNodePython(python!, [
-        join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
-        "make-repo-scope-input",
-        "--repo",
-        repository,
-        "--scopes-file",
-        scopes,
-        "--out",
-        join(root, "scope-input.jsonl"),
-      ]);
-      expect(scopeInput.status).toBe(1);
+      const scopeInput = spawnSync(
+        nodeCommand().command,
+        [
+          join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+          "make-repo-scope-input",
+          "--repo",
+          repository,
+          "--scopes-file",
+          scopes,
+          "--out",
+          join(root, "scope-input.jsonl"),
+        ],
+        { encoding: "utf8" },
+      );
+      expect(scopeInput.status).toBe(2);
       expect(scopeInput.stderr).toContain("NTFS alternate data stream");
     },
   );
@@ -6071,8 +6075,7 @@ describe("runtime directories and plugin Python boundary", () => {
       const result = spawnSync(
         nodeCommand().command,
         [
-          "-B",
-          join(PLUGIN_ROOT, "scripts", "generate_rank_input.py"),
+          join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
           "make-repo-scope-input",
           "--repo",
           repository,

@@ -1,3 +1,4 @@
+import path from "node:path";
 import { jsonLineInputSource } from "./json-line-input-source.ts";
 
 export function fakeCodexSource(
@@ -117,4 +118,57 @@ console.log(JSON.stringify({ type: 'turn.completed', usage: stdin.includes('NULL
 if (stdin.includes('COMPLETE_THEN_HANG')) { setInterval(() => {}, 1_000); await new Promise(() => {}); }
 }
 `;
+}
+
+export function workerGitEnvironment(root: string) {
+  return {
+    NODE_OPTIONS: "--no-warnings",
+    NODE_DEBUG: "synthetic-ambient-debug",
+    NODE_EXTRA_CA_CERTS: path.join(root, "ambient-ca.pem"),
+    CODEX_MCP_NODE_PATH: path.join(root, "inherited node"),
+    HOME: path.join(root, "inherited home"),
+    PATH: [path.join(root, "selected tools"), "../selected tools", ""].join(
+      path.delimiter,
+    ),
+    CODEX_SECURITY_GIT: path.join(root, "selected tools", "git"),
+    GIT_SSH_COMMAND: "synthetic-ssh --fixture",
+    GIT_CONFIG_GLOBAL: path.join(root, "operator.gitconfig"),
+  };
+}
+
+export const expectedGitEnvironment = (
+  gitEnvironment: ReturnType<typeof workerGitEnvironment>,
+  nodePath: string,
+  environment?: {
+    HOME: string;
+    PATH: string;
+    NODE_OPTIONS: string;
+    NODE_DEBUG: string;
+    NODE_EXTRA_CA_CERTS: string;
+    CODEX_MCP_NODE_PATH: string;
+  },
+) => ({
+  ...gitEnvironment,
+  CODEX_MCP_NODE_PATH: nodePath,
+  ...(environment === undefined
+    ? {}
+    : {
+        HOME: environment.HOME,
+        PATH: environment.PATH,
+        NODE_OPTIONS: environment.NODE_OPTIONS,
+        NODE_DEBUG: environment.NODE_DEBUG,
+        NODE_EXTRA_CA_CERTS: environment.NODE_EXTRA_CA_CERTS,
+        CODEX_MCP_NODE_PATH: environment.CODEX_MCP_NODE_PATH,
+      }),
+});
+
+export function restoreEnv(name: string, value: string | undefined) {
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
+}
+
+export function nativeConfigOverrides(args: readonly string[]) {
+  return args.flatMap((arg, index) =>
+    arg === "--config" || arg === "-c" ? [args[index + 1]] : [],
+  );
 }
