@@ -28,6 +28,7 @@ async function fixture(
   rejectManaged: boolean,
   rejectOrdinary = false,
   nativeCommand = false,
+  ordinaryHasSqlite = true,
 ) {
   const root = await directories.create("codex-security-node-launcher-");
   const launcher = path.join(root, "scripts", "launch_codex_security_mcp");
@@ -98,6 +99,13 @@ try {
 const { appendFileSync } = require("node:fs");
 appendFileSync(${JSON.stringify(launchLog)}, JSON.stringify({ runtime: ${JSON.stringify(label)}, argv: process.argv.slice(1) }) + "\\n");
 Object.defineProperty(process, "platform", { value: "darwin" });
+const Module = require("node:module");
+const load = Module._load;
+Module._load = function(request, ...args) {
+  if (${JSON.stringify(label === "ordinary" && !ordinaryHasSqlite)} && request === "node:sqlite")
+    throw new Error("No such built-in module: node:sqlite");
+  return load.call(this, request, ...args);
+};
 const dlopen = process.dlopen;
 process.dlopen = function(module, filename, ...args) {
   appendFileSync(${JSON.stringify(log)}, JSON.stringify({ runtime: ${JSON.stringify(label)}, filename, argv: process.argv.slice(1) }) + "\\n");
@@ -155,7 +163,7 @@ process.dlopen = function(module, filename, ...args) {
       );
       env.PATH += path.delimiter + path.dirname(executable);
     },
-    run(args: string[], override?: string) {
+    run(args: string[], override?: string, input = "preserved helper input\n") {
       return spawnSync("/bin/sh", [launcher, "--helper", ...args], {
         cwd: root,
         env: {
@@ -163,7 +171,7 @@ process.dlopen = function(module, filename, ...args) {
           ...(override === undefined ? {} : { CODEX_MCP_NODE_PATH: override }),
         },
         encoding: "utf8",
-        input: "preserved helper input\n",
+        input,
       });
     },
     async loads() {
@@ -355,6 +363,26 @@ test(
       helpers.map((entry) => entry.runtime),
       ["managed"],
       "A failing command must not retry in another runtime.",
+    );
+  },
+);
+
+test(
+  "database helpers retain the managed runtime when PATH Node lacks SQLite",
+  { skip: process.platform === "win32" },
+  async () => {
+    const setup = await fixture(true, false, false, false);
+    const result = setup.run(
+      ["database-info"],
+      undefined,
+      JSON.stringify(setup.root),
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(
+      (await setup.launches())
+        .filter((entry) => entry.argv.includes("--helper"))
+        .map((entry) => entry.runtime),
+      ["managed"],
     );
   },
 );
