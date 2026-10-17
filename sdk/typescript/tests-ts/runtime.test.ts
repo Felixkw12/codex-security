@@ -521,7 +521,7 @@ describe("plugin runtime preparation", () => {
         ],
         { encoding: "utf8" },
       );
-      expect(scopeInput.status).toBe(2);
+      expect(scopeInput.status).toBe(1);
       expect(scopeInput.stderr).toContain("NTFS alternate data stream");
     },
   );
