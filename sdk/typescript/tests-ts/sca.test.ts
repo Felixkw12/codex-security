@@ -1331,19 +1331,22 @@ test.each(["absolute", "relative"] as const)(
 );
 
 test("final cost recovery persists an unchanged estimate without duplicate notifications", async () => {
-  const { client, repository, outputDir } = await fixture({ turns: ["malformed"] });
+  const { client, repository, outputDir } = await fixture({
+    turns: ["malformed"],
+  });
   await using security = client;
   const costs: Readonly<ScanCost>[] = [];
   const originalRefresh = ScanCostTracker.prototype.refresh;
   const originalStop = ScanCostTracker.prototype.stop;
   let finalizing = false;
-  const refresh = spyOn(ScanCostTracker.prototype, "refresh").mockImplementation(
-    async function (this: ScanCostTracker) {
-      const snapshot = await originalRefresh.call(this);
-      if (!finalizing) throw new Error("synthetic temporary usage read failure");
-      return snapshot;
-    },
-  );
+  const refresh = spyOn(
+    ScanCostTracker.prototype,
+    "refresh",
+  ).mockImplementation(async function (this: ScanCostTracker) {
+    const snapshot = await originalRefresh.call(this);
+    if (!finalizing) throw new Error("synthetic temporary usage read failure");
+    return snapshot;
+  });
   const stop = spyOn(ScanCostTracker.prototype, "stop").mockImplementation(
     async function (this: ScanCostTracker, usage?: unknown) {
       finalizing = true;
@@ -1366,12 +1369,21 @@ test("final cost recovery persists an unchanged estimate without duplicate notif
       await readFile(join(outputDir, "sca-result.json"), "utf8"),
     ) as ScaResult;
     expect(saved.model.costUsd).toBe(expected);
+    expect(saved.model.cost?.estimatedUsd).toBe(expected);
+    expect(saved.model.costPending).toBe(false);
     for (let index = 1; index < costs.length; index++)
       expect(costs[index]).not.toEqual(costs[index - 1]);
   } finally {
     refresh.mockRestore();
     stop.mockRestore();
   }
+  const resumed = await security.scanDependencies({
+    repositoryPath: repository,
+    outputDir,
+    maxCostUsd: 1,
+  });
+  expect(resumed.status).toBe("completed");
+  expect(resumed.model.costUsd).toBeGreaterThan(costs.at(-1)!.estimatedUsd);
 });
 
 test.each([

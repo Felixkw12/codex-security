@@ -137,16 +137,20 @@ export async function dependencyPackageContexts(
   );
   for (const file of files) {
     signal?.throwIfAborted();
+    const projectDirectory = dirname(join(repository, file));
+    let project: Package | null = null;
     const projects: Package[] = [];
     for (const path of new Set([
-      dirname(join(repository, file)),
+      projectDirectory,
       ...(await workspacePaths(file, repository)),
     ])) {
       signal?.throwIfAborted();
-      const project = await readPackage(path, repository, true);
-      if (project !== null) projects.push(project);
+      const candidate = await readPackage(path, repository, true);
+      if (candidate !== null) {
+        projects.push(candidate);
+        if (path === projectDirectory) project = candidate;
+      }
     }
-    const project = projects[0];
     const selected = components.filter(
       (component) =>
         component.sourcePath === file && component.ecosystem === "npm",
@@ -155,7 +159,7 @@ export async function dependencyPackageContexts(
       const context = contexts.find(
         (item) => item.componentId === component.id,
       )!;
-      if (project !== undefined) {
+      if (project !== null) {
         context.manifestPath = relative(
           repository,
           join(project.path, "package.json"),
@@ -177,11 +181,13 @@ export async function dependencyPackageContexts(
       groups: [],
     }));
     const visited = new Set<string>();
+    const visitedProjects = new Set<string>();
     for (let index = 0; index < queue.length; index++) {
       signal?.throwIfAborted();
       const { pkg, project, chain, groups } = queue[index]!;
-      if (visited.has(pkg.path)) continue;
-      visited.add(pkg.path);
+      const seen = chain.length === 0 ? visitedProjects : visited;
+      if (seen.has(pkg.path)) continue;
+      seen.add(pkg.path);
       const current = [
         ...chain,
         {

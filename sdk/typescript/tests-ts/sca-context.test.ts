@@ -186,6 +186,104 @@ test.each(["npm", "pnpm"] as const)(
   },
 );
 
+test("unresolved workspace matches do not inherit an unrelated importer manifest", async () => {
+  const { repository, result } = await fixture();
+  await rm(join(repository, "package.json"));
+  await rm(join(repository, "node_modules"), { recursive: true });
+  await packageAt(
+    join(repository, "packages/alpha"),
+    "synthetic-alpha",
+    "1.0.0",
+  );
+  await packageAt(
+    join(repository, "packages/beta"),
+    "synthetic-beta",
+    "1.0.0",
+    {
+      "@synthetic/leaf": "3.0.0",
+    },
+  );
+  await writeFile(
+    join(repository, "pnpm-lock.yaml"),
+    "lockfileVersion: '9.0'\nimporters:\n  packages/alpha: {}\n  packages/beta:\n    dependencies:\n      '@synthetic/leaf':\n        specifier: 3.0.0\n        version: 3.0.0\n",
+  );
+  const [context] = await dependencyPackageContexts(result);
+  expect(context).toMatchObject({
+    manifestPath: null,
+    projectName: null,
+    private: null,
+    installedPath: null,
+    dependencyChain: [],
+  });
+});
+
+test("workspace seeds preserve incoming dependency and peer chains", async () => {
+  const { repository, result } = await fixture();
+  const workspace = join(repository, "packages/bridge");
+  await packageAt(repository, "synthetic-project", "1.0.0", {
+    "synthetic-bridge": "2.0.0",
+  });
+  await packageAt(workspace, "synthetic-bridge", "2.0.0");
+  await writeFile(
+    join(workspace, "package.json"),
+    JSON.stringify({
+      name: "synthetic-bridge",
+      version: "2.0.0",
+      peerDependencies: { "@synthetic/leaf": "3.0.0" },
+    }),
+  );
+  const peer = join(repository, "node_modules/@synthetic/leaf");
+  await packageAt(peer, "@synthetic/leaf", "3.0.0");
+  await symlink(
+    workspace,
+    join(repository, "node_modules/synthetic-bridge"),
+    process.platform === "win32" ? "junction" : "dir",
+  );
+  await writeFile(
+    join(repository, "package-lock.json"),
+    JSON.stringify({
+      lockfileVersion: 3,
+      packages: {
+        "": { name: "synthetic-project", version: "1.0.0" },
+        "packages/bridge": { name: "synthetic-bridge", version: "2.0.0" },
+        "node_modules/synthetic-bridge": {
+          resolved: "packages/bridge",
+          link: true,
+        },
+        "node_modules/@synthetic/leaf": { version: "3.0.0" },
+      },
+    }),
+  );
+  result.components[0]!.sourcePath = "package-lock.json";
+  result.components.push({
+    ...result.components[0]!,
+    id: "bridge",
+    name: "synthetic-bridge",
+    version: "2.0.0",
+  });
+  result.matches.push({
+    ...result.matches[0]!,
+    id: "bridge-match",
+    componentId: "bridge",
+  });
+  const contexts = await dependencyPackageContexts(result);
+  for (const [id, path, names] of [
+    [
+      "leaf",
+      peer,
+      ["synthetic-project", "synthetic-bridge", "@synthetic/leaf"],
+    ],
+    ["bridge", workspace, ["synthetic-project", "synthetic-bridge"]],
+  ] as const) {
+    const context = contexts.find((item) => item.componentId === id)!;
+    expect(context.manifestPath).toBe("package.json");
+    expect(context.installedPath).toBe(relative(repository, path));
+    expect(context.dependencyChain.map((item) => item.name)).toEqual([
+      ...names,
+    ]);
+  }
+});
+
 test.each(["project", "parent", "leaf"] as const)(
   "a linked %s manifest preserves installed source and transitive resolution",
   async (kind) => {
