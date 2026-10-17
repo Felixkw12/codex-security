@@ -13,6 +13,194 @@ from test_deep_scan_stop_conditions import saturated_scan as saturated_scan
 from workbench_test_support import saved_draft, write_checkpoint
 
 
+@pytest.mark.parametrize("source", ["result", "checkpoint", "archived-checkpoint"])
+@pytest.mark.parametrize(
+    "marker",
+    [
+        pytest.param("false", id="string-false"),
+        pytest.param(None, id="null"),
+        pytest.param(0, id="zero"),
+        pytest.param(1, id="one"),
+        pytest.param(False, id="incomplete"),
+        pytest.param(True, id="complete"),
+        pytest.param("omitted", id="omitted"),
+    ],
+)
+def test_deadline_requires_boolean_completion_before_superseding_worker_history(
+    workbench_api, workbench_db, deadline_scan, source, marker
+):
+    scan = deadline_scan
+    _, output = canceled_discovery_output(workbench_db, scan, attempt=2)
+    if source == "archived-checkpoint":
+        output = output.parent / "attempts" / "attempt-1"
+    earlier = worker_finding(scan, "earlier-worker-finding")
+    rejected = worker_finding(scan, "rejected-worker-finding")
+    rejected["provenance"]["candidateId"] = "rejected-worker-finding"
+    checkpoint = write_checkpoint(
+        output / "checkpoints",
+        saved_draft(
+            scan.scan_id,
+            findings=[earlier, rejected],
+            deferred=[{"id": "review", "reason": "Review remains."}],
+        ),
+    )
+    os.utime(checkpoint, ns=(100, 100))
+    sibling = worker_finding(scan, "latest-valid-sibling")
+    latest = saved_draft(
+        scan.scan_id,
+        complete=marker,
+        findings=[sibling],
+        surfaces=[
+            {
+                "id": "rejected-outcome",
+                "candidateId": "rejected-worker-finding",
+                "label": "Rejected after review",
+                "disposition": "rejected",
+                "receiptRefs": [],
+            }
+        ],
+        closures=[{"id": "review", "reason": "Review completed."}],
+    )
+    if marker == "omitted":
+        latest.pop("complete")
+    if source == "result":
+        result = output / "result.json"
+        result.write_text(json.dumps(latest))
+    else:
+        result = write_checkpoint(output / "checkpoints", latest)
+        head = output / "checkpoint-head.json"
+        head.write_text(json.dumps({"checkpoint": result.name}))
+        os.utime(head, ns=(300, 300))
+    os.utime(result, ns=(200, 200))
+    original = {path: path.read_bytes() for path in (checkpoint, result)}
+
+    finish(workbench_api, workbench_db, scan, terminal_reason="capped")
+    completed = complete(workbench_api, workbench_db, scan)
+
+    terminal = marker is True or marker == "omitted"
+    invalid = not isinstance(marker, bool) and marker != "omitted"
+    findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
+    titles = {finding["title"] for finding in findings}
+    assert sibling["title"] in titles
+    assert rejected["title"] not in titles
+    if not terminal or source == "result":
+        assert (earlier["title"] in titles) == (not terminal)
+    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    assert any(row["reason"] == "Review remains." for row in coverage["deferred"]) == (not terminal)
+    assert (
+        any(
+            "Invalid complete marker" in warning and result.name in warning
+            for warning in completed["warnings"]
+        )
+        == invalid
+    )
+    manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())["scan"]
+    for path, contents in original.items():
+        assert path.read_bytes() == contents
+        assert manifest["preservedSources"][path.relative_to(scan.scan_dir).as_posix()] == (
+            workbench_api["saved_results"]._digest(json.loads(contents))
+        )
+
+
+@pytest.mark.parametrize("source", ["result", "checkpoint", "archived-result"])
+@pytest.mark.parametrize("invalid", ["rationale", "code_evidence", "sourceFindingIds"])
+def test_deadline_validates_each_recovered_finding_against_the_completed_contract(
+    workbench_api, workbench_db, deadline_scan, source, invalid
+):
+    scan = deadline_scan
+    worker_id, output = canceled_discovery_output(workbench_db, scan, attempt=2)
+    if source == "archived-result":
+        output = output.parent / "attempts" / "attempt-1"
+    earlier = worker_finding(scan, "earlier-worker-finding")
+    rejected = worker_finding(scan, "rejected-worker-finding")
+    rejected["provenance"]["candidateId"] = "rejected-worker-finding"
+    checkpoint = write_checkpoint(
+        output / "checkpoints",
+        saved_draft(
+            scan.scan_id,
+            findings=[earlier, rejected],
+            deferred=[
+                {"id": "review", "reason": "Review remains."},
+                {"id": "finished", "reason": "Separate review remains."},
+            ],
+        ),
+    )
+    os.utime(checkpoint, ns=(100, 100))
+    sibling = worker_finding(scan, "valid-worker-sibling")
+    malformed = worker_finding(scan, "malformed-worker-finding")
+    malformed["provenance"]["candidateId"] = "malformed-worker-finding"
+    if invalid == "rationale":
+        malformed["severity"]["rationale"] = " \t "
+    elif invalid == "code_evidence":
+        malformed["code_evidence"] = []
+    else:
+        malformed["provenance"]["sourceFindingIds"] = ["source-finding", "source-finding"]
+    latest = saved_draft(
+        scan.scan_id,
+        complete=True,
+        findings=[malformed, sibling],
+        surfaces=[
+            {
+                "id": "reported-outcome",
+                "candidateId": "malformed-worker-finding",
+                "label": "Unverified finding",
+                "disposition": "reported",
+                "receiptRefs": [],
+            },
+            {
+                "id": "rejected-outcome",
+                "candidateId": "rejected-worker-finding",
+                "label": "Rejected after review",
+                "disposition": "rejected",
+                "receiptRefs": [],
+            },
+        ],
+        closures=[{"id": "finished", "reason": "Separate review completed."}],
+    )
+    if source == "checkpoint":
+        result = write_checkpoint(output / "checkpoints", latest)
+        head = output / "checkpoint-head.json"
+        head.write_text(json.dumps({"checkpoint": result.name}))
+        os.utime(head, ns=(300, 300))
+    else:
+        result = output / "result.json"
+        result.write_text(json.dumps(latest))
+    os.utime(result, ns=(200, 200))
+    original = {path: path.read_bytes() for path in (checkpoint, result)}
+    if source == "archived-result":
+        selected = write_checkpoint(output / "checkpoints", latest)
+        os.utime(selected, ns=(200, 200))
+        head = output / "checkpoint-head.json"
+        head.write_text(json.dumps({"checkpoint": selected.name}))
+        os.utime(head, ns=(300, 300))
+        original[selected] = selected.read_bytes()
+
+    finish(workbench_api, workbench_db, scan, terminal_reason="capped")
+    completed = complete(workbench_api, workbench_db, scan)
+
+    findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
+    assert {finding["title"] for finding in findings} == {
+        scan.findings[0]["title"],
+        earlier["title"],
+        sibling["title"],
+    }
+    retained = next(finding for finding in findings if finding["title"] == sibling["title"])
+    assert retained["provenance"]["workerId"] == worker_id
+    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    assert any(row["reason"] == "Review remains." for row in coverage["deferred"])
+    assert not any(row["reason"] == "Separate review remains." for row in coverage["deferred"])
+    surfaces = {row["label"]: row for row in coverage["surfaces"]}
+    assert surfaces["Unverified finding"]["disposition"] == "needs_follow_up"
+    assert surfaces["Rejected after review"]["disposition"] == "rejected"
+    assert any(invalid in warning and result.name in warning for warning in completed["warnings"])
+    manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())["scan"]
+    for path, contents in original.items():
+        assert path.read_bytes() == contents
+        assert manifest["preservedSources"][path.relative_to(scan.scan_dir).as_posix()] == (
+            workbench_api["saved_results"]._digest(json.loads(contents))
+        )
+
+
 @pytest.mark.parametrize(
     "model",
     [
@@ -63,6 +251,29 @@ def test_deadline_still_rejects_malformed_canonical_model(
     write_checkpoint(output / "checkpoints", saved_draft(scan.scan_id))
     with pytest.raises(ContractError, match="threatModel"):
         finish(workbench_api, workbench_db, scan, terminal_reason="capped")
+
+
+def test_deadline_still_rejects_canonical_findings_outside_the_completed_contract(
+    workbench_api, workbench_db, deadline_scan
+):
+    from finalize_scan_contract import ContractError
+
+    scan = deadline_scan
+    finding = worker_finding(scan, "valid-worker-finding")
+    scan.findings[0]["severity"]["rationale"] = " \t "
+    findings_path = scan.scan_dir / "findings.json"
+    findings_path.write_text(json.dumps({"findings": scan.findings}))
+    original = findings_path.read_bytes()
+    _, output = canceled_discovery_output(workbench_db, scan)
+    write_checkpoint(
+        output / "checkpoints",
+        saved_draft(scan.scan_id, findings=[finding]),
+    )
+
+    with pytest.raises(ContractError, match="rationale"):
+        finish(workbench_api, workbench_db, scan, terminal_reason="capped")
+
+    assert findings_path.read_bytes() == original
 
 
 @pytest.mark.parametrize("label", [" \t ", "  Reviewed Résumé 😀  "])
@@ -155,6 +366,67 @@ def test_deadline_applies_existing_unicode_contract_per_worker_record(
         )
         assert text in json.dumps(document, ensure_ascii=False)
     assert checkpoint.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [pytest.param("\u0085", id="historical-nel"), pytest.param("Review completed.", id="valid")],
+)
+def test_deadline_recovers_historical_closure_text_without_losing_a_valid_sibling(
+    workbench_api, workbench_db, deadline_scan, reason
+):
+    scan = deadline_scan
+    _, output = canceled_discovery_output(workbench_db, scan)
+    previous = write_checkpoint(
+        output / "checkpoints",
+        saved_draft(
+            scan.scan_id,
+            deferred=[
+                {"id": "review", "reason": "First review pending."},
+                {"id": "sibling", "reason": "Valid sibling review pending."},
+            ],
+        ),
+    )
+    os.utime(previous, ns=(100, 100))
+    draft = saved_draft(
+        scan.scan_id,
+        complete=True,
+        closures=[
+            {"id": "review", "reason": reason},
+            {"id": "sibling", "reason": "Valid sibling review completed."},
+        ],
+    )
+    checkpoint = write_checkpoint(output / "checkpoints", draft)
+    result = output / "result.json"
+    result.write_text(json.dumps(draft))
+    head = output / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+    for path in (checkpoint, result, head):
+        os.utime(path, ns=(200, 200))
+    original = {path: path.read_bytes() for path in (previous, checkpoint, result)}
+
+    finish(workbench_api, workbench_db, scan, terminal_reason="capped")
+    completed = complete(workbench_api, workbench_db, scan)
+
+    invalid = not reason.strip()
+    assert completed["progress"]["status"] == "complete"
+    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    pending = {row["reason"] for row in coverage["deferred"]}
+    assert ("First review pending." in pending) == invalid
+    assert "Valid sibling review pending." not in pending
+    report = (scan.scan_dir / "report.md").read_text()
+    assert ("First review pending." in report) == invalid
+    assert "Valid sibling review pending." not in report
+    assert any("expected a non-empty string" in warning for warning in completed["warnings"]) == (
+        invalid
+    )
+    manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())["scan"]
+    assert manifest["sealedAt"]
+    for path, contents in original.items():
+        assert path.read_bytes() == contents
+        assert manifest["preservedSources"][path.relative_to(scan.scan_dir).as_posix()] == (
+            workbench_api["saved_results"]._digest(json.loads(contents))
+        )
 
 
 @pytest.mark.parametrize(

@@ -1312,6 +1312,8 @@ def _recover_unsealed_coverage(
                 if field == "deferred":
                     _validate_deferred_paths(item, context)
                 _validate_schema_node(item, item_schema, context)
+                if field == "resolvedDeferred":
+                    _validate_resolved_deferred({"resolvedDeferred": [item]})
                 _require_safe_json_value(item, context)
             except ContractError as exc:
                 warnings.append(f"Skipped malformed {label} {index + 1}: {exc}.")
