@@ -1025,57 +1025,15 @@ def test_completion_rejects_non_system_rollout_symlink(tmp_path: Path) -> None:
     }
 
 
-def test_completion_counts_deep_sdk_workers_and_descendants(tmp_path: Path) -> None:
+def test_completion_counts_deep_worker_retries_and_descendants(tmp_path: Path) -> None:
     fixture = _start_scan(tmp_path, mode="deep")
     counted = fixture.started_at + timedelta(microseconds=1)
     artifact = fixture.scan_dir / "artifacts" / "usage-worker"
     artifact.mkdir(parents=True)
     prompt = artifact / "prompt.md"
     prompt.write_text("Review the fixture target.\n", encoding="utf-8")
-    upsert_deep_worker(
-        fixture.state_dir,
-        fixture.scan_id,
-        str(uuid.uuid4()),
-        "discovery",
-        "running",
-        str(prompt),
-        str(artifact),
-        "--sdk-thread-id",
-        "sdk-worker",
-        environment=fixture.environment,
-    )
-    _state_graph(
-        fixture.environment,
-        {
-            "scan-parent": _rollout(tmp_path, "scan-parent", [_token_event(counted, 10, 3)]),
-            "sdk-worker": _rollout(tmp_path, "sdk-worker", [_token_event(counted, 20, 5)]),
-            "sdk-child": _rollout(
-                tmp_path,
-                "sdk-child",
-                [_token_event(counted, 7, 2)],
-                parent_thread_id="sdk-worker",
-            ),
-        },
-        [("sdk-worker", "sdk-child")],
-    )
-    usage = _complete_scan(fixture)["scan"]["usage"]
-    assert usage == {
-        "coverage": "complete",
-        "source": "codex_rollout",
-        **_counts(37, 0, 10),
-        "threadCount": 3,
-    }
-
-
-def test_completion_counts_all_independent_deep_worker_retry_threads(tmp_path: Path) -> None:
-    fixture = _start_scan(tmp_path, mode="deep")
-    counted = fixture.started_at + timedelta(microseconds=1)
-    artifact = fixture.scan_dir / "artifacts" / "retry-worker"
-    artifact.mkdir(parents=True)
-    prompt = artifact / "prompt.md"
-    prompt.write_text("Review the fixture target.\n", encoding="utf-8")
     worker_id = str(uuid.uuid4())
-    for attempt, thread in [(1, "first-attempt"), (2, "retry-attempt"), (2, "retry-attempt")]:
+    for attempt, thread in [(1, "sdk-worker"), (2, "sdk-retry"), (2, "sdk-retry")]:
         upsert_deep_worker(
             fixture.state_dir,
             fixture.scan_id,
@@ -1093,18 +1051,23 @@ def test_completion_counts_all_independent_deep_worker_retry_threads(tmp_path: P
     _state_graph(
         fixture.environment,
         {
-            "scan-parent": _rollout(tmp_path, "scan-parent", [_token_event(counted, 10, 1)]),
-            "first-attempt": _rollout(tmp_path, "first-attempt", [_token_event(counted, 20, 2)]),
-            "retry-attempt": _rollout(tmp_path, "retry-attempt", [_token_event(counted, 30, 3)]),
+            "scan-parent": _rollout(tmp_path, "scan-parent", [_token_event(counted, 10, 3)]),
+            "sdk-worker": _rollout(tmp_path, "sdk-worker", [_token_event(counted, 20, 5)]),
+            "sdk-child": _rollout(
+                tmp_path,
+                "sdk-child",
+                [_token_event(counted, 7, 2)],
+                parent_thread_id="sdk-worker",
+            ),
+            "sdk-retry": _rollout(tmp_path, "sdk-retry", [_token_event(counted, 30, 3)]),
         },
-        [],
+        [("sdk-worker", "sdk-child")],
     )
-
     assert _complete_scan(fixture)["scan"]["usage"] == {
         "coverage": "complete",
         "source": "codex_rollout",
-        **_counts(60, 0, 6),
-        "threadCount": 3,
+        **_counts(67, 0, 13),
+        "threadCount": 4,
     }
 
 

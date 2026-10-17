@@ -303,7 +303,7 @@ describe("CodexSecurity headless patching", () => {
           default_permissions: "codex_security_scan",
         },
       });
-      expect(requestMetadata(captured.codex)).toMatchObject({
+      expect(requestMetadata(captured.codex?.configOverrides)).toMatchObject({
         codex_security_surface: "sdk",
       });
       expect(captured.thread).not.toHaveProperty("sandboxMode");

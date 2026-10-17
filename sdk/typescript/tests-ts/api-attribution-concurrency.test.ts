@@ -212,7 +212,9 @@ describe("delegated scan attribution", () => {
                       expect(options.config).not.toHaveProperty(
                         "responses_api_metadata",
                       );
-                      expect(requestMetadata(options)).toMatchObject({
+                      expect(
+                        requestMetadata(options.configOverrides),
+                      ).toMatchObject({
                         custom_attribution: surface,
                         "team.tag": `synthetic-${surface}`,
                         codex_security_integration: "github_action",
@@ -234,7 +236,9 @@ describe("delegated scan attribution", () => {
                         ).toMatchObject({
                           analytics: { enabled: surface === "sdk" },
                           otel: { environment: `synthetic-${surface}` },
-                          responses_api_metadata: requestMetadata(options),
+                          responses_api_metadata: requestMetadata(
+                            options.configOverrides,
+                          ),
                         });
                       }
                       expect(threadOptions.threadSource).toBe("security_scan");

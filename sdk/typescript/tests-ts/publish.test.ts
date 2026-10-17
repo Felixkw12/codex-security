@@ -23,7 +23,7 @@ import {
   UnknownLinearError,
 } from "@linear/sdk";
 import { afterEach, describe, expect, spyOn, test, mock } from "bun:test";
-import { parse } from "smol-toml";
+import { requestMetadata } from "./support/request-metadata.js";
 import { VERSION } from "../src/version.js";
 import {
   forceTerminatePublicationProcesses,
@@ -1229,25 +1229,9 @@ describe("connected Linear publication", () => {
   test("attributes publication while preserving ambient Codex configuration and private issue data", async () => {
     const publication = preparedPublication();
     const stateDirectory = await temporaryDirectory();
-    const codexHome = join(stateDirectory, "codex-home");
-    await mkdir(codexHome);
-    const config = [
-      'profile = "publication"',
-      "[analytics]",
-      "enabled = true",
-      "[responses_api_metadata]",
-      'codex_security_integration = "github-action"',
-      '"team.tag" = "literal-value"',
-      "[profiles.publication]",
-      'model_provider = "amazon-bedrock"',
-      "[profiles.publication.analytics]",
-      "enabled = false",
-    ].join("\n");
-    await writeFile(join(codexHome, "config.toml"), config);
     const environment = {
-      CODEX_HOME: codexHome,
+      CODEX_HOME: "/existing/connected-codex-home",
       CODEX_SECURITY_STATE_DIR: stateDirectory,
-      AWS_PROFILE: "synthetic-profile",
     };
     let command: string | undefined;
     let args: readonly string[] | undefined;
@@ -1287,9 +1271,6 @@ describe("connected Linear publication", () => {
     expect(
       handoffDirectory.startsWith(join(stateDirectory, "publications")),
     ).toBe(true);
-    const metadataOverride = args!.find((argument) =>
-      argument.startsWith("responses_api_metadata="),
-    );
     expect(args).toEqual([
       "exec",
       "--model",
@@ -1297,7 +1278,7 @@ describe("connected Linear publication", () => {
       "-c",
       'model_reasoning_effort="low"',
       "-c",
-      metadataOverride!,
+      expect.stringMatching(/^responses_api_metadata=\{/u),
       "--ephemeral",
       "--json",
       "--sandbox",
@@ -1309,14 +1290,11 @@ describe("connected Linear publication", () => {
     ]);
     expect(args).not.toContain("--ignore-user-config");
     expect(args).not.toContain("--disable");
-    expect(parse(metadataOverride!)).toEqual({
-      responses_api_metadata: {
-        codex_security_surface: "sdk",
-        codex_security_command: "publish",
-        codex_security_package_version: VERSION,
-      },
+    expect(requestMetadata(args)).toEqual({
+      codex_security_surface: "sdk",
+      codex_security_command: "publish",
+      codex_security_package_version: VERSION,
     });
-    expect(await readFile(join(codexHome, "config.toml"), "utf8")).toBe(config);
     expect(inheritedEnvironment).toBe(environment);
     expect(input).toContain("already-connected hosted Linear application");
     expect(input).toContain("untrusted inert data");

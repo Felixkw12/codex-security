@@ -19,9 +19,14 @@ import { writeSession } from "./support/usage-rollout.js";
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
 
-test.each([false, true])(
-  "preserves incomplete worker usage in scan results (workbenchValidated=%p)",
-  async (workbenchValidated) => {
+test.each([
+  [false, null],
+  [true, null],
+  [false, undefined],
+  [true, undefined],
+] as const)(
+  "preserves finalizer results (workbenchValidated=%p, result=%p)",
+  async (workbenchValidated, finalizedUsage) => {
     const scanDir = await copyCompletedScan(await temporaryDirectory());
     const codexHome = await temporaryDirectory();
     await writeSession(
@@ -39,14 +44,22 @@ test.each([false, true])(
     const result = await runEvents(scanDir, completedEvents(), {
       workbenchValidated,
       onThreadStarted: (threadId) => tracker.start(threadId),
-      onFinalize: async (usage) => (await tracker.stop(usage)).usage,
+      onFinalize: async (usage) => {
+        const snapshot = await tracker.stop(usage);
+        return finalizedUsage === null ? snapshot.usage : undefined;
+      },
     });
 
-    expect(result.turnResult.usage).toBeNull();
-    expect(result.cost).toBeNull();
     expect(result.toJSON()).toMatchObject({
-      cost: null,
-      turn: { usage: null, status: "completed" },
+      cost:
+        finalizedUsage === null ? null : { inputTokens: 10, outputTokens: 3 },
+      turn: {
+        usage:
+          finalizedUsage === null
+            ? null
+            : { input_tokens: 10, output_tokens: 3 },
+        status: "completed",
+      },
     });
   },
 );
@@ -137,22 +150,5 @@ test.each([false, true])(
       clearTimeout(keepAlive);
       await client.close();
     }
-  },
-);
-
-test.each([false, true])(
-  "retains turn usage when finalization does not replace it (workbenchValidated=%p)",
-  async (workbenchValidated) => {
-    const scanDir = await copyCompletedScan(await temporaryDirectory());
-    const result = await runEvents(scanDir, completedEvents(), {
-      workbenchValidated,
-      onFinalize: async () => {},
-    });
-
-    expect(result.turnResult.usage).toMatchObject({
-      input_tokens: 10,
-      output_tokens: 3,
-    });
-    expect(result.cost).toMatchObject({ inputTokens: 10, outputTokens: 3 });
   },
 );

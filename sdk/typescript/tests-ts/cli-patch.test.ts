@@ -1,3 +1,4 @@
+import { requestMetadata } from "./support/request-metadata.js";
 import { gitText } from "./support/shell.js";
 import { emptyPage } from "./support/linear-pagination.js";
 import { resolving } from "./support/promises.js";
@@ -1163,13 +1164,7 @@ describe("scan and patch workflow", () => {
 
       expect(outcome.exitCode, outcome.stderr).toBe(0);
       expect(childArgs).toContain(`analytics.enabled=${profileAnalytics}`);
-      expect(
-        parseToml(
-          childArgs.find((value) =>
-            value.startsWith("responses_api_metadata="),
-          )!,
-        )["responses_api_metadata"],
-      ).toMatchObject({
+      expect(requestMetadata(childArgs)).toMatchObject({
         "team.tag": "selected",
         caller: "preserved",
         codex_security_surface: "cli",
@@ -1434,13 +1429,9 @@ describe("scan and patch workflow", () => {
             ) {
               expect(output.command).toBe("patch");
               expect(output.appServer?.sandbox).toBe("read-only");
-              expect(
-                parseToml(
-                  args.find((value) =>
-                    value.startsWith("responses_api_metadata="),
-                  )!,
-                )["responses_api_metadata"],
-              ).toMatchObject({ codex_security_command: "assess-patch-risk" });
+              expect(requestMetadata(args)).toMatchObject({
+                codex_security_command: "assess-patch-risk",
+              });
               expect(output.appServer?.prompt).toContain(
                 "<!-- codex-security:patch-risk-summary:start -->",
               );

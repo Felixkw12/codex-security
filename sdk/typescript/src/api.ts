@@ -887,7 +887,7 @@ export class CodexSecurity {
       session.sessionConfig["approval_policy"] = "never";
       const { codex } = await this.#createSessionCodex(
         session,
-        "validate",
+        { command: "validate" },
         {
           CODEX_SECURITY_REPOSITORY: inputs.repository,
           CODEX_SECURITY_PLUGIN_ROOT: runtime.plugin.pluginRoot,
@@ -998,7 +998,7 @@ export class CodexSecurity {
       };
       const { codex } = await this.#createSessionCodex(
         session,
-        "patch",
+        { command: "patch" },
         {
           CODEX_SECURITY_REPOSITORY: repository,
           CODEX_SECURITY_PLUGIN_ROOT: session.runtime.plugin.pluginRoot,
@@ -1367,7 +1367,7 @@ export class CodexSecurity {
       );
       const { codex } = await this.#createSessionCodex(
         session,
-        "policy",
+        { command: "policy" },
         {
           CODEX_SECURITY_REPOSITORY: target.repository,
           CODEX_SECURITY_PLUGIN_ROOT: runtime.plugin.pluginRoot,
@@ -2383,13 +2383,10 @@ export class CodexSecurity {
       const { codex, environment, codexOptions } =
         await this.#createSessionCodex(
           session,
-          "scan",
+          { command: "scan", mode },
           runtimePaths,
           options.auth,
           git,
-          undefined,
-          [],
-          mode,
         );
       const threadOptions: ThreadOptions = {
         threadSource: CODEX_SECURITY_THREAD_SOURCES.scan,
@@ -3222,13 +3219,12 @@ export class CodexSecurity {
 
   async #createSessionCodex(
     session: PreparedSession,
-    command: string,
+    { command, mode }: { command: string; mode?: ScanMode },
     runtimePaths: Record<string, string>,
     auth: ScanAuthMode = "auto",
     git?: InspectedExecutable,
     config?: JsonObject,
     configOverrides: string[] = [],
-    mode?: ScanMode,
   ): Promise<{
     codex: CodexClientLike;
     environment: ProcessEnvironment;

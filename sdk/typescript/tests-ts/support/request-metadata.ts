@@ -1,8 +1,7 @@
-import type { CodexOptions } from "@openai/codex-sdk";
 import { parse } from "smol-toml";
 
-export function requestMetadata(options: CodexOptions | undefined) {
-  const override = options?.configOverrides?.find((value) =>
+export function requestMetadata(args: readonly string[] | undefined) {
+  const override = args?.find((value) =>
     value.startsWith("responses_api_metadata="),
   );
   return override === undefined

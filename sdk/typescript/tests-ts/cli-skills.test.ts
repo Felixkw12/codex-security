@@ -1,3 +1,4 @@
+import { requestMetadata } from "./support/request-metadata.js";
 import { execFileSync, spawn } from "node:child_process";
 import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import * as filesystem from "node:fs/promises";
@@ -306,13 +307,7 @@ describe("CLI skill commands", () => {
                 "-",
               ]),
         ]);
-        expect(
-          parseToml(
-            invocation!.find((value) =>
-              value.startsWith("responses_api_metadata="),
-            )!,
-          )["responses_api_metadata"],
-        ).toEqual({
+        expect(requestMetadata(invocation!)).toEqual({
           codex_security_surface: "cli",
           codex_security_command: command,
           codex_security_package_version: VERSION,

@@ -563,7 +563,7 @@ describe("CodexSecurity finding validation", () => {
           analytics: { enabled: false },
         },
       });
-      expect(requestMetadata(captured.codex)).toMatchObject({
+      expect(requestMetadata(captured.codex?.configOverrides)).toMatchObject({
         codex_security_surface: "sdk",
         codex_security_command: "validate",
         codex_security_package_version: VERSION,
@@ -637,6 +637,8 @@ describe("CodexSecurity finding validation", () => {
             review: {
               web_search: "cached",
               approval_policy: "on-request",
+              analytics: { enabled: false },
+              otel: { exporter: "none" },
               responses_api_metadata: {
                 "team.tag": "synthetic-validation",
                 codex_security_integration: "github_action",
@@ -675,6 +677,8 @@ describe("CodexSecurity finding validation", () => {
     expect(config).toMatchObject({
       web_search: "disabled",
       approval_policy: "never",
+      analytics: { enabled: false },
+      otel: { exporter: "none" },
       default_permissions: "codex_security_validation",
       responses_api_metadata: {
         "team.tag": "synthetic-validation",

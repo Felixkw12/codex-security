@@ -2606,86 +2606,10 @@ describe("live scan cost tracking", () => {
     });
   });
 
-  test.each([...parentFields])(
-    "does not treat missing worker usage via %s as a complete parent receipt",
-    async (parentField) => {
-      const home = await codexHome();
-      const parentUsage = { input_tokens: 100, output_tokens: 10 };
-      await writeSession(home, "scan-thread", parentUsage);
-      await writeSession(
-        home,
-        "worker-thread",
-        {},
-        {
-          parent: "scan-thread",
-          parentField,
-        },
-      );
-      const tracker = costTracker(home);
-      tracker.start("scan-thread");
-
-      expect(await tracker.stop(parentUsage)).toEqual({
-        usage: null,
-        cost: null,
-      });
-    },
-  );
-
-  test("recovers incomplete usage when a worker reports zero and then more tokens", async () => {
+  test("reports budget subtotals until missing worker usage becomes measured", async () => {
     const home = await codexHome();
-    const parentUsage = { input_tokens: 100, output_tokens: 10 };
+    const parentUsage = { input_tokens: 1_000_000, output_tokens: 100_000 };
     await writeSession(home, "scan-thread", parentUsage);
-    const tracker = costTracker(home);
-    tracker.start("scan-thread");
-    expect((await tracker.refresh()).cost?.inputTokens).toBe(100);
-
-    const worker = await writeSession(
-      home,
-      "worker-thread",
-      {},
-      {
-        parent: "scan-thread",
-      },
-    );
-    expect(await tracker.refresh()).toEqual({ usage: null, cost: null });
-
-    await appendFile(
-      worker,
-      jsonLines([legacyUsageRecord({ input_tokens: 0, output_tokens: 0 })]) +
-        "\n",
-    );
-    expect((await tracker.refresh()).usage).toMatchObject({
-      input_tokens: 100,
-      output_tokens: 10,
-      total_tokens: 110,
-    });
-
-    await appendFile(
-      worker,
-      jsonLines([legacyUsageRecord({ input_tokens: 50, output_tokens: 5 })]) +
-        "\n",
-    );
-    expect((await tracker.stop(parentUsage)).usage).toMatchObject({
-      input_tokens: 150,
-      output_tokens: 15,
-      total_tokens: 165,
-    });
-  });
-
-  test("reports measured cost for budgets while withholding incomplete usage", async () => {
-    const home = await codexHome();
-    await writeSession(home, "scan-thread", {
-      input_tokens: 1_000_000,
-      output_tokens: 100_000,
-    });
-    const worker = await writeSession(
-      home,
-      "worker-thread",
-      {},
-      {
-        parent: "scan-thread",
-      },
-    );
     const costs: Array<[number, boolean]> = [];
     const usages: unknown[] = [];
     const tracker = costTracker(home, {
@@ -2693,21 +2617,50 @@ describe("live scan cost tracking", () => {
       onUsage: (usage) => usages.push(usage),
     });
     tracker.start("scan-thread");
+    expect((await tracker.refresh()).cost?.estimatedUsd).toBe(6);
+
+    const worker = await writeSession(
+      home,
+      "worker-thread",
+      {},
+      {
+        parent: "scan-thread",
+      },
+    );
     expect(await tracker.refresh()).toEqual({ usage: null, cost: null });
-    expect(costs).toEqual([[6, false]]);
-    expect(usages).toEqual([]);
+    expect(costs.at(-1)).toEqual([6, false]);
+    expect(usages).toHaveLength(1);
 
     await appendFile(
       worker,
       jsonLines([legacyUsageRecord({ input_tokens: 0, output_tokens: 0 })]) +
         "\n",
     );
-    expect((await tracker.stop()).cost?.estimatedUsd).toBe(6);
+    expect((await tracker.refresh()).usage).toMatchObject({
+      ...parentUsage,
+      total_tokens: 1_100_000,
+    });
+    expect(costs.at(-1)).toEqual([6, true]);
+    expect(usages).toHaveLength(1);
+
+    await appendFile(
+      worker,
+      jsonLines([
+        legacyUsageRecord({ input_tokens: 500_000, output_tokens: 50_000 }),
+      ]) + "\n",
+    );
+    expect((await tracker.stop(parentUsage)).usage).toMatchObject({
+      input_tokens: 1_500_000,
+      output_tokens: 150_000,
+      total_tokens: 1_650_000,
+    });
     expect(costs).toEqual([
+      [6, true],
       [6, false],
       [6, true],
+      [9, true],
     ]);
-    expect(usages).toHaveLength(1);
+    expect(usages).toHaveLength(2);
   });
 
   test("keeps independent Deep worker usage unknown until a receipt supplies it", async () => {

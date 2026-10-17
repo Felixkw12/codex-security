@@ -344,7 +344,7 @@ describe("CodexSecurity orchestration", () => {
                 set: { PRIVATE_TOKEN: "RUNTIME_SHELL_SECRET" },
               },
             });
-            expect(requestMetadata(options)).toMatchObject({
+            expect(requestMetadata(options.configOverrides)).toMatchObject({
               request_trace: "preserve-configured-metadata",
               codex_security_surface: "sdk",
             });

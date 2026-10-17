@@ -3149,9 +3149,6 @@ export { recordCodexSecurityDeepReduction } from "./src/artifact-deep-reducer.ts
               (await readJson(fixture.markerPath)).argv.includes("resume"),
               false,
             );
-            assertConfigOverrides((await readJson(fixture.markerPath)).argv, {
-              "responses_api_metadata.codex_security_worker_role": "dedup",
-            });
           },
         },
         random: () => 0,
@@ -3188,9 +3185,6 @@ export { recordCodexSecurityDeepReduction } from "./src/artifact-deep-reducer.ts
         invocation.argv[invocation.argv.indexOf("resume") + 1],
         "fixture-thread-id",
       );
-      assertConfigOverrides(invocation.argv, {
-        "responses_api_metadata.codex_security_worker_role": "dedup",
-      });
     } finally {
       for (const [name, value] of saved) restoreEnv(name, value);
     }

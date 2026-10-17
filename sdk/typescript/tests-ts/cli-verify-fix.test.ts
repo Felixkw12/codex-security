@@ -1,8 +1,8 @@
+import { requestMetadata } from "./support/request-metadata.js";
 import { describe, expect, test, mock } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
-import { parse as parseToml } from "smol-toml";
 import { main } from "../src/cli.js";
 import { VERSION } from "../src/version.js";
 import type { Finding, JsonObject } from "../src/index.js";
@@ -50,13 +50,7 @@ describe("read-only finding verification", () => {
           },
           linearClient,
           onCodex: (args, output, processEnvironment, input) => {
-            expect(
-              parseToml(
-                args.find((value) =>
-                  value.startsWith("responses_api_metadata="),
-                )!,
-              )["responses_api_metadata"],
-            ).toMatchObject({
+            expect(requestMetadata(args)).toMatchObject({
               codex_security_command: "verify-fix",
               codex_security_package_version: VERSION,
             });

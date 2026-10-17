@@ -1,13 +1,14 @@
 import type { CodexSecuritySurface } from "./api.js";
 import { inlineToml, resolveCodexProfile, type JsonObject } from "./config.js";
 import { isRecord } from "./record.js";
+import type { ScanMode } from "./scan-modes.js";
 import { VERSION } from "./version.js";
 
 interface RequestContextOptions {
   surface: CodexSecuritySurface;
   command: string;
   pluginVersion?: string;
-  mode?: "standard" | "deep";
+  mode?: ScanMode;
   /** False when this caller leaves provider selection to native config layers. */
   providerResolved?: boolean;
 }
@@ -22,11 +23,12 @@ export function codexSecurityRequestContext(
   const configured = resolved["responses_api_metadata"];
   const metadata = Object.freeze({
     ...(isRecord(configured) ? configured : {}),
-    ...codexSecurityRequestMetadata(
-      context.surface,
-      context.command,
-      context.pluginVersion,
-    ),
+    codex_security_surface: context.surface,
+    codex_security_command: context.command,
+    codex_security_package_version: VERSION,
+    ...(context.pluginVersion === undefined
+      ? {}
+      : { codex_security_plugin_version: context.pluginVersion }),
     ...(context.providerResolved === false
       ? {}
       : {
@@ -57,20 +59,4 @@ function providerFamily(provider: unknown): string {
     default:
       return "custom";
   }
-}
-
-/** Attribution for model requests, independent of native analytics events. */
-export function codexSecurityRequestMetadata(
-  surface: CodexSecuritySurface,
-  command: string,
-  pluginVersion?: string,
-) {
-  return {
-    codex_security_surface: surface,
-    codex_security_command: command,
-    codex_security_package_version: VERSION,
-    ...(pluginVersion === undefined
-      ? {}
-      : { codex_security_plugin_version: pluginVersion }),
-  };
 }

@@ -1368,7 +1368,7 @@ describe("CodexSecurity policy API", () => {
       web_search: "disabled",
       sandbox_workspace_write: { network_access: false },
     });
-    expect(requestMetadata(f.configuration())).toMatchObject({
+    expect(requestMetadata(f.configuration()?.configOverrides)).toMatchObject({
       codex_security_surface: "cli",
       codex_security_command: "policy",
     });
