@@ -107,7 +107,7 @@ describe("built candidate normalizer", () => {
         `
 const fs = require("node:fs");
 fs.renameSync = () => { throw new Error("Synthetic output rename failed"); };
-fs.unlinkSync = () => { throw new Error("Synthetic temporary unlink failed"); };
+fs.unlinkSync = () => { throw new Error("Synthetic temporary unlink failed" + String.fromCharCode(27, 155)); };
 require("node:module").syncBuiltinESMExports();
 `,
       );
@@ -118,6 +118,8 @@ require("node:module").syncBuiltinESMExports();
       expect(result.status).toBe(2);
       expect(result.stderr).toContain("Synthetic output rename failed");
       expect(result.stderr).toContain("Synthetic temporary unlink failed");
+      expect(result.stderr).not.toContain("\u001b");
+      expect(result.stderr).not.toContain("\u009b");
       expect(existsSync(f.output)).toBe(false);
     },
   );
