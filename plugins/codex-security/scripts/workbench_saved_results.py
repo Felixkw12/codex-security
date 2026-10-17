@@ -908,6 +908,7 @@ def merge_saved_results(
     allow_frozen_legacy_parent: bool = False,
     frozen_model_source: str | None = None,
     selected_model_source: list[str] | None = None,
+    preserve_canonical_parent: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None:
     """Read only bound parent/worker files; return an unsealed loss-preserving union."""
     initial_warnings = set(warnings)
@@ -932,7 +933,7 @@ def merge_saved_results(
                 warnings.append(f"Could not read the saved parent draft: {exc}")
             parent_manifest = None
             parent = None
-        if parent_manifest is not None and parent is not None:
+        if parent_manifest is not None and parent is not None and not preserve_canonical_parent:
             parent_scan = parent_manifest["scan"]
             try:
                 previous_head, _, head_modified = _read_saved_result(
@@ -1017,8 +1018,9 @@ def merge_saved_results(
         for saved_directory in (directory, head_snapshots):
             paths.update(dict.fromkeys(_checkpoint_paths(scan_dir, saved_directory), worker_id))
 
-    paths["checkpoint-head.json"] = None
-    checkpoints("checkpoints", None)
+    if not preserve_canonical_parent:
+        paths["checkpoint-head.json"] = None
+        checkpoints("checkpoints", None)
     for worker in workers:
         try:
             outputs = _worker_outputs(scan_dir, worker)
@@ -1310,6 +1312,7 @@ def merge_saved_results(
     )
     findings: list[dict[str, Any]] = []
     finding_positions: dict[str, int] = {}
+    canonical_finding_keys: set[str] = set()
     represented: dict[str, str | None] = {}
     represented_candidates: dict[tuple[str, str, Any, Any, Any], str | None] = {}
     represented_history: dict[str, set[str]] = {}
@@ -1754,6 +1757,8 @@ def merge_saved_results(
                     continue
                 if valid_finding(finding):
                     finding_positions.setdefault(_finding_key(finding), len(findings))
+                    if preserve_canonical_parent:
+                        canonical_finding_keys.add(_finding_key(finding))
                 findings.append(finding)
                 continue
             if relative != "parent" and parent and value in parent["findings"]:
@@ -1826,8 +1831,10 @@ def merge_saved_results(
             if key in finding_positions:
                 retained = findings[finding_positions[key]]
                 if finding != retained:
-                    if not represented_by_parent and _finding_strength(finding) > _finding_strength(
-                        retained
+                    if (
+                        key not in canonical_finding_keys
+                        and not represented_by_parent
+                        and _finding_strength(finding) > _finding_strength(retained)
                     ):
                         previous = copy.deepcopy(retained)
                         previous_history = previous["provenance"].pop("previousFindings", [])
@@ -2063,31 +2070,56 @@ def _restore_published_outputs(
 
 
 @contextmanager
-def preserve_deep_deadline_draft(db: Any, connection: Any, scan: Any) -> Iterator[None]:
-    """Recover a settled, zero-accepted Deep deadline without sealing the parent."""
+def preserve_deep_deadline_draft(
+    db: Any, connection: Any, scan: Any, *, preserve_reduction: bool
+) -> Iterator[None]:
+    """Recover unfinished reviews at a settled Deep deadline without sealing the parent."""
     scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
     snapshots = _snapshot_published_outputs(scan_dir)
     warnings = json.loads(scan["completion_warnings_json"])
     binding = db.workbench_completion_binding(scan, db.now())
+    workers = connection.execute(
+        "SELECT * FROM deep_scan_workers WHERE scan_id = ? ORDER BY created_at, id",
+        (scan["id"],),
+    ).fetchall()
+    if preserve_reduction:
+        # Completed reviews already went through reduction. Only add evidence
+        # from unfinished reviews; raw accepted drafts must not undo that result.
+        workers = [
+            worker
+            for worker in workers
+            if worker["kind"] == "discovery" and worker["status"] == "canceled"
+        ]
+        if not workers:
+            yield
+            return
     with preserve_parent_head_on_error(scan_dir):
         try:
             documents = merge_saved_results(
                 scan_dir,
                 scan["id"],
                 binding,
-                connection.execute(
-                    "SELECT * FROM deep_scan_workers WHERE scan_id = ? ORDER BY created_at, id",
-                    (scan["id"],),
-                ).fetchall(),
+                workers,
                 warnings,
-                stopped=True,
+                stopped=not preserve_reduction,
                 reason=(
                     "The configured discovery time limit elapsed before any source review completed. "
                     "Saved findings and pending review were preserved without a completed reduction."
                 ),
+                preserve_canonical_parent=preserve_reduction,
             )
             if documents is None:
                 raise ContractError("Deep Scan deadline has no saved parent draft.")
+            if preserve_reduction:
+                documents[2]["deferred"].append(
+                    {
+                        "id": "scan-deadline",
+                        "reason": (
+                            "The configured discovery time limit elapsed. Saved findings and "
+                            "pending work from unfinished source reviews were preserved."
+                        ),
+                    }
+                )
             documents[0]["scan"].pop("complete", None)
             # Validate recovered evidence against the current finding contract,
             # scope, source lineage, and receipts before admitting this draft.
