@@ -24,7 +24,7 @@ import { runWorkbench } from "../src/runtime.js";
 import { readKnowledgeBaseSnapshot } from "../src/knowledge-base.js";
 import { saveScanKnowledge, scanInputIdentity } from "../src/scan-inputs.js";
 import { scanRequestDigest, workflowDigest } from "../src/finding-workflow.js";
-import { capture, dependencies } from "./cli-fixtures.js";
+import { capture, dependencies, fakeResult } from "./cli-fixtures.js";
 import { runPython } from "./support/python-probe.js";
 import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
 import { TestClient } from "./support/api-client.js";
@@ -1377,11 +1377,7 @@ test.each(["failed", "missing-checkout", "missing-session", "standard"])(
                   await readFile(join(repository, "source.py"), "utf8")
                 ).replaceAll("\r\n", "\n"),
               ).toBe("# synthetic source\n");
-              return {
-                manifest: { scan: { status: "completed" } },
-                coverage: {},
-                cost: null,
-              } as import("../src/result.js").ScanResult;
+              return fakeResult();
             },
           }),
         },

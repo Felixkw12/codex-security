@@ -1656,7 +1656,10 @@ describe("multiscan", () => {
       ];
       const clientDependencies = dependencies({
         currentDirectory: paths.root,
-        environment: { CODEX_SECURITY_STATE_DIR: fixtureState },
+        environment: {
+          CODEX_SECURITY_STATE_DIR: fixtureState,
+          PYTHON,
+        },
         result,
         onRun,
       });
@@ -1704,6 +1707,7 @@ describe("multiscan", () => {
           resumedError.stream,
           clientDependencies,
         ),
+        resumedError.text(),
       ).toBe(0);
       expect(JSON.parse(resumedOutput.text())).toMatchObject({
         completed: 1,
