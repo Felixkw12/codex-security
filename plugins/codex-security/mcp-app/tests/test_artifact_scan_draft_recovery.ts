@@ -323,6 +323,19 @@ for (const layout of ["standard", "diff", "worker"] as const) {
 }
 
 for (const layout of ["standard", "diff", "deep"] as const) {
+  test(`${layout}: parent checkpoint updates retain semantic scope metadata`, async (t) => {
+    const f = await fixture(t, layout);
+    await f.write({ ...f.draft(), scope: { summary: "Archive handling" } });
+    await f.write(f.draft());
+    const saved = await readJson(f.root, "scan-manifest.json");
+    assert.equal(saved.scan.scope.summary, "Archive handling");
+    assert.deepEqual(saved.scan.scope.includePaths, ["."]);
+    assert.deepEqual(saved.scan.scope.excludePaths, []);
+
+    await f.write({ ...f.draft(), scope: { summary: "Updated assessment" } });
+    const updated = await readJson(f.root, "scan-manifest.json");
+    assert.equal(updated.scan.scope.summary, "Updated assessment");
+  });
   for (const variant of ["surface ID", "path spelling", "source annotation"]) {
     test(`${layout}: checkpoints preserve canonical ${variant}`, async (t) => {
       const f = await fixture(t, layout);

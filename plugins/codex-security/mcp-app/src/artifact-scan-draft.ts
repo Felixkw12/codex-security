@@ -43,6 +43,8 @@ const canonicalScanDraftInputSchema = fileScanDraftInputSchema.extend({
   scope: canonicalFieldSchema({
     ...scanManifestDocument.properties.scan.properties.scope,
     $defs: scanManifestDocument.$defs,
+    required:
+      z.toJSONSchema(draftDefinitions.scope, { io: "input" }).required ?? [],
   }).optional(),
   threatModel: canonicalFieldSchema({
     ...scanManifestDocument.properties.scan.properties.threatModel,

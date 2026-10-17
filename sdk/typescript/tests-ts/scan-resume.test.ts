@@ -1429,7 +1429,7 @@ test.each([false, true])(
         },
       })),
     );
-    expect(code, stderr.text()).toBe(2);
+    expect(code, stderr.text()).toBe(0);
     expect(
       (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
     ).toMatchObject({ progress: { status: "complete" } });
