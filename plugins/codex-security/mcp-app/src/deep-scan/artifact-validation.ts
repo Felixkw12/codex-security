@@ -447,7 +447,9 @@ export function projectDiscoveryCoverage(
       id: scopedId(typeof item.id === "string" ? item.id : String(index)),
       ...(item.candidateId === undefined
         ? {}
-        : { candidateId: `${worker.id}-candidate-${item.candidateId}` }),
+        : {
+            candidateId: `${worker.id}-attempt-${worker.attempt ?? "unknown"}-candidate-${index + 1}`,
+          }),
       ...(item.surfaceIds === undefined
         ? {}
         : {

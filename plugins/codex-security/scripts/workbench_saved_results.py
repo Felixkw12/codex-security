@@ -22,6 +22,7 @@ from finalize_scan_contract import (
     ContractError,
     PreparedScanFinalization,
     RecoverableContractError,
+    _contract_json_bytes,
     _finding_strength,
     _populate_unsealed_artifact_envelope,
     _populate_unsealed_manifest_envelope,
@@ -2903,13 +2904,23 @@ def _read_staged_scan_draft(scan_dir: Path, draft_path: str) -> dict[str, Any]:
     return _read_scan_local_json(scan_dir, relative, "Staged scan draft")
 
 
-def _selected_publication_digest(prepared: Any) -> str:
+def _selected_publication_digest(prepared: Any, legacy_completeness: str | None = None) -> str:
     # Completion time is chosen at sealing, after publication. Everything else
     # must remain the host projection of the same accepted aggregate.
     manifest = copy.deepcopy(prepared[2])
     for field in ("completedAt", "sealedAt"):
         manifest["scan"].pop(field, None)
-    return _digest([manifest, prepared[3], prepared[4]])
+    coverage = prepared.coverage
+    if legacy_completeness is not None:
+        # Reconstruct the historical projection and its coverage artifact binding.
+        coverage = {**coverage, "completeness": legacy_completeness}
+        coverage_digest = hashlib.sha256(
+            _contract_json_bytes("coverage.json", coverage)
+        ).hexdigest()
+        for artifact in manifest["scan"]["artifacts"]:
+            if artifact["path"] == manifest["scan"]["coverageRef"]:
+                artifact["sha256"] = coverage_digest
+    return _digest([manifest, prepared.findings, coverage])
 
 
 def _require_selected_result(scan: Any, selection: dict[str, Any]) -> None:
@@ -2953,11 +2964,19 @@ def require_selected_publication(db: Any, connection: Any, scan: Any, prepared: 
         _require_selected_result(scan, selection)
     except ContractError as exc:
         raise RecoverableContractError(str(exc)) from exc
-    if selection.get("publicationSha256") != _selected_publication_digest(prepared):
-        raise RecoverableContractError(
-            "The selected Deep Scan publication changed or is missing; "
-            "republish its accepted result before completing the scan."
-        )
+    digest = selection.get("publicationSha256")
+    if digest == _selected_publication_digest(prepared):
+        return
+    # Old receipts still bind every field, including on normalized seal replay.
+    if "completeness" not in prepared.coverage and any(
+        digest == _selected_publication_digest(prepared, completeness)
+        for completeness in ("complete", "partial", "unknown")
+    ):
+        return
+    raise RecoverableContractError(
+        "The selected Deep Scan publication changed or is missing; "
+        "republish its accepted result before completing the scan."
+    )
 
 
 def _require_current_deep_publication(

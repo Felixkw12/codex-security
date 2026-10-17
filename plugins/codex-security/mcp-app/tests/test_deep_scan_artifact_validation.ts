@@ -6,10 +6,14 @@ import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { importSource } from "./import-module.ts";
 
-const { validateDiscoveryArtifacts, validateReducerArtifacts } =
-  await importSource(
-    path.join(import.meta.dirname, "../src/deep-scan/artifact-validation.ts"),
-  );
+const {
+  parseDeepReduction,
+  projectDiscoveryCoverage,
+  validateDiscoveryArtifacts,
+  validateReducerArtifacts,
+} = await importSource(
+  path.join(import.meta.dirname, "../src/deep-scan/artifact-validation.ts"),
+);
 
 const otherScanId = "12c17317-9594-49e0-b06a-d72fd7e14bba";
 const root = await temporaryDirectory("deep-scan-artifact-validation-", true);
@@ -17,6 +21,7 @@ try {
   await testDiscoveryValidation(root);
   await testReducerValidation(root);
   await testEmptyDiscoveryAndReduction(root);
+  await testLongDeferredCandidateRecovery(root);
 } finally {
   await rm(root, { recursive: true, force: true });
 }
@@ -606,6 +611,81 @@ async function testEmptyDiscoveryAndReduction(root: string) {
     result.result,
     { scanId, findings: [] },
     "reducers submit and return results without coverage",
+  );
+}
+
+async function testLongDeferredCandidateRecovery(root: string) {
+  const candidateIds = ["a".repeat(512), "b".repeat(512)];
+  const { artifacts, ...worker } = await createWorker(
+    path.join(root, "long-deferred-candidates"),
+    "903ef9e0-b34e-4b59-99ac-31d047f82742",
+    draft([], {
+      coverage: {
+        surfaces: [],
+        explicitExclusions: [],
+        deferred: candidateIds.map((candidateId) => ({
+          candidateId,
+          reason: "Follow up on this accepted candidate.",
+        })),
+      },
+    }),
+  );
+  const discovery = await validateDiscoveryArtifacts(
+    artifacts,
+    worker.resultPath,
+    scanId,
+  );
+  const prefix = "artifacts/deep_discovery/workers/discovery-0001/output";
+  const coverage = projectDiscoveryCoverage(
+    discovery.coverage,
+    { id: worker.id, attempt: 2 },
+    prefix,
+  );
+  const artifactDir = path.join(artifacts.dedupRoot, "dedup-long", "output");
+  const resultPath = path.join(artifactDir, "result.json");
+  await mkdir(artifactDir, { recursive: true });
+  await writeResult(resultPath, reduction([]));
+  const accepted = await validateReducerArtifacts(
+    {
+      artifacts,
+      artifactDir,
+      resultPath,
+      reducerId: "dedup-long",
+      persistSourceCoverage: true,
+      sources: {
+        discoveries: [
+          { workerId: worker.id, attempt: 2, coverage, result: discovery },
+        ],
+        previous: null,
+      },
+    },
+    scanId,
+  );
+  const recovered = parseDeepReduction(await readJson(resultPath), true);
+  assert.deepEqual(recovered.sourceCoverage, accepted.result.sourceCoverage);
+  assert.deepEqual(
+    recovered.sourceCoverage.deferred.map(
+      (item: { provenance: { candidateId: string } }) =>
+        item.provenance.candidateId,
+    ),
+    candidateIds,
+  );
+  assert.equal(
+    new Set(
+      recovered.sourceCoverage.deferred.map(
+        (item: { candidateId: string }) => item.candidateId,
+      ),
+    ).size,
+    candidateIds.length,
+  );
+  const nextAttempt = projectDiscoveryCoverage(
+    discovery.coverage,
+    { id: worker.id, attempt: 3 },
+    prefix,
+  );
+  assert.notEqual(
+    nextAttempt.deferred[0].candidateId,
+    recovered.sourceCoverage.deferred[0].candidateId,
   );
 }
 

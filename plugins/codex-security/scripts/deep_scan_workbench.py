@@ -2401,7 +2401,9 @@ def finish_deep_scan_locked(
             promotion = promote_staged_file(staged_manifest_path, manifest_path)
         with (
             saved_results.preserve_deep_deadline_draft(dependencies(), connection, scan)
-            if zero_discovery_deadline and standard_scan_manifest
+            if zero_discovery_deadline
+            and standard_scan_manifest
+            and (finalization is None or "publicationSha256" not in finalization)
             else nullcontext()
         ):
             timestamp = dependencies().now()
