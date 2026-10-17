@@ -988,10 +988,13 @@ interface ScanOutcome {
 const failedScanEnvelopeSchema = z
   .looseObject({
     ok: z.literal(false),
-    error: z.object({
-      code: z.literal("SCAN_FAILED"),
-      message: z.string(),
-    }),
+    error: z.union([
+      z.object({
+        code: z.literal("SCAN_FAILED"),
+        message: z.string(),
+      }),
+      z.string().describe("Text from a token-truncated failure."),
+    ]),
     data: z.unknown().optional(),
     meta: z.record(z.string(), z.unknown()),
   })
@@ -1067,7 +1070,11 @@ const scanOutputSchema: z.ZodType<Record<string, unknown> | undefined> = z
     failedScanEnvelopeSchema,
     z.looseObject({
       ok: z.literal(true),
-      data: z.union([completedScanOutputSchema, dryRunScanOutputSchema]),
+      data: z.union([
+        completedScanOutputSchema,
+        dryRunScanOutputSchema,
+        z.string().describe("Text from a token-truncated result."),
+      ]),
       meta: z.record(z.string(), z.unknown()),
     }),
   ])

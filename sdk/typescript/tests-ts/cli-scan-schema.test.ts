@@ -53,7 +53,10 @@ describe("scan output schema", () => {
         },
         { properties: { code: { const: "SCAN_FAILED" } } },
         {
-          properties: { ok: { const: false }, error: { type: "object" } },
+          properties: {
+            ok: { const: false },
+            error: { anyOf: [{ type: "object" }, { type: "string" }] },
+          },
         },
         {
           properties: {
@@ -246,6 +249,49 @@ test.each(["completed", "dry-run"] as const)(
       expect(output.ok).toBe(true);
       expect(validate(output), JSON.stringify(validate.errors)).toBe(true);
       expect(validate({ ...output, data: {} })).toBe(false);
+    }
+  },
+);
+
+test.each(["completed", "dry-run", "failed", "argument-error"] as const)(
+  "accepts token-truncated %s full-output envelopes",
+  async (outcome) => {
+    const validate = new Ajv2020({ strict: false }).compile(
+      await scanOutputSchema(),
+    );
+    const failed = outcome === "failed" || outcome === "argument-error";
+    for (const format of ["json", "jsonl"]) {
+      for (const transform of ["--token-limit", "--token-offset"]) {
+        const stdout = capture();
+        expect(
+          await main(
+            [
+              "scan",
+              ".",
+              "--format",
+              format,
+              "--full-output",
+              transform,
+              "2",
+              ...(outcome === "dry-run" ? ["--dry-run"] : []),
+              ...(outcome === "argument-error" ? ["--path"] : []),
+            ],
+            stdout.stream,
+            capture().stream,
+            dependencies({
+              result: fakeResult(["high"]),
+              preflight: fakePreflight(),
+              onRun: () => {
+                if (outcome === "failed") throw new Error("Synthetic failure.");
+              },
+            }),
+          ),
+        ).toBe(failed ? 2 : 0);
+        const output = JSON.parse(stdout.text());
+        expect(output.ok).toBe(!failed);
+        expect(typeof output[failed ? "error" : "data"]).toBe("string");
+        expect(validate(output), JSON.stringify(validate.errors)).toBe(true);
+      }
     }
   },
 );

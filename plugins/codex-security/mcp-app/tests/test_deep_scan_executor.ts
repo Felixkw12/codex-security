@@ -1279,7 +1279,7 @@ env_key = "CODEX_API_KEY"
           }
 
           assert.equal(
-            invocation.openaiAuthentication.configuration,
+            invocation.configuration,
             entry.projectConfiguration ?? configuration,
           );
           assert.equal(
