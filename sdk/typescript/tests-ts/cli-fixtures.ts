@@ -209,6 +209,7 @@ export function dependencies(
     onInterrupt?: () => void;
     onClose?: () => void | Promise<void>;
     onCodex?: OnCodex;
+    manualCodexPreparation?: boolean;
     linearClient?: MainDependencies["linearClient"];
     importGitHubAlerts?: MainDependencies["importGitHubAlerts"];
     onRepositoryCommand?: (
@@ -279,14 +280,24 @@ export function dependencies(
       signals.remove(signal, listener),
     writeSynchronously: (stream, value) => stream.write(value),
     forceExit: () => {},
-    runCodex: async (...args) => (await options.onCodex?.(...args)) ?? 0,
+    runCodex: async (...args) => {
+      // Simple model doubles are ready immediately; native fixtures own preparation.
+      if (!options.manualCodexPreparation)
+        await args[1]?.appServer?.onBeforeTurn?.();
+      return (await options.onCodex?.(...args)) ?? 0;
+    },
     runRepositoryCommand: async (command, args, repository, commandOptions) =>
       (await options.onRepositoryCommand?.(
         command,
         args,
         repository,
         commandOptions,
-      )) ?? (args.includes("--name-only") ? "src/finding-1.ts\0" : ""),
+      )) ??
+      (command === "gh" && args[0] === "pr" && args[1] === "list"
+        ? "[]"
+        : args.includes("--name-only")
+          ? "src/finding-1.ts\0"
+          : ""),
     ...(options.linearClient === undefined
       ? {}
       : { linearClient: options.linearClient }),

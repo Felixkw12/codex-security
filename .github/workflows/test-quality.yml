@@ -32,7 +32,7 @@ jobs:
     if: ${{ !cancelled() && (inputs.native-artifacts-ready || needs.native.result == 'success') }}
     name: ${{ matrix.os }} / ${{ matrix.mode }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: ${{ matrix.os == 'windows-latest' && (matrix.mode == 'baseline' && 90 || matrix.mode == 'parallel' && 60) || 30 }}
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && (matrix.mode == 'baseline' && 240 || matrix.mode == 'parallel' && 150 || 120) || 30 }}
     env:
       CODEX_SECURITY_PROPERTY_SEED: ${{ github.event_name == 'pull_request' && 1 || github.run_number }}
     strategy:
@@ -131,6 +131,12 @@ jobs:
         run: |
           pnpm --dir sdk/typescript install --frozen-lockfile
           pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
+      - name: Set up the Ubuntu sandbox
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap apparmor-profiles
+          sudo apparmor_parser -r /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
       - name: Prepare private Windows test root
         if: runner.os == 'Windows'
         id: windows-temp

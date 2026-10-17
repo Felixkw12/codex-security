@@ -16,13 +16,18 @@ async function repositoryFixture({ initializeGit = true } = {}) {
   const runRepositoryCommand: NonNullable<
     FixtureOptions["onRepositoryCommand"]
   > = async (command, args, cwd, options) => {
-    const { stdout } = await execFileAsync(command, [...args], {
+    const child = execFileAsync(command, [...args], {
       cwd,
-      encoding: "utf8",
+      encoding: options?.encoding === "base64" ? "buffer" : "utf8",
       env: { ...process.env, ...options?.environment },
       windowsHide: true,
     });
-    return options?.trim === false ? stdout : stdout.trim();
+    child.child.stdin?.end(options?.input);
+    const { stdout } = await child;
+    const output = Buffer.isBuffer(stdout)
+      ? stdout.toString(options?.encoding ?? "utf8")
+      : stdout;
+    return options?.trim === false ? output : output.trim();
   };
   const git = (...args: string[]) =>
     runRepositoryCommand("git", args, directory);
@@ -99,6 +104,7 @@ lines.on("line", (line) => {
     const outcome = await fixture.patch(
       ["Synthetic issue", "--external-sandbox"],
       {
+        manualCodexPreparation: true,
         onCodex: nodeCodex(source),
       },
     );
@@ -261,6 +267,7 @@ const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
 lines.on("line", (line) => {
   const request = JSON.parse(line);
   if (request.method === "initialize" || request.method === "account/login/start") send({ id: request.id, result: {} });
+  if (request.method === "config/read") send({ id: request.id, result: { config: { permissions: { codex_security_patch: { extends: ":workspace" } } } } });
   if (request.method === "thread/start") send({ id: request.id, result: { thread: { id: "thread" }, sandbox: { type: "workspaceWrite", writableRoots: [], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false } } });
   if (request.method === "command/exec") {
     assert.equal(request.params.sandboxPolicy.type, "workspaceWrite");
@@ -272,6 +279,7 @@ lines.on("line", (line) => {
       const outcome = await fixture.patch(
         ["Synthetic issue", "--full-output"],
         {
+          manualCodexPreparation: true,
           onCodex: nodeCodex(source),
         },
       );
