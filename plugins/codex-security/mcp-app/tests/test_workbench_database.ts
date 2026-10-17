@@ -1098,9 +1098,35 @@ with sqlite3.connect(sys.argv[2]) as connection:
       ([name]) =>
         name !== "schema_migrations" &&
         name !== "scan_severity_assessments" &&
-        name !== "local_finding_embeddings",
+        name !== "local_finding_embeddings" &&
+        name !== "finding_issue_receipts" &&
+        name !== "sqlite_sequence",
     ),
-    savedRows.filter(([name]) => name !== "schema_migrations"),
+    savedRows.filter(
+      ([name]) =>
+        name !== "schema_migrations" &&
+        name !== "finding_publications" &&
+        name !== "sqlite_sequence",
+    ),
+  );
+  assert.deepEqual(
+    savedRows.find(([name]) => name === "finding_publications")?.[1],
+    [],
+  );
+  assert.deepEqual(
+    savedRows.find(([name]) => name === "sqlite_sequence")?.[1],
+    [],
+  );
+  assert.deepEqual(
+    initialized.prepare("SELECT * FROM finding_issue_receipts").all(),
+    [],
+  );
+  assert.deepEqual(
+    initialized
+      .prepare("SELECT name, seq FROM sqlite_sequence")
+      .all()
+      .map((row) => ({ ...row })),
+    [{ name: "finding_issue_receipts", seq: 0 }],
   );
   assert.equal(
     initialized
