@@ -98,9 +98,7 @@ try {
     assert.equal(preflight.mode, mode);
   }
 
-  // The published 0.2.0 pin lacks GPT-6 Sol pricing. A release candidate and
-  // every subsequent published pin must accept the model with a cost limit.
-  const unpricedPublishedPin = candidatePackage === undefined && installed.version === '0.2.0';
+  // Validate workflow model and cost settings against both the published pin and release candidates.
   const diffBase = git('rev-parse', 'HEAD').trim();
   await writeFile(join(repository, 'added.ts'), 'export const added = true;\n');
   git('add', 'added.ts'); git('commit', '-m', 'Synthetic pull request');
@@ -119,18 +117,30 @@ try {
       const inputs = parseInputs(name => dryValues[name] ?? '', repository);
       const target = production.scope === 'diff' ? {repository, diffBase, diffHead} : {repository};
       const args = scanArguments(inputs, target, join(root, `budget-${example}-${mode}-${program ?? 'example'}`));
-      const result = JSON.parse(run(args, unpricedPublishedPin ? 2 : 0));
-      if (unpricedPublishedPin) {
-        assert.equal(result.status, 'failed');
-        assert.match(result.message, /A scan cost limit is not available for the configured model: gpt-6-sol\./);
-      } else {
-        assert.equal(result.dryRun, true);
-        assert.equal(result.mode, mode);
-        assert.equal(result.model, production.model);
-        assert.equal(result.reasoningEffort, production.effort);
-        assert.equal(result.maxCostUsd, production.maxCost);
-      }
+      const result = JSON.parse(run(args, 0));
+      assert.equal(result.dryRun, true);
+      assert.equal(result.mode, mode);
+      assert.equal(result.model, production.model);
+      assert.equal(result.reasoningEffort, production.effort);
+      assert.equal(result.maxCostUsd, production.maxCost);
     }
+  }
+
+  // Pass provider/model through the locked CLI without copying its provider setup or validation.
+  for (const provider of ['amazon-bedrock', 'openrouter', 'fireworks']) for (const mode of ['standard', 'deep']) {
+    const values: Record<string, string> = {provider, model:'synthetic/model', mode, 'dry-run':'true'};
+    const args = scanArguments(parseInputs(name => values[name] ?? '', repository),
+      {repository}, join(root, `${provider}-${mode}`));
+    const preflight = JSON.parse(run(args, 0));
+    assert.equal(preflight.dryRun, true); assert.equal(preflight.mode, mode);
+    assert.equal(preflight.modelProvider, provider);
+    if (provider === 'amazon-bedrock') assert.equal(preflight.authentication.method, 'aws_credentials');
+    values.model = '';
+    const missingModelArgs = scanArguments(parseInputs(name => values[name] ?? '', repository), {repository}, join(root, 'missing-model'));
+    const missing = spawnSync(process.execPath, [cli, ...missingModelArgs], {cwd:repository, env, encoding:'utf8', timeout:120_000});
+    if (missing.error) throw missing.error;
+    assert.equal(missing.status, 2);
+    assert.match(missing.stderr + missing.stdout, /--model is required when using --provider/);
   }
 
   // Normalization must not let a literal repository path become a framework option.

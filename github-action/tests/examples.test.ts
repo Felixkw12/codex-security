@@ -35,7 +35,7 @@ test('the required PR check runs even when the scan job is skipped', () => {
 for (const [jobResult, scanStatus, skipReason, accepted] of [
   ['success', 'completed', '', true],
   ['success', 'skipped', 'empty-diff', true],
-  ['success', 'incomplete', '', false],
+  ['success', 'failed', '', false],
   ['success', 'skipped', 'dry-run', false],
   ['success', '', '', false],
   ['failure', 'completed', '', false],
