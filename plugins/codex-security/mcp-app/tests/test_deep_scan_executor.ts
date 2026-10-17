@@ -1756,10 +1756,12 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               mergeProfileTelemetry
                 ? {
                     profile: "selected",
+                    approval_policy: "never",
                     profiles: {
                       ...profiles,
                       selected: {
                         ...profiles.selected,
+                        approval_policy: "on-request",
                         ...(index === 4 || mergeProfileTelemetry
                           ? { skills }
                           : {}),
