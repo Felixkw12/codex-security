@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { writeFixture } from "../secret-discovery/fixtures.mts";
 import {
   createFixture,
   prepareStandardEval,
@@ -12,6 +13,7 @@ import { gradeResult, type Result } from "./grade.mts";
 import {
   hashText,
   runComparison,
+  snapshotEvaluator,
   snapshotFiles,
   validateExperiment,
   type RunRecord,
@@ -32,6 +34,44 @@ function mockResult() {
     semanticResult: { findings: [] },
   };
 }
+
+test("evaluator provenance tracks implementation and shared helpers, not reports", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "time-budget-provenance-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const directory = join(root, "standard-time-budget");
+  const files = Object.fromEntries(
+    [
+      "run.mts",
+      "production.mts",
+      "experiment.mts",
+      "fixtures.mts",
+      "grade.mts",
+      "summary.mts",
+      "../secret-discovery/fixtures.mts",
+      "../secret-discovery/runtime.mts",
+    ].map((path) => [path, path]),
+  );
+  await writeFixture(directory, { files });
+  const before = await snapshotEvaluator(directory);
+  assert.deepEqual(
+    before,
+    Object.fromEntries(
+      Object.entries(files).map(([path, text]) => [path, hashText(text)]),
+    ),
+  );
+  await writeFixture(directory, {
+    files: {
+      "grade.mts": "changed grader",
+      "../secret-discovery/runtime.mts": "changed state helper",
+      "reports/run-123/experiment.json": "generated report",
+    },
+  });
+  assert.deepEqual(await snapshotEvaluator(directory), {
+    ...before,
+    "grade.mts": hashText("changed grader"),
+    "../secret-discovery/runtime.mts": hashText("changed state helper"),
+  });
+});
 
 test("pairs stage source without labels, alternate order, and opt in only for treatment", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "time-budget-eval-"));

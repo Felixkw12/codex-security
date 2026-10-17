@@ -66,6 +66,23 @@ export function hashText(text: string | Uint8Array) {
   return createHash("sha256").update(text).digest("hex");
 }
 
+export async function snapshotEvaluator(directory = import.meta.dirname) {
+  const files: Record<string, string> = {};
+  for (const path of [
+    "run.mts",
+    "production.mts",
+    "experiment.mts",
+    "fixtures.mts",
+    "grade.mts",
+    "summary.mts",
+    "../secret-discovery/fixtures.mts",
+    "../secret-discovery/runtime.mts",
+  ]) {
+    files[path] = hashText(await readFile(join(directory, path)));
+  }
+  return files;
+}
+
 export async function snapshotFiles(directory: string, prefix = "") {
   const files: Record<string, string> = {};
   const entries = await readdir(directory, { withFileTypes: true });

@@ -15,6 +15,7 @@ import { createStandardRunner, preflightStandardEval } from "./production.mts";
 import { prepareStandardEval } from "./fixtures.mts";
 import {
   runComparison,
+  snapshotEvaluator,
   snapshotFiles,
   validateExperiment,
 } from "./experiment.mts";
@@ -46,6 +47,7 @@ await withEvalState(
       reasoningEffort: "xhigh",
       execution: "CodexSecurity.run Standard production pipeline",
       order: "alternating baseline-first and time-aware-first pairs",
+      evaluator: await snapshotEvaluator(),
       source: await snapshotFiles(prepared.repo),
       plugin: await snapshotFiles(pluginRoot),
       sdk: await snapshotFiles(

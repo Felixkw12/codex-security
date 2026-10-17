@@ -62,8 +62,9 @@ remain unchanged. This eval does not test resumption or external publication.
 
 Artifacts are saved under ignored `reports/`, updated after every attempt:
 
-- `experiment.json`: settings, source/full-plugin/built-SDK file hashes, and
-  SDK/Codex package versions.
+- `experiment.json`: settings, evaluator/shared-helper, source, full-plugin,
+  and built-SDK file hashes, plus SDK/Codex package versions. Generated reports
+  are excluded from evaluator hashes.
 - `fixture.json`: synthetic source and held-out gold labels for review.
 - `pair-<number>-<variant>/prompt.txt`: the actual first dispatched scan prompt.
 - Per-arm `scan/`, `result.json`, and `report.json`: canonical scan artifacts,
