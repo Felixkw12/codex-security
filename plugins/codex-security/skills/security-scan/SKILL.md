@@ -11,7 +11,7 @@ Run one independent general audit while the parent maps the repository's securit
 
 For an explicitly identified desktop host, load `references/desktop-scan.md`. Otherwise run headlessly: preserve an SDK-provided `CODEX_SECURITY_SCAN_ID` and `CODEX_SECURITY_SCAN_DIR`, or obtain the authoritative scan through `start_codex_security_standard_scan`. If the required start tool is unavailable, report the blocker before reviewing source or creating canonical files. Do not open desktop setup from a headless host.
 
-Read `../../references/scan-prologue.md` and run its `security_scan` capability preflight before source review or worker dispatch. It defines scan ownership, context updates, source-access boundaries, and recovery. Follow the ready/degraded result; available worker capacity is a maximum, not a required running-worker count.
+Read `../../references/scan-prologue.md` once after resolving authoritative scan context and follow its runtime-tool guidance. It defines scan ownership, context updates, source-access boundaries, and recovery.
 
 SDK hosts supply their own progress instructions. Use actual deduplicated reviewed paths for completed counts and the scoped inventory or host estimate for totals. Do not create inventories or receipt files solely for progress.
 
