@@ -91,6 +91,7 @@ EXPECTED_MIGRATIONS = [
     (47, "snapshot deep scan discovery context"),
     (48, "share finding issue receipts across trackers"),
     (49, "index finding issue receipt ownership"),
+    (50, "preserve deep scan worker thread history"),
 ]
 
 
@@ -998,6 +999,73 @@ def test_scan_model_migration_preserves_existing_scans() -> None:
     assert scan["model"] is None
     assert scan["reasoning_effort"] is None
     assert scan["completion_warnings_json"] == "[]"
+
+
+@pytest.mark.cross_platform
+def test_worker_thread_history_migration_backfills_and_preserves_retry_threads() -> None:
+    connection, apply_migrations = create_historical_database(50)
+    connection.execute("PRAGMA foreign_keys = ON")
+    timestamp = "2026-07-01T00:00:00Z"
+    connection.execute(
+        "INSERT INTO workspaces (id, created_at, updated_at) VALUES (?, ?, ?)",
+        ("legacy-workspace", timestamp, timestamp),
+    )
+    connection.execute(
+        """
+        INSERT INTO scans (
+            id, workspace_id, target_path, target_revision, scope, mode, scan_dir,
+            status, phase, started_at, created_at, updated_at
+        ) VALUES ('legacy-scan', 'legacy-workspace', '/legacy/target', 'legacy-revision',
+            '.', 'deep', '/legacy/scan', 'running', 'discovery', ?, ?, ?)
+        """,
+        (timestamp, timestamp, timestamp),
+    )
+    connection.execute(
+        """
+        INSERT INTO deep_scan_runs (
+            scan_id, schema_version, workflow_version, status, phase, workers,
+            subagents, stop_after_no_new, max_discovery_runs, created_at, updated_at
+        ) VALUES ('legacy-scan', 1, 'legacy-workflow', 'running', 'discovery',
+            1, 0, 3, 10, ?, ?)
+        """,
+        (timestamp, timestamp),
+    )
+    connection.execute(
+        """
+        INSERT INTO deep_scan_workers (
+            id, scan_id, kind, status, prompt_path, artifact_dir, attempt,
+            sdk_thread_id, created_at, updated_at
+        ) VALUES ('legacy-worker', 'legacy-scan', 'discovery', 'running',
+            '/legacy/prompt.md', '/legacy/output', 1, 'first-thread', ?, ?)
+        """,
+        (timestamp, timestamp),
+    )
+    connection.commit()
+
+    apply_migrations(connection)
+    for thread_id in ["retry-thread", "retry-thread"]:
+        connection.execute(
+            "UPDATE deep_scan_workers SET sdk_thread_id = ?, attempt = 2 WHERE id = ?",
+            (thread_id, "legacy-worker"),
+        )
+    # Removing a retired logical worker must not remove its incurred usage.
+    connection.execute("DELETE FROM deep_scan_workers WHERE id = 'legacy-worker'")
+    connection.commit()
+    apply_migrations(connection)
+
+    assert [
+        tuple(row)
+        for row in connection.execute(
+            "SELECT scan_id, worker_id, sdk_thread_id FROM deep_scan_worker_threads "
+            "ORDER BY sdk_thread_id"
+        )
+    ] == [
+        ("legacy-scan", "legacy-worker", "first-thread"),
+        ("legacy-scan", "legacy-worker", "retry-thread"),
+    ]
+    connection.execute("DELETE FROM scans WHERE id = 'legacy-scan'")
+    assert connection.execute("SELECT COUNT(*) FROM deep_scan_worker_threads").fetchone()[0] == 0
+    connection.close()
 
 
 def test_deep_discovery_error_migration_backfills_each_existing_threshold() -> None:

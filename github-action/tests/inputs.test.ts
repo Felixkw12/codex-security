@@ -27,6 +27,11 @@ test('provider and model inputs map directly to scan CLI arguments in both modes
     assert.equal(args[args.indexOf('--auth') + 1], provider === 'amazon-bedrock' || dryRun === 'true' ? 'auto' : 'api-key');
     assert.ok(args.includes('--model=synthetic/model'));
     assert.equal(args.includes('--dry-run'), dryRun === 'true');
+    assert.deepEqual(args.flatMap((arg, index) => arg === '--codex' ? [args[index + 1]] : []), [
+      'analytics.enabled=false',
+      'responses_api_metadata.codex_security_integration="github_action"',
+      `responses_api_metadata.codex_security_provider="${provider}"`,
+    ]);
   }
   assert.throws(() => parse({provider:'unsupported'}), /provider must be one of/);
   for (const provider of ['amazon-bedrock', 'openrouter', 'fireworks']) for (const model of ['', '  ']) {

@@ -292,13 +292,7 @@ describe("CLI skill commands", () => {
           "--config",
           'approval_policy="never"',
           "--config",
-          'responses_api_metadata.codex_security_surface="cli"',
-          "--config",
-          `responses_api_metadata.codex_security_command=${JSON.stringify(command)}`,
-          "--config",
-          `responses_api_metadata.codex_security_package_version=${JSON.stringify(VERSION)}`,
-          "--config",
-          `responses_api_metadata.codex_security_plugin_version=${JSON.stringify((await pluginMetadata(PLUGIN_ROOT)).version)}`,
+          expect.stringMatching(/^responses_api_metadata=\{/u),
           ...(command === "patch"
             ? []
             : [
@@ -312,6 +306,22 @@ describe("CLI skill commands", () => {
                 "-",
               ]),
         ]);
+        expect(
+          parseToml(
+            invocation!.find((value) =>
+              value.startsWith("responses_api_metadata="),
+            )!,
+          )["responses_api_metadata"],
+        ).toEqual({
+          codex_security_surface: "cli",
+          codex_security_command: command,
+          codex_security_package_version: VERSION,
+          codex_security_plugin_version: (await pluginMetadata(PLUGIN_ROOT))
+            .version,
+          ...(command === "validate"
+            ? { codex_security_provider: "openai" }
+            : {}),
+        });
         if (command === "validate") {
           expect(prompt).toContain(
             await filesystem.readFile(
