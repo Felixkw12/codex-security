@@ -2463,7 +2463,7 @@ def test_repository_generation_upgrade_requires_the_original_v2_digest(
             (previous if stored_binding else None,),
         )
         connection.execute("UPDATE scans SET repository_generation=?", (previous,))
-        connection.execute("DELETE FROM schema_migrations WHERE version=49")
+        connection.execute("DELETE FROM schema_migrations WHERE version=51")
         before = dict(connection.execute("SELECT * FROM scans").fetchone())
         if remounted_before_upgrade:
             change_repository_metadata(monkeypatch, repository, "device")
@@ -2513,7 +2513,7 @@ def test_repository_generation_migration_preserves_null_history(
             previous = "repository_sha256_" + "0" * 64
         connection.execute("UPDATE security_targets SET repository_identity=?", (previous,))
         connection.execute("UPDATE scans SET repository_generation=NULL")
-        connection.execute("DELETE FROM schema_migrations WHERE version=49")
+        connection.execute("DELETE FROM schema_migrations WHERE version=51")
         before = [dict(row) for row in connection.execute("SELECT * FROM scans")]
         if binding == "authenticated":
             scope = target_state.RepositoryIdentityCache(connection).scope(target_id)
@@ -2527,7 +2527,7 @@ def test_repository_generation_migration_preserves_null_history(
             == expected
         )
         assert [dict(row) for row in connection.execute("SELECT * FROM scans")] == before
-        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 49
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 51
         # A completed migration, including an unverifiable binding, does not probe
         # local repositories again on a database reopen.
         with monkeypatch.context() as no_probes:
@@ -2581,7 +2581,7 @@ def test_repository_generation_migration_is_atomic_and_preserves_shared_history(
         connection.execute(
             "UPDATE scans SET repository_generation=NULL WHERE id=?", (legacy["scanId"],)
         )
-        connection.execute("DELETE FROM schema_migrations WHERE version=49")
+        connection.execute("DELETE FROM schema_migrations WHERE version=51")
         connection.commit()
         before = [dict(row) for row in connection.execute("SELECT * FROM scans ORDER BY id")]
         dump = list(connection.iterdump())
@@ -2671,7 +2671,7 @@ def test_repository_generation_migration_keeps_released_null_history_local(
         assert {name: after[name] for name in before} == before
         assert after["repository_generation"] is None
         assert after["completion_sequence"] == 1
-        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 49
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 51
         scope = target_state.RepositoryIdentityCache(connection).scope_for_path(str(repository))
         assert scope.available and scope.contains(after)
         assert after["id"] == scan["scanId"]
@@ -2729,11 +2729,11 @@ def test_repository_generation_returns_after_offline_migration(
                 "UPDATE security_targets SET repository_identity=NULL WHERE current_path=?",
                 (str(repository),),
             )
-        connection.execute("DELETE FROM schema_migrations WHERE version=49")
+        connection.execute("DELETE FROM schema_migrations WHERE version=51")
         offline = tmp_path / "offline"
         repository.rename(offline)
         workbench.apply_migrations(connection)
-        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 49
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 51
         assert (
             connection.execute(
                 "SELECT repository_generation FROM scans WHERE id=?", (scan["scanId"],)
