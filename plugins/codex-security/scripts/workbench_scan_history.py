@@ -19,7 +19,7 @@ from report_projection import SEVERITY_ORDER
 from workbench_constants import ARTIFACTS, FINDINGS_PAGE_MAX
 from workbench_scan_start import scan_target_identity
 from workbench_scan_usage import stored_scan_cost_fields
-from workbench_target import git_output, require_scan_target_identity
+from workbench_target import git_bytes, git_output, require_scan_target_identity
 from workbench_validation import reject_non_finite_json, timestamp_key
 
 
@@ -509,6 +509,13 @@ def _same_reviewed_content(before: sqlite3.Row, after: sqlite3.Row) -> bool:
     required = ("mode", "target_revision", "target_snapshot_digest")
     if any(column not in scan.keys() for scan in (before, after) for column in required):
         return False
+    before_target = Path(before["target_path"])
+    after_target = Path(after["target_path"])
+    if before_target.resolve() != after_target.resolve():
+        before_prefix = git_bytes(before_target, "rev-parse", "--show-prefix")
+        after_prefix = git_bytes(after_target, "rev-parse", "--show-prefix")
+        if before_prefix is None or before_prefix != after_prefix:
+            return False
     return (
         before["mode"] != "diff"
         and after["mode"] != "diff"

@@ -1653,6 +1653,77 @@ def test_semantic_scan_comparison_accepts_linked_git_worktrees(tmp_path: Path) -
     assert saved["summary"]["persisting"] == 1
 
 
+@pytest.mark.parametrize("checkout_kind", ["same", "worktree", "clone"])
+def test_equivalent_locations_require_same_git_target_prefix(
+    tmp_path: Path, checkout_kind: str
+) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    initialize_git_repository(repository)
+    for name in ("first", "second"):
+        source = repository / name / "src"
+        source.mkdir(parents=True)
+        (source / "extract.py").write_text("destination.write_bytes(entry.read())\n")
+    subprocess.run(["git", "-C", str(repository), "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", str(repository), "commit", "-qm", "Add target fixtures"], check=True
+    )
+    revision = subprocess.check_output(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"], text=True
+    ).strip()
+    other = repository
+    if checkout_kind != "same":
+        other = tmp_path / "other-checkout"
+        if checkout_kind == "worktree":
+            subprocess.run(
+                ["git", "-C", str(repository), "worktree", "add", "-q", "--detach", str(other)],
+                check=True,
+            )
+        else:
+            subprocess.run(["git", "clone", "-q", str(repository), str(other)], check=True)
+            for checkout in (repository, other):
+                subprocess.run(
+                    ["git", "-C", str(checkout), "remote", "remove", "origin"],
+                    check=False,
+                    capture_output=True,
+                )
+                subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        str(checkout),
+                        "remote",
+                        "add",
+                        "origin",
+                        "https://github.com/example/project.git",
+                    ],
+                    check=True,
+                )
+    before = create_cli_scan(
+        state_dir, tmp_path / "before-results", repository / "first", target_revision=revision
+    )
+    after = create_cli_scan(
+        state_dir,
+        tmp_path / "after-results",
+        other / "second",
+        target_revision=revision,
+        identity_anchor="other-control",
+    )
+    compared = compare_scan_pair(state_dir, before, after)
+    assert compared["summary"]["persisting"] == 0
+    assert compared["summary"]["new"] == compared["summary"]["not_observed"] == 1
+    corresponding = create_cli_scan(
+        state_dir,
+        tmp_path / "corresponding-results",
+        other / "first",
+        target_revision=revision,
+        identity_anchor="renamed-control",
+    )
+    compared = compare_scan_pair(state_dir, before, corresponding)
+    assert compared["summary"]["persisting"] == 1
+    assert compared["summary"]["new"] == compared["summary"]["not_observed"] == 0
+
+
 def test_semantic_scan_comparison_accepts_matching_git_origins(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     before_repository = tmp_path / "before"
