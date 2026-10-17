@@ -2248,6 +2248,30 @@ function findingLocationKeys(finding: JsonObject): string[] {
     .sort();
 }
 
+function strongerFinding(current: JsonObject, previous: JsonObject): boolean {
+  const levelDifference = (field: string, levels: string[]) =>
+    levels.indexOf((current[field] as JsonObject).level as string) -
+    levels.indexOf((previous[field] as JsonObject).level as string);
+  const evidenceCount = (finding: JsonObject) =>
+    new Set(
+      ((finding.codeEvidence as JsonObject[] | undefined) ?? []).map(
+        (evidence) => evidence.id,
+      ),
+    ).size;
+  // Match recovery's preference for severity, confidence, then canonical evidence.
+  return (
+    (levelDifference("severity", [
+      "informational",
+      "low",
+      "medium",
+      "high",
+      "critical",
+    ]) ||
+      levelDifference("confidence", ["low", "medium", "high"]) ||
+      evidenceCount(current) - evidenceCount(previous)) > 0
+  );
+}
+
 function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
   const identified = identifyFindings(findings);
   const anchors = identified.map(
@@ -2300,9 +2324,11 @@ function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
       if (finding.identity !== undefined)
         used.set(scanFindingIdentity(finding), candidateKeys[index]);
   const candidateIdentities = new Map<string, JsonObject | null>();
+  const explicitCounts = new Map<string, number>();
   for (const [index, finding] of findings.entries()) {
     const key = candidateKeys[index];
     if (!key || finding.identity === undefined) continue;
+    explicitCounts.set(key, (explicitCounts.get(key) ?? 0) + 1);
     const previous = candidateIdentities.get(key);
     candidateIdentities.set(
       key,
@@ -2313,7 +2339,7 @@ function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
         : finding,
     );
   }
-  return identified.map((finding, index) => {
+  const projected = identified.map((finding, index) => {
     const key = scanFindingIdentity(finding);
     const original = findings[index]!;
     if (mode !== "deep" && original.identity !== undefined) return finding;
@@ -2369,6 +2395,31 @@ function buildFindings(findings: JsonObject[], mode?: string): JsonObject[] {
     if (candidateKey) candidateIdentities.set(candidateKey, distinct);
     return distinct;
   });
+  const coalesced: JsonObject[] = [];
+  const positions = new Map<string, number>();
+  for (const [index, finding] of projected.entries()) {
+    const candidateKey = candidateKeys[index];
+    // Reusing an identity makes these semantic observations one canonical row.
+    // Explicit duplicates remain intact for the strict completion validator.
+    const key =
+      candidateKey &&
+      candidateIdentities.get(candidateKey) !== null &&
+      (explicitCounts.get(candidateKey) ?? 0) <= 1
+        ? JSON.stringify([candidateKey, scanFindingIdentity(finding)])
+        : undefined;
+    const position = key === undefined ? undefined : positions.get(key);
+    if (position === undefined) {
+      if (key !== undefined) positions.set(key, coalesced.length);
+      coalesced.push(finding);
+      continue;
+    }
+    const previous = coalesced[position]!;
+    const stronger = strongerFinding(finding, previous);
+    const retained = structuredClone(stronger ? finding : previous);
+    preserveFindingDetails(retained, stronger ? previous : finding);
+    coalesced[position] = retained;
+  }
+  return coalesced;
 }
 
 function buildCoverage(
