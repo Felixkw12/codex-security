@@ -938,9 +938,9 @@ function expandHome(value: string): string {
   }
   if (value.startsWith("~/") || value.startsWith("~\\")) {
     const suffix = value.slice(2).replace(/^[/\\]+/, "");
-    return process.platform === "win32"
-      ? resolve(homedir(), suffix)
-      : `${homedir()}${sep}${suffix}`;
+    const home = homedir();
+    if (process.platform === "win32") return resolve(home, suffix);
+    return home === "" ? resolveTargetPath(suffix) : `${home}${sep}${suffix}`;
   }
   return value;
 }

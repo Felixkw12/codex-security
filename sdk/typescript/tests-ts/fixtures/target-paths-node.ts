@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join, relative } from "node:path";
 import { TestClient } from "../support/api-client.js";
 import { main } from "../../src/cli.js";
@@ -74,14 +75,54 @@ try {
       await realpath(repository),
     );
   }
-  for (const home of [undefined, ""]) {
+  const otherHome = join(root, "other-home");
+  await mkdir(otherHome, { mode: 0o700 });
+  for (const home of [root, undefined, ""]) {
+    const profile = home === undefined ? root : otherHome;
+    process.env["USERPROFILE"] = profile;
     if (home === undefined) delete process.env["HOME"];
     else process.env["HOME"] = home;
     try {
+      const directory = process.cwd();
+      process.chdir(root);
+      try {
+        const home = homedir();
+        const requested = `~/${relative(home === "" ? root : home, entry)}/link/../repository`;
+        assert.equal(
+          (await client.preflight(requested)).repository,
+          await realpath(repository),
+        );
+        assert.deepEqual(
+          (
+            await client.preflight(repository, {
+              target: [`${requested}/scope/../app.ts`],
+            })
+          ).target,
+          { kind: "paths", paths: ["components/app.ts"] },
+        );
+        if (home === "") {
+          await writeFile(
+            join(root, "app.ts"),
+            "export const caller = true;\n",
+          );
+          await writeFile(
+            join(repository, "app.ts"),
+            "export const caller = false;\n",
+          );
+          await assert.rejects(
+            client.preflight(repository, { target: ["~/app.ts"] }),
+            /outside the repository/,
+          );
+        }
+      } finally {
+        process.chdir(directory);
+      }
+      const cliEntry = relative(home || profile, entry);
+      const windowsEntry = cliEntry.replaceAll("/", "\\");
       for (const requested of [
-        "~/entry/link/../repository",
-        "~\\entry\\link\\..\\repository",
-        "~\\\\entry\\link\\..\\repository",
+        `~/${cliEntry}/link/../repository`,
+        `~\\${windowsEntry}\\link\\..\\repository`,
+        `~\\\\${windowsEntry}\\link\\..\\repository`,
       ]) {
         const fallback = createCliTest(main);
         assert.equal(
@@ -99,6 +140,7 @@ try {
       }
     } finally {
       process.env["HOME"] = root;
+      process.env["USERPROFILE"] = root;
     }
   }
   const planned = createCliTest(main);
