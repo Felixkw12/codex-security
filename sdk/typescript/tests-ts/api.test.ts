@@ -1113,6 +1113,7 @@ describe("CodexSecurity orchestration", () => {
       const module = join(root, "target-paths.mjs");
       await writeFile(module, await built.outputs[0]!.text());
       execFileSync(nodeCommand().command, [module, root], {
+        cwd: root,
         encoding: "utf8",
         env: { ...process.env, HOME: root, USERPROFILE: root },
       });

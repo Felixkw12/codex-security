@@ -1,7 +1,7 @@
 import { notify } from "./value.js";
 import { execFile as execFileCallback } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { lstatSync, realpathSync, statSync } from "node:fs";
+import { realpathSync } from "node:fs";
 import {
   lstat,
   mkdir,
@@ -1140,8 +1140,7 @@ function parseInventory(
     // Filesystem access always uses the original source path.
     const repository =
       process.platform !== "win32" && isAbsolute(sourceRepository)
-        ? (normalizeRepositoryParents(sourceRepository) ??
-          resolve(sourceRepository))
+        ? resolve(sourceRepository)
         : sourceRepository;
     return {
       id,
@@ -1191,30 +1190,6 @@ function normalizeRepository(repository: string, directory: string): string {
     );
   }
   return repository;
-}
-
-function normalizeRepositoryParents(path: string): string | undefined {
-  if (!path.split("/").includes("..")) return path;
-  let parent = "/";
-  try {
-    for (const part of path.split("/").filter(Boolean)) {
-      if (part !== "..") {
-        parent = join(parent, part);
-        continue;
-      }
-      // Preserve campaign path identities unless traversal follows a symlink.
-      let metadata = lstatSync(parent);
-      if (metadata.isSymbolicLink()) {
-        parent = realpathSync.native(parent);
-        metadata = statSync(parent);
-      }
-      if (!metadata.isDirectory()) return undefined;
-      parent = dirname(parent);
-    }
-    return parent;
-  } catch {
-    return undefined;
-  }
 }
 
 async function checkoutRevision(

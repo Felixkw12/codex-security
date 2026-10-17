@@ -3,6 +3,7 @@ import { mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, relative } from "node:path";
 import { TestClient } from "../support/api-client.js";
+import type { JsonObject } from "../../src/config.js";
 import { main } from "../../src/cli.js";
 import { dependencies, fakeResult } from "../cli-fixtures.js";
 import { createCliTest } from "../support/cli-run.js";
@@ -83,9 +84,7 @@ try {
     if (home === undefined) delete process.env["HOME"];
     else process.env["HOME"] = home;
     try {
-      const directory = process.cwd();
-      process.chdir(root);
-      try {
+      {
         const home = homedir();
         const requested = `~/${relative(home === "" ? root : home, entry)}/link/../repository`;
         assert.equal(
@@ -114,8 +113,6 @@ try {
             /outside the repository/,
           );
         }
-      } finally {
-        process.chdir(directory);
       }
       const cliEntry = relative(home || profile, entry);
       const windowsEntry = cliEntry.replaceAll("/", "\\");
@@ -191,6 +188,78 @@ try {
     );
     assert.equal(editorOpened, true);
   }
+  for (const patchReview of [false, true]) {
+    const link = join(entry, "temporary-link");
+    await symlink(join(root, "physical", "child"), link);
+    const lifecycle = createCliTest(main, { stderr: patchReview });
+    let editorOpened = false;
+    assert.equal(
+      await lifecycle.runCli(
+        ["scan", `${link}/../repository`, ...(patchReview ? [] : ["--json"])],
+        {
+          ...dependencies({ currentDirectory: root }),
+          createSecurity: () => ({
+            preflight: client.preflight.bind(client),
+            run: async (selected, options) => {
+              assert.equal(
+                (await client.preflight(selected, options)).repository,
+                await realpath(repository),
+              );
+              await rm(link);
+              return fakeResult(["high"]);
+            },
+            close: async () => {},
+          }),
+          confirmPatchReview: async () => true,
+          patchEditor: async (selected) => {
+            assert.equal(selected, await realpath(repository));
+            editorOpened = true;
+            return null;
+          },
+        },
+      ),
+      0,
+      lifecycle.stderr.text(),
+    );
+    assert.equal(editorOpened, patchReview);
+    if (!patchReview)
+      assert.equal(
+        JSON.parse(lifecycle.stdout.text()).manifest.scan.status,
+        "completed",
+      );
+  }
+  await mkdir(sibling, { mode: 0o700 });
+  const history = createCliTest(main);
+  let selectedTarget: string | undefined;
+  assert.equal(
+    await history.runCli(
+      ["findings", "list", requestedRepository, "--json"],
+      dependencies({
+        currentDirectory: root,
+        onWorkbench: (args): JsonObject => {
+          if (args[0] === "list-repositories") {
+            return {
+              repositories: [
+                { targetId: "sibling", targetPath: sibling },
+                { targetId: "physical", targetPath: repository },
+              ],
+            };
+          }
+          selectedTarget = args[2];
+          return {
+            findings: [{ title: "Physical finding" }],
+            nextOffset: null,
+          };
+        },
+      }),
+    ),
+    0,
+    history.stderr.text(),
+  );
+  assert.equal(selectedTarget, "physical");
+  assert.deepEqual(JSON.parse(history.stdout.text()).findings, [
+    { title: "Physical finding" },
+  ]);
   await assert.rejects(
     client.preflight(requestedRepository, {
       outputDir: join(repository, "output"),

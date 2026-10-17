@@ -956,6 +956,39 @@ describe("multiscan", () => {
     },
   );
 
+  testPosix.each(["link", "target"])(
+    "resumes a completed campaign after its traversal %s disappears",
+    async (removed) => {
+      const paths = await fixture();
+      const source = await repository(paths.root, "physical/repository");
+      const target = join(paths.root, "physical", "child");
+      const link = join(paths.root, "entry", "link");
+      await mkdir(target);
+      await mkdir(dirname(link));
+      await symlink(target, link);
+      await writeFile(
+        paths.input,
+        `id,repository,revision\nresume,entry/link/../repository,${source.revision}\n`,
+      );
+      const security = client(mock(completeRun));
+      const settings = options(paths, security);
+      expect(await runMultiscan(settings)).toMatchObject({
+        completed: 1,
+        failed: 0,
+      });
+      const manifestPath = join(paths.output, "manifest.json");
+      const manifest = await readFile(manifestPath, "utf8");
+      await rm(removed === "link" ? link : target, { recursive: true });
+      expect(await runMultiscan(settings)).toMatchObject({
+        completed: 1,
+        failed: 0,
+        skipped: 1,
+      });
+      expect(await readFile(manifestPath, "utf8")).toBe(manifest);
+      expect(security.run).toHaveBeenCalledTimes(1);
+    },
+  );
+
   testPosix.each(["missing", "file", "file-link"])(
     "does not collapse a %s parent component into another repository",
     async (component) => {

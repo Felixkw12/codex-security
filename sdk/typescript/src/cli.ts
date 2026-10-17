@@ -269,6 +269,7 @@ import {
 import {
   abortable,
   DiffTarget,
+  normalizeRepository,
   resolveRepositoryPath,
   resolveTargetPath,
   enclosingGitWorktreeRoots,
@@ -2046,13 +2047,16 @@ export async function main(
     }),
     output: z.record(z.string(), z.unknown()).optional(),
     async run({ args, format }) {
-      const requestedRepository = resolveCliRepositoryPath(
+      const requestedPath = resolveCliRepositoryPath(
         args.repository ?? ".",
         dependencies.currentDirectory(),
       );
-      const repository = await realpath(requestedRepository).catch(
-        () => requestedRepository,
+      const canonicalPath = await realpath(requestedPath).catch(
+        () => undefined,
       );
+      const requestedRepository =
+        canonicalPath === undefined ? resolve(requestedPath) : requestedPath;
+      const repository = canonicalPath ?? requestedRepository;
       return presentHistory(
         await history(
           ["list-repositories"],
@@ -8329,6 +8333,13 @@ async function executeScan(
   try {
     const directory = dependencies.currentDirectory();
     repository = arguments_.repository ?? directory;
+    const repositoryPath = resolveRepositoryPath(repository, directory);
+    if (repositoryPath.split(sep).includes("..")) {
+      repository = await normalizeRepository(
+        repositoryPath,
+        preparationAbortController.signal,
+      );
+    }
     const target = arguments_.target;
     const prompts = await resolveScanPrompts(
       arguments_,
@@ -8825,9 +8836,6 @@ async function executeScan(
         repository,
         dependencies.currentDirectory(),
       );
-      // Later patch path joins must keep the repository selected by parent traversal.
-      if (repository.split(sep).includes(".."))
-        repository = await realpath(repository);
     }
   } catch (error) {
     failed = true;
