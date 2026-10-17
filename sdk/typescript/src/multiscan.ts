@@ -335,7 +335,7 @@ async function runCampaign(
       const [python, helperRoot] = await Promise.all([
         resolvePluginPythonCommand({
           configuredPath: options.config.pythonPath,
-          environment: pluginHelperEnvironment(process.env),
+          environment: pluginHelperEnvironment(environment),
           protectedRoot,
           signal: options.signal,
         }),
@@ -459,8 +459,17 @@ async function runCampaign(
         options.signal,
         options.githubHost,
         restoreReport,
+        (warning) => {
+          warnings.push({ repository: task.id, warnings: [warning] });
+          notifyProgress(options, {
+            repository: task.id,
+            status: receipt.status,
+            attempt: receipt.attempt,
+            warning,
+          });
+        },
         options.config.pythonPath ??
-          environmentValue(pluginHelperEnvironment(process.env), "PYTHON"),
+          environmentValue(pluginHelperEnvironment(environment), "PYTHON"),
         options.recoverScan === undefined
           ? undefined
           : (scanDir) => options.recoverScan!(scanDir, options),
@@ -1464,6 +1473,7 @@ async function loadResumableScan(
     schemaRoot: string,
     protectedRoot: string,
   ) => Promise<void>,
+  onWarning: (warning: string) => void,
   configuredPythonPath: string | undefined,
   recoverScan:
     | ((
@@ -1579,7 +1589,7 @@ async function loadResumableScan(
       configuredPythonPath === undefined
         ? await resolvePluginPythonCommand({
             protectedRoot: matchedRoot,
-            environment: pluginHelperEnvironment(process.env),
+            environment: pluginHelperEnvironment(environment),
             signal,
           }).then(
             () => true,
@@ -1605,7 +1615,7 @@ async function loadResumableScan(
       if (isPythonPathCandidate(configuredPythonPath)) {
         candidates = [
           resolve(
-            expandHome(configuredPythonPath) +
+            expandHome(configuredPythonPath, environment) +
               (process.platform === "win32" &&
               extname(configuredPythonPath) === ""
                 ? ".exe"
@@ -1615,7 +1625,7 @@ async function loadResumableScan(
       } else {
         const inspected = await inspectTrustedExecutable(
           configuredPythonPath,
-          pluginHelperEnvironment(process.env),
+          pluginHelperEnvironment(environment),
           matchedRoot,
         );
         const suffixes =
@@ -1736,8 +1746,10 @@ async function loadResumableScan(
       findings,
     };
   } finally {
-    if (createdCheckout)
-      await rm(matchedRoot, { recursive: true, force: true });
+    if (createdCheckout) {
+      const warning = await removeCheckout(matchedRoot);
+      if (warning !== undefined) onWarning(warning);
+    }
   }
 }
 

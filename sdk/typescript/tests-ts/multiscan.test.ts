@@ -406,6 +406,18 @@ function options(
 
 const results = readJsonLines<Record<string, unknown>>;
 
+async function clearFixtureCleanupPending(resultsPath: string) {
+  // Successful recovery already removed the checkout recreated by these fixtures.
+  const receipts = await results(resultsPath);
+  for (const receipt of receipts) {
+    if (receipt["status"] === "completed") delete receipt["cleanupPending"];
+  }
+  await writeFile(
+    resultsPath,
+    receipts.map((receipt) => JSON.stringify(receipt) + "\n").join(""),
+  );
+}
+
 describe("multiscan", () => {
   test.each([false, true])(
     "only links current models from failed child runs with recovery=%p",
@@ -2054,6 +2066,70 @@ describe("multiscan", () => {
     expect(run).toHaveBeenCalledTimes(1);
   });
 
+  test("continues pending rows when reused scope checkout cleanup fails", async () => {
+    const { paths, source } = await repositoryFixture("reused-cleanup");
+    await writeFile(
+      paths.input,
+      `id,repository,revision,scope\nsaved,${source.path},${source.revision},src\nnext,${source.path},${source.revision},src\n`,
+    );
+    const first = await runMultiscan(
+      options(
+        paths,
+        client(async (checkout, settings = {}) => {
+          if (basename(checkout) === "next") throw new Error("Interrupted");
+          return completedScan(settings.outputDir!, "complete", checkout);
+        }),
+        { maxAttempts: 1 },
+      ),
+    );
+    expect(first).toMatchObject({ completed: 1, failed: 1 });
+    const savedReceipt = (await results(first.resultsPath))[0];
+    const checkout = join(paths.output, "checkouts", "saved");
+    const diagnostic = "EBUSY: synthetic cleanup sk-proj-SYNTHETIC_123";
+    const warning = `Multiscan checkout cleanup failed: ${diagnostic}`;
+    const originalRm = filesystem.rm;
+    const removeSpy = spyOn(filesystem, "rm").mockImplementation(
+      async (...args: Parameters<typeof originalRm>) => {
+        if (String(args[0]) === checkout) throw new Error(diagnostic);
+        return await Reflect.apply(originalRm, filesystem, args);
+      },
+    );
+    const progress: Parameters<
+      NonNullable<MultiscanOptions["onProgress"]>
+    >[0][] = [];
+    const run = mock(completeRun);
+    try {
+      const summary = await runMultiscan(
+        options(paths, client(run), {
+          onProgress: (event) => progress.push(event),
+        }),
+      );
+      expect(summary).toMatchObject({
+        completed: 2,
+        failed: 0,
+        skipped: 1,
+        warnings: [{ repository: "saved", warnings: [warning] }],
+      });
+      expect(progress).toContainEqual({
+        repository: "saved",
+        status: "completed",
+        attempt: 1,
+        warning,
+      });
+      const receipts = await results(summary.resultsPath);
+      expect(receipts[0]).toEqual(savedReceipt);
+      expect(receipts.at(-1)).toMatchObject({
+        id: "next",
+        status: "completed",
+        attempt: 2,
+      });
+      expect(run).toHaveBeenCalledTimes(1);
+      expect((await lstat(checkout)).isDirectory()).toBe(true);
+    } finally {
+      removeSpy.mockRestore();
+    }
+  });
+
   test("retries failed scans and continues later tasks when checkout cleanup fails", async () => {
     const { paths, source } = await repositoryFixture("cleanup-retry", "retry");
     await appendFile(paths.input, `next,${source.path},${source.revision}\n`);
@@ -3264,6 +3340,63 @@ describe("multiscan", () => {
     );
     expect(security.run.mock.calls.length).toBe(1);
   });
+
+  for (const selection of ["PYTHON", "PATH"] as const) {
+    testPosix(
+      `report recovery uses campaign ${selection} and helper environment`,
+      async () => {
+        const { paths } = await repositoryFixture(
+          `report-environment-${selection}`,
+        );
+        const tools = join(paths.root, "report-tools");
+        await mkdir(tools);
+        const interpreter = join(tools, "campaign-python");
+        const marker = join(paths.root, "report-environment.json");
+        await writeFile(
+          interpreter,
+          `#!${PYTHON}\nimport json, os, sys\nif any(arg.endswith("finalize_scan_contract.py") for arg in sys.argv):\n    with open(${JSON.stringify(marker)}, "w") as output:\n        json.dump({name: os.environ.get(name) for name in ("PYTHON", "PATH", "MULTISCAN_REPORT_FIXTURE")}, output)\nos.execv(${JSON.stringify(PYTHON)}, [${JSON.stringify(PYTHON)}, *sys.argv[1:]])\n`,
+          { mode: 0o700 },
+        );
+        const environment = {
+          ...process.env,
+          PYTHON: selection === "PYTHON" ? interpreter : undefined,
+          PATH: tools + delimiter + (process.env["PATH"] ?? ""),
+          MULTISCAN_REPORT_FIXTURE: "invocation-specific",
+        };
+        const run = mock(completeRun);
+        const campaign = options(paths, client(run), {
+          environment,
+          config: selection === "PATH" ? { pythonPath: "campaign-python" } : {},
+        });
+        const initial = await runMultiscan(campaign);
+        const ledger = await readFile(initial.resultsPath);
+        const receipt = (await results(initial.resultsPath))[0]!;
+        const report = join(receipt["outputDir"] as string, "report.md");
+        await rm(report);
+        const previousPython = process.env["PYTHON"];
+        process.env["PYTHON"] = join(paths.root, "unavailable-ambient-python");
+        try {
+          expect(await runMultiscan(campaign)).toMatchObject({
+            completed: 1,
+            failed: 0,
+            skipped: 1,
+          });
+          const observed = JSON.parse(await readFile(marker, "utf8"));
+          expect(observed).toMatchObject({
+            PYTHON: environment.PYTHON ?? null,
+            MULTISCAN_REPORT_FIXTURE: "invocation-specific",
+          });
+          expect(observed.PATH.split(delimiter)[0]).toBe(tools);
+          expect((await lstat(report)).isFile()).toBe(true);
+          expect(run).toHaveBeenCalledTimes(1);
+          expect(await readFile(initial.resultsPath)).toEqual(ledger);
+        } finally {
+          if (previousPython === undefined) delete process.env["PYTHON"];
+          else process.env["PYTHON"] = previousPython;
+        }
+      },
+    );
+  }
 
   test("skips sealed report recovery and preserves earned receipts on recovery failure", async () => {
     const paths = await fixture();
@@ -5636,6 +5769,8 @@ for (const recovery of [false, true]) {
         completed: 1,
         skipped: 0,
       });
+      if (recovery)
+        await clearFixtureCleanupPending(join(paths.output, "results.jsonl"));
       const checkout = recovery
         ? join(paths.output, "recovery-checkouts", "repo", "attempt-2")
         : join(paths.output, "checkouts", "repo");
@@ -6025,6 +6160,7 @@ for (const modified of [
       completed: 1,
       skipped: 0,
     });
+    await clearFixtureCleanupPending(join(paths.output, "results.jsonl"));
     const checkout = join(
       paths.output,
       "recovery-checkouts",
@@ -6118,6 +6254,7 @@ for (const nested of [false, true, "chain"] as const) {
         completed: 1,
         skipped: 0,
       });
+      await clearFixtureCleanupPending(join(paths.output, "results.jsonl"));
       const checkout = join(
         paths.output,
         "recovery-checkouts",
@@ -6769,6 +6906,7 @@ test("retained scope recovery rejects mismatched artifacts without resurrecting 
     recoverScan: async () => undefined,
   });
   const first = await runMultiscan(campaign);
+  await clearFixtureCleanupPending(join(paths.output, "results.jsonl"));
   const receipt = (await results(first.resultsPath)).find(
     (entry) => entry["status"] === "completed",
   );
@@ -7215,6 +7353,7 @@ for (const staged of [false, true]) {
       scanOptionsByMode: { standard: { target: ["src/app.ts", "README.md"] } },
     });
     const initial = await runMultiscan(campaign);
+    await clearFixtureCleanupPending(join(paths.output, "results.jsonl"));
     expect(initial).toMatchObject({ completed: 1, skipped: 0 });
     const ledger = await readFile(initial.resultsPath);
     const checkout = join(
@@ -7488,6 +7627,7 @@ for (const nested of [false, true]) {
       skipped: 0,
     });
 
+    await clearFixtureCleanupPending(join(paths.output, "results.jsonl"));
     await unlink(join(checkout, "alias"));
     await rm(join(checkout, "src"), { recursive: true });
     await writeFile(
@@ -7575,6 +7715,7 @@ test("retained spelling recovery restores a tracked interpreter selection", asyn
     recoverScan: async () => undefined,
   });
   const initial = await runMultiscan(campaign);
+  await clearFixtureCleanupPending(join(paths.output, "results.jsonl"));
   expect(await results(initial.resultsPath)).toEqual(
     expect.arrayContaining([expect.objectContaining({ status: "completed" })]),
   );
@@ -7658,6 +7799,7 @@ for (const tracked of [false, true]) {
         recoverScan: async () => undefined,
       });
       const initial = await runMultiscan(campaign);
+      await clearFixtureCleanupPending(join(paths.output, "results.jsonl"));
       expect(initial).toMatchObject({ completed: 1, skipped: 0 });
       const ledger = await readFile(initial.resultsPath);
       const checkout = join(
@@ -7729,6 +7871,7 @@ for (const missingCode of ["native", "ENOENT"]) {
         scanOptionsByMode: selected,
       });
       const initial = await runMultiscan(campaign);
+      await clearFixtureCleanupPending(join(paths.output, "results.jsonl"));
       expect(initial).toMatchObject({ completed: 1, skipped: 0 });
       const ledger = await readFile(initial.resultsPath);
       const checkout = join(
@@ -7851,6 +7994,7 @@ for (const { parentThroughLink, missing } of [
         config,
       });
       const initial = await runMultiscan(campaign);
+      await clearFixtureCleanupPending(join(paths.output, "results.jsonl"));
       expect(initial).toMatchObject({ completed: 1, skipped: 0 });
       const ledger = await readFile(initial.resultsPath);
       const checkout = join(
@@ -7954,6 +8098,7 @@ for (const linked of [false, true]) {
         scanOptionsByMode: selected,
       });
       const initial = await runMultiscan(campaign);
+      await clearFixtureCleanupPending(join(paths.output, "results.jsonl"));
       expect(initial).toMatchObject({ completed: 1, skipped: 0 });
       const ledger = await readFile(initial.resultsPath);
       const checkout = join(
@@ -8161,6 +8306,7 @@ for (const imported of [false, true]) {
           recoverScan: async () => undefined,
         });
         const initial = await runMultiscan(campaign);
+        await clearFixtureCleanupPending(join(paths.output, "results.jsonl"));
         expect(initial).toMatchObject({ completed: 1, skipped: 0 });
         const ledger = await readFile(initial.resultsPath);
         execFileSync(original!.executable, [
@@ -8246,6 +8392,7 @@ for (const ignoreCase of [false, true]) {
       recoverScan: async () => undefined,
     });
     const initial = await runMultiscan(campaign);
+    await clearFixtureCleanupPending(join(paths.output, "results.jsonl"));
     expect(initial).toMatchObject({ completed: 1, skipped: 0 });
     expect(await results(initial.resultsPath)).toEqual(
       expect.arrayContaining([
