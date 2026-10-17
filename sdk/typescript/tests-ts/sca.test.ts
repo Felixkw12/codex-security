@@ -1315,6 +1315,50 @@ test.each(["absolute", "relative"] as const)(
   },
 );
 
+test("final cost recovery persists an unchanged estimate without duplicate notifications", async () => {
+  const { client, repository, outputDir } = await fixture({ turns: ["malformed"] });
+  await using security = client;
+  const costs: Readonly<ScanCost>[] = [];
+  const originalRefresh = ScanCostTracker.prototype.refresh;
+  const originalStop = ScanCostTracker.prototype.stop;
+  let finalizing = false;
+  const refresh = spyOn(ScanCostTracker.prototype, "refresh").mockImplementation(
+    async function (this: ScanCostTracker) {
+      const snapshot = await originalRefresh.call(this);
+      if (!finalizing) throw new Error("synthetic temporary usage read failure");
+      return snapshot;
+    },
+  );
+  const stop = spyOn(ScanCostTracker.prototype, "stop").mockImplementation(
+    async function (this: ScanCostTracker, usage?: unknown) {
+      finalizing = true;
+      return originalStop.call(this, usage);
+    },
+  );
+  try {
+    const result = await security.scanDependencies({
+      repositoryPath: repository,
+      outputDir,
+      onCost: (cost) => {
+        costs.push(cost);
+      },
+    });
+    expect(costs.length).toBeGreaterThan(0);
+    const expected = costs.at(-1)!.estimatedUsd;
+    expect(expected).toBeGreaterThan(0);
+    expect(result.model.costUsd).toBe(expected);
+    const saved = JSON.parse(
+      await readFile(join(outputDir, "sca-result.json"), "utf8"),
+    ) as ScaResult;
+    expect(saved.model.costUsd).toBe(expected);
+    for (let index = 1; index < costs.length; index++)
+      expect(costs[index]).not.toEqual(costs[index - 1]);
+  } finally {
+    refresh.mockRestore();
+    stop.mockRestore();
+  }
+});
+
 test.each([
   "relative",
   "home",
