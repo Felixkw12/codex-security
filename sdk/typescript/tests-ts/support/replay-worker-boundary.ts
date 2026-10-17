@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { syncBuiltinESMExports } from "node:module";
 import { parse, stringify } from "smol-toml";
 import type { JsonObject } from "../../src/config.js";
-import { fakeCodexExecutorSource } from "../../../../plugins/codex-security/mcp-app/tests/support/fake-codex-executor-source.ts";
+import { fakeCodexSource } from "../../../../plugins/codex-security/mcp-app/tests/support/fake-codex-source.ts";
 const { importModule } = await import(
   new URL(
     "../../../../plugins/codex-security/mcp-app/tests/import-module.ts",
@@ -51,7 +51,7 @@ async function assertWorkerReplay(
   };
   await writeFile(
     fake,
-    fakeCodexExecutorSource(
+    fakeCodexSource(
       profile,
       true,
       { account: null, requiresOpenaiAuth: false },
