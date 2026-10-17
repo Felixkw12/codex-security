@@ -1316,19 +1316,22 @@ test.each(["absolute", "relative"] as const)(
 );
 
 test("final cost recovery persists an unchanged estimate without duplicate notifications", async () => {
-  const { client, repository, outputDir } = await fixture({ turns: ["malformed"] });
+  const { client, repository, outputDir } = await fixture({
+    turns: ["malformed"],
+  });
   await using security = client;
   const costs: Readonly<ScanCost>[] = [];
   const originalRefresh = ScanCostTracker.prototype.refresh;
   const originalStop = ScanCostTracker.prototype.stop;
   let finalizing = false;
-  const refresh = spyOn(ScanCostTracker.prototype, "refresh").mockImplementation(
-    async function (this: ScanCostTracker) {
-      const snapshot = await originalRefresh.call(this);
-      if (!finalizing) throw new Error("synthetic temporary usage read failure");
-      return snapshot;
-    },
-  );
+  const refresh = spyOn(
+    ScanCostTracker.prototype,
+    "refresh",
+  ).mockImplementation(async function (this: ScanCostTracker) {
+    const snapshot = await originalRefresh.call(this);
+    if (!finalizing) throw new Error("synthetic temporary usage read failure");
+    return snapshot;
+  });
   const stop = spyOn(ScanCostTracker.prototype, "stop").mockImplementation(
     async function (this: ScanCostTracker, usage?: unknown) {
       finalizing = true;
