@@ -11366,7 +11366,7 @@ async function executeScan(
       patches = patchRun.patches;
       scanData = { ...scanData, patchSeverity: patchThreshold, patches };
       if (patchRun.exitCode === 130 || patchRun.exitCode === 143)
-        return completedScan(patchRun.exitCode);
+        return finishResult(patchRun.exitCode);
       if (publication && patchExitCode(patches) === 0) {
         const pullRequest = await createPatchPullRequest(
           selected.repository,
