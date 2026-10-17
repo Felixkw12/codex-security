@@ -55,8 +55,8 @@ def test_empty_budget_report_does_not_deny_saved_validation(
     assert evidence.read_bytes() == original
     assert json.loads(original)["findings"]
     assert json.loads((scan.scan_dir / "findings.json").read_text())["findings"] == []
-    assert json.loads((scan.scan_dir / "coverage.json").read_text())["completeness"] == "partial"
+    assert "completeness" not in json.loads((scan.scan_dir / "coverage.json").read_text())
     report = (scan.scan_dir / "report.md").read_text()
     assert "No findings were validated" not in report
-    assert "No findings are included in this partial report." in report
-    assert "Review the unresolved work in Open Questions And Follow Up." in report
+    assert "No findings were reported." in report
+    assert "Open Questions And Follow Up" in report

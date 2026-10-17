@@ -210,7 +210,7 @@ async function testResponseLoss(responseLosses) {
       JSON.parse(await readFile(merged.resultPath, "utf8")),
       merged.result,
     );
-    assert.equal(merged.result.sourceCoverage.completeness, "complete");
+    assert.equal(merged.result.sourceCoverage.completeness, undefined);
     const snapshot = await store.get(run.scanId, "fixture-owner");
     const resumed = new DeepScanCoordinator({
       run: snapshot,

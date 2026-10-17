@@ -46,7 +46,7 @@ for (const options of [
       const coverage = JSON.parse(
         await readFile(path.join(scanDir, "coverage.json"), "utf8"),
       );
-      assert.equal(coverage.completeness, "partial");
+      assert.equal(coverage.completeness, undefined);
       assert.equal(
         new Set(coverage.deferred.map((item) => item.candidateId)).size,
         2,

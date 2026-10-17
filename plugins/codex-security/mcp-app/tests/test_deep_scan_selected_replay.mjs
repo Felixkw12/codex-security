@@ -43,6 +43,7 @@ for (const terminalReason of ["saturated", "capped"]) {
       };
       const { coverage, ...reduction } = draft;
       const bytes = JSON.stringify({ ...reduction, sourceCoverage: coverage });
+      delete draft.coverage.completeness;
       const digest = createHash("sha256").update(bytes).digest("hex");
       const resultPath = `artifacts/deep_discovery/dedup/dedup-0001/output/checkpoints/${digest}.json`;
       await mkdir(path.dirname(path.join(scanDir, resultPath)), {

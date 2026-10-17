@@ -165,7 +165,7 @@ def test_cost_before_selection_retains_only_merged_findings(
         findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
         assert len(findings) == (1 if accepted_kind == "reducer" else 0)
         coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
-        assert coverage["completeness"] == "partial"
+        assert "completeness" not in coverage
         assert any(item["id"] == "scan-cost-limit" for item in coverage["deferred"])
         if accepted_kind == "reducer":
             selection = json.loads(run["finalization_input_json"])
@@ -362,7 +362,7 @@ def test_budget_preserves_accepted_scope_and_unmerged_scope_limits(
             assert saved_scope[key] == value
     assert warning in saved_scope["limitations"]
     coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
-    assert coverage["completeness"] == "partial"
+    assert "completeness" not in coverage
     assert any(
         item["reason"] == unmerged_limit
         and item["provenance"]["workerId"] == unmerged.parent.parent.name
@@ -492,7 +492,7 @@ def test_budget_completion_and_cancel_keep_the_committed_outcome(
             assert len(recorded["publicationSha256"]) == 64
         assert accepted.read_bytes() == accepted_bytes
         coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
-        assert coverage["completeness"] == "partial"
+        assert "completeness" not in coverage
         assert any(item["id"] == "accepted-follow-up" for item in coverage["deferred"])
         if not cancel_first:
             assert any(item["id"] == "scan-cost-limit" for item in coverage["deferred"])
@@ -658,7 +658,7 @@ os._exit(87)
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
     coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
     assert len(findings) == int(has_reducer)
-    assert coverage["completeness"] == "partial"
+    assert "completeness" not in coverage
     assert len({x["id"] for x in coverage["deferred"]}) == len(coverage["deferred"])
     assert all(Path(path).read_bytes() == data for path, data in originals.items())
 

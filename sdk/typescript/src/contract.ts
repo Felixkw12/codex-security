@@ -179,14 +179,14 @@ export async function loadContractWithScanDirectory(
 }
 
 /** Normalize optional legacy details on a copy, without changing saved artifacts. */
-export function normalizePersistedFindings(payload: unknown): unknown {
+function normalizePersistedFindings(payload: unknown): unknown {
   const compatible = structuredClone(payload);
   if (!isRecord(compatible) || !Array.isArray(compatible["findings"])) {
     return compatible;
   }
   for (const finding of compatible["findings"]) {
     if (!isRecord(finding)) continue;
-    normalizePersistedFindingDetails(finding, "canonical");
+    normalizePersistedFindingDetails(finding);
   }
   return compatible;
 }
@@ -499,7 +499,7 @@ function expectedCoverageMode(
   return mode === "deep" ? "deep_repository" : "repository";
 }
 
-function safeScopePath(value: string): string {
+export function safeScopePath(value: string): string {
   return value === "."
     ? value
     : safeRelativePath(value, "manifest scope include path");

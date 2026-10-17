@@ -21,10 +21,10 @@ for (const continueAfterResume of [false, true]) {
       const coverage = JSON.parse(
         await readFile(path.join(scanDir, "coverage.json"), "utf8"),
       );
-      assert.equal(coverage.completeness, "partial");
+      assert.equal(coverage.completeness, undefined);
       assert.deepEqual(
         coverage.reviews.map((review) => review.completeness),
-        ["partial", "complete", "unknown"],
+        [undefined, undefined, undefined],
       );
       assert.equal(coverage.reviews[0].attempt, 2);
       assert.equal(

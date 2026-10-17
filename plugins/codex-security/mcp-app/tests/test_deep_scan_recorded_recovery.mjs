@@ -42,10 +42,10 @@ for (const [continueAfterResume, legacyAttempts, splitSeededReducers] of [
       const coverage = JSON.parse(
         await readFile(path.join(scanDir, "coverage.json"), "utf8"),
       );
-      assert.equal(coverage.completeness, "partial");
+      assert.equal(coverage.completeness, undefined);
       assert.deepEqual(
         coverage.reviews.map((review) => review.completeness),
-        ["partial", "complete", "unknown"],
+        [undefined, undefined, undefined],
       );
       assert.equal(
         new Set(coverage.deferred.map((item) => item.candidateId)).size,

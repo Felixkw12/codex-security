@@ -54,6 +54,7 @@ def test_public_stop_retains_accepted_partial_evidence_and_newer_rejection(tmp_p
         run_workbench(state, *worker_args, "--status", "running", environment=environment)
         current = copy.deepcopy(finding)
         current["identity"]["anchor"] = name
+        current["provenance"]["candidateId"] = name
         current["extensions"] = {"candidateId": name}
         draft = {"scanId": scan_id, "complete": True, "findings": [current], "coverage": coverage}
         result.write_text(json.dumps(draft))
@@ -106,7 +107,7 @@ def test_public_stop_retains_accepted_partial_evidence_and_newer_rejection(tmp_p
     findings = json.loads((scan_dir / "findings.json").read_text())["findings"]
     assert [item["identity"]["anchor"] for item in findings] == ["accepted"]
     retained_coverage = json.loads((scan_dir / "coverage.json").read_text())
-    assert retained_coverage["completeness"] == "partial"
+    assert "completeness" not in retained_coverage
     assert any(item.get("candidateId") == "pending-query" for item in retained_coverage["deferred"])
     assert any(
         item.get("candidateId") == "interrupted" and item["disposition"] == "rejected"

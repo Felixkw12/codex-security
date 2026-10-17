@@ -64,9 +64,7 @@
   {
     "version": 8,
     "name": "sealed manifest digests",
-    "statements": [
-      "ALTER TABLE scans\nADD COLUMN seal_manifest_digest TEXT;"
-    ]
+    "statements": ["ALTER TABLE scans\nADD COLUMN seal_manifest_digest TEXT;"]
   },
   {
     "version": 9,
@@ -79,9 +77,7 @@
   {
     "version": 10,
     "name": "scan cancellation state",
-    "statements": [
-      "ALTER TABLE scans\nADD COLUMN canceled_at TEXT;"
-    ]
+    "statements": ["ALTER TABLE scans\nADD COLUMN canceled_at TEXT;"]
   },
   {
     "version": 11,
@@ -100,9 +96,7 @@
   {
     "version": 12,
     "name": "scan continuation threads",
-    "statements": [
-      "ALTER TABLE scans\nADD COLUMN continuation_thread_id TEXT;"
-    ]
+    "statements": ["ALTER TABLE scans\nADD COLUMN continuation_thread_id TEXT;"]
   },
   {
     "version": 13,
@@ -141,9 +135,7 @@
   {
     "version": 17,
     "name": "scan target summaries",
-    "statements": [
-      "ALTER TABLE scans\nADD COLUMN target_summary TEXT;"
-    ]
+    "statements": ["ALTER TABLE scans\nADD COLUMN target_summary TEXT;"]
   },
   {
     "version": 18,
@@ -198,9 +190,7 @@
   {
     "version": 24,
     "name": "persist scan cost estimates",
-    "statements": [
-      "ALTER TABLE scans ADD COLUMN cost_json TEXT;"
-    ]
+    "statements": ["ALTER TABLE scans ADD COLUMN cost_json TEXT;"]
   },
   {
     "version": 25,
@@ -366,9 +356,7 @@
   {
     "version": 42,
     "name": "editable scan names",
-    "statements": [
-      "ALTER TABLE scans ADD COLUMN name TEXT;"
-    ]
+    "statements": ["ALTER TABLE scans ADD COLUMN name TEXT;"]
   },
   {
     "version": 43,
@@ -381,9 +369,7 @@
   {
     "version": 44,
     "name": "version local finding embedding inputs",
-    "statements": [
-      "ALTER TABLE finding_embeddings ADD COLUMN cache_key TEXT;"
-    ]
+    "statements": ["ALTER TABLE finding_embeddings ADD COLUMN cache_key TEXT;"]
   },
   {
     "version": 45,
@@ -410,6 +396,23 @@
   },
   {
     "version": 48,
+    "name": "share finding issue receipts across trackers",
+    "statements": [
+      "CREATE TABLE finding_issue_receipts (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    scan_id TEXT NOT NULL,\n    finding_id TEXT NOT NULL,\n    occurrence_id TEXT NOT NULL,\n    destination_key TEXT NOT NULL,\n    external_id TEXT NOT NULL,\n    external_url TEXT,\n    operation TEXT NOT NULL CHECK (operation IN ('create', 'update', 'reuse')),\n    readback_json TEXT,\n    created_at TEXT NOT NULL,\n    updated_at TEXT NOT NULL,\n    UNIQUE (occurrence_id, destination_key, external_id, operation)\n);",
+      "INSERT INTO finding_issue_receipts (\n    scan_id, finding_id, occurrence_id, destination_key, external_id, external_url,\n    operation, readback_json, created_at, updated_at\n) SELECT scan_id, finding_id, occurrence_id, json_array(destination_type, team_id, project_id),\n    external_id, external_url, 'create', NULL, created_at, created_at\nFROM finding_publications ORDER BY id;",
+      "DROP TABLE finding_publications;",
+      "CREATE INDEX finding_issue_receipts_by_finding\nON finding_issue_receipts(finding_id, destination_key, id);"
+    ]
+  },
+  {
+    "version": 49,
+    "name": "index finding issue receipt ownership",
+    "statements": [
+      "CREATE INDEX finding_issue_receipts_by_destination_issue\nON finding_issue_receipts(destination_key, external_id, finding_id);"
+    ]
+  },
+  {
+    "version": 50,
     "name": "preserve original deep scan discovery context",
     "statements": [
       "ALTER TABLE deep_scan_runs ADD COLUMN discovery_user_context TEXT;",
@@ -417,7 +420,7 @@
     ]
   },
   {
-    "version": 49,
+    "version": 51,
     "name": "retain deep scan attempts and exact merge inputs",
     "statements": [
       "CREATE TABLE deep_scan_attempts (\n    scan_id TEXT NOT NULL REFERENCES deep_scan_runs(scan_id) ON DELETE CASCADE,\n    worker_id TEXT NOT NULL REFERENCES deep_scan_workers(id) ON DELETE CASCADE,\n    attempt INTEGER NOT NULL,\n    status TEXT NOT NULL,\n    started_at TEXT NOT NULL,\n    completed_at TEXT,\n    end_reason TEXT,\n    error_message TEXT,\n    accepted_result_path TEXT,\n    accepted_result_sha256 TEXT,\n    receipt_json TEXT,\n    PRIMARY KEY (worker_id, attempt)\n);",
@@ -429,28 +432,28 @@
     ]
   },
   {
-    "version": 50,
+    "version": 52,
     "name": "persist selected deep scan finalization input",
     "statements": [
       "ALTER TABLE deep_scan_runs ADD COLUMN finalization_input_json TEXT;"
     ]
   },
   {
-    "version": 51,
+    "version": 53,
     "name": "freeze stopped scan checkpoint selections",
     "statements": [
       "ALTER TABLE scans ADD COLUMN retained_checkpoint_heads_json TEXT;"
     ]
   },
   {
-    "version": 52,
+    "version": 54,
     "name": "bind original deep scan parent usage turn",
     "statements": [
       "ALTER TABLE deep_scan_runs ADD COLUMN usage_owner_json TEXT;"
     ]
   },
   {
-    "version": 53,
+    "version": 55,
     "name": "bind original deep scan execution settings",
     "statements": [
       "ALTER TABLE deep_scan_runs ADD COLUMN execution_settings_json TEXT;"

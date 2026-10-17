@@ -39,8 +39,9 @@ async function fixture() {
   return { root, home, plugin: { pluginRoot, installedRoot }, blocked };
 }
 
-for (const profile of [false, true]) {
-  test(`disables cached skill files while preserving effective selection (profile=${profile})`, async () => {
+test.each([false, true])(
+  "disables cached skill files while preserving effective selection (profile=%j)",
+  async (profile) => {
     const { root, home, plugin, blocked } = await fixture();
     const unrelated = {
       path: join(root, "other-plugin", "SKILL.md"),
@@ -91,8 +92,8 @@ for (const profile of [false, true]) {
         (before["profiles"] as JsonObject)["unused"],
       );
     }
-  });
-}
+  },
+);
 
 test("leaves plugins outside the credential home and absent skills unchanged", async () => {
   const { root, home, plugin } = await fixture();
@@ -115,8 +116,9 @@ test("leaves plugins outside the credential home and absent skills unchanged", a
   ).toBe(config);
 });
 
-for (const profile of [false, true]) {
-  test(`preserves malformed native skill settings (profile=${profile})`, async () => {
+test.each([false, true])(
+  "preserves malformed native skill settings (profile=%j)",
+  async (profile) => {
     const { home, plugin } = await fixture();
     for (const skills of [
       false,
@@ -133,8 +135,8 @@ for (const profile of [false, true]) {
       expect(await scanSkillConfig(config, plugin, home)).toBe(config);
       expect(config).toEqual(before);
     }
-  });
-}
+  },
+);
 
 test("isolates concurrent scan selections without changing their shared configuration", async () => {
   const [first, second] = await Promise.all([fixture(), fixture()]);

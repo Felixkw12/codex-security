@@ -29,10 +29,11 @@ import {
   preflightProviderDefinitions,
   profileConfigOverrides,
 } from "../../../scripts/codex_profile.mjs";
-import { executablePathForSpawn } from "./executable-path.js";
+import { executablePathForSpawn } from "../executable-path.js";
 import { writePrivateFile } from "./artifacts.js";
 import {
   classifyCodexWorkerError,
+  codexWorkerTurnError,
   DeepScanNonRetryableError,
 } from "./errors.js";
 import {
@@ -334,7 +335,12 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
             } else if (event.type === "turn.completed") {
               request.signal.removeEventListener("abort", forwardAbort);
             } else if (event.type === "turn.failed") {
-              throw new Error((event.error as { message: string }).message);
+              const error = codexWorkerTurnError(
+                (event.error as { message: string }).message,
+              );
+              if (error instanceof DeepScanNonRetryableError)
+                request.onNonRetryableError?.(error);
+              throw error;
             } else if (
               event.type === "error" &&
               typeof event.message === "string"
@@ -381,17 +387,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
   private compactArtifactServer(
     request: CodexWorkerRequest,
     includePathsFile?: string,
-  ): Record<
-    string,
-    {
-      command: string;
-      args: string[];
-      env: Record<string, string>;
-      required: true;
-      startup_timeout_sec: number;
-      tool_timeout_sec: number;
-    }
-  > {
+  ) {
     const scan = this.modelSettings.artifactContext;
     if (!scan) return {};
 

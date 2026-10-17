@@ -227,7 +227,7 @@ export function applyMigrations(
         if ([2, 12, 13, 26, 28, 31, 32, 47].includes(item.version))
           repairAdditive(database, item.version);
         else if (item.version === 11) repairDeepScan(database);
-        else if (item.version >= 48 && item.version <= 53) {
+        else if (item.version >= 50 && item.version <= 55) {
           // Restore recorded extensions when the base Deep tables were recreated.
           // Data updates from an already applied migration must not run again.
           for (const statement of item.statements) {

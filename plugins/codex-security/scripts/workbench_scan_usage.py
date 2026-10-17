@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
+from urllib.parse import quote
 
 TOKEN_FIELDS = {
     "input_tokens": "inputTokens",
@@ -85,9 +86,11 @@ def collect_scan_usage(
     *,
     thread_id: str | None = None,
     completed_at: str | None = None,
+    completed_turn_id: str | None = None,
 ) -> dict[str, Any]:
     """Count only complete, attributable rollout events inside this scan's window."""
 
+    completion_thread_id = thread_id
     attribution = scan_execution_attribution(connection, scan)
     if attribution and attribution.get("legacy"):
         attribution = None
@@ -107,7 +110,8 @@ def collect_scan_usage(
         if attribution
         else _scan_root_thread_ids(connection, scan, thread_id)
     )
-    if not roots:
+    worker_directories = _scan_worker_directories(connection, scan)
+    if not roots and not worker_directories:
         return _unavailable_usage("scan_thread_unavailable")
 
     warnings: set[str] = set()
@@ -150,11 +154,12 @@ def collect_scan_usage(
     if started_at is None:
         return _unavailable_usage("scan_window_unavailable")
 
+    execution_thread_ids = set(attribution["executionThreadIds"]) if attribution else set()
     sessions: dict[str, list[RolloutSession]] = {}
     missing_thread_ids: set[str] = set()
     seen_thread_ids: set[str] = set()
     for state_database, group_roots in groups:
-        if not group_roots:
+        if not group_roots and not worker_directories:
             continue
         try:
             if state_database is None:
@@ -164,6 +169,9 @@ def collect_scan_usage(
                 group_roots,
                 warnings,
                 descendant_roots=set(attribution["executionThreadIds"]) if attribution else None,
+                worker_directories=worker_directories,
+                started_at=started_at,
+                completed_at=stopped_at,
             )
         except (OSError, sqlite3.Error, ValueError):
             warnings.add("codex_state_unavailable")
@@ -171,6 +179,8 @@ def collect_scan_usage(
             continue
         missing_thread_ids.update(missing)
         for session in discovered:
+            if session.parent_thread_id is None and session.thread_id not in roots:
+                execution_thread_ids.add(session.thread_id)
             copies = sessions.setdefault(session.thread_id, [])
             if session not in copies:
                 copies.append(session)
@@ -227,7 +237,7 @@ def collect_scan_usage(
         owner_turn_id = None
         if (
             attribution
-            and session.thread_id not in attribution["executionThreadIds"]
+            and session.thread_id not in execution_thread_ids
             and session.parent_thread_id is None
         ):
             owner = attribution["owner"]
@@ -252,6 +262,9 @@ def collect_scan_usage(
                 started_at=started_at,
                 completed_at=stopped_at,
                 owner_turn_id=owner_turn_id,
+                completed_turn_id=(
+                    completed_turn_id if session.thread_id == completion_thread_id else None
+                ),
                 model_usage=model_usage,
             )
         except (OSError, UnicodeError, ValueError):
@@ -298,6 +311,7 @@ def _read_rollout_copies_usage(
     started_at: datetime,
     completed_at: datetime | None,
     owner_turn_id: str | None,
+    completed_turn_id: str | None = None,
     model_usage: dict[str | None, dict[str, int]],
 ) -> tuple[dict[str, int], set[str]]:
     readings = []
@@ -309,6 +323,7 @@ def _read_rollout_copies_usage(
                 started_at=started_at,
                 completed_at=completed_at,
                 owner_turn_id=owner_turn_id,
+                completed_turn_id=completed_turn_id,
                 model_usage=local_models,
             )
         except (OSError, UnicodeError, ValueError):
@@ -492,6 +507,21 @@ def scan_execution_fields(connection: sqlite3.Connection, scan: sqlite3.Row) -> 
     }
 
 
+def _scan_worker_directories(connection: sqlite3.Connection, scan: sqlite3.Row) -> set[str]:
+    if scan["mode"] != "deep":
+        return set()
+    return {
+        row["artifact_dir"]
+        if row["kind"] == "discovery"
+        else str(Path(scan["scan_dir"]) / "artifacts")
+        for row in connection.execute(
+            "SELECT kind, artifact_dir FROM deep_scan_workers "
+            "WHERE scan_id = ? AND kind IN ('discovery', 'dedup')",
+            (scan["id"],),
+        )
+    }
+
+
 def _codex_state_database(worker_codex_home: Path | None = None) -> Path | None:
     configured_home = os.environ.get("CODEX_HOME", "")
     current_home = Path(configured_home) if configured_home.strip() else Path.home() / ".codex"
@@ -537,9 +567,12 @@ def _discover_rollout_sessions(
     warnings: set[str],
     *,
     descendant_roots: set[str] | None = None,
+    worker_directories: set[str] | None = None,
+    started_at: datetime | None = None,
+    completed_at: datetime | None = None,
 ) -> tuple[list[RolloutSession], set[str]]:
     database = sqlite3.connect(
-        state_database.as_uri() + "?mode=ro",
+        f"file:{quote(str(state_database), safe='')}?mode=ro",
         uri=True,
         timeout=STATE_DATABASE_TIMEOUT_SECONDS,
     )
@@ -555,7 +588,32 @@ def _discover_rollout_sessions(
                 raise ValueError("Codex state graph does not expose the required thread columns.")
         sessions: dict[str, RolloutSession] = {}
         missing_thread_ids: set[str] = set()
-        for root in roots:
+        root_ids = dict.fromkeys(roots)
+        worker_directories = worker_directories or set()
+        started_millisecond = (
+            started_at.replace(microsecond=started_at.microsecond // 1000 * 1000)
+            if started_at is not None
+            else None
+        )
+        completed_timestamp = int(completed_at.timestamp()) if completed_at is not None else None
+        directory_expression = "cwd"
+        if worker_directories and os.name == "nt":
+            from windows_scan_local_files import _normalized_windows_path
+
+            database.create_function(
+                "codex_security_path_key", 1, _normalized_windows_path, deterministic=True
+            )
+            directory_expression = "codex_security_path_key(cwd)"
+            worker_directories = {_normalized_windows_path(value) for value in worker_directories}
+        for directory in sorted(worker_directories):
+            for row in database.execute(
+                "SELECT id FROM threads WHERE cwd IS NOT NULL "
+                f"AND {directory_expression} = ? AND created_at >= ? "
+                "AND (? IS NULL OR created_at <= ?) ORDER BY id",
+                (directory, int(started_at.timestamp()), completed_timestamp, completed_timestamp),
+            ):
+                root_ids[row["id"]] = None
+        for root in root_ids:
             row = database.execute(
                 "SELECT id, rollout_path FROM threads WHERE id = ?",
                 (root,),
@@ -564,14 +622,30 @@ def _discover_rollout_sessions(
                 missing_thread_ids.add(root)
                 warnings.add("scan_root_unavailable")
                 continue
-            if root not in sessions:
-                path = _rollout_path(row["rollout_path"])
-                if path is None:
+            path = _rollout_path(row["rollout_path"])
+            if path is None:
+                missing_thread_ids.add(root)
+                warnings.add("rollout_unavailable")
+                continue
+            if root not in roots:
+                try:
+                    with path.open("rb") as source:
+                        metadata = json.loads(source.readline())
+                except (OSError, ValueError):
                     missing_thread_ids.add(root)
                     warnings.add("rollout_unavailable")
                     continue
-                sessions[root] = RolloutSession(root, None, path)
-            if descendant_roots is not None and root not in descendant_roots:
+                if (
+                    isinstance(metadata, dict)
+                    and metadata.get("type") == "session_meta"
+                    and isinstance(payload := metadata.get("payload"), dict)
+                    and (payload.get("id") or payload.get("session_id")) == root
+                    and (created_at := _timestamp(payload.get("timestamp"))) is not None
+                    and created_at < started_millisecond
+                ):
+                    continue
+            sessions[root] = RolloutSession(root, None, path)
+            if descendant_roots is not None and root in roots and root not in descendant_roots:
                 continue
             descendants = database.execute(
                 """
@@ -727,12 +801,14 @@ def _read_rollout_usage(
     completed_at: datetime | None,
     owner_turn_id: str | None = None,
     model_usage: dict[str | None, dict[str, int]] | None = None,
+    completed_turn_id: str | None = None,
 ) -> tuple[dict[str, int], set[str]]:
     usage, warnings, _ = _read_rollout_usage_with_extent(
         session,
         started_at=started_at,
         completed_at=completed_at,
         owner_turn_id=owner_turn_id,
+        completed_turn_id=completed_turn_id,
         model_usage=model_usage,
     )
     return usage, warnings
@@ -744,6 +820,7 @@ def _read_rollout_usage_with_extent(
     started_at: datetime,
     completed_at: datetime | None,
     owner_turn_id: str | None = None,
+    completed_turn_id: str | None = None,
     model_usage: dict[str | None, dict[str, int]] | None = None,
 ) -> tuple[dict[str, int], set[str], int]:
     parsed_events = 0
@@ -762,6 +839,47 @@ def _read_rollout_usage_with_extent(
     expected_response_tokens = 0
     response_epoch_owned = False
     local_models: dict[str | None, dict[str, int]] = {}
+    finished_total = _empty_token_usage()
+    finished_models: dict[str | None, dict[str, int]] = {}
+    observed_response_usage = _empty_token_usage()
+    native_receipts = False
+    completed_turn_measured = False
+
+    def finish_turn() -> None:
+        nonlocal total, counter_total, local_models, response_usage_observed, native_receipts
+        # Turn receipts supersede overlapping legacy counters. Older receipts
+        # lack a turn total, so retain the measured counter remainder as unknown-model usage.
+        remainder = (
+            {key: max(0, value - total[key]) for key, value in counter_total.items()}
+            if not native_receipts
+            else _empty_token_usage()
+        )
+        remainder["cachedInputTokens"] = min(
+            remainder["cachedInputTokens"], remainder["inputTokens"]
+        )
+        remainder["cacheWriteInputTokens"] = min(
+            remainder["cacheWriteInputTokens"],
+            remainder["inputTokens"] - remainder["cachedInputTokens"],
+        )
+        remainder["reasoningOutputTokens"] = min(
+            remainder["reasoningOutputTokens"], remainder["outputTokens"]
+        )
+        remainder["totalTokens"] = remainder["inputTokens"] + remainder["outputTokens"]
+        if remainder["totalTokens"] > 0:
+            if response_usage_observed:
+                warnings.add("token_receipts_incomplete")
+            _add_token_usage(total, remainder)
+            _add_token_usage(local_models.setdefault(None, _empty_token_usage()), remainder)
+        if response_usage_observed:
+            warnings.discard("token_counter_regressed")
+        _add_token_usage(finished_total, total)
+        for model, usage in local_models.items():
+            _add_token_usage(finished_models.setdefault(model, _empty_token_usage()), usage)
+        total = _empty_token_usage()
+        counter_total = _empty_token_usage()
+        local_models = {}
+        response_usage_observed = False
+        native_receipts = False
 
     with session.path.open("rb") as source:
         for line_number, raw_line in enumerate(source, start=1):
@@ -810,10 +928,6 @@ def _read_rollout_usage_with_extent(
 
             if not isinstance(payload, dict):
                 continue
-            if event.get("type") == "turn_context" or (
-                event.get("type") == "event_msg" and payload.get("type") == "task_started"
-            ):
-                current_turn_id = payload.get("turn_id")
             if not boundary_reached:
                 if _is_owned_task_start(session.thread_id, event, payload, session_started_at):
                     task_started_at = _timestamp(event.get("timestamp"))
@@ -821,17 +935,56 @@ def _read_rollout_usage_with_extent(
                         warnings.add("thread_ownership_unavailable")
                         return total, warnings, parsed_events
                     if task_started_at < started_at or (
-                        completed_at is not None and task_started_at > completed_at
+                        completed_at is not None
+                        and task_started_at > completed_at
+                        and payload.get("turn_id") != completed_turn_id
                     ):
                         warnings.add("thread_outside_scan_window")
                         return total, warnings, parsed_events
                     boundary_reached = True
+                    current_turn_id = payload.get("turn_id")
                 elif event.get("type") == "event_msg" and payload.get("type") == "token_count":
                     inherited_usage = _token_snapshot(payload)
                     if inherited_usage is not None:
                         previous = inherited_usage
                 continue
+            if event.get("type") == "turn_context" or (
+                event.get("type") == "event_msg" and payload.get("type") == "task_started"
+            ):
+                next_turn_id = payload.get("turn_id")
+                if (
+                    completed_turn_id is not None
+                    and current_turn_id == completed_turn_id
+                    and next_turn_id != completed_turn_id
+                ):
+                    break
+                if next_turn_id != current_turn_id:
+                    finish_turn()
+                    observed_response_usage = _empty_token_usage()
+                current_turn_id = next_turn_id
+                continue
+            if (
+                completed_turn_id is not None
+                and event.get("type") == "event_msg"
+                and payload.get("type") == "task_complete"
+                and payload.get("turn_id") == completed_turn_id
+            ):
+                break
             if event.get("type") == "compacted":
+                timestamp = _timestamp(event.get("timestamp"))
+                if (
+                    timestamp is not None
+                    and timestamp >= started_at
+                    and (
+                        completed_at is None
+                        or timestamp <= completed_at
+                        or (completed_turn_id is not None and current_turn_id == completed_turn_id)
+                    )
+                    and (owner_turn_id is None or current_turn_id == owner_turn_id)
+                    and "compaction_response_id" not in payload
+                    and not response_usage_observed
+                ):
+                    warnings.add("compaction_usage_unavailable")
                 # Later receipt counters describe a new compaction epoch and cannot
                 # account for missing receipts from the earlier one.
                 if response_epoch_owned and expected_response_tokens > response_tokens:
@@ -842,37 +995,56 @@ def _read_rollout_usage_with_extent(
                 continue
             if event.get("type") == "token_usage_record":
                 response_id = payload.get("response_id")
-                usage = _token_snapshot({"info": {"total_token_usage": payload.get("usage")}})
+                usage = _usage_counts(payload.get("usage"))
+                timestamp = _timestamp(event.get("timestamp"))
+                if payload.get("thread_id", session.thread_id) != session.thread_id:
+                    continue
                 if (
                     not isinstance(response_id, str)
+                    or not response_id
                     or usage is None
-                    or payload.get("thread_id", session.thread_id) != session.thread_id
-                    or response_id in response_ids
+                    or timestamp is None
                 ):
+                    warnings.add("token_record_invalid")
+                    continue
+                is_completion_turn = (
+                    completed_turn_id is not None and payload.get("turn_id") == completed_turn_id
+                )
+                if completed_at is not None and timestamp > completed_at and not is_completion_turn:
+                    continue
+                if response_id in response_ids:
                     continue
                 response_ids.add(response_id)
-                cumulative = _token_snapshot(
-                    {"info": {"total_token_usage": payload.get("thread_token_usage")}}
-                )
-                if cumulative is not None:
+                turn_usage = _usage_counts(payload.get("turn_token_usage"))
+                _add_token_usage(observed_response_usage, usage)
+                cumulative = _usage_counts(payload.get("thread_token_usage"))
+                if cumulative is not None and turn_usage is None:
                     expected_response_tokens = max(
                         expected_response_tokens, cumulative["totalTokens"]
                     )
                 response_tokens += usage["totalTokens"]
-                timestamp = _timestamp(event.get("timestamp"))
-                if timestamp is None:
-                    warnings.add("token_record_invalid")
-                    continue
-                if timestamp < started_at or (
-                    completed_at is not None and timestamp > completed_at
-                ):
+                if timestamp < started_at:
+                    if turn_usage is not None:
+                        observed_response_usage = turn_usage
                     continue
                 if (
                     owner_turn_id is not None
                     and payload.get("turn_id", current_turn_id) != owner_turn_id
                 ):
                     continue
-                response_epoch_owned = True
+                if current_turn_id is None:
+                    current_turn_id = payload.get("turn_id")
+                if turn_usage is not None:
+                    native_receipts = True
+                    if any(
+                        turn_usage[key] > observed_response_usage[key]
+                        for key in TOKEN_FIELDS.values()
+                    ):
+                        warnings.add("token_record_incomplete")
+                else:
+                    response_epoch_owned = True
+                if is_completion_turn:
+                    completed_turn_measured = True
                 if not response_usage_observed:
                     response_usage_observed = True
                     total = _empty_token_usage()
@@ -901,11 +1073,16 @@ def _read_rollout_usage_with_extent(
             previous = snapshot
             if timestamp < started_at:
                 continue
-            if completed_at is not None and timestamp > completed_at:
+            is_completion_turn = (
+                completed_turn_id is not None and current_turn_id == completed_turn_id
+            )
+            if completed_at is not None and timestamp > completed_at and not is_completion_turn:
                 continue
             if owner_turn_id is not None and current_turn_id != owner_turn_id:
                 continue
             usage_observed = True
+            if is_completion_turn:
+                completed_turn_measured = True
             if not response_usage_observed:
                 local_models.setdefault(current_model, _empty_token_usage())
             if delta["totalTokens"] <= 0:
@@ -917,33 +1094,20 @@ def _read_rollout_usage_with_extent(
                     local_models.setdefault(current_model, _empty_token_usage()), delta
                 )
 
-    remainder = {key: max(0, value - total[key]) for key, value in counter_total.items()}
-    remainder["cachedInputTokens"] = min(remainder["cachedInputTokens"], remainder["inputTokens"])
-    remainder["cacheWriteInputTokens"] = min(
-        remainder["cacheWriteInputTokens"],
-        remainder["inputTokens"] - remainder["cachedInputTokens"],
-    )
-    remainder["reasoningOutputTokens"] = min(
-        remainder["reasoningOutputTokens"], remainder["outputTokens"]
-    )
-    remainder["totalTokens"] = remainder["inputTokens"] + remainder["outputTokens"]
-    if remainder["totalTokens"] > 0:
-        if response_usage_observed:
-            warnings.add("token_receipts_incomplete")
-        _add_token_usage(total, remainder)
-        _add_token_usage(local_models.setdefault(None, _empty_token_usage()), remainder)
-    if response_usage_observed:
-        warnings.discard("token_counter_regressed")
+    finish_turn()
+
     if response_epoch_owned and expected_response_tokens > response_tokens:
         warnings.add("token_receipts_incomplete")
     if model_usage is not None:
-        for model, usage in local_models.items():
+        for model, usage in finished_models.items():
             _add_token_usage(model_usage.setdefault(model, _empty_token_usage()), usage)
     if not boundary_reached:
         warnings.add("thread_ownership_unavailable")
     elif not usage_observed:
         warnings.add("token_usage_unavailable")
-    return total, warnings, parsed_events
+    if completed_turn_id is not None and not completed_turn_measured:
+        warnings.add("completion_turn_unavailable")
+    return finished_total, warnings, parsed_events
 
 
 def _session_parent_thread_id(payload: Mapping[str, Any]) -> str | None:
@@ -999,7 +1163,10 @@ def _token_snapshot(payload: Mapping[str, Any]) -> dict[str, int] | None:
     info = payload.get("info")
     if not isinstance(info, dict):
         return None
-    usage = info.get("total_token_usage")
+    return _usage_counts(info.get("total_token_usage"))
+
+
+def _usage_counts(usage: object) -> dict[str, int] | None:
     if not isinstance(usage, dict):
         return None
     cache_write = usage.get("cache_write_input_tokens", usage.get("cache_write_tokens", 0))

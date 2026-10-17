@@ -148,6 +148,7 @@ for (const terminalReason of ["capped", "saturated"]) {
           sourceCoverage: coverage,
         },
       );
+      delete draft.coverage.completeness;
       const [name] = await readdir(path.join(root, "checkpoints"));
       const checkpoint = path.join(root, "checkpoints", name);
       const contents = await readFile(checkpoint);
@@ -194,7 +195,7 @@ for (const terminalReason of ["capped", "saturated"]) {
   });
 }
 
-test("recreates only partial coverage for a persisted zero-success deadline selection", async () => {
+test("retains unresolved coverage for a persisted zero-success deadline selection", async () => {
   const selection = {
     version: 1,
     resultPath: null,
@@ -210,7 +211,7 @@ test("recreates only partial coverage for a persisted zero-success deadline sele
   );
   assert.equal(result.scanId, scanId);
   assert.deepEqual(result.findings, []);
-  assert.equal(result.coverage.completeness, "partial");
+  assert.equal(result.coverage.completeness, undefined);
   assert.equal(result.coverage.deferred.length, 1);
   await assert.rejects(
     readSelectedDeepScanDraft(createDeepScanArtifacts("unused"), scanId, {

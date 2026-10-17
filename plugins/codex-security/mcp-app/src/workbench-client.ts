@@ -100,6 +100,7 @@ async function executeWorkbench(
     "complete-scan",
     "export-findings",
     "finish-deep-scan",
+    "finding-issues",
     "get-scan",
     "get-deep-scan",
     "get-workspace",
@@ -122,7 +123,8 @@ async function executeWorkbench(
   const execution = execFileAsync(
     pythonCommand,
     [
-      ...(isolatedPython ? ["-I", "-X", "utf8", "-B"] : []),
+      ...(isolatedPython ? ["-I", "-X", "utf8"] : []),
+      "-B",
       "-c",
       pythonSource,
       workbenchScriptPath(),

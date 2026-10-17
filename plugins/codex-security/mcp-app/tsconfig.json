@@ -6,7 +6,8 @@
     "paths": {
       "@openai/codex-sdk": ["./node_modules/@openai/codex-sdk"],
       "smol-toml": ["./node_modules/smol-toml/dist/index"],
-      "yauzl": ["./node_modules/@types/yauzl", "./node_modules/yauzl"]
+      "yauzl": ["./node_modules/@types/yauzl", "./node_modules/yauzl"],
+      "zod": ["./node_modules/zod"]
     },
     "resolveJsonModule": true,
     "skipLibCheck": true,

@@ -167,7 +167,7 @@ def test_budget_completion_validates_then_binds_intentional_projection(
         assert rebound["publicationSha256"] != recorded["publicationSha256"]
         assert workbench_db.execute("SELECT status FROM scans").fetchone()[0] == "complete"
         coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
-        assert coverage["completeness"] == "partial"
+        assert "completeness" not in coverage
         assert any(item["id"] == "scan-cost-limit" for item in coverage["deferred"])
 
 

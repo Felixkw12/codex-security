@@ -93,7 +93,7 @@ def test_stopped_recovery_preserves_accepted_coverage_without_worker_id_collisio
 
     assert stopped["progress"]["status"] == "failed"
     coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
-    assert coverage["completeness"] == "partial"
+    assert "completeness" not in coverage
     assert len(coverage["deferred"]) == 2
     assert coverage["deferred"][-1]["id"] == "scan-stopped"
     assert len(coverage["surfaces"]) == 2
@@ -165,6 +165,6 @@ def test_stopped_recovery_keeps_unmerged_coverage_after_accepted_review(
     )
 
     coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
-    assert coverage["completeness"] == "partial"
+    assert "completeness" not in coverage
     assert coverage["reviews"] == reviews
     assert deferred in coverage["deferred"]

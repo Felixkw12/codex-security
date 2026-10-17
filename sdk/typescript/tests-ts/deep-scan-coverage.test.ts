@@ -55,13 +55,13 @@ test.each([
         threadId,
         turnResult: { status: "completed" },
       });
-      expect(result.coverage.completeness).toBe(completeness);
+      expect(result.coverage["completeness"]).toBeUndefined();
       const coverage = JSON.parse(
         await readFile(join(scanDir, "coverage.json"), "utf8"),
       );
       expect(coverage.reviews[0].attempt).toBe(2);
       const report = await readFile(join(scanDir, "report.md"), "utf8");
-      expect(report).toContain(`| Coverage | ${completeness} |`);
+      expect(report).not.toContain("| Coverage |");
       expect(coverage.explicitExclusions).toHaveLength(coverage.reviews.length);
       for (const review of coverage.reviews)
         expect(report).toContain(review.workerId);
@@ -74,10 +74,11 @@ test.each([
             .size,
         ).toBe(2);
         expect(
-          coverage.reviews.map(
-            (review: { completeness: string }) => review.completeness,
+          coverage.reviews.every(
+            (review: Record<string, unknown>) =>
+              review["completeness"] === undefined,
           ),
-        ).toEqual(["partial", "complete", "unknown"]);
+        ).toBe(true);
         for (const item of coverage.deferred) {
           expect(item.provenance.candidateId).toBe("candidate-1");
           expect(report).toContain(item.reason);
@@ -102,10 +103,8 @@ test.each([
           stderr.stream,
           dependencies({ result, onWorkbench: () => ({ deepScan: terminal }) }),
         ),
-      ).toBe(completeness === "complete" ? 0 : 2);
+      ).toBe(0);
       expect(JSON.parse(stdout.text()).coverage).toEqual(coverage);
-      if (completeness !== "complete")
-        expect(stderr.text()).toContain("STOPPED");
     } finally {
       await rm(root, { recursive: true, force: true });
     }

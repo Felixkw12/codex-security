@@ -231,7 +231,7 @@ def test_cost_completion_retains_independent_unmerged_surfaces_and_receipts(
 
     assert workbench_db.execute("SELECT status FROM scans").fetchone()[0] == "complete"
     coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
-    assert coverage["completeness"] == "partial"
+    assert "completeness" not in coverage
     actual = coverage["surfaces"]
     assert [(item["label"], item.get("notes"), item.get("reason")) for item in actual] == [
         (item["label"], item.get("notes"), item.get("reason")) for item in surfaces
@@ -264,7 +264,7 @@ def test_cost_completion_retains_independent_unmerged_surfaces_and_receipts(
         assert item["provenance"] == {**descriptions, "workerId": worker_id, "attempt": 1}
     if explicit_ids:
         assert obligation["surfaceIds"] == [item["id"] for item in actual]
-    assert {"workerId": worker_id, "attempt": 1, "completeness": "partial"} in coverage["reviews"]
+    assert {"workerId": worker_id, "attempt": 1} in coverage["reviews"]
     report = (scan.scan_dir / "report.md").read_text()
     for surface in surfaces:
         for field in ("notes", "reason"):
