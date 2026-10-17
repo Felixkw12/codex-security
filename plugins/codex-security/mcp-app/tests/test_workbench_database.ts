@@ -169,11 +169,12 @@ test("every released schema upgrades to the same current schema and remains idem
 });
 
 for (const { missingVersions, legacyCheckpoint, mainReader } of [
-  { missingVersions: [48], legacyCheckpoint: false, mainReader: false },
-  { missingVersions: [], legacyCheckpoint: true, mainReader: false },
-  { missingVersions: [], legacyCheckpoint: true, mainReader: true },
-  { missingVersions: [43], legacyCheckpoint: true, mainReader: false },
-  { missingVersions: [44, 45, 46], legacyCheckpoint: true, mainReader: false },
+  { missingVersions: [50], legacyCheckpoint: 0, mainReader: false },
+  { missingVersions: [], legacyCheckpoint: 47, mainReader: false },
+  { missingVersions: [], legacyCheckpoint: 47, mainReader: true },
+  { missingVersions: [], legacyCheckpoint: 48, mainReader: false },
+  { missingVersions: [43], legacyCheckpoint: 47, mainReader: false },
+  { missingVersions: [44, 45, 46], legacyCheckpoint: 47, mainReader: false },
 ]) {
   test(`database-info retains stopped-scan checkpoints when adding migration ${missingVersions.join(",")} (legacy checkpoint: ${legacyCheckpoint}, main reader: ${mainReader})`, async () => {
     const directory = await temporary.create("workbench-checkpoint-upgrade-");
@@ -191,11 +192,12 @@ for (const { missingVersions, legacyCheckpoint, mainReader } of [
           .filter(
             (item) =>
               !missingVersions.includes(item.version) &&
-              !(legacyCheckpoint && item.version === 47),
+              !(legacyCheckpoint && [48, 49].includes(item.version)) &&
+              !(legacyCheckpoint === 47 && item.version === 47),
           )
           .map((item) =>
-            legacyCheckpoint && item.version === 48
-              ? { ...item, version: 47 }
+            legacyCheckpoint && item.version === 50
+              ? { ...item, version: legacyCheckpoint }
               : item,
           ),
       );
@@ -207,7 +209,7 @@ for (const { missingVersions, legacyCheckpoint, mainReader } of [
       old.exec(`INSERT INTO deep_scan_runs (scan_id, schema_version, workflow_version, status, phase,
         workers, subagents, stop_after_no_new, max_discovery_runs, created_at, updated_at)
         VALUES ('scan', 1, 'v1', 'failed', 'terminal', 1, 0, 7, 10, 'created', 'updated')`);
-      if (!legacyCheckpoint || mainReader) {
+      if (legacyCheckpoint !== 47 || mainReader) {
         old
           .prepare("UPDATE deep_scan_runs SET discovery_user_context_json = ?")
           .run(context);
@@ -220,7 +222,7 @@ for (const { missingVersions, legacyCheckpoint, mainReader } of [
           "UPDATE scans SET status = 'failed', retained_source_digests_json = ?",
         )
         .run(sources);
-      if (!missingVersions.includes(48)) {
+      if (!missingVersions.includes(50)) {
         old
           .prepare("UPDATE scans SET retained_checkpoint_heads_json = ?")
           .run(heads);
@@ -229,7 +231,7 @@ for (const { missingVersions, legacyCheckpoint, mainReader } of [
         .prepare(
           "SELECT name, applied_at FROM schema_migrations WHERE version = ?",
         )
-        .get(legacyCheckpoint ? 47 : 48);
+        .get(legacyCheckpoint || 50);
     } finally {
       old.close();
     }
@@ -240,7 +242,7 @@ for (const { missingVersions, legacyCheckpoint, mainReader } of [
         upgraded
           .prepare("SELECT retained_checkpoint_heads_json FROM scans")
           .get()?.retained_checkpoint_heads_json,
-        !missingVersions.includes(48) ? heads : null,
+        !missingVersions.includes(50) ? heads : null,
       );
       upgraded
         .prepare("UPDATE scans SET retained_checkpoint_heads_json = ?")
@@ -259,7 +261,7 @@ for (const { missingVersions, legacyCheckpoint, mainReader } of [
         assert.deepEqual(
           reopened
             .prepare(
-              "SELECT name, applied_at FROM schema_migrations WHERE version = 48",
+              "SELECT name, applied_at FROM schema_migrations WHERE version = 50",
             )
             .get(),
           originalCheckpointMigration,
@@ -275,9 +277,9 @@ for (const { missingVersions, legacyCheckpoint, mainReader } of [
         reopened
           .prepare("SELECT MAX(version) AS version FROM schema_migrations")
           .get()?.version,
-        48,
+        50,
       );
-      for (const version of [43, 44, 45, 46, 47, 48]) {
+      for (const version of [43, 44, 45, 46, 47, 48, 49, 50]) {
         assert.equal(
           reopened
             .prepare(
@@ -292,10 +294,10 @@ for (const { missingVersions, legacyCheckpoint, mainReader } of [
         reopened
           .prepare("SELECT discovery_user_context_json FROM deep_scan_runs")
           .get()?.discovery_user_context_json,
-        !legacyCheckpoint || mainReader ? context : null,
+        legacyCheckpoint !== 47 || mainReader ? context : null,
       );
-      assertMigrationNames(reopened, 47, 48);
-      if (!legacyCheckpoint) {
+      assertMigrationNames(reopened, 47, 48, 49, 50);
+      if (legacyCheckpoint !== 47) {
         assert.deepEqual(
           reopened
             .prepare("SELECT * FROM schema_migrations WHERE version = 47")
