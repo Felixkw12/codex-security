@@ -6,7 +6,7 @@ import { createReadStream } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
 import { version as MCP_APP_VERSION } from "../../package.json";
 import { DeepScanNonRetryableError } from "./errors.js";
-import { executablePathForSpawn } from "./executable-path.js";
+import { executablePathForSpawn } from "../executable-path.js";
 import { isPermissionProfileFallbackWarning } from "../../../scripts/codex_profile.mjs";
 
 /** The stable profile id selected by the worker's raw config overrides. */
@@ -234,6 +234,14 @@ class AppServerPreflightClient {
   private closed = false;
   private childClosed = false;
   private readonly removeAbortListener: () => void;
+  private readonly onStdioError = (error: Error): void => {
+    const failure = codexExecutableStdioError(
+      this.options.codexPath,
+      this.options.context,
+    );
+    failure.message += "\n" + error.message;
+    this.fail(failure);
+  };
 
   constructor(private readonly options: RuntimeConfigReadOptions) {
     const args: string[] = [...(options.commandArgs ?? [])];
@@ -264,16 +272,8 @@ class AppServerPreflightClient {
       crlfDelay: Infinity,
     });
     this.stdoutLines.on("line", (line) => this.consumeStdoutLine(line));
-    const onStdioError = (error: Error) => {
-      const failure = codexExecutableStdioError(
-        options.codexPath,
-        options.context,
-      );
-      failure.message += "\n" + error.message;
-      this.fail(failure);
-    };
-    this.stdoutLines.on("error", onStdioError);
-    this.child.stdin.on("error", onStdioError);
+    this.stdoutLines.on("error", this.onStdioError);
+    this.child.stdin.on("error", this.onStdioError);
     this.child.on("error", (error) => {
       this.fail(
         codexExecutableStartError(options.codexPath, error, options.context),
@@ -417,14 +417,7 @@ class AppServerPreflightClient {
       return;
     }
     this.child.stdin.write(`${JSON.stringify(message)}\n`, (error) => {
-      if (error) {
-        const failure = codexExecutableStdioError(
-          this.options.codexPath,
-          this.options.context,
-        );
-        failure.message += "\n" + error.message;
-        this.fail(failure);
-      }
+      if (error) this.onStdioError(error);
     });
   }
 

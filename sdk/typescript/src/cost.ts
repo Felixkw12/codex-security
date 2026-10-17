@@ -19,6 +19,7 @@ import {
 } from "./cost-model.js";
 import {
   scanActivityFromSessionEvent,
+  sessionContentText,
   type ScanActivity,
 } from "./scan-activity.js";
 import {
@@ -48,11 +49,10 @@ export interface ScanSessionEvent {
   event: Record<string, unknown>;
 }
 
-interface SessionReasoning {
-  id: string;
-  text: string;
-  raw: boolean;
-  activity: ScanActivity | null;
+type SessionReasoning = ReturnType<typeof createSessionReasoning>;
+
+function createSessionReasoning(id: string, text = "") {
+  return { id, text, raw: false, activity: null as ScanActivity | null };
 }
 
 interface SessionUsage {
@@ -144,9 +144,9 @@ function createSessionUsage(): SessionUsage {
     activities: [],
     progress: [],
     filesCompleted: 0,
-    filesTotal: null,
-    prose: new Set(),
-    reasoning: null,
+    filesTotal: null as number | null,
+    prose: new Set<string>(),
+    reasoning: null as SessionReasoning | null,
     reasoningCount: 0,
   };
 }
@@ -1317,12 +1317,10 @@ function readSessionEvent(
         ) {
           continue;
         }
-        session.reasoning = {
-          id: activity.id,
-          text: activity.description,
-          raw: false,
-          activity: null,
-        };
+        session.reasoning = createSessionReasoning(
+          activity.id,
+          activity.description,
+        );
         recordReasoningActivity(session, activity);
       }
       return;
@@ -1330,12 +1328,10 @@ function readSessionEvent(
     const activity = scanActivityFromSessionEvent(event, repository);
     if (activity !== null) {
       if (activity.kind === "reasoning") {
-        const reasoning = (session.reasoning ??= {
-          id: activity.id,
-          text: activity.description,
-          raw: false,
-          activity: null,
-        });
+        const reasoning = (session.reasoning ??= createSessionReasoning(
+          activity.id,
+          activity.description,
+        ));
         recordReasoningActivity(session, {
           ...activity,
           id: reasoning.id,
@@ -1512,12 +1508,9 @@ function readSessionReasoning(
   ) {
     session.reasoning = null;
   }
-  const reasoning = (session.reasoning ??= {
-    id: `reasoning-${++session.reasoningCount}`,
-    text: "",
-    raw: false,
-    activity: null,
-  });
+  const reasoning = (session.reasoning ??= createSessionReasoning(
+    `reasoning-${++session.reasoningCount}`,
+  ));
   if (reasoning.raw && !raw) return;
   if (raw && !reasoning.raw) {
     reasoning.text = "";
@@ -1559,9 +1552,7 @@ function sessionProgressUpdates(
   payload: Readonly<Record<string, unknown>>,
 ): ScanProgress[] {
   if (payload["type"] === "message" && payload["role"] === "assistant") {
-    const content = payload["content"];
-    if (!Array.isArray(content)) return [];
-    return scanProgressUpdatesFromText(sessionContentText(content, false));
+    return scanProgressUpdatesFromText(sessionContentText(payload["content"]));
   }
   if (
     payload["type"] !== "function_call_output" &&
@@ -1574,29 +1565,11 @@ function sessionProgressUpdates(
   const output =
     typeof value === "string"
       ? value
-      : Array.isArray(value)
-        ? sessionContentText(value, true)
-        : null;
-  if (payload["status"] === "failed" || output === null) {
+      : sessionContentText(value, ["output_text", "input_text"]);
+  if (payload["status"] === "failed") {
     return [];
   }
   return scanProgressUpdatesFromText(output);
-}
-
-function sessionContentText(
-  content: readonly unknown[],
-  includeInputText: boolean,
-): string {
-  return content
-    .filter(
-      (item): item is Record<string, unknown> & { text: string } =>
-        isRecord(item) &&
-        (item["type"] === "output_text" ||
-          (includeInputText && item["type"] === "input_text")) &&
-        typeof item["text"] === "string",
-    )
-    .map((item) => item.text)
-    .join("\n");
 }
 
 function refinesCacheClassification(

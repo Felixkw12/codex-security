@@ -3,8 +3,12 @@ import { createInterface } from "node:readline";
 import { version as MCP_APP_VERSION } from "../../package.json";
 import { asRecord } from "../record.js";
 import type { JsonObject } from "../types.js";
-import { abortError } from "./errors.js";
-import { executablePathForSpawn } from "./executable-path.js";
+import {
+  abortError,
+  codexWorkerTurnError,
+  DeepScanNonRetryableError,
+} from "./errors.js";
+import { executablePathForSpawn } from "../executable-path.js";
 import type { CodexWorkerRequest } from "./types.js";
 import { DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID } from "./permission-profile-preflight.js";
 
@@ -295,11 +299,14 @@ export async function runAppServerWorker(
     if (failure) throw failure;
     if (result.status !== "completed") {
       const error = asRecord(result.error);
-      throw new Error(
+      const failure = codexWorkerTurnError(
         typeof error?.message === "string"
           ? error.message
           : (lastStreamError ?? `Codex worker turn ${String(result.status)}`),
       );
+      if (failure instanceof DeepScanNonRetryableError)
+        request.onNonRetryableError?.(failure);
+      throw failure;
     }
     return { threadId };
   } catch (error) {

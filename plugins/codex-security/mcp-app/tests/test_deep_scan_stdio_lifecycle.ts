@@ -954,9 +954,9 @@ model_reasoning_summary = "none"
         );
         assert.ok(launches.length > 0);
         for (const launch of launches) {
-          assert.equal(launch.args[0], "-c");
+          assert.deepEqual(launch.args.slice(0, 2), ["-B", "-c"]);
           assert.equal(launch.args.at(-1), workbenchPath);
-          assert.equal(launch.args.length, 3);
+          assert.equal(launch.args.length, 4);
           assert.equal(launch.cwd, pluginRoot);
         }
       }
@@ -1461,7 +1461,7 @@ const runWorker = () => {
   if (!existsSync(process.env.FAKE_CODEX_RESTART_CONTROL)) return;
   const phase = readFileSync(process.env.FAKE_CODEX_RESTART_CONTROL, "utf8");
   if (phase !== "after-restart" && context.workerLabel !== "discovery-0001") return;
-  const coverage = { completeness: "complete", surfaces: [], explicitExclusions: [], deferred: [] };
+  const coverage = { surfaces: [], explicitExclusions: [], deferred: [] };
   if (context.claimedWorkerIds) {
     const output = path.join(root, "deep_discovery", "dedup", context.reducerLabel, "output");
     const firstResult = JSON.parse(readFileSync(path.join(root, "deep_discovery", "workers", "discovery-0001", "output", "result.json"), "utf8"));
@@ -1522,7 +1522,7 @@ process.stdin.on("data", (chunk) => {
 process.stdin.on("end", () => {
   if (interrupted) {
     if (existsSync(process.env.FAKE_CODEX_SIGNAL_CHECKPOINT_CONTROL)) {
-      const coverage = { completeness: "complete", surfaces: [], explicitExclusions: [], deferred: [] };
+      const coverage = { surfaces: [], explicitExclusions: [], deferred: [] };
       const checkpointDir = path.join(thread.cwd, "checkpoints");
       mkdirSync(checkpointDir, { recursive: true });
       writeFileSync(path.join(checkpointDir, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json"), JSON.stringify({ scanId: context.scanId, findings: [], coverage }));

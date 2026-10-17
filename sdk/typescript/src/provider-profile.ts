@@ -230,7 +230,6 @@ export async function readNativeSessionSqliteHome(
       : undefined;
   });
 }
-
 export async function withCodexPreflightLock<T>(
   env: Record<string, string> | undefined,
   signal: AbortSignal | undefined,

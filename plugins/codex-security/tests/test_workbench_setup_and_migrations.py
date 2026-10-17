@@ -89,7 +89,9 @@ EXPECTED_MIGRATIONS = [
     (45, "separate local and service embedding caches"),
     (46, "invalidate local embeddings when finding bodies change"),
     (47, "snapshot deep scan discovery context"),
-    (48, "retain deep scan worker session ownership"),
+    (48, "share finding issue receipts across trackers"),
+    (49, "index finding issue receipt ownership"),
+    (50, "retain deep scan worker session ownership"),
 ]
 
 
@@ -320,6 +322,22 @@ def test_sqlite_snapshot_includes_uncheckpointed_wal_rows(tmp_path: Path) -> Non
             [sys.executable, str(SNAPSHOT_SCRIPT), str(source), str(snapshot)],
             check=True,
         )
+    with sqlite3.connect(snapshot) as connection:
+        assert connection.execute("SELECT value FROM records").fetchone() == ("sealed",)
+
+
+@pytest.mark.native_windows
+@pytest.mark.skipif(os.name != "nt", reason="requires Win32 extended-length paths")
+def test_sqlite_snapshot_reads_windows_extended_length_source(tmp_path: Path) -> None:
+    source = tmp_path / "source.sqlite3"
+    snapshot = tmp_path / "snapshot.sqlite3"
+    with sqlite3.connect(source) as connection:
+        connection.execute("CREATE TABLE records (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO records VALUES ('sealed')")
+    subprocess.run(
+        [sys.executable, str(SNAPSHOT_SCRIPT), "\\\\?\\" + str(source), str(snapshot)],
+        check=True,
+    )
     with sqlite3.connect(snapshot) as connection:
         assert connection.execute("SELECT value FROM records").fetchone() == ("sealed",)
 
@@ -985,7 +1003,7 @@ def test_scan_model_migration_preserves_existing_scans() -> None:
 
 @pytest.mark.parametrize(
     ("before_version", "ownership_version"),
-    [(44, None), (48, None), (43, 44), (44, 44), (47, 47)],
+    [(44, None), (50, None), (43, 44), (44, 44), (47, 47), (48, 48)],
 )
 def test_worker_thread_history_backfills_and_survives_retries(
     before_version: int, ownership_version: int | None
@@ -995,7 +1013,7 @@ def test_worker_thread_history_backfills_and_survives_retries(
     connection.execute("PRAGMA foreign_keys = ON")
     timestamp = "2026-07-01T00:00:00Z"
     if published_ownership:
-        _, name, sql = next(migration for migration in SCHEMA.MIGRATIONS if migration[0] == 48)
+        _, name, sql = next(migration for migration in SCHEMA.MIGRATIONS if migration[0] == 50)
         for statement in SCHEMA.sql_statements(sql):
             connection.execute(statement)
         connection.execute(
@@ -1048,7 +1066,7 @@ def test_worker_thread_history_backfills_and_survives_retries(
     if published_ownership:
         assert (
             connection.execute(
-                "SELECT applied_at FROM schema_migrations WHERE version = 48"
+                "SELECT applied_at FROM schema_migrations WHERE version = 50"
             ).fetchone()[0]
             == timestamp
         )
@@ -1313,7 +1331,7 @@ def test_workbench_reconciles_monorepo_migration_lineage() -> None:
     ]
     assert (
         connection.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'finding_publications'"
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'finding_issue_receipts'"
         ).fetchone()
         is not None
     )
@@ -1321,13 +1339,11 @@ def test_workbench_reconciles_monorepo_migration_lineage() -> None:
         row[0]
         for row in connection.execute(
             "SELECT name FROM sqlite_master WHERE type = 'index' "
-            "AND tbl_name = 'finding_publications'"
+            "AND tbl_name = 'finding_issue_receipts'"
         )
     } >= {
-        "finding_publications_by_scan",
-        "finding_publications_by_finding",
-        "finding_publications_team_only_occurrence",
-        "finding_publications_team_only_external_issue",
+        "finding_issue_receipts_by_finding",
+        "finding_issue_receipts_by_destination_issue",
     }
     assert [
         row["name"]
@@ -1339,6 +1355,69 @@ def test_workbench_reconciles_monorepo_migration_lineage() -> None:
         for row in connection.execute("PRAGMA table_info(deep_scan_runs)")
         if row["name"] == "publication_error_message"
     ] == ["publication_error_message"]
+
+
+def test_workbench_indexes_issue_ownership_without_changing_existing_receipts() -> None:
+    connection, apply_migrations = create_historical_database(49)
+    with closing(connection):
+        timestamp = "2026-01-01T00:00:00Z"
+        connection.executemany(
+            "INSERT INTO finding_issue_receipts (scan_id, finding_id, occurrence_id, "
+            "destination_key, external_id, external_url, operation, readback_json, "
+            "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    f"scan-{index}",
+                    f"finding-{index}",
+                    f"occurrence-{index}",
+                    f"destination-{index % 2}",
+                    f"ISSUE-{index}",
+                    f"https://issues.example.test/browse/ISSUE-{index}",
+                    "create",
+                    '{"status":"verified"}',
+                    timestamp,
+                    timestamp,
+                )
+                for index in range(256)
+            ],
+        )
+        connection.commit()
+        receipts = connection.execute("SELECT * FROM finding_issue_receipts ORDER BY id").fetchall()
+        history = connection.execute("SELECT * FROM schema_migrations ORDER BY version").fetchall()
+
+        apply_migrations(connection)
+        apply_migrations(connection)
+
+        assert (
+            connection.execute("SELECT * FROM finding_issue_receipts ORDER BY id").fetchall()
+            == receipts
+        )
+        assert (
+            connection.execute(
+                "SELECT * FROM schema_migrations WHERE version < 49 ORDER BY version"
+            ).fetchall()
+            == history
+        )
+        query = (
+            "SELECT 1 FROM finding_issue_receipts WHERE destination_key = ? "
+            "AND external_id = ? AND finding_id != ? LIMIT 1"
+        )
+        parameters = ("destination-1", "ISSUE-129", "another-finding")
+        plan = connection.execute("EXPLAIN QUERY PLAN " + query, parameters).fetchall()
+        assert any(
+            row[3].startswith("SEARCH ")
+            and "COVERING INDEX finding_issue_receipts_by_destination_issue" in row[3]
+            for row in plan
+        ), [tuple(row) for row in plan]
+        assert connection.execute(query, parameters).fetchone()[0] == 1
+        assert (
+            connection.execute(query, ("destination-1", "ISSUE-129", "finding-129")).fetchone()
+            is None
+        )
+        assert (
+            connection.execute(query, ("destination-0", "ISSUE-129", "another-finding")).fetchone()
+            is None
+        )
 
 
 def test_workbench_creates_single_final_schema(tmp_path: Path) -> None:

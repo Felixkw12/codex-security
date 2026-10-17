@@ -173,13 +173,15 @@ for (const [label, version, ownershipVersion] of [
   ["schema 46", 46, null],
   ["current main schema 47", 47, null],
   ["published 47", 46, 47],
+  ["published 48", 47, 48],
+  ["current main schema 49", 49, null],
   ["published 44 before severity migration", 42, 44],
   ["published 44 after severity migration", 43, 44],
 ] as const) {
   test(`worker ownership survives upgrade from ${label}`, (t) => {
     const database = memory(t);
     const publishedOwnership = ownershipVersion !== null;
-    const ownership = migrations.find((item) => item.version === 48)!;
+    const ownership = migrations.find((item) => item.version === 50)!;
     applyMigrations(database, [
       ...migrations.filter((item) => item.version <= version),
       ...(publishedOwnership
@@ -207,12 +209,12 @@ for (const [label, version, ownershipVersion] of [
       `);
     }
     applyMigrations(database);
-    assertMigrationNames(database, 44, 45, 46, 47, 48);
+    assertMigrationNames(database, 44, 45, 46, 47, 48, 49, 50);
     if (publishedOwnership)
       assert.equal(
         database
           .prepare(
-            "SELECT applied_at FROM schema_migrations WHERE version = 48",
+            "SELECT applied_at FROM schema_migrations WHERE version = 50",
           )
           .get()?.applied_at,
         "original-ownership-time",

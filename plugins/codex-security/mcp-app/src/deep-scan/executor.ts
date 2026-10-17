@@ -26,10 +26,11 @@ import {
   profileConfigOverrides,
 } from "../../../scripts/codex_profile.mjs";
 import { runAppServerWorker } from "./app-server-worker.js";
-import { executablePathForSpawn } from "./executable-path.js";
+import { executablePathForSpawn } from "../executable-path.js";
 import { writePrivateFile } from "./artifacts.js";
 import {
   classifyCodexWorkerError,
+  codexWorkerTurnError,
   DeepScanNonRetryableError,
 } from "./errors.js";
 import {
@@ -167,6 +168,13 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           signal: request.signal,
         });
       const prompt = await fs.readFile(request.promptPath, "utf8");
+      const workerPrompt = request.resumeThreadId
+        ? (request.continuationPrompt ?? prompt)
+        : prompt;
+      const pluginRoot = this.modelSettings.artifactContext?.pluginRoot;
+      const input = pluginRoot
+        ? `${workerPrompt}\n\nFor a Codex Security skill invoked by the assigned workflow, remove any codex-security: prefix from its name and read <skill-name>/SKILL.md beneath ${JSON.stringify(join(pluginRoot, "skills"))}. Follow that file and resolve its relative references from its directory. Give delegated workers the same readable skill paths. Load only skills required by the assigned workflow; this does not expand the worker's assigned role.`
+        : workerPrompt;
       const diagnostics: CodexWorkerDiagnostic[] = [];
       const result = await runAppServerWorker({
         codexPath,
@@ -187,9 +195,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         model: this.modelSettings.model,
         cyberAccessProgram: runtimeSettings.cyberAccessProgram,
         request,
-        input: request.resumeThreadId
-          ? (request.continuationPrompt ?? prompt)
-          : prompt,
+        input,
         onDiagnostic: (item) => {
           if (isRecord(item) && item.type === "error") {
             const fallback = deepScanPermissionProfileFallbackError(
@@ -215,17 +221,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
   private compactArtifactServer(
     request: CodexWorkerRequest,
     includePathsFile?: string,
-  ): Record<
-    string,
-    {
-      command: string;
-      args: string[];
-      env: Record<string, string>;
-      required: true;
-      startup_timeout_sec: number;
-      tool_timeout_sec: number;
-    }
-  > {
+  ) {
     const scan = this.modelSettings.artifactContext;
     if (!scan) return {};
 
@@ -492,6 +488,7 @@ async function workerRuntimeSettings(
       "service_tier",
       "analytics",
       "responses_api_metadata",
+      "skills",
     ].map((key) => [key, selected[key]]),
   );
   const settings: CodexSdkWorkerRuntimeSettings = { config: inherited };

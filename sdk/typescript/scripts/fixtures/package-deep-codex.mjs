@@ -282,7 +282,6 @@ async function runWorker(args, config, resumed, model, signal) {
         scanId: env.CODEX_SECURITY_SCAN_ID,
         findings: [],
         coverage: {
-          completeness: "complete",
           surfaces: [],
           explicitExclusions: [],
           deferred: [],
