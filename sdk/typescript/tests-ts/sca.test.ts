@@ -1672,6 +1672,8 @@ test("dependency observers report saved assessments, activity, usage, and total 
   ]);
   expect(costs.at(-1)?.estimatedUsd).toBe(result.model.costUsd!);
   expect(costs.at(-1)!.estimatedUsd).toBeGreaterThan(0);
+  for (let index = 1; index < costs.length; index++)
+    expect(costs[index]).not.toEqual(costs[index - 1]);
   expect(usage.at(-1)?.input_tokens).toBe(3000);
 });
 

@@ -257,3 +257,9 @@ export {
   createScaUpdateHandoff,
 } from "./sca-report.js";
 export type { ScaComparison, ScaUpdateHandoff } from "./sca-report.js";
+export { validateRecords } from "./validation-records.js";
+export type {
+  ValidateRecordsInput,
+  ValidateRecordsOptions,
+  ValidationReviewRequest,
+} from "./validation-records.js";

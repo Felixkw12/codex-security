@@ -1305,8 +1305,7 @@ export class CodexSecurity {
           if (!attemptedTurn) return;
           result!.model.costPending =
             cost === null || previousUsageUnknown || unverifiedTurn;
-          if (cost !== null) reportCost(cost);
-          else {
+          if (cost === null) {
             result!.model.costUsd = null;
             delete result!.model.cost;
           }
