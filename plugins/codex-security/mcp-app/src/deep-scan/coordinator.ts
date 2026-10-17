@@ -33,6 +33,7 @@ import {
   abortError,
   errorMessage,
   boundedDeepScanErrorMessage,
+  DeepScanNonRetryableError,
 } from "./errors.js";
 import type {
   CodexWorkerExecutor,
@@ -59,8 +60,8 @@ interface SchedulerResult {
   reason: DeepScanTerminalReason;
   omittedWorkerIds: string[];
   result?: DeepReductionInput;
-  discoveries: AcceptedDiscovery[];
   resultPath?: string;
+  discoveries: AcceptedDiscovery[];
 }
 
 export interface ParentScanState {
@@ -141,6 +142,7 @@ export class DeepScanCoordinator {
       random: options.random ?? Math.random,
       log: this.log,
       retryDelaysMs: options.retryDelaysMs ?? RETRY_DELAYS_MS,
+      onNonRetryableError: (error: Error) => this.abortController.abort(error),
     } satisfies Omit<
       ConstructorParameters<typeof DeepScanWorkerRunner>[0],
       "signal"
@@ -370,7 +372,6 @@ export class DeepScanCoordinator {
             scanId: this.state.scanId,
             findings: [],
             coverage: {
-              completeness: "partial",
               surfaces: [],
               explicitExclusions: [],
               deferred: [
@@ -420,6 +421,11 @@ export class DeepScanCoordinator {
       }
       if (await this.stopAfterOwnershipChange(this.options.threadId, error)) {
         return;
+      }
+      if (
+        this.abortController.signal.reason instanceof DeepScanNonRetryableError
+      ) {
+        error = this.abortController.signal.reason;
       }
       const message = errorMessage(error);
       const persistedMessage = boundedDeepScanErrorMessage(error);
@@ -714,10 +720,9 @@ export class DeepScanCoordinator {
   }
 
   /**
-   * Keep the discovery pool full until the reducer establishes convergence or
-   * the configured run cap is exhausted. Completed discoveries enter a stable
-   * FIFO buffer. One reducer claims the current buffer snapshot; discoveries
-   * that finish during that reduction wait for the next one.
+   * Refill discovery between reductions so a slow reducer cannot build an
+   * unchecked backlog. One reducer claims the FIFO buffer. Discoveries that
+   * finish during reduction wait for the next one.
    */
   private async runScheduler(): Promise<SchedulerResult> {
     const config = this.state.config;
@@ -904,6 +909,7 @@ export class DeepScanCoordinator {
       }
       if (settlements.length === 0) {
         while (
+          !reducer &&
           !this.discoveryDeadlineReached &&
           (!previousReducerResultPath ||
             this.state.noNewStreak < config.stopAfterNoNew) &&
@@ -1069,10 +1075,10 @@ export class DeepScanCoordinator {
       reason: stopReason,
       omittedWorkerIds: [...new Set(omittedWorkerIds)],
       result: latestResult,
+      resultPath: previousReducerResultPath,
       discoveries: [...accepted.values()].filter((worker) =>
         mergedIds.has(worker.id),
       ),
-      resultPath: previousReducerResultPath,
     };
   }
 
@@ -1094,7 +1100,7 @@ export class DeepScanCoordinator {
       recovered.push({
         id: worker.id,
         resultPath: worker.resultManifestPath,
-        coverage: result.coverage,
+        result,
         completionSequence: worker.completionSequence,
       });
     }
