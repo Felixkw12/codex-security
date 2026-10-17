@@ -198,8 +198,8 @@ export class ScanCostTracker {
       return this.#snapshot;
     const cost = estimateScanCost(this.#options.model, fallbackUsage);
     this.#snapshot = { usage: fallbackUsage ?? null, cost };
-    this.#reportUsage(tokenUsage(fallbackUsage));
-    this.#reportCost(cost);
+    const reportedUsage = this.#reportUsage(tokenUsage(fallbackUsage));
+    this.#reportCost(cost, reportedUsage);
     return this.#snapshot;
   }
 
@@ -382,6 +382,10 @@ export class ScanCostTracker {
       const cost = estimateScanCost(model, value);
       if (cost === null) {
         this.#snapshot = { usage, cost: null };
+        if (this.#lastCost !== null) {
+          this.#lastCost = null;
+          this.#lastUsage = null;
+        }
         this.#reportUsage(usage);
         if (this.#options.maxCostUsd !== undefined) {
           throw new Error(
@@ -426,8 +430,8 @@ export class ScanCostTracker {
             },
           };
     this.#snapshot = { usage, cost };
-    this.#reportUsage(usage);
-    this.#reportCost(cost);
+    const reportedUsage = this.#reportUsage(usage);
+    this.#reportCost(cost, reportedUsage);
   }
 
   #reportWorkerProgress(session: SessionUsage): void {
@@ -469,20 +473,22 @@ export class ScanCostTracker {
     }
   }
 
-  #reportCost(cost: ScanCost | null): void {
+  #reportCost(cost: ScanCost | null, reportedUsage = false): void {
     if (cost === null) return;
     const signature = JSON.stringify(cost);
-    if (signature === this.#lastCost) return;
+    // Usage without a paired cost update means its pricing is unavailable.
+    if (signature === this.#lastCost && !reportedUsage) return;
     this.#lastCost = signature;
     this.#options.onCost?.(cost);
   }
 
-  #reportUsage(usage: ScanTokenUsage | null): void {
-    if (usage === null) return;
+  #reportUsage(usage: ScanTokenUsage | null): boolean {
+    if (usage === null) return false;
     const signature = JSON.stringify(usage);
-    if (signature === this.#lastUsage) return;
+    if (signature === this.#lastUsage) return false;
     this.#lastUsage = signature;
     this.#options.onUsage?.(usage);
+    return this.#options.onUsage !== undefined;
   }
 }
 

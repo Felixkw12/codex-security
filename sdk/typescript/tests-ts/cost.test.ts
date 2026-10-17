@@ -514,6 +514,70 @@ describe("scan cost", () => {
 });
 
 describe("live scan cost tracking", () => {
+  test.each([1_000, 2_000])(
+    "invalidates a prior estimate when an unpriced rollout reports %p tokens",
+    async (inputTokens) => {
+      const home = await codexHome();
+      const updates: string[] = [];
+      const tracker = costTracker(home, {
+        onUsage: () => updates.push("usage"),
+        onCost: () => updates.push("cost"),
+      });
+      tracker.recordUsage(
+        { input_tokens: 1_000, output_tokens: 0 },
+        "worker-thread",
+      );
+      tracker.start("scan-thread");
+      try {
+        expect((await tracker.refresh()).cost).not.toBeNull();
+        expect(updates.splice(0)).toEqual(["usage", "cost"]);
+        await writeSession(
+          home,
+          "worker-thread",
+          {
+            input_tokens: inputTokens,
+            output_tokens: 0,
+          },
+          { model: "synthetic-unpriced-model" },
+        );
+        expect((await tracker.refresh()).cost).toBeNull();
+        expect(updates.splice(0)).toEqual(["usage"]);
+        await tracker.refresh();
+        expect(updates).toEqual([]);
+      } finally {
+        await tracker.stop();
+      }
+    },
+  );
+
+  test("pairs changed usage with its still-valid unchanged price", async () => {
+    const home = await codexHome();
+    const usage = { input_tokens: 100, output_tokens: 10 };
+    const path = await writeSession(home, "scan-thread", usage);
+    const updates: string[] = [];
+    const tracker = costTracker(home, {
+      onUsage: () => updates.push("usage"),
+      onCost: () => updates.push("cost"),
+    });
+    tracker.start("scan-thread");
+    try {
+      const original = await tracker.refresh();
+      expect(updates.splice(0)).toEqual(["usage", "cost"]);
+      await appendFile(
+        path,
+        jsonLines([
+          legacyUsageRecord({ ...usage, reasoning_output_tokens: 5 }),
+        ]) + "\n",
+      );
+      expect((await tracker.refresh()).cost).toEqual(original.cost);
+      expect(updates.splice(0)).toEqual(["usage", "cost"]);
+      await tracker.refresh();
+      expect(updates).toEqual([]);
+    } finally {
+      await tracker.stop();
+    }
+  });
+
   test.each([
     ["gpt-5.6-luna", "gpt-5.6-sol", 4.0004, 8.0004, true],
     ["gpt-5.6-sol", "gpt-5.6-luna", 0.208, 0.408, false],
