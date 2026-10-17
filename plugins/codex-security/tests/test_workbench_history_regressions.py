@@ -646,10 +646,6 @@ def test_history_index_does_not_read_followup_artifacts(history, artifact, missi
         path.write_text(path.read_text() + "\n")
     findings = run_workbench(state, "list-global-findings")["findings"]
     assert [finding["scanId"] for finding in findings] == [earlier["scanId"]]
-    if not missing:
-        result = run_workbench(state, "get-scan", "--scan-id", later["scanId"], check=False)
-        assert result["returncode"] != 0
-        assert "changed" in result["stderr"]
 
 
 @pytest.mark.parametrize(

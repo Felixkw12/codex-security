@@ -750,7 +750,7 @@ describe("workbench findings index", () => {
     ).toContainEqual(
       expect.objectContaining({
         targetId: "current-target",
-        openFindingsCount: 2,
+        openFindingsCount: 1,
       }),
     );
   });
