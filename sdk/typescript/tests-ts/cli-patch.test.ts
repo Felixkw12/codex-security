@@ -2041,6 +2041,7 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
           "lin_api_SYNTHETIC",
           "--assess-patch-risk",
           "--create-pr",
+          "--json",
         ],
         {
           currentDirectory: join(repository, "src"),
@@ -2130,6 +2131,9 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
       ]);
       expect(outcome.stderr).toContain("Patch risk assessment:");
       expect(outcome.stderr).toContain(`Pull request: ${url}`);
+      expect(JSON.parse(outcome.stdout)).toMatchObject({
+        pullRequest: { branch: "codex-security/patch-SEC-123", url },
+      });
       expect(pullRequestArguments.at(-1)).not.toContain("schemaVersion");
       expect(pullRequestArguments.at(-1)).not.toContain(
         "codex-security:patch-risk-summary",
@@ -2950,25 +2954,42 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
     }
   });
 
-  test("keeps completed scan results when publication preflight fails", async () => {
-    const outcome = await runWorkflow(
-      ["scan", "--patch", "--create-pr", "--json"],
-      {
-        result: resultWithFindings(["high"]),
-        onRepositoryCommand: (command, args) => {
-          if (command === "gh")
-            throw new Error("GitHub authentication failed.");
-          return args.includes("--name-only") ? "src/finding-1.ts\0" : "";
+  test.each([false, true])(
+    "keeps completed scan results when publication preflight fails (full-output: %p)",
+    async (fullOutput) => {
+      const outcome = await runWorkflow(
+        [
+          "scan",
+          "--patch",
+          "--create-pr",
+          "--json",
+          ...(fullOutput ? ["--full-output"] : []),
+        ],
+        {
+          result: resultWithFindings(["high"]),
+          onRepositoryCommand: (command, args) => {
+            if (command === "gh")
+              throw new Error("GitHub authentication failed.");
+            return args.includes("--name-only") ? "src/finding-1.ts\0" : "";
+          },
         },
-      },
-    );
-
-    expect(outcome.exitCode).toBe(2);
-    expect(outcome.stderr).toContain("GitHub authentication failed.");
-    expect(JSON.parse(outcome.stdout)).toMatchObject({
-      patches: [],
-    });
-  });
+      );
+      expect(outcome.exitCode).toBe(2);
+      expect(outcome.stderr).toContain("GitHub authentication failed.");
+      const value = JSON.parse(outcome.stdout);
+      expect(fullOutput ? value.data : value).toMatchObject({
+        patches: [],
+      });
+      if (fullOutput)
+        expect(value).toMatchObject({
+          ok: false,
+          error: {
+            code: "SCAN_FAILED",
+            message: "GitHub authentication failed.",
+          },
+        });
+    },
+  );
 
   test.each([
     ["blocked", undefined],
@@ -3026,15 +3047,15 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
     },
   );
 
-  test("does not patch incomplete scans or allow patching during a dry run", async () => {
+  test("does not patch failed scans or allow patching during a dry run", async () => {
     const onCodex = mock<() => number>().mockReturnValue(0);
-    const incomplete = resultWithFindings(["high"]);
-    incomplete.coverage.completeness = "partial";
-    const partial = await runWorkflow(["scan", "--patch", "--json"], {
-      result: incomplete,
+    const failedScan = resultWithFindings(["high"]);
+    failedScan.manifest.scan.status = "failed";
+    const outcome = await runWorkflow(["scan", "--patch", "--json"], {
+      result: failedScan,
       onCodex,
     });
-    expect(partial.exitCode).toBe(2);
+    expect(outcome.exitCode).toBe(2);
     expect(onCodex).not.toHaveBeenCalled();
 
     const dryRun = await runWorkflow(["scan", "--patch", "--dry-run"]);
