@@ -1079,8 +1079,7 @@ export class CodexSecurity {
             result!.diagnostics.push(`Cost tracking: ${errorMessage(error)}`);
         };
         const verifyCost = (cost: Readonly<ScanCost> | null): void => {
-          if (cost !== null) reportCost(cost);
-          else {
+          if (cost === null) {
             result!.model.costUsd = null;
             if (options.maxCostUsd !== undefined)
               budgetController.abort(

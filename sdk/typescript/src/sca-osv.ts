@@ -1418,6 +1418,9 @@ export async function runOsvScan(
     if (error instanceof ScaInputDiscoveryError) {
       const { localReferences, diagnostics, ...coverage } = error.discovery;
       Object.assign(result.coverage, coverage);
+      selected = result.coverage.inputs.filter(
+        (input) => input.status === "scanned",
+      );
       result.coverage.unresolvedPackages = localReferences.length;
       result.diagnostics.push(...diagnostics);
     }

@@ -755,8 +755,15 @@ describe("SCA input selection", () => {
         await symlink(outside, unsafeConfig);
       } else await mkdir(unsafeConfig);
       let scannerCalls = 0;
+      const progress: DependencyScanProgress[] = [];
       const result = await runOsvScan(
-        { repositoryPath: repository, outputDir: output },
+        {
+          repositoryPath: repository,
+          outputDir: output,
+          onProgress: (event) => {
+            progress.push(event);
+          },
+        },
         {
           executable: process.execPath,
           runProcess: async () => {
@@ -798,6 +805,15 @@ describe("SCA input selection", () => {
       expect(saved.scanner.invocations).toEqual([]);
       expect(saved.components).toEqual([]);
       expect(saved.coverage.limitations.length).toBeGreaterThan(0);
+      expect(progress.at(-1)).toEqual({
+        phase: "matching",
+        inputsTotal: 2,
+        inputsProcessed: 0,
+        inputsFailed: 2,
+        currentInput: null,
+        components: 0,
+        matches: 0,
+      });
     },
   );
 
