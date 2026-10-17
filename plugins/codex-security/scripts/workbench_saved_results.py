@@ -678,6 +678,15 @@ def _resolved_deferred_rows(draft: dict[str, Any], schema: dict[str, Any]) -> li
     return rows
 
 
+def _parent_observation_content(parent: dict[str, Any]) -> dict[str, Any]:
+    # Frozen recovery ancestry does not change the observed scan result.
+    return {
+        key: value
+        for key, value in parent.items()
+        if key not in {"previousParentCheckpoints", "canonicalParent"}
+    }
+
+
 def _merge_tied_parent_observations(
     current: dict[str, Any], previous: dict[str, Any]
 ) -> dict[str, Any]:
@@ -820,7 +829,9 @@ def merge_saved_results(
                     previous_parent, _, _ = _read_saved_result(
                         scan_dir, f"checkpoints/{previous_head['checkpoint']}", scan_id
                     )
-                    if previous_parent != parent:
+                    if _parent_observation_content(previous_parent) != _parent_observation_content(
+                        parent
+                    ):
                         # Tied observations cannot decide which pending work came last.
                         parent = _merge_tied_parent_observations(parent, previous_parent)
                         parent_is_canonical = False
@@ -830,6 +841,7 @@ def merge_saved_results(
                     # Bind the frozen parent even if canonical outputs are lost.
                     snapshot = {
                         **parent,
+                        "canonicalParent": parent_is_canonical,
                         "previousParentCheckpoints": [
                             f"checkpoints/{name}"
                             for name in _children(scan_dir, "checkpoints")
@@ -1045,6 +1057,7 @@ def merge_saved_results(
         for relative, draft in saved_parents.items():
             if relative not in previous_parents:
                 frozen_parent_path, parent = relative, draft
+                parent_is_canonical = draft.get("canonicalParent") is True
                 break
     projected_coverage = parent["coverage"] if parent else {}
     # V1 persists the review projection in the parent, without reducer sourceCoverage.
@@ -1247,8 +1260,10 @@ def merge_saved_results(
                     else None
                 )
                 parent_modified = modified
-                parent_is_canonical = False
-            elif modified == parent_modified and draft != parent:
+                parent_is_canonical = draft.get("canonicalParent") is True
+            elif modified == parent_modified and _parent_observation_content(
+                draft
+            ) != _parent_observation_content(parent):
                 parent = _merge_tied_parent_observations(parent, draft)
                 parent_is_canonical = False
     # A reducer supplies findings but cannot supersede saved parent coverage.

@@ -2187,6 +2187,7 @@ function parsePersistedCheckpoint(
 ): ScanDraftInput {
   const compatible = structuredClone(input);
   delete compatible.previousParentCheckpoints;
+  delete compatible.canonicalParent;
   if (isObject(compatible.scope)) {
     delete compatible.scope.includePaths;
     delete compatible.scope.excludePaths;
