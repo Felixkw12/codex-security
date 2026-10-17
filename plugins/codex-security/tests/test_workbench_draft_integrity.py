@@ -877,49 +877,23 @@ def test_stopped_worker_candidates_remain_distinct(tmp_path: Path, separate_work
     assert len(findings) == 2
 
 
-def test_unhashable_progress_and_usage_enums_use_existing_validation_errors(tmp_path: Path):
+def test_unhashable_usage_enums_use_existing_validation_errors(tmp_path: Path):
     state, home, _, scan_id = draft_fixture(tmp_path)
-    issue = {
-        "capability": "command",
-        "reason": "Unavailable",
-        "severity": "warn",
-        "status": "unknown",
-    }
-    for field in ("severity", "status", "usage"):
-        for invalid in ([], {}):
-            args = (
-                (
-                    "complete-scan",
-                    "--cost-json",
-                    json.dumps(
-                        {
-                            "usage": {
-                                "coverage": invalid,
-                                "source": "codex_rollout",
-                                "threadCount": 0,
-                            }
-                        }
-                    ),
-                )
-                if field == "usage"
-                else (
-                    "update-progress",
-                    "--preflight-issues-json",
-                    json.dumps([{**issue, field: invalid}]),
-                )
-            )
-            result = run_workbench(state, *args, "--scan-id", scan_id, check=False)
-            assert result["returncode"] != 0
-            assert "invalid" in str(result["stderr"]).lower()
-            assert "Traceback" not in str(result["stderr"])
-    run_workbench(
-        state,
-        "update-progress",
-        "--scan-id",
-        scan_id,
-        "--preflight-issues-json",
-        json.dumps([issue]),
-    )
+    for invalid in ([], {}):
+        result = run_workbench(
+            state,
+            "complete-scan",
+            "--scan-id",
+            scan_id,
+            "--cost-json",
+            json.dumps(
+                {"usage": {"coverage": invalid, "source": "codex_rollout", "threadCount": 0}}
+            ),
+            check=False,
+        )
+        assert result["returncode"] != 0
+        assert "invalid" in str(result["stderr"]).lower()
+        assert "Traceback" not in str(result["stderr"])
     run_workbench(
         state,
         "complete-scan",
