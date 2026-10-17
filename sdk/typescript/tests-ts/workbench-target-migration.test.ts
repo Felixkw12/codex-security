@@ -1,8 +1,25 @@
-import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
+import { resolvePluginPython, runCodexCommand } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+
+async function runPythonProbe(
+  program: string,
+  ...args: string[]
+): Promise<Record<string, unknown>> {
+  const python = await resolvePluginPython();
+  const result = await runCodexCommand(
+    { command: python },
+    ["-I", "-X", "utf8", "-B", "-", join(PLUGIN_ROOT, "scripts"), ...args],
+    process.env,
+    program,
+    AbortSignal.timeout(10_000),
+  );
+  expect(result.exitCode, result.stderr).toBe(0);
+  expect(result.stderr).toBe("");
+  return JSON.parse(result.stdout) as Record<string, unknown>;
+}
 
 const migrationProbe = String.raw`
 import json
@@ -319,30 +336,12 @@ describe("stable workbench target migration", () => {
       "orphan-workspace-and-scan",
       "repairs a workspace and scan after their repository is deleted",
     ],
-  ] as const)("%s: %s", (scenario) => {
-    const python =
-      Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
-    expect(python).not.toBeNull();
-    if (python === null) throw new Error("A Python interpreter is required.");
-
-    const execution = spawnSync(
-      python,
-      [
-        "-I",
-        "-B",
-        "-c",
-        migrationProbe,
-        join(PLUGIN_ROOT, "scripts"),
-        scenario,
-        join(tmpdir(), "codex-security-stable-target-migration", scenario),
-      ],
-      { encoding: "utf8", timeout: 10_000 },
-    );
-
-    expect(execution.status, execution.stderr).toBe(0);
-    expect(execution.stderr).toBe("");
-
-    const result = JSON.parse(execution.stdout) as {
+  ] as const)("%s: %s", async (scenario) => {
+    const result = (await runPythonProbe(
+      migrationProbe,
+      scenario,
+      join(tmpdir(), "codex-security-stable-target-migration", scenario),
+    )) as {
       backfillCalls: number;
       emptyWorkspaceTargetId: string | null;
       existingScanTargetId: string;
@@ -420,28 +419,11 @@ describe("stable workbench target migration", () => {
       "pre-release-identity-version40",
       "preserves the previous identity migration alongside published history and severity migrations",
     ],
-  ] as const)("%s: %s", (scenario) => {
-    const python =
-      Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
-    expect(python).not.toBeNull();
-    if (python === null) throw new Error("A Python interpreter is required.");
-
-    const execution = spawnSync(
-      python,
-      [
-        "-I",
-        "-B",
-        "-c",
-        repositoryIdentityMigrationProbe,
-        join(PLUGIN_ROOT, "scripts"),
-        scenario,
-      ],
-      { encoding: "utf8", timeout: 10_000 },
-    );
-
-    expect(execution.status, execution.stderr).toBe(0);
-    expect(execution.stderr).toBe("");
-    const result = JSON.parse(execution.stdout) as {
+  ] as const)("%s: %s", async (scenario) => {
+    const result = (await runPythonProbe(
+      repositoryIdentityMigrationProbe,
+      scenario,
+    )) as {
       backfillCalls: number;
       hasRepositoryIdentityColumn: boolean;
       hasRepositoryIdentityIndex: boolean;
