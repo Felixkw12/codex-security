@@ -118,7 +118,7 @@ for (const replayRows of [false, true]) {
         const result = await f.write(input);
         assert.deepEqual(result.coverage.resolvedDeferred, [closure]);
         assert.deepEqual(result.coverage.deferred, [candidate]);
-        assert.equal(result.coverage.completeness, "partial");
+        assert.equal(result.coverage.completeness, undefined);
         assert.equal(
           result.coverage.surfaces[0].disposition,
           "needs_follow_up",

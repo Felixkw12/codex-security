@@ -6,7 +6,6 @@ import {
   saveScanDraftCheckpoint,
 } from "./artifact-scan-draft.js";
 import { artifactSchemaDocuments } from "./artifact-contracts.js";
-import { projectArtifactToolSchema } from "./artifact-schema-loader.js";
 import { saveThreatModelDocument } from "./threat-model-document.js";
 import {
   createDeepScanArtifacts,
@@ -25,9 +24,7 @@ import {
 
 const reducerDefinitions = artifactSchemaDocuments["tools/deep-reducer"].$defs;
 export const deepReducerInputsInputSchema = reducerDefinitions.reducerInputs;
-export const deepReductionInputSchema = projectArtifactToolSchema(
-  reducerDefinitions.reductionInput,
-);
+export { deepReductionInputSchema } from "./deep-scan/artifact-validation.js";
 
 /** Read the findings and scan context assigned to this reducer. */
 export async function getCodexSecurityDeepReducerInputs(
@@ -98,8 +95,7 @@ export async function recordCodexSecurityDeepReduction(
 }> {
   return withLogicalReducerErrors(context, async () => {
     const bound = bindDeepReducer(context);
-    const submitted = deepReductionInputSchema.parse(input);
-    let reduction = parseDeepReduction(submitted);
+    let reduction = parseDeepReduction(input);
     if (reduction.complete === false)
       throw new Error(
         "Deep reduction is only a checkpoint, not a complete result.",

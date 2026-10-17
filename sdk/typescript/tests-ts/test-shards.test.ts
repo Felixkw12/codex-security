@@ -341,3 +341,53 @@ test("synthetic blocked shard", async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test.each([false, true])(
+  "keeps the shard result after stderr disconnects, failure=%p",
+  async (fail) => {
+    const node = Bun.which("node");
+    expect(node).not.toBeNull();
+    const root = await temporaryDirectory("codex-security-disconnected-shard-");
+    await mkdir(join(root, "scripts"));
+    await mkdir(join(root, "tests-ts"));
+    await copyFile(
+      new URL("../scripts/run-ci-tests.mts", import.meta.url),
+      join(root, "scripts", "run-ci-tests.mts"),
+    );
+    await writeFile(
+      join(root, "tests-ts", "probe.test.ts"),
+      `import { test, expect } from "bun:test";
+test("synthetic disconnected diagnostic consumer", () => {
+  console.error("synthetic diagnostic".repeat(10000));
+  expect(true).toBe(${!fail});
+});`,
+    );
+    const child = Bun.spawn({
+      cmd: [
+        node!,
+        "--experimental-strip-types",
+        join(root, "scripts", "run-ci-tests.mts"),
+        "1/1",
+      ],
+      env: {
+        ...process.env,
+        PATH: `${dirname(process.execPath)}${delimiter}${process.env["PATH"] ?? ""}`,
+      },
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "pipe",
+      timeout: 30000,
+      windowsHide: true,
+    });
+    try {
+      await child.stderr.cancel();
+      expect(await child.exited).toBe(fail ? 1 : 0);
+      expect(
+        await readFile(join(root, "reports", "junit-1.xml"), "utf8"),
+      ).toContain("synthetic disconnected diagnostic consumer");
+    } finally {
+      await child.exited;
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);

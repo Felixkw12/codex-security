@@ -205,7 +205,7 @@ for (const collision of [false, true]) {
           surface,
           stage,
         );
-        assert.equal(coverage.completeness, "partial", stage);
+        assert.equal(coverage.completeness, undefined, stage);
         const decisions = coverage.surfaces.filter(
           (row: { candidateId?: string }) => row.candidateId === candidateId,
         );

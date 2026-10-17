@@ -189,14 +189,14 @@ export async function loadContractWithScanDirectory(
 }
 
 /** Normalize optional legacy details on a copy, without changing saved artifacts. */
-export function normalizePersistedFindings(payload: unknown): unknown {
+function normalizePersistedFindings(payload: unknown): unknown {
   const compatible = structuredClone(payload);
   if (!isRecord(compatible) || !Array.isArray(compatible["findings"])) {
     return compatible;
   }
   for (const finding of compatible["findings"]) {
     if (!isRecord(finding)) continue;
-    normalizePersistedFindingDetails(finding, "canonical");
+    normalizePersistedFindingDetails(finding);
   }
   return compatible;
 }
@@ -686,7 +686,7 @@ async function verifyScanRoot(
 function safeRelativePath(value: string, context: string): string {
   const parts = value.split("/");
   if (
-    value.trim().length === 0 ||
+    value.length === 0 ||
     Buffer.from(value, "utf8").toString("utf8") !== value ||
     value === "." ||
     value.startsWith("/") ||
@@ -714,7 +714,10 @@ function safeRelativePath(value: string, context: string): string {
 
 function portableRelativePath(value: string, context: string): string {
   const normalized = safeRelativePath(value, context);
-  if (value.split("/").some(isWindowsUnsafePathComponent)) {
+  if (
+    value.trim().length === 0 ||
+    value.split("/").some(isWindowsUnsafePathComponent)
+  ) {
     throw new ContractValidationError(
       `${context}: expected a safe scan-relative POSIX path.`,
     );
@@ -722,7 +725,7 @@ function portableRelativePath(value: string, context: string): string {
   return normalized;
 }
 
-function safeScopePath(value: string): string {
+export function safeScopePath(value: string): string {
   return value === "."
     ? value
     : safeRelativePath(value, "manifest scope include path");

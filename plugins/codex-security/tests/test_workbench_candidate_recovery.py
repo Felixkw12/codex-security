@@ -254,7 +254,7 @@ def test_stopped_reducer_candidates_without_coverage_preserve_scope(
     coverage = json.loads((scan_dir / "coverage.json").read_text())
     assert coverage["inventoryStrategy"] == ("repository" if scope == "." else "scoped_path")
     assert coverage["includePaths"] == [scope]
-    assert coverage["completeness"] == "partial"
+    assert "completeness" not in coverage
     pending = [item for item in coverage["deferred"] if item.get("candidateId")]
     assert len(pending) == 1
     assert pending[0]["candidateId"] == "pending-reducer"

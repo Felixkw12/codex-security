@@ -1,5 +1,4 @@
 import { spawn } from "node:child_process";
-import { once } from "node:events";
 import { mkdir, mkdtemp, open, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -142,23 +141,40 @@ const reader = await open(outputPath, "r");
 const buffer = Buffer.allocUnsafe(64 * 1024);
 let offset = 0;
 let flushing: Promise<void> | undefined;
+let relayFailed = false;
+// A disconnected diagnostic consumer must not replace the test process result.
+process.stderr.on("error", () => {
+  relayFailed = true;
+});
 const flush = (): Promise<void> => {
   flushing ??= (async () => {
     for (;;) {
       const { bytesRead } = await reader.read(buffer, 0, buffer.length, offset);
       if (bytesRead === 0) return;
       offset += bytesRead;
-      if (!process.stderr.write(Buffer.from(buffer.subarray(0, bytesRead))))
-        await once(process.stderr, "drain");
+      if (relayFailed) continue;
+      await new Promise<void>((resolve) => {
+        process.stderr.write(
+          Buffer.from(buffer.subarray(0, bytesRead)),
+          (error) => {
+            if (error) relayFailed = true;
+            resolve();
+          },
+        );
+      });
     }
-  })().finally(() => {
-    flushing = undefined;
-  });
+  })()
+    .catch(() => {
+      relayFailed = true;
+    })
+    .finally(() => {
+      flushing = undefined;
+    });
   return flushing;
 };
 // Keep diagnostics visible before an interrupted or timed-out child exits.
 const relay = setInterval(() => {
-  void flush().catch(console.error);
+  void flush();
 }, 100);
 relay.unref();
 try {

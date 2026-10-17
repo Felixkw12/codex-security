@@ -300,7 +300,6 @@ export interface CoverageDocument {
     | "branch_diff"
     | "working_tree"
     | "deep_repository";
-  completeness: "complete" | "partial" | "unknown";
   inventoryStrategy:
     "repository" | "scoped_path" | "diff" | "directory" | "custom";
   includePaths: string[];
@@ -350,15 +349,15 @@ export interface CoverageDocument {
     id: string;
     reason: string;
   }[];
+  /**
+   * Sealed receipt contract, including exclusion proof. Absent on legacy coverage, whose exclusion receipt metadata remains opaque.
+   */
+  receiptSealVersion?: 1;
   openQuestions?: {
     question: string;
     followUpPrompt?: string;
     [k: string]: unknown;
   }[];
-  /**
-   * Sealed receipt contract, including exclusion proof. Absent on legacy coverage, whose exclusion receipt metadata remains opaque.
-   */
-  receiptSealVersion?: 1;
   [k: string]: unknown;
 }
 
@@ -421,8 +420,6 @@ export type AttackPathReachability = Extract<
 export type FindingProvenance = Finding["provenance"];
 
 export type CoverageMode = CoverageDocument["mode"];
-
-export type CoverageCompleteness = CoverageDocument["completeness"];
 
 export type InventoryStrategy = CoverageDocument["inventoryStrategy"];
 

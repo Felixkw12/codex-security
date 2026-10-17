@@ -178,7 +178,7 @@ print(json.dumps({'pending':unresolved_candidates(recovered['coverage'],recovere
               saved.unresolvedCandidates[0].candidate,
               candidate,
             );
-            assert.equal(published.coverage.completeness, "partial");
+            assert.equal(published.coverage.completeness, undefined);
           }
           assert.deepEqual(
             await readFile(path.join(source, "result.json")),
@@ -272,10 +272,7 @@ for (const receipt of [
         unresolvedCandidates(published.coverage, published.findings).length,
         valid ? 0 : 1,
       );
-      assert.equal(
-        published.coverage.completeness,
-        valid ? "complete" : "partial",
-      );
+      assert.equal(published.coverage.completeness, undefined);
       if (hasOriginal) {
         const retainedRef = current.coverage.surfaces.find(
           (row: any) => row.candidateId === "candidate",
@@ -626,7 +623,7 @@ for (const archived of [false, true]) {
           unresolvedCandidates(published.coverage, published.findings).length,
           0,
         );
-        assert.equal(published.coverage.completeness, "complete");
+        assert.equal(published.coverage.completeness, undefined);
         assert.deepEqual(
           await readFile(path.join(source, "result.json")),
           original,

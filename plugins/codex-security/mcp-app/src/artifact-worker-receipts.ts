@@ -60,7 +60,6 @@ export async function recoverWorkerCandidateReceipts(
       } catch (error) {
         if (candidateId !== undefined) reopened.add(candidateId);
         surface.disposition = "needs_follow_up";
-        coverage.completeness = "partial";
         let pending =
           candidateId === undefined
             ? undefined

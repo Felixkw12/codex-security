@@ -184,7 +184,6 @@ export function refreshDiffCandidateHistory(
       if (!reopened.has(key!) && !deferred.includes(pending))
         deferred.push(pending);
       if (!reopened.has(key!)) reopened.set(key!, pending);
-      Object.assign(result.coverage, candidatePartialCoverage(result.coverage));
     }
     result.coverage.surfaces = result.coverage.surfaces.map((surface) => {
       const key = coverageCandidateKey(surface);
@@ -221,10 +220,6 @@ export function refreshDiffCandidateHistory(
         };
         if (!deferred.includes(item)) deferred.push(item);
         if (!reopened.has(key)) reopened.set(key, item);
-        Object.assign(
-          result.coverage,
-          candidatePartialCoverage(result.coverage),
-        );
       } else if (generatedFollowUp) {
         closed.add(key);
         const resolved = deferred.filter(
@@ -274,7 +269,6 @@ export function refreshDiffCandidateHistory(
     result.coverage.deferred = deferred.filter(
       (item) => !closed.has(coverageCandidateKey(item) ?? ""),
     );
-    if (closed.size > 0) restoreCandidateCompleteness(result.coverage);
     return result;
   });
   for (const source of refreshed) {
@@ -832,41 +826,11 @@ export function preserveUnresolvedDiffCandidates(
     });
   }
   const coverage = {
-    ...(deferred.length > 0
-      ? candidatePartialCoverage(input.coverage)
-      : input.coverage),
+    ...input.coverage,
     deferred,
     surfaces,
   };
-  restoreCandidateCompleteness(coverage);
   return { ...input, coverage };
-}
-
-function restoreCandidateCompleteness(coverage: JsonObject): void {
-  if (
-    coverage.completenessBeforeCandidates !== undefined &&
-    coverage.completeness === "partial" &&
-    (coverage.deferred as JsonObject[]).length === 0 &&
-    !(coverage.surfaces as JsonObject[]).some(
-      (surface) => surface.disposition === "needs_follow_up",
-    )
-  ) {
-    coverage.completeness = coverage.completenessBeforeCandidates;
-    delete coverage.completenessBeforeCandidates;
-  }
-}
-
-// Retain the author's completeness only when candidate projection changes it.
-function candidatePartialCoverage<Coverage extends JsonObject>(
-  coverage: Coverage,
-) {
-  return {
-    ...coverage,
-    ...(coverage.completeness === "partial"
-      ? {}
-      : { completenessBeforeCandidates: coverage.completeness }),
-    completeness: "partial" as const,
-  };
 }
 
 function changedFindingDecision(

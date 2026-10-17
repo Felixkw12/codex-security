@@ -68,13 +68,13 @@ test("Diff ledger retains verified merged candidate resolutions on later saves",
       ],
     });
     const coverage = await f.read();
-    assert.equal(coverage.completeness, "complete");
+    assert.equal(coverage.completeness, undefined);
     assert.deepEqual(coverage.deferred, []);
   }
   await f.write(f.draft({}, true));
   const coverage = await f.read();
   assert.deepEqual(coverage.deferred, []);
-  assert.equal(coverage.completeness, "complete");
+  assert.equal(coverage.completeness, undefined);
   const saved = JSON.parse(
     await readFile(path.join(f.root, "findings.json"), "utf8"),
   );
@@ -94,7 +94,7 @@ test("Diff ledger retains verified merged candidate resolutions on later saves",
   );
   await f.write(f.draft({}, true));
   const reopened = await f.read();
-  assert.equal(reopened.completeness, "partial");
+  assert.equal(reopened.completeness, undefined);
   assert.deepEqual(
     reopened.deferred.map((row: any) => row.candidateId),
     ["first"],
@@ -932,10 +932,7 @@ for (const mode of ["standard", "diff"] as const) {
       for (let replay = 0; replay < 2; replay++) {
         await f.write({ ...f.draft({}, true), findings: [current] });
         const coverage = await f.read();
-        assert.equal(
-          coverage.completeness,
-          independentPending ? "partial" : "complete",
-        );
+        assert.equal(coverage.completeness, undefined);
         assert.deepEqual(
           coverage.deferred,
           independentPending ? [pending("worker-c")] : [],

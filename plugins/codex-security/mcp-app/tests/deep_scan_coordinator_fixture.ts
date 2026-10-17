@@ -308,7 +308,6 @@ export class FakeStore {
           scanId: this.run.scanId,
           findings: [],
           coverage: {
-            completeness: "partial",
             surfaces: [],
             explicitExclusions: [],
             deferred: [],
@@ -502,7 +501,6 @@ export class FakeExecutor {
             context.workerLabel,
           );
           if (this.options.discoveryDeferred?.length) {
-            draft.coverage.completeness = "partial";
             draft.coverage.deferred = structuredClone(
               this.options.discoveryDeferred,
             );
@@ -723,7 +721,6 @@ export function standardScanDraft(
         ]
       : [],
     coverage: {
-      completeness: "complete",
       surfaces: [
         {
           label: "Fixture query",

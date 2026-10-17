@@ -327,7 +327,7 @@ for (const [section, termination] of ["surfaces", "explicitExclusions"].flatMap(
               "The submitted proof gap survives receipt recovery.",
             );
             assert.deepEqual(originalGap.paths, submittedGap.paths);
-            assert.equal(coverage.completeness, "partial", command);
+            assert.equal(coverage.completeness, undefined, command);
             assert.ok(
               surfaces.every(
                 (row: { receiptRefs: string[] }) =>

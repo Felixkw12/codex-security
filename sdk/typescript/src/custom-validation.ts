@@ -10,7 +10,7 @@ import {
 import { basename, dirname, join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import Ajv2020 from "ajv/dist/2020.js";
-import { normalizePersistedFindings, requireScanFile } from "./contract.js";
+import { requireScanFile } from "./contract.js";
 import { IncompleteScanError, errorMessage } from "./errors.js";
 import {
   candidateIdentity,
@@ -236,9 +236,7 @@ export async function runCustomValidation(options: {
       "The scan did not return an unsealed custom-validation draft.",
     );
   }
-  const { findings } = normalizePersistedFindings(
-    findingsDocument,
-  ) as typeof findingsDocument;
+  const { findings } = findingsDocument;
   const [common, candidatesSchema, draft, coverageSchema] = await Promise.all([
     readSchema(options.pluginRoot, "definitions/artifact-common.schema.json"),
     readSchema(options.pluginRoot, "tools/candidate-validations.schema.json"),
@@ -435,7 +433,7 @@ export async function runCustomValidation(options: {
     )
       return true;
     const key = candidateIdentity(item["candidateId"], item["sourceWorkerId"]);
-    if (candidateIdentityCounts.get(key) !== 1) return true;
+    if (!candidateIdentityCounts.has(key)) return true;
     const rows = previousDecisions.get(key) ?? [];
     rows.push(structuredClone(item));
     previousDecisions.set(key, rows);
@@ -525,7 +523,6 @@ export async function runCustomValidation(options: {
       surfaceCandidateKeys.set(id, keys);
     }
     if (validation.disposition === "deferred") {
-      coverage.completeness = "partial";
       const uniqueIdentity =
         key !== undefined && candidateIdentityCounts.get(key) === 1;
       const previous = uniqueIdentity
@@ -657,18 +654,6 @@ export async function runCustomValidation(options: {
     ];
   }
   coverage.surfaces.push(...independentDecisions);
-  const priorCompleteness = coverage["completenessBeforeCandidates"];
-  if (
-    (priorCompleteness === "complete" || priorCompleteness === "unknown") &&
-    coverage.completeness === "partial" &&
-    coverage.deferred.length === 0 &&
-    !coverage.surfaces.some(
-      (surface) => surface.disposition === "needs_follow_up",
-    )
-  ) {
-    coverage.completeness = priorCompleteness;
-    delete coverage["completenessBeforeCandidates"];
-  }
   if (coverage.surfaces.length === 0) {
     coverage.surfaces.push({
       id: "custom-validation",
@@ -681,6 +666,8 @@ export async function runCustomValidation(options: {
   firstSurface.receiptRefs = [
     ...new Set([...firstSurface.receiptRefs, CANDIDATES, RESULTS]),
   ];
+  delete coverage["completeness"];
+  delete coverage["completenessBeforeCandidates"];
   findingsDocument.findings = reported;
   manifest.scan.scope.validationMode = "custom";
   // Rewrite the captured draft, not any canonical-file edits made during validation.

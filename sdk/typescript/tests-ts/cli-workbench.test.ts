@@ -28,7 +28,6 @@ import {
 describe("CLI workbench", () => {
   test("reports saved unresolved candidates separately from reportable findings", async () => {
     const result = fakeResult(["high"]);
-    result.coverage.completeness = "partial";
     result.coverage.deferred = [
       {
         id: "pending",
@@ -38,7 +37,7 @@ describe("CLI workbench", () => {
       { id: "review", reason: "Remaining review work." },
     ];
     const { stdout, stderr, runCli } = createCliTest(main);
-    expect(await runCli(["scan", "--json"], dependencies({ result }))).toBe(2);
+    expect(await runCli(["scan", "--json"], dependencies({ result }))).toBe(0);
     expect(stderr.text()).toContain("FINDINGS  1 (1 high) + 1 candidate\n");
     expect(stderr.text()).not.toContain("CANDIDATES");
     expect(JSON.parse(stdout.text())).toMatchObject({
@@ -71,7 +70,6 @@ describe("CLI workbench", () => {
           confirmedInLatestScan,
         })),
       });
-      result.coverage.completeness = "partial";
       result.coverage.deferred = Array.from(
         { length: candidates },
         (_, index) => ({
@@ -81,10 +79,8 @@ describe("CLI workbench", () => {
         }),
       );
       const stderr = captureCli(main, "stderr");
-      expect(await stderr.run(["scan"], dependencies({ result }))).toBe(2);
-      expect(stderr.text()).toContain(
-        `  FINDINGS  ${summary}\n  COVERAGE  partial\n`,
-      );
+      expect(await stderr.run(["scan"], dependencies({ result }))).toBe(0);
+      expect(stderr.text()).toContain(`  FINDINGS  ${summary}\n`);
       expect(stderr.text()).not.toContain("CANDIDATES");
     },
   );
@@ -577,12 +573,11 @@ describe("CLI workbench", () => {
           "--include-matching-inputs",
         ],
         {
-          comparable: true,
           matchingCached: true,
           matchingInputs: { before: [], after: [] },
           summary: { persisting: 1, resolved: 1 },
         },
-        { comparable: true, summary: { persisting: 1, resolved: 1 } },
+        { summary: { persisting: 1, resolved: 1 } },
       ],
       [
         [
@@ -605,12 +600,11 @@ describe("CLI workbench", () => {
           "--include-matching-inputs",
         ],
         {
-          comparable: true,
           matchingCached: true,
           matchingInputs: { before: [], after: [] },
           summary: { persisting: 1, resolved: 1 },
         },
-        { comparable: true, summary: { persisting: 1, resolved: 1 } },
+        { summary: { persisting: 1, resolved: 1 } },
       ],
     ];
     for (const [argv, expected, response, output] of cases) {

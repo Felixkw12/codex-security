@@ -1045,9 +1045,7 @@ for (const mode of ["standard", "diff"] as const) {
           stillReopened,
         );
         expect(coverage.deferred).toEqual(expectedPending ? [currentGap] : []);
-        expect(coverage.completeness).toBe(
-          expectedPending ? "partial" : "complete",
-        );
+        expect(coverage["completeness"]).toBe(undefined);
         expect(confirmed.provenance.candidateReopened).toBe(true);
         await f.unchanged();
       }
@@ -1081,9 +1079,7 @@ for (const mode of ["standard", "diff"] as const) {
         .scan;
       expect(result.unresolvedCandidateCount).toBe(Number(expectedPending));
       expect(scan.progress.candidates.unresolved).toBe(Number(expectedPending));
-      expect(result.coverage.completeness).toBe(
-        expectedPending ? "partial" : "complete",
-      );
+      expect(result.coverage["completeness"]).toBe(undefined);
       if (submission === "incomplete") {
         expect(result.unresolvedCandidates[0]).toMatchObject({
           candidateId: pending.candidateId,

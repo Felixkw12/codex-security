@@ -79,7 +79,7 @@ describe("ScanResult", () => {
   test("counts saved unresolved candidates once per logical worker", () => {
     const result = fakeResult(["high"]);
     result.findings.findings[0]!.provenance["candidateId"] = "confirmed";
-    result.coverage.completeness = "partial";
+    result.coverage["completeness"] = "partial";
     result.coverage.surfaces = [
       {
         id: "rejected",
@@ -499,7 +499,7 @@ for (const historical of [false, true]) {
           reason: "The worker still needs independent validation.",
           candidate: { evidence: "Keep current checkpoint evidence." },
         };
-        result.coverage.completeness = "partial";
+        result.coverage["completeness"] = "partial";
         result.coverage.deferred = [pending];
         result.coverage.surfaces = terminal
           ? [

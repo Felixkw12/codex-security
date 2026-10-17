@@ -1,4 +1,8 @@
 import { isDeepStrictEqual } from "node:util";
+import { dirname, relative, sep } from "node:path";
+import type { JsonObject } from "../types.js";
+import { artifactSchemaDocuments } from "../artifact-contracts.js";
+import { projectArtifactToolSchema } from "../artifact-schema-loader.js";
 import {
   coverageCandidateKey,
   findingCandidateId,
@@ -7,10 +11,10 @@ import {
 } from "../artifact-candidates.js";
 import {
   parsePersistedScanDraft,
-  parseScanDraft,
   preserveFindingDetails,
   saveScanDraftCheckpoint,
   scanFindingIdentity,
+  validateFindingSemantics,
   type ScanDraftInput,
 } from "../artifact-scan-draft.js";
 import {
@@ -29,6 +33,9 @@ export type UnresolvedCandidate =
 export type DeepReductionInput = Omit<ScanDraftInput, "coverage"> & {
   unresolvedCandidates?: UnresolvedCandidate[];
 };
+export const deepReductionInputSchema = projectArtifactToolSchema(
+  artifactSchemaDocuments["tools/deep-reducer"].$defs.reductionInput,
+);
 
 export interface DeepReductionSources {
   discoveries: { workerId: string; result: DeepReductionInput }[];
@@ -38,35 +45,6 @@ export interface DeepReductionSources {
 export interface ReducerArtifactValidation {
   newFindings: number;
   result: DeepReductionInput;
-}
-
-/**
- * Check reducer findings with the Standard scan validator.
- * Reuse its coverage validator for saved candidate state, then remove coverage.
- */
-export function parseDeepReduction(
-  input: Record<string, unknown>,
-  persisted = false,
-): DeepReductionInput {
-  const { unresolvedCandidates, ...semantic } = input;
-  const standard = {
-    ...semantic,
-    coverage: {
-      completeness: persisted && unresolvedCandidates ? "partial" : "complete",
-      surfaces: [],
-      explicitExclusions: [],
-      deferred: persisted ? (unresolvedCandidates ?? []) : [],
-    },
-  };
-  const { coverage, ...parsed } = persisted
-    ? parsePersistedScanDraft(standard)
-    : parseScanDraft(standard as unknown as ScanDraftInput);
-  return {
-    ...parsed,
-    ...((coverage.deferred as unknown[]).length > 0
-      ? { unresolvedCandidates: coverage.deferred as UnresolvedCandidate[] }
-      : {}),
-  };
 }
 
 /** Retain candidate state without importing worker-local coverage observations. */
@@ -137,11 +115,104 @@ export function deepReductionScanDraft(
   return {
     ...result,
     coverage: {
-      completeness: unresolvedCandidates.length > 0 ? "partial" : "complete",
       surfaces: [],
       explicitExclusions: [],
       deferred,
     },
+  };
+}
+
+/** Reduction combines findings; it does not complete the source workers' review. */
+export function aggregateDiscoveryCoverage(
+  artifacts: DeepScanArtifacts,
+  discoveries: { id: string; resultPath: string; result: ScanDraftInput }[],
+  unresolvedCandidates?: UnresolvedCandidate[],
+): ScanDraftInput["coverage"] {
+  const coverage: ScanDraftInput["coverage"] = {
+    surfaces: [],
+    explicitExclusions: [],
+    deferred: [],
+  };
+  for (const worker of discoveries) {
+    const source = structuredClone(worker.result.coverage);
+    const prefix = relative(artifacts.scanDir, dirname(worker.resultPath))
+      .split(sep)
+      .join("/");
+    const scopedId = (id: string) => `${worker.id}/${id}`;
+    for (const field of [
+      "surfaces",
+      "explicitExclusions",
+      "deferred",
+    ] as const) {
+      const rows =
+        field === "deferred" && unresolvedCandidates !== undefined
+          ? [
+              ...source.deferred.filter(
+                (row) => coverageCandidateKey(row, worker.id) === undefined,
+              ),
+              ...unresolvedCandidates.filter(
+                (row) => row.sourceWorkerId === worker.id,
+              ),
+            ]
+          : source[field];
+      for (const [index, row] of (rows as JsonObject[]).entries()) {
+        const retained: JsonObject = {
+          ...row,
+          workerId: worker.id,
+          ...(coverageCandidateKey(row, worker.id) === undefined
+            ? {}
+            : { sourceWorkerId: worker.id }),
+        };
+        // Independent reviews reuse local IDs. Preserve their links without
+        // allowing one worker's disposition to stand in for another's work.
+        retained.id = scopedId(
+          typeof row.id === "string" ? row.id : String(index),
+        );
+        if (Array.isArray(row.surfaceIds)) {
+          retained.surfaceIds = (row.surfaceIds as string[]).map(scopedId);
+        }
+        if (Array.isArray(row.receiptRefs)) {
+          retained.receiptRefs = (row.receiptRefs as string[]).map(
+            (ref) => `${prefix}/${ref}`,
+          );
+        }
+        (coverage[field] as JsonObject[]).push(retained);
+      }
+    }
+    for (const question of source.openQuestions ?? []) {
+      (coverage.openQuestions ??= []).push({
+        ...(typeof question === "string" ? { question } : question),
+        workerId: worker.id,
+      });
+    }
+  }
+  return coverage;
+}
+
+export function parseDeepReduction(
+  input: unknown,
+  persisted = false,
+): DeepReductionInput {
+  const { unresolvedCandidates, ...semantic } = input as Record<
+    string,
+    unknown
+  >;
+  const parsed = deepReductionInputSchema.parse(semantic);
+  validateFindingSemantics(parsed.findings);
+  if (!persisted || unresolvedCandidates === undefined) return parsed;
+  const { coverage } = parsePersistedScanDraft({
+    ...parsed,
+    coverage: {
+      surfaces: [],
+      explicitExclusions: [],
+      deferred: unresolvedCandidates,
+    },
+  });
+  return {
+    ...parsed,
+    ...(coverage.deferred.length > 0
+      ? { unresolvedCandidates: coverage.deferred as UnresolvedCandidate[] }
+      : {}),
   };
 }
 

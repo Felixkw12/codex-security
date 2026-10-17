@@ -103,7 +103,7 @@ def test_exclusion_proof_recovery_matches_public_entrypoints(
     assert (pending["reason"] in report) is reopened
     if reopened:
         assert pending in coverage["deferred"]
-        assert coverage["completeness"] == "partial"
+        assert "completeness" not in coverage
     sarif = json.loads((scan_dir / "exports/results.sarif").read_text())
     assert sarif["runs"][0]["results"] == []
     before = {
@@ -155,6 +155,24 @@ def test_sealed_exclusion_cannot_reference_proof_outside_its_artifact_inventory(
     ]
     path.write_text(json.dumps(manifest))
     with pytest.raises(FINALIZER.ContractError, match="missing from sealed artifacts"):
+        FINALIZER.finalize_scan(scan_dir)
+
+
+def test_sealed_exclusion_receipt_version_rejects_boolean(tmp_path: Path) -> None:
+    state, scan_id, scan_dir, _, _ = exclusion_scan(tmp_path, "rejected", "valid")
+    publish(state, scan_id, scan_dir, "standalone")
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage["receiptSealVersion"] = True
+    coverage_path.write_text(json.dumps(coverage))
+    manifest_path = scan_dir / "scan-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    for artifact in manifest["scan"]["artifacts"]:
+        if artifact["path"] == "coverage.json":
+            artifact["sha256"] = hashlib.sha256(coverage_path.read_bytes()).hexdigest()
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(FINALIZER.ContractError, match="receiptSealVersion"):
         FINALIZER.finalize_scan(scan_dir)
 
 

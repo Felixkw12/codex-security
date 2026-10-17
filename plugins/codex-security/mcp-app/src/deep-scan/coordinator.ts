@@ -8,6 +8,7 @@ import {
   ensureDeepScanDirectories,
 } from "./artifacts.js";
 import {
+  aggregateDiscoveryCoverage,
   deepReductionScanDraft,
   validateDiscoveryArtifacts,
   validateReducerArtifacts,
@@ -33,6 +34,7 @@ import {
   abortError,
   errorMessage,
   boundedDeepScanErrorMessage,
+  DeepScanNonRetryableError,
 } from "./errors.js";
 import type {
   CodexWorkerExecutor,
@@ -60,6 +62,7 @@ interface SchedulerResult {
   omittedWorkerIds: string[];
   result?: DeepReductionInput;
   resultPath?: string;
+  discoveries: AcceptedDiscovery[];
 }
 
 export interface ParentScanState {
@@ -140,6 +143,7 @@ export class DeepScanCoordinator {
       random: options.random ?? Math.random,
       log: this.log,
       retryDelaysMs: options.retryDelaysMs ?? RETRY_DELAYS_MS,
+      onNonRetryableError: (error: Error) => this.abortController.abort(error),
     } satisfies Omit<
       ConstructorParameters<typeof DeepScanWorkerRunner>[0],
       "signal"
@@ -358,12 +362,18 @@ export class DeepScanCoordinator {
       const schedulerResult = await this.runScheduler();
       if (this.canceled || this.externallyFailed) return;
       const draft = schedulerResult.result
-        ? deepReductionScanDraft(schedulerResult.result)
+        ? {
+            ...deepReductionScanDraft(schedulerResult.result),
+            coverage: aggregateDiscoveryCoverage(
+              this.artifacts,
+              schedulerResult.discoveries,
+              schedulerResult.result.unresolvedCandidates ?? [],
+            ),
+          }
         : scanDraftInputSchema.parse({
             scanId: this.state.scanId,
             findings: [],
             coverage: {
-              completeness: "partial",
               surfaces: [],
               explicitExclusions: [],
               deferred: [
@@ -413,6 +423,11 @@ export class DeepScanCoordinator {
       }
       if (await this.stopAfterOwnershipChange(this.options.threadId, error)) {
         return;
+      }
+      if (
+        this.abortController.signal.reason instanceof DeepScanNonRetryableError
+      ) {
+        error = this.abortController.signal.reason;
       }
       const message = errorMessage(error);
       const persistedMessage = boundedDeepScanErrorMessage(error);
@@ -707,16 +722,16 @@ export class DeepScanCoordinator {
   }
 
   /**
-   * Keep the discovery pool full until the reducer establishes convergence or
-   * the configured run cap is exhausted. Completed discoveries enter a stable
-   * FIFO buffer. One reducer claims the current buffer snapshot; discoveries
-   * that finish during that reduction wait for the next one.
+   * Refill discovery between reductions so a slow reducer cannot build an
+   * unchecked backlog. One reducer claims the FIFO buffer. Discoveries that
+   * finish during reduction wait for the next one.
    */
   private async runScheduler(): Promise<SchedulerResult> {
     const config = this.state.config;
     const active = new Map<string, Promise<DiscoveryOutcome>>();
     const recovered = await this.recoverAcceptedDiscoveries();
-    let acceptedCount = recovered.length;
+    const accepted = new Map(recovered.map((worker) => [worker.id, worker]));
+    let reducerInputs: AcceptedDiscovery[] = [];
     const mergedIds = new Set(
       (this.state.persistedWorkers ?? [])
         .filter(
@@ -884,7 +899,7 @@ export class DeepScanCoordinator {
       phase: "discovery",
       handoffClaimToken: this.options.handoffClaimToken,
     });
-    this.logProgress(acceptedCount);
+    this.logProgress(accepted.size);
 
     while (!stopReason) {
       if (this.abortController.signal.aborted) {
@@ -896,6 +911,7 @@ export class DeepScanCoordinator {
       }
       if (settlements.length === 0) {
         while (
+          !reducer &&
           !this.discoveryDeadlineReached &&
           (!previousReducerResultPath ||
             this.state.noNewStreak < config.stopAfterNoNew) &&
@@ -924,6 +940,7 @@ export class DeepScanCoordinator {
           )
         ) {
           const consumed = [...buffer].sort(compareCompletionSequence);
+          reducerInputs = consumed;
           buffer = [];
           reducerSequence += 1n;
           reducer = this.trackSchedulerWork(
@@ -999,10 +1016,10 @@ export class DeepScanCoordinator {
           }
           continue;
         }
-        acceptedCount += 1;
+        accepted.set(outcome.worker.id, outcome.worker);
         this.state = { ...this.state, consecutiveErrors: 0 };
         buffer.push(outcome.worker);
-        this.logProgress(acceptedCount);
+        this.logProgress(accepted.size);
         continue;
       }
 
@@ -1027,6 +1044,7 @@ export class DeepScanCoordinator {
         return await settleFailure(thresholdError);
       }
       reducerFailures = 0;
+      for (const worker of reducerInputs) mergedIds.add(worker.id);
       if (!this.canceled && !this.externallyFailed) this.state = outcome.run;
       previousReducerResultPath = outcome.resultPath;
       latestResult = outcome.result;
@@ -1049,7 +1067,7 @@ export class DeepScanCoordinator {
 
     if (
       !previousReducerResultPath &&
-      !(this.discoveryDeadlineReached && acceptedCount === 0)
+      !(this.discoveryDeadlineReached && accepted.size === 0)
     ) {
       throw new Error(
         "Deep Scan ended without a successfully reduced Standard scan.",
@@ -1060,6 +1078,9 @@ export class DeepScanCoordinator {
       omittedWorkerIds: [...new Set(omittedWorkerIds)],
       result: latestResult,
       resultPath: previousReducerResultPath,
+      discoveries: [...accepted.values()].filter((worker) =>
+        mergedIds.has(worker.id),
+      ),
     };
   }
 
@@ -1073,7 +1094,7 @@ export class DeepScanCoordinator {
           `Accepted discovery ${worker.id} has incomplete persisted evidence.`,
         );
       }
-      await validateDiscoveryArtifacts(
+      const result = await validateDiscoveryArtifacts(
         this.artifacts,
         worker.resultManifestPath,
         this.state.scanId,
@@ -1081,6 +1102,7 @@ export class DeepScanCoordinator {
       recovered.push({
         id: worker.id,
         resultPath: worker.resultManifestPath,
+        result,
         completionSequence: worker.completionSequence,
       });
     }

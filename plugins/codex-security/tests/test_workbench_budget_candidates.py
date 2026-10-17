@@ -539,6 +539,19 @@ def test_budget_exhaustion_resolves_candidates_only_with_recoverable_findings(
     result = complete_budget_scan(state_dir, scan_id, check=False)
 
     assert result["returncode"] != 0
+    assert "invalid findings" in result["stderr"]
+    scan = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+    assert scan["progress"]["status"] == "running"
+    assert not json.loads((scan_dir / "scan-manifest.json").read_text())["scan"].get("sealedAt")
+
+    run_workbench(
+        state_dir,
+        "fail-scan",
+        "--scan-id",
+        scan_id,
+        "--message",
+        "Stopped after invalid completion.",
+    )
     scan = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
     assert scan["progress"]["status"] == "failed"
     assert scan["findingCount"] == int(not missing_rule_id)
@@ -1402,7 +1415,7 @@ def test_public_budget_completion_keeps_receipt_reopened_work(
         assert any(row.get("candidateId") == candidate["candidate_id"] for row in saved["deferred"])
         assert saved["surfaces"][0]["disposition"] == "needs_follow_up"
         assert saved["surfaces"][0]["receiptRefs"] == []
-        assert saved["completeness"] == "partial"
+        assert "completeness" not in saved
     elif receipt != "reported":
         assert saved["surfaces"][0]["disposition"] == (
             "rejected" if decision == "suppressed" else "not_applicable"

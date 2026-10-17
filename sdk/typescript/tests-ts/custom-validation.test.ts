@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import type { ThreadEvent } from "@openai/codex-sdk";
 import type { ScanActivity } from "../src/scan-activity.js";
 import Ajv2020 from "ajv/dist/2020.js";
-import { afterEach, describe, expect, test, mock } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import {
   runCustomValidation,
   type CustomValidationResult,
@@ -122,7 +122,6 @@ async function publishDraft(
       ),
     },
     coverage: {
-      completeness: coverage.completeness,
       inventoryStrategy: coverage.inventoryStrategy,
       surfaces: coverage.surfaces,
       explicitExclusions: coverage.explicitExclusions,
@@ -270,7 +269,7 @@ for (const disposition of [
       reason: "A still requires validation.",
       surfaceIds: ["surface-0"],
     };
-    coverage.completeness = "partial";
+    coverage["completeness"] = "partial";
     coverage.deferred = [independent];
     await save(join(f.scanDir, "coverage.json"), coverage);
     await runCustomValidation({
@@ -303,7 +302,7 @@ for (const disposition of [
         title: `Earlier finding ${index}`,
       },
     }));
-    coverage.completeness = "partial";
+    coverage["completeness"] = "partial";
     coverage.deferred = previous;
     await save(join(f.scanDir, "coverage.json"), coverage);
     await runCustomValidation({
@@ -380,7 +379,7 @@ describe("custom validation", () => {
           reason: "Independent worker review remains.",
         },
       ];
-      coverage.completeness = "partial";
+      coverage["completeness"] = "partial";
       coverage.deferred = [
         old,
         { ...old, id: "duplicate-checkpoint" },
@@ -453,7 +452,7 @@ describe("custom validation", () => {
         id: "other-owner",
         sourceWorkerId: "worker-other",
       };
-      coverage.completeness = "partial";
+      coverage["completeness"] = "partial";
       coverage.deferred = [previous, unrelated];
       await save(join(f.scanDir, "coverage.json"), coverage);
       await runCustomValidation({
@@ -532,7 +531,7 @@ describe("custom validation", () => {
     "not_applicable",
   ] as const) {
     test.each(["none", "deferred", "surface", "authored-partial"] as const)(
-      `restores candidate-only completeness after ${disposition}: %s`,
+      `drops retired completeness metadata after ${disposition}: %s`,
       async (remaining) => {
         const f = await fixture();
         const finding = f.findings.findings[0]!;
@@ -542,7 +541,7 @@ describe("custom validation", () => {
         const coverage = await json<CoverageDocument>(
           join(f.scanDir, "coverage.json"),
         );
-        coverage.completeness = "partial";
+        coverage["completeness"] = "partial";
         if (remaining !== "authored-partial")
           coverage["completenessBeforeCandidates"] = "complete";
         coverage.deferred = [
@@ -573,14 +572,8 @@ describe("custom validation", () => {
         });
         const saved = await loadResult(f.scanDir);
         expect(saved.unresolvedCandidateCount).toBe(0);
-        expect(saved.coverage.completeness).toBe(
-          remaining === "none" ? "complete" : "partial",
-        );
-        expect(saved.coverage["completenessBeforeCandidates"]).toBe(
-          remaining === "none" || remaining === "authored-partial"
-            ? undefined
-            : "complete",
-        );
+        expect(saved.coverage["completeness"]).toBe(undefined);
+        expect(saved.coverage["completenessBeforeCandidates"]).toBe(undefined);
       },
     );
   }
@@ -623,7 +616,7 @@ describe("custom validation", () => {
     const coverage = await json<CoverageDocument>(
       join(f.scanDir, "coverage.json"),
     );
-    coverage.completeness = "partial";
+    coverage["completeness"] = "partial";
     coverage.deferred.push({
       id: "custom-validation-candidate-4-4",
       reason: "Unrelated source review remains unfinished.",
@@ -727,7 +720,7 @@ describe("custom validation", () => {
       "not_applicable",
       "needs_follow_up",
     ]);
-    expect(coverage.completeness).toBe("partial");
+    expect(coverage).not.toHaveProperty("completeness");
     expect(coverage.surfaces[0]!.receiptRefs).toContain(
       "artifacts/custom-validation/proof.txt",
     );
@@ -783,82 +776,27 @@ describe("custom validation", () => {
     ).rejects.toThrow("unsealed custom-validation draft");
   });
 
-  test("validates persisted findings with empty optional dataflow details", async () => {
-    const f = await fixture(3);
-    for (const [index, finding] of f.findings.findings.entries()) {
-      finding.attackPath = {
-        dataflow: {
-          source: "Synthetic request input",
-          sink: index < 2 ? "" : "Synthetic output operation",
-        },
-      };
-    }
-    await save(join(f.scanDir, "findings.json"), f.findings);
-    const run = mock(async () => {
-      const candidates = await json<{
-        candidates: Array<{ finding: unknown }>;
-      }>(join(f.scanDir, "artifacts/custom-validation/candidates.json"));
-      expect(candidates.candidates).toHaveLength(3);
-      expect(candidates.candidates[0]!.finding).toHaveProperty(
-        "attackPath.dataflow",
-        { source: "Synthetic request input" },
-      );
-      return JSON.stringify(result("reportable", "reportable", "reportable"));
-    });
-    await runCustomValidation({
-      ...f,
-      run,
-    });
-    expect(run).toHaveBeenCalled();
-    const saved = await json<FindingsDocument>(
-      join(f.scanDir, "findings.json"),
-    );
-    expect(saved.findings).toHaveLength(3);
-    for (const [index, finding] of saved.findings.entries()) {
-      expect(finding.validation).toMatchObject({
-        counterEvidence: [],
-        limitations: [],
-      });
-      expect(finding.identity).toEqual(f.findings.findings[index]!.identity);
-      expect(finding.locations).toEqual(f.findings.findings[index]!.locations);
-      expect(finding.attackPath).toEqual({
-        dataflow: {
-          source: "Synthetic request input",
-          ...(index < 2 ? {} : { sink: "Synthetic output operation" }),
-        },
-      });
-    }
-  });
-
-  test("retains original optional details when custom validation fails", async () => {
-    const f = await fixture();
-    f.findings.findings[0]!.attackPath = { dataflow: { sink: "" } };
-    await save(join(f.scanDir, "findings.json"), f.findings);
-    await expect(
-      runCustomValidation({
-        ...f,
-        run: rejecting("Synthetic validation failure"),
-      }),
-    ).rejects.toThrow("Synthetic validation failure");
-    expect(
-      await json<FindingsDocument>(join(f.scanDir, "findings.json")),
-    ).toEqual(f.findings);
-  });
-
-  test("identifies an invalid provisional finding and field before validation", async () => {
-    const f = await fixture(2);
-    f.findings.findings[1]!.title = "";
-    await save(join(f.scanDir, "findings.json"), f.findings);
-    await expect(
-      runCustomValidation({
-        ...f,
-        run: unexpectedValidation,
-      }),
-    ).rejects.toThrow(/findings\[1\].*title/);
-    expect(
-      await json<FindingsDocument>(join(f.scanDir, "findings.json")),
-    ).toEqual(f.findings);
-  });
+  test.each([
+    ["empty title", { title: "" }],
+    ["empty optional detail", { attackPath: { dataflow: { sink: "" } } }],
+    ["legacy field", { root_cause: "Synthetic legacy detail." }],
+  ])(
+    "rejects %s before validation without changing the draft",
+    async (_name, fields) => {
+      const f = await fixture(2);
+      Object.assign(f.findings.findings[1]!, fields);
+      await save(join(f.scanDir, "findings.json"), f.findings);
+      await expect(
+        runCustomValidation({
+          ...f,
+          run: unexpectedValidation,
+        }),
+      ).rejects.toThrow(/valid provisional finding set.*findings\[1\]/);
+      expect(
+        await json<FindingsDocument>(join(f.scanDir, "findings.json")),
+      ).toEqual(f.findings);
+    },
+  );
 
   test("identifies invalid provisional coverage before validation", async () => {
     const f = await fixture();
@@ -1148,11 +1086,6 @@ describe("custom validation", () => {
                       expect(prompt).not.toContain("run `$validation` once");
                       expect(turnOptions.outputSchema).toBeUndefined();
                       await draft(scanDir, scanId, 0, diff);
-                      const earlyCoverage = await json<CoverageDocument>(
-                        join(scanDir, "coverage.json"),
-                      );
-                      earlyCoverage.completeness = "partial";
-                      await save(join(scanDir, "coverage.json"), earlyCoverage);
                       await publishDraft(scanDir, scanId, workbench, false);
                       const provisional = await draft(
                         scanDir,
@@ -1217,7 +1150,7 @@ describe("custom validation", () => {
                         const coverage = await json<CoverageDocument>(
                           join(scanDir, "coverage.json"),
                         );
-                        coverage.completeness = "partial";
+                        coverage["completeness"] = "partial";
                         coverage.deferred.push({
                           id: "previous-candidate",
                           candidateId: "candidate-shared",
@@ -1230,7 +1163,6 @@ describe("custom validation", () => {
                         const coverage = await json<CoverageDocument>(
                           join(scanDir, "coverage.json"),
                         );
-                        coverage.completeness = "partial";
                         coverage.deferred = [
                           {
                             id: "unfinished-source",
@@ -1387,9 +1319,12 @@ describe("custom validation", () => {
             status: "complete",
           });
           expect(
-            (await json<CoverageDocument>(join(scanDir, "coverage.json")))
-              .completeness,
-          ).toBe("partial");
+            await json<CoverageDocument>(join(scanDir, "coverage.json")),
+          ).toMatchObject({
+            deferred: expect.arrayContaining([
+              expect.objectContaining({ id: "unfinished-source" }),
+            ]),
+          });
           return;
         }
         if (stopAfterValidation) {
@@ -1497,7 +1432,7 @@ describe("custom validation", () => {
             expect(completed.unresolvedCandidates[0]!.candidateId).toBe(
               semanticIdentity,
             );
-            expect(completed.coverage.completeness).toBe("partial");
+            expect(completed.coverage["completeness"]).toBe(undefined);
           } else {
             expect(completed.unresolvedCandidateCount).toBe(0);
             if (dispositions[0] !== "reportable")
@@ -1562,7 +1497,7 @@ describe("custom validation", () => {
           expect(completed.unresolvedCandidateCount).toBe(expectedPending);
           expect(completed.coverage.deferred).toHaveLength(expectedPending);
           if (expectedPending > 0)
-            expect(completed.coverage.completeness).toBe("partial");
+            expect(completed.coverage["completeness"]).toBe(undefined);
           expect(
             new Set(
               completed.unresolvedCandidates.map((item) => item.candidateId),
@@ -1633,9 +1568,10 @@ describe("custom validation", () => {
     const diff = await customDiscoveryPrompt(PLUGIN_ROOT, "security-diff-scan");
     expect(standard).toContain("## Baseline Auditor Prompt");
     expect(standard).toContain("## Focused Investigator Prompt");
-    expect(standard).toContain("security_scan` capability preflight");
+    expect(standard).toContain("<plugin_dir>/references/scan-prologue.md");
+    expect(diff).toContain("<plugin_dir>/references/scan-runtime.md");
     expect(standard).toContain("use it for the same early model checkpoint");
-    expect(standard).toContain("retain the model in an early partial");
+    expect(standard).toContain("retain the model in an early");
     expect(standard).toContain("`followup_task`");
     expect(standard).toContain("`send_message`");
     expect(standard).not.toContain("undefined");
@@ -1743,7 +1679,7 @@ for (const prior of ["rejected", "not_applicable"] as const) {
           annotation: "Retain this authored annotation.",
         };
         coverage.surfaces.push(previous);
-        coverage.completeness = "partial";
+        coverage["completeness"] = "partial";
         const independent = {
           id: "independent-review",
           ...(gap === "other-worker"
@@ -1849,7 +1785,7 @@ for (const disposition of [
           annotation: "Retain this saved annotation.",
         };
         coverage.surfaces.push(previous);
-        coverage.completeness = "partial";
+        coverage["completeness"] = "partial";
         coverage.deferred = [
           {
             id: "saved-pending",
@@ -1919,7 +1855,7 @@ for (const prior of ["rejected", "not_applicable"] as const) {
           : "independent-candidate";
         coverage.surfaces[0]!.disposition = prior;
         coverage.surfaces[0]!["annotation"] = "Saved terminal annotation.";
-        coverage.completeness = "partial";
+        coverage["completeness"] = "partial";
         coverage.deferred = [
           {
             id: "old-independent-gap",
@@ -1979,7 +1915,7 @@ for (const mapped of [false, true]) {
       annotation: "Retain this historical annotation.",
     };
     coverage.surfaces.push(previous);
-    coverage.completeness = "partial";
+    coverage["completeness"] = "partial";
     coverage.deferred = [
       {
         id: "saved-pending",
@@ -2042,7 +1978,7 @@ for (const owner of [{ worker: "historical-worker" }, ["historical-worker"]]) {
         surfaceIds: [coverage.surfaces[0]!.id],
       };
       coverage.deferred = [historical];
-      coverage.completeness = "partial";
+      coverage["completeness"] = "partial";
       await save(join(f.scanDir, "coverage.json"), coverage);
       await runCustomValidation({
         ...f,
@@ -2107,7 +2043,7 @@ for (const outcomes of [
         surfaceIds: [historical.id],
       };
       if (independent) coverage.deferred.push(shared);
-      coverage.completeness = "partial";
+      coverage["completeness"] = "partial";
       await save(join(f.scanDir, "coverage.json"), coverage);
       await runCustomValidation({
         ...f,
@@ -2175,7 +2111,7 @@ for (const owner of [
           receiptRefs: [],
         };
         coverage.surfaces.push(historical);
-        coverage.completeness = "partial";
+        coverage["completeness"] = "partial";
         await save(join(f.scanDir, "coverage.json"), coverage);
         await runCustomValidation({
           ...f,
@@ -2231,7 +2167,7 @@ for (const owner of [undefined, "", " ", "other-worker"]) {
         notes: "Original proof evidence.",
       };
       coverage.surfaces.push(historical);
-      coverage.completeness = "partial";
+      coverage["completeness"] = "partial";
       coverage.deferred = [
         {
           id: "legacy-gap",
@@ -2296,7 +2232,7 @@ for (const disposition of ["reportable", "suppressed"] as const) {
           notes: "Preserve the saved proof and owner.",
         };
         coverage.surfaces.push(historical);
-        coverage.completeness = "partial";
+        coverage["completeness"] = "partial";
         coverage.deferred = [
           {
             id: "candidate-gap",
@@ -2379,5 +2315,48 @@ for (const reassessed of [false, true]) {
         provenance: { originalCandidates: expect.arrayContaining([previous]) },
       });
     }
+  });
+}
+
+for (const section of ["surfaces", "explicitExclusions"] as const) {
+  test(`reassessment archives a shared prior decision from ${section}`, async () => {
+    const f = await fixture(2);
+    for (const finding of f.findings.findings) {
+      finding.provenance["candidateId"] = "shared-candidate";
+      finding.provenance["sourceWorkerId"] = "worker-current";
+    }
+    await save(join(f.scanDir, "findings.json"), f.findings);
+    const coverage = await json<CoverageDocument>(
+      join(f.scanDir, "coverage.json"),
+    );
+    const previous = {
+      id: "earlier-decision",
+      label: "Earlier candidate review",
+      pattern: "src/shared.ts",
+      reason: "Earlier evidence did not establish the issue.",
+      candidateId: "shared-candidate",
+      sourceWorkerId: "worker-current",
+      disposition: "rejected" as const,
+      receiptRefs: [],
+    };
+    coverage[section].push(previous);
+    await save(join(f.scanDir, "coverage.json"), coverage);
+    await runCustomValidation({
+      ...f,
+      run: async () => JSON.stringify(result("reportable", "suppressed")),
+    });
+    const saved = await loadResult(f.scanDir);
+    expect(saved.findings.findings).toHaveLength(1);
+    expect(saved.coverage[section]).not.toContainEqual(previous);
+    expect(
+      saved.findings.findings[0]!.provenance["originalCandidates"],
+    ).toContainEqual(previous);
+    expect(
+      saved.coverage.surfaces.some(
+        (row) =>
+          row.candidateId === "shared-candidate" &&
+          row.disposition === "rejected",
+      ),
+    ).toBe(false);
   });
 }

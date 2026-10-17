@@ -153,7 +153,6 @@ function draft(deferred: FixtureObject[] = []): FixtureDraft {
     scanId: "11111111-1111-4111-8111-111111111111",
     findings: [],
     coverage: {
-      completeness: "complete",
       surfaces: [],
       explicitExclusions: [],
       deferred,
@@ -335,7 +334,7 @@ test("diff outcomes retain unresolved candidates and exclude terminal dismissals
     result.coverage.deferred.map((item: FixtureObject) => item.candidate),
     expected,
   );
-  assert.equal(result.coverage.completeness, "partial");
+  assert.equal(result.coverage.completeness, undefined);
   assert.deepEqual(
     result.coverage.surfaces.filter(
       (item: FixtureObject) => item.disposition === "needs_follow_up",
@@ -459,7 +458,7 @@ for (const resolution of ["finding", "ledger rejection"]) {
         saved.surfaces.find((item: FixtureObject) => item.id === surface.id),
         surface,
       );
-      assert.equal(saved.completeness, "partial");
+      assert.equal(saved.completeness, undefined);
       await recordCodexSecurityScanDraft(context, { ...draft(), complete });
     }
   });
@@ -491,7 +490,7 @@ for (const metadata of [
       });
       const saved = await readCoverage(context);
       assert.deepEqual(saved.deferred, []);
-      assert.equal(saved.completeness, "complete");
+      assert.equal(saved.completeness, undefined);
       const findings = JSON.parse(
         await readFile(path.join(context.root, "findings.json"), "utf8"),
       ).findings;
@@ -616,7 +615,7 @@ test("structured exclusion owner metadata does not resolve an unowned candidate"
     assert.deepEqual(saved.explicitExclusions, [exclusion]);
     assert.equal(saved.deferred.length, 1);
     assert.equal(saved.deferred[0].candidateId, pending.candidate_id);
-    assert.equal(saved.completeness, "partial");
+    assert.equal(saved.completeness, undefined);
     await recordCodexSecurityScanDraft(context, { ...draft(), complete });
   }
 });
@@ -684,7 +683,7 @@ for (const mapping of ["candidateId", "surfaceIds"]) {
     const result = await reconcileDiffCandidates(context, input);
     assert.deepEqual(result.coverage.surfaces, input.coverage.surfaces);
     assert.equal(result.coverage.deferred.length, 1);
-    assert.equal(result.coverage.completeness, "partial");
+    assert.equal(result.coverage.completeness, undefined);
   });
 }
 
@@ -718,7 +717,7 @@ for (const remaining of ["none", "deferred", "surface", "explicit partial"]) {
     }
     await recordCodexSecurityScanDraft(context, checkpoint);
     const savedCheckpoint = await readCoverage(context);
-    assert.equal(savedCheckpoint.completeness, "partial");
+    assert.equal(savedCheckpoint.completeness, undefined);
     assert.ok(
       savedCheckpoint.deferred.some(
         (item: FixtureObject) => item.candidateId === pending.candidate_id,
@@ -740,10 +739,7 @@ for (const remaining of ["none", "deferred", "surface", "explicit partial"]) {
       finalDraft.coverage.completeness = "partial";
     await recordCodexSecurityScanDraft(context, finalDraft);
     const saved = await readCoverage(context);
-    assert.equal(
-      saved.completeness,
-      remaining === "none" ? "complete" : "partial",
-    );
+    assert.equal(saved.completeness, undefined);
     assert.equal(
       saved.deferred.some(
         (item: FixtureObject) => item.candidateId === pending.candidate_id,
@@ -861,10 +857,7 @@ for (const remaining of [
     for (let attempt = 0; attempt < 2; attempt++) {
       await recordCodexSecurityScanDraft(context, finalDraft);
       const saved = await readCoverage(context);
-      assert.equal(
-        saved.completeness,
-        remaining === "none" ? "complete" : "partial",
-      );
+      assert.equal(saved.completeness, undefined);
       assert.equal(
         saved.deferred.some(
           (item: FixtureObject) => item.candidateId === pending.candidate_id,
@@ -956,7 +949,7 @@ for (const resolution of ["finding", "exclusion"]) {
         complete: true,
       });
       const saved = await readCoverage(context);
-      assert.equal(saved.completeness, "complete");
+      assert.equal(saved.completeness, undefined);
       assert.deepEqual(saved.deferred, []);
       assert.deepEqual(
         saved.surfaces.map((item: FixtureObject) => [
@@ -1022,7 +1015,7 @@ for (const resolution of ["finding", "exclusion"]) {
         complete: true,
       });
       const saved = await readCoverage(context);
-      assert.equal(saved.completeness, "complete");
+      assert.equal(saved.completeness, undefined);
       assert.deepEqual(saved.deferred, []);
       assert.deepEqual(saved.surfaces, []);
     }
@@ -1058,7 +1051,7 @@ for (const disposition of ["rejected", "not_applicable"]) {
     for (let attempt = 0; attempt < 2; attempt++) {
       await recordCodexSecurityScanDraft(context, finalDraft);
       const saved = await readCoverage(context);
-      assert.equal(saved.completeness, "partial");
+      assert.equal(saved.completeness, undefined);
       assert.deepEqual(saved.deferred, []);
       assert.deepEqual(saved.surfaces, [unrelated]);
     }
@@ -1120,7 +1113,7 @@ for (const mapping of ["surfaceIds", "candidateId"]) {
       for (let attempt = 0; attempt < 2; attempt++) {
         await recordCodexSecurityScanDraft(context, finalDraft);
         const saved = await readCoverage(context);
-        assert.equal(saved.completeness, "partial");
+        assert.equal(saved.completeness, undefined);
         assert.deepEqual(
           saved.deferred,
           finalDraft.coverage.deferred.map((item: FixtureObject) => ({
@@ -1151,14 +1144,14 @@ for (const disposition of ["rejected", "not_applicable"]) {
     });
     await recordCodexSecurityScanDraft(context, finalDraft);
     const resolved = await readCoverage(context);
-    assert.equal(resolved.completeness, "complete");
+    assert.equal(resolved.completeness, undefined);
     assert.deepEqual(resolved.deferred, []);
     assert.deepEqual(resolved.explicitExclusions[0].candidate, pending);
     assert.equal(resolved.explicitExclusions[0].disposition, disposition);
 
     await recordCodexSecurityScanDraft(context, { ...draft(), complete: true });
     const retained = await readCoverage(context);
-    assert.equal(retained.completeness, "complete");
+    assert.equal(retained.completeness, undefined);
     assert.deepEqual(retained.deferred, []);
     assert.deepEqual(retained.explicitExclusions, resolved.explicitExclusions);
   });
@@ -1224,7 +1217,7 @@ for (const disposition of ["rejected", "not_applicable"]) {
         saved.deferred[0].reason,
         followup.coverage.deferred[0].reason,
       );
-      assert.equal(saved.completeness, "partial");
+      assert.equal(saved.completeness, undefined);
       assert.deepEqual(saved.explicitExclusions, [
         currentExclusion,
         unrelatedExclusion,
@@ -1261,7 +1254,7 @@ for (const disposition of ["rejected", "not_applicable"]) {
     });
     await recordCodexSecurityScanDraft(context, finalDraft);
     const resolved = await readCoverage(context);
-    assert.equal(resolved.completeness, "complete");
+    assert.equal(resolved.completeness, undefined);
     assert.deepEqual(resolved.deferred, []);
     assert.equal(resolved.surfaces.length, 1);
     assert.equal(resolved.surfaces[0].disposition, disposition);
@@ -1269,7 +1262,7 @@ for (const disposition of ["rejected", "not_applicable"]) {
 
     await recordCodexSecurityScanDraft(context, { ...draft(), complete: true });
     const retained = await readCoverage(context);
-    assert.equal(retained.completeness, "complete");
+    assert.equal(retained.completeness, undefined);
     assert.deepEqual(retained.deferred, []);
     assert.deepEqual(retained.surfaces, resolved.surfaces);
   });
@@ -1321,7 +1314,7 @@ for (const complete of [false, true]) {
           const saved = await readCoverage(context);
           const reopened =
             !authored && expectedDisposition === "needs_follow_up";
-          assert.equal(saved.completeness, reopened ? "partial" : "complete");
+          assert.equal(saved.completeness, undefined);
           assert.equal(saved.deferred.length, reopened ? 1 : 0);
           assert.equal(saved.surfaces.length, 1);
           const surface = saved.surfaces[0];
@@ -1413,7 +1406,7 @@ for (const [validation, attackPath, disposition] of [
         complete,
       });
       const saved = await readCoverage(context);
-      assert.equal(saved.completeness, "complete");
+      assert.equal(saved.completeness, undefined);
       assert.deepEqual(saved.deferred, []);
       assert.equal(saved.surfaces.length, 1);
       assert.equal(saved.surfaces[0].candidateId, pending.candidate_id);
@@ -1461,7 +1454,7 @@ for (const authored of [false, true]) {
     for (const complete of [false, true]) {
       await recordCodexSecurityScanDraft(context, { ...draft(), complete });
       const saved = await readCoverage(context);
-      assert.equal(saved.completeness, authored ? "complete" : "partial");
+      assert.equal(saved.completeness, undefined);
       assert.equal(saved.deferred.length, authored ? 0 : 1);
       assert.equal(
         saved.surfaces[0].disposition,
@@ -1489,7 +1482,7 @@ for (const complete of [false, true]) {
     await writeLedger(context, [reportable]);
     await recordCodexSecurityScanDraft(context, { ...draft(), complete: true });
     const missingFinding = await readCoverage(context);
-    assert.equal(missingFinding.completeness, "partial");
+    assert.equal(missingFinding.completeness, undefined);
     assert.equal(missingFinding.deferred.length, 1);
     assert.equal(missingFinding.deferred[0].candidateId, pending.candidate_id);
     assert.deepEqual(missingFinding.deferred[0].candidate, reportable);
@@ -1499,7 +1492,7 @@ for (const complete of [false, true]) {
     finalDraft.findings.push(finding(pending.candidate_id));
     await recordCodexSecurityScanDraft(context, finalDraft);
     const saved = await readCoverage(context);
-    assert.equal(saved.completeness, "complete");
+    assert.equal(saved.completeness, undefined);
     assert.deepEqual(saved.deferred, []);
     assert.ok(
       saved.surfaces.every(
@@ -1512,7 +1505,7 @@ for (const complete of [false, true]) {
         complete: repeatComplete,
       });
       const repeated = await readCoverage(context);
-      assert.equal(repeated.completeness, "complete");
+      assert.equal(repeated.completeness, undefined);
       assert.deepEqual(repeated.deferred, []);
       assert.ok(
         repeated.surfaces.every(
@@ -1521,7 +1514,7 @@ for (const complete of [false, true]) {
       );
     }
     const retained = await readCoverage(context);
-    assert.equal(retained.completeness, "complete");
+    assert.equal(retained.completeness, undefined);
     assert.deepEqual(retained.deferred, []);
     const findings = JSON.parse(
       await readFile(path.join(context.root, "findings.json"), "utf8"),
@@ -1573,7 +1566,7 @@ for (const section of ["surfaces", "explicitExclusions"]) {
       await recordCodexSecurityScanDraft(context, current);
       for (const complete of [false, true, false]) {
         const saved = await readCoverage(context);
-        assert.equal(saved.completeness, "complete");
+        assert.equal(saved.completeness, undefined);
         assert.deepEqual(saved.deferred, []);
         assert.equal(saved.surfaces.length, 1);
         const surface = saved.surfaces[0];
@@ -1636,7 +1629,7 @@ for (const section of ["surfaces", "explicitExclusions"]) {
       await recordCodexSecurityScanDraft(context, current);
       for (let attempt = 0; attempt < 2; attempt++) {
         const saved = await readCoverage(context);
-        assert.equal(saved.completeness, "partial");
+        assert.equal(saved.completeness, undefined);
         assert.deepEqual(
           saved.surfaces.find((item: FixtureObject) => item.id === evidence.id),
           evidence,
@@ -1715,7 +1708,7 @@ for (const authored of [false, true]) {
         complete: true,
       });
       const saved = await readCoverage(context);
-      assert.equal(saved.completeness, "partial");
+      assert.equal(saved.completeness, undefined);
       assert.equal(saved.deferred.length, 1);
       const item = saved.deferred[0];
       assert.deepEqual(
@@ -1773,7 +1766,7 @@ for (const uncertainty of ["  A runtime check is still required.\n", " \t "]) {
     const expectedReason = uncertainty.trim()
       ? uncertainty
       : `Candidate review is incomplete: ${pending.summary}`;
-    assert.equal(saved.completeness, "partial");
+    assert.equal(saved.completeness, undefined);
     assert.equal(saved.deferred[0].reason, expectedReason);
     assert.equal(saved.surfaces[0].notes, expectedReason);
     assert.deepEqual(saved.deferred[0].candidate.validation, validation);
@@ -1982,13 +1975,7 @@ for (const remaining of [
     await recordCodexSecurityScanDraft(context, initial);
     assert.equal(
       (await readCoverage(context)).completenessBeforeCandidates,
-      remaining === "unknown"
-        ? "unknown"
-        : ["none", "later partial", "later checkpoint partial"].includes(
-              remaining,
-            )
-          ? "complete"
-          : undefined,
+      undefined,
     );
     if (
       remaining === "later partial" ||
@@ -2011,14 +1998,7 @@ for (const remaining of [
         complete: false,
       });
       const saved = await readCoverage(context);
-      assert.equal(
-        saved.completeness,
-        remaining === "none"
-          ? "complete"
-          : remaining === "unknown"
-            ? "unknown"
-            : "partial",
-      );
+      assert.equal(saved.completeness, undefined);
       assert.equal(saved.completenessBeforeCandidates, undefined);
       assert.equal(
         saved.deferred.some(
@@ -2147,7 +2127,7 @@ for (const validation of ["deferred", undefined]) {
     for (const complete of [false, true, false]) {
       await recordCodexSecurityScanDraft(context, { ...draft(), complete });
       const saved = await readCoverage(context);
-      assert.equal(saved.completeness, "partial");
+      assert.equal(saved.completeness, undefined);
       assert.equal(saved.deferred.length, 1);
       assert.deepEqual(saved.deferred[0].candidate, reopened);
       assert.equal(
@@ -2282,7 +2262,7 @@ for (const complete of [false, true]) {
     second.coverage.surfaces.push(reviewed);
     await recordCodexSecurityScanDraft(context, second);
     const expected = await readCoverage(context);
-    assert.equal(expected.completeness, "partial");
+    assert.equal(expected.completeness, undefined);
     assert.equal(expected.surfaces.length, 2);
     assert.equal(
       new Set(expected.surfaces.map((surface: FixtureObject) => surface.id))
@@ -2301,7 +2281,7 @@ for (const complete of [false, true]) {
         complete: nextComplete,
       });
       const saved = await readCoverage(context);
-      assert.equal(saved.completeness, "partial");
+      assert.equal(saved.completeness, undefined);
       assert.deepEqual(saved.surfaces, expected.surfaces);
     }
     for (const name of await readdir(path.join(context.root, "checkpoints"))) {
@@ -2369,10 +2349,7 @@ for (const remaining of [
     await recordCodexSecurityScanDraft(context, current);
     for (let attempt = 0; attempt < 2; attempt++) {
       const saved = await readCoverage(context);
-      assert.equal(
-        saved.completeness,
-        remaining === "unknown" ? "unknown" : "partial",
-      );
+      assert.equal(saved.completeness, undefined);
       assert.equal(
         saved.deferred.length,
         remaining === "shared pending" ? 1 : 0,
@@ -3259,7 +3236,7 @@ for (const confirmed of [false, true]) {
       ).length,
       confirmed ? 0 : 1,
     );
-    if (confirmed) assert.equal(published.completeness, "complete");
+    if (confirmed) assert.equal(published.completeness, undefined);
     else
       assert.ok(
         published.surfaces.some(
@@ -4103,7 +4080,7 @@ for (const variant of ["generated", "authored", "shared"] as const) {
         complete: true,
       });
       const saved = await readCoverage(context);
-      assert.equal(saved.completeness, "partial");
+      assert.equal(saved.completeness, undefined);
       assert.equal(
         saved.surfaces.find(
           (row: FixtureObject) => row.candidateId === original.candidate_id,

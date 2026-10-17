@@ -134,7 +134,7 @@ def reducer_coverage(coverage: dict[str, Any], candidates: list[Any]) -> dict[st
     result["deferred"] = (deferred if isinstance(deferred, list) else []) + copy.deepcopy(
         candidates
     )
-    result["completeness"] = "partial"
+    result.pop("completeness", None)
     return result
 
 
