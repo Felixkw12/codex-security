@@ -871,6 +871,45 @@ describe("multiscan", () => {
     expect(summary).toMatchObject({ total: 1, completed: 1, failed: 0 });
   });
 
+  testPosix.each(["repository", "inventory"])(
+    "clones the physical repository through a %s symlink parent traversal",
+    async (selection) => {
+      const paths = await fixture();
+      const source = await repository(paths.root, "physical/repository");
+      await repository(paths.root, "entry/repository");
+      await mkdir(join(paths.root, "physical", "child"));
+      await symlink(
+        join(paths.root, "physical", "child"),
+        join(paths.root, "entry", "link"),
+      );
+      const input =
+        selection === "inventory"
+          ? `${paths.root}/entry/link/../repositories.csv`
+          : paths.input;
+      await writeFile(
+        selection === "inventory"
+          ? join(paths.root, "physical", "repositories.csv")
+          : input,
+        `id,repository,revision\nphysical,${selection === "inventory" ? "repository" : "entry/link/../repository"},${source.revision}\n`,
+      );
+      let scanned = false;
+      const summary = await runMultiscan(
+        options(
+          { ...paths, input },
+          client(async (checkout, scanOptions = {}) => {
+            expect(
+              await readFile(join(checkout, "src", "app.ts"), "utf8"),
+            ).toBe(await readFile(join(source.path, "src", "app.ts"), "utf8"));
+            scanned = true;
+            return completedScan(scanOptions.outputDir!);
+          }),
+        ),
+      );
+      expect(summary).toMatchObject({ total: 1, completed: 1, failed: 0 });
+      expect(scanned).toBe(true);
+    },
+  );
+
   test("parses quoted CSV fields, embedded delimiters, and Windows line endings", async () => {
     const paths = await fixture();
     const source = await repository(paths.root, "comma, quoted");

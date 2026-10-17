@@ -38,6 +38,7 @@ import { requireSecureOutputAncestry, validateOutputDir } from "./runtime.js";
 import {
   DiffTarget,
   UNSUPPORTED_GIT_ENVIRONMENT,
+  resolveTargetPath,
   type ScanMode,
 } from "./targets.js";
 import {
@@ -144,7 +145,7 @@ export async function runMultiscan(
   }
   const tasks = parseInventory(
     await readFile(options.inputPath, "utf8"),
-    dirname(resolve(options.inputPath)),
+    dirname(resolveTargetPath(options.inputPath)),
     options.mode,
   );
   if (
@@ -1144,7 +1145,7 @@ function normalizeRepository(repository: string, directory: string): string {
   }
   if (/^[^@\s/:]+@[^:\s/]+:.+$/u.test(repository)) return repository;
   if (!repository.includes("://")) {
-    const path = resolve(directory, repository);
+    const path = resolveTargetPath(repository, directory);
     if (process.platform !== "win32") return path;
     try {
       return realpathSync.native(path);

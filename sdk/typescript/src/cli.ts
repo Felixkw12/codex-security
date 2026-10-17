@@ -39,6 +39,7 @@ import {
   parse,
   relative,
   resolve,
+  sep,
   win32,
 } from "node:path";
 import { cwd } from "node:process";
@@ -268,6 +269,7 @@ import {
 import {
   abortable,
   DiffTarget,
+  resolveRepositoryPath,
   enclosingGitWorktreeRoots,
   UNSUPPORTED_GIT_ENVIRONMENT,
   type ScanTarget,
@@ -954,6 +956,13 @@ const DEEP_SCAN_OPTION_SCHEMAS = Object.fromEntries(
 
 export function resolveCliPath(directory: string, value: string): AbsolutePath {
   return resolveConfigPath(directory, value);
+}
+
+function resolveCliRepositoryPath(value: string, directory: string): string {
+  return resolveRepositoryPath(
+    value.startsWith("~\\") ? value.replaceAll("\\", "/") : value,
+    directory,
+  );
 }
 
 interface ScanArguments extends ResolvedScanSettings {
@@ -2031,9 +2040,9 @@ export async function main(
     }),
     output: z.record(z.string(), z.unknown()).optional(),
     async run({ args, format }) {
-      const requestedRepository = resolveCliPath(
-        dependencies.currentDirectory(),
+      const requestedRepository = resolveCliRepositoryPath(
         args.repository ?? ".",
+        dependencies.currentDirectory(),
       );
       const repository = await realpath(requestedRepository).catch(
         () => requestedRepository,
@@ -2119,7 +2128,7 @@ export async function main(
         const repository =
           scanRoot !== undefined && args.repository === undefined
             ? undefined
-            : resolveCliPath(directory, args.repository ?? directory);
+            : resolveCliRepositoryPath(args.repository ?? directory, directory);
         return presentHistory(
           await history(
             workbenchArgs("list-scans", {
@@ -3431,7 +3440,10 @@ export async function main(
           const outcome = await withTerminalErrorsHandled(errorOutput, () =>
             runPolicyCommand(
               {
-                repository: resolveCliPath(directory, args.repository ?? "."),
+                repository: resolveCliRepositoryPath(
+                  args.repository ?? ".",
+                  directory,
+                ),
                 config: {
                   pluginPath: options.pluginPath,
                   pythonPath: options.python,
@@ -3803,9 +3815,9 @@ export async function main(
             "git",
             [
               "-C",
-              resolveCliPath(
-                dependencies.currentDirectory(),
+              resolveCliRepositoryPath(
                 args.repository ?? ".",
+                dependencies.currentDirectory(),
               ),
               "rev-parse",
               "--path-format=absolute",
@@ -3882,9 +3894,9 @@ export async function main(
         const removeSignals = listenForAbort(dependencies, controller);
         try {
           const directory = dependencies.currentDirectory();
-          const repository = resolveCliPath(
-            directory,
+          const repository = resolveCliRepositoryPath(
             options.sourceRoot ?? ".",
+            directory,
           );
           const findings = await parseImportedFindings(
             await readRegularInputFile(
@@ -4297,7 +4309,10 @@ export async function main(
         signalHandlers(dependencies, "add", onInterrupt, onTerminate);
         try {
           const directory = dependencies.currentDirectory();
-          const repository = resolveCliPath(directory, args.repository ?? ".");
+          const repository = resolveCliRepositoryPath(
+            args.repository ?? ".",
+            directory,
+          );
           const project = await selectedProjectConfig(
             options.config,
             dependencies,
@@ -8311,7 +8326,7 @@ async function executeScan(
     const target = arguments_.target;
     const prompts = await resolveScanPrompts(
       arguments_,
-      resolve(directory, repository),
+      resolveRepositoryPath(repository, directory),
       directory,
     );
     const config: CodexSecurityConfig = {
@@ -8800,7 +8815,13 @@ async function executeScan(
     } else {
       result = await security.run(repository, options);
       scanDir = result.scanDir;
-      repository = resolve(dependencies.currentDirectory(), repository);
+      repository = resolveRepositoryPath(
+        repository,
+        dependencies.currentDirectory(),
+      );
+      // Later patch path joins must keep the repository selected by parent traversal.
+      if (repository.split(sep).includes(".."))
+        repository = await realpath(repository);
     }
   } catch (error) {
     failed = true;
