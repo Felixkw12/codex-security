@@ -52,46 +52,52 @@ jobs:
             args: --parallel=2
           - os: windows-latest
             mode: isolated-1
-            args: --isolate --shard=1/7
+            args: --isolate --shard=1/8
           - os: windows-latest
             mode: isolated-2
-            args: --isolate --shard=2/7
+            args: --isolate --shard=2/8
           - os: windows-latest
             mode: isolated-3
-            args: --isolate --shard=3/7
+            args: --isolate --shard=3/8
           - os: windows-latest
             mode: isolated-4
-            args: --isolate --shard=4/7
+            args: --isolate --shard=4/8
           - os: windows-latest
             mode: isolated-5
-            args: --isolate --shard=5/7
+            args: --isolate --shard=5/8
           - os: windows-latest
             mode: isolated-6
-            args: --isolate --shard=6/7
+            args: --isolate --shard=6/8
           - os: windows-latest
             mode: isolated-7
-            args: --isolate --shard=7/7
+            args: --isolate --shard=7/8
+          - os: windows-latest
+            mode: isolated-8
+            args: --isolate --shard=8/8
           - os: windows-latest
             mode: shard-1
-            args: --shard=1/7
+            args: --shard=1/8
           - os: windows-latest
             mode: shard-2
-            args: --shard=2/7
+            args: --shard=2/8
           - os: windows-latest
             mode: shard-3
-            args: --shard=3/7
+            args: --shard=3/8
           - os: windows-latest
             mode: shard-4
-            args: --shard=4/7
+            args: --shard=4/8
           - os: windows-latest
             mode: shard-5
-            args: --shard=5/7
+            args: --shard=5/8
           - os: windows-latest
             mode: shard-6
-            args: --shard=6/7
+            args: --shard=6/8
           - os: windows-latest
             mode: shard-7
-            args: --shard=7/7
+            args: --shard=7/8
+          - os: windows-latest
+            mode: shard-8
+            args: --shard=8/8
     steps:
       - &actions-checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

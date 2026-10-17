@@ -140,7 +140,7 @@ do not. Use `python -m pytest -n 0` to reproduce Python failures serially.
 
 The separate `test-quality` workflow runs weekly, can be dispatched manually,
 and runs on pull requests that change its workflow file. It compares Bun's
-default runner, `--isolate`, `--parallel=2`, and seven-way Windows sharding.
+default runner, `--isolate`, `--parallel=2`, and eight-way Windows sharding.
 Every mode uses the same seed for property cases and test ordering: pull
 requests replay seed 1; scheduled and manual runs use the workflow run number.
 The workflow compares test identities and outcomes against the unsharded

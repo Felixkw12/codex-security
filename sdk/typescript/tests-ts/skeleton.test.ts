@@ -499,13 +499,13 @@ describe("TypeScript package skeleton", () => {
       "false",
     );
     expect(quality.env?.["CODEX_SECURITY_INTEGRATION"]).toBe("0");
-    for (let shard = 1; shard <= 7; shard += 1) {
+    for (let shard = 1; shard <= 8; shard += 1) {
       expect(
         quality.jobs["runner"]?.strategy?.matrix["include"],
       ).toContainEqual({
         os: "windows-latest",
         mode: `shard-${shard}`,
-        args: `--shard=${shard}/7`,
+        args: `--shard=${shard}/8`,
       });
     }
   });
@@ -533,11 +533,11 @@ describe("TypeScript package skeleton", () => {
         args,
       });
     }
-    for (let shard = 1; shard <= 7; shard += 1) {
+    for (let shard = 1; shard <= 8; shard += 1) {
       expect(runner.strategy?.matrix["include"]).toContainEqual({
         os: "windows-latest",
         mode: `isolated-${shard}`,
-        args: `--isolate --shard=${shard}/7`,
+        args: `--isolate --shard=${shard}/8`,
       });
     }
     const command = runner.steps!.find(
