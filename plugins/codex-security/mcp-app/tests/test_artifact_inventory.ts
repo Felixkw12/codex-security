@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { execFile as nodeExecFile } from "node:child_process";
 import {
   chmod,
+  cp,
+  readdir,
   mkdir,
   readFile,
   rename,
@@ -35,6 +37,7 @@ const inventory = await importSource(
 try {
   await testSchemasAreBoundAndExact();
   await testPrepareUsesTheExistingStandardGenerator();
+  await testPrepareDoesNotWritePluginBytecode();
   if (!["win32", "darwin"].includes(process.platform))
     await testNonUtf8InventoryPaths();
   await testPrepareListsIgnoredTrackedFilesOnce();
@@ -350,6 +353,28 @@ async function testInventoryChildFailuresPreserveOutput() {
       "previous.py\n",
     );
   }
+}
+
+async function testPrepareDoesNotWritePluginBytecode() {
+  const fixture = await createFixture("plugin bytecode");
+  const pluginRoot = path.join(fixture.root, "plugin");
+  const scripts = path.join(pluginRoot, "scripts");
+  await cp(path.resolve(import.meta.dirname, "../../scripts"), scripts, {
+    recursive: true,
+    filter: (file) => path.basename(file) !== "__pycache__",
+  });
+  await fixture.writeRepositoryFile("example.py", "value = 1\n");
+  const result = await inventory.prepareCodexSecurityReviewItems({
+    ...fixture.scan,
+    pluginRoot,
+  });
+  assert.equal(result.reviewItemsTotal, 1);
+  assert.equal(
+    (await readdir(scripts, { recursive: true })).some((file) =>
+      file.endsWith(".pyc"),
+    ),
+    false,
+  );
 }
 
 async function testNonUtf8InventoryPaths() {

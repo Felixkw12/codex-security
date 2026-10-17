@@ -1,7 +1,9 @@
 import { closeSync, readFileSync, existsSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-export { parseCanonicalScanDraft } from "./src/artifact-scan-draft.js";
-import { inventoryCommand } from "./src/helpers/generate-inventory";
+export {
+  parseCanonicalScanDraft,
+  parseCurrentFindings,
+} from "./src/artifact-scan-draft.js";
 import { parseArgs } from "node:util";
 import { isMainThread, parentPort, workerData } from "node:worker_threads";
 import { resolveSecurityMdCommand } from "./src/helpers/resolve-security-md";
@@ -13,12 +15,10 @@ import {
 } from "./src/helpers/normalize-candidates";
 import { validatePatchRiskAssessmentCommand } from "./src/helpers/validate-patch-risk-assessment";
 import { deepReviewInputCommand } from "./src/helpers/deep-review-input";
-import { rankShardsCommand } from "./src/helpers/rank-shards";
-import { rankPoolCommand } from "./src/helpers/rank-pool";
+import { inventoryCommand } from "./src/helpers/generate-inventory";
 import { bindRepoScopesCommand } from "./src/helpers/bind-repo-scopes";
 import { escapeControls, stringifyJson } from "./src/helpers/json";
 import { decodeUtf8 } from "./src/helpers/utf8";
-import { configPreflightCommand } from "./src/helpers/config-preflight";
 
 // Importing the bundled parser does not invoke its CLI adapter.
 const entryPath = import.meta.url.startsWith("file:")
@@ -77,9 +77,7 @@ function runHelper(): void {
     "read-severity-classification":
       "Usage: read-severity-classification --scan-id <id>\nReads a JSON object from stdin with an absolute stateDirectory. Reads saved assessments without updating the database.",
   };
-  if (command === "config-preflight") {
-    process.exitCode = configPreflightCommand(args);
-  } else if (
+  if (
     command === "generate-in-scope-files" ||
     command === "make-repo-rank-input" ||
     command === "make-repo-scope-input" ||
@@ -94,23 +92,8 @@ function runHelper(): void {
     process.exitCode = normalizeCandidatesCommand(args, posixHome);
   } else if (command === "validate-patch-risk-assessment") {
     process.exitCode = validatePatchRiskAssessmentCommand(args);
-  } else if (
-    command === "copy-deep-review-input" ||
-    command === "select-deep-review-input"
-  ) {
-    process.exitCode = deepReviewInputCommand(command, args, posixHome);
-  } else if (
-    command === "make-rank-shards" ||
-    command === "validate-rank-shard" ||
-    command === "merge-rank-outputs"
-  ) {
-    process.exitCode = rankShardsCommand(command, args, posixHome);
-  } else if (
-    command === "make-rank-pool-plan" ||
-    command === "validate-rank-worker" ||
-    command === "validate-rank-pool"
-  ) {
-    process.exitCode = rankPoolCommand(command, args, posixHome);
+  } else if (command === "copy-deep-review-input") {
+    process.exitCode = deepReviewInputCommand(args, posixHome);
   } else if (command === "bind-repo-scopes") {
     process.exitCode = bindRepoScopesCommand(args, posixHome);
   } else if (Object.hasOwn(workbenchUsage, command)) {
@@ -159,7 +142,7 @@ function runHelper(): void {
     });
   } else {
     console.error(
-      `Usage: launch_codex_security_mcp[.cmd] --helper <config-preflight | generate-in-scope-files | make-repo-rank-input | make-repo-scope-input | make-diff-rank-input | resolve-security-md | normalize-candidates | validate-patch-risk-assessment | copy-deep-review-input | select-deep-review-input | make-rank-shards | validate-rank-shard | merge-rank-outputs | make-rank-pool-plan | validate-rank-worker | validate-rank-pool | bind-repo-scopes | ${Object.keys(workbenchUsage).join(" | ")}> [options]`,
+      `Usage: launch_codex_security_mcp[.cmd] --helper <generate-in-scope-files | make-repo-rank-input | make-repo-scope-input | make-diff-rank-input | resolve-security-md | normalize-candidates | validate-patch-risk-assessment | copy-deep-review-input | bind-repo-scopes | ${Object.keys(workbenchUsage).join(" | ")}> [options]`,
     );
     process.exitCode = 2;
   }

@@ -24,7 +24,11 @@ function shellQuote(value: string): string {
   return "'" + value.replaceAll("'", "'\\''") + "'";
 }
 
-async function fixture(rejectManaged: boolean, rejectOrdinary = false) {
+async function fixture(
+  rejectManaged: boolean,
+  rejectOrdinary = false,
+  nativeCommand = false,
+) {
   const root = await directories.create("codex-security-node-launcher-");
   const launcher = path.join(root, "scripts", "launch_codex_security_mcp");
   const mcp = path.join(root, "mcp");
@@ -33,12 +37,9 @@ async function fixture(rejectManaged: boolean, rejectOrdinary = false) {
   const launchLog = path.join(root, "launches.jsonl");
   const repo = path.join(root, "repo");
   await Promise.all(
-    [
-      path.dirname(launcher),
-      path.dirname(addon),
-      repo,
-      path.join(root, "preflight"),
-    ].map((directory) => mkdir(directory, { recursive: true })),
+    [path.dirname(launcher), path.dirname(addon), repo].map((directory) =>
+      mkdir(directory, { recursive: true }),
+    ),
   );
   // Keep host-installed Node runtimes out of the simulated macOS runtime set.
   const tools = path.join(root, "shell-tools");
@@ -70,15 +71,23 @@ async function fixture(rejectManaged: boolean, rejectOrdinary = false) {
     path.join(pluginRoot, "mcp", "native", nativeTarget, "unix.node"),
     addon,
   );
-  await copyFile(
-    path.join(sourcePluginRoot, "preflight", "capability-profiles.toml"),
-    path.join(root, "preflight", "capability-profiles.toml"),
-  );
+  if (nativeCommand)
+    await writeFile(
+      path.join(mcp, "helpers.mjs"),
+      `import { createRequire } from "node:module";
+try {
+  createRequire(import.meta.url)(${JSON.stringify(addon)});
+  console.log(JSON.stringify({ status: "ready" }));
+} catch (error) {
+  console.log(JSON.stringify({ status: "error", error: error.message }));
+  process.exitCode = 2;
+}
+`,
+    );
   await writeFile(
     path.join(repo, "SECURITY.md"),
     "Synthetic repository policy.\n",
   );
-  await writeFile(path.join(root, "config.toml"), "");
 
   async function runtime(label: string, executable: string, reject: boolean) {
     const preload = path.join(root, `${label}.cjs`);
@@ -176,16 +185,20 @@ test(
   "macOS helpers skip managed runtimes that reject the packaged addon",
   { skip: process.platform === "win32" },
   async () => {
-    for (const command of ["config-preflight", "resolve-security-md"]) {
-      const setup = await fixture(true);
+    for (const command of ["synthetic-native-helper", "resolve-security-md"]) {
+      const setup = await fixture(
+        true,
+        false,
+        command === "synthetic-native-helper",
+      );
       const result = setup.run(
-        command === "config-preflight"
-          ? [command, "--profile", "deep_security_scan", "--cwd", setup.repo]
+        command === "synthetic-native-helper"
+          ? [command]
           : [command, "--repo", setup.repo, "--list"],
       );
       assert.equal(result.status, 0, result.stderr);
       assert.equal(result.stderr, "");
-      if (command === "config-preflight")
+      if (command === "synthetic-native-helper")
         assert.equal(JSON.parse(result.stdout).status, "ready");
       else assert.deepEqual(JSON.parse(result.stdout), ["SECURITY.md"]);
       const loads = await setup.loads();
@@ -200,10 +213,10 @@ test(
         1,
         "Rejected runtimes must only probe; helpers must not start in them.",
       );
-      if (command === "config-preflight")
+      if (command === "synthetic-native-helper")
         assert.ok(
           loads.length > 2,
-          "Config preflight must load the actual packaged addon.",
+          "The native helper must load the actual packaged addon.",
         );
     }
   },
@@ -213,15 +226,9 @@ test(
   "macOS helpers try later PATH runtimes after an incompatible first runtime",
   { skip: process.platform === "win32" },
   async () => {
-    const setup = await fixture(true, true);
+    const setup = await fixture(true, true, true);
     await setup.addPathRuntime();
-    const result = setup.run([
-      "config-preflight",
-      "--profile",
-      "deep_security_scan",
-      "--cwd",
-      setup.repo,
-    ]);
+    const result = setup.run(["synthetic-native-helper"]);
     assert.equal(result.status, 0, result.stderr);
     assert.equal(JSON.parse(result.stdout).status, "ready");
     assert.deepEqual(
@@ -259,17 +266,8 @@ test(
   "explicit runtime selection remains authoritative",
   { skip: process.platform === "win32" },
   async () => {
-    const setup = await fixture(true);
-    const result = setup.run(
-      [
-        "config-preflight",
-        "--profile",
-        "deep_security_scan",
-        "--cwd",
-        setup.repo,
-      ],
-      setup.managed,
-    );
+    const setup = await fixture(true, false, true);
+    const result = setup.run(["synthetic-native-helper"], setup.managed);
     assert.notEqual(result.status, 0);
     assert.match(result.stdout, /different Team IDs/);
     const loads = await setup.loads();
@@ -339,14 +337,8 @@ test(
   "native commands retain their error when no compatible runtime exists",
   { skip: process.platform === "win32" },
   async () => {
-    const setup = await fixture(true, true);
-    const result = setup.run([
-      "config-preflight",
-      "--profile",
-      "deep_security_scan",
-      "--cwd",
-      setup.repo,
-    ]);
+    const setup = await fixture(true, true, true);
+    const result = setup.run(["synthetic-native-helper"]);
     assert.equal(result.status, 2);
     assert.equal(result.stderr, "");
     const report = JSON.parse(result.stdout);

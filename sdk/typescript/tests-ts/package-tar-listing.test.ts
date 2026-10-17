@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
@@ -14,9 +14,9 @@ import {
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { brotliCompressSync, brotliDecompressSync, gzipSync } from "node:zlib";
 import { describe, expect, test } from "bun:test";
-import { runCommand } from "./support/shell.js";
 import {
   archive,
   cleanCompressedPayload,
@@ -35,6 +35,10 @@ const { assertTarListingSizes, regularTarListingLines } = (await import(
 const { packageDistFiles } = (await import(
   new URL("../scripts/package-dist-files.mjs", import.meta.url).href
 )) as { packageDistFiles: readonly string[] };
+// Avoid Bun 1.3.14's stale Windows spawnSync timeout.
+// https://github.com/oven-sh/bun/issues/33932
+const execFileAsync = promisify(execFile);
+
 const pluginContract = {
   externalOwnedExact: [".codex-plugin/plugin.json"],
   shippedExact: ["scripts/launch_codex_security_mcp"],
@@ -77,6 +81,9 @@ function packageTar({
     "package/docs/cli.md",
     "package/docs/findings-service.md",
     "package/docs/dedupe-records.md",
+    "package/docs/hosted-scans.md",
+    "package/docs/validate-records.md",
+    "package/schemas/hosted-scan-v2.fixture.json",
     "package/schemas/project-config.schema.json",
     "package/LICENSE",
     ...executablePaths,
@@ -514,7 +521,7 @@ describe("npm package tar listings", () => {
     "ordinary-pax-then-wrong-long-name",
     "ordinary-pax-then-correct-long-name",
     "ordinary-long-name-then-pax",
-  ])("validates assets as npm installs them: %s", async (representation) => {
+  ])("validates assets installed by npm: %s", async (representation) => {
     const root = mkdtempSync(join(tmpdir(), "codex-package-npm-sparse-"));
     try {
       const logo = readFileSync(
@@ -620,15 +627,12 @@ describe("npm package tar listings", () => {
       );
       const nativeRoot = join(root, "native");
       mkdirSync(nativeRoot);
-      const extracted = await runCommand(
+      const extracted = await execFileAsync(
         "tar",
         ["-xzf", archivePath, "-C", nativeRoot],
-        { timeout: 30_000, windowsHide: true },
+        { encoding: "buffer", timeout: 30_000, windowsHide: true },
       );
-      expect({
-        status: extracted.status,
-        stderr: extracted.stderr,
-      }).toEqual({ status: 0, stderr: "" });
+      expect(extracted.stderr.toString()).toBe("");
       // These incompatible packages do not promise a portable native asset path.
       if (!wrongLongName)
         expect(readFileSync(join(nativeRoot, path)).equals(logo)).toBe(true);
@@ -685,7 +689,7 @@ describe("npm package tar listings", () => {
       ).toBe(compatible);
       if (overwrite)
         expect(readFileSync(installedLogo).equals(stored)).toBe(true);
-      const checked = await runCommand(
+      const checked = spawnSync(
         commandPath("node"),
         [
           fileURLToPath(
@@ -697,6 +701,7 @@ describe("npm package tar listings", () => {
         {
           cwd: root,
           env: environment,
+          encoding: "utf8",
           timeout: 30_000,
           windowsHide: true,
         },
@@ -794,15 +799,17 @@ describe("npm package tar listings", () => {
       }
       const archivePath = join(root, "package.tgz");
       writeFileSync(archivePath, gzipSync(packageTar({ overrides })));
-      const extracted = await runCommand("tar", ["-xOzf", archivePath, path], {
-        timeout: 30_000,
-        windowsHide: true,
-      });
-      expect({
-        status: extracted.status,
-        stderr: extracted.stderr,
-      }).toEqual({ status: 0, stderr: "" });
-      expect(Buffer.from(extracted.stdout, "utf8").equals(manifest)).toBe(true);
+      const extracted = await execFileAsync(
+        "tar",
+        ["-xOzf", archivePath, path],
+        {
+          encoding: "buffer",
+          timeout: 30_000,
+          windowsHide: true,
+        },
+      );
+      expect(extracted.stderr.toString()).toBe("");
+      expect(extracted.stdout.equals(manifest)).toBe(true);
       const environment: NodeJS.ProcessEnv = {
         ...process.env,
         npm_config_cache: join(root, "npm-cache"),
@@ -846,7 +853,7 @@ describe("npm package tar listings", () => {
       );
       const contractPath = join(root, "contract.json");
       writeFileSync(contractPath, JSON.stringify(pluginContract));
-      const checked = await runCommand(
+      const checked = spawnSync(
         commandPath("node"),
         [
           fileURLToPath(
@@ -858,6 +865,7 @@ describe("npm package tar listings", () => {
         {
           cwd: root,
           env: environment,
+          encoding: "utf8",
           timeout: 30_000,
           windowsHide: true,
         },
