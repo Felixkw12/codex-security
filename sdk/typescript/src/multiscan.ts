@@ -62,7 +62,7 @@ const LOCK_HEARTBEAT_MS = 5_000;
 const WINDOWS_DEVICE_PATH_NAME =
   /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu;
 
-type MultiscanTask = ReturnType<typeof parseInventory>["tasks"][number];
+type MultiscanTask = ReturnType<typeof parseInventory>[number];
 
 interface MultiscanReceipt extends MultiscanTask {
   status: "completed" | "failed";
@@ -143,7 +143,7 @@ export async function runMultiscan(
   if (!Number.isSafeInteger(options.maxAttempts) || options.maxAttempts < 1) {
     throw new Error("Multiscan max attempts must be a positive integer.");
   }
-  const { tasks, repositorySources } = parseInventory(
+  const tasks = parseInventory(
     await readFile(options.inputPath, "utf8"),
     dirname(resolveTargetPath(options.inputPath)),
     options.mode,
@@ -167,7 +167,7 @@ export async function runMultiscan(
       [options.postScanPrompt, options.postScanPromptFile],
     ].some(([inline, file]) => inline === undefined && file !== undefined)
   ) {
-    for (const repository of new Set(repositorySources.values())) {
+    for (const repository of new Set(tasks.map((task) => task.repository))) {
       if (!isAbsolute(repository)) continue;
       try {
         repositories.push(await realpath(repository));
@@ -212,12 +212,7 @@ export async function runMultiscan(
   await requireSecureOutputAncestry(output);
   const unlock = await acquireLock(output);
   try {
-    const result = await runCampaign(
-      resolvedOptions,
-      tasks,
-      repositorySources,
-      output,
-    );
+    const result = await runCampaign(resolvedOptions, tasks, output);
     return (await realpath(requestedOutput).catch(() => undefined)) === output
       ? { ...result, resultsPath: join(requestedOutput, "results.jsonl") }
       : result;
@@ -229,7 +224,6 @@ export async function runMultiscan(
 async function runCampaign(
   options: MultiscanOptions,
   tasks: MultiscanTask[],
-  repositorySources: ReadonlyMap<string, string>,
   output: string,
 ): Promise<MultiscanResult> {
   const ledger = join(output, "results.jsonl");
@@ -485,7 +479,6 @@ async function runCampaign(
             protectedRoot = checkout;
             await checkoutRevision(
               task,
-              repositorySources.get(task.id)!,
               checkout,
               options.signal,
               options.githubHost,
@@ -1096,8 +1089,7 @@ function parseInventory(
   if (rows.length === 0)
     throw new Error("Multiscan CSV must contain at least one repository.");
   const seen = new Set<string>();
-  const repositorySources = new Map<string, string>();
-  const tasks = rows.map((fields) => {
+  return rows.map((fields) => {
     if (fields.length !== headers.length) {
       throw new Error("Multiscan CSV rows must match their header columns.");
     }
@@ -1134,14 +1126,7 @@ function parseInventory(
     ) {
       throw new Error("Multiscan scope must stay inside its repository.");
     }
-    const sourceRepository = normalizeRepository(get("repository"), directory);
-    repositorySources.set(id, sourceRepository);
-    // Completed campaigns retain their identities when sources are unavailable.
-    // Filesystem access always uses the original source path.
-    const repository =
-      process.platform !== "win32" && isAbsolute(sourceRepository)
-        ? resolve(sourceRepository)
-        : sourceRepository;
+    const repository = normalizeRepository(get("repository"), directory);
     return {
       id,
       repository,
@@ -1151,7 +1136,6 @@ function parseInventory(
       ...(prompt ? { prompt } : {}),
     };
   });
-  return { tasks, repositorySources };
 }
 
 function normalizeRepository(repository: string, directory: string): string {
@@ -1194,7 +1178,6 @@ function normalizeRepository(repository: string, directory: string): string {
 
 async function checkoutRevision(
   task: MultiscanTask,
-  sourceRepository: string,
   path: string,
   signal?: AbortSignal,
   githubHost?: string,
@@ -1240,7 +1223,7 @@ async function checkoutRevision(
     "--no-tags",
     "--depth=1",
     "--",
-    sourceRepository,
+    task.repository,
     task.revision,
   );
   await git("checkout", "--quiet", "--detach", "FETCH_HEAD");

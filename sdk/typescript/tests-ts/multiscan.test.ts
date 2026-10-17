@@ -916,7 +916,7 @@ describe("multiscan", () => {
     ["terminal alias", "../alias"],
     ["ancestor alias", "../alias/src/.."],
   ])(
-    "resumes the same campaign with %s parent traversal",
+    "resumes the recorded %s source without changing traversal spelling",
     async (selection, relativePath) => {
       const paths = await fixture();
       const source = await repository(paths.root, "source");
@@ -939,12 +939,16 @@ describe("multiscan", () => {
       expect(JSON.parse(manifest).tasks[0].repository).toBe(original);
 
       await writeFile(input, inventory(relativePath));
+      await expect(runMultiscan(settings)).rejects.toThrow(
+        "Multiscan manifest does not match existing output directory.",
+      );
+      expect(await readFile(manifestPath, "utf8")).toBe(manifest);
+      await writeFile(input, inventory(original));
       expect(await runMultiscan(settings)).toMatchObject({
         completed: 1,
         failed: 0,
         skipped: 1,
       });
-      expect(await readFile(manifestPath, "utf8")).toBe(manifest);
       await rm(source.path, { recursive: true });
       expect(await runMultiscan(settings)).toMatchObject({
         completed: 1,
@@ -953,6 +957,63 @@ describe("multiscan", () => {
       });
       expect(await readFile(manifestPath, "utf8")).toBe(manifest);
       expect(security.run).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  testPosix.each([
+    ["traversal", "entry/first/../repository", "entry/second/../repository"],
+    ["recorded path", "entry/repository", "entry/first/../repository"],
+  ])(
+    "rejects changing a %s source at the same revision",
+    async (_selection, original, changed) => {
+      const paths = await fixture();
+      const source = await repository(paths.root, "first/repository");
+      await mkdir(join(paths.root, "first", "child"));
+      await mkdir(join(paths.root, "second", "child"), { recursive: true });
+      await mkdir(join(paths.root, "entry"));
+      for (const destination of ["second/repository", "entry/repository"]) {
+        git(paths.root, "clone", "--quiet", "--", source.path, destination);
+        expect(git(join(paths.root, destination), "rev-parse", "HEAD")).toBe(
+          source.revision,
+        );
+      }
+      for (const name of ["first", "second"]) {
+        await symlink(
+          join(paths.root, name, "child"),
+          join(paths.root, "entry", name),
+        );
+      }
+      const inventory = (path: string) =>
+        `id,repository,revision\nresume,${path},${source.revision}\n`;
+      await writeFile(paths.input, inventory(original));
+      const security = client(mock(completeRun));
+      const settings = options(paths, security);
+      expect(await runMultiscan(settings)).toMatchObject({
+        completed: 1,
+        failed: 0,
+      });
+      const manifestPath = join(paths.output, "manifest.json");
+      const manifest = await readFile(manifestPath, "utf8");
+      await writeFile(paths.input, inventory(changed));
+      await expect(runMultiscan(settings)).rejects.toThrow(
+        "Multiscan manifest does not match existing output directory.",
+      );
+      expect(await readFile(manifestPath, "utf8")).toBe(manifest);
+      expect(security.run).toHaveBeenCalledTimes(1);
+
+      await rm(
+        original === "entry/repository"
+          ? join(paths.root, "entry", "repository")
+          : source.path,
+        { recursive: true },
+      );
+      expect(
+        await runMultiscan({
+          ...settings,
+          outputDir: join(paths.root, "new-results"),
+        }),
+      ).toMatchObject({ completed: 1, failed: 0, skipped: 0 });
+      expect(security.run).toHaveBeenCalledTimes(2);
     },
   );
 
