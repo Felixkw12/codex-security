@@ -274,7 +274,6 @@ def test_root_outcome_uses_its_own_completion_marker(
                 saved_draft(
                     scan.scan_id,
                     complete=worker_complete,
-                    completeness="complete" if worker_complete else "partial",
                 )
             )
         )
