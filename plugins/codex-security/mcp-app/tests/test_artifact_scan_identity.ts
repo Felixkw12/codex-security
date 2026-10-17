@@ -1449,7 +1449,7 @@ documents=tuple(json.loads((root/name).read_text()) for name in ('scan-manifest.
 documents[0]['scan'].update(id=sys.argv[3],status='completed',producer={'name':'test','version':'1'},startedAt='2026-05-31T18:00:00Z',completedAt='2026-05-31T18:09:00Z')
 for document in documents[1:]: document['scanId']=sys.argv[3]
 prepared=_prepare_scan_finalization(root,draft_documents=documents)
-print(len(prepared[3]['findings']))`,
+print(len(prepared.findings['findings']))`,
         fileURLToPath(new URL("../../scripts", import.meta.url)),
         f.root,
         f.context.scanId!,

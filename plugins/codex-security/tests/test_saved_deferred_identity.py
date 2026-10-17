@@ -376,7 +376,7 @@ def cancel_and_preserve(monkeypatch, saved_results, state, codex_home, scan_dir,
     prepared_coverage = []
 
     def fail_publication(prepared, *, projection_warnings=None):
-        prepared_coverage.append(prepared[4])
+        prepared_coverage.append(prepared.coverage)
         raise OSError("injected publication failure")
 
     with monkeypatch.context() as patch:
@@ -1288,7 +1288,7 @@ def test_latest_eligible_worker_revision_survives_out_of_scope_result(
             for row in findings[0]["provenance"]["previousFindings"]
         )
         assert warnings == ["Skipped out-of-scope finding from reviewer/result.json."]
-        assert documents[2]["completeness"] == "partial"
+        assert "completeness" not in documents[2]
         if original is not None:
             assert documents == original
         original = documents

@@ -9,6 +9,7 @@ import os
 import re
 import stat
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -428,3 +429,67 @@ def _require_current_deep_publication(
 
 if __name__ == "__main__":
     argparse.ArgumentParser(description=__doc__).parse_args()
+
+
+def _latest_successful_reducer(workers: list[Any]) -> Any | None:
+    return max(
+        (
+            worker
+            for worker in workers
+            if worker["kind"] == "dedup"
+            and worker["status"] == "succeeded"
+            and worker["result_manifest_path"]
+        ),
+        key=lambda worker: (worker["completed_at"] or "", worker["id"]),
+        default=None,
+    )
+
+
+def _worker_outputs(scan_dir: Path, worker: Any) -> list[tuple[str, int]]:
+    output = Path(worker["artifact_dir"]).relative_to(scan_dir)
+    attempts = (output.parent if output.name == "output" else output) / "attempts"
+    archived = [
+        ((attempts / name).as_posix(), int(name.split("-")[1]))
+        for name in _children(scan_dir, attempts.as_posix())
+        if re.fullmatch(r"attempt-\d+", name)
+    ]
+    attempt = int(worker["attempt"] or 0) if "attempt" in worker.keys() else 0
+    if worker["kind"] == "discovery" and not attempt:
+        attempt = max((attempt for _, attempt in archived), default=0) + 1
+    return [(output.as_posix(), attempt), *archived]
+
+
+def _saved_result_paths(scan_dir: Path, workers: list[Any]) -> Iterator[tuple[str, str | None]]:
+    latest_reducer = _latest_successful_reducer(workers)
+    yield "checkpoint-head.json", None
+    for directory in ("checkpoint-heads", "checkpoints"):
+        yield from ((path, None) for path in _checkpoint_paths(scan_dir, directory))
+    for worker in workers:
+        if worker["kind"] not in {"dedup", "discovery"}:
+            continue
+        try:
+            outputs = _worker_outputs(scan_dir, worker)
+        except (TypeError, ValueError):
+            continue
+        for directory, _ in outputs:
+            if worker["kind"] == "discovery":
+                yield f"{directory}/checkpoint-head.json", worker["kind"]
+                yield from (
+                    (path, worker["kind"])
+                    for path in _checkpoint_paths(scan_dir, f"{directory}/checkpoint-heads")
+                )
+            checkpoint_paths = _checkpoint_paths(scan_dir, f"{directory}/checkpoints")
+            if worker["kind"] == "discovery" or checkpoint_paths:
+                yield f"{directory}/result.json", worker["kind"]
+                yield from ((path, worker["kind"]) for path in checkpoint_paths)
+        if worker["result_manifest_path"] and (
+            worker["kind"] == "discovery"
+            or (latest_reducer is not None and worker["id"] == latest_reducer["id"])
+        ):
+            try:
+                yield (
+                    Path(worker["result_manifest_path"]).relative_to(scan_dir).as_posix(),
+                    worker["kind"],
+                )
+            except ValueError:
+                continue

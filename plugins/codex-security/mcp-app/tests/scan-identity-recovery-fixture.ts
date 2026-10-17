@@ -78,9 +78,10 @@ preserved_identities=[]
 for root,documents in [(normal,ordinary),(recovered,recovery)]:
  documents[0]['scan'].update(id=scan_id,producer={'name':'codex-security-plugin','version':'0.1.0'},status='failed',startedAt='2026-05-31T18:00:00Z',completedAt='2026-05-31T18:09:00Z')
  for document in documents[1:]: document['scanId']=scan_id
- prepared=_prepare_scan_finalization(root,completion_warnings=warnings,draft_documents=documents)
- preserved_identities.append([row.get('provenance',{}).get('preservedIdentity') for row in prepared[3]['findings']])
- results.append([{'title':row['title'],'identity':row['identity'],'fingerprints':row['fingerprints'],'findingId':row['findingId'],'occurrenceId':row['occurrenceId'],'workerMetadata':row.get('provenance',{}).get('workerId'),**({'evidenceProvenance':{key:row.get('provenance',{}).get(key,[]) for key in ['sourceFindingIds','sourceFindings','previousFindings','originalCandidates']}} if json.loads(sys.argv[8]) else {}),**({'summary':row['summary'],'locations':row['locations'],'severity':row['severity'],'candidateMetadata':{'provenance':row.get('provenance',{}).get('candidateId'),'extensions':row.get('extensions')}} if json.loads(sys.argv[6]) else {})} for row in prepared[3]['findings']])
+ prepared=_prepare_scan_finalization(root,draft_documents=documents)
+ warnings.extend(prepared.warnings)
+ preserved_identities.append([row.get('provenance',{}).get('preservedIdentity') for row in prepared.findings['findings']])
+ results.append([{'title':row['title'],'identity':row['identity'],'fingerprints':row['fingerprints'],'findingId':row['findingId'],'occurrenceId':row['occurrenceId'],'workerMetadata':row.get('provenance',{}).get('workerId'),**({'evidenceProvenance':{key:row.get('provenance',{}).get(key,[]) for key in ['sourceFindingIds','sourceFindings','previousFindings','originalCandidates']}} if json.loads(sys.argv[8]) else {}),**({'summary':row['summary'],'locations':row['locations'],'severity':row['severity'],'candidateMetadata':{'provenance':row.get('provenance',{}).get('candidateId'),'extensions':row.get('extensions')}} if json.loads(sys.argv[6]) else {})} for row in prepared.findings['findings']])
 print(json.dumps({'normal':results[0],'recovered':results[1],'warnings':warnings,'normalCoverage':ordinary[2],'recoveredCoverage':recovery[2],'preservedIdentities':preserved_identities,'historySummaries':[previous.get('summary') for row in recovery[1]['findings'] for previous in row.get('provenance',{}).get('previousFindings',[]) if isinstance(previous,dict)]}))`,
       fileURLToPath(new URL("../../scripts", import.meta.url)),
       normal.root,
