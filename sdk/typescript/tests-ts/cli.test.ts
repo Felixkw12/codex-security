@@ -3678,11 +3678,6 @@ describe("CLI", () => {
         options?.onOutputDirReady?.("/tmp/scan");
         options?.onScanStarted?.();
         options?.onWorkerStatus?.({
-          kind: "preflight",
-          delegation: "available",
-          configuredSlots: 8,
-        });
-        options?.onWorkerStatus?.({
           kind: "dispatch",
           phase: "validation",
           planned: 6,
@@ -3711,9 +3706,6 @@ describe("CLI", () => {
       'codex-security: debug: scan.output_ready scan_dir="/tmp/scan"',
     );
     expect(stderr.text()).toContain("codex-security: debug: scan.started");
-    expect(stderr.text()).toContain(
-      'codex-security: debug: worker.preflight delegation="available" configured_slots=8',
-    );
     expect(stderr.text()).toContain(
       'codex-security: debug: worker.phase phase="validation" planned=6 started=3',
     );
@@ -4994,20 +4986,12 @@ describe("CLI", () => {
         ["scan", "--json"],
         dependencies({
           workerStatuses: [
-            {
-              kind: "preflight",
-              delegation: "available",
-              configuredSlots: 8,
-            },
             { kind: "dispatch", phase: "ranking", planned: 6, started: 3 },
           ],
         }),
       ),
     ).toBe(0);
     expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
-    expect(stderr.text()).toContain(
-      "Preflight: worker delegation supported (up to 8 worker slots).",
-    );
     expect(stderr.text()).toContain(
       "Worker capacity changed during ranking; started 3 of 6 planned workers. Continuing scan.",
     );
@@ -5322,11 +5306,6 @@ describe("CLI", () => {
         dependencies({
           workerStatuses: [
             {
-              kind: "preflight",
-              delegation: "unavailable",
-              configuredSlots: 8,
-            },
-            {
               kind: "dispatch",
               phase: "file_review",
               planned: 6,
@@ -5336,9 +5315,6 @@ describe("CLI", () => {
         }),
       ),
     ).toBe(0);
-    expect(stderr.text()).toContain(
-      "Preflight: worker delegation unavailable; continuing without delegated workers.",
-    );
     expect(stderr.text()).toContain(
       "Worker delegation unavailable during file review; continuing without delegated workers.",
     );
