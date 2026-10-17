@@ -768,10 +768,7 @@ print(json.dumps({'withLinks': with_links, 'withoutLinks': collect_history()}))
   });
 });
 
-test("never matches independently registered sibling repository targets", () => {
-  const python = Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
-  if (python === null) throw new Error("A Python interpreter is required.");
-
+test("never matches independently registered sibling repository targets", async () => {
   const probe = [
     "import argparse, json, os, pathlib, sqlite3, subprocess, sys, tempfile",
     "sys.path.insert(0, sys.argv[1])",
@@ -800,17 +797,11 @@ test("never matches independently registered sibling repository targets", () => 
     "        connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?, ?, ?, ?, ?)', (scan, str(path), target, serialize_filesystem_identity(metadata.st_dev), serialize_filesystem_identity(metadata.st_ino), 'revision', 'complete', '2026-01-01'))",
     "        connection.execute('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?, ?, ?, ?, ?)', (scan, scan, scan, '{}', 'fix', 'high', 'summary', 'title'))",
     "    results = [history.list_unmatched_scan_pairs(connection, argparse.Namespace(repository=str(repository), force=force), backfill_finding_details=lambda *_args: None, read_coverage=lambda _scan: {}) for force in (False, True)]",
-    "    print(json.dumps(results))",
+    "    print(json.dumps({'results': results}))",
   ].join("\n");
 
-  const result = spawnSync(
-    python,
-    ["-I", "-B", "-c", probe, join(PLUGIN_ROOT, "scripts")],
-    { encoding: "utf8", timeout: 10_000 },
-  );
-
-  expect(result.status, result.stderr).toBe(0);
-  for (const matching of JSON.parse(result.stdout)) {
+  const observed = await runPythonProbe(probe);
+  for (const matching of observed["results"] as unknown[]) {
     expect(matching).toMatchObject({
       scanCount: 3,
       batches: [
