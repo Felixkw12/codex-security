@@ -289,7 +289,6 @@ async function testCompactDiffScanCompletion(
         handoffClaimToken,
         findings: [],
         coverage: {
-          completeness: "complete",
           surfaces: [
             {
               label: "Changed handler and removed guard",
@@ -473,7 +472,6 @@ async function testSemanticScanDraftCompletion(
     const explicitCollisionDeferredId = "explicit-adapter-review";
     const candidateCollisionDeferredId = "candidate-adapter-review";
     const coverage = {
-      completeness: "partial",
       surfaces: [
         {
           id: "surface_sql-execution",
@@ -686,7 +684,7 @@ async function testSemanticScanDraftCompletion(
       handoffClaimToken,
       complete: false,
       findings: [finding],
-      coverage: { ...coverage, completeness: "partial" },
+      coverage: { ...coverage },
     };
     requireSuccessfulTool(
       await call("record_codex_security_scan_draft", checkpoint),
@@ -806,7 +804,7 @@ async function testSemanticScanDraftCompletion(
     assert.ok(results.findings.findings[0].fingerprints.primary);
     assert.equal(results.manifest.scan.target.kind, "directory_snapshot");
     assert.equal(results.coverage.inventoryStrategy, "directory");
-    assert.equal(results.coverage.completeness, "partial");
+    assert.equal(results.coverage.completeness, undefined);
     assert.deepEqual(results.coverage.includePaths, ["."]);
     assert.deepEqual(results.coverage.excludePaths, []);
     assert.equal(results.coverage.surfaces[0].disposition, "reported");
@@ -1202,6 +1200,8 @@ async function testParentToolList(bundle: string) {
       "record_candidate_attack_paths",
       "record_codex_security_scan_draft",
       "get_codex_security_completed_scan",
+      "get_codex_security_finding_issues",
+      "record_codex_security_finding_issues",
       "complete_codex_security_scan",
     ]) {
       assert.equal(names.has(name), true, `Missing parent MCP tool ${name}.`);
@@ -1365,7 +1365,18 @@ async function testDiscoveryWorkerToolList(bundle: string) {
     const input = {
       scanId,
       findings: [],
-      coverage: workerDraft([]).coverage,
+      coverage: {
+        ...workerDraft([]).coverage,
+        explicitExclusions: [
+          { pattern: "vendor/**", reason: "Third-party source." },
+        ],
+        deferred: [
+          {
+            id: "runtime-check",
+            reason: "Runtime confirmation remains unavailable.",
+          },
+        ],
+      },
     };
 
     for (const forbiddenInput of [
@@ -1393,22 +1404,6 @@ async function testDiscoveryWorkerToolList(bundle: string) {
       }),
       /scanId does not match/,
       "The Standard worker draft must use the coordinator-bound scan identity.",
-    );
-    await assert.rejects(readFile(resultPath), { code: "ENOENT" });
-
-    requireToolError(
-      await client.callTool({
-        name: tool.name,
-        arguments: {
-          ...input,
-          coverage: {
-            ...input.coverage,
-            deferred: [{ reason: "Review remains incomplete." }],
-          },
-        },
-      }),
-      /complete coverage cannot contain deferred/,
-      "The Standard worker must reject invalid coverage before writing its checkpoint.",
     );
     await assert.rejects(readFile(resultPath), { code: "ENOENT" });
 
@@ -1683,6 +1678,16 @@ function assertSemanticInputProperties(schema: Record<string, unknown>) {
     Record<string, unknown>
   >;
   const findingSchema = properties.findings.items as Record<string, unknown>;
+  if (properties.coverage) {
+    assert.equal(
+      Object.hasOwn(properties.coverage.properties as object, "completeness"),
+      false,
+    );
+    assert.equal(
+      (properties.coverage.required as string[]).includes("completeness"),
+      false,
+    );
+  }
   const groups: [Record<string, unknown>, string[]][] = [
     [properties.scope, ["includePaths", "excludePaths"]],
     [findingSchema, ["findingId", "occurrenceId", "fingerprints"]],

@@ -339,7 +339,6 @@ def _indexed_active_findings(
         connection,
         read_coverage,
         allowed_scan_ids=allowed_scan_ids,
-        uncertain_scans={},
         include_resolved=True,
         **scope,
     ):
@@ -364,7 +363,6 @@ def _indexed_active_findings(
             connection,
             read_coverage,
             allowed_scan_ids=allowed_scan_ids,
-            uncertain_scans={},
             include_resolved=True,
             target_ids=history_targets or None,
             target_paths=history_paths or None,
@@ -379,21 +377,6 @@ def _indexed_active_findings(
                 (settings["through_scan_sequence"], json.dumps(sorted(allowed_scan_ids))),
             )
         }
-    uncertain_scans: dict[str, set[str]] = {}
-    admitted = json.dumps(sorted(allowed_scan_ids))
-    for comparison in connection.execute(
-        "SELECT before_scan_id, after_scan_id, result_json FROM scan_comparisons "
-        "WHERE before_scan_id IN (SELECT value FROM json_each(?)) "
-        "AND after_scan_id IN (SELECT value FROM json_each(?))",
-        (admitted, admitted),
-    ):
-        for match in json.loads(comparison["result_json"]).get("uncertain", []):
-            uncertain_scans.setdefault(match["beforeOccurrenceId"], set()).add(
-                comparison["after_scan_id"]
-            )
-            uncertain_scans.setdefault(match["afterOccurrenceId"], set()).add(
-                comparison["before_scan_id"]
-            )
     query = settings.get("query", "")
     indexed = list(
         _indexed_findings(
@@ -409,13 +392,6 @@ def _indexed_active_findings(
             connection,
             read_coverage,
             allowed_scan_ids=allowed_scan_ids,
-            uncertain_scans=uncertain_scans,
-            reopened={
-                occurrence_id: (finding["decision_scan_sequence"], finding["decision_updated_at"])
-                for finding in indexed
-                if finding["decision_status"] == "open"
-                for occurrence_id in finding["occurrence_ids"]
-            },
             **settings,
         )
     }
@@ -473,7 +449,6 @@ def _active_findings(
     read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
     *,
     allowed_scan_ids: set[str],
-    uncertain_scans: dict[str, set[str]],
     target_ids: set[str] | None = None,
     target_paths: set[str] | None = None,
     repository: str | None = None,
@@ -481,7 +456,6 @@ def _active_findings(
     query: str = "",
     include_resolved: bool = False,
     through_scan_sequence: int | None = None,
-    reopened: dict[str, tuple[int | None, str]] | None = None,
 ) -> Iterator[dict[str, Any]]:
     target_filters = []
     target_values = []
@@ -604,7 +578,6 @@ def _active_findings(
             completed_scans_by_target.setdefault(scan["indexed_target_id"], []).append(scan)
         allowed_scan_ids.add(scan["id"])
 
-    coverage_by_scan_id: dict[str, dict[str, Any] | None] = {}
     if query:
         connection.create_function("codex_security_casefold", 1, str.casefold, deterministic=True)
     secondary_location_match = (
@@ -615,39 +588,6 @@ def _active_findings(
         if query
         else "0"
     )
-    uncertain_by_finding: dict[tuple[str, str], set[str]] = {}
-    related_scans_by_finding: dict[tuple[str, str], set[str]] = {}
-    if uncertain_scans:
-        groups_by_occurrence = {
-            occurrence_id: finding
-            for finding in _indexed_findings(
-                connection, allowed_scan_ids, allow_cross_target_matches=True
-            )
-            for occurrence_id in finding["occurrence_ids"]
-        }
-        for occurrence in connection.execute(
-            f"""
-            SELECT occurrences.id, occurrences.finding_id,
-                COALESCE(targets.id, scans.target_path) AS indexed_target_id
-            FROM finding_occurrences AS occurrences
-            JOIN scans ON scans.id = occurrences.scan_id
-            LEFT JOIN security_targets AS targets ON targets.id = scans.target_id
-            WHERE 1 = 1 {target_filter} {repository_filter} {current_owner_only}
-            """,
-            target_values,
-        ):
-            group = groups_by_occurrence.get(occurrence["id"])
-            group_occurrences = group["occurrence_ids"] if group else {occurrence["id"]}
-            scans_with_uncertainty = {
-                scan_id
-                for occurrence_id in group_occurrences
-                for scan_id in uncertain_scans.get(occurrence_id, ())
-            }
-            identity = (occurrence["indexed_target_id"], occurrence["finding_id"])
-            if group is not None and scans_with_uncertainty:
-                related_scans_by_finding.setdefault(identity, set()).update(group["known_scan_ids"])
-            if scans_with_uncertainty:
-                uncertain_by_finding.setdefault(identity, set()).update(scans_with_uncertainty)
     rows = connection.execute(
         f"""
         WITH ranked_findings AS (
@@ -723,79 +663,9 @@ def _active_findings(
                 completed_scans[0]["id"] == row["scan_id"] if completed_scans else True
             ),
         }
-        if include_resolved:
-            if row["seal_manifest_digest"] is not None:
-                allowed_scan_ids.add(row["scan_id"])
-            yield finding
-            continue
-        resolved = False
-        reopening = (reopened or {}).get(row["occurrence_id"])
-        for scan in completed_scans:
-            if scan["scan_sequence"] <= row["scan_sequence"]:
-                break
-            if reopening is not None and (
-                scan["scan_sequence"] <= reopening[0]
-                if reopening[0] is not None
-                else timestamp_key(scan["started_at"]) <= timestamp_key(reopening[1])
-            ):
-                continue
-            if scan["seal_manifest_digest"] is None:
-                continue
-            if scan["mode"] == "diff":
-                continue
-            if scan["id"] in related_scans_by_finding.get(
-                (row["indexed_target_id"], row["finding_id"]), ()
-            ):
-                continue
-            if scan["id"] in uncertain_by_finding.get(
-                (row["indexed_target_id"], row["finding_id"]), ()
-            ):
-                continue
-            if scan["id"] not in coverage_by_scan_id:
-                try:
-                    coverage_by_scan_id[scan["id"]] = read_coverage(scan)
-                except SystemExit as error:
-                    cause: BaseException | None = error
-                    while cause is not None and not isinstance(cause, FileNotFoundError):
-                        cause = cause.__cause__
-                    message = str(error)
-                    if isinstance(cause, FileNotFoundError):
-                        coverage_by_scan_id[scan["id"]] = None
-                    elif message == (
-                        "Scan directory must be an existing canonical non-symlink directory."
-                    ):
-                        try:
-                            Path(scan["scan_dir"]).lstat()
-                        except FileNotFoundError:
-                            coverage_by_scan_id[scan["id"]] = None
-                        else:
-                            raise
-                    elif message.startswith(
-                        "missing required contract artifact: "
-                    ) or message.endswith(": expected a regular file inside the scan directory."):
-                        coverage_by_scan_id[scan["id"]] = None
-                    else:
-                        raise
-            coverage = coverage_by_scan_id[scan["id"]]
-            if coverage is None:
-                continue
-            comparable_scan = (
-                scan
-                if scan["target_id"] == row["indexed_target_id"]
-                else {**dict(scan), "target_id": row["indexed_target_id"]}
-            )
-            if scan_history.scan_covers_path(
-                comparable_scan,
-                target_id=row["indexed_target_id"],
-                path=row["location_path"],
-                coverage=coverage,
-            ):
-                resolved = True
-                break
-        if not resolved:
-            if allowed_scan_ids is not None and row["seal_manifest_digest"] is not None:
-                allowed_scan_ids.add(row["scan_id"])
-            yield finding
+        if row["seal_manifest_digest"] is not None:
+            allowed_scan_ids.add(row["scan_id"])
+        yield finding
 
 
 def list_repositories(

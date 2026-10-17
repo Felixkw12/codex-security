@@ -121,9 +121,9 @@ const findingsIndexProbe = [
   "    assert scan['seal_manifest_digest'] is not None, 'Unsealed scan coverage was read.'",
   "    coverage_reads.append(scan['id'])",
   "    if settings.get('inactiveRepresentative') and scan['id'] == 'current-followup':",
-  "        return {'completeness': 'complete', 'includePaths': ['src/new.py'], 'excludePaths': [], 'explicitExclusions': []}",
+  "        return {'includePaths': ['src/new.py'], 'excludePaths': [], 'explicitExclusions': []}",
   "    if settings.get('mixedLegacyOwnership') and scan['id'] == 'current-new':",
-  "        return {'completeness': 'partial', 'includePaths': ['src/new.py'], 'excludePaths': [], 'explicitExclusions': []}",
+  "        return {'includePaths': ['src/new.py'], 'excludePaths': [], 'explicitExclusions': []}",
   "    if scan['id'] == 'stale-new':",
   "        if settings.get('coverageFailure') == 'tampered':",
   "            raise SystemExit('The sealed scan manifest changed after completion.')",
@@ -133,8 +133,8 @@ const findingsIndexProbe = [
   "            raise SystemExit('coverage.json: expected a regular file inside the scan directory.')",
   "        raise SystemExit('Scan directory must be an existing canonical non-symlink directory.')",
   "    if scan['id'] == 'orphan-new':",
-  "        return {'completeness': 'partial', 'includePaths': ['src/orphan-new.py'], 'excludePaths': [], 'explicitExclusions': []}",
-  "    return {'completeness': 'complete', 'includePaths': ['.'], 'excludePaths': [], 'explicitExclusions': []}",
+  "        return {'includePaths': ['src/orphan-new.py'], 'excludePaths': [], 'explicitExclusions': []}",
+  "    return {'includePaths': ['.'], 'excludePaths': [], 'explicitExclusions': []}",
   "args = argparse.Namespace(query=settings.get('query'), severity=None, status=None, target_id=settings.get('targetIds') or settings.get('targetId'), target_path=settings.get('targetPaths') or settings.get('targetPath'), repository=os.path.join(sys.argv[1], 'nested') if settings.get('scopedLegacyDescendant') else '/current/repository' if settings.get('linkedWorktree') else None, include_resolved=settings.get('includeResolved', False), offset=0, limit=20)",
   "if settings.get('repositories'):",
   "    indexes.scan_history.list_scans = lambda connection: {'scans': [{'scanId': row['id'], 'targetId': row['target_id']} for row in connection.execute('SELECT id, target_id FROM scans')]}",
@@ -348,8 +348,12 @@ describe("workbench findings index", () => {
         scanId: "current-new",
         targetId: "current-target",
       }),
+      expect.objectContaining({
+        confirmedInLatestScan: false,
+        occurrenceId: "current-old-occurrence",
+      }),
     ]);
-    expect(result.coverageReads).toEqual(["current-new"]);
+    expect(result.coverageReads).toEqual([]);
     expect(result.findings).not.toContainEqual(
       expect.objectContaining({ occurrenceId: "reused-legacy-occurrence" }),
     );
@@ -369,13 +373,13 @@ describe("workbench findings index", () => {
     );
   });
 
-  test("counts only active findings when listing repositories", () => {
+  test("counts historical open findings when listing repositories", () => {
     const result = probeFindingsIndex(null, { repositories: true });
 
     expect(result.repositories).toContainEqual(
       expect.objectContaining({
         targetId: "current-target",
-        openFindingsCount: 1,
+        openFindingsCount: 2,
       }),
     );
   });
@@ -390,8 +394,12 @@ describe("workbench findings index", () => {
         confirmedInLatestScan: true,
         occurrenceId: "current-new-occurrence",
       }),
+      expect.objectContaining({
+        confirmedInLatestScan: false,
+        occurrenceId: "current-old-occurrence",
+      }),
     ]);
-    expect(result.coverageReads).toEqual(["current-new"]);
+    expect(result.coverageReads).toEqual([]);
   });
 
   test("keeps rediscovered findings active when the system clock moves backward", () => {
@@ -742,7 +750,7 @@ describe("workbench findings index", () => {
     ).toContainEqual(
       expect.objectContaining({
         targetId: "current-target",
-        openFindingsCount: 1,
+        openFindingsCount: 2,
       }),
     );
   });
@@ -839,7 +847,7 @@ describe("workbench findings index", () => {
     }
   });
 
-  test("does not search resolved matched finding representatives", () => {
+  test("searches matched findings that were absent from a later scan", () => {
     const result = probeFindingsIndex("current-target", {
       inactiveRepresentative: true,
       indexedAliases: true,
@@ -847,10 +855,12 @@ describe("workbench findings index", () => {
       query: "CURRENT CLI FINDING",
     });
 
-    expect(result.findings).toEqual([]);
+    expect(result.findings).toEqual([
+      expect.objectContaining({ occurrenceId: "current-new-occurrence" }),
+    ]);
   });
 
-  test("keeps an active occurrence as the matched finding representative", () => {
+  test("keeps the latest matched occurrence after a scan does not observe it", () => {
     const result = probeFindingsIndex("current-target", {
       inactiveRepresentative: true,
       indexedAliases: true,
@@ -860,25 +870,25 @@ describe("workbench findings index", () => {
     expect(result.findings).toEqual([
       expect.objectContaining({
         confirmedInLatestScan: false,
-        createdAt: "2026-01-01T00:00:00Z",
-        findingId: "current-old-finding",
+        createdAt: "2026-02-01T00:00:00Z",
+        findingId: "current-new-finding",
         knownScanIds: ["current-old", "current-new"],
         knownSince: "2026-01-01T00:00:00Z",
-        locationPath: "src/old.py",
+        locationPath: "src/new.py",
         matchedFindingIds: ["current-new-finding", "current-old-finding"],
         occurrenceCount: 2,
-        occurrenceId: "current-old-occurrence",
-        scanId: "current-old",
-        severity: { level: "high" },
+        occurrenceId: "current-new-occurrence",
+        scanId: "current-new",
+        severity: { level: "critical" },
         status: "open",
-        summary: "Older issue",
-        title: "Resolved current finding",
+        summary: "Latest issue",
+        title: "Current CLI finding",
         updatedAt: "2026-02-01T00:00:00Z",
       }),
     ]);
   });
 
-  test("preserves the active linked-worktree target and aggregate triage", () => {
+  test("preserves linked-worktree aggregate triage after an empty follow-up", () => {
     const result = probeFindingsIndex(null, {
       inactiveRepresentative: true,
       indexedAliases: true,
@@ -887,15 +897,15 @@ describe("workbench findings index", () => {
 
     expect(result.findings).toEqual([
       expect.objectContaining({
-        confirmedInLatestScan: true,
+        confirmedInLatestScan: false,
         knownScanIds: ["current-old", "current-new"],
-        locationPath: "src/old.py",
+        locationPath: "src/new.py",
         occurrenceCount: 2,
-        occurrenceId: "current-old-occurrence",
-        scanId: "current-old",
+        occurrenceId: "current-new-occurrence",
+        scanId: "current-new",
         status: "closed",
-        targetId: "linked-target",
-        targetPath: "/linked/repository",
+        targetId: "current-target",
+        targetPath: "/current/repository",
       }),
     ]);
   });
@@ -908,7 +918,7 @@ describe("workbench findings index", () => {
     expect(result.findings).toEqual([
       expect.objectContaining({ occurrenceId: "stale-old-occurrence" }),
     ]);
-    expect(result.coverageReads).toEqual(["stale-new"]);
+    expect(result.coverageReads).toEqual([]);
   });
 
   test.each([false, true])(
@@ -930,12 +940,14 @@ describe("workbench findings index", () => {
   );
 
   test.each(["tampered", "sealedArtifact"] as const)(
-    "rejects %s sealed scan artifacts",
+    "lists saved findings without reading %s follow-up artifacts",
     (coverageFailure) => {
-      const result = runFindingsIndex("stale-target", { coverageFailure });
+      const result = probeFindingsIndex("stale-target", { coverageFailure });
 
-      expect(result.exitCode).not.toBe(0);
-      expect(new TextDecoder().decode(result.stderr)).toContain("changed");
+      expect(result.findings).toEqual([
+        expect.objectContaining({ occurrenceId: "stale-old-occurrence" }),
+      ]);
+      expect(result.coverageReads).toEqual([]);
     },
   );
 
@@ -958,7 +970,7 @@ describe("workbench findings index", () => {
         targetPath: "/orphan/repository",
       }),
     ]);
-    expect(result.coverageReads).toEqual(["orphan-new"]);
+    expect(result.coverageReads).toEqual([]);
   });
 
   test.each([
@@ -1014,9 +1026,7 @@ describe("workbench findings index", () => {
       expect(result.remediationGuardError).toBe(
         "Reopen this finding before requesting remediation.",
       );
-      expect(result.coverageReads).toEqual(
-        unsealedScans || targetlessHistory === "stable" ? [] : ["orphan-new"],
-      );
+      expect(result.coverageReads).toEqual([]);
     },
   );
 
@@ -1026,10 +1036,11 @@ describe("workbench findings index", () => {
     });
     expect(scoped.findings.map((finding) => finding.occurrenceId)).toEqual([
       "current-new-occurrence",
+      "current-old-occurrence",
       "orphan-old-occurrence",
       "orphan-new-occurrence",
     ]);
-    expect(scoped.coverageReads).toEqual(["current-new", "orphan-new"]);
+    expect(scoped.coverageReads).toEqual([]);
 
     const siblingPrefix = probeFindingsIndex(null, {
       targetPaths: ["/current/repositor"],
@@ -1046,6 +1057,7 @@ describe("workbench findings index", () => {
 
     expect(result.findings.map((finding) => finding.occurrenceId)).toEqual([
       "orphan-old-occurrence",
+      "current-old-occurrence",
       "orphan-new-occurrence",
       "current-new-occurrence",
     ]);
@@ -1057,6 +1069,7 @@ describe("workbench findings index", () => {
     });
     expect(identified.findings.map((finding) => finding.occurrenceId)).toEqual([
       "current-new-occurrence",
+      "current-old-occurrence",
       "stale-old-occurrence",
     ]);
 
@@ -1066,6 +1079,7 @@ describe("workbench findings index", () => {
     });
     expect(mixed.findings.map((finding) => finding.occurrenceId)).toEqual([
       "current-new-occurrence",
+      "current-old-occurrence",
       "orphan-old-occurrence",
       "orphan-new-occurrence",
     ]);

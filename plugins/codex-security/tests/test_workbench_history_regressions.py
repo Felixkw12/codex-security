@@ -594,7 +594,7 @@ def test_stopped_sealed_occurrences_remain_in_complete_scan_history(history) -> 
 
 
 @pytest.mark.parametrize("uncertain", [False, True])
-def test_stable_recurrence_keeps_prior_uncertainty_until_later_coverage(history, uncertain) -> None:
+def test_stable_recurrence_remains_open_after_unobserved_followup(history, uncertain) -> None:
     state, root, repository = history
     first = create_cli_scan(state, root, repository, identity_anchor="stable")
     repeated = create_cli_scan(state, root, repository, identity_anchor="stable")
@@ -622,32 +622,32 @@ def test_stable_recurrence_keeps_prior_uncertainty_until_later_coverage(history,
         "findings"
     ]
     stable = [row for row in findings if row["findingId"] == rows[0]["findingId"]]
-    assert len(stable) == int(uncertain)
+    assert len(stable) == 1
     repositories = run_workbench(state, "list-repositories")["repositories"]
-    assert repositories[0]["openFindingsCount"] == 1 + int(uncertain)
+    assert repositories[0]["openFindingsCount"] == 2
     create_cli_scan(state, root, repository, finding=False)
-    assert (
-        run_workbench(state, "list-global-findings", "--repository", str(repository))["findings"]
-        == []
-    )
+    unobserved = run_workbench(state, "list-global-findings", "--repository", str(repository))[
+        "findings"
+    ]
+    assert {row["findingId"] for row in unobserved} == {row["findingId"] for row in findings}
+    assert all(row["status"] == "open" and not row["confirmedInLatestScan"] for row in unobserved)
 
 
 @pytest.mark.parametrize("artifact", ["scan-manifest.json", "coverage.json"])
 @pytest.mark.parametrize("missing", [False, True])
-def test_pruned_coverage_keeps_history_but_tampering_is_rejected(
-    history, artifact, missing
-) -> None:
+def test_history_index_does_not_read_followup_artifacts(history, artifact, missing) -> None:
     state, root, repository = history
     earlier = create_cli_scan(state, root, repository)
     later = create_cli_scan(state, root, repository, finding=False)
     path = Path(later["scanDir"]) / artifact
     if missing:
         path.unlink()
-        findings = run_workbench(state, "list-global-findings")["findings"]
-        assert [finding["scanId"] for finding in findings] == [earlier["scanId"]]
     else:
         path.write_text(path.read_text() + "\n")
-        result = run_workbench(state, "list-global-findings", check=False)
+    findings = run_workbench(state, "list-global-findings")["findings"]
+    assert [finding["scanId"] for finding in findings] == [earlier["scanId"]]
+    if not missing:
+        result = run_workbench(state, "get-scan", "--scan-id", later["scanId"], check=False)
         assert result["returncode"] != 0
         assert "changed" in result["stderr"]
 
@@ -681,9 +681,9 @@ def test_selected_repository_ignores_an_unrelated_tampered_scan(history, selecto
         assert result["repositories"][0]["openFindingsCount"] == 1
     else:
         assert result["repositories"] == []
-    unfiltered = run_workbench(state, "list-repositories", check=False)
-    assert unfiltered["returncode"] != 0
-    assert "changed after completion" in unfiltered["stderr"]
+    unfiltered = run_workbench(state, "list-repositories")["repositories"]
+    assert {row["targetId"] for row in unfiltered} == {selected["targetId"], later["targetId"]}
+    assert all(row["openFindingsCount"] == 1 for row in unfiltered)
 
 
 @pytest.mark.parametrize("close_reason", ["already_fixed", "false_positive"])
@@ -857,7 +857,9 @@ def test_semantic_alias_uncertainty_preserves_group(tmp_path: Path, history):
     assert len(listed) == 2
     assert {r["findingId"] for r in listed} & {rows[0]["findingId"], rows[1]["findingId"]}
     create_cli_scan(state, root, repo, finding=False)
-    assert run_workbench(state, "list-global-findings")["findings"] == []
+    unobserved = run_workbench(state, "list-global-findings")["findings"]
+    assert {row["findingId"] for row in unobserved} == {row["findingId"] for row in listed}
+    assert all(row["status"] == "open" and not row["confirmedInLatestScan"] for row in unobserved)
 
 
 def test_clean_diff_does_not_resolve_unchanged_source(tmp_path: Path, history):
@@ -910,7 +912,9 @@ def test_clean_diff_does_not_resolve_unchanged_source(tmp_path: Path, history):
     ]
     assert run_workbench(state, "list-repositories")["repositories"][0]["openFindingsCount"] == 1
     create_cli_scan(state, root, repo, finding=False, target_revision=head)
-    assert run_workbench(state, "list-global-findings")["findings"] == []
+    assert [row["scanId"] for row in run_workbench(state, "list-global-findings")["findings"]] == [
+        previous["scanId"]
+    ]
 
 
 @pytest.mark.parametrize("matched", [False, True])
@@ -1120,7 +1124,7 @@ def test_repeated_inherited_action_keeps_ledger_order(tmp_path: Path, repeat: bo
 
 
 @pytest.mark.parametrize("unrelated_uncertainty", [False, True])
-def test_unrelated_uncertainty_does_not_resurrect_resolved_alias(
+def test_unrelated_uncertainty_does_not_change_unobserved_alias(
     tmp_path: Path, unrelated_uncertainty: bool
 ):
     state, root = tmp_path / "state", tmp_path / "scans"
@@ -1185,7 +1189,11 @@ def test_unrelated_uncertainty_does_not_resurrect_resolved_alias(
     )
     custom_scan("src/b.py", "clean-scope", paths=["src/b.py"], finding=False)
     target = before["targetId"]
-    assert run_workbench(state, "list-global-findings", "--target-id", target)["findings"] == []
+    unobserved = run_workbench(state, "list-global-findings", "--target-id", target)["findings"]
+    assert len(unobserved) == 1
+    assert unobserved[0]["occurrenceId"] == rows[1]["occurrenceId"]
+    assert unobserved[0]["status"] == "open"
+    assert unobserved[0]["confirmedInLatestScan"] is False
     other = tmp_path / "unrelated-repository"
     other.mkdir()
     scans = [
@@ -1210,7 +1218,7 @@ def test_unrelated_uncertainty_does_not_resurrect_resolved_alias(
             ),
         )
     findings = run_workbench(state, "list-global-findings", "--target-id", target)["findings"]
-    assert findings == []
+    assert findings == unobserved
 
 
 @pytest.mark.parametrize("unrelated", [False, True])
@@ -2010,7 +2018,7 @@ def test_transitive_comparison_keeps_dismissal_for_predecision_scans(history, re
 
 @pytest.mark.parametrize("matched", [False, True])
 @pytest.mark.parametrize("legacy_decision", [False, True])
-def test_explicit_reopen_outlives_earlier_clean_coverage(history, matched, legacy_decision):
+def test_explicit_reopen_survives_unobserved_followups(history, matched, legacy_decision):
     state, root, repository = history
     first = create_cli_scan(state, root, repository, identity_anchor="first")
     occurrence = run_workbench(state, "get-scan", "--scan-id", first["scanId"])["scan"]["findings"][
@@ -2022,6 +2030,18 @@ def test_explicit_reopen_outlives_earlier_clean_coverage(history, matched, legac
             0
         ]["occurrenceId"]
         save_scan_matches(state, first, second, confirmed_match(occurrence, other))
+    run_workbench(
+        state,
+        "set-finding-triage",
+        "--occurrence-id",
+        occurrence,
+        "--status",
+        "closed",
+        "--close-reason",
+        "false_positive",
+        "--note",
+        "Synthetic dismissed finding",
+    )
     create_cli_scan(state, root, repository, finding=False)
 
     def open_findings():
@@ -2045,5 +2065,5 @@ def test_explicit_reopen_outlives_earlier_clean_coverage(history, matched, legac
     assert reopened[0]["occurrenceCount"] == 1 + int(matched)
     assert run_workbench(state, "list-repositories")["repositories"][0]["openFindingsCount"] == 1
     create_cli_scan(state, root, repository, finding=False)
-    assert open_findings() == []
-    assert run_workbench(state, "list-repositories")["repositories"][0]["openFindingsCount"] == 0
+    assert open_findings() == reopened
+    assert run_workbench(state, "list-repositories")["repositories"][0]["openFindingsCount"] == 1

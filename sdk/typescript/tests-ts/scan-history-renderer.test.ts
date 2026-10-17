@@ -216,7 +216,6 @@ describe("scan history renderer", () => {
         repository: "/synthetic/repository",
         beforeScanId: "before-scan",
         afterScanId: "after-scan",
-        coverage: { afterCompleteness: "complete" },
         summary: { persisting: 2 },
         findings: [
           {
@@ -250,7 +249,6 @@ describe("scan history renderer", () => {
         repository: "/synthetic/repository",
         beforeScanId: "before-scan",
         afterScanId: "after-scan",
-        coverage: { afterCompleteness: "complete" },
         summary: { resolved: 2, new: 2 },
         findings: [
           {
@@ -375,8 +373,6 @@ describe("scan history renderer", () => {
           repository: "/demo/juice-shop",
           beforeScanId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
           afterScanId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-          comparable: true,
-          coverage: { afterCompleteness: "complete" },
           summary: {
             new: 1,
             persisting: 2,
@@ -497,26 +493,30 @@ describe("scan history renderer", () => {
         ([, value]) => value,
       ),
     ).toEqual(["/demo/threat-model.md", "routes/login.ts"]);
-    for (const coverage of ["partial", "unknown", "complete"]) {
-      const comparison = renderScanHistory(
-        {
-          beforeScanId: "before-scan",
-          afterScanId: "after-scan",
-          coverage: { afterCompleteness: coverage },
-          summary: {},
-          findings: [],
-        },
-        "compare",
-        { color: false },
-      );
-      if (coverage === "complete") {
-        expect(comparison).not.toContain("Follow-up coverage");
-      } else {
-        expect(comparison).toContain(
-          `⚠ Follow-up coverage is ${coverage}; resolved findings cannot be confirmed.`,
-        );
-      }
-    }
+  });
+
+  test("shows absent findings without claiming they were fixed", () => {
+    const output = renderScanHistory(
+      {
+        beforeScanId: "before-scan",
+        afterScanId: "after-scan",
+        summary: { not_observed: 1 },
+        findings: [
+          {
+            status: "not_observed",
+            severity: "high",
+            title: "Missing authorization",
+            path: "src/handler.ts",
+            reason:
+              "Not observed in the later scan; remediation has not been verified.",
+          },
+        ],
+      },
+      "compare",
+      { color: false },
+    );
+    expect(output).toContain("Not observed");
+    expect(output).not.toContain("Resolved");
   });
 
   test("keeps repositories visible at narrow and wide terminal widths", () => {
@@ -933,7 +933,6 @@ describe("scan history renderer", () => {
       {
         beforeScanId: "before",
         afterScanId: "after",
-        coverage: { afterCompleteness: "complete" },
         summary: {},
         findings: [],
         related: [relation],
