@@ -209,6 +209,7 @@ test.each([{ args: ["--mode", "bogus"] }, { args: ["--unknown-option"] }])(
           ["--token-count"],
           ["--token-limit", "4"],
           ["--token-offset", "4", "--token-limit", "4"],
+          ["--token-offset", "999999"],
         ]) {
           const expected = capture();
           await Cli.create("synthetic-token-contract")
@@ -336,3 +337,25 @@ for (const flag of ["--token-limit", "--token-offset"] as const) {
     }
   });
 }
+
+test("recognizes scans preceded by the global JSON flag", async () => {
+  const stdout = capture();
+  const stderr = capture();
+  expect(
+    await main(
+      ["--json", "scan", "--unknown-option"],
+      stdout.stream,
+      stderr.stream,
+      dependencies({
+        onConfig: () => {
+          throw new Error("Argument errors must not initialize the scanner.");
+        },
+      }),
+    ),
+  ).toBe(2);
+  expect(stderr.text()).toContain("unknown-option");
+  expect(JSON.parse(stdout.text())).toMatchObject({
+    status: "failed",
+    code: "SCAN_FAILED",
+  });
+});

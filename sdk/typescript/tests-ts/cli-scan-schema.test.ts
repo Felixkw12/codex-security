@@ -55,6 +55,11 @@ describe("scan output schema", () => {
         {
           properties: { ok: { const: false }, error: { type: "object" } },
         },
+        {
+          properties: {
+            ok: { const: true },
+          },
+        },
       ],
     });
     const validate = new Ajv2020({ strict: false }).compile(schema);
@@ -62,7 +67,7 @@ describe("scan output schema", () => {
   });
 
   test.each(["partial", "unknown"] as const)(
-    "accepts actual %s full-output errors alongside completed scan shapes",
+    "accepts changed-target full-output errors with legacy %s coverage",
     async (completeness) => {
       const validate = new Ajv2020({ strict: false }).compile(
         await scanOutputSchema(),
@@ -70,6 +75,17 @@ describe("scan output schema", () => {
       for (const format of ["json", "jsonl"]) {
         for (const filter of [undefined, "warnings", "findings"]) {
           const stdout = capture();
+          const deps = dependencies();
+          deps.createSecurity = () => ({
+            run: async (_repository, options) => {
+              options?.onWarning?.("Synthetic target changed.", {
+                kind: "target_changed",
+              });
+              return fakeResult(["high"], completeness);
+            },
+            close: async () => {},
+            preflight: async () => fakePreflight(),
+          });
           expect(
             await main(
               [
@@ -82,7 +98,7 @@ describe("scan output schema", () => {
               ],
               stdout.stream,
               capture().stream,
-              dependencies({ result: fakeResult(["high"], completeness) }),
+              deps,
             ),
           ).toBe(2);
           const output: unknown = JSON.parse(stdout.text());
@@ -159,6 +175,7 @@ test.each(retainedThreatModels)(
         {},
         {},
         {},
+        {},
       ],
     });
     const original = fakeResult(["high"]);
@@ -196,5 +213,39 @@ test.each(retainedThreatModels)(
     expect(validate(data), JSON.stringify(validate.errors)).toBe(true);
     expect(validate({ ...data, threatModel: "wrong object type" })).toBe(false);
     expect(validate({ ...data, threatModelPath: 1 })).toBe(false);
+  },
+);
+
+test.each(["completed", "dry-run"] as const)(
+  "accepts actual %s full-output success envelopes",
+  async (outcome) => {
+    const validate = new Ajv2020({ strict: false }).compile(
+      await scanOutputSchema(),
+    );
+    for (const format of ["json", "jsonl"]) {
+      const stdout = capture();
+      expect(
+        await main(
+          [
+            "scan",
+            ".",
+            "--format",
+            format,
+            "--full-output",
+            ...(outcome === "dry-run" ? ["--dry-run"] : []),
+          ],
+          stdout.stream,
+          capture().stream,
+          dependencies({
+            result: fakeResult(["high"]),
+            preflight: fakePreflight(),
+          }),
+        ),
+      ).toBe(0);
+      const output = JSON.parse(stdout.text());
+      expect(output.ok).toBe(true);
+      expect(validate(output), JSON.stringify(validate.errors)).toBe(true);
+      expect(validate({ ...output, data: {} })).toBe(false);
+    }
   },
 );
