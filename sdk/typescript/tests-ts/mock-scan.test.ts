@@ -126,11 +126,29 @@ test("mock scans seal real artifacts and index shared and unique findings withou
       expect(pair[0]!.findingId).not.toBe(pair[1]!.findingId);
       expect(pair[0]!.locations).toEqual(pair[1]!.locations);
     }
-    expect(second.repositoryFindings).toHaveLength(12);
+    expect(second.repositoryFindings).toHaveLength(16);
     expect(second.repositoryFindings).toEqual(
       expect.arrayContaining(
         second.findings.findings.map((finding) =>
           expect.objectContaining({ findingId: finding.findingId }),
+        ),
+      ),
+    );
+    const currentIds = new Set(
+      second.findings.findings.map((finding) => finding.findingId),
+    );
+    const priorOnly = first.findings.findings.filter(
+      (finding) => !currentIds.has(finding.findingId),
+    );
+    expect(priorOnly).toHaveLength(4);
+    expect(second.repositoryFindings).toEqual(
+      expect.arrayContaining(
+        priorOnly.map((finding) =>
+          expect.objectContaining({
+            findingId: finding.findingId,
+            status: "open",
+            confirmedInLatestScan: false,
+          }),
         ),
       ),
     );

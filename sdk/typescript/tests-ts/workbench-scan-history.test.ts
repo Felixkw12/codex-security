@@ -823,10 +823,7 @@ test("never matches independently registered sibling repository targets", () => 
   }
 });
 
-test("lists completed scans in insertion order after clock rollback", () => {
-  const python = Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
-  if (python === null) throw new Error("A Python interpreter is required.");
-
+test("lists completed scans in insertion order after clock rollback", async () => {
   const probe = [
     "import json, sqlite3, sys",
     "sys.path.insert(0, sys.argv[1])",
@@ -839,17 +836,11 @@ test("lists completed scans in insertion order after clock rollback", () => {
     "for scan, status, started in [('older', 'complete', '2026-02-01'), ('newer', 'complete', '2026-01-01'), ('running', 'running', '2025-12-01')]:",
     "    connection.execute('INSERT INTO scans (id, workspace_id, target_path, target_revision, scope, mode, scan_dir, status, phase, started_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (scan, 'workspace', '/repository', 'revision', '.', 'standard', '/scans/' + scan, status, 'reporting', started, started, started))",
     "    connection.execute('INSERT INTO scan_progress (scan_id, updated_at) VALUES (?, ?)', (scan, started))",
-    "print(json.dumps([scan['scanId'] for scan in history.list_scans(connection)['scans']]))",
+    "print(json.dumps({'scanIds': [scan['scanId'] for scan in history.list_scans(connection)['scans']]}))",
   ].join("\n");
 
-  const result = spawnSync(
-    python,
-    ["-I", "-B", "-c", probe, join(PLUGIN_ROOT, "scripts")],
-    { encoding: "utf8", timeout: 10_000 },
-  );
-
-  expect(result.status, result.stderr).toBe(0);
-  expect(JSON.parse(result.stdout)).toEqual(["running", "newer", "older"]);
+  const observed = await runPythonProbe(probe);
+  expect(observed["scanIds"]).toEqual(["running", "newer", "older"]);
 });
 
 test("orders finding-detail history by scan insertion after clock rollback", () => {
