@@ -1126,11 +1126,30 @@ process.stdout.write(input);
           }),
         ).toString("base64");
         // Preserve order and masks only for capabilities generated in this fixture's home.
-        const script = `$observation = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${observation}')) | ConvertFrom-Json
+        const script = `$ErrorActionPreference = "Stop"
+$observation = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${observation}')) | ConvertFrom-Json
+Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+public static class SnapshotAclReader {
+  [DllImport("advapi32.dll", EntryPoint = "GetFileSecurityW", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+  [return: MarshalAs(UnmanagedType.Bool)]
+  private static extern bool GetFileSecurity(string path, uint information, [Out] byte[] descriptor, uint length, out uint needed);
+  public static byte[] Read(string path) {
+    uint needed;
+    bool result = GetFileSecurity(path, 4, null, 0, out needed);
+    int error = Marshal.GetLastWin32Error();
+    if (!result && error != 122) throw new Win32Exception(error);
+    byte[] descriptor = new byte[needed];
+    if (!GetFileSecurity(path, 4, descriptor, needed, out needed)) throw new Win32Exception(Marshal.GetLastWin32Error());
+    return descriptor;
+  }
+}
+'@
 $rows = @()
 foreach ($target in $observation.paths) {
-  $acl = Get-Acl -LiteralPath $target -ErrorAction Stop
-  $descriptor = [System.Security.AccessControl.RawSecurityDescriptor]::new($acl.GetSecurityDescriptorBinaryForm(), 0)
+  $descriptor = [System.Security.AccessControl.RawSecurityDescriptor]::new([SnapshotAclReader]::Read($target), 0)
   $entries = @()
   for ($ordinal = 0; $ordinal -lt $descriptor.DiscretionaryAcl.Count; $ordinal++) {
     $ace = $descriptor.DiscretionaryAcl[$ordinal]
@@ -1138,7 +1157,7 @@ foreach ($target in $observation.paths) {
       $entries += [ordered]@{ ordinal = $ordinal; type = $ace.AceType.ToString(); flags = $ace.AceFlags.ToString(); mask = $ace.AccessMask; sid = $ace.SecurityIdentifier.Value }
     }
   }
-  $rows += [ordered]@{ path = $target; protected = $acl.AreAccessRulesProtected; entries = $entries }
+  $rows += [ordered]@{ path = $target; protected = ($descriptor.ControlFlags -band [System.Security.AccessControl.ControlFlags]::DiscretionaryAclProtected) -ne 0; nullDacl = $null -eq $descriptor.DiscretionaryAcl; entries = $entries }
 }
 ConvertTo-Json -InputObject $rows -Depth 8 -Compress
 `;
