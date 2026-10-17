@@ -1261,6 +1261,7 @@ def _recover_unsealed_coverage(
                     raise ContractError(f"{context}: expected an object")
                 if field == "surfaces":
                     surface_id = _require_str(item, "id", context)
+                    _require_str(item, "label", context)
                     if surface_id in surface_ids and not worker_draft:
                         raise ContractError(f"{context}.id: duplicate surface id")
                     disposition = item.get("disposition")
@@ -1306,6 +1307,7 @@ def _recover_unsealed_coverage(
                     item["receiptRefs"] = recovered_receipts
                     if surface_recovered:
                         item["disposition"] = "needs_follow_up"
+                        discarded_fields.add(field)
 
                 if field == "deferred":
                     _validate_deferred_paths(item, context)

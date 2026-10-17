@@ -65,6 +65,41 @@ def test_deadline_still_rejects_malformed_canonical_model(
         finish(workbench_api, workbench_db, scan, terminal_reason="capped")
 
 
+@pytest.mark.parametrize("label", [" \t ", "  Reviewed Résumé 😀  "])
+def test_deadline_applies_existing_nonblank_surface_label_contract(
+    workbench_api, workbench_db, deadline_scan, label
+):
+    scan = deadline_scan
+    worker_id, output = canceled_discovery_output(workbench_db, scan)
+    checkpoint = write_checkpoint(
+        output / "checkpoints",
+        saved_draft(
+            scan.scan_id,
+            findings=[worker_finding(scan, "worker-label-finding")],
+            surfaces=[
+                {"id": "entry", "label": label, "disposition": "reported", "receiptRefs": []}
+            ],
+        ),
+    )
+    original = checkpoint.read_bytes()
+
+    finish(workbench_api, workbench_db, scan, terminal_reason="capped")
+    completed = complete(workbench_api, workbench_db, scan)
+
+    assert len(json.loads((scan.scan_dir / "findings.json").read_text())["findings"]) == 2
+    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    surfaces = [row for row in coverage["surfaces"] if row.get("workerId") == worker_id]
+    assert len(surfaces) == bool(label.strip())
+    if surfaces:
+        assert surfaces[0]["label"] == label
+    else:
+        assert any(
+            "label: expected a non-empty string" in warning and checkpoint.name in warning
+            for warning in completed["warnings"]
+        )
+    assert checkpoint.read_bytes() == original
+
+
 @pytest.mark.parametrize(
     "field",
     ["finding", "surfaces", "explicitExclusions", "deferred", "openQuestions", "resolvedDeferred"],
@@ -132,6 +167,12 @@ def test_deadline_applies_existing_unicode_contract_per_worker_record(
         (False, "closure", False),
         (True, "closure", False),
         (True, "surface", True),
+        (False, "missing-receipt", False),
+        (True, "missing-receipt", False),
+        (False, "disposition", False),
+        (True, "disposition", False),
+        (False, "receipt-array", False),
+        (True, "receipt-array", False),
     ],
     ids=[
         "valid-coverage-empty-findings",
@@ -141,6 +182,12 @@ def test_deadline_applies_existing_unicode_contract_per_worker_record(
         "malformed-closure-empty-findings",
         "malformed-closure-retained-finding",
         "malformed-selected-head",
+        "missing-receipt-empty-findings",
+        "missing-receipt-retained-finding",
+        "disposition-empty-findings",
+        "disposition-retained-finding",
+        "receipt-array-empty-findings",
+        "receipt-array-retained-finding",
     ],
 )
 def test_malformed_terminal_coverage_preserves_only_earlier_coverage(
@@ -149,6 +196,8 @@ def test_malformed_terminal_coverage_preserves_only_earlier_coverage(
     scan = deadline_scan
     worker_id, output = canceled_discovery_output(workbench_db, scan)
     finding = worker_finding(scan, "earlier-worker-finding")
+    rejected = worker_finding(scan, "rejected-sibling")
+    rejected["provenance"]["candidateId"] = "rejected-sibling"
     surface = {
         "id": "entry",
         "label": "Unfinished review",
@@ -159,7 +208,7 @@ def test_malformed_terminal_coverage_preserves_only_earlier_coverage(
         output / "checkpoints",
         saved_draft(
             scan.scan_id,
-            findings=[finding],
+            findings=[finding, rejected],
             surfaces=[surface],
             deferred=[
                 {"id": "review", "reason": "Review remains.", "surfaceIds": ["entry"]},
@@ -169,7 +218,16 @@ def test_malformed_terminal_coverage_preserves_only_earlier_coverage(
     )
     os.utime(checkpoint, ns=(100, 100))
     invalid_surface = copy.deepcopy(surface)
-    invalid_surface.pop("label")
+    if malformed == "surface":
+        invalid_surface.pop("label")
+    else:
+        invalid_surface.update(id="latest", label="Latest review", disposition="no_issue_found")
+        if malformed == "missing-receipt":
+            invalid_surface["receiptRefs"] = ["artifacts/missing.txt"]
+        elif malformed == "disposition":
+            invalid_surface["disposition"] = "unknown"
+        elif malformed == "receipt-array":
+            invalid_surface["receiptRefs"] = "invalid"
     closures = [{"id": "finished", "reason": "Separate review completed."}]
     if malformed == "closure":
         closures.append({"id": "review", "reason": "Invalid " + chr(0xD800)})
@@ -177,7 +235,16 @@ def test_malformed_terminal_coverage_preserves_only_earlier_coverage(
         scan.scan_id,
         complete=True,
         findings=[finding] if terminal_findings else [],
-        surfaces=[invalid_surface] if malformed == "surface" else [],
+        surfaces=[
+            {
+                "id": "sibling-outcome",
+                "candidateId": "rejected-sibling",
+                "label": "Sibling reviewed",
+                "disposition": "rejected",
+                "receiptRefs": [],
+            },
+            *([invalid_surface] if malformed not in (None, "closure") else []),
+        ],
         closures=closures,
     )
     if selected_head:
@@ -194,6 +261,7 @@ def test_malformed_terminal_coverage_preserves_only_earlier_coverage(
 
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
     assert any(row["title"] == finding["title"] for row in findings) == terminal_findings
+    assert all(row["title"] != rejected["title"] for row in findings)
     coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
     assert any(
         row.get("workerId") == worker_id and row["label"] == surface["label"]
@@ -203,6 +271,16 @@ def test_malformed_terminal_coverage_preserves_only_earlier_coverage(
         malformed
     )
     assert not any(row["reason"] == "Separate review remains." for row in coverage["deferred"])
+    assert (
+        next(row for row in coverage["surfaces"] if row["label"] == "Sibling reviewed")[
+            "disposition"
+        ]
+        == "rejected"
+    )
+    if malformed in {"missing-receipt", "disposition", "receipt-array"}:
+        latest = next(row for row in coverage["surfaces"] if row["label"] == "Latest review")
+        assert latest["disposition"] == "needs_follow_up"
+        assert latest["receiptRefs"] == []
     assert {path: path.read_bytes() for path in original} == original
 
 

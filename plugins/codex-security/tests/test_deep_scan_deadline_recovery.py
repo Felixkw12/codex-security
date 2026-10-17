@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import sqlite3
@@ -30,6 +31,28 @@ def worker_finding(scan, anchor):
     finding["title"] = anchor
     finding["provenance"] = {"source": "local_plugin"}
     return finding
+
+
+def interrupt_finish_before_commit(workbench_api, database, scan):
+    child = os.fork()
+    if child == 0:
+        connection = sqlite3.connect(database)
+        connection.row_factory = sqlite3.Row
+
+        class CrashBeforeCommit:
+            def __getattr__(self, name):
+                return getattr(connection, name)
+
+            def commit(self):
+                os._exit(0)
+
+        try:
+            finish(workbench_api, CrashBeforeCommit(), scan, terminal_reason="capped")
+        except BaseException:
+            traceback.print_exc()
+        os._exit(1)
+    _, status = os.waitpid(child, 0)
+    assert os.waitstatus_to_exitcode(status) == 0
 
 
 def test_discarded_worker_finding_leaves_its_review_pending(
@@ -324,25 +347,7 @@ def test_deadline_recovery_is_idempotent_after_crash_before_commit(
         ),
     )
     connection.close()
-    child = os.fork()
-    if child == 0:
-        connection = sqlite3.connect(database)
-        connection.row_factory = sqlite3.Row
-
-        class CrashBeforeCommit:
-            def __getattr__(self, name):
-                return getattr(connection, name)
-
-            def commit(self):
-                os._exit(0)
-
-        try:
-            finish(workbench_api, CrashBeforeCommit(), scan, terminal_reason="capped")
-        except BaseException:
-            traceback.print_exc()
-        os._exit(1)
-    _, status = os.waitpid(child, 0)
-    assert os.waitstatus_to_exitcode(status) == 0
+    interrupt_finish_before_commit(workbench_api, database, scan)
     before = json.loads((scan.scan_dir / "coverage.json").read_text())
     findings_before = json.loads((scan.scan_dir / "findings.json").read_text())
     assert len([row for row in before["surfaces"] if row.get("workerId") == worker_id]) == len(
@@ -371,3 +376,79 @@ def test_deadline_recovery_is_idempotent_after_crash_before_commit(
                 finding["provenance"].pop("previousFindings")
     assert findings_after == findings_before
     assert after == before
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "fork"), reason="Crash boundary uses a forked workbench process."
+)
+@pytest.mark.parametrize("earlier_checkpoint_first", [False, True])
+@pytest.mark.parametrize("colliding_ids", [False, True])
+def test_deadline_rejection_history_is_stable_across_repeated_crashes(
+    workbench_api, workbench_db, deadline_scan, tmp_path, earlier_checkpoint_first, colliding_ids
+):
+    scan = deadline_scan
+    worker_id, output = canceled_discovery_output(workbench_db, scan)
+    finding = worker_finding(scan, "reviewed-candidate")
+    finding["provenance"]["candidateId"] = "candidate"
+    # Check both hash filename orders without adding invalid or unrelated checkpoints.
+    for attempt in range(1000):
+        finding["title"] = f"Candidate review {attempt}"
+        earlier = saved_draft(scan.scan_id, findings=[finding])
+        outcomes = [
+            {
+                "id": "entry",
+                "candidateId": "candidate",
+                "finding": copy.deepcopy(finding),
+                "label": "Candidate reviewed",
+                "disposition": "rejected",
+                "receiptRefs": [],
+            }
+        ]
+        if colliding_ids:
+            outcomes.append({**copy.deepcopy(outcomes[0]), "label": "Separate observation"})
+        terminal = saved_draft(scan.scan_id, complete=True, surfaces=outcomes)
+        earlier_hash = hashlib.sha256(json.dumps(earlier).encode()).hexdigest()
+        terminal_hash = hashlib.sha256(json.dumps(terminal).encode()).hexdigest()
+        if (earlier_hash < terminal_hash) == earlier_checkpoint_first:
+            break
+    else:
+        pytest.fail("Could not select checkpoint filename order")
+    old_checkpoint = write_checkpoint(output / "checkpoints", earlier)
+    checkpoint = write_checkpoint(output / "checkpoints", terminal)
+    assert (old_checkpoint.name < checkpoint.name) == earlier_checkpoint_first
+    os.utime(old_checkpoint, ns=(100, 100))
+    os.utime(checkpoint, ns=(200, 200))
+    head = output / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+    (output / "result.json").unlink(missing_ok=True)
+    originals = {path: path.read_bytes() for path in (old_checkpoint, checkpoint, head)}
+    database = tmp_path / "repeated-crash.db"
+    with sqlite3.connect(database) as connection:
+        workbench_db.backup(connection)
+
+    publications = []
+    for _ in range(3):
+        interrupt_finish_before_commit(workbench_api, database, scan)
+        publications.append(json.loads((scan.scan_dir / "coverage.json").read_text()))
+        with sqlite3.connect(database) as connection:
+            assert (
+                connection.execute(
+                    "SELECT status FROM deep_scan_runs WHERE scan_id = ?", (scan.scan_id,)
+                ).fetchone()[0]
+                == "running"
+            )
+    with sqlite3.connect(database) as connection:
+        connection.row_factory = sqlite3.Row
+        finish(workbench_api, connection, scan, terminal_reason="capped")
+        complete(workbench_api, connection, scan)
+    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    assert all(publication == coverage for publication in publications)
+    surfaces = [row for row in coverage["surfaces"] if row.get("workerId") == worker_id]
+    assert {row["label"] for row in surfaces} == {row["label"] for row in outcomes}
+    assert len(surfaces) == len({row["id"] for row in surfaces}) == len(outcomes)
+    assert all(len(row["previousFindings"]) == 1 for row in surfaces)
+    assert all(row["previousFindings"][0]["title"] == finding["title"] for row in surfaces)
+    assert all(row["disposition"] == "rejected" for row in surfaces)
+    findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
+    assert len(findings) == 1 and findings[0]["title"] == scan.findings[0]["title"]
+    assert {path: path.read_bytes() for path in originals} == originals

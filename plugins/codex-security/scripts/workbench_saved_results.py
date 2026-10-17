@@ -1923,9 +1923,15 @@ def merge_saved_results(
                 "rejected",
                 "not_applicable",
             }:
+                if preserve_canonical_parent:
+                    rejected_history.setdefault((worker_id, candidate_id), []).append(finding)
                 surfaces = coverage.get("surfaces")
                 for item in surfaces if isinstance(surfaces, list) else []:
-                    if isinstance(item, dict) and item.get("candidateId") == candidate_id:
+                    if (
+                        isinstance(item, dict)
+                        and item.get("candidateId") == candidate_id
+                        and (not preserve_canonical_parent or item.get("workerId") == worker_id)
+                    ):
                         if not isinstance(item.get("previousFindings"), list):
                             item["previousFindings"] = []
                         history = item["previousFindings"]
