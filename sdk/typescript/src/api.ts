@@ -114,6 +114,7 @@ import {
   SCAN_AUTH_MODES,
   ScanSettingsSchema,
   type DeepScanOptions,
+  type ResolvedDeepScanOptions,
   type ScanAuthMode,
   type ScanSettings,
   type ScanPromptSettings,
@@ -750,7 +751,7 @@ export class CodexSecurity {
     });
     type ScanMetadata = Pick<
       ScanResultOptions,
-      "threadId" | "turnResult" | "sarifPath" | "repositoryFindings"
+      "threadId" | "turnResult" | "sarifPath" | "repositoryFindings" | "cost"
     >;
     if (state.scanId && state.scanDir) {
       await workflow.protectArtifacts(state.scanDir);
@@ -765,6 +766,7 @@ export class CodexSecurity {
           metadata = {
             threadId: (scan["continuationThreadId"] as string) ?? "",
             turnResult: { status: "completed" },
+            cost: scan["cost"] as ScanMetadata["cost"],
           };
       }
       if (completed) {
@@ -804,6 +806,7 @@ export class CodexSecurity {
       await workflow.complete("scan", {
         threadId: result.threadId,
         turnResult: result.turnResult,
+        cost: result.cost,
         sarifPath: result.sarifPath,
         repositoryFindings: result.repositoryFindings,
       } satisfies ScanMetadata);
@@ -1143,7 +1146,11 @@ export class CodexSecurity {
     const configuration = await mergedCodexConfig(this.config);
     const model = scanModelConfiguration(configuration);
     const modelProvider = scanModelProvider(configuration);
-    validateScanCostLimit(options.maxCostUsd, model.model);
+    validateScanCostLimit(
+      options.maxCostUsd,
+      model.model,
+      inputs.deepScanConfiguration?.settings.discoveryModel,
+    );
     const archiveDir =
       options.archiveExisting === true
         ? await planOutputArchive(inputs.outputDir)
@@ -1884,7 +1891,11 @@ export class CodexSecurity {
         pluginVersion: runtime.plugin.version,
       };
       const { model } = scanModelConfiguration(effectiveConfig);
-      validateScanCostLimit(options.maxCostUsd, model);
+      validateScanCostLimit(
+        options.maxCostUsd,
+        model,
+        deepScanConfiguration?.settings.discoveryModel,
+      );
       if (mode === "deep" && options.maxCostUsd !== undefined) {
         budgetRecovery = {
           expectation,
@@ -2632,17 +2643,20 @@ export class CodexSecurity {
         completedScan,
         "completed",
       );
-      if (directDeepScan) {
-        result = new ScanResult({
-          ...result,
-          turnResult: {
-            ...result.turnResult,
-            finalResponse: (
-              await readScanFile(scanDir, "report.md", "report.md", signal)
-            ).toString("utf8"),
-          },
-        });
-      }
+      result = new ScanResult({
+        ...result,
+        cost: completionCost,
+        ...(directDeepScan
+          ? {
+              turnResult: {
+                ...result.turnResult,
+                finalResponse: (
+                  await readScanFile(scanDir, "report.md", "report.md", signal)
+                ).toString("utf8"),
+              },
+            }
+          : {}),
+      });
       if (isRecord(completedScan) && Array.isArray(completedScan["warnings"])) {
         const targetWarnings = new Set([
           ...preparedTargetWarnings,
@@ -2904,7 +2918,10 @@ export class CodexSecurity {
                 : undefined,
             );
           }
-          return result;
+          return new ScanResult({
+            ...result,
+            cost: snapshot?.cost ?? failure.cost,
+          });
         } catch {}
       }
       if (activeScan !== null && scanTurnStatus !== null) {
@@ -4807,7 +4824,7 @@ function scanRecipe({
   failOnSeverity?: SeverityLevel;
   knowledgeBasePaths?: string[];
   maxCostUsd?: number;
-  deepScan?: Required<DeepScanOptions>;
+  deepScan?: ResolvedDeepScanOptions;
   auth?: ScanAuthMode;
   cyberAccessProgram?: ScanSettings["cyberAccessProgram"];
 }): JsonObject {
@@ -4844,12 +4861,18 @@ async function prepareScanOutputDir(
 function validateScanCostLimit(
   maxCostUsd: number | undefined,
   model: string,
+  discoveryModel?: string,
 ): void {
   if (maxCostUsd === undefined) return;
-  if (estimateScanCost(model, { input_tokens: 0, output_tokens: 0 }) === null) {
-    throw new CodexSecurityError(
-      `A scan cost limit is not available for the configured model: ${model}.`,
-    );
+  for (const selected of [model, discoveryModel]) {
+    if (
+      selected !== undefined &&
+      estimateScanCost(selected, { input_tokens: 0, output_tokens: 0 }) === null
+    ) {
+      throw new CodexSecurityError(
+        `A scan cost limit is not available for the configured model: ${selected}.`,
+      );
+    }
   }
 }
 

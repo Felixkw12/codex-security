@@ -253,10 +253,13 @@ discovery_reasoning_effort = "high"
 
 Each omitted setting inherits the parent scan's choice. Setup and reducer workers
 keep the parent settings. Discovery choices are saved when the scan starts and
-retained when workers resume. These settings have no new CLI flags or project-file
-keys. Supplying all six orchestration settings forms a complete configuration that
-does not read legacy TOML, including these optional choices; saved scan recipes
-retain that behavior.
+retained when workers resume or the scan is rerun. SDK callers can set
+`discoveryModel` and `discoveryReasoningEffort` directly; each optional string
+overrides its legacy TOML value. These settings have no new CLI flags or
+project-file keys. Supplying all six orchestration settings forms a complete
+configuration that does not read legacy TOML; include any desired discovery
+overrides explicitly. Saved recipes preserve the original choices without reading
+today's legacy configuration.
 
 A valid deep block can stay inactive in standard mode. Explicit deep CLI options
 still require deep mode. Deep diff scans and custom validation remain unsupported.

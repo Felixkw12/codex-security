@@ -123,8 +123,44 @@ test.each<{
         ...discovery,
       },
     );
+    await writeFile(input.source, "invalid TOML [");
+    const replay = await resolveDeepScanConfig(resolved.settings, input.source);
+    expect(replay.settings).toEqual(resolved.settings);
+    const replayDestination = join(input.root, "replay", "deep-scan.toml");
+    await writeDeepScanConfig(replayDestination, replay);
+    expect(
+      parseToml(await readFile(replayDestination, "utf8"))["deep_scan"],
+    ).toEqual(parseToml(await readFile(destination, "utf8"))["deep_scan"]);
   },
 );
+
+test("SDK discovery overrides merge independently with legacy settings", async () => {
+  const input = await fixture(
+    '[deep_scan]\ndiscovery_model = "legacy-model"\ndiscovery_reasoning_effort = "high"\n',
+  );
+  const model = await resolveDeepScanConfig(
+    { discoveryModel: "sdk-model" },
+    input.source,
+  );
+  expect(model.settings).toMatchObject({
+    discoveryModel: "sdk-model",
+    discoveryReasoningEffort: "high",
+  });
+  const effort = await resolveDeepScanConfig(
+    { discoveryReasoningEffort: "low" },
+    input.source,
+  );
+  expect(effort.settings).toMatchObject({
+    discoveryModel: "legacy-model",
+    discoveryReasoningEffort: "low",
+  });
+  const complete = await resolveDeepScanConfig(
+    { ...DEFAULT_DEEP_SCAN_SETTINGS, discoveryModel: "sdk-model" },
+    input.source,
+  );
+  expect(complete.settings.discoveryModel).toBe("sdk-model");
+  expect(complete.settings).not.toHaveProperty("discoveryReasoningEffort");
+});
 
 test("independent scans retain their own discovery configuration", async () => {
   const inputs = await Promise.all(

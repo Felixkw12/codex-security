@@ -52,6 +52,37 @@ const coverage = {
 } satisfies CoverageDocument;
 
 describe("ScanResult", () => {
+  test.each([
+    null,
+    {
+      model: "gpt-5.6-luna, gpt-5.6-sol",
+      inputTokens: 1_100_000,
+      cachedInputTokens: 0,
+      cacheWriteInputTokens: 0,
+      outputTokens: 0,
+      estimatedUsd: 0.6,
+    },
+  ])(
+    "preserves an observed multi-model cost, including unavailable pricing: %p",
+    (cost) => {
+      const result = new ScanResult({
+        manifest,
+        findings,
+        coverage,
+        scanDir: "/scan",
+        threadId: "thread",
+        turnResult: {
+          model: "gpt-5.6-sol",
+          usage: { input_tokens: 1_100_000, output_tokens: 0 },
+        },
+        cost,
+      });
+      expect(result.cost).toBe(cost);
+      expect(result.toJSON()["cost"]).toEqual(cost);
+      expect(new ScanResult({ ...result }).cost).toBe(cost);
+    },
+  );
+
   test("rejects an unknown threshold with or without findings", () => {
     for (const levels of [[], ["high"]] satisfies SeverityLevel[][]) {
       const result = fakeResult(levels);

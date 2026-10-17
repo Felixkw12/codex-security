@@ -75,7 +75,6 @@ import {
   scanAuthentication,
   runtimeScanAuthentication,
   selectedScanEnvironment,
-  type DeepScanOptions,
   type ScanAuthMode,
   type ScanAuthentication,
   type ScanOptions,
@@ -311,6 +310,7 @@ import {
   meetsSeverity,
   type FailureSeverity,
   type ResolvedScanSettings,
+  type ResolvedDeepScanOptions,
 } from "./scan-settings.js";
 
 const PROGRESS_REFRESH_MILLISECONDS = 1_000;
@@ -9354,7 +9354,7 @@ async function readDeepScanStop(
         dispatchedCount: number;
         completionSequence: number;
         noNewStreak: number;
-        config: Required<DeepScanOptions>;
+        config: ResolvedDeepScanOptions;
         createdAt: string;
         completedAt: string;
       }
