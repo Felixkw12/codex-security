@@ -1283,7 +1283,10 @@ export class CodexSecurity {
           networkAccessEnabled: false,
           webSearchMode: "disabled",
         };
-        const reportCost = (currentCost: Readonly<ScanCost>): void => {
+        const reportCost = (
+          currentCost: Readonly<ScanCost>,
+          notify = true,
+        ): void => {
           if (previousUsageUnknown) return;
           const cost =
             previousCost === null
@@ -1302,7 +1305,7 @@ export class CodexSecurity {
                 outputDir,
               ),
             );
-          onCost(cost, options.maxCostUsd);
+          if (notify) onCost(cost, options.maxCostUsd);
         };
         const reportTrackingError = (error: unknown): void => {
           if (options.maxCostUsd !== undefined) budgetController.abort(error);
@@ -1318,7 +1321,7 @@ export class CodexSecurity {
           if (cost === null) {
             result!.model.costUsd = null;
             delete result!.model.cost;
-          }
+          } else reportCost(cost, false);
           if (result!.model.costPending && options.maxCostUsd !== undefined)
             budgetController.abort(
               new CodexSecurityError(
