@@ -1559,6 +1559,20 @@ def test_workbench_repairs_recorded_deep_scan_migration(
         assert "max_time_hours" in {
             row[1] for row in connection.execute("PRAGMA table_info(deep_scan_runs)")
         }
+        connection.execute(
+            """
+            INSERT INTO deep_scan_runs (
+                scan_id, schema_version, workflow_version, status, phase,
+                workers, subagents, stop_after_no_new, max_discovery_runs,
+                discovery_model, discovery_reasoning_effort, created_at, updated_at
+            ) VALUES (?, 1, 'deep-scan-mcp/v1', 'running', 'discovery',
+                4, 0, 4, 40, 'fixture-model', 'custom-effort', 'created', 'updated')
+            """,
+            (scan_id,),
+        )
+        assert connection.execute(
+            "SELECT discovery_model, discovery_reasoning_effort FROM deep_scan_runs"
+        ).fetchone() == ("fixture-model", "custom-effort")
         assert {
             row[0]
             for row in connection.execute(
