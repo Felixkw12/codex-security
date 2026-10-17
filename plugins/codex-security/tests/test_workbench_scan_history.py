@@ -928,6 +928,7 @@ def test_scan_comparison_matches_equivalent_findings_across_standard_and_deep_sc
         "new": 0,
         "persisting": 1,
         "resolved": 0,
+        "not_observed": 0,
         "reopened": 0,
         "unknown": 0,
     }
@@ -1023,7 +1024,8 @@ def test_equivalent_locations_preserve_confirmed_groups(
     assert compared["summary"] == {
         "new": 0 if reverse else 1,
         "persisting": 1,
-        "resolved": 1 if reverse else 0,
+        "resolved": 0,
+        "not_observed": 1 if reverse else 0,
         "reopened": 0,
         "unknown": 0,
     }
@@ -1162,7 +1164,8 @@ def test_equivalent_locations_preserve_related_findings(
     assert compared["summary"] == {
         "new": 2 if alias_shape == "chain" else 1,
         "persisting": 1,
-        "resolved": 2 if alias_shape == "chain" else 1,
+        "resolved": 0,
+        "not_observed": 2 if alias_shape == "chain" else 1,
         "reopened": 0,
         "unknown": 0,
     }
@@ -1203,7 +1206,8 @@ def test_scan_comparison_keeps_different_instances_at_the_same_location_separate
     assert compared["summary"] == {
         "new": 1,
         "persisting": 0,
-        "resolved": 1,
+        "resolved": 0,
+        "not_observed": 1,
         "reopened": 0,
         "unknown": 0,
     }
@@ -1224,7 +1228,7 @@ def test_scan_comparison_keeps_changed_content_and_ambiguous_locations_for_seman
     )
     compared = compare_scan_pair(state_dir, original, changed)
     assert compared["summary"]["new"] == 1
-    assert compared["summary"]["resolved"] == 1
+    assert compared["summary"]["not_observed"] == 1
 
     siblings = create_cli_scan(
         state_dir,
@@ -1235,7 +1239,7 @@ def test_scan_comparison_keeps_changed_content_and_ambiguous_locations_for_seman
     )
     ambiguous = compare_scan_pair(state_dir, changed, siblings)
     assert ambiguous["summary"]["new"] == 2
-    assert ambiguous["summary"]["resolved"] == 1
+    assert ambiguous["summary"]["not_observed"] == 1
 
 
 def test_list_unmatched_scan_pairs_groups_pending_pairs_and_skips_saved_results(
