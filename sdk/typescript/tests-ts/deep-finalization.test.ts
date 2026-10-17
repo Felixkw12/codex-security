@@ -143,8 +143,18 @@ const cases: {
   statusReadFault?: boolean;
   resumeStatusFault?: "transport" | "missing-selection" | "stopped";
   cancellationFault?: "status-read" | "deep-state-read" | "cancel-response";
+  historicalFindings?: boolean;
+  changedHistoricalFollowUp?: boolean;
 }[] = [
   ...outcomes.map((outcome) => ({ outcome })),
+  { outcome: "restart", historicalFindings: true },
+  { outcome: "completed", historicalFindings: true },
+  {
+    outcome: "completed",
+    historicalFindings: true,
+    changedHistoricalFollowUp: true,
+  },
+  { outcome: "restart-corrupt-selection", historicalFindings: true },
   { outcome: "restart", statusReadFault: true },
   { outcome: "restart", resumeStatusFault: "transport" },
   { outcome: "restart", resumeStatusFault: "missing-selection" },
@@ -218,6 +228,8 @@ for (const {
   unpricedUsage,
   statusReadFault,
   resumeStatusFault,
+  historicalFindings,
+  changedHistoricalFollowUp,
 } of cases) {
   const resumedStop = outcome.includes("-resumed-");
   const restart = outcome.startsWith("restart") || resumedStop;
@@ -232,7 +244,7 @@ for (const {
   const name =
     outcome === "followup-canceled"
       ? "SDK preserves a selected aggregate when its follow-up is canceled"
-      : `SDK handles selected aggregate: ${outcome}${budgetCompletionFault ? ` (budget completion ${budgetCompletionFault})` : ""}${cancellationFault ? ` (cancellation ${cancellationFault})` : ""}${statusReadFault ? " (selection status unavailable)" : ""}${resumeStatusFault ? ` (resume status ${resumeStatusFault})` : ""}${initialResumeUsage ? " (initial resume cost)" : ""}${unpricedUsage ? " (unpriced remainder)" : ""}`;
+      : `SDK handles selected aggregate: ${outcome}${budgetCompletionFault ? ` (budget completion ${budgetCompletionFault})` : ""}${cancellationFault ? ` (cancellation ${cancellationFault})` : ""}${statusReadFault ? " (selection status unavailable)" : ""}${resumeStatusFault ? ` (resume status ${resumeStatusFault})` : ""}${initialResumeUsage ? " (initial resume cost)" : ""}${unpricedUsage ? " (unpriced remainder)" : ""}${historicalFindings ? " (historical findings)" : ""}${changedHistoricalFollowUp ? " (changed follow-up)" : ""}`;
   const runCase = async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -557,6 +569,13 @@ for (const {
               async runStreamed(input: string) {
                 modelInputs.push(input);
                 if (input === followUp) {
+                  if (changedHistoricalFollowUp) {
+                    const file = join(scanDir, "findings.json");
+                    const document = JSON.parse(await readFile(file, "utf8"));
+                    document.findings[0].root_cause.summary =
+                      "New unaccepted model detail.";
+                    await writeFile(file, JSON.stringify(document));
+                  }
                   if (canceledFollowUp) {
                     const reportPath = join(scanDir, "report.md");
                     acceptedReport = await readFile(reportPath, "utf8");
@@ -608,6 +627,21 @@ for (const {
                           source: "local_plugin",
                           candidateId: "archive-entry",
                         },
+                        ...(historicalFindings
+                          ? {
+                              root_cause: {
+                                summary:
+                                  "The original destination is unchecked.",
+                                evidence_refs: ["legacy-proof"],
+                              },
+                              code_evidence: [
+                                {
+                                  id: "legacy-proof",
+                                  code: "write(destination)",
+                                },
+                              ],
+                            }
+                          : {}),
                       },
                     ],
                     coverage: {
@@ -1211,6 +1245,24 @@ for (const {
       expect(result.findings.findings[0]?.remediation).toBe(
         "Validate the resolved destination before writing.",
       );
+      if (historicalFindings) {
+        const published = JSON.parse(
+          await readFile(join(scanDir, "findings.json"), "utf8"),
+        );
+        expect(published.findings[0]).toMatchObject({
+          root_cause: {
+            summary: "The original destination is unchecked.",
+            evidence_refs: ["legacy-proof"],
+          },
+          code_evidence: [{ id: "legacy-proof", code: "write(destination)" }],
+        });
+        expect(await readFile(selectedPath)).toEqual(selectedBytes!);
+        expect(
+          warnings.some((warning) =>
+            warning.startsWith("Could not run post-scan instructions:"),
+          ),
+        ).toBe(changedHistoricalFollowUp === true);
+      }
       // postScanPrompt retains its existing behavior on each caller invocation.
       expect(modelInputs.filter((input) => input !== followUp).length).toBe(1);
       expect(modelInputs.filter((input) => input === followUp).length).toBe(

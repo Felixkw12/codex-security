@@ -37,6 +37,10 @@ const canonicalFileScanDraftInputSchema = fileScanDraftInputSchema.extend({
     ),
   }),
 });
+const acceptedCanonicalFileScanDraftInputSchema =
+  canonicalFileScanDraftInputSchema.extend({
+    findings: acceptedDeepScanDraftInputSchema.shape.findings,
+  });
 export const completedScanInputSchema = draftDefinitions.completedScanInput;
 // Host drafts include accepted historical findings as well as current inputs.
 export type ScanDraftInput = z.infer<typeof acceptedDeepScanDraftInputSchema>;
@@ -1796,12 +1800,15 @@ function safeRelativePath(value: string, context: string): string {
 }
 
 /** Admit file-authored drafts through the current contract after removing host fields. */
-export function parseCanonicalScanDraft(input: {
-  scanId?: string;
-  manifest: JsonObject;
-  findings: JsonObject;
-  coverage: JsonObject;
-}): ScanDraftInput {
+export function parseCanonicalScanDraft(
+  input: {
+    scanId?: string;
+    manifest: JsonObject;
+    findings: JsonObject;
+    coverage: JsonObject;
+  },
+  acceptedFindings = false,
+): ScanDraftInput {
   const scan = requireObject(input.manifest.scan, "scan draft manifest.scan");
   for (const scanId of [
     scan.id,
@@ -1814,24 +1821,31 @@ export function parseCanonicalScanDraft(input: {
       );
     }
   }
-  return parseCanonicalCheckpoint({
-    scanId: input.scanId,
-    ...(scan.complete === undefined ? {} : { complete: scan.complete }),
-    ...(scan.scope === undefined ? {} : { scope: scan.scope }),
-    ...(scan.threatModel === undefined
-      ? {}
-      : { threatModel: scan.threatModel }),
-    findings: input.findings.findings,
-    coverage: input.coverage,
-  });
+  return parseCanonicalCheckpoint(
+    {
+      scanId: input.scanId,
+      ...(scan.complete === undefined ? {} : { complete: scan.complete }),
+      ...(scan.scope === undefined ? {} : { scope: scan.scope }),
+      ...(scan.threatModel === undefined
+        ? {}
+        : { threatModel: scan.threatModel }),
+      findings: input.findings.findings,
+      coverage: input.coverage,
+    },
+    acceptedFindings,
+  );
 }
 
 function parseCanonicalCheckpoint(
   input: Record<string, unknown>,
+  acceptedFindings = false,
 ): ScanDraftInput {
   const parsed = parsePersistedCheckpoint(
     input,
-    canonicalFileScanDraftInputSchema,
+    acceptedFindings
+      ? acceptedCanonicalFileScanDraftInputSchema
+      : canonicalFileScanDraftInputSchema,
+    acceptedFindings,
   );
   for (const [index, finding] of parsed.findings.entries()) {
     for (const field of ["locations", "codeEvidence"] as const) {
@@ -1890,8 +1904,11 @@ export function parsePersistedScanDraft(
 }
 
 /** Replay host-accepted Deep findings while preserving their original details. */
-export function parseAcceptedDeepScanDraft(input: unknown): ScanDraftInput {
-  const parsed = acceptedDeepScanDraftInputSchema.parse(input);
+export function parseAcceptedDeepScanDraft(
+  input: unknown,
+  schema: z.ZodType<ScanDraftInput> = acceptedDeepScanDraftInputSchema,
+): ScanDraftInput {
+  const parsed = schema.parse(input);
   validateFindingSemantics(parsed.findings, true);
   delete parsed.coverage.completeness;
   return parsed;
@@ -1911,6 +1928,7 @@ export function parseAcceptedDiscoveryDraft(input: unknown): ScanDraftInput {
 function parsePersistedCheckpoint(
   input: Record<string, unknown>,
   schema: z.ZodType<ScanDraftInput> = fileScanDraftInputSchema,
+  acceptedFindings = false,
 ): ScanDraftInput {
   const compatible = structuredClone(input);
   if (isObject(compatible.scope)) {
@@ -1939,7 +1957,9 @@ function parsePersistedCheckpoint(
       delete finding.fingerprints;
     }
   }
-  return parsePersistedScanDraft(compatible, schema);
+  return acceptedFindings
+    ? parseAcceptedDeepScanDraft(compatible, schema)
+    : parsePersistedScanDraft(compatible, schema);
 }
 
 function requireBoundScan(

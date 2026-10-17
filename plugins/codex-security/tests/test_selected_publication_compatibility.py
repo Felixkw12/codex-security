@@ -145,6 +145,12 @@ def test_legacy_v1_accepted_findings_publish_and_resume_completion(
         with pytest.raises(RuntimeError, match="Interrupted legacy completion"):
             complete(workbench_db, args)
     assert workbench_db.execute("SELECT status FROM scans").fetchone()[0] == "running"
+    prepared = workbench_api["complete_scan"](
+        workbench_db,
+        Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None),
+        prepare_only=True,
+    )
+    assert prepared["acceptedFindings"] is True
     complete(workbench_db, args)
     assert_legacy_finding_published(scan, expected)
     assert workbench_db.execute("SELECT status FROM scans").fetchone()[0] == "complete"
@@ -307,6 +313,8 @@ def test_selected_historical_findings_resume_across_interrupted_sealing(
         with pytest.raises(RuntimeError, match="Interrupted historical publication"):
             workbench_api["complete_scan"](workbench_db, completion)
     assert workbench_db.execute("SELECT status FROM scans").fetchone()[0] == "running"
+    prepared = workbench_api["complete_scan"](workbench_db, completion, prepare_only=True)
+    assert prepared["acceptedFindings"] is True
     workbench_api["complete_scan"](workbench_db, completion)
     assert_legacy_finding_published(scan, expected)
     sealed = {p: p.read_bytes() for p in scan.scan_dir.rglob("*") if p.is_file()}
@@ -361,12 +369,21 @@ def test_new_producers_still_reject_legacy_finding_fields(
     workbench_api, workbench_db, publication_scan, mode
 ):
     scan = publication_scan(mode=mode)
+    findings_path = scan.scan_dir / "findings.json"
+    original_findings = findings_path.read_bytes()
     legacy_finding(scan)
     with pytest.raises(SystemExit, match="invalid findings.*unexpected schema property"):
         workbench_api["complete_scan"](
             workbench_db, Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None)
         )
     assert workbench_db.execute("SELECT status FROM scans").fetchone()[0] == "running"
+    findings_path.write_bytes(original_findings)
+    prepared = workbench_api["complete_scan"](
+        workbench_db,
+        Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None),
+        prepare_only=True,
+    )
+    assert prepared["acceptedFindings"] is False
 
 
 def test_zero_result_selection_does_not_admit_legacy_findings(
@@ -645,6 +662,8 @@ def test_selected_zero_discovery_deadline_preserves_the_published_draft(
     assert workbench_db.execute("SELECT status FROM deep_scan_runs").fetchone()[0] == "succeeded"
     assert {path: path.read_bytes() for path in scan.scan_dir.rglob("*.json")} == before
     completion = Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None)
+    prepared = workbench_api["complete_scan"](workbench_db, completion, prepare_only=True)
+    assert prepared["acceptedFindings"] is False
     workbench_api["complete_scan"](workbench_db, completion)
     assert workbench_db.execute("SELECT status FROM scans").fetchone()[0] == "complete"
     sealed = {path: path.read_bytes() for path in scan.scan_dir.rglob("*.json")}

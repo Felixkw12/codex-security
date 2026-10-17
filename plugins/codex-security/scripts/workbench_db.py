@@ -1543,6 +1543,7 @@ def complete_scan_locked(
         scan["mode"] != "deep" and current_manifest_path is not None and not already_sealed
     )
     wrote = False
+    accepted = False
     try:
         with (
             saved_results.preserve_parent_head_on_error(scan_dir)
@@ -1566,6 +1567,9 @@ def complete_scan_locked(
                     if merge_parent_draft
                     else None
                 )
+                accepted = saved_results.has_verified_selected_result(
+                    _WORKBENCH_DB_CONTEXT, connection, scan
+                )
                 prepared = _prepare_scan_finalization(
                     scan_dir,
                     expected_coverage_mode=expected_coverage_mode(scan),
@@ -1575,9 +1579,7 @@ def complete_scan_locked(
                     draft_documents=draft_documents,
                     finding_scope=requested_finding_scope(scan) if scan["mode"] == "deep" else None,
                     require_complete=True,
-                    accepted_findings=saved_results.has_verified_selected_result(
-                        _WORKBENCH_DB_CONTEXT, connection, scan
-                    ),
+                    accepted_findings=accepted,
                 )
             if prepared[2]["scan"].get("complete") is False:
                 raise RecoverableContractError(
@@ -1635,6 +1637,7 @@ def complete_scan_locked(
                 raise SystemExit("Only a running scan can be prepared for completion.")
         context = scan_context(connection, scan["id"])
         context["targetWarnings"] = target_warnings
+        context["acceptedFindings"] = accepted
         return context
 
     if cost_json is None:

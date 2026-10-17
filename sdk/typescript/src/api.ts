@@ -2662,7 +2662,9 @@ export class CodexSecurity {
       if (!savedCompletion) scanTurnStatus = "in_progress";
       checkOpen();
 
+      let preparedAcceptedFindings = false;
       let result = await runScanEvents({
+        acceptedFindings: () => preparedAcceptedFindings,
         savedCompletion: savedCompletion ?? undefined,
         recoverCompletion: recoverSelectedCompletion,
         reconcileCheckpoint:
@@ -2842,6 +2844,7 @@ export class CodexSecurity {
             }
             throw error;
           }
+          preparedAcceptedFindings = preparation["acceptedFindings"] === true;
           preparedTargetWarnings = Array.isArray(preparation["targetWarnings"])
             ? preparation["targetWarnings"].filter(
                 (warning): warning is string => typeof warning === "string",
@@ -2955,7 +2958,24 @@ export class CodexSecurity {
             { ...workbenchOptions, signal: undefined },
             scanDir,
           );
+          const savedDocument = (name: string) =>
+            JSON.parse(
+              completedArtifacts
+                .find((artifact) => artifact.name === name)!
+                .contents.toString("utf8"),
+            );
+          const acceptedDocuments = preparedAcceptedFindings
+            ? {
+                manifest: savedDocument("scan-manifest.json"),
+                findings: savedDocument("findings.json"),
+                coverage: savedDocument("coverage.json"),
+              }
+            : undefined;
           const followUpResult = await runScanEvents({
+            // A new model edit cannot inherit the saved publication's authority.
+            acceptedFindings: (documents) =>
+              preparedAcceptedFindings &&
+              isDeepStrictEqual(documents, acceptedDocuments),
             thread,
             events: (await followUp()).events,
             signal,
@@ -4690,6 +4710,12 @@ async function removeTargetPathsFile(path: string | null): Promise<void> {
   }
 }
 
+interface CanonicalScanDraftDocuments {
+  manifest: JsonObject;
+  findings: JsonObject;
+  coverage: JsonObject;
+}
+
 interface ScanEventRunOptions extends Pick<ScanOptions, "onReconnect"> {
   scanId?: string;
   savedCompletion?: Awaited<ReturnType<typeof readCodexTurn>>;
@@ -4697,6 +4723,7 @@ interface ScanEventRunOptions extends Pick<ScanOptions, "onReconnect"> {
     ReturnType<typeof readCodexTurn>
   > | null>;
   reconcileCheckpoint?: () => Promise<void>;
+  acceptedFindings?: (documents: CanonicalScanDraftDocuments) => boolean;
   thread: Pick<CodexThreadLike, "id"> &
     Partial<Pick<CodexThreadLike, "runStreamed">>;
   events: AsyncGenerator<ScanEvent>;
@@ -4855,12 +4882,11 @@ export async function runScanEvents(
           pathToFileURL(join(await bundledPluginRoot(), "mcp/helpers.mjs")).href
         )
       ).default;
-      const draft: ScanDraftInput = helper.parseCanonicalScanDraft({
-        scanId: options.scanId ?? manifest.scan.id,
-        manifest,
-        findings,
-        coverage,
-      });
+      const documents = { manifest, findings, coverage };
+      const draft: ScanDraftInput = helper.parseCanonicalScanDraft(
+        { scanId: options.scanId ?? manifest.scan.id, ...documents },
+        options.acceptedFindings?.(documents) === true,
+      );
       return auditEvidence(draft);
     };
     let audit;
@@ -4918,7 +4944,11 @@ export async function runScanEvents(
     if (options.signal.reason instanceof ScanCostLimitExceededError) {
       throw options.signal.reason;
     }
-    if (options.signal.aborted && !(error instanceof ScanInterruptedError)) {
+    if (
+      options.signal.aborted &&
+      !(error instanceof ScanInterruptedError) &&
+      !(error instanceof ScanExecutionError)
+    ) {
       throw new ScanInterruptedError(
         `Codex Security scan was interrupted; partial output remains at ${options.scanDir}.`,
         options.scanDir,

@@ -452,6 +452,43 @@ test("canonical admission still rejects reversed typed evidence bounds", async (
   expect(outcome.finalizations).toBe(0);
 });
 
+test.each(["standard", "deep"] as const)(
+  "managed %s preparation without accepted authority rejects historical findings",
+  async (mode) => {
+    const scanDir = await copyCompletedScan(await temporaryDirectory());
+    const file = join(scanDir, "findings.json");
+    const findings = JSON.parse(await readFile(file, "utf8"));
+    findings.findings[0].root_cause = { summary: "Unaccepted legacy detail." };
+    const original = JSON.stringify(findings);
+    await writeFile(file, original);
+    let preparations = 0;
+    await expect(
+      runScanEvents({
+        thread: { id: "synthetic-thread" },
+        events: completedEvents("synthetic-thread"),
+        signal: new AbortController().signal,
+        scanDir,
+        pluginRoot: PLUGIN_ROOT,
+        expectation: {
+          repository: "/repository",
+          repositoryRevision: "deadbeef",
+          target: { kind: "repository", paths: [] },
+          mode,
+          pluginVersion: "0.1.0",
+        },
+        workbenchValidated: true,
+        acceptedFindings: () => false,
+        onFinalize: async () => {
+          preparations++;
+          return null;
+        },
+      }),
+    ).rejects.toThrow("root_cause");
+    expect(preparations).toBe(1);
+    expect(await readFile(file, "utf8")).toBe(original);
+  },
+);
+
 test("recovered admission does not repeat successful managed finalization", async () => {
   const scanDir = await copyCompletedScan(await temporaryDirectory());
   const file = join(scanDir, "findings.json");
