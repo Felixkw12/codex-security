@@ -238,6 +238,7 @@ test("retries a legacy stopped seal after transient publication failure", () => 
     [`checkpoints/${recovered.head.checkpoint}`]: recovered.snapshotDigest,
     [recovered.headPath]: recovered.headDigest,
   });
+  expect(recovered.snapshot.coverage).not.toHaveProperty("completeness");
   expect(recovered.snapshot).toMatchObject({
     scanId: recovered.scanId,
     findings: [
@@ -248,7 +249,6 @@ test("retries a legacy stopped seal after transient publication failure", () => 
       }),
     ],
     coverage: {
-      completeness: "partial",
       deferred: expect.arrayContaining([
         expect.objectContaining({ candidateId: "pending-validation" }),
       ]),

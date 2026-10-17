@@ -32,7 +32,6 @@ from finalize_scan_contract import (
     _recover_unsealed_findings,
     _remove_scan_local_file_if_exists,
     _validate_completion_binding,
-    _validate_resolved_deferred,
     _validate_schema_node,
     _write_prepared_scan_finalization,
     finalize_scan,
@@ -43,12 +42,23 @@ from finalize_scan_contract import (
 )
 from workbench.saved_sources import (
     _checkpoint_head_directory,
+    _deferred_candidate_id,
+    _deferred_rows,
     _digest,
     _encode_retained_sources,
     _encoded,
+    _ensure_finding_identity,
+    _finding_content,
+    _finding_key,
+    _generic_surface_updates,
     _is_source_order_snapshot,
     _latest_successful_reducer,
+    _merge_tied_parent_observations,
+    _resolved_deferred_rows,
+    _retained_findings,
+    _saved_coverage_id,
     _unselected_root_order,
+    _worker_candidate_key,
 )
 from workbench.saved_sources import _children as _children
 from workbench_constants import PHASES
@@ -695,324 +705,6 @@ def scan_results_recovery_needed(db: Any, connection: Any, scan: Any) -> bool:
     return _saved_results_changed(db, connection, scan)
 
 
-def _finding_key(finding: dict[str, Any]) -> str:
-    # Wording and evidence may improve between checkpoints; distinct source locations
-    # must not collide merely because two workers chose the same semantic identity.
-    provenance = finding.get("provenance")
-    identity = (
-        provenance.get("preservedIdentity", finding.get("identity"))
-        if isinstance(provenance, dict)
-        else finding.get("identity")
-    )
-    if not isinstance(identity, dict):
-        normalized = dict(finding)
-        normalized.pop("identity", None)
-        _ensure_finding_identity(normalized)
-        identity = normalized["identity"]
-    locations = finding.get("locations", [])
-    if not isinstance(locations, list):
-        locations = []
-    return _digest(
-        [
-            finding.get("ruleId"),
-            identity,
-            sorted(
-                (
-                    (
-                        location.get("path"),
-                        location.get("startLine"),
-                        location.get("endLine", location.get("startLine")),
-                    )
-                    for location in locations
-                    if isinstance(location, dict)
-                ),
-                key=_encoded,
-            ),
-        ]
-    )
-
-
-def _worker_candidate_key(
-    worker_id: str, candidate_id: str, finding: dict[str, Any]
-) -> tuple[str, str, Any, Any, Any]:
-    """Identify one worker-local candidate without merging unrelated locations."""
-    provenance = finding.get("provenance")
-    identity = (
-        provenance.get("preservedIdentity", finding.get("identity"))
-        if isinstance(provenance, dict)
-        else finding.get("identity")
-    )
-    if not isinstance(identity, dict):
-        normalized = dict(finding)
-        _ensure_finding_identity(normalized)
-        identity = normalized.get("identity")
-    anchor = identity.get("anchor") if isinstance(identity, dict) else None
-    instance = identity.get("instance") if isinstance(identity, dict) else None
-    return worker_id, candidate_id, finding.get("ruleId"), anchor, instance
-
-
-def _finding_content(finding: dict[str, Any]) -> dict[str, Any]:
-    """Return substantive finding content without generated identity or provenance."""
-    return {
-        key: value
-        for key, value in finding.items()
-        if key not in {"findingId", "occurrenceId", "fingerprints", "identity", "provenance"}
-    }
-
-
-def _ensure_finding_identity(finding: Any, *, candidate_only: bool = False) -> None:
-    if not isinstance(finding, dict) or "identity" in finding:
-        return
-    if candidate_only and not finding_candidate_id(finding):
-        return
-    extensions = finding.get("extensions")
-    source = str(
-        (extensions.get("candidateId") if isinstance(extensions, dict) else None)
-        or finding.get("title")
-        or "finding"
-    )
-    anchor = re.sub(r"[^a-z0-9._/-]+", "-", source.lower()).strip("._/-") or "finding"
-    finding["identity"] = {"anchor": anchor}
-
-
-def _retained_findings(finding: dict[str, Any]) -> Iterator[dict[str, Any]]:
-    """Yield canonical and historical findings without trusting candidate IDs."""
-    pending = [finding]
-    seen: set[int] = set()
-    while pending:
-        current = pending.pop()
-        marker = id(current)
-        if marker in seen:
-            continue
-        seen.add(marker)
-        yield current
-        provenance = current.get("provenance")
-        if not isinstance(provenance, dict):
-            continue
-        previous = provenance.get("previousFindings")
-        if isinstance(previous, list):
-            pending.extend(item for item in reversed(previous) if isinstance(item, dict))
-        sources = provenance.get("sourceFindings")
-        if isinstance(sources, list):
-            pending.extend(
-                source["finding"]
-                for source in reversed(sources)
-                if isinstance(source, dict) and isinstance(source.get("finding"), dict)
-            )
-
-
-def _deferred_rows(coverage: dict[str, Any]) -> list[Any]:
-    rows = coverage.get("deferred", [])
-    return rows if isinstance(rows, list) else []
-
-
-def _resolved_deferred_rows(draft: dict[str, Any], schema: dict[str, Any]) -> list[dict[str, Any]]:
-    if draft.get("complete") is False:
-        return []
-    coverage = draft["coverage"]
-    rows = coverage.get("resolvedDeferred", [])
-    try:
-        # Invalid closure metadata cannot discard the evidence it names.
-        _validate_schema_node(rows, schema, "coverage.resolvedDeferred")
-        _validate_resolved_deferred({**coverage, "deferred": _deferred_rows(coverage)})
-    except ContractError:
-        return []
-    return rows
-
-
-def _merge_tied_parent_observations(
-    current: dict[str, Any], previous: dict[str, Any]
-) -> dict[str, Any]:
-    merged = copy.deepcopy(current)
-    for finding in previous["findings"]:
-        if finding not in merged["findings"]:
-            merged["findings"].append(copy.deepcopy(finding))
-    coverage = merged["coverage"]
-    for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions"):
-        rows = previous["coverage"].get(field, [])
-        output = coverage.setdefault(field, [])
-        if isinstance(rows, list) and isinstance(output, list):
-            for row in rows:
-                if row not in output:
-                    output.append(copy.deepcopy(row))
-    pending_ids = {
-        identity
-        for row in _deferred_rows(coverage)
-        if isinstance(row, dict)
-        for identity in (row.get("id"), row.get("candidateId"))
-        if isinstance(identity, str)
-    }
-    closure_schema = _read_json(
-        Path(__file__).resolve().parent.parent / "schemas" / "coverage.schema.json"
-    )["properties"]["resolvedDeferred"]
-    closures = {}
-    for observed in (current, previous):
-        for row in _resolved_deferred_rows(observed, closure_schema):
-            if row["id"] not in pending_ids:
-                closures.setdefault(row["id"], copy.deepcopy(row))
-    coverage.pop("resolvedDeferred", None)
-    if closures:
-        coverage["resolvedDeferred"] = list(closures.values())
-    if current.get("complete") is False or previous.get("complete") is False:
-        merged["complete"] = False
-    if (
-        coverage.get("deferred")
-        or merged.get("complete") is False
-        or (
-            isinstance(coverage.get("surfaces"), list)
-            and any(
-                isinstance(row, dict) and row.get("disposition") == "needs_follow_up"
-                for row in coverage["surfaces"]
-            )
-        )
-        or previous["coverage"].get("completeness") == "partial"
-    ):
-        coverage["completeness"] = "partial"
-    return merged
-
-
-def _saved_coverage_id(item: dict[str, Any]) -> str:
-    return item.get("candidateId") or f"saved-{_digest(item)[:16]}"
-
-
-def _deferred_candidate_id(
-    row: dict[str, Any],
-    owner: str | None,
-    ambiguous_deferred: set[tuple[str | None, str]],
-) -> str | None:
-    identity = row.get("candidateId") or row.get("id")
-    if not isinstance(identity, str):
-        return None
-    if (owner, identity) in ambiguous_deferred and not any(
-        key in row for key in ("candidateId", "candidate", "finding")
-    ):
-        return None
-    return identity
-
-
-def _generic_surface_updates(
-    sources: list[tuple[str, dict[str, Any], str | None]],
-    source_order: dict[str, tuple[int, int]],
-    closed_deferred: dict[tuple[str | None, str], tuple[tuple[int, int], dict[str, Any], str]],
-    active_deferred: dict[tuple[str | None, str], tuple[tuple[int, int], dict[str, Any], str]],
-    resolved_candidates: dict[tuple[str | None, str], str],
-    reopened_generic: set[tuple[str | None, str]],
-    surface_schema: dict[str, Any],
-    deferred_rows: dict[str, list[Any]],
-    ambiguous_deferred: set[tuple[str | None, str]],
-) -> tuple[set[int], list[dict[str, Any]]]:
-    if not closed_deferred and not reopened_generic:
-        return set(), []
-
-    def linked(row: dict[str, Any], identity: str | None) -> bool:
-        surface_ids = row.get("surfaceIds", [])
-        return identity is not None and (
-            row.get("id") == identity or (isinstance(surface_ids, list) and identity in surface_ids)
-        )
-
-    saved_surfaces: dict[tuple[str | None, str], list[tuple[str, dict[str, Any]]]] = {}
-    for relative, draft, owner in sources:
-        rows = draft["coverage"].get("surfaces", [])
-        for row in rows if isinstance(rows, list) else []:
-            if isinstance(row, dict) and isinstance(row.get("id"), str):
-                saved_surfaces.setdefault((owner, row["id"]), []).append((relative, row))
-    replaced: set[int] = set()
-    updates: list[dict[str, Any]] = []
-    for relative, draft, owner in sources:
-        closed_ids = {
-            identity
-            for (saved_owner, identity), (_, _, source) in closed_deferred.items()
-            if saved_owner == owner and source == relative
-        }
-        reopened_ids = {
-            identity
-            for (saved_owner, identity), (_, _, source) in active_deferred.items()
-            if saved_owner == owner and source == relative and (owner, identity) in reopened_generic
-        }
-        if not closed_ids and not reopened_ids:
-            continue
-        current = draft["coverage"].get("surfaces", [])
-        for surface in current if isinstance(current, list) else []:
-            if not isinstance(surface, dict):
-                continue
-            reopening = surface.get("disposition") == "needs_follow_up"
-            work_ids = reopened_ids if reopening else closed_ids
-            if not work_ids:
-                continue
-            identity = surface.get("id")
-            if not isinstance(identity, str):
-                continue
-            matches = saved_surfaces[(owner, identity)]
-            # Older writers could assign one ID to distinct surfaces in a draft.
-            # A closure cannot identify which of those observations it replaces.
-            by_source = dict(matches)
-            if any(row != by_source[saved_path] for saved_path, row in matches):
-                continue
-            if any(
-                "candidateId" in row or "candidate" in row or "finding" in row for _, row in matches
-            ):
-                continue
-            if any(
-                row is not surface
-                and source_order[saved_path] >= source_order[relative]
-                and row.get("disposition") != surface.get("disposition")
-                for saved_path, row in matches
-            ):
-                continue
-
-            if not reopening and any(
-                saved_owner == owner
-                and (
-                    not isinstance(row.get("id") or row.get("candidateId"), str)
-                    or (
-                        isinstance(row.get("id"), str)
-                        and (owner, row["id"]) in ambiguous_deferred
-                        and not any(key in row for key in ("candidateId", "candidate", "finding"))
-                    )
-                )
-                and linked(row, identity)
-                for saved_path, _, saved_owner in sources
-                for row in deferred_rows[saved_path]
-                if isinstance(row, dict)
-            ):
-                continue
-            if not reopening and any(
-                saved_owner == owner
-                and (owner, deferred_id) not in closed_deferred
-                and (
-                    (candidate_id := _deferred_candidate_id(row, owner, ambiguous_deferred)) is None
-                    or (owner, candidate_id) not in resolved_candidates
-                )
-                and linked(row, identity)
-                for (saved_owner, deferred_id), (_, row, _) in active_deferred.items()
-            ):
-                continue
-            # An accepted checkpoint can update a saved surface by ID without
-            # optional surfaceIds links on its generic task.
-            latest_surface = max(matches, key=lambda match: source_order[match[0]])[1]
-            update = copy.deepcopy(latest_surface)
-            refs = update.setdefault("receiptRefs", [])
-            if isinstance(refs, list):
-                for _, row in matches:
-                    previous_refs = row.get("receiptRefs", [])
-                    for ref in previous_refs if isinstance(previous_refs, list) else []:
-                        if ref not in refs:
-                            refs.append(ref)
-            try:
-                _validate_schema_node(update, surface_schema, "coverage.surfaces")
-            except ContractError:
-                continue
-            replaced.update(
-                id(row)
-                for _, row in matches
-                if reopening
-                or row.get("disposition") in {"needs_follow_up", surface.get("disposition")}
-            )
-            if update not in updates:
-                updates.append(update)
-    return replaced, updates
-
-
 @contextmanager
 def preserve_parent_head_on_error(scan_dir: Path) -> Iterator[None]:
     """Keep rejected completion attempts from becoming accepted parent observations."""
@@ -1035,7 +727,7 @@ def preserve_parent_head_on_error(scan_dir: Path) -> Iterator[None]:
     }
     try:
         yield
-    except ContractError:
+    except BaseException:
         if previous is None:
             _remove_scan_local_file_if_exists(scan_dir, "checkpoint-head.json")
         else:
@@ -1642,7 +1334,6 @@ def merge_saved_results(
         copy.deepcopy(parent["coverage"])
         if parent and parent["coverage"]
         else {
-            "completeness": "partial",
             "mode": binding["coverageMode"],
             "inventoryStrategy": "diff"
             if binding["coverageMode"] in {"commit", "branch_diff", "working_tree"}
@@ -2170,17 +1861,6 @@ def merge_saved_results(
             and source_order[relative] >= accepted_order
             and any(isinstance(row, dict) for row in deferred_rows[relative])
         )
-        if (
-            (relative != "parent" or not parent_is_canonical)
-            and not superseded
-            and not selected_coverage_superseded
-            and (
-                draft.get("complete") is False
-                or draft["coverage"].get("completeness") != "complete"
-            )
-            and coverage.get("completeness") in {"complete", "unknown"}
-        ):
-            coverage["completeness"] = "partial"
         skip_superseded_findings = (
             superseded
             and not stopped
@@ -2321,7 +2001,6 @@ def merge_saved_results(
                 for location in locations
             ):
                 warnings.append(f"Skipped out-of-scope finding from {relative}.")
-                coverage["completeness"] = "partial"
                 continue
             provenance = finding.setdefault("provenance", {"source": "local_plugin"})
             if not isinstance(provenance, dict):
@@ -2541,8 +2220,7 @@ def merge_saved_results(
             used.add(item["id"])
             if field == "surfaces":
                 item.setdefault("receiptRefs", [])
-    if stopped or any(warning not in initial_warnings for warning in warnings):
-        coverage["completeness"] = "partial"
+    coverage.pop("completeness", None)
     if stopped:
         if not isinstance(coverage.get("deferred"), list):
             coverage["deferred"] = []
@@ -2582,16 +2260,16 @@ def coverage_for_comparison(db: Any, scan: Any) -> dict[str, Any]:
     scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
     db.require_recorded_manifest_digest(scan, scan_dir)
     try:
-        _, _, manifest, _, coverage, was_sealed, _ = _prepare_scan_finalization(scan_dir)
+        prepared = _prepare_scan_finalization(scan_dir)
     except ContractError as exc:
         raise SystemExit(str(exc)) from exc
-    if not was_sealed or manifest["scan"]["id"] != scan["id"]:
+    if not prepared.was_sealed or prepared.manifest["scan"]["id"] != scan["id"]:
         raise SystemExit("Only sealed scans can be compared.")
-    return coverage
+    return prepared.coverage
 
 
-def _snapshot_published_outputs(scan_dir: Path) -> dict[str, bytes | None]:
-    snapshots: dict[str, bytes | None] = {}
+def _snapshot_published_outputs(scan_dir: Path) -> dict[str, tuple[bytes, os.stat_result] | None]:
+    snapshots: dict[str, tuple[bytes, os.stat_result] | None] = {}
     for relative in _PUBLISHED_OUTPUTS:
         descriptor = -1
         try:
@@ -2600,7 +2278,8 @@ def _snapshot_published_outputs(scan_dir: Path) -> dict[str, bytes | None]:
             )
             with os.fdopen(descriptor, "rb") as handle:
                 descriptor = -1
-                snapshots[relative] = handle.read()
+                metadata = os.fstat(handle.fileno())
+                snapshots[relative] = (handle.read(), metadata)
         except ContractError:
             path = scan_dir / relative
             if path.exists() or path.is_symlink():
@@ -2615,14 +2294,80 @@ def _snapshot_published_outputs(scan_dir: Path) -> dict[str, bytes | None]:
     return snapshots
 
 
-def _restore_published_outputs(scan_dir: Path, snapshots: dict[str, bytes | None]) -> None:
-    for relative, contents in snapshots.items():
-        if contents is None:
+def _restore_published_outputs(
+    scan_dir: Path, snapshots: dict[str, tuple[bytes, os.stat_result] | None]
+) -> None:
+    for relative, snapshot in snapshots.items():
+        if snapshot is None:
             path = scan_dir / relative
             if path.exists() or path.is_symlink():
                 _remove_scan_local_file_if_exists(scan_dir, relative)
         else:
+            contents, metadata = snapshot
             write_scan_local_bytes(scan_dir, relative, contents)
+            # Saved-result selection uses mtime; rollback must preserve its ordering.
+            os.utime(scan_dir / relative, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+
+
+@contextmanager
+def preserve_deep_deadline_draft(db: Any, connection: Any, scan: Any) -> Iterator[None]:
+    """Recover a settled, zero-accepted Deep deadline without sealing the parent."""
+    scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
+    snapshots = _snapshot_published_outputs(scan_dir)
+    warnings = json.loads(scan["completion_warnings_json"])
+    binding = db.workbench_completion_binding(scan, db.now())
+    with preserve_parent_head_on_error(scan_dir):
+        try:
+            documents = merge_saved_results(
+                scan_dir,
+                scan["id"],
+                binding,
+                connection.execute(
+                    "SELECT * FROM deep_scan_workers WHERE scan_id = ? ORDER BY created_at, id",
+                    (scan["id"],),
+                ).fetchall(),
+                warnings,
+                stopped=True,
+                reason=(
+                    "The configured discovery time limit elapsed before any source review completed. "
+                    "Saved findings and pending review were preserved without a completed reduction."
+                ),
+            )
+            if documents is None:
+                raise ContractError("Deep Scan deadline has no saved parent draft.")
+            documents[0]["scan"].pop("complete", None)
+            # Validate recovered evidence against the current finding contract,
+            # scope, source lineage, and receipts before admitting this draft.
+            prepared = _prepare_scan_finalization(
+                scan_dir,
+                expected_coverage_mode=db.expected_coverage_mode(scan),
+                completion_binding=binding,
+                recover_unsealed=True,
+                draft_documents=documents,
+            )
+            warnings.extend(prepared.warnings)
+            manifest, findings, coverage = prepared.manifest, prepared.findings, prepared.coverage
+            manifest["scan"].pop("sealedAt", None)
+            manifest["scan"].pop("artifacts", None)
+            checkpoint = _parent_scan_draft(scan["id"], manifest["scan"], findings, coverage)
+            contents = _encoded(checkpoint)
+            name = f"{hashlib.sha256(contents).hexdigest()}.json"
+            write_scan_local_bytes(scan_dir, f"checkpoints/{name}", contents)
+            write_scan_local_bytes(scan_dir, "checkpoint-head.json", _encoded({"checkpoint": name}))
+            for filename, document in (
+                ("findings.json", findings),
+                ("coverage.json", coverage),
+                ("scan-manifest.json", manifest),
+            ):
+                write_scan_local_bytes(scan_dir, filename, _encoded(document))
+            connection.execute(
+                "UPDATE scans SET completion_warnings_json = ? WHERE id = ?",
+                (json.dumps(list(dict.fromkeys(warnings))), scan["id"]),
+            )
+            yield
+        except BaseException:
+            _restore_published_outputs(scan_dir, snapshots)
+            raise
 
 
 def preserve_scan_results_locked(
@@ -2911,12 +2656,13 @@ def preserve_scan_results_locked(
         scan_dir,
         expected_coverage_mode=db.expected_coverage_mode(scan),
         completion_binding=binding,
-        completion_warnings=warnings,
+        recover_unsealed=True,
         draft_documents=documents,
-        finding_scope=db.requested_scan_paths(scan) if scan["mode"] == "deep" else None,
+        finding_scope=db.requested_finding_scope(scan) if scan["mode"] == "deep" else None,
     )
     if not first_preservation:
         retain_sources()
+    warnings.extend(prepared.warnings)
     snapshots = _snapshot_published_outputs(scan_dir)
     try:
         manifest, findings, _ = _write_prepared_scan_finalization(
@@ -3031,6 +2777,66 @@ def save_scan_artifact(db: Any, connection: Any, args: Any) -> dict[str, Any]:
     return {"scanId": scan_id, "path": str(scan_dir / output)}
 
 
+def _require_current_deep_publication(
+    db: Any, connection: Any, scan: Any, draft: dict[str, Any]
+) -> None:
+    scan_id = scan["id"]
+    run = connection.execute(
+        "SELECT * FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
+    ).fetchone()
+    publication = draft.get("deepScanPublication")
+    if (
+        publication is None
+        and draft["manifest"]["scan"].get("complete") is False
+        and (run is None or run["status"] == "running")
+    ):
+        return
+    if run is None:
+        run = db.deep_scan.require_deep_scan_run(connection, scan_id)
+    # Finished discovery-only runs hand remaining publication back to the parent.
+    if (
+        publication is None
+        and run["status"] != "running"
+        and run["manifest_path"] != str(Path(scan["scan_dir"]) / "scan-manifest.json")
+    ):
+        return
+    db.deep_scan.require_current_coordinator(
+        run,
+        argparse.Namespace(
+            coordinator_generation=publication.get("coordinatorGeneration") if publication else None
+        ),
+    )
+    # Once finish selects the canonical parent, only completion may replay it.
+    if publication is None:
+        if run["status"] != "running" and run["manifest_path"] == str(
+            Path(scan["scan_dir"]) / "scan-manifest.json"
+        ):
+            raise SystemExit("Deep Scan is terminal; drafts cannot replace its publication.")
+        return
+
+    # Match the durable reducer sequence used by coordinator recovery.
+    def reducer_order(worker: Any) -> tuple[int, str]:
+        match = re.fullmatch(r"dedup-([0-9]+)", Path(worker["prompt_path"]).parent.name)
+        return (int(match[1]) if match else 0, worker["id"])
+
+    reducer = max(
+        (
+            worker
+            for worker in connection.execute(
+                "SELECT * FROM deep_scan_workers WHERE scan_id = ?", (scan_id,)
+            )
+            if worker["kind"] == "dedup"
+            and worker["status"] == "succeeded"
+            and worker["result_manifest_path"]
+        ),
+        key=reducer_order,
+        default=None,
+    )
+    selected_result = reducer["result_manifest_path"] if reducer is not None else None
+    if publication["resultPath"] != selected_result:
+        raise SystemExit("Deep Scan aggregate belongs to a superseded publication selection.")
+
+
 def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
     scan_id = db.require_uuid(args.scan_id, "scan-id")
     with db.scan_completion_lock(scan_id):
@@ -3065,6 +2871,8 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         _populate_unsealed_manifest_envelope(manifest, manifest["scan"], binding)
         _populate_unsealed_artifact_envelope(manifest, findings, coverage, binding)
         _validate_completion_binding(manifest, findings, coverage, binding)
+        checkpoint = manifest["scan"]
+        checkpoint_contents = None
         if args.checkpoint_path is not None:
             try:
                 checkpoint_relative = Path(args.checkpoint_path).relative_to(scan_dir).as_posix()
@@ -3081,18 +2889,36 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             )
             if checkpoint.get("scanId") != scan_id:
                 raise SystemExit("Staged scan checkpoint belongs to another scan.")
+        checkpoint_only = (
+            scan["mode"] == "deep"
+            and draft.get("deepScanPublication") is None
+            and checkpoint.get("complete") is False
+            and connection.execute(
+                "SELECT 1 FROM deep_scan_runs WHERE scan_id = ? "
+                "AND status = 'running' AND manifest_path = ?",
+                (scan_id, str(scan_dir / "scan-manifest.json")),
+            ).fetchone()
+            is not None
+        )
+        if scan["mode"] == "deep" and not checkpoint_only:
+            _require_current_deep_publication(db, connection, scan, draft)
+        if checkpoint_contents is not None:
             checkpoint_digest = hashlib.sha256(checkpoint_contents).hexdigest()
             write_scan_local_bytes(
                 scan_dir,
                 f"checkpoints/{checkpoint_digest}.json",
                 checkpoint_contents,
             )
+            if checkpoint_only:
+                return {"scanId": scan_id, "status": "draft_written"}
         checkpoint = _parent_scan_draft(scan_id, manifest["scan"], findings, coverage)
         checkpoint_contents = _encoded(checkpoint)
         checkpoint_name = f"{hashlib.sha256(checkpoint_contents).hexdigest()}.json"
         checkpoint_relative = f"checkpoints/{checkpoint_name}"
         if not (scan_dir / checkpoint_relative).exists():
             write_scan_local_bytes(scan_dir, checkpoint_relative, checkpoint_contents)
+        if checkpoint_only:
+            return {"scanId": scan_id, "status": "draft_written"}
         write_scan_local_bytes(
             scan_dir, "checkpoint-head.json", _encoded({"checkpoint": checkpoint_name})
         )
@@ -3106,6 +2932,14 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
                 filename,
                 (json.dumps(document, allow_nan=False, indent=2) + "\n").encode(),
             )
+        if scan["mode"] == "deep" and manifest["scan"].get("complete") is not False:
+            # Select the accepted final publication before releasing the write lock.
+            with connection:
+                connection.execute(
+                    "UPDATE deep_scan_runs SET manifest_path = ? "
+                    "WHERE scan_id = ? AND status = 'running'",
+                    (str(scan_dir / "scan-manifest.json"), scan_id),
+                )
         model_warning = write_threat_model_projection_if_possible(scan_dir, manifest)
         # Accepted Standard drafts are evidence of review or report assembly,
         # even when the parent omitted its explicit progress call.

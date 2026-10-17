@@ -110,9 +110,7 @@ def test_canonical_candidate_resolution_keeps_legacy_checkpoint_authority(
             ),
         )
     coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
-    assert coverage["completeness"] == (
-        "partial" if flow in {"stop", "interrupted-stop"} or pending_time > 200 else "complete"
-    )
+    assert "completeness" not in coverage
     for document in [coverage, *prepared_coverage]:
         assert any(
             row.get("candidateId") == "candidate-review" for row in document["deferred"]
@@ -157,7 +155,7 @@ def test_accepted_pending_root_tie_survives_canonical_disposition(
         Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
     )
     coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
-    assert coverage["completeness"] == "partial"
+    assert "completeness" not in coverage
     assert any(row.get("candidateId") == "candidate-review" for row in coverage["deferred"])
     saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))
     assert json.loads((scan.scan_dir / "coverage.json").read_text()) == coverage
