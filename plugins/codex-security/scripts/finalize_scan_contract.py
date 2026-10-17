@@ -29,6 +29,7 @@ import threat_model_projection
 from candidate_identity import (
     archive_candidate_payloads,
     coverage_candidate_key,
+    coverage_owner,
     finding_candidate_id,
 )
 
@@ -1349,7 +1350,7 @@ def _recover_candidate_receipts(
                             ),
                             **{
                                 field: copy.deepcopy(row[field])
-                                for field in ("sourceWorkerId", "candidate", "finding")
+                                for field in ("sourceWorkerId", "workerId", "candidate", "finding")
                                 if field in row
                             },
                         }
@@ -1519,7 +1520,7 @@ def _recover_unsealed_coverage(
     for surface, reason in recovered_candidates:
         if any(
             item.get("candidateId") == surface["candidateId"]
-            and item.get("sourceWorkerId") == surface.get("sourceWorkerId")
+            and coverage_owner(item) == coverage_owner(surface)
             for item in coverage["deferred"]
         ):
             continue
@@ -1537,9 +1538,11 @@ def _recover_unsealed_coverage(
                 "surfaceIds": [surface["id"]],
                 **{
                     field: copy.deepcopy(surface[field])
-                    for field in ("sourceWorkerId", "candidate", "finding")
+                    for field in ("sourceWorkerId", "workerId", "candidate", "finding")
                     if field in surface
-                    and (field == "sourceWorkerId" or isinstance(surface[field], dict))
+                    and (
+                        field in ("sourceWorkerId", "workerId") or isinstance(surface[field], dict)
+                    )
                 },
             }
         )

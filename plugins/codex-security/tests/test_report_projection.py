@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import copy
+import json
+from pathlib import Path
 
 import pytest
-from workbench_test_support import load_script
+from workbench_test_support import load_script, write_completed_contract
 
 pytestmark = pytest.mark.cross_platform
 
 PROJECTION = load_script("report_projection")
 CANDIDATES = load_script("candidate_identity")
+FINALIZER = load_script("finalize_scan_contract")
 
 
 def canonical_documents() -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
@@ -244,6 +247,104 @@ def test_projection_excludes_resolved_candidates_with_the_same_owner() -> None:
     assert "Review deferred unit worker-two-confirmed" in markdown
 
 
+@pytest.mark.parametrize("disposition", [None, "rejected", "not_applicable"])
+def test_projection_preserves_main_coverage_worker_ownership(
+    tmp_path: Path, disposition: str | None
+) -> None:
+    write_completed_contract(
+        tmp_path, "scan-main-worker-ownership", tmp_path, coverage_mode="deep_repository"
+    )
+    coverage_path = tmp_path / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage["deferred"] = [
+        {
+            "id": f"pending-{worker}",
+            "candidateId": "shared-candidate",
+            "workerId": worker,
+            "reason": f"Unfinished evidence from {worker}.",
+        }
+        for worker in ("worker-one", "worker-two")
+    ]
+    coverage["surfaces"] = (
+        [
+            {
+                "id": "reviewed-worker-one",
+                "label": "First worker review",
+                "candidateId": "shared-candidate",
+                "workerId": "worker-one",
+                "disposition": disposition,
+                "receiptRefs": [],
+            }
+        ]
+        if disposition is not None
+        else []
+    )
+    assert "completeness" not in coverage
+    coverage_path.write_text(json.dumps(coverage))
+    manifest, findings, coverage = FINALIZER.finalize_scan(tmp_path)
+    sealed = {
+        name: (tmp_path / name).read_bytes()
+        for name in ("scan-manifest.json", "findings.json", "coverage.json")
+    }
+
+    pending = CANDIDATES.unresolved_candidates(coverage, findings["findings"], sealed=True)
+    expected_workers = ["worker-one", "worker-two"] if disposition is None else ["worker-two"]
+    assert [row["workerId"] for row in pending] == expected_workers
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    assert f"| Unresolved candidates | {len(expected_workers)} |" in markdown
+    for worker in expected_workers:
+        assert f"| shared-candidate | {worker} |" in markdown
+        assert f"Unfinished evidence from {worker}." in markdown
+    if disposition is not None:
+        assert "Unfinished evidence from worker-one." not in markdown
+    assert all((tmp_path / name).read_bytes() == contents for name, contents in sealed.items())
+
+
+@pytest.mark.parametrize("field", ["surfaces", "explicitExclusions"])
+def test_recovered_main_coverage_keeps_each_workers_pending_candidate(
+    tmp_path: Path, field: str
+) -> None:
+    write_completed_contract(tmp_path, "scan-recovered-workers", tmp_path)
+    coverage_path = tmp_path / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage["deferred"] = [
+        {
+            "id": "pending-worker-one",
+            "candidateId": "shared-candidate",
+            "workerId": "worker-one",
+            "reason": "First worker proof gap.",
+        }
+    ]
+    coverage["surfaces"] = []
+    coverage[field] = [
+        {
+            "id": "reviewed-worker-two",
+            "label": "Second worker review",
+            "candidateId": "shared-candidate",
+            "workerId": "worker-two",
+            "disposition": "rejected",
+            "receiptRefs": ["artifacts/missing-receipt.json"],
+            **(
+                {"pattern": "src/extract.py", "reason": "Second worker terminal review."}
+                if field == "explicitExclusions"
+                else {}
+            ),
+        }
+    ]
+    coverage_path.write_text(json.dumps(coverage))
+
+    prepared = FINALIZER._prepare_scan_finalization(tmp_path, recover_unsealed=True)
+    manifest, findings, coverage = FINALIZER._write_prepared_scan_finalization(prepared)
+    pending = CANDIDATES.unresolved_candidates(coverage, findings["findings"], sealed=True)
+    assert [row["workerId"] for row in pending] == ["worker-one", "worker-two"]
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    assert "| Unresolved candidates | 2 |" in markdown
+    assert "| shared-candidate | worker-one |" in markdown
+    assert "| shared-candidate | worker-two |" in markdown
+    assert "First worker proof gap." in markdown
+    assert "Skipped malformed coverage receipt" in markdown
+
+
 def test_reported_shared_surface_does_not_resolve_an_explicit_deferred_candidate() -> None:
     manifest, findings, coverage = canonical_documents()
     findings["findings"][0]["provenance"] = {"candidateId": "confirmed"}
@@ -351,6 +452,62 @@ def test_projection_resolves_candidates_using_string_owner_metadata(
     assert "Earlier checkpoint." not in markdown
     assert "Independent review." in markdown
     assert finding == saved_finding
+
+
+@pytest.mark.parametrize(
+    ("metadata", "remaining_owners"),
+    [
+        ({"workerId": "worker-one"}, ["worker-two", None]),
+        ({"sourceWorkerId": None, "workerId": "worker-one"}, ["worker-two", None]),
+        ({"sourceWorkerId": "worker-two", "workerId": "worker-one"}, ["worker-one", None]),
+        ({"sourceWorkerId": {}, "workerId": "worker-one"}, ["worker-one", "worker-two", None]),
+        ({"sourceWorkerId": " ", "workerId": "worker-one"}, ["worker-one", "worker-two"]),
+        ({"workerId": []}, ["worker-one", "worker-two"]),
+    ],
+)
+def test_projection_preserves_coverage_owner_precedence(
+    metadata: dict, remaining_owners: list[str | None]
+) -> None:
+    manifest, findings, coverage = canonical_documents()
+    coverage["deferred"] = [
+        {
+            "id": f"pending-{owner}",
+            "candidateId": "shared-candidate",
+            "sourceWorkerId": owner,
+            "reason": f"Review from {owner}.",
+        }
+        for owner in ("worker-one", "worker-two", None)
+    ]
+    coverage["surfaces"] = [
+        {"candidateId": "shared-candidate", "disposition": "rejected", **metadata}
+    ]
+    saved_coverage = copy.deepcopy(coverage)
+
+    pending = CANDIDATES.unresolved_candidates(coverage, [])
+    assert [row["sourceWorkerId"] for row in pending] == remaining_owners
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    assert f"| Unresolved candidates | {len(remaining_owners)} |" in markdown
+    assert coverage == saved_coverage
+    assert CANDIDATES.coverage_candidate_key(
+        {"candidateId": "shared-candidate", **metadata}, "actual-worker"
+    ) == ("actual-worker", "shared-candidate")
+
+
+def test_main_coverage_surface_references_keep_their_worker() -> None:
+    deferred = {
+        "candidateId": "shared-candidate",
+        "workerId": "worker-one",
+        "surfaceIds": ["shared-surface"],
+    }
+    surfaces = [
+        {"id": "shared-surface", "workerId": worker} for worker in ("worker-two", "worker-one")
+    ]
+    assert CANDIDATES.surface_reference_key("shared-surface", deferred, surfaces) == (
+        "worker-one",
+        "shared-surface",
+    )
+    assert CANDIDATES._deferred_owner(deferred, None) == "worker-one"
+    assert CANDIDATES._deferred_owner(deferred, "actual-worker") == "actual-worker"
 
 
 def test_projection_normalizes_tilde_fences_and_parenthesized_lists() -> None:

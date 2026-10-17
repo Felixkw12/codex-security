@@ -38,6 +38,10 @@ export function candidateIdentity(
   return JSON.stringify([candidateOwner(sourceWorkerId) ?? null, candidateId]);
 }
 
+function coverageCandidateOwner(row: Record<string, unknown>): unknown {
+  return row["sourceWorkerId"] ?? candidateOwner(row["workerId"]);
+}
+
 /** Saved candidate identities without a finding or terminal disposition. */
 export function unresolvedCandidates(
   coverage: CoverageDocument,
@@ -61,7 +65,7 @@ export function unresolvedCandidates(
       ? coverage.explicitExclusions
       : []),
   ]) {
-    const owner = surface["sourceWorkerId"];
+    const owner = coverageCandidateOwner(surface);
     if (
       typeof surface["candidateId"] === "string" &&
       (owner == null || typeof owner === "string") &&
@@ -73,17 +77,14 @@ export function unresolvedCandidates(
   }
   const pending = new Map<string, DeferredCoverage>();
   for (const candidate of coverage.deferred) {
+    const owner = coverageCandidateOwner(candidate);
     if (
       typeof candidate.candidateId !== "string" ||
       !candidate.candidateId.trim() ||
-      (candidate["sourceWorkerId"] != null &&
-        typeof candidate["sourceWorkerId"] !== "string")
+      (owner != null && typeof owner !== "string")
     )
       continue;
-    const key = candidateIdentity(
-      candidate.candidateId,
-      candidate["sourceWorkerId"],
-    );
+    const key = candidateIdentity(candidate.candidateId, owner);
     if (!resolved.has(key) && !pending.has(key)) pending.set(key, candidate);
   }
   return [...pending.values()];

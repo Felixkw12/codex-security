@@ -328,19 +328,7 @@ export function reconcileDeepReduction(
         "Deep reduction source is only a checkpoint, not a complete result.",
       );
   }
-  const currentWorkers = new Set(discoveries.map((source) => source.workerId));
-  const pending: UnresolvedCandidate[] = [];
-  for (const candidate of [
-    ...(previous?.unresolvedCandidates ?? []).filter(
-      (candidate) => !currentWorkers.has(candidate.sourceWorkerId),
-    ),
-    ...discoveries.flatMap(
-      (source) => source.result.unresolvedCandidates ?? [],
-    ),
-  ]) {
-    if (!pending.some((previous) => isDeepStrictEqual(previous, candidate)))
-      pending.push(structuredClone(candidate));
-  }
+  const pending = collectUnresolvedCandidates(discoveries, previous);
   delete result.unresolvedCandidates;
   if (pending.length > 0) result.unresolvedCandidates = pending;
   validateRetainedFindings(
@@ -385,6 +373,26 @@ export function reconcileDeepReduction(
     }
   }
   return result;
+}
+
+export function collectUnresolvedCandidates(
+  discoveries: DeepReductionSources["discoveries"],
+  previous: DeepReductionInput | null,
+): UnresolvedCandidate[] {
+  const currentWorkers = new Set(discoveries.map((source) => source.workerId));
+  const pending: UnresolvedCandidate[] = [];
+  for (const candidate of [
+    ...(previous?.unresolvedCandidates ?? []).filter(
+      (candidate) => !currentWorkers.has(candidate.sourceWorkerId),
+    ),
+    ...discoveries.flatMap(
+      (source) => source.result.unresolvedCandidates ?? [],
+    ),
+  ]) {
+    if (!pending.some((previous) => isDeepStrictEqual(previous, candidate)))
+      pending.push(structuredClone(candidate));
+  }
+  return pending;
 }
 
 function findingSourceIds(finding: Record<string, unknown>): string[] {

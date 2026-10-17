@@ -14,6 +14,7 @@ from candidate_identity import (
     archive_candidate_payloads,
     candidate_key,
     coverage_candidate_key,
+    coverage_owner,
     diff_candidate_disposition,
     finding_candidate_key,
     is_candidate_row,
@@ -118,7 +119,7 @@ def project_resolved_candidate_rows(
             if (
                 field == "surfaces"
                 and referenced_surfaces
-                and candidate_key(row.get("id"), row.get("sourceWorkerId")) in referenced_surfaces
+                and candidate_key(row.get("id"), coverage_owner(row)) in referenced_surfaces
             ):
                 retained.append(
                     {
@@ -276,7 +277,7 @@ def preserve_budget_candidates(
             candidate is not None
             and surface.get("candidateId") is None
             and surface.get("candidate") is None
-            and surface.get("sourceWorkerId") is None
+            and coverage_owner(surface) is None
             and (
                 (
                     surface.get("label") == candidate["summary"]
@@ -508,7 +509,7 @@ def preserve_budget_candidates(
             if isinstance(item.get("id"), str)
             and item["id"].strip()
             and (item.get("disposition") != "reported" or disposition == "reported")
-            and candidate_key(item["id"], item.get("sourceWorkerId")) not in referenced
+            and candidate_key(item["id"], coverage_owner(item)) not in referenced
         ]
         if not surfaces:
             surface = {

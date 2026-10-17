@@ -14,6 +14,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from candidate_identity import (
     coverage_candidate_key,
+    coverage_owner,
     unresolved_candidate_rows,
     unresolved_candidates,
 )
@@ -1025,7 +1026,7 @@ def build_report_markdown(
             locations, evidence = _candidate_details(original, candidate)
             lines.append(
                 f"| {_cell(candidate['candidateId'])} "
-                f"| {_cell(candidate.get('sourceWorkerId'))} "
+                f"| {_cell(coverage_owner(candidate))} "
                 f"| {_cell(title or candidate.get('title', candidate['candidateId']))} "
                 f"| {_cell(candidate.get('reason'))} "
                 f"| {_cell(locations)} "

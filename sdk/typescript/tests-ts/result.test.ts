@@ -145,6 +145,87 @@ describe("ScanResult", () => {
     expect(fakeResult([]).unresolvedCandidateCount).toBe(0);
   });
 
+  test.each([undefined, "rejected", "not_applicable"] as const)(
+    "preserves legacy Deep worker ownership with disposition %s",
+    (disposition) => {
+      const savedCoverage: CoverageDocument = {
+        ...coverage,
+        surfaces: disposition
+          ? [
+              {
+                id: "worker-a/decision",
+                label: "Worker A decision",
+                disposition,
+                receiptRefs: [],
+                candidateId: "shared-id",
+                workerId: "worker-a",
+              },
+            ]
+          : [],
+        deferred: ["worker-a", "worker-b"].map((workerId) => ({
+          id: `${workerId}/pending`,
+          candidateId: "shared-id",
+          workerId,
+          reason: `Evidence retained for ${workerId}.`,
+        })),
+      };
+      delete savedCoverage["completeness"];
+      const original = structuredClone(savedCoverage);
+      const result = new ScanResult({
+        manifest,
+        findings,
+        coverage: savedCoverage,
+        scanDir: "/scan",
+        threadId: "thread",
+        turnResult: {},
+      });
+      const pending = disposition
+        ? [savedCoverage.deferred[1]!]
+        : savedCoverage.deferred;
+
+      expect(result.unresolvedCandidates).toEqual(pending);
+      expect(result.unresolvedCandidateCount).toBe(pending.length);
+      expect(result.toJSON()).toMatchObject({
+        unresolvedCandidates: pending,
+        unresolvedCandidateCount: pending.length,
+      });
+      expect(savedCoverage).toEqual(original);
+    },
+  );
+
+  test.each([
+    { sourceWorkerId: "worker-a", workerId: "worker-b", expected: 1 },
+    { sourceWorkerId: {}, workerId: "worker-b", expected: 0 },
+    { sourceWorkerId: " ", workerId: "worker-b", expected: 1 },
+    { sourceWorkerId: null, workerId: "worker-b", expected: 0 },
+    { sourceWorkerId: undefined, workerId: {}, expected: 1 },
+  ])("preserves canonical coverage-owner precedence: %j", (row) => {
+    const result = fakeResult([]);
+    result.coverage.surfaces = [
+      {
+        id: "worker-b/decision",
+        label: "Worker B decision",
+        candidateId: "shared-id",
+        workerId: "worker-b",
+        disposition: "rejected",
+        receiptRefs: [],
+      },
+    ];
+    result.coverage.deferred = [
+      {
+        id: "pending",
+        candidateId: "shared-id",
+        reason: "Saved evidence.",
+        sourceWorkerId: row.sourceWorkerId,
+        workerId: row.workerId,
+      },
+    ];
+    const original = structuredClone(result.coverage);
+
+    expect(result.unresolvedCandidateCount).toBe(row.expected);
+    expect(result.coverage).toEqual(original);
+  });
+
   test.each([
     [{ sourceWorkerId: { imported: "worker" } }, {}, undefined],
     [{ sourceWorkerId: ["worker"] }, {}, undefined],

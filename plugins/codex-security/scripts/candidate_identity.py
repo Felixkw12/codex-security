@@ -43,6 +43,12 @@ def candidate_owner(*values: Any) -> str | None:
     return next((value for value in values if isinstance(value, str) and value.strip()), None)
 
 
+def coverage_owner(item: dict[str, Any]) -> Any:
+    """Read legacy workerId metadata without overriding a canonical owner."""
+    owner = item.get("sourceWorkerId")
+    return owner if owner is not None else candidate_owner(item.get("workerId"))
+
+
 def candidate_key(candidate_id: Any, owner: Any = None) -> CandidateKey | None:
     if not isinstance(candidate_id, str) or not candidate_id.strip():
         return None
@@ -86,7 +92,7 @@ def finding_candidate_key(finding: dict[str, Any], owner: str | None = None) -> 
 
 
 def coverage_candidate_key(item: dict[str, Any], owner: str | None = None) -> CandidateKey | None:
-    source_owner = candidate_owner(owner) or item.get("sourceWorkerId")
+    source_owner = candidate_owner(owner) or coverage_owner(item)
     # A malformed coverage owner cannot resolve valid candidates before draft recovery.
     if source_owner is not None and not isinstance(source_owner, str):
         return None
@@ -99,7 +105,7 @@ def is_candidate_row(row: dict[str, Any]) -> bool:
 
 
 def _deferred_owner(row: dict[str, Any], owner: str | None) -> str | None:
-    return candidate_owner(owner, row.get("sourceWorkerId")) if is_candidate_row(row) else owner
+    return candidate_owner(owner, coverage_owner(row)) if is_candidate_row(row) else owner
 
 
 def _deferred_candidate_id(row: dict[str, Any]) -> str | None:
@@ -120,12 +126,11 @@ def surface_reference_key(
         (
             surface
             for surface in matches
-            if candidate_owner(surface.get("sourceWorkerId"))
-            == candidate_owner(source.get("sourceWorkerId"))
+            if candidate_owner(coverage_owner(surface)) == candidate_owner(coverage_owner(source))
         ),
         matches[0] if len(matches) == 1 else source,
     )
-    return candidate_key(surface_id, target.get("sourceWorkerId"))
+    return candidate_key(surface_id, coverage_owner(target))
 
 
 def reducer_coverage(coverage: dict[str, Any], candidates: list[Any]) -> dict[str, Any]:

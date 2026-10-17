@@ -24,6 +24,7 @@ from candidate_identity import (
     candidate_key,
     candidate_owner,
     coverage_candidate_key,
+    coverage_owner,
     finding_candidate_key,
     is_candidate_row,
     reducer_coverage,
@@ -623,7 +624,7 @@ def _stopped_diff_candidate_decisions(
     current_pending_ids = {
         item["candidateId"]
         for item in unresolved_candidates(current_coverage, current_findings)
-        if candidate_owner(item.get("sourceWorkerId")) is None
+        if candidate_owner(coverage_owner(item)) is None
     }
     reopened = {
         key
@@ -1717,7 +1718,7 @@ def merge_saved_results(
             for item in items
             if isinstance(item, dict)
             and isinstance(item.get("candidateId"), str)
-            and candidate_owner(item.get("sourceWorkerId")) is None
+            and candidate_owner(coverage_owner(item)) is None
         ]
         for field in ("surfaces", "explicitExclusions", "deferred")
     }
@@ -2382,7 +2383,7 @@ def merge_saved_results(
                     for existing in output:
                         if (
                             isinstance(existing, dict)
-                            and candidate_owner(existing.get("sourceWorkerId")) is None
+                            and candidate_owner(coverage_owner(existing)) is None
                             and existing in legacy_candidate_rows.get(field, [])
                             and (
                                 existing == item
@@ -2485,12 +2486,12 @@ def merge_saved_results(
                 (key := coverage_candidate_key(item)) not in diff_resolved
                 and (
                     key is not None
-                    or candidate_key(item.get("id"), item.get("sourceWorkerId"))
+                    or candidate_key(item.get("id"), coverage_owner(item))
                     not in resolved_surface_keys
                 )
             )
             or key in pending_candidate_keys
-            or candidate_key(item.get("id"), item.get("sourceWorkerId")) in pending_surface_keys
+            or candidate_key(item.get("id"), coverage_owner(item)) in pending_surface_keys
         ]
 
     reopened_candidates = {key for _, key in inactive_outcomes if key not in resolved}
@@ -2550,7 +2551,7 @@ def merge_saved_results(
                 item.setdefault("receiptRefs", [])
     renamed_surfaces = {}
     for original, surface in zip(original_surfaces, surfaces):
-        if (key := candidate_key(original.get("id"), original.get("sourceWorkerId"))) is not None:
+        if (key := candidate_key(original.get("id"), coverage_owner(original))) is not None:
             renamed_surfaces.setdefault(key, surface["id"])
     deferred = coverage.get("deferred", [])
     for item in deferred if isinstance(deferred, list) else []:
