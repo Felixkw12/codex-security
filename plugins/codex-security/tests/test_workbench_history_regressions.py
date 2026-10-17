@@ -1801,12 +1801,26 @@ def test_false_positive_feedback_follows_reopened_matched_group(history, redisco
     assert bool(feedback) is not rediscover
 
 
-@pytest.mark.parametrize("earlier", ["verified", "unverified", "explicit-request"])
-def test_current_semantic_alias_excludes_superseded_checkout_verification(tmp_path, earlier):
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "verified",
+        "unverified",
+        "explicit-request",
+        "scoped-followup",
+        "stable-followup",
+        "unmatched-middle",
+        "reopened-middle",
+        "missing-middle",
+        "tampered-middle",
+    ],
+)
+def test_current_semantic_alias_excludes_superseded_checkout_verification(tmp_path, scenario):
     state, root, repository = tmp_path / "state", tmp_path / "scans", tmp_path / "repository"
     initialize_git_repository(repository)
     (repository / "src").mkdir()
     (repository / "src/extract.py").write_text("vulnerable\n")
+    (repository / "src/other.py").write_text("Synthetic related finding.\n")
     subprocess.run(["git", "-C", str(repository), "add", "."], check=True)
     subprocess.run(
         ["git", "-C", str(repository), "commit", "-qm", "Synthetic initial revision"], check=True
@@ -1820,7 +1834,7 @@ def test_current_semantic_alias_excludes_superseded_checkout_verification(tmp_pa
     first_id = run_workbench(state, "get-scan", "--scan-id", first["scanId"])["scan"]["findings"][
         0
     ]["occurrenceId"]
-    if earlier != "unverified":
+    if scenario != "unverified":
         verified_patch(state, first, first_id, repository, first_revision)
     (repository / "src/extract.py").write_text("vulnerable\n")
     (repository / "next-revision.txt").write_text("Synthetic later revision.\n")
@@ -1831,15 +1845,62 @@ def test_current_semantic_alias_excludes_superseded_checkout_verification(tmp_pa
     second_revision = subprocess.check_output(
         ["git", "-C", str(repository), "rev-parse", "HEAD"], text=True
     ).strip()
+    followup = scenario in {
+        "scoped-followup",
+        "stable-followup",
+        "unmatched-middle",
+        "reopened-middle",
+        "missing-middle",
+        "tampered-middle",
+    }
     second = create_cli_scan(
-        state, root, repository, identity_anchor="current-alias", target_revision=second_revision
+        state,
+        root,
+        repository,
+        identity_anchor="current-alias",
+        relative_path="src/other.py" if followup else "src/extract.py",
+        target_revision=second_revision,
     )
     second_id = run_workbench(state, "get-scan", "--scan-id", second["scanId"])["scan"]["findings"][
         0
     ]["occurrenceId"]
     verified_patch(state, second, second_id, repository, second_revision)
-    save_scan_matches(state, first, second, confirmed_match(first_id, second_id))
-    requested = first_id if earlier == "explicit-request" else second_id
+    if scenario != "unmatched-middle":
+        save_scan_matches(state, first, second, confirmed_match(first_id, second_id))
+    if scenario == "reopened-middle":
+        run_workbench(state, "set-finding-triage", "--occurrence-id", second_id, "--status", "open")
+    requested = first_id if scenario == "explicit-request" else second_id
+    if followup:
+        third = create_cli_scan(
+            state,
+            root,
+            repository,
+            identity_anchor="current-alias" if scenario == "stable-followup" else "scoped-alias",
+            paths=["src/other.py"],
+            relative_path="src/other.py",
+            target_kind="git_worktree",
+            target_revision=second_revision,
+        )
+        third_finding = run_workbench(state, "get-scan", "--scan-id", third["scanId"])["scan"][
+            "findings"
+        ][0]
+        third_id = third_finding["occurrenceId"]
+        if scenario == "stable-followup":
+            second_finding = run_workbench(state, "get-scan", "--scan-id", second["scanId"])[
+                "scan"
+            ]["findings"][0]
+            assert third_finding["findingId"] == second_finding["findingId"]
+        else:
+            before, before_id = (
+                (first, first_id) if scenario == "unmatched-middle" else (second, second_id)
+            )
+            save_scan_matches(state, before, third, confirmed_match(before_id, third_id))
+        requested = third_id
+    if scenario == "missing-middle":
+        (Path(second["scanDir"]) / "coverage.json").unlink()
+    elif scenario == "tampered-middle":
+        manifest = Path(second["scanDir"]) / "scan-manifest.json"
+        manifest.write_text(manifest.read_text() + "\n")
     result = run_workbench(
         state,
         "set-finding-triage",
@@ -1851,10 +1912,22 @@ def test_current_semantic_alias_excludes_superseded_checkout_verification(tmp_pa
         "already_fixed",
         check=False,
     )
-    if earlier == "explicit-request":
+    rejected = scenario in {
+        "explicit-request",
+        "unmatched-middle",
+        "reopened-middle",
+        "missing-middle",
+        "tampered-middle",
+    }
+    if scenario == "tampered-middle":
+        assert result["returncode"] != 0 and "sealed scan manifest changed" in result["stderr"]
+    elif rejected:
         assert result["returncode"] != 0 and "Repository HEAD changed" in result["stderr"]
     else:
         assert result["returncode"] == 0, result["stderr"]
+    assert run_workbench(state, "get-scan", "--scan-id", first["scanId"])["scan"]["findings"][0][
+        "status"
+    ] == ("open" if rejected else "closed")
 
 
 @pytest.mark.parametrize(

@@ -240,8 +240,10 @@ def create_cli_scan(
     mode: str = "standard",
     parent_scan_id: str | None = None,
     paths: list[str] | None = None,
+    relative_path: str = "src/extract.py",
     cost: dict[str, Any] | None = None,
     target: dict[str, Any] | None = None,
+    target_kind: str | None = None,
     target_revision: str | None = None,
 ) -> dict[str, Any]:
     scan_dir = root / str(uuid.uuid4())
@@ -284,10 +286,12 @@ def create_cli_scan(
         launched["scanId"],
         repository,
         identity_anchor=identity_anchor,
+        relative_path=relative_path,
         include_paths=paths,
         coverage_mode=coverage_mode,
         inventory_strategy="scoped_path" if paths else "repository",
-        target_kind="git_revision" if target_revision is not None else "directory_snapshot",
+        target_kind=target_kind
+        or ("git_revision" if target_revision is not None else "directory_snapshot"),
         target_revision=target_revision,
         snapshot_digest=snapshot_digest,
     )

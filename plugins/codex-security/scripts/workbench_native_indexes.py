@@ -439,17 +439,17 @@ def _indexed_active_findings(
     coverage_by_scan_id: dict[str, tuple[sqlite3.Row, dict[str, Any] | None]] = {}
     uncertain_occurrence_ids: set[str] | None = None
 
-    def superseded_for_verification(finding, representative, finding_group):
+    def superseded_for_verification(finding, later_scan, finding_group):
         nonlocal uncertain_occurrence_ids
         if (
-            finding["scan_id"] == representative["scan_id"]
-            or finding["indexed_target_id"] != representative["indexed_target_id"]
+            finding["scan_sequence"] >= later_scan["scan_sequence"]
+            or finding["indexed_target_id"] != later_scan["indexed_target_id"]
         ):
             return False
         if finding_group["decision_status"] == "open" and (
-            representative["scan_sequence"] <= finding_group["decision_scan_sequence"]
+            later_scan["scan_sequence"] <= finding_group["decision_scan_sequence"]
             if finding_group["decision_scan_sequence"] is not None
-            else timestamp_key(representative["scan_started_at"])
+            else timestamp_key(later_scan["started_at"])
             <= timestamp_key(finding_group["decision_updated_at"])
         ):
             return False
@@ -468,9 +468,9 @@ def _indexed_active_findings(
             }
         if finding_group["occurrence_ids"] & uncertain_occurrence_ids:
             return False
-        scan_id = representative["scan_id"]
+        scan_id = later_scan["id"]
         if scan_id not in coverage_by_scan_id:
-            scan = connection.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
+            scan = later_scan
             coverage = None
             if (
                 scan["status"] == "complete"
@@ -511,7 +511,7 @@ def _indexed_active_findings(
                 for surface in coverage.get("surfaces", [])
             )
             and scan_history.scan_covers_path(
-                {**dict(scan), "target_id": representative["indexed_target_id"]},
+                {**dict(scan), "target_id": later_scan["indexed_target_id"]},
                 target_id=finding["indexed_target_id"],
                 path=finding["location_path"],
                 coverage=coverage,
@@ -541,13 +541,26 @@ def _indexed_active_findings(
             )
             for matched in matched_by_target.values()
         ]
+        verification_scans = (
+            connection.execute(
+                "SELECT scans.*, rowid AS scan_sequence, "
+                "COALESCE(target_id, target_path) AS indexed_target_id "
+                "FROM scans WHERE id IN (SELECT value FROM json_each(?)) ORDER BY rowid DESC",
+                (json.dumps(row["known_scan_ids"]),),
+            ).fetchall()
+            if verification_occurrence_id in row["occurrence_ids"]
+            else ()
+        )
         active_occurrence_ids = {
             finding["occurrence_id"]
-            for matched, representative in representatives
+            for matched, _ in representatives
             for finding in matched
-            # Retained history is still verified unless the newer alias covers its location.
+            # Retained history is verified unless a later matched scan covers its location.
             if verification_occurrence_id not in row["occurrence_ids"]
-            or not superseded_for_verification(finding, representative, row)
+            or not any(
+                superseded_for_verification(finding, later_scan, row)
+                for later_scan in verification_scans
+            )
         }
         for matched, representative in representatives:
             combined.append(
