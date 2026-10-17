@@ -2859,7 +2859,7 @@ def test_identity_migrations_skip_unavailable_historical_git(
 def test_registration_keeps_a_competing_targets_existing_id(tmp_path: Path) -> None:
     repository = tmp_path / "repository"
     repository.mkdir()
-    connection, apply_migrations = create_historical_database(50)
+    connection, apply_migrations = create_historical_database(52)
     connection.executescript("""
         CREATE TRIGGER competing_target BEFORE INSERT ON security_targets
         WHEN NEW.id <> 'existing-target'
@@ -2956,7 +2956,7 @@ def test_identity_migration_excludes_all_history_and_caller_git(
 def test_identity_migration_merges_partially_sequenced_completion_history(
     clock_reversed: bool,
 ) -> None:
-    connection, apply_migrations = create_historical_database(50)
+    connection, apply_migrations = create_historical_database(52)
     connection.execute(
         "INSERT INTO workspaces(id, created_at, updated_at) VALUES ('workspace', 'created', 'updated')"
     )
@@ -3085,7 +3085,7 @@ def test_identity_migrations_keep_healthy_targets_when_another_path_is_unavailab
 def test_current_database_does_not_inspect_historical_git_paths(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    connection, apply_migrations = create_historical_database(50)
+    connection, apply_migrations = create_historical_database(52)
     connection.executemany(
         "INSERT INTO security_targets(id, current_path, display_name, created_at, updated_at) "
         "VALUES (?, ?, 'Saved checkout', 'created', 'updated')",

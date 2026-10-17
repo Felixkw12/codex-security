@@ -385,7 +385,7 @@ def test_legacy_linked_comparison_keeps_unbound_triage_target_local(
             later,
             confirmed_match(first_finding["occurrenceId"], later_finding["occurrenceId"]),
         )
-        assert match["comparable"] is True
+        assert match["summary"]["persisting"] == 1
     create_cli_scan(
         state, tmp_path / "results", repository, target_revision=revision, finding=False
     )
@@ -475,7 +475,7 @@ def test_sealed_legacy_recurrence_match_keeps_linked_scope_status(
                 current_finding["occurrenceId"], later_finding["occurrenceId"]
             ),
         )
-        assert result["comparable"] is True
+        assert result["summary"]["persisting"] == 1
     global_rows = run_workbench(state, "list-global-findings")["findings"]
     scoped_rows = run_workbench(state, "list-global-findings", "--repository", str(linked))[
         "findings"
@@ -579,7 +579,7 @@ def test_saved_legacy_alias_survives_current_linked_match(
             second,
             producer.confirmed_match(first_finding["occurrenceId"], second_finding["occurrenceId"]),
         )
-        assert result["comparable"] is True
+        assert result["summary"]["persisting"] == 1
     current = producer.create_cli_scan(
         state,
         tmp_path / "results",
@@ -611,7 +611,7 @@ def test_saved_legacy_alias_survives_current_linked_match(
                 current_finding["occurrenceId"], later_finding["occurrenceId"]
             ),
         )
-        assert result["comparable"] is True
+        assert result["summary"]["persisting"] == 1
     global_rows = run_workbench(state, "list-global-findings")["findings"]
     scoped_rows = run_workbench(state, "list-global-findings", "--repository", str(repository))[
         "findings"
