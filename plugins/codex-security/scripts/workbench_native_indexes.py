@@ -313,9 +313,49 @@ def _sorted_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return findings
 
 
+def indexed_scan_findings(
+    connection: sqlite3.Connection,
+    scan: sqlite3.Row,
+    *,
+    read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
+    through_scan: bool = False,
+    include_resolved: bool = True,
+    verification_occurrence_id: str | None = None,
+) -> dict[str, dict[str, Any]]:
+    if (
+        connection.execute(
+            "SELECT 1 FROM finding_occurrences WHERE scan_id = ? LIMIT 1", (scan["id"],)
+        ).fetchone()
+        is None
+    ):
+        return {}
+    scope = (
+        {"target_paths": {scan["target_path"]}}
+        if scan["target_id"] is None
+        else {"target_ids": scan_history.saved_repository_target_ids(connection, scan)}
+    )
+    if through_scan:
+        scope["through_scan_sequence"] = connection.execute(
+            "SELECT rowid FROM scans WHERE id = ?", (scan["id"],)
+        ).fetchone()[0]
+    return {
+        occurrence_id: finding
+        for finding in _indexed_active_findings(
+            connection,
+            read_coverage,
+            include_resolved=include_resolved,
+            verification_occurrence_id=verification_occurrence_id,
+            **scope,
+        )
+        for occurrence_id in finding.get("occurrence_ids", ())
+    }
+
+
 def _indexed_active_findings(
     connection: sqlite3.Connection,
     read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
+    *,
+    verification_occurrence_id: str | None = None,
     **settings: Any,
 ) -> Iterator[dict[str, Any]]:
     allowed_scan_ids: set[str] = set()
@@ -395,6 +435,55 @@ def _indexed_active_findings(
             **settings,
         )
     }
+    coverage_by_scan_id: dict[str, tuple[sqlite3.Row, dict[str, Any] | None]] = {}
+
+    def superseded_for_verification(finding, representative):
+        if (
+            finding["scan_id"] == representative["scan_id"]
+            or finding["indexed_target_id"] != representative["indexed_target_id"]
+        ):
+            return False
+        scan_id = representative["scan_id"]
+        if scan_id not in coverage_by_scan_id:
+            scan = connection.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
+            coverage = None
+            if (
+                scan["status"] == "complete"
+                and scan["mode"] != "diff"
+                and scan["seal_manifest_digest"] is not None
+            ):
+                try:
+                    coverage = read_coverage(scan)
+                except SystemExit as error:
+                    cause: BaseException | None = error
+                    while cause is not None and not isinstance(cause, FileNotFoundError):
+                        cause = cause.__cause__
+                    message = str(error)
+                    if isinstance(cause, FileNotFoundError):
+                        pass
+                    elif message == (
+                        "Scan directory must be an existing canonical non-symlink directory."
+                    ):
+                        try:
+                            Path(scan["scan_dir"]).lstat()
+                        except FileNotFoundError:
+                            pass
+                        else:
+                            raise
+                    elif not (
+                        message.startswith("missing required contract artifact: ")
+                        or message.endswith(": expected a regular file inside the scan directory.")
+                    ):
+                        raise
+            coverage_by_scan_id[scan_id] = scan, coverage
+        scan, coverage = coverage_by_scan_id[scan_id]
+        return coverage is not None and scan_history.scan_covers_path(
+            {**dict(scan), "target_id": representative["indexed_target_id"]},
+            target_id=finding["indexed_target_id"],
+            path=finding["location_path"],
+            coverage=coverage,
+        )
+
     combined = []
     for row in indexed:
         matched_by_target: dict[str, list[dict[str, Any]]] = {}
@@ -422,7 +511,9 @@ def _indexed_active_findings(
             finding["occurrence_id"]
             for matched, representative in representatives
             for finding in matched
-            if finding["scan_id"] == representative["scan_id"]
+            # Retained history is still verified unless the newer alias covers its location.
+            if verification_occurrence_id not in row["occurrence_ids"]
+            or not superseded_for_verification(finding, representative)
         }
         for matched, representative in representatives:
             combined.append(

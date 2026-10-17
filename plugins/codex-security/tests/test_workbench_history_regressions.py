@@ -1857,6 +1857,121 @@ def test_current_semantic_alias_excludes_superseded_checkout_verification(tmp_pa
         assert result["returncode"] == 0, result["stderr"]
 
 
+@pytest.mark.parametrize("scope", ["scoped", "diff"])
+def test_newer_alias_keeps_verification_without_full_location_coverage(tmp_path, scope):
+    state, root, repository = tmp_path / "state", tmp_path / "scans", tmp_path / "repository"
+    initialize_git_repository(repository)
+    (repository / "src").mkdir()
+    (repository / "src/extract.py").write_text("vulnerable\n")
+    (repository / "src/other.py").write_text("Synthetic related finding.\n")
+    subprocess.run(["git", "-C", str(repository), "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", str(repository), "commit", "-qm", "Synthetic coverage fixture"], check=True
+    )
+    revision = subprocess.check_output(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"], text=True
+    ).strip()
+    first = create_cli_scan(
+        state, root, repository, identity_anchor="earlier-alias", target_revision=revision
+    )
+    first_id = run_workbench(state, "get-scan", "--scan-id", first["scanId"])["scan"]["findings"][
+        0
+    ]["occurrenceId"]
+    verified_patch(state, first, first_id, repository, revision)
+    (repository / "src/extract.py").write_text(
+        "changed vulnerable\n" if scope == "diff" else "vulnerable\n"
+    )
+    path = "src/extract.py" if scope == "diff" else "src/other.py"
+    second = create_cli_scan(
+        state,
+        root,
+        repository,
+        complete=False,
+        paths=None if scope == "diff" else [path],
+        target={"kind": "working_tree", "paths": [], "base": revision, "head": revision}
+        if scope == "diff"
+        else None,
+    )
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute("SELECT * FROM scans WHERE id = ?", (second["scanId"],)).fetchone()
+    directory = Path(second["scanDir"])
+    write_completed_contract(
+        directory,
+        second["scanId"],
+        repository,
+        identity_anchor="current-alias",
+        relative_path=path,
+        include_paths=None if scope == "diff" else [path],
+        target_kind="git_diff" if scope == "diff" else "git_revision",
+        target_revision=revision,
+        diff_base_revision=revision if scope == "diff" else None,
+        diff_head_revision=revision if scope == "diff" else None,
+        snapshot_digest=row["diff_content_digest"]
+        if scope == "diff"
+        else row["target_snapshot_digest"],
+        coverage_mode="working_tree" if scope == "diff" else "scoped_path",
+        inventory_strategy="diff" if scope == "diff" else "scoped_path",
+    )
+    subprocess.run([sys.executable, str(FINALIZER), "--scan-dir", str(directory)], check=True)
+    run_workbench(state, "complete-scan", "--scan-id", second["scanId"])
+    second_id = run_workbench(state, "get-scan", "--scan-id", second["scanId"])["scan"]["findings"][
+        0
+    ]["occurrenceId"]
+    save_scan_matches(state, first, second, confirmed_match(first_id, second_id))
+    result = run_workbench(
+        state,
+        "set-finding-triage",
+        "--occurrence-id",
+        second_id,
+        "--status",
+        "closed",
+        "--close-reason",
+        "already_fixed",
+        check=False,
+    )
+    assert result["returncode"] != 0 and "Working-tree contents changed" in result["stderr"]
+    assert (
+        run_workbench(state, "get-scan", "--scan-id", first["scanId"])["scan"]["findings"][0][
+            "status"
+        ]
+        == "open"
+    )
+
+
+@pytest.mark.parametrize("action", ["read", "reopen", "false_positive", "already_fixed"])
+def test_unverified_alias_actions_do_not_read_newer_coverage(history, action):
+    state, root, repository = history
+    scans = [
+        create_cli_scan(state, root, repository, identity_anchor=anchor)
+        for anchor in ["earlier-alias", "later-alias"]
+    ]
+    ids = [
+        run_workbench(state, "get-scan", "--scan-id", scan["scanId"])["scan"]["findings"][0][
+            "occurrenceId"
+        ]
+        for scan in scans
+    ]
+    save_scan_matches(state, *scans, confirmed_match(*ids))
+    manifest = Path(scans[1]["scanDir"]) / "scan-manifest.json"
+    manifest.write_text(manifest.read_text() + "\n")
+    if action != "read":
+        arguments = [
+            "set-finding-triage",
+            "--occurrence-id",
+            ids[0],
+            "--status",
+            "open" if action == "reopen" else "closed",
+            "--note",
+            "Synthetic saved decision.",
+        ]
+        if action != "reopen":
+            arguments.extend(["--close-reason", action])
+        run_workbench(state, *arguments)
+    findings = run_workbench(state, "get-scan", "--scan-id", scans[0]["scanId"])["scan"]["findings"]
+    assert findings[0]["status"] == ("open" if action in {"read", "reopen"} else "closed")
+
+
 @pytest.mark.parametrize("selection", ["inherited", "unmatched", "local"])
 def test_false_positive_feedback_projects_inherited_linked_decision(linked_history, selection):
     state, root, repository, linked, revision = linked_history

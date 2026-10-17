@@ -1976,6 +1976,7 @@ def set_finding_triage(connection: sqlite3.Connection, args: argparse.Namespace)
         indexed_finding = _indexed_scan_findings(connection, scan).get(occurrence["id"])
         triaged_occurrences = [occurrence]
         verification_ids = {occurrence["id"]}
+        verification_loaded = False
         if indexed_finding is not None:
             triaged_occurrences = connection.execute(
                 """
@@ -1987,11 +1988,6 @@ def set_finding_triage(connection: sqlite3.Connection, args: argparse.Namespace)
                 """,
                 (json.dumps(sorted(indexed_finding["occurrence_ids"])),),
             ).fetchall()
-            active_finding = _indexed_scan_findings(connection, scan, include_resolved=False).get(
-                occurrence["id"]
-            )
-            if active_finding is not None:
-                verification_ids.update(active_finding["active_occurrence_ids"])
         if args.status == "closed":
             for checked_occurrence in triaged_occurrences:
                 remediation = connection.execute(
@@ -2017,16 +2013,26 @@ def set_finding_triage(connection: sqlite3.Connection, args: argparse.Namespace)
                     )
                 if (
                     close_reason == "already_fixed"
-                    and checked_occurrence["id"] in verification_ids
                     and remediation is not None
                     and remediation["state"] == "verified"
                 ):
-                    scan = require_scan(connection, checked_occurrence["scan_id"])
-                    require_remediation_checkout_unchanged(
-                        scan,
-                        remediation,
-                        require_applied_content=True,
-                    )
+                    if checked_occurrence["id"] not in verification_ids and not verification_loaded:
+                        active_finding = _indexed_scan_findings(
+                            connection,
+                            scan,
+                            include_resolved=False,
+                            verification_occurrence_id=occurrence["id"],
+                        ).get(occurrence["id"])
+                        if active_finding is not None:
+                            verification_ids.update(active_finding["active_occurrence_ids"])
+                        verification_loaded = True
+                    if checked_occurrence["id"] in verification_ids:
+                        checked_scan = require_scan(connection, checked_occurrence["scan_id"])
+                        require_remediation_checkout_unchanged(
+                            checked_scan,
+                            remediation,
+                            require_applied_content=True,
+                        )
         scan_sequence = connection.execute("SELECT COALESCE(MAX(rowid), 0) FROM scans").fetchone()[
             0
         ]
@@ -2824,33 +2830,16 @@ def _indexed_scan_findings(
     *,
     through_scan: bool = False,
     include_resolved: bool = True,
+    verification_occurrence_id: str | None = None,
 ) -> dict[str, dict[str, Any]]:
-    if (
-        connection.execute(
-            "SELECT 1 FROM finding_occurrences WHERE scan_id = ? LIMIT 1", (scan["id"],)
-        ).fetchone()
-        is None
-    ):
-        return {}
-    scope = (
-        {"target_paths": {scan["target_path"]}}
-        if scan["target_id"] is None
-        else {"target_ids": scan_history.saved_repository_target_ids(connection, scan)}
+    return native_indexes.indexed_scan_findings(
+        connection,
+        scan,
+        read_coverage=coverage_for_comparison,
+        through_scan=through_scan,
+        include_resolved=include_resolved,
+        verification_occurrence_id=verification_occurrence_id,
     )
-    if through_scan:
-        scope["through_scan_sequence"] = connection.execute(
-            "SELECT rowid FROM scans WHERE id = ?", (scan["id"],)
-        ).fetchone()[0]
-    return {
-        occurrence_id: finding
-        for finding in native_indexes._indexed_active_findings(
-            connection,
-            coverage_for_comparison,
-            include_resolved=include_resolved,
-            **scope,
-        )
-        for occurrence_id in finding.get("occurrence_ids", ())
-    }
 
 
 def scan_finding_triage(
