@@ -318,7 +318,7 @@ def indexed_scan_findings(
     scan: sqlite3.Row,
     *,
     read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
-    through_scan: bool = False,
+    through_scan: sqlite3.Row | None = None,
     include_resolved: bool = True,
     verification_occurrence_id: str | None = None,
 ) -> dict[str, dict[str, Any]]:
@@ -334,9 +334,10 @@ def indexed_scan_findings(
         if scan["target_id"] is None
         else {"target_ids": scan_history.saved_repository_target_ids(connection, scan)}
     )
-    if through_scan:
+    if through_scan is not None:
+        # Keep the requested scan visible when a comparison runs in reverse order.
         scope["through_scan_sequence"] = connection.execute(
-            "SELECT rowid FROM scans WHERE id = ?", (scan["id"],)
+            "SELECT MAX(rowid) FROM scans WHERE id IN (?, ?)", (scan["id"], through_scan["id"])
         ).fetchone()[0]
     return {
         occurrence_id: finding
@@ -436,12 +437,36 @@ def _indexed_active_findings(
         )
     }
     coverage_by_scan_id: dict[str, tuple[sqlite3.Row, dict[str, Any] | None]] = {}
+    uncertain_occurrence_ids: set[str] | None = None
 
-    def superseded_for_verification(finding, representative):
+    def superseded_for_verification(finding, representative, finding_group):
+        nonlocal uncertain_occurrence_ids
         if (
             finding["scan_id"] == representative["scan_id"]
             or finding["indexed_target_id"] != representative["indexed_target_id"]
         ):
+            return False
+        if finding_group["decision_status"] == "open" and (
+            representative["scan_sequence"] <= finding_group["decision_scan_sequence"]
+            if finding_group["decision_scan_sequence"] is not None
+            else timestamp_key(representative["scan_started_at"])
+            <= timestamp_key(finding_group["decision_updated_at"])
+        ):
+            return False
+        if uncertain_occurrence_ids is None:
+            admitted = json.dumps(sorted(allowed_scan_ids))
+            uncertain_occurrence_ids = {
+                match[f"{side}OccurrenceId"]
+                for comparison in connection.execute(
+                    "SELECT result_json FROM scan_comparisons "
+                    "WHERE before_scan_id IN (SELECT value FROM json_each(?)) "
+                    "AND after_scan_id IN (SELECT value FROM json_each(?))",
+                    (admitted, admitted),
+                )
+                for match in json.loads(comparison["result_json"]).get("uncertain", [])
+                for side in ("before", "after")
+            }
+        if finding_group["occurrence_ids"] & uncertain_occurrence_ids:
             return False
         scan_id = representative["scan_id"]
         if scan_id not in coverage_by_scan_id:
@@ -522,7 +547,7 @@ def _indexed_active_findings(
             for finding in matched
             # Retained history is still verified unless the newer alias covers its location.
             if verification_occurrence_id not in row["occurrence_ids"]
-            or not superseded_for_verification(finding, representative)
+            or not superseded_for_verification(finding, representative, row)
         }
         for matched, representative in representatives:
             combined.append(

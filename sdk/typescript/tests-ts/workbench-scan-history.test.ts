@@ -93,7 +93,7 @@ from pathlib import Path
 sys.path.insert(0, sys.argv[1])
 import workbench_scan_history as history
 from filesystem_identity import serialize_filesystem_identity
-def fixture_triage(db, scan):
+def fixture_triage(db, scan, _through_scan):
     return {row["id"]: {"status": row["triage_status"], "closeReason": row["close_reason"]}
             for row in history._scan_findings(db, scan["id"]).values()}
 connection = sqlite3.connect(':memory:')
@@ -146,7 +146,7 @@ import argparse, json, os, sqlite3, sys, tempfile
 sys.path.insert(0, sys.argv[1])
 import workbench_scan_history as history
 from filesystem_identity import serialize_filesystem_identity
-def fixture_triage(db, scan):
+def fixture_triage(db, scan, _through_scan):
     return {row["id"]: {"status": row["triage_status"], "closeReason": row["close_reason"]}
             for row in history._scan_findings(db, scan["id"]).values()}
 connection = sqlite3.connect(':memory:')
@@ -463,7 +463,7 @@ import argparse, json, os, sqlite3, sys, tempfile
 sys.path.insert(0, sys.argv[1])
 import workbench_scan_history as history
 from filesystem_identity import serialize_filesystem_identity
-def fixture_triage(db, scan):
+def fixture_triage(db, scan, _through_scan):
     return {row["id"]: {"status": row["triage_status"], "closeReason": row["close_reason"]}
             for row in history._scan_findings(db, scan["id"]).values()}
 connection = sqlite3.connect(':memory:')
@@ -1065,7 +1065,7 @@ test("loads oversized comparison matches from stdin", async () => {
     "history.compare_scans = lambda *_args, **_kwargs: {'saved': True}",
     "payload = sys.stdin.read()",
     "sys.stdin = io.StringIO(payload)",
-    "result = history.save_scan_comparison(connection, argparse.Namespace(before_scan_id='before', after_scan_id='after', matches_json=None, matches_json_stdin=True), now=lambda: 'now', require_scan=lambda _connection, scan_id: scans[scan_id], read_coverage=lambda _scan: {}, finding_triage=lambda _connection, _scan: {})",
+    "result = history.save_scan_comparison(connection, argparse.Namespace(before_scan_id='before', after_scan_id='after', matches_json=None, matches_json_stdin=True), now=lambda: 'now', require_scan=lambda _connection, scan_id: scans[scan_id], read_coverage=lambda _scan: {}, finding_triage=lambda _connection, _scan, _through_scan: {})",
     "print(json.dumps(result))",
   ].join("\n");
   const payload = JSON.stringify({

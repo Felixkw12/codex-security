@@ -2828,7 +2828,7 @@ def _indexed_scan_findings(
     connection: sqlite3.Connection,
     scan: sqlite3.Row,
     *,
-    through_scan: bool = False,
+    through_scan: sqlite3.Row | None = None,
     include_resolved: bool = True,
     verification_occurrence_id: str | None = None,
 ) -> dict[str, dict[str, Any]]:
@@ -2843,7 +2843,7 @@ def _indexed_scan_findings(
 
 
 def scan_finding_triage(
-    connection: sqlite3.Connection, scan: sqlite3.Row, *, through_scan: bool = False
+    connection: sqlite3.Connection, scan: sqlite3.Row, *, through_scan: sqlite3.Row | None = None
 ) -> dict[str, dict[str, Any]]:
     return finding_results.scan_finding_triage(
         connection, scan, _indexed_scan_findings(connection, scan, through_scan=through_scan)
@@ -3506,8 +3506,8 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
                 args,
                 require_scan=require_scan,
                 read_coverage=coverage_for_comparison,
-                finding_triage=lambda connection, scan: scan_finding_triage(
-                    connection, scan, through_scan=True
+                finding_triage=lambda connection, scan, through_scan: scan_finding_triage(
+                    connection, scan, through_scan=through_scan
                 ),
                 backfill_finding_details=backfill_legacy_finding_details,
                 include_matching_inputs=args.include_matching_inputs,
@@ -3520,8 +3520,8 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
                 now=now,
                 require_scan=require_scan,
                 read_coverage=coverage_for_comparison,
-                finding_triage=lambda connection, scan: scan_finding_triage(
-                    connection, scan, through_scan=True
+                finding_triage=lambda connection, scan, through_scan: scan_finding_triage(
+                    connection, scan, through_scan=through_scan
                 ),
             )
         elif args.command == "list-global-findings":

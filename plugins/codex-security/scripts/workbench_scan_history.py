@@ -1177,7 +1177,9 @@ def compare_scans(
     *,
     require_scan: Callable[[sqlite3.Connection, str], sqlite3.Row],
     read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
-    finding_triage: Callable[[sqlite3.Connection, sqlite3.Row], dict[str, dict[str, Any]]],
+    finding_triage: Callable[
+        [sqlite3.Connection, sqlite3.Row, sqlite3.Row], dict[str, dict[str, Any]]
+    ],
     backfill_finding_details: Callable[[sqlite3.Connection, sqlite3.Row], None] | None = None,
     include_matching_inputs: bool = False,
     require_matches: bool = False,
@@ -1213,8 +1215,9 @@ def compare_scans(
     after_coverage = read_coverage(after)
     before_findings = _scan_findings(connection, before["id"])
     after_findings = _scan_findings(connection, after["id"])
-    previous_triage = finding_triage(connection, before) if before_findings else {}
-    current_triage = finding_triage(connection, after) if after_findings else {}
+    previous_triage = finding_triage(connection, before, before) if before_findings else {}
+    current_triage = finding_triage(connection, after, after) if after_findings else {}
+    absent_triage = None
     matches = json.loads(cached["result_json"]) if cached is not None else None
     saved_matches = matches["matches"] if matches is not None else []
     occurrences = {
@@ -1298,15 +1301,20 @@ def compare_scans(
         ):
             status = "unknown"
             item["reason"] = "The affected path was excluded or outside the later scope."
-        elif all(
-            previous_triage[row["id"]]["status"] == "closed"
-            and previous_triage[row["id"]].get("closeReason") == "already_fixed"
-            for row in previous_rows
-        ):
-            status = "resolved"
         else:
-            status = "not_observed"
-            item["reason"] = "Not observed in the later scan; remediation has not been verified."
+            if absent_triage is None:
+                absent_triage = finding_triage(connection, before, after)
+            if all(
+                absent_triage[row["id"]]["status"] == "closed"
+                and absent_triage[row["id"]].get("closeReason") == "already_fixed"
+                for row in previous_rows
+            ):
+                status = "resolved"
+            else:
+                status = "not_observed"
+                item["reason"] = (
+                    "Not observed in the later scan; remediation has not been verified."
+                )
         if len(previous_rows) == 1:
             item["beforeOccurrenceId"] = previous["id"]
         elif previous_rows:
@@ -1377,7 +1385,9 @@ def save_scan_comparison(
     now: Callable[[], str],
     require_scan: Callable[[sqlite3.Connection, str], sqlite3.Row],
     read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
-    finding_triage: Callable[[sqlite3.Connection, sqlite3.Row], dict[str, dict[str, Any]]],
+    finding_triage: Callable[
+        [sqlite3.Connection, sqlite3.Row, sqlite3.Row], dict[str, dict[str, Any]]
+    ],
 ) -> dict[str, Any]:
     before = require_scan(connection, args.before_scan_id)
     after = require_scan(connection, args.after_scan_id)

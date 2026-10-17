@@ -1260,7 +1260,7 @@ def test_empty_comparison_does_not_rebuild_aggregate_triage(tmp_path):
     ns = runpy.run_path(str(SCRIPT), run_name="empty_history_read_fixture")
     calls = []
 
-    def triage(connection, scan):
+    def triage(connection, scan, through_scan):
         calls.append(scan["id"])
         return {}
 
@@ -1867,6 +1867,11 @@ def test_current_semantic_alias_excludes_superseded_checkout_verification(tmp_pa
         "legacy_partial",
         "legacy_unknown",
         "legacy_complete",
+        "reopened",
+        "reopened_legacy",
+        "uncertain",
+        "unrelated_uncertainty",
+        "reviewed_after_reopen",
     ],
 )
 def test_newer_alias_verification_uses_location_and_review_coverage(tmp_path, scope):
@@ -1892,6 +1897,8 @@ def test_newer_alias_verification_uses_location_and_review_coverage(tmp_path, sc
     (repository / "src/extract.py").write_text(
         "changed vulnerable\n" if scope == "diff" else "vulnerable\n"
     )
+    if scope == "reviewed_after_reopen":
+        run_workbench(state, "set-finding-triage", "--occurrence-id", first_id, "--status", "open")
     path = "src/other.py" if scope == "scoped" else "src/extract.py"
     second = create_cli_scan(
         state,
@@ -1971,6 +1978,43 @@ def test_newer_alias_verification_uses_location_and_review_coverage(tmp_path, sc
         0
     ]["occurrenceId"]
     save_scan_matches(state, first, second, confirmed_match(first_id, second_id))
+    if scope in {"reopened", "reopened_legacy"}:
+        run_workbench(state, "set-finding-triage", "--occurrence-id", second_id, "--status", "open")
+        if scope == "reopened_legacy":
+            with sqlite3.connect(state / "workbench.sqlite3") as connection:
+                connection.execute("DELETE FROM finding_decisions")
+    elif scope in {"uncertain", "unrelated_uncertainty"}:
+        third = create_cli_scan(
+            state, root, repository, identity_anchor="uncertain-alias", target_revision=revision
+        )
+        third_id = run_workbench(state, "get-scan", "--scan-id", third["scanId"])["scan"][
+            "findings"
+        ][0]["occurrenceId"]
+        uncertain_before, uncertain_before_id = first, first_id
+        if scope == "unrelated_uncertainty":
+            uncertain_before, uncertain_before_id = third, third_id
+            third = create_cli_scan(
+                state,
+                root,
+                repository,
+                identity_anchor="other-uncertain-alias",
+                target_revision=revision,
+            )
+            third_id = run_workbench(state, "get-scan", "--scan-id", third["scanId"])["scan"][
+                "findings"
+            ][0]["occurrenceId"]
+        save_scan_matches(
+            state,
+            uncertain_before,
+            third,
+            uncertain=(
+                {
+                    "beforeOccurrenceId": uncertain_before_id,
+                    "afterOccurrenceId": third_id,
+                    "reason": "Synthetic uncertain recurrence.",
+                },
+            ),
+        )
     result = run_workbench(
         state,
         "set-finding-triage",
@@ -1982,13 +2026,14 @@ def test_newer_alias_verification_uses_location_and_review_coverage(tmp_path, sc
         "already_fixed",
         check=False,
     )
-    if scope == "legacy_complete":
+    superseded = scope in {"legacy_complete", "unrelated_uncertainty", "reviewed_after_reopen"}
+    if superseded:
         assert result["returncode"] == 0, result["stderr"]
     else:
         assert result["returncode"] != 0 and "Working-tree contents changed" in result["stderr"]
     assert run_workbench(state, "get-scan", "--scan-id", first["scanId"])["scan"]["findings"][0][
         "status"
-    ] == ("closed" if scope == "legacy_complete" else "open")
+    ] == ("closed" if superseded else "open")
 
 
 @pytest.mark.parametrize("action", ["read", "reopen", "false_positive", "already_fixed"])
@@ -2139,11 +2184,19 @@ def test_scope_expansion_skips_same_target_pairs_but_keeps_linked_comparisons(
         assert same.call_count == (1 if linked else 0)
 
 
-def test_comparison_uses_inherited_fixed_decision_in_linked_checkout(linked_history):
+@pytest.mark.parametrize("order", ["earlier", "intervening", "later", "reverse"])
+def test_comparison_uses_inherited_fixed_decision_in_linked_checkout(linked_history, order):
     state, root, repository, linked, revision = linked_history
+    after = (
+        create_cli_scan(state, root, linked, finding=False, target_revision=revision)
+        if order == "reverse"
+        else None
+    )
     before = create_cli_scan(
         state, root, repository, identity_anchor="original-alias", target_revision=revision
     )
+    if order == "later":
+        after = create_cli_scan(state, root, repository, finding=False, target_revision=revision)
     related = create_cli_scan(
         state, root, linked, identity_anchor="linked-alias", target_revision=revision
     )
@@ -2157,21 +2210,23 @@ def test_comparison_uses_inherited_fixed_decision_in_linked_checkout(linked_hist
         state,
         "set-finding-triage",
         "--occurrence-id",
-        occurrences[0],
+        occurrences[0 if order in {"earlier", "reverse"} else 1],
         "--status",
         "closed",
         "--close-reason",
         "already_fixed",
     )
     save_scan_matches(state, before, related, confirmed_match(*occurrences))
-    inherited = run_workbench(state, "get-scan", "--scan-id", related["scanId"])["scan"][
+    inherited_scan = related if order in {"earlier", "reverse"} else before
+    inherited = run_workbench(state, "get-scan", "--scan-id", inherited_scan["scanId"])["scan"][
         "findings"
     ][0]
     assert inherited["status"] == "closed"
-    after = create_cli_scan(state, root, linked, finding=False, target_revision=revision)
-    comparison = compare_scan_pair(state, related, after)
-    assert comparison["summary"]["resolved"] == 1
-    assert comparison["summary"]["not_observed"] == 0
+    if after is None:
+        after = create_cli_scan(state, root, linked, finding=False, target_revision=revision)
+    comparison = compare_scan_pair(state, inherited_scan, after)
+    assert comparison["summary"]["resolved"] == int(order != "later")
+    assert comparison["summary"]["not_observed"] == int(order == "later")
 
 
 @pytest.mark.parametrize("reason", ["false_positive", "already_fixed"])
