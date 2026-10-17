@@ -1142,7 +1142,6 @@ def test_accepted_head_survives_superseded_terminal_timestamps(
         scan_id,
         complete=complete,
         findings=findings,
-        completeness="complete" if complete else "partial",
     )
     checkpoints = tmp_path / "checkpoints"
     raw = write_checkpoint(

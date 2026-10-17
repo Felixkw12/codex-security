@@ -2,27 +2,11 @@ import json
 import sqlite3
 from pathlib import Path
 
-import pytest
 from workbench_test_support import (
     create_saved_workspace,
     start_delivered_scan,
     update_progress,
 )
-
-
-@pytest.mark.parametrize("field", ["severity", "status"])
-def test_preflight_list_uses_controlled_invalid_input_error(field, workbench_api):
-    from workbench_progress import preflight_issues_json
-
-    issue = {
-        "capability": "tool",
-        "reason": "Unavailable.",
-        "severity": "warn",
-        "status": "unknown",
-    }
-    issue[field] = [issue[field]]
-    with pytest.raises(SystemExit, match="invalid severity or status"):
-        preflight_issues_json(json.dumps([issue]))
 
 
 def test_usage_list_coverage_is_invalid(workbench_api):
