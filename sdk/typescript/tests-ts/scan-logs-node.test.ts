@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
@@ -16,17 +16,24 @@ afterEach(cleanup);
 
 let moduleSource: string;
 beforeAll(async () => {
-  const { stdout } = await promisify(execFile)(
-    process.execPath,
-    [
-      "build",
-      fileURLToPath(new URL("../src/scan-logs.ts", import.meta.url)),
-      "--target=node",
-      "--format=esm",
-    ],
-    { encoding: "utf8" },
-  );
-  moduleSource = stdout;
+  const module = join(await temporaryDirectory(), "scan-logs.mjs");
+  try {
+    await promisify(execFile)(
+      process.execPath,
+      [
+        "build",
+        fileURLToPath(new URL("../src/scan-logs.ts", import.meta.url)),
+        "--target=node",
+        "--format=esm",
+        "--outfile",
+        module,
+      ],
+      { encoding: "utf8" },
+    );
+    moduleSource = await readFile(module, "utf8");
+  } finally {
+    await cleanup();
+  }
 });
 
 test.each(["native", "without zstd"])(
