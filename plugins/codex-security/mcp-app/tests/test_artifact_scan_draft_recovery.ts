@@ -182,11 +182,12 @@ root,scan_id,status=Path(sys.argv[2]),sys.argv[3],sys.argv[4]
 manifest=json.loads((root/'scan-manifest.json').read_text())
 coverage=json.loads((root/'coverage.json').read_text())
 binding={'status':status,'allowedTargetKinds':[manifest['scan']['target']['kind']],'target':manifest['scan']['target'],'scope':manifest['scan']['scope'],'coverageMode':coverage['mode']}
+binding.update(scanId=scan_id,producer={'name':'codex-security-plugin','version':'0.1.0'},startedAt='2026-05-31T18:00:00Z',completedAt='2026-05-31T18:09:00Z')
 warnings=[]
 documents=merge_saved_results(root,scan_id,binding,[],warnings,stopped=True,reason='Synthetic interruption')
 documents[0]['scan'].update(id=scan_id,producer={'name':'codex-security-plugin','version':'0.1.0'},status=status,startedAt='2026-05-31T18:00:00Z',completedAt='2026-05-31T18:09:00Z')
 for document in documents[1:]: document['scanId']=scan_id
-prepared=_prepare_scan_finalization(root,draft_documents=documents)
+prepared=_prepare_scan_finalization(root,completion_binding=binding,recover_unsealed=True,draft_documents=documents)
 warnings.extend(prepared.warnings)
 published=_write_prepared_scan_finalization(prepared)
 print(json.dumps({'count':len(published[1]['findings']),'sealed':bool(published[0]['scan'].get('sealedAt')),'warnings':warnings,'assessments':sorted([row['title'],row['severity']['level']] for row in published[1]['findings'])}))`,
@@ -395,7 +396,7 @@ for (const source of ["title", "candidateId", "reportId", "ledgerRowId"]) {
       const finding = {
         ...findingFor("candidate-example"),
         ...(source === "title"
-          ? { title: value }
+          ? { title: value, provenance: { source: "local_plugin" } }
           : { extensions: { [source]: value } }),
       };
       const draft = { ...f.draft(), findings: [finding] };
