@@ -62,6 +62,7 @@ can_load_native() {
   # Capture output without opening a writable file for read-only callers.
   _native_probe_output=$("$1" -e '
     if (process.platform === "darwin") {
+      require("node:sqlite");
       require(require("node:path").join(process.argv[1], "native",
         `${process.platform}-${process.arch}`, "unix.node"));
     }
