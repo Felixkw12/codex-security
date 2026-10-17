@@ -66,7 +66,7 @@ test("minute settings keep Standard advisory and preserve Deep limits and aliase
 });
 
 test.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY])(
-  "rejects invalid minute setting %s in both modes",
+  "rejects invalid minute setting %d in both modes",
   (maxTimeMinutes) => {
     for (const mode of ["standard", "deep"] as const) {
       expect(() => deepScanOptions({ mode, maxTimeMinutes })).toThrow(
