@@ -26,17 +26,6 @@ export async function testDeepScanContextSnapshots({
   parentSandbox: DeepWorkerParentSandbox;
 }) {
   const pluginRoot = fileURLToPath(new URL("../../", import.meta.url));
-  const configSource = new URL(
-    "../../../../sdk/typescript/src/deep-config.ts",
-    import.meta.url,
-  );
-  const { resolveDeepScanConfig, writeDeepScanConfig } = await importModule({
-    entryPoints: [fileURLToPath(configSource)],
-    define: { "import.meta.url": JSON.stringify(configSource.href) },
-    banner: {
-      js: `import { createRequire } from "node:module"; const require = createRequire(${JSON.stringify(configSource.href)});`,
-    },
-  });
   const {
     WorkbenchDeepScanStore,
     DeepScanWorkerRunner,
@@ -80,16 +69,11 @@ export async function testDeepScanContextSnapshots({
     await Promise.all(
       ["Review authentication only.", undefined].map(
         async (userContext, index) => {
-          const ambientConfig = path.join(
-            fixture.root,
-            `ambient-${index}.toml`,
-          );
           const deepConfig = path.join(fixture.root, `deep-${index}.toml`);
-          const maxTimeMinutes = 90 + 60 * index;
-          await writeFile(ambientConfig, "[deep_scan]\nmax_time_hours = 96\n");
-          await writeDeepScanConfig(
+          const maxTimeHours = 1.5 + index;
+          await writeFile(
             deepConfig,
-            await resolveDeepScanConfig({ maxTimeMinutes }, ambientConfig),
+            `[deep_scan]\nmax_time_hours = ${maxTimeHours}\n`,
           );
           const command = async (args: string[], input?: string) => {
             const result = spawnSync(
@@ -118,7 +102,7 @@ export async function testDeepScanContextSnapshots({
           });
           const createdAt = run.createdAt;
           assert.ok(createdAt);
-          assert.equal(run.config.maxTimeHours, maxTimeMinutes / 60);
+          assert.equal(run.config.maxTimeHours, maxTimeHours);
           const invocations: {
             kind: DeepScanWorkerKind;
             invocation: { argv: string[]; stdin: string; deepConfig: string };
@@ -194,7 +178,7 @@ export async function testDeepScanContextSnapshots({
             threadId,
             scanRoot: path.join(fixture.root, "scans"),
           });
-          assert.equal(run.config.maxTimeHours, maxTimeMinutes / 60);
+          assert.equal(run.config.maxTimeHours, maxTimeHours);
           assert.equal(run.createdAt, createdAt);
           const second = await runner().runDiscoveryWorker(
             randomUUID(),
@@ -224,7 +208,7 @@ export async function testDeepScanContextSnapshots({
               assert.equal(
                 (parseToml(invocation.deepConfig).deep_scan as TomlTable)
                   .max_time_hours,
-                maxTimeMinutes / 60,
+                maxTimeHours,
               );
             }
             const context = JSON.parse(
@@ -253,7 +237,7 @@ export async function testDeepScanContextSnapshots({
             threadId,
             scanRoot: path.join(fixture.root, "scans"),
           });
-          assert.equal(restarted.config.maxTimeHours, maxTimeMinutes / 60);
+          assert.equal(restarted.config.maxTimeHours, maxTimeHours);
           assert.equal(restarted.createdAt, createdAt);
           const current = await command(["get-scan", "--scan-id", run.scanId]);
           assert.equal(current.scan.userContext, editedContext);
