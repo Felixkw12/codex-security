@@ -130,6 +130,7 @@ try {
     CodexSdkWorkerExecutor,
     fakeCodexFixture,
     parentSandbox: trustedParentSandbox,
+    resolveCodexPath,
   });
   if (process.platform !== "win32") {
     await testDeepScanContextSnapshots({

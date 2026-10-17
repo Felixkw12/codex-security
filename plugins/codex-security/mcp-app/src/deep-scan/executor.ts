@@ -163,7 +163,11 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       const executable = await (this.codexExecutable ??= bindCodexExecutable(
         childEnv,
         originalCwd,
-      ));
+      ).catch((error) => {
+        // A failed first lookup has not pinned an executable yet; allow startup retries.
+        this.codexExecutable = undefined;
+        throw error;
+      }));
       await verifyBoundCodexExecutable(executable);
       const { useOpenAiApiKey } =
         await preflightDeepScanWorkerPermissionProfile({
@@ -535,16 +539,7 @@ async function bindCodexExecutable(
     process.arch,
     originalCwd,
   );
-  try {
-    return { path, identity: await codexExecutableIdentity(path) };
-  } catch (error) {
-    throw new DeepScanNonRetryableError(
-      "Deep Scan cannot start a worker because the selected Codex executable " +
-        `"${path}" is not an available file. ` +
-        "Check CODEX_CLI_PATH/PATH, then retry.",
-      { cause: error },
-    );
-  }
+  return { path, identity: await codexExecutableIdentity(path) };
 }
 
 async function verifyBoundCodexExecutable(
@@ -763,7 +758,21 @@ export function resolveCodexPath(
           : resolveFromSearchPath(searchPath, executableName, originalCwd);
       if (fromSearchPath) return fromSearchPath;
     }
-    return absoluteCodexPath(configured, platform, originalCwd);
+    const configuredPath = absoluteCodexPath(configured, platform, originalCwd);
+    if (platform === "win32") {
+      // Match Node's spawn lookup before binding the actual file's identity.
+      const suffixBase = configuredPath.endsWith(".")
+        ? configuredPath
+        : `${configuredPath}.`;
+      const hasExtension = /\.[^.]+$/u.test(win32.basename(configuredPath));
+      const candidates = [
+        ...(hasExtension ? [configuredPath] : []),
+        `${suffixBase}com`,
+        `${suffixBase}exe`,
+      ];
+      return candidates.find(isExecutableFile) ?? configuredPath;
+    }
+    return configuredPath;
   }
 
   if (platform !== "win32") {
