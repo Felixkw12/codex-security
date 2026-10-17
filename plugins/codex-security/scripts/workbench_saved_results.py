@@ -2500,7 +2500,7 @@ def preserve_deep_deadline_draft(
             completion_binding=binding,
             recover_unsealed=True,
             draft_documents=documents,
-            finding_scope=db.requested_scan_paths(scan),
+            finding_scope=db.requested_finding_scope(scan),
         )
         warnings.extend(prepared.warnings)
         manifest, findings, coverage = prepared.manifest, prepared.findings, prepared.coverage
