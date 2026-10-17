@@ -57,10 +57,10 @@ describe("deep scan completion summary", () => {
       "time limit",
       {
         dispatchedCount: 3,
-        config: { maxDiscoveryRuns: 40, maxTimeHours: 0.5 },
+        config: { maxDiscoveryRuns: 40, maxTimeHours: 0.119 / 60 },
       },
-      "30-minute time limit",
-      "--max-time greater than 30",
+      "0.119-minute time limit",
+      "--max-time greater than 0.119",
     ],
     [
       "maximum time limit",

@@ -9387,7 +9387,9 @@ async function readDeepScanStop(
   const elapsedHours =
     (Date.parse(state.completedAt) - Date.parse(state.createdAt)) / 3_600_000;
   if (elapsedHours >= maxTimeHours) {
-    const maxTimeMinutes = maxTimeHours * 60;
+    let maxTimeMinutes = maxTimeHours * 60;
+    const roundedMinutes = Number(maxTimeMinutes.toPrecision(15));
+    if (roundedMinutes / 60 === maxTimeHours) maxTimeMinutes = roundedMinutes;
     return {
       reason: `Reached the ${maxTimeMinutes}-minute time limit. More issues may remain.`,
       nextStep:
