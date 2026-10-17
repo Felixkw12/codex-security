@@ -98,6 +98,13 @@ async function bundledWorkerExecutor(
   const diagnostic = extract(/function workerDiagnosticItem\([\s\S]*?\n\}/u);
   const abort = extract(/function abortError\([\s\S]*?\n\}/u);
   const record = extract(/function asRecord\([\s\S]*?\n\}/u);
+  const workerErrors = [
+    extract(
+      /var DeepScanNonRetryableError = class extends Error \{[\s\S]*?\n\};/u,
+    ),
+    extract(/var USAGE_LIMIT_MESSAGES = [\s\S]*?\n\]\);/u),
+    extract(/function codexWorkerTurnError\([\s\S]*?\n\}/u),
+  ].join("\n");
   const fileSystemImport = /\b(import_node_fs\d*)\.promises\.readFile\(/u.exec(
     source,
   )?.[1];
@@ -137,7 +144,7 @@ async function bundledWorkerExecutor(
     "appendItemDiagnostic",
     "classifyCodexWorkerError",
     "isRecord",
-    `${record}\n${abort}\n${diagnostic}\n${transport}\n${source}\nreturn CodexSdkWorkerExecutor;`,
+    `${workerErrors}\n${record}\n${abort}\n${diagnostic}\n${transport}\n${source}\nreturn CodexSdkWorkerExecutor;`,
   )(
     { promises: { readFile: async () => "fixture worker prompt" } },
     {

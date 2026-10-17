@@ -9172,11 +9172,12 @@ test.each([
       "--thread-id",
       "scan-thread",
     ]);
+    expect(commands[3]).toEqual(["get-scan", "--scan-id", "scan_example_001"]);
     if (userCanceled) {
-      expect(commands[3]?.[0]).toBe("fail-scan");
-      expect(commands[3]).toContain(JSON.stringify(cost));
+      expect(commands[4]?.[0]).toBe("fail-scan");
+      expect(commands[4]).toContain(JSON.stringify(cost));
     } else {
-      expect(commands[3]).toEqual([
+      expect(commands[4]).toEqual([
         "fail-scan",
         "--scan-id",
         "scan_example_001",
@@ -9838,6 +9839,7 @@ test("fails a budgeted scan when only unfinished root usage is available", async
     "register-cli-scan",
     "get-scan-feedback",
     "set-scan-thread",
+    "get-scan",
     "fail-scan",
   ]);
   expect(commands.some((args) => args[0] === "complete-scan")).toBe(false);
