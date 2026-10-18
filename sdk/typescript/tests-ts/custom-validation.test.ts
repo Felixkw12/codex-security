@@ -852,9 +852,8 @@ describe("custom validation", () => {
     ).rejects.toThrow("incompatible");
   });
 
-  test.each([false, true])(
-    "the bundled Codex honors the invocation-only completion restriction with inline profile: %s",
-    async (profiled) => {
+  for (const profiled of [false, true]) {
+    test(`the bundled Codex honors the invocation-only completion restriction with inline profile: ${profiled}`, async () => {
       const home = await temporaryDirectory();
       const marketplace = await createMarketplace(home, PLUGIN_ROOT);
       const command = resolveCodexCommand({}).command;
@@ -906,8 +905,8 @@ describe("custom validation", () => {
         run(["mcp", "get", "codex-security", "--json"]),
       );
       expect(ordinary.disabled_tools).toBeNull();
-    },
-  );
+    });
+  }
 });
 
 const unexpectedValidation = rejecting("unexpected validation");
