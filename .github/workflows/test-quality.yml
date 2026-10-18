@@ -17,7 +17,7 @@ env:
 
 jobs:
   runner:
-    name: windows-latest / optional cache transition diagnostic
+    name: windows-latest / native write carveout comparison
     runs-on: windows-latest
     timeout-minutes: 240
     env:
@@ -25,6 +25,17 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
+      - name: Check out the released native source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        env:
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: "false"
+        with:
+          repository: openai/codex
+          ref: 83086188ae0614bd882818ff1aa23f3194962012
+          path: .native-write-carveout-source
           persist-credentials: false
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -59,7 +70,9 @@ jobs:
         id: windows-temp
         shell: pwsh
         run: ./sdk/typescript/scripts/prepare-windows-test-root.ps1
-      - name: Test optional cache permission transition
+      - name: Install the released native toolchain
+        run: rustup toolchain install 1.95.0 --profile minimal --target x86_64-pc-windows-msvc
+      - name: Compare original and candidate native write carveouts
         env:
           CODEX_SECURITY_TEST_TIMEOUT_MS: "120000"
           TEMP: ${{ steps.windows-temp.outputs.path || runner.temp }}
@@ -68,13 +81,13 @@ jobs:
         run: |
           pnpm --dir sdk/typescript run build:plugin
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node --experimental-strip-types sdk/typescript/scripts/run-ci-tests.mts 5/7 --seed=1 --test-name-pattern '^optional cache keeps model protection and inherited snapshot access:' --reporter-outfile=reports/runner-windows-cache-transition.xml
+          python .github/scripts/compare_windows_write_carveout.py
       - name: Upload runner report
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: runner-windows-cache-transition
+          name: runner-windows-write-carveout
           overwrite: true
-          path: sdk/typescript/reports/runner-windows-cache-transition.xml
+          path: sdk/typescript/reports/windows-write-carveout
           if-no-files-found: error
           retention-days: 14

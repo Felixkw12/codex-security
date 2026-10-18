@@ -1,0 +1,264 @@
+--- a/codex-rs/windows-sandbox-rs/src/acl_tests.rs
++++ b/codex-rs/windows-sandbox-rs/src/acl_tests.rs
+@@ -9,6 +9,7 @@
+ use std::ffi::c_void;
+ use std::fs::OpenOptions;
+ use std::os::windows::fs::OpenOptionsExt;
++use std::os::windows::io::AsRawHandle;
+ use std::path::Path;
+ use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
+ use windows_sys::Win32::Foundation::HLOCAL;
+@@ -195,3 +196,253 @@
+     });
+     assert_eq!(acl_snapshot(&child), before);
+ }
++
++#[test]
++fn write_carveout_adds_an_explicit_deny_in_either_ancestor_order() {
++    for ancestor_first in [true, false] {
++        let root = tempfile::tempdir().expect("temporary root");
++        let cache = root.path().join("cache");
++        let hook = cache.join("hook");
++        std::fs::create_dir(&cache).expect("cache directory");
++        std::fs::write(&hook, b"original").expect("hook file");
++        let sid = LocalSid::from_string("S-1-5-21-10-20-30-40").expect("test SID");
++
++        unsafe {
++            super::ensure_allow_write_aces(&cache, &[sid.as_ptr()]).expect("writable cache");
++            if ancestor_first {
++                assert!(
++                    super::add_deny_write_ace(root.path(), sid.as_ptr())
++                        .expect("read-only ancestor")
++                );
++            }
++            assert!(
++                super::add_deny_write_ace(&hook, sid.as_ptr()).expect("explicit hook carveout"),
++                "requested hook carveout must add an explicit deny"
++            );
++            if !ancestor_first {
++                assert!(
++                    super::add_deny_write_ace(root.path(), sid.as_ptr())
++                        .expect("read-only ancestor")
++                );
++            }
++            let protected = acl_snapshot(&hook);
++            assert!(
++                !super::add_deny_write_ace(&hook, sid.as_ptr())
++                    .expect("existing explicit hook carveout")
++            );
++            assert_eq!(acl_snapshot(&hook), protected);
++        }
++    }
++}
++
++struct LocalAclAllocation(*mut c_void);
++
++impl Drop for LocalAclAllocation {
++    fn drop(&mut self) {
++        if !self.0.is_null() {
++            unsafe { LocalFree(self.0 as HLOCAL) };
++        }
++    }
++}
++
++struct RestoreDacl {
++    handle: std::fs::File,
++    _descriptor: LocalAclAllocation,
++    dacl: *mut super::ACL,
++    protection: u32,
++}
++
++impl Drop for RestoreDacl {
++    fn drop(&mut self) {
++        // This handle retained WRITE_DAC before OWNER RIGHTS blocked fresh opens.
++        let code = unsafe {
++            super::SetSecurityInfo(
++                self.handle.as_raw_handle() as _,
++                1, // SE_FILE_OBJECT
++                DACL_SECURITY_INFORMATION | self.protection,
++                std::ptr::null_mut(),
++                std::ptr::null_mut(),
++                self.dacl,
++                std::ptr::null_mut(),
++            )
++        };
++        if code != super::ERROR_SUCCESS {
++            if std::thread::panicking() {
++                eprintln!("restoring temporary target DACL failed: {code}");
++            } else {
++                panic!("restoring temporary target DACL failed: {code}");
++            }
++        }
++    }
++}
++
++fn with_read_control_only(path: &Path, check: impl FnOnce(std::io::Error)) {
++    let handle = OpenOptions::new()
++        .access_mode(READ_CONTROL | super::WRITE_DAC)
++        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
++        .open(path)
++        .expect("retain original DACL update handle");
++    let mut descriptor = LocalAclAllocation(std::ptr::null_mut());
++    let mut dacl = std::ptr::null_mut();
++    assert_eq!(
++        unsafe {
++            super::GetSecurityInfo(
++                handle.as_raw_handle() as _,
++                1,
++                DACL_SECURITY_INFORMATION,
++                std::ptr::null_mut(),
++                std::ptr::null_mut(),
++                &mut dacl,
++                std::ptr::null_mut(),
++                &mut descriptor.0,
++            )
++        },
++        super::ERROR_SUCCESS
++    );
++    let mut control = 0;
++    let mut revision = 0;
++    assert_ne!(
++        unsafe { GetSecurityDescriptorControl(descriptor.0, &mut control, &mut revision) },
++        0
++    );
++    let restore = RestoreDacl {
++        handle,
++        _descriptor: descriptor,
++        dacl,
++        protection: if control & SE_DACL_PROTECTED != 0 {
++            windows_sys::Win32::Security::PROTECTED_DACL_SECURITY_INFORMATION
++        } else {
++            UNPROTECTED_DACL_SECURITY_INFORMATION
++        },
++    };
++    let owner = LocalSid::from_string("S-1-3-4").expect("OWNER RIGHTS SID");
++    let entries = [
++        (super::DENY_ACCESS, super::WRITE_DAC),
++        (super::GRANT_ACCESS, READ_CONTROL),
++    ]
++    .map(|(mode, mask)| super::EXPLICIT_ACCESS_W {
++        grfAccessPermissions: mask,
++        grfAccessMode: mode,
++        grfInheritance: 0, // OWNER RIGHTS restrictions apply only to this target.
++        Trustee: super::TRUSTEE_W {
++            pMultipleTrustee: std::ptr::null_mut(),
++            MultipleTrusteeOperation: 0,
++            TrusteeForm: super::TRUSTEE_IS_SID,
++            TrusteeType: super::TRUSTEE_IS_UNKNOWN,
++            ptstrName: owner.as_ptr().cast(),
++        },
++    });
++    let mut restricted = std::ptr::null_mut();
++    let code = unsafe {
++        super::SetEntriesInAclW(
++            entries.len() as u32,
++            entries.as_ptr(),
++            dacl,
++            &mut restricted,
++        )
++    };
++    let _restricted = LocalAclAllocation(restricted.cast());
++    assert_eq!(code, super::ERROR_SUCCESS);
++    assert_eq!(
++        unsafe {
++            super::SetSecurityInfo(
++                restore.handle.as_raw_handle() as _,
++                1,
++                DACL_SECURITY_INFORMATION,
++                std::ptr::null_mut(),
++                std::ptr::null_mut(),
++                restricted,
++                std::ptr::null_mut(),
++            )
++        },
++        super::ERROR_SUCCESS
++    );
++    let read_handle = OpenOptions::new()
++        .access_mode(READ_CONTROL)
++        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
++        .open(path)
++        .expect("fresh READ_CONTROL open remains permitted");
++    drop(read_handle);
++    let write_error = OpenOptions::new()
++        .access_mode(READ_CONTROL | super::WRITE_DAC)
++        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
++        .open(path)
++        .expect_err("fresh WRITE_DAC open must be denied");
++    assert_eq!(write_error.raw_os_error(), Some(ERROR_ACCESS_DENIED as i32));
++    check(write_error);
++    drop(restore);
++    OpenOptions::new()
++        .access_mode(READ_CONTROL | super::WRITE_DAC)
++        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
++        .open(path)
++        .expect("original DACL permits fresh update access after restoration");
++}
++
++#[test]
++fn explicit_write_deny_remains_visible_without_write_dac() {
++    let target = tempfile::NamedTempFile::new().expect("temporary file");
++    let sid = LocalSid::from_string("S-1-5-21-10-20-30-40").expect("test SID");
++    assert!(unsafe { super::add_deny_write_ace(target.path(), sid.as_ptr()) }.unwrap());
++
++    with_read_control_only(target.path(), |_| {
++        assert!(
++            !unsafe { super::add_deny_write_ace(target.path(), sid.as_ptr()) }
++                .expect("existing explicit deny needs no DACL update")
++        );
++    });
++}
++
++#[test]
++fn inherited_write_deny_without_write_dac_requires_update() {
++    let parent = tempfile::tempdir().expect("temporary parent");
++    let sid = LocalSid::from_string("S-1-5-21-10-20-30-40").expect("test SID");
++    assert!(unsafe { super::add_deny_write_ace(parent.path(), sid.as_ptr()) }.unwrap());
++    let target = parent.path().join("target");
++    std::fs::write(&target, b"synthetic").expect("file inheriting the parent deny");
++
++    with_read_control_only(&target, |write_error| {
++        // Check the final raw ACE flags independently of the production no-op predicate.
++        unsafe {
++            let (dacl, descriptor) = fetch_dacl_handle(&target).unwrap();
++            let _descriptor = LocalAclAllocation(descriptor);
++            let mut found = false;
++            for index in 0..(*dacl).AceCount {
++                let mut ace = std::ptr::null_mut();
++                assert_ne!(super::GetAce(dacl, u32::from(index), &mut ace), 0);
++                let header = &*ace.cast::<super::ACE_HEADER>();
++                if header.AceType != super::ACCESS_DENIED_ACE_TYPE {
++                    continue;
++                }
++                let deny = &*ace.cast::<super::ACCESS_DENIED_ACE>();
++                if super::EqualSid(
++                    std::ptr::addr_of!(deny.SidStart).cast_mut().cast(),
++                    sid.as_ptr(),
++                ) == 0
++                {
++                    continue;
++                }
++                assert_ne!(header.AceFlags & super::INHERITED_ACE, 0);
++                assert_eq!(header.AceFlags & super::INHERIT_ONLY_ACE, 0);
++                assert_ne!(deny.Mask & super::FILE_WRITE_DATA, 0);
++                found = true;
++            }
++            assert!(
++                found,
++                "target has only inherited effective write denies for the SID"
++            );
++        }
++        let error = unsafe { super::add_deny_write_ace(&target, sid.as_ptr()) }
++            .expect_err("an inherited-only deny still requires an explicit target update");
++        assert_eq!(
++            error.to_string(),
++            "open deny ACL target for update (READ_CONTROL | WRITE_DAC)"
++        );
++        assert_eq!(
++            error
++                .downcast_ref::<std::io::Error>()
++                .unwrap()
++                .raw_os_error(),
++            write_error.raw_os_error()
++        );
++    });
++}

@@ -1,0 +1,30 @@
+--- a/codex-rs/windows-sandbox-rs/src/acl.rs
++++ b/codex-rs/windows-sandbox-rs/src/acl.rs
+@@ -399,7 +399,7 @@
+     false
+ }
+ 
+-pub unsafe fn dacl_has_write_deny_for_sid(p_dacl: *mut ACL, psid: *mut c_void) -> bool {
++pub unsafe fn dacl_has_explicit_write_deny_for_sid(p_dacl: *mut ACL, psid: *mut c_void) -> bool {
+     if p_dacl.is_null() {
+         return false;
+     }
+@@ -430,7 +430,8 @@
+         if hdr.AceType != ACCESS_DENIED_ACE_TYPE {
+             continue; // ACCESS_DENIED_ACE_TYPE
+         }
+-        if (hdr.AceFlags & INHERIT_ONLY_ACE) != 0 {
++        // An inherited deny can follow a nearer inherited allow on this object.
++        if (hdr.AceFlags & (INHERIT_ONLY_ACE | INHERITED_ACE)) != 0 {
+             continue;
+         }
+         let ace = &*(p_ace as *const ACCESS_DENIED_ACE);
+@@ -861,7 +862,7 @@
+     unsafe fn already_present(self, p_dacl: *mut ACL, psid: *mut c_void) -> bool {
+         match self {
+             Self::Read => dacl_has_read_deny_for_sid(p_dacl, psid),
+-            Self::Write => dacl_has_write_deny_for_sid(p_dacl, psid),
++            Self::Write => dacl_has_explicit_write_deny_for_sid(p_dacl, psid),
+         }
+     }
+ }

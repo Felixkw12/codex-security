@@ -10,6 +10,8 @@
 *.tsx text eol=lf
 *.yaml text eol=lf
 *.yml text eol=lf
+# Unified patches preserve blank context lines.
+.github/fixtures/windows-write-carveout/*.patch text eol=lf -whitespace
 
 # Bundled dependencies contain intentional whitespace in strings and comments.
 github-action/dist/*.cjs linguist-generated=true -whitespace
