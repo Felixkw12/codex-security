@@ -2,7 +2,7 @@ import { build } from 'esbuild';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export type UploadBehavior = 'success' | 'reject' | 'stream-error' | 'unhandled-rejection' | 'cancel' | 'runner-commands';
+export type UploadBehavior = 'success' | 'reject' | 'stream-error' | 'unhandled-rejection' | 'cancel' | 'runner-commands' | 'extra-ca';
 export const uploadSignature = 'synthetic-artifact+signature/value';
 export const uploadFailure = 'Synthetic artifact upload failure: sk-synthetic/diagnostic+value';
 export const uploadEnvironment = {
@@ -28,6 +28,7 @@ export async function buildUploadWorker(actionRoot: string, behavior: UploadBeha
         import { readFile, readdir, stat } from 'node:fs/promises';
         import { basename } from 'node:path';
         import { PassThrough } from 'node:stream';
+        import { getCACertificates } from 'node:tls';
         export class DefaultArtifactClient {
           async uploadArtifact(name, files, staging, options) {
             const reports = await Promise.all(files.map(async path => ({
@@ -44,6 +45,9 @@ export async function buildUploadWorker(actionRoot: string, behavior: UploadBeha
             // Every outcome leaves a handle alive to catch exitCode-only workers.
             setInterval(() => {}, 1000);
             switch (${JSON.stringify(behavior)}) {
+              case 'extra-ca':
+                console.log('UPLOAD_CA_CERTIFICATES:' + JSON.stringify(getCACertificates('extra')));
+                return {id: 1, size: 1};
               case 'success': return {id: 1, size: 1};
               case 'reject': throw new Error(${JSON.stringify(diagnostic)});
               case 'stream-error':

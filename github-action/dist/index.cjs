@@ -20369,6 +20369,7 @@ async function collectReports(result) {
 async function uploadReports(reports, inputs, tempRoot, actionRoot, log) {
   if (!reports.size) throw new Error("Artifact upload requested, but no validated reports are available.");
   const env = { ...process.env };
+  const cwd = process.cwd();
   const staging = await (0, import_promises5.mkdtemp)((0, import_node_path6.join)(tempRoot, "codex-security-upload-"));
   try {
     await (0, import_promises5.chmod)(staging, 448);
@@ -20382,7 +20383,7 @@ async function uploadReports(reports, inputs, tempRoot, actionRoot, log) {
       "--unhandled-rejections=strict",
       (0, import_node_path6.join)(actionRoot, "dist", "artifact-upload.cjs"),
       JSON.stringify({ name: inputs.artifactName, files, staging, retentionDays: inputs.retentionDays })
-    ], { cwd: staging, env });
+    ], { cwd, env });
     for (const message of [execution.stdout, ...safeLogLines(execution.stderr)]) {
       if (!message) continue;
       try {

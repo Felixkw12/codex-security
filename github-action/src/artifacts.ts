@@ -19,8 +19,9 @@ export async function collectReports(result: ScanResults): Promise<Map<string, B
 export async function uploadReports(reports: Map<string, Buffer>, inputs: Inputs, tempRoot: string, actionRoot: string, log?: (line: string) => void): Promise<void> {
   if (!reports.size) throw new Error('Artifact upload requested, but no validated reports are available.');
   // The uploader needs the runner's artifact-service credentials and network settings.
-  // Snapshot them per upload; the scanner's restricted environment stays separate.
+  // Snapshot them and the caller's cwd so relative Node startup paths still resolve.
   const env = { ...process.env };
+  const cwd = process.cwd();
   const staging = await mkdtemp(join(tempRoot, 'codex-security-upload-'));
   try {
     await chmod(staging, 0o700);
@@ -33,7 +34,7 @@ export async function uploadReports(reports: Map<string, Buffer>, inputs: Inputs
     const execution = await runProcess(process.execPath, [
       '--unhandled-rejections=strict', join(actionRoot, 'dist', 'artifact-upload.cjs'),
       JSON.stringify({name: inputs.artifactName, files, staging, retentionDays: inputs.retentionDays}),
-    ], {cwd: staging, env});
+    ], {cwd, env});
     // The trusted uploader's stdout includes runner commands such as upstream
     // secret masks and debug logs. Preserve them before replaying stderr.
     for (const message of [execution.stdout, ...safeLogLines(execution.stderr)]) {

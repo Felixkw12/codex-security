@@ -1,6 +1,6 @@
 import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readdir, rm, stat } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { uploadReports } from '../src/artifacts.js';
@@ -94,6 +94,49 @@ test('concurrent uploads snapshot their own inherited environment before staging
   assert.equal(process.env.ACTIONS_RUNTIME_TOKEN, 'synthetic-later-token');
   await assertCleaned(root, firstLogs.join('\n'));
   await assertCleaned(root, secondLogs.join('\n'));
+});
+
+test('relative NODE_OPTIONS preload resolves from the snapshotted caller directory', {timeout: 10_000}, async t => {
+  const root = await fixture(t);
+  await buildUploadWorker(root);
+  await writeFile(join(root, 'startup.cjs'), 'process.env.RUNNER_TRACKING_ID = "synthetic-preloaded-runner";\n');
+  const previousCwd = process.cwd();
+  const logs: string[] = [];
+  process.env.NODE_OPTIONS = '--require=./startup.cjs';
+  let upload: Promise<void>;
+  try {
+    process.chdir(root);
+    upload = uploadReports(reports, inputs, root, root, line => logs.push(line));
+  } finally { process.chdir(previousCwd); }
+  process.env.NODE_OPTIONS = '--require=./missing-after-start.cjs';
+  await upload;
+  assert.equal(uploadReceipt(logs.join('\n')).environment.RUNNER_TRACKING_ID, 'synthetic-preloaded-runner');
+  assert.equal(process.env.RUNNER_TRACKING_ID, uploadEnvironment.RUNNER_TRACKING_ID);
+  await assertCleaned(root, logs.join('\n'));
+});
+
+test('relative NODE_EXTRA_CA_CERTS loads trust from the snapshotted caller directory', {timeout: 10_000}, async t => {
+  const root = await fixture(t);
+  await buildUploadWorker(root, 'extra-ca');
+  const certificate = await readFile(new URL('./fixtures/upload-ca.pem', import.meta.url), 'utf8');
+  await mkdir(join(root, 'certificates'));
+  await writeFile(join(root, 'certificates', 'upload-ca.pem'), certificate);
+  const previousCwd = process.cwd();
+  const logs: string[] = [];
+  process.env.NODE_EXTRA_CA_CERTS = './certificates/upload-ca.pem';
+  let upload: Promise<void>;
+  try {
+    process.chdir(root);
+    upload = uploadReports(reports, inputs, root, root, line => logs.push(line));
+  } finally { process.chdir(previousCwd); }
+  process.env.NODE_EXTRA_CA_CERTS = './missing-after-start.pem';
+  await upload;
+  const output = logs.join('\n');
+  const certificates = JSON.parse(output.match(/UPLOAD_CA_CERTIFICATES:(.*)/)?.[1] ?? 'null') as string[];
+  assert.equal(certificates.length, 1);
+  assert.equal(certificates[0].trim(), certificate.trim());
+  assert.doesNotMatch(output, /Ignoring extra certs/);
+  await assertCleaned(root, output);
 });
 
 for (const behavior of ['success', 'reject', 'stream-error', 'unhandled-rejection'] as const) {
