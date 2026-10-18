@@ -534,10 +534,14 @@ jobs:
               echo 'The existing Action tag must derive from the exact CLI source.' >&2
               exit 1
             fi
+            upload_bundle=()
+            if [[ -f github-action/src/artifact-upload.ts ]]; then
+              upload_bundle+=(':!github-action/dist/artifact-upload.cjs')
+            fi
             changed_source="$(git diff --name-only "$RELEASE_SHA" "$action_sha" -- . \
               ':!github-action/package.json' ':!github-action/package-lock.json' \
               ':!github-action/runtime/package.json' ':!github-action/runtime/package-lock.json' \
-              ':!github-action/dist/index.cjs' ':!github-action/dist/post.cjs')"
+              ':!github-action/dist/index.cjs' ':!github-action/dist/post.cjs' "${upload_bundle[@]}")"
             if [[ -n "$changed_source" ]]; then
               echo 'The existing Action tag contains changes outside release packaging.' >&2
               exit 1
@@ -646,6 +650,9 @@ jobs:
             git add github-action/package.json github-action/package-lock.json \
               github-action/runtime/package.json github-action/runtime/package-lock.json \
               github-action/dist/index.cjs github-action/dist/post.cjs
+            if [[ -f github-action/src/artifact-upload.ts ]]; then
+              git add github-action/dist/artifact-upload.cjs
+            fi
             git -c user.name='github-actions[bot]' \
               -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
               -c commit.gpgsign=false commit --allow-empty -m "chore(release): package Action $RELEASE_VERSION"

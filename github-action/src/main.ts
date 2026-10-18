@@ -146,7 +146,7 @@ export async function runAction(actionRoot: string, overrides: Partial<Dependenc
           reportsValidated = true;
           if (inputs.uploadArtifacts) {
             core.info('Uploading validated report artifacts.');
-            await uploadReports(reports, inputs, tempRoot);
+            await uploadReports(reports, inputs, tempRoot, actionRoot, core.info);
           }
         } catch (error) {
           result.reportStatus = 'failed';
