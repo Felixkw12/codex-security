@@ -359,5 +359,5 @@ for (const status of ['completed', 'failed'] as const) {
     assert.equal(result.paths.coveragePath, '')
     assert.equal(result.paths.manifestPath, join(options.resultsDirectory, 'scan-manifest.json'))
     assert.equal(result.errors.length, status === 'completed' ? 0 : 1)
-  })
+  });
 }
