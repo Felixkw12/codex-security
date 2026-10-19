@@ -1906,7 +1906,7 @@ function parsePersistedCheckpoint(
     delete compatible.scope.excludePaths;
     if (Object.keys(compatible.scope).length === 0) delete compatible.scope;
   }
-  const reviewState = compatible.reviewState ?? compatible.coverage
+  const reviewState = compatible.reviewState ?? compatible.coverage;
   if (isObject(reviewState)) {
     for (const field of [
       "documentType",
