@@ -37,6 +37,7 @@ export async function buildUploadWorker(actionRoot: string, behavior: UploadBeha
             })));
             console.log('UPLOAD_RECEIPT:' + JSON.stringify({
               name, options, reports, staging, stagingMode: (await stat(staging)).mode & 0o777,
+              serverUrl: process.env.GITHUB_SERVER_URL,
               entries: (await readdir(staging)).sort(),
               environment: Object.fromEntries(${JSON.stringify(Object.keys(uploadEnvironment))}.map(key => [key, process.env[key]])),
             }));
@@ -79,6 +80,7 @@ export async function buildUploadWorker(actionRoot: string, behavior: UploadBeha
 
 export function uploadReceipt(logs: string): {
   name: string; options: {retentionDays: number; compressionLevel: number};
+  serverUrl?: string;
   reports: Array<{path: string; name: string; contents: string; mode: number}>;
   staging: string; stagingMode: number; entries: string[]; environment: Record<string, string>;
 } {
