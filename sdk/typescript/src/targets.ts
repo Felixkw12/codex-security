@@ -906,7 +906,10 @@ export async function abortable<T>(
         settle(value);
       };
     void Promise.resolve()
-      .then(operation)
+      .then(() => {
+        throwIfAborted(signal);
+        return operation();
+      })
       .then(finish(resolvePromise), finish(reject));
   });
 }
