@@ -984,6 +984,29 @@ function resolveCliRepositoryPath(value: string, directory: string): string {
   return resolveTargetPath(value, directory);
 }
 
+async function resolveRemovedRepositoryPath(
+  requestedPath: string,
+): Promise<string> {
+  if (!requestedPath.split(sep).includes("..")) return resolve(requestedPath);
+  let prefix = requestedPath;
+  const suffix: string[] = [];
+  // Keep the physical parent of a missing checkout, but never discard an
+  // unresolved parent traversal: it could cross a missing symlink.
+  while (basename(prefix) !== "..") {
+    suffix.unshift(basename(prefix));
+    const parent = dirname(prefix);
+    if (parent === prefix) break;
+    prefix = parent;
+    const canonical = await realpath(prefix).catch(() => undefined);
+    if (canonical !== undefined) {
+      return (await sameFile(prefix, canonical))
+        ? resolve(canonical, ...suffix)
+        : requestedPath;
+    }
+  }
+  return requestedPath;
+}
+
 interface ScanArguments extends ResolvedScanSettings {
   rerunInputIdentity?: JsonValue;
   knowledgeBaseSnapshot?: KnowledgeBaseSnapshot;
@@ -2093,7 +2116,9 @@ export async function main(
         () => undefined,
       );
       const requestedRepository =
-        canonicalPath === undefined ? resolve(requestedPath) : requestedPath;
+        canonicalPath === undefined
+          ? await resolveRemovedRepositoryPath(requestedPath)
+          : requestedPath;
       const repository = canonicalPath ?? requestedRepository;
       return presentHistory(
         await history(
@@ -4664,7 +4689,7 @@ export async function main(
                 "--output-dir is required with a repository CSV.",
               );
             }
-            inputPath = resolveCliPath(currentDirectory, args.input);
+            inputPath = resolveCliRepositoryPath(args.input, currentDirectory);
             outputDir = settings.outputDir;
           }
           const scanOptionsByMode =

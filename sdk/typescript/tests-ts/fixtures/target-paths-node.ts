@@ -229,37 +229,43 @@ try {
       );
   }
   await mkdir(sibling, { mode: 0o700 });
-  const history = createCliTest(main);
-  let selectedTarget: string | undefined;
-  assert.equal(
-    await history.runCli(
-      ["findings", "list", requestedRepository, "--json"],
-      dependencies({
-        currentDirectory: root,
-        onWorkbench: (args): JsonObject => {
-          if (args[0] === "list-repositories") {
+  async function checkHistory(expectedTarget: string | undefined) {
+    const history = createCliTest(main);
+    let selectedTarget: string | undefined;
+    assert.equal(
+      await history.runCli(
+        ["findings", "list", requestedRepository, "--json"],
+        dependencies({
+          currentDirectory: root,
+          onWorkbench: (args): JsonObject => {
+            if (args[0] === "list-repositories") {
+              return {
+                repositories: [
+                  { targetId: "sibling", targetPath: sibling },
+                  { targetId: "physical", targetPath: repository },
+                ],
+              };
+            }
+            selectedTarget = args[2];
             return {
-              repositories: [
-                { targetId: "sibling", targetPath: sibling },
-                { targetId: "physical", targetPath: repository },
-              ],
+              findings: [{ title: `${selectedTarget} finding` }],
+              nextOffset: null,
             };
-          }
-          selectedTarget = args[2];
-          return {
-            findings: [{ title: "Physical finding" }],
-            nextOffset: null,
-          };
-        },
-      }),
-    ),
-    0,
-    history.stderr.text(),
-  );
-  assert.equal(selectedTarget, "physical");
-  assert.deepEqual(JSON.parse(history.stdout.text()).findings, [
-    { title: "Physical finding" },
-  ]);
+          },
+        }),
+      ),
+      0,
+      history.stderr.text(),
+    );
+    assert.equal(selectedTarget, expectedTarget);
+    assert.deepEqual(
+      JSON.parse(history.stdout.text()).findings,
+      expectedTarget === undefined
+        ? []
+        : [{ title: `${expectedTarget} finding` }],
+    );
+  }
+  await checkHistory("physical");
   await assert.rejects(
     client.preflight(requestedRepository, {
       outputDir: join(repository, "output"),
@@ -279,6 +285,12 @@ try {
     client.preflight(repository, { target: ["outside/../app.ts"] }),
     /outside the repository/,
   );
+  await rm(repository, { recursive: true });
+  await checkHistory("physical");
+  await rm(join(root, "physical", "child"), { recursive: true });
+  await checkHistory(undefined);
+  await rm(join(entry, "link"));
+  await checkHistory(undefined);
 } finally {
   await client.close();
 }
