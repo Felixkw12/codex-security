@@ -362,7 +362,7 @@ SARIF, when produced, is saved at `<scan-dir>/exports/results.sarif`.
 
 Scans are report-only by default. `--fail-on-severity high` exits with `1` for
 high or critical findings. Incomplete scans exit with `2`, returning available
-results and a coverage warning. `scan`, `scans rerun`, and `scans resume`
+results and a review-status warning. `scan`, `scans rerun`, and `scans resume`
 execution failures with `--json`, JSON, or JSONL output produce:
 
 ```json
@@ -370,7 +370,7 @@ execution failures with `--json`, JSON, or JSONL output produce:
 ```
 
 With `--full-output`, the error appears under `error` in an `ok: false` envelope.
-A scan that returns partial or unknown coverage uses that failure envelope and
+A scan that returns incomplete or unknown review status uses that failure envelope and
 keeps its available results under `data`. This also applies to `scans rerun` and
 `scans resume`. If the scan target also changed, the error explains that the
 results no longer represent the current checkout. For incomplete `scans rerun` and
@@ -518,7 +518,7 @@ severity. Uncertain matches stay separate. `summary.json` records coverage and
 matching status; `report.md` links to component reports. Export or publish each
 individual scan folder.
 
-Failures do not stop other components. Failed scans, incomplete coverage, or
+Failures do not stop other components. Failed scans, unfinished review work, or
 failed matching return `2`; severity-policy violations return `1`. Retry with
 `--components-file retry-components.json` and a new empty output directory.
 The retry report covers only those components.
@@ -845,7 +845,7 @@ codex-security bulk-scan repositories.csv \
 ```
 
 Recovery requires a matching campaign manifest. It skips completed results
-(including partial coverage) and repositories never started. For each latest
+(including unfinished review work) and repositories never started. For each latest
 failed or interrupted attempt:
 
 - A sealed scan is recorded in `results.jsonl` without scanning again.
@@ -861,7 +861,7 @@ fresh completed checkouts are removed after recording their result.
 
 Same-scan resume needs the original checkout, session logs, and state directory.
 Recovery cannot reconstruct deleted checkpoints or fix execution failures.
-New attempts incur new costs. Remaining failures or partial coverage return `2`;
+New attempts incur new costs. Remaining failures or unfinished review work return `2`;
 completed severity-policy violations return `1` without retrying the scan.
 
 ## Custom validation
@@ -1371,12 +1371,12 @@ codex-security scan . --diff origin/main \
   > "$SCAN_ROOT/findings.json"
 ```
 
-| Exit code     | Meaning                                                               |
-| ------------- | --------------------------------------------------------------------- |
-| `0`           | Complete report-only scan or passing severity policy.                 |
-| `1`           | Severity policy violation.                                            |
-| `2`           | Invalid input, incomplete coverage, runtime error, or export failure. |
-| `130` / `143` | Interrupt / termination.                                              |
+| Exit code     | Meaning                                                                  |
+| ------------- | ------------------------------------------------------------------------ |
+| `0`           | Complete report-only scan or passing severity policy.                    |
+| `1`           | Severity policy violation.                                               |
+| `2`           | Invalid input, unfinished review work, runtime error, or export failure. |
+| `130` / `143` | Interrupt / termination.                                                 |
 
 JSON scans have no interactive controls. `validate`, `login`, and `logout` reject
 `--json`. For GitHub Actions setup, see the

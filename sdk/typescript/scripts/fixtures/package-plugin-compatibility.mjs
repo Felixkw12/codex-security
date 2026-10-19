@@ -77,7 +77,7 @@ const client = new CodexSecurity(
                     const plugin = env.CODEX_SECURITY_PLUGIN_ROOT;
                     const scanDir = env.CODEX_SECURITY_SCAN_DIR;
                     await cp(
-                      join(plugin, "examples", "completed-scan"),
+                      join(plugin, "examples", "legacy-completed-scan"),
                       scanDir,
                       { recursive: true },
                     );
@@ -183,10 +183,14 @@ try {
     await realpath(scanEnvironment.CODEX_SECURITY_PLUGIN_ROOT),
     await realpath(selectedPlugin),
   );
+  const legacyCoverage = JSON.parse(
+    await readFile(join(result.scanDir, "coverage.json"), "utf8"),
+  );
+  assert.equal(result.review.status, "incomplete");
   assert.equal(result.manifest.scan.status, "completed");
   assert.ok(result.manifest.scan.sealedAt);
   assert.deepEqual(
-    result.coverage.surfaces.map((surface) => surface.id),
+    legacyCoverage.surfaces.map((surface) => surface.id),
     ["HTTP API", "ArchiveSurface"],
   );
   assert.equal(turns.length, 2);
@@ -196,16 +200,16 @@ try {
     "src/./extract.py",
   );
   assert.equal(result.findings.findings[0].locations[0].role, " ");
-  assert.equal(result.coverage.surfaces[0].notes, " ");
-  assert.equal(result.coverage.surfaces[0].riskArea, " ");
-  assert.equal(result.coverage.completeness, "partial");
+  assert.equal(legacyCoverage.surfaces[0].notes, " ");
+  assert.equal(legacyCoverage.surfaces[0].riskArea, " ");
+  assert.equal(legacyCoverage.completeness, "partial");
   // Main normalizes absent receipt references without changing review disposition.
-  assert.equal(result.coverage.surfaces[1].disposition, "reported");
-  assert.deepEqual(result.coverage.surfaces[1].receiptRefs, []);
-  assert.deepEqual(result.coverage.deferred, []);
+  assert.equal(legacyCoverage.surfaces[1].disposition, "reported");
+  assert.deepEqual(legacyCoverage.surfaces[1].receiptRefs, []);
+  assert.deepEqual(legacyCoverage.deferred, []);
   assert.ok(
-    result.coverage.openQuestions.length > 0 &&
-      result.coverage.openQuestions.every(
+    legacyCoverage.openQuestions.length > 0 &&
+      legacyCoverage.openQuestions.every(
         (entry) => entry.question === "What deployment controls apply?",
       ),
   );
@@ -229,7 +233,7 @@ try {
       scanDir: result.scanDir,
       turns: turns.length,
       status: saved.scan.progress.status,
-      coverageIds: result.coverage.surfaces.map((surface) => surface.id),
+      coverageIds: legacyCoverage.surfaces.map((surface) => surface.id),
     }),
   );
 } finally {

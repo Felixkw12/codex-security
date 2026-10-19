@@ -68,7 +68,7 @@ export interface ScanManifest {
       portfolioPath: "hardening/hardening.md";
       [k: string]: unknown;
     };
-    coverageRef: "coverage.json";
+    coverageRef?: "coverage.json";
     findingsRef: "findings.json";
     /**
      * @minItems 1
@@ -79,6 +79,21 @@ export interface ScanManifest {
       mediaType: string;
       [k: string]: unknown;
     }[];
+    mode?:
+      | "repository"
+      | "scoped_path"
+      | "diff"
+      | "commit"
+      | "branch_diff"
+      | "working_tree"
+      | "deep_repository";
+    /**
+     * Review completion and exclusions used to compare findings. This is not a measure of files read.
+     */
+    review?: {
+      status: "complete" | "incomplete" | "unknown";
+      excludedPaths: string[];
+    };
     [k: string]: unknown;
   };
   [k: string]: unknown;

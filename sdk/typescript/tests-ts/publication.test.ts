@@ -125,7 +125,7 @@ describe("scan publication preparation", () => {
       "**Snapshot digest:** codex-security-snapshot/v1:sha256:",
     );
     expect(issue.description).toContain("**Scanned scope:** .");
-    expect(issue.description).toContain("**Coverage:** complete");
+    expect(issue.description).toContain("**Review status:** complete");
     expect(issue.description).toContain("**Scan mode:** standard");
     expect(issue.description).toContain("**CWE:** CWE-22");
     expect(issue.description).toContain("**Sink:** `src/extract.py:41-44`");
@@ -234,7 +234,6 @@ describe("scan publication preparation", () => {
         )
       ).issues[0]!;
 
-      expect(description).toContain(`**Coverage mode:** ${mode}`);
       expect(description).toContain(`**Scan mode:** ${expectedMode}`);
       expect(description).not.toContain("**Scan mode:** unknown");
     },

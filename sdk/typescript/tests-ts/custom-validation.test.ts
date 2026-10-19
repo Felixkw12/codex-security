@@ -773,9 +773,9 @@ describe("custom validation", () => {
             status: "complete",
           });
           expect(
-            (await json<CoverageDocument>(join(scanDir, "coverage.json")))
-              .completeness,
-          ).toBe("partial");
+            (await json<ScanManifest>(join(scanDir, "scan-manifest.json"))).scan
+              .review?.status,
+          ).toBe("incomplete");
           return;
         }
         if (scenario === "incomplete") {
@@ -850,7 +850,7 @@ describe("custom validation", () => {
           output_tokens: count === 0 ? 3 : 6,
         });
         expect(await readFile(join(scanDir, "report.md"), "utf8")).toContain(
-          count === 0 ? "No findings" : "Fixture 0",
+          count === 0 || scenario === "dismissed" ? "No findings" : "Fixture 0",
         );
       } finally {
         await client.close();

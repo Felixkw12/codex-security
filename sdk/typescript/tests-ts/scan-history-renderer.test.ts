@@ -303,10 +303,10 @@ describe("scan history renderer", () => {
         { color: false },
       );
       if (coverage === "complete") {
-        expect(comparison).not.toContain("Follow-up coverage");
+        expect(comparison).not.toContain("Follow-up review");
       } else {
         expect(comparison).toContain(
-          `⚠ Follow-up coverage is ${coverage}; resolved findings cannot be confirmed.`,
+          `⚠ Follow-up review status is ${coverage}; resolved findings cannot be confirmed.`,
         );
       }
     }
@@ -404,7 +404,7 @@ describe("scan history renderer", () => {
       "model=gpt-5.6-sol",
       'features={"goals":true,"multi_agent_v2":{"enabled":true}}',
       'trusted_paths=["src","packages/core"]',
-      "COVERAGE",
+      "REVIEW",
       "12 of 15 reviewed",
       "9 files",
       "ARTIFACTS",

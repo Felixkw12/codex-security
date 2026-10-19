@@ -752,9 +752,9 @@ def test_projection_omits_informational_findings() -> None:
     assert "| Reportable findings | 0 |" in markdown
     assert "### No findings" in markdown
     assert (
-        "No reportable findings survived the canonical discovery, validation, "
-        "and reportability gates."
-    ) in markdown
+        "No reportable findings survived the canonical discovery, validation, and reportability gates."
+        in markdown
+    )
     assert "Parser \\| boundary" not in markdown
 
 
@@ -791,7 +791,7 @@ def test_projection_explains_unvalidated_findings_after_cost_limit(reason: str) 
     markdown = PROJECTION.generate_report_markdown(manifest, findings, coverage).decode()
 
     assert "| Reportable findings | 0 |" in markdown
-    assert "| Coverage | partial |" in markdown
+    assert "| Review status | incomplete |" in markdown
     assert (
         "No findings were validated before the scan reached its cost limit. "
         "Review the deferred candidates in Open Questions And Follow Up."
@@ -827,10 +827,7 @@ def test_projection_preserves_no_findings_text_for_other_partial_coverage(reason
 
     markdown = PROJECTION.generate_report_markdown(manifest, findings, coverage).decode()
 
-    assert (
-        "No reportable findings survived the canonical discovery, validation, "
-        "and reportability gates."
-    ) in markdown
+    assert ("The review did not finish. No vulnerability conclusion can be drawn.") in markdown
     assert "No findings were validated before" not in markdown
 
 
@@ -850,7 +847,7 @@ def test_projection_explains_timeout_before_source_review() -> None:
     markdown = PROJECTION.generate_report_markdown(manifest, findings, coverage).decode()
 
     assert "| Reportable findings | 0 |" in markdown
-    assert "| Coverage | partial |" in markdown
+    assert "| Review status | incomplete |" in markdown
     assert (
         "No source review completed before the configured time limit. "
         "No vulnerability conclusion can be drawn."
@@ -882,8 +879,9 @@ def test_projection_preserves_other_no_findings_results(completeness: str, reaso
     markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
 
     assert (
-        "No reportable findings survived the canonical discovery, validation, "
-        "and reportability gates."
+        "No reportable findings survived the canonical discovery, validation, and reportability gates."
+        if completeness == "complete"
+        else "The review did not finish. No vulnerability conclusion can be drawn."
     ) in markdown
     assert "No source review completed" not in markdown
 

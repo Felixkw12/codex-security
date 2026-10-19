@@ -112,7 +112,7 @@ export async function analyzeResults(options: ResultOptions): Promise<ScanResult
       result.errors.push(value.message);
       return result;
     }
-    if (!value?.manifest?.scan?.target || !Array.isArray(value?.findings?.findings) || !value?.coverage)
+    if (!value?.manifest?.scan?.target || !Array.isArray(value?.findings?.findings) || !(value?.review ?? value?.coverage))
       throw new Error();
   } catch {
     result.errors.push('CLI did not return a usable JSON scan result. See the CLI diagnostics.');
@@ -145,21 +145,22 @@ export async function analyzeResults(options: ResultOptions): Promise<ScanResult
   for (const finding of result.findings) result.counts[finding.severity] += 1;
   result.estimatedCost = value.cost?.estimatedUsd;
   result.paths = {resultsDirectory: options.resultsDirectory, manifestPath: join(options.resultsDirectory, 'scan-manifest.json'),
-    jsonPath: join(options.resultsDirectory, 'findings.json'), coveragePath: join(options.resultsDirectory, 'coverage.json'), sarifPath: ''};
+    jsonPath: join(options.resultsDirectory, 'findings.json'), coveragePath: value.coverage ? join(options.resultsDirectory, 'coverage.json') : '', sarifPath: ''};
+  const reviewStatus = value.review?.status ?? (value.coverage?.completeness === 'partial' ? 'incomplete' : value.coverage?.completeness)
   const warnings: string[] = value.warnings ?? [];
   // The CLI includes target-change warnings in result data even when it exits 2.
   // Those and failed execution must not become warning-only partial scans.
   if (options.executionFailed || value.manifest.scan.status !== 'completed' || warnings.length > 0) {
     result.errors.push('CLI did not complete successfully. See the CLI diagnostics.');
-  } else if (value.coverage.completeness === 'partial' && (options.exitCode === 0 || options.exitCode === 2)) {
+  } else if (reviewStatus === 'incomplete' && (options.exitCode === 0 || options.exitCode === 2)) {
     result.scanStatus = 'incomplete';
-  } else if (value.coverage.completeness === 'complete' && (options.exitCode === 0 || options.exitCode === 1)) {
+  } else if (reviewStatus === 'complete' && (options.exitCode === 0 || options.exitCode === 1)) {
     result.scanStatus = 'completed';
     result.policyStatus = options.exitCode === 1 ? 'failed' : 'passed';
-  } else result.errors.push(value.coverage.completeness === 'unknown'
-    ? 'CLI could not determine scan coverage. See the CLI diagnostics.'
+  } else result.errors.push(reviewStatus === 'unknown'
+    ? 'CLI could not determine whether review finished. See the CLI diagnostics.'
     : 'CLI did not complete successfully. See the CLI diagnostics.');
-  if (value.coverage.completeness !== 'complete') {
+  if (reviewStatus !== 'complete' && value.coverage) {
     for (const item of Array.isArray(value.coverage.deferred) ? value.coverage.deferred : []) if (typeof item?.reason === 'string') result.errors.push(`Deferred work: ${item.reason}`);
     for (const item of Array.isArray(value.coverage.surfaces) ? value.coverage.surfaces : []) if (item?.disposition === 'needs_follow_up' && typeof item.label === 'string')
       result.errors.push(`Needs follow-up: ${item.label}`);

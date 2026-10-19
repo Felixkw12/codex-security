@@ -23,7 +23,7 @@ import { propertyOptions } from "./support/property.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { readJson as readJsonFile, writeJson } from "./support/json.js";
 
-const EXAMPLE = join(PLUGIN_ROOT, "examples", "completed-scan");
+const EXAMPLE = join(PLUGIN_ROOT, "examples", "legacy-completed-scan");
 const { temporaryDirectory, cleanup } = createApiTestFixtures(
   "codex-security-contract-",
   false,
@@ -309,7 +309,7 @@ describe("canonical scan contract", () => {
       "target_sha256_example",
     );
     expect(contract.findings.findings[0]?.severity.level).toBe("high");
-    expect(contract.coverage.mode).toBe("repository");
+    expect(contract.review.status).toBe("complete");
     expect(contract.findings.scanId).toBe(contract.manifest.scan.id);
   });
 

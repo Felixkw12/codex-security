@@ -66,7 +66,7 @@ const pluginRoot = path.resolve(mcpAppRoot, "..");
 const workbenchPath = path.join(pluginRoot, "scripts", "workbench_db.py");
 const python = process.env.PYTHON?.trim() || "python3";
 const owner = "publication-test-owner";
-const coverage: ScanDraftInput["coverage"] = {
+const reviewState: ScanDraftInput["reviewState"] = {
   completeness: "complete",
   surfaces: [],
   explicitExclusions: [],
@@ -137,7 +137,7 @@ test("public partial drafts retain checkpoints after coordinator adoption", asyn
   assert.deepEqual(
     new Set(
       Object.values(retained).flatMap((bytes) =>
-        JSON.parse(bytes).coverage.deferred.map(
+        JSON.parse(bytes).reviewState.deferred.map(
           (item: { candidateId: string }) => item.candidateId,
         ),
       ),
@@ -265,7 +265,7 @@ for (const [
         context,
         {
           ...JSON.parse(await readFile(results[index], "utf8")),
-          coverage,
+          reviewState,
         },
         runWorkbench,
         undefined,
@@ -329,7 +329,8 @@ for (const [
     );
     assert.ok(manifest.scan.sealedAt);
     assert.deepEqual(JSON.parse(sealed.files["findings.json"]).findings, []);
-    assert.deepEqual(JSON.parse(sealed.files["coverage.json"]).deferred, []);
+    assert.equal(manifest.scan.review.status, "complete");
+    assert.equal(sealed.files["coverage.json"], undefined);
     assert.ok(sealed.files["report.md"]);
     for (const [name, bytes] of Object.entries(parentCheckpoints)) {
       assert.equal(
@@ -409,7 +410,7 @@ for (const [claimed, outputFailure] of [
         scanId: run.scanId,
         complete: true,
         findings: [],
-        coverage,
+        reviewState,
       }),
     );
     if (outputFailure) {
@@ -458,7 +459,7 @@ for (const complete of [false, true]) {
       scanId: run.scanId,
       complete: true,
       findings: [],
-      coverage,
+      reviewState,
       threatModel: { summary: "Selected aggregate" },
     };
     await assert.rejects(
@@ -506,8 +507,8 @@ for (const complete of [false, true]) {
     );
     const completed = await snapshot(run);
     assert.deepEqual(
-      JSON.parse(completed.files["coverage.json"]),
-      JSON.parse(interrupted.files["coverage.json"]),
+      JSON.parse(completed.files["scan-manifest.json"]).scan.review,
+      JSON.parse(interrupted.files["scan-manifest.json"]).scan.review,
     );
     assert.equal(
       JSON.parse(completed.files["scan-manifest.json"]).scan.threatModel
@@ -571,8 +572,8 @@ for (const claimed of [false, true]) {
     await rm(report, { recursive: true });
     const interrupted = await snapshot(run);
     assert.equal(
-      JSON.parse(interrupted.files["coverage.json"]).completeness,
-      "partial",
+      JSON.parse(interrupted.files["scan-manifest.json"]).scan.review.status,
+      "incomplete",
     );
     assertToolError(
       await call(
@@ -588,8 +589,8 @@ for (const claimed of [false, true]) {
     const completed = await snapshot(run);
     assert.ok(JSON.parse(completed.files["scan-manifest.json"]).scan.sealedAt);
     assert.deepEqual(
-      JSON.parse(completed.files["coverage.json"]),
-      JSON.parse(interrupted.files["coverage.json"]),
+      JSON.parse(completed.files["scan-manifest.json"]).scan.review,
+      JSON.parse(interrupted.files["scan-manifest.json"]).scan.review,
     );
     assert.deepEqual(completed.checkpoints, interrupted.checkpoints);
     assert.equal((await store.get(run.scanId, owner)).terminalReason, "capped");
@@ -606,7 +607,7 @@ for (const status of ["failed", "interrupted"] as const) {
     const draft: ScanDraftInput = {
       scanId: run.scanId,
       findings: [],
-      coverage,
+      reviewState,
     };
     const publication = { coordinatorGeneration: 2, resultPath: null };
     await assert.rejects(
@@ -657,8 +658,8 @@ async function assertInterleavedProgressRetained(fixture: PublicationFixture) {
     scanId: run.scanId,
     complete: false,
     findings: [],
-    coverage: {
-      ...coverage,
+    reviewState: {
+      ...reviewState,
       completeness: "partial",
       deferred: [
         {
@@ -784,7 +785,7 @@ async function commitReducers(
       const resultManifestPath = path.join(artifact.artifactDir, "result.json");
       await writeFile(
         resultManifestPath,
-        JSON.stringify({ scanId: run.scanId, findings: [], coverage }),
+        JSON.stringify({ scanId: run.scanId, findings: [], reviewState }),
       );
       await store.updateWorker({
         ...update,
@@ -852,8 +853,8 @@ function partial(run: DeepScanRunState, candidateId: string): ScanDraftInput {
     scanId: run.scanId,
     complete: false,
     findings: [],
-    coverage: {
-      ...coverage,
+    reviewState: {
+      ...reviewState,
       completeness: "partial",
       deferred: [
         {

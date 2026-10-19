@@ -17,6 +17,7 @@ from typing import Any, Callable
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from deep_scan_config import resolve_deep_scan_config
 from finalize_scan_contract import _read_scan_local_json
+from review_state import review_state, uses_legacy_review
 from workbench.handoff import require_current_continuation
 from workbench.storage import create_private_directory
 from workbench_target import directory_snapshot_regular_file_count
@@ -1610,16 +1611,26 @@ def finish_deep_scan_locked(
             and args.terminal_reason == "capped"
             and (run["status"] == "running" or omitted_worker_ids)
         ):
-            for artifact_name in ("scan-manifest.json", "findings.json", "coverage.json"):
+            for artifact_name in ("scan-manifest.json", "findings.json"):
                 deep_scan_path(
                     scan,
                     str(Path(scan["scan_dir"]) / artifact_name),
                     f"Canonical parent {artifact_name}",
                     kind="file",
                 )
-            coverage = _read_scan_local_json(
-                Path(scan["scan_dir"]), "coverage.json", "Canonical parent coverage.json"
+            parent_manifest = _read_scan_local_json(
+                Path(scan["scan_dir"]), "scan-manifest.json", "Canonical parent manifest"
             )
+            if uses_legacy_review(parent_manifest["scan"]):
+                coverage_path = deep_scan_path(
+                    scan,
+                    str(Path(scan["scan_dir"]) / "coverage.json"),
+                    "Canonical parent coverage.json",
+                    kind="file",
+                )
+                coverage = dependencies().read_json_object(Path(coverage_path))
+            else:
+                coverage = review_state(parent_manifest["scan"])
             deferred = coverage.get("deferred")
             failure_capped = (
                 coverage.get("completeness") == "partial"
@@ -1714,7 +1725,7 @@ def finish_deep_scan_locked(
             )
         canonical_artifacts = None
         if standard_scan_manifest:
-            for artifact_name in ("scan-manifest.json", "findings.json", "coverage.json"):
+            for artifact_name in ("scan-manifest.json", "findings.json"):
                 deep_scan_path(
                     scan,
                     str(Path(scan["scan_dir"]) / artifact_name),

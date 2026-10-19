@@ -314,9 +314,9 @@ test('partial scan warns with provisional findings and no SARIF upload eligibili
   assert.equal(result.outputs['policy-status'], 'not-evaluated'); assert.equal(result.outputs['sarif-upload-ready'], 'false');
   assert.equal(result.outputs['high-count'], '1'); assert.ok(result.outputs['json-path']);
   assert.match(result.logs, /Provisional findings:/);
-  assert.match(result.logs, /::warning::Scan coverage is partial\..*findings policy was not evaluated/);
+  assert.match(result.logs, /::warning::Review did not finish\..*findings policy was not evaluated/);
   assert.doesNotMatch(result.logs, /::error::/);
-  assert.match(result.summary, /\*\*Scan coverage is partial\. Available findings are provisional\.\*\*/);
+  assert.match(result.summary, /\*\*Review did not finish\. Available findings are provisional\.\*\*/);
   assert.match(result.summary, /Deferred work: Dependency &lt;example&gt; unavailable; validation deferred\./);
   assert.match(result.logs, /Report diagnostic: Deferred work: Dependency <example> unavailable; validation deferred\./);
   assert.doesNotMatch(result.logs, /Synthetic live CLI progress/);
@@ -347,7 +347,7 @@ test('partial scans retain reports without evaluating the configured findings th
   assert.equal(result.outputs['policy-status'], 'not-evaluated'); assert.equal(result.outputs['sarif-upload-ready'], 'false');
   assert.equal(result.outputs['high-count'], '1');
   assert.ok(uploadedFiles.includes('findings.json')); assert.ok(uploadedFiles.includes('coverage.json'));
-  assert.match(result.logs, /::warning::Scan coverage is partial\..*findings policy was not evaluated/);
+  assert.match(result.logs, /::warning::Review did not finish\..*findings policy was not evaluated/);
   assert.doesNotMatch(result.logs, /::error::/);
 });
 
@@ -361,12 +361,12 @@ for (const [name, scanProcess] of [
     const result = await app.run();
     assert.equal(result.exitCode, 1); assert.equal(result.outputs['scan-status'], 'failed');
     assert.equal(result.outputs['policy-status'], 'not-evaluated'); assert.equal(result.outputs['sarif-upload-ready'], 'false');
-    assert.doesNotMatch(result.logs, /::warning::Scan coverage is partial/);
+    assert.doesNotMatch(result.logs, /::warning::Review did not finish/);
   });
 }
 
 for (const [name, scanResult] of [
-  ['unknown coverage', (value: any) => { value.coverage.completeness = 'unknown'; }],
+  ['unknown review status', (value: any) => { value.coverage.completeness = 'unknown'; }],
   ['failed manifest', (value: any) => { value.manifest.scan.status = 'failed'; }],
   ['target-change warning', (value: any) => { value.warnings = ['Synthetic target changed during scanning.']; }],
 ] as const) {
@@ -394,7 +394,7 @@ for (const missingReport of ['scan-manifest.json', 'findings.json', 'coverage.js
     assert.equal(result.exitCode, 1); assert.equal(result.outputs['report-status'], 'failed');
     assert.equal(result.outputs['json-path'], ''); assert.equal(result.outputs['sarif-upload-ready'], 'false');
     assert.match(result.logs, /required reporting failed/);
-    assert.doesNotMatch(result.logs, /::warning::Scan coverage is partial/);
+    assert.doesNotMatch(result.logs, /::warning::Review did not finish/);
   });
 }
 

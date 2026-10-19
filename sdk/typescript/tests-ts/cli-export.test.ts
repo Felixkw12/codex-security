@@ -724,7 +724,7 @@ describe("CLI", () => {
       const manifest = JSON.parse(
         await readFile(manifestPath, "utf8"),
       ) as ScanManifest;
-      const coveragePath = join(scan, manifest.scan.coverageRef);
+      const coveragePath = join(scan, manifest.scan.coverageRef!);
       const coverage = JSON.parse(
         await readFile(coveragePath, "utf8"),
       ) as CoverageDocument;
@@ -775,8 +775,12 @@ describe("CLI", () => {
           const sarif = JSON.parse(contents);
           expect(sarif.version).toBe("2.1.0");
           const run = sarif.runs[0];
-          expect(run.properties.codexSecurityCoverageCompleteness).toBe(
-            completeness === "complete" ? undefined : completeness,
+          expect(run.properties.codexSecurityReviewStatus).toBe(
+            completeness === "complete"
+              ? undefined
+              : completeness === "partial"
+                ? "incomplete"
+                : completeness,
           );
           if (completeness === "complete") {
             expect(run.invocations).toBeUndefined();

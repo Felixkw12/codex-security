@@ -177,10 +177,20 @@ def assert_published_aggregate(scan):
             value = finding.pop(field)
             assert value
     assert findings == scan.findings
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
-    for field in ("documentType", "schemaVersion", "scanId"):
-        coverage.pop(field)
-    assert coverage == scan.coverage
+    manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())
+    if "coverageRef" in manifest["scan"]:
+        coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+        for field in ("documentType", "schemaVersion", "scanId"):
+            coverage.pop(field)
+        assert coverage == scan.coverage
+    else:
+        assert manifest["scan"]["review"] == {
+            "status": "incomplete"
+            if scan.coverage["completeness"] == "partial"
+            else scan.coverage["completeness"],
+            "excludedPaths": [item["pattern"] for item in scan.coverage["explicitExclusions"]],
+        }
+        assert not (scan.scan_dir / "coverage.json").exists()
     assert (scan.scan_dir / "report.md").is_file()
 
 
@@ -247,10 +257,9 @@ def test_publication_renders_each_source_remediation(
                 value = source.pop(field)
                 assert value
         assert retained == sources
-        coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
-        for field in ("documentType", "schemaVersion", "scanId"):
-            coverage.pop(field)
-        assert coverage == scan.coverage
+        manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())
+        assert manifest["scan"]["review"]["status"] == "complete"
+        assert not (scan.scan_dir / "coverage.json").exists()
     else:
         assert_published_aggregate(scan)
     report = (scan.scan_dir / "report.md").read_text()
@@ -443,16 +452,16 @@ def test_stopped_deep_scan_still_salvages_saved_findings(
 
     assert stopped["progress"]["status"] == "failed"
     manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
     assert manifest["scan"]["status"] == "failed"
-    assert coverage["completeness"] == "partial"
+    assert manifest["scan"]["review"]["status"] == "incomplete"
+    assert not (scan.scan_dir / "coverage.json").exists()
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
     expected_summaries = {later_finding["summary"]}
     if has_parent:
         expected_summaries.add(scan.findings[0]["summary"])
     assert {finding["summary"] for finding in findings} == expected_summaries
 
-    artifact_names = ("scan-manifest.json", "findings.json", "coverage.json")
+    artifact_names = ("scan-manifest.json", "findings.json")
     published = {name: (scan.scan_dir / name).read_bytes() for name in artifact_names}
     recovered = workbench_api["saved_results"].recover_scan_results(
         workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
@@ -517,7 +526,7 @@ def test_stopped_deep_scan_ignores_non_reducer_sources_without_coverage(
     )
     assert manifest["scan"]["preservedSources"] == frozen
     assert source_relative not in frozen
-    artifact_names = ("scan-manifest.json", "findings.json", "coverage.json")
+    artifact_names = ("scan-manifest.json", "findings.json")
     published = {name: (scan.scan_dir / name).read_bytes() for name in artifact_names}
 
     recovered = workbench_api["saved_results"].recover_scan_results(

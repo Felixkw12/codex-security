@@ -51,12 +51,7 @@ import type { ScanResult } from "./result.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
 
 const execFile = promisify(execFileCallback);
-const REQUIRED_ARTIFACTS = [
-  "scan-manifest.json",
-  "findings.json",
-  "coverage.json",
-  "report.md",
-];
+const REQUIRED_ARTIFACTS = ["scan-manifest.json", "findings.json", "report.md"];
 const LOCK_LEASE_MS = 30_000;
 const LOCK_HEARTBEAT_MS = 5_000;
 const WINDOWS_DEVICE_PATH_NAME =
@@ -104,7 +99,7 @@ export interface MultiscanOptions extends ScanPromptSettings {
     prompts: ScanPromptSettings & {
       knowledgeBaseSnapshot?: KnowledgeBaseSnapshot;
     },
-  ): Promise<Pick<ScanResult, "coverage" | "cost" | "findings"> | undefined>;
+  ): Promise<Pick<ScanResult, "review" | "cost" | "findings"> | undefined>;
   maxCostUsd?: number;
   // Prompts are shared across modes and prepared from the top-level options.
   scanOptionsByMode?: Partial<
@@ -337,7 +332,7 @@ async function runCampaign(
           attempt: receipt.attempt,
           warning:
             receipt.warning ??
-            `Scan coverage is ${coverage}; results may be incomplete.`,
+            `Review status is ${coverage === "partial" ? "incomplete" : coverage}; results may be incomplete.`,
         });
         continue;
       }
@@ -403,7 +398,7 @@ async function runCampaign(
         try {
           await ensureOutputDirectory(artifactRoot);
           let result:
-            | (Pick<ScanResult, "coverage" | "cost" | "findings"> &
+            | (Pick<ScanResult, "review" | "cost" | "findings"> &
                 Partial<Pick<ScanResult, "threatModelPath">>)
             | undefined;
           if (options.recoverScan !== undefined && retry === 0 && attempt > 0) {
@@ -533,14 +528,17 @@ async function runCampaign(
               meetsSeverity(finding, failureSeverity),
             );
           }
-          coverage = result.coverage.completeness;
+          coverage =
+            result.review.status === "incomplete"
+              ? "partial"
+              : result.review.status;
           if (coverage !== "complete") {
             if (!(await hasArtifacts(scanDir))) {
               throw new Error(
                 "Multiscan scan output is missing required artifacts.",
               );
             }
-            warning = `Scan coverage is ${coverage}; results may be incomplete.`;
+            warning = `Review status is ${coverage === "partial" ? "incomplete" : coverage}; results may be incomplete.`;
           }
         } catch (error) {
           if (options.signal?.aborted === true) options.signal.throwIfAborted();

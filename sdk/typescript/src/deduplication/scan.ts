@@ -31,6 +31,7 @@ import type {
 } from "../finding-retrieval.js";
 import {
   FindingWorkflow,
+  scanArtifactDigest,
   workflowDestination,
   workflowDigest,
 } from "../finding-workflow.js";
@@ -228,7 +229,7 @@ async function deduplicateResolvedScan(
       ...(bindRepository ? { repositoryPath } : {}),
       scanId,
       scanDir: scanDirectory,
-      artifactDigest: workflowDigest(contract),
+      artifactDigest: scanArtifactDigest(contract),
       destination: local
         ? `sqlite:${codexSecurityStateDirectory(environment)}`
         : workflowDestination(options.findingsUrl!),

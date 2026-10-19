@@ -673,7 +673,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
       ...identity,
       findings: [],
       threatModel: { summary: "Synthetic test target" },
-      coverage: {
+      reviewState: {
         completeness: "complete",
         surfaces: [
           {

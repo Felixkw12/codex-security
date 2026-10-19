@@ -34,7 +34,7 @@ const {
   },
 });
 const scanId = "7b95abf2-dc04-47a9-9950-53b5c2057f49";
-const coverage = {
+const reviewState = {
   completeness: "partial",
   surfaces: [],
   explicitExclusions: [],
@@ -69,7 +69,7 @@ for (const complete of [true, undefined]) {
       );
       // A final Deep result replaces old review documents without parsing them.
       await writeFile(join(root, "findings.json"), "unfinished findings");
-      await writeFile(join(root, "coverage.json"), "unfinished coverage");
+      await writeFile(join(root, "coverage.json"), "unfinished reviewState");
       const replacement = {
         format: "markdown",
         content: "# Replacement model\n",
@@ -92,7 +92,7 @@ for (const complete of [true, undefined]) {
         for (const checkpoint of checkpoints) {
           assert.notEqual(checkpoint.complete, false);
           assert.deepEqual(checkpoint.threatModel, expectedModel);
-          assert.deepEqual(checkpoint.coverage.deferred, []);
+          assert.deepEqual(checkpoint.reviewState.deferred, []);
         }
         const savedCoverage = await readJson(root, "coverage.json");
         assert.deepEqual(savedCoverage.deferred, []);
@@ -192,7 +192,7 @@ test("model-only worker checkpoints save Markdown before findings and retain it 
       complete: false,
       threatModel,
       findings: [],
-      coverage,
+      reviewState,
     };
     assert.deepEqual(
       scanDraftInputSchema.parse(checkpoint).threatModel,
@@ -231,7 +231,7 @@ test("model-only worker checkpoints save Markdown before findings and retain it 
       scanId,
       complete: false,
       findings: [],
-      coverage,
+      reviewState,
     });
     const saved = await readJson(root, "result.json");
     assert.deepEqual(saved.threatModel, threatModel);
@@ -250,7 +250,7 @@ test("a convenience-document failure preserves the worker result and reports a w
     await mkdir(join(root, "threatmodel.md"));
     const result = await recordCodexSecurityWorkerScanDraft(
       { root, repoRoot: root, layout: "worker", scanId, pluginRoot },
-      { scanId, complete: false, threatModel, findings: [], coverage },
+      { scanId, complete: false, threatModel, findings: [], reviewState },
     );
     assert.match(result.warnings[0], /threatmodel\.md could not be written/);
     assert.deepEqual(
@@ -274,7 +274,7 @@ test("the configured worker interpreter is honored without losing the canonical 
         pluginRoot,
         pythonCommand: join(root, "missing-interpreter"),
       },
-      { scanId, complete: false, threatModel, findings: [], coverage },
+      { scanId, complete: false, threatModel, findings: [], reviewState },
     );
     assert.match(result.warnings[0], /missing-interpreter/);
     assert.deepEqual(
@@ -365,7 +365,7 @@ test("overlapping draft projections retain the latest committed model", async (t
       complete: false,
       threatModel: firstModel,
       findings: [],
-      coverage,
+      reviewState,
     });
     const input = await firstStarted.promise;
     assert.equal(input.provenance.revision, context.targetRevision);
@@ -378,7 +378,7 @@ test("overlapping draft projections retain the latest committed model", async (t
       complete: false,
       threatModel: latestModel,
       findings: [],
-      coverage,
+      reviewState,
     });
     await latestCommitted;
     releaseFirst!();

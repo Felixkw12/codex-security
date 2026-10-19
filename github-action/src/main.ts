@@ -9,7 +9,7 @@ import { collectReports, uploadReports } from './artifacts.js';
 import { resultSummary, emitAnnotations, plain, resultTitle } from './reporting.js';
 
 export const OUTPUT_NAMES = [
-  'sarif-path', 'json-path', 'coverage-path', 'results-directory', 'scan-status', 'skip-reason',
+  'sarif-path', 'json-path', 'manifest-path', 'coverage-path', 'results-directory', 'scan-status', 'skip-reason',
   'policy-status', 'report-status', 'exit-code', 'scanned-sha', 'analysis-ref', 'sarif-upload-ready',
   'critical-count', 'high-count', 'medium-count', 'low-count', 'informational-count', 'estimated-cost',
 ] as const;
@@ -30,7 +30,7 @@ async function context(): Promise<EventContext> {
 }
 function outputs(result: ScanResults, target: Target, exitCode: number): void {
   const values: Record<string, string | number | boolean> = {
-    'sarif-path': result.paths.sarifPath, 'json-path': result.paths.jsonPath, 'coverage-path': result.paths.coveragePath,
+    'sarif-path': result.paths.sarifPath, 'json-path': result.paths.jsonPath, 'coverage-path': result.paths.coveragePath, 'manifest-path': result.paths.manifestPath,
     'results-directory': result.paths.resultsDirectory, 'scan-status': result.scanStatus, 'policy-status': result.policyStatus,
     'report-status': result.reportStatus, 'exit-code': exitCode, 'scanned-sha': target.scannedSha,
     'analysis-ref': target.analysisRef, 'sarif-upload-ready': result.sarifUploadReady,
@@ -162,7 +162,7 @@ export async function runAction(actionRoot: string, overrides: Partial<Dependenc
           (result.scanStatus === 'completed' && result.policyStatus === 'passed'));
         finalTitle = resultTitle(result, inputs);
         if (success && result.scanStatus === 'incomplete')
-          core.warning('Scan coverage is partial. Available findings are provisional; the findings policy was not evaluated. Review the deferred work in the reports.');
+          core.warning('Review did not finish. The findings policy was not evaluated. Resume the scan to finish the remaining work.');
       }
     }
   } catch (error) {

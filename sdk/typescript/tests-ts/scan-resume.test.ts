@@ -756,7 +756,7 @@ test.each([
         failed: 0,
       });
     } else {
-      expect(result.coverage.completeness).toBe("partial");
+      expect(result.review.status).toBe("incomplete");
       expect(result.manifest.scan.id).toBe(f.scanId);
       expect(result.manifest.scan.sealedAt).toBeString();
       expect(result.cost.inputTokens).toBe(10000);
@@ -1342,9 +1342,9 @@ test.each(["failed", "missing-checkout", "missing-session", "standard"])(
                 ).replaceAll("\r\n", "\n"),
               ).toBe("# synthetic source\n");
               return {
-                coverage: { completeness: "complete" },
+                review: { status: "complete", excludedPaths: [] },
                 cost: null,
-              } as import("../src/result.js").ScanResult;
+              } as unknown as import("../src/result.js").ScanResult;
             },
           }),
         },

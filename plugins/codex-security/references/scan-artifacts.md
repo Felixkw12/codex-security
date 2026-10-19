@@ -36,7 +36,7 @@ Workbench-owned Standard scans submit findings and coverage through `record_code
 
 Deep scans run ordinary Standard scan workers. Workers save progress with `complete: false` and submit final results through `record_codex_security_scan_draft`. Their checkpoints and results contain findings and coverage, with optional scope and threat-model context. Pending candidates and their evidence are recorded in worker coverage. Immutable checkpoints store progress across retries, cancellation, and failure. The coordinator passes completed workers' findings and context to the reducer.
 
-Deep reducer inputs, results, and checkpoints contain findings and optional scope and threat-model context. The host writes the parent scan's unsealed `scan-manifest.json` and `findings.json` from the accepted aggregate, and derives `coverage.json` from the configured include and exclude paths and the coordinator's outcome. The parent completes the scan from these artifacts. If the discovery time limit expires before any source review completes, the parent records partial coverage with that reason. See `scan-contract.md` for canonical field definitions.
+Deep reducer inputs, results, and checkpoints contain findings and optional scope and threat-model context. The host writes the parent scan's unsealed `scan-manifest.json` and `findings.json` from the accepted aggregate, and records the review status in `scan.review`. The parent completes the scan from these artifacts. If the discovery time limit expires before any source review completes, the parent records unfinished review work with that reason. See `scan-contract.md` for canonical field definitions.
 
 - A workbench-backed diff scan records all candidates once with `record_codex_security_discovery_candidates({ scanId, candidates })` and reads the canonical candidates with `list_codex_security_candidates({ scanId, cursor?, limit? })`.
   - The writer validates candidates against assigned source paths, merges rows with the same CWE ids, locations, and optional instance, preserves their text, and assigns deterministic `candidate_id` values.
@@ -91,9 +91,9 @@ Standard scans and Deep Standard scan workers include attack-path analysis direc
 
 ## Final Report Paths
 
-- Workbench-owned Standard or workbench-backed diff draft: `record_codex_security_scan_draft({ scanId, handoffClaimToken?, scope?, threatModel?, findings, coverage })`
-- Bound Deep Standard worker result: `record_codex_security_scan_draft({ scanId, scope?, threatModel?, findings, coverage })`; the Deep coordinator writes the aggregated parent draft
-- SDK-owned Standard draft: unsealed `scan-manifest.json`, `findings.json`, and `coverage.json` under the SDK-provided scan directory
+- Workbench-owned Standard or workbench-backed diff draft: `record_codex_security_scan_draft({ scanId, handoffClaimToken?, scope?, threatModel?, findings, reviewState })`
+- Bound Deep Standard worker result: `record_codex_security_scan_draft({ scanId, scope?, threatModel?, findings, reviewState })`; the Deep coordinator writes the aggregated parent draft
+- SDK-owned Standard draft: unsealed `scan-manifest.json` and `findings.json` under the SDK-provided scan directory
 - Deep, workbench-backed diff, or explicitly requested Standard completed results: `get_codex_security_completed_scan({ scanId, handoffClaimToken? })`
 - Final scan report: `<scan_dir>/report.md`
 - Detailed vulnerability write-up: `<scan_dir>/findings/<slug>/<slug>.md`

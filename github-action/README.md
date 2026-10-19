@@ -1,8 +1,7 @@
 # Codex Security GitHub Action
 
 Run Codex Security scans in GitHub Actions. Scan a repository or pull request,
-check findings against a severity threshold, and export JSON, coverage, and
-SARIF reports.
+check findings against a severity threshold, and export JSON and SARIF reports.
 
 ## Quick start
 
@@ -203,14 +202,14 @@ distinguish findings above the failure threshold from a scan that could not
 complete or a required reporting failure. With `fail-on-severity: none`, findings
 are report-only; scanner and required reporting failures still fail the job.
 
-When the CLI returns a valid finalized result with partial coverage, the Action
-warns and preserves the available findings and coverage explanations. It sets
+When the CLI returns a valid finalized result with unfinished review work, the Action
+warns and preserves the available findings and review status. It sets
 `scan-status: incomplete`, `policy-status: not-evaluated`, and
-`sarif-upload-ready: false`. Partial coverage alone does not fail the step, even
+`sarif-upload-ready: false`. Unfinished review alone does not fail the step, even
 when `fail-on-severity` is configured or the CLI returns exit code `2`.
 
 A successful Action step therefore does not always mean the security review is
-complete. Workflows that require complete coverage can explicitly check the
+complete. Workflows that require a completed review can explicitly check the
 `scan-status` output after the scan step (which must have `id: security`):
 
 ```yaml
@@ -220,8 +219,8 @@ complete. Workflows that require complete coverage can explicitly check the
   run: test "$SCAN_STATUS" = completed
 ```
 
-Scanner failures, interruption, unknown coverage, invalid or missing required
-reports, and a changed checkout still fail the step. A partial coverage file
+Scanner failures, interruption, an unknown review status, invalid or missing required
+reports, and a changed checkout still fail the step. A saved result
 left behind by a failed scan does not make that failure advisory. Required
 artifact-upload and runtime-cleanup failures also remain failures.
 
@@ -288,7 +287,7 @@ report paths empty; it does not recover unvalidated partial files from disk.
   loaded successfully before running the Action.
 - **Missing SARIF uploads:** inspect `scan-status`, `report-status`, and
   `sarif-upload-ready`.
-- **Incomplete scans:** inspect the warning and coverage report before adjusting
+- **Incomplete scans:** inspect the warning and resume the scan before adjusting
   scope or budget. A successful step with `scan-status: incomplete` has partial
   results, not a completed review or a passed severity policy.
 
@@ -377,7 +376,8 @@ All outputs are strings. An empty cost or count means unavailable, not zero.
 | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `sarif-path`          | Absolute validated SARIF file path, or empty when unavailable or withheld.                                                                                         |
 | `json-path`           | Absolute canonical findings JSON path, or empty when unavailable or withheld.                                                                                      |
-| `coverage-path`       | Absolute coverage JSON path, or empty when unavailable or withheld.                                                                                                |
+| `manifest-path`       | Absolute scan manifest path, including review status, or empty when unavailable or withheld.                                                                       |
+| `coverage-path`       | Legacy coverage JSON path. Empty for current CLI results.                                                                                                          |
 | `results-directory`   | Runner-local reports directory; do not upload it recursively.                                                                                                      |
 | `scan-status`         | completed, incomplete, failed, or skipped. Valid partial results are incomplete and warn without failing the step. Skipped is reserved for empty diffs or dry-run. |
 | `skip-reason`         | empty-diff or dry-run when no scan ran; otherwise empty.                                                                                                           |

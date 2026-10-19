@@ -233,7 +233,10 @@ export async function runComponentScans(
             });
             results.set(receipt.id, result);
             receipt.scanId = result.manifest.scan.id;
-            receipt.coverage = result.coverage.completeness;
+            receipt.coverage =
+              result.review.status === "incomplete"
+                ? "partial"
+                : result.review.status;
             receipt.findingCount = result.findings.findings.length;
             if (result.cost !== null) receipt.cost = result.cost;
             receipt.status =

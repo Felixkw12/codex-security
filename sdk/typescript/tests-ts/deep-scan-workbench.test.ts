@@ -7,6 +7,28 @@ import { loadBundledRuntime, PLUGIN_ROOT } from "./plugin-root.js";
 import { runPython } from "./support/python-probe.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
+async function readReviewState(scanDir: string): Promise<CoverageDocument> {
+  const python = Bun.which("python3") ?? Bun.which("python")!;
+  const script = [
+    "import json, pathlib, sys",
+    "sys.path.insert(0, sys.argv[1])",
+    "from review_state import review_state",
+    "scan_dir = pathlib.Path(sys.argv[2])",
+    "scan = json.loads((scan_dir / 'scan-manifest.json').read_text())['scan']",
+    "head = json.loads((scan_dir / 'checkpoint-head.json').read_text())",
+    "checkpoint = json.loads((scan_dir / 'checkpoints' / head['checkpoint']).read_text())",
+    "print(json.dumps(review_state({**scan, 'reviewState': checkpoint['reviewState']})))",
+  ].join("\n");
+  const result = runPython(python, [
+    "-c",
+    script,
+    join(PLUGIN_ROOT, "scripts"),
+    scanDir,
+  ]);
+  expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+  return JSON.parse(new TextDecoder().decode(result.stdout));
+}
+
 const originalClaimToken = "22222222-2222-4222-8222-222222222222";
 const replacementClaimToken = "33333333-3333-4333-8333-333333333333";
 const temporaryDirectories = createTemporaryDirectories(true);
@@ -665,20 +687,7 @@ describe("deep scan workbench ownership", () => {
         await readFile(join(scanDir, "findings.json"), "utf8"),
       ) as { findings: unknown[] };
       expect(findings.findings).toEqual([]);
-      const coverage = JSON.parse(
-        await readFile(join(scanDir, "coverage.json"), "utf8"),
-      ) as {
-        completeness: string;
-        inventoryStrategy: string;
-        includePaths: string[];
-        deferred: Array<{
-          id: string;
-          candidateId?: string;
-          reason: string;
-          paths?: string[];
-        }>;
-        surfaces: Array<{ id: string; disposition: string }>;
-      };
+      const coverage = await readReviewState(scanDir);
       expect(coverage).toMatchObject({
         completeness: "partial",
         inventoryStrategy,
@@ -758,24 +767,8 @@ describe("deep scan workbench ownership", () => {
       );
       const report = await readFile(join(scanDir, "report.md"), "utf8");
       expect(report).toContain(
-        "No findings were validated before the scan reached its cost limit.",
+        "The review did not finish. No vulnerability conclusion can be drawn.",
       );
-      if (existingDeferred) {
-        expect(report).toContain(
-          "Existing candidate validation dependency was unavailable.",
-        );
-        expect(report).toContain(
-          "Existing runtime policy could not be inspected.",
-        );
-      } else {
-        expect(report).toContain("Possible missing authorization");
-        expect(report).toContain("The request reaches a protected handler.");
-      }
-      expect(report).toContain(
-        "Authorization guard already protects the handler",
-      );
-      expect(report).toContain("Handler cannot receive external requests");
-      expect(report).toContain("Attack path does not cross the trust boundary");
       expect(report).not.toContain(
         "No reportable findings survived the canonical discovery, validation",
       );
@@ -821,7 +814,7 @@ describe("deep scan workbench ownership", () => {
       const script = [
         "import json, pathlib, runpy, sys",
         "plugin = pathlib.Path(sys.argv[1])",
-        "examples = plugin / 'examples' / 'completed-scan'",
+        "examples = plugin / 'examples' / 'legacy-completed-scan'",
         "documents = [json.loads((examples / name).read_text()) for name in ('scan-manifest.json', 'findings.json', 'coverage.json')]",
         "manifest, findings, coverage = documents",
         "findings['findings'] = []",
@@ -840,7 +833,7 @@ describe("deep scan workbench ownership", () => {
       ).toBe(exhausted);
       expect(
         report.includes(
-          "No reportable findings survived the canonical discovery, validation, and reportability gates.",
+          "The review did not finish. No vulnerability conclusion can be drawn.",
         ),
       ).toBe(!exhausted);
     },
@@ -1210,9 +1203,7 @@ describe("deep scan workbench ownership", () => {
     };
     expect(completed.progress.status).toBe("complete");
     expect(completed.findings).toEqual([]);
-    const coverage = JSON.parse(
-      await readFile(join(scanDir, "coverage.json"), "utf8"),
-    );
+    const coverage = await readReviewState(scanDir);
     expect(coverage).toMatchObject({
       completeness: "partial",
       mode: "deep_repository",
@@ -1220,8 +1211,7 @@ describe("deep scan workbench ownership", () => {
     });
     const report = await readFile(join(scanDir, "report.md"), "utf8");
     expect(report).toContain(
-      "No source review completed before the configured time limit. " +
-        "No vulnerability conclusion can be drawn.",
+      "The review did not finish. No vulnerability conclusion can be drawn.",
     );
     expect(report).not.toContain("No reportable findings survived");
     expect(report).not.toContain("No findings were validated before");
@@ -1533,20 +1523,20 @@ function writePartialScanArtifacts(
             displayName: "repository",
           },
           scope: { limitations: [], validationMode: "incomplete" },
+          mode:
+            inventoryStrategy === "scoped_path"
+              ? "scoped_path"
+              : "deep_repository",
+          reviewState: {
+            completeness: "partial",
+            surfaces: [],
+            explicitExclusions: [],
+            deferred,
+          },
         },
       }),
     ),
     writeFile(join(scanDir, "findings.json"), JSON.stringify({ findings: [] })),
-    writeFile(
-      join(scanDir, "coverage.json"),
-      JSON.stringify({
-        completeness: "partial",
-        inventoryStrategy,
-        surfaces: [],
-        explicitExclusions: [],
-        deferred,
-      }),
-    ),
   ]);
 }
 

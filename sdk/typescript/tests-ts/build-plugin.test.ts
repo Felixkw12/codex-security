@@ -75,7 +75,7 @@ describe("bundled plugin build", () => {
       (path) =>
         (path.startsWith("scripts/") && path.endsWith(".py")) ||
         path.startsWith("schemas/") ||
-        path.startsWith("examples/completed-scan/"),
+        path.startsWith("examples/legacy-completed-scan/"),
     )) {
       expect(await readFile(join(PLUGIN_ROOT, path)), path).toEqual(
         await readFile(join(source, path)),

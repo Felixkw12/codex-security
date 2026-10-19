@@ -9,11 +9,11 @@ import { PLUGIN_NAME } from "./runtime.js";
 // the ordinary validation sequence with a custom-validation request.
 const SOURCES = {
   "references/core-scan.md":
-    "11826b993499aa1a1bab35eb3f54da83376925afae00f9fcd375177847451916",
+    "2b32324407d855f44237ee1eee85d10e567317ad9f602dbd8f960a07cdc7946c",
   "skills/security-scan/SKILL.md":
-    "7d66fe0bc471a4e13907c20f4167ff7a9de8bbf07e6e7dda6ccdab19117a945d",
+    "78c127b05f911d41b8f8d4cc058f4caeda4d723bf71d8f6134b044033fa438eb",
   "skills/security-diff-scan/SKILL.md":
-    "2dbe04cbe50f8a511327fa384e37f23cdf0630b233186a52d02c515082c4c881",
+    "9b9049bd9032e1f6690dfed21870cd281d958a6ff6be91035c1de5b04bed8a6b",
 } as const;
 
 const DISABLED_TOOLS = [
@@ -26,7 +26,7 @@ const DISABLED_TOOLS = [
 ];
 
 const HANDOFF =
-  "Preserve every surviving source-backed candidate as a provisional finding, including its identity, source locations, evidence, counterevidence, and preliminary assessments. Assemble unsealed scan-manifest.json, findings.json, and coverage.json using <plugin_dir>/examples/completed-scan/ and <plugin_dir>/schemas/ as shape references. Set scan.scope.validationMode to custom_pending and put each finding's matching coverage surface IDs in extensions.customValidationSurfaceIds. Every reported coverage surface must have a candidate. When source discovery finishes and a bound semantic draft tool is available, submit an accepted final source-discovery draft with complete: true, preserving the provisional findings, coverage, threat model, and custom_pending validation mode. This marks source discovery finished; it does not claim custom validation has occurred or seal the scan. Keep complete: false when requested source review remains unfinished. Verify the three files exist, then return control to the SDK without invoking validation or attack-path skills, running application code, sealing files, generating a report, or calling a scan completion tool or helper.";
+  "Preserve every surviving source-backed candidate as a provisional finding, including its identity, source locations, evidence, counterevidence, and preliminary assessments. Assemble unsealed scan-manifest.json and findings.json using <plugin_dir>/examples/completed-scan/ and <plugin_dir>/schemas/ as shape references. Put candidate dispositions and pending work in scan.reviewState. Set scan.scope.validationMode to custom_pending and put each finding's matching review-state surface IDs in extensions.customValidationSurfaceIds. Every reported review-state surface must have a candidate. When source discovery finishes and a bound semantic draft tool is available, submit an accepted final source-discovery draft with complete: true, preserving the provisional findings, reviewState, threat model, and custom_pending validation mode. This marks source discovery finished; it does not claim custom validation has occurred or seal the scan. Keep complete: false when requested source review remains unfinished. Verify both files exist, then return control to the SDK without invoking validation or attack-path skills, running application code, sealing files, generating a report, or calling a scan completion tool or helper.";
 
 async function source(pluginRoot: string, name: keyof typeof SOURCES) {
   const text = (await readFile(join(pluginRoot, name), "utf8")).replaceAll(
@@ -88,7 +88,7 @@ export async function customDiscoveryPrompt(
     );
     workflow = [
       skill.slice(skill.indexOf("## Setup"), skill.indexOf("\n4. ")),
-      `4. ${HANDOFF} Use diff for coverage.mode and coverage.inventoryStrategy.`,
+      `4. ${HANDOFF} Use diff for scan.mode.`,
     ].join("\n\n");
   } else {
     throw new IncompleteScanError(

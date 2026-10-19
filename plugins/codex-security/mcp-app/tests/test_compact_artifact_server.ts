@@ -9,6 +9,8 @@ type CompletedResult = {
     scan: {
       status: string;
       sealedAt: string;
+      mode: string;
+      scope: { includePaths: string[]; excludePaths: string[] };
       artifacts: unknown[];
       target: Record<string, unknown> & { snapshotDigest: string };
     };
@@ -19,7 +21,7 @@ type CompletedResult = {
       fingerprints: { primary: string };
     })[];
   };
-  coverage: Record<string, unknown> & { surfaces: { disposition: string }[] };
+  review: { status: string; excludedPaths: string[] };
 };
 type ToolResponse = Awaited<ReturnType<Client["callTool"]>>;
 type WorkspaceResult = {
@@ -287,7 +289,7 @@ async function testCompactDiffScanCompletion(
         scanId,
         handoffClaimToken,
         findings: [],
-        coverage: {
+        reviewState: {
           completeness: "complete",
           surfaces: [
             {
@@ -318,7 +320,7 @@ async function testCompactDiffScanCompletion(
       completed.manifest.scan.target.snapshotDigest,
       /^codex-security-snapshot\/v1:sha256:[a-f0-9]{64}$/u,
     );
-    assert.equal(completed.coverage.inventoryStrategy, "diff");
+    assert.equal(completed.manifest.scan.mode, "branch_diff");
     assert.equal(completed.findings.findings.length, 0);
   } finally {
     await client.close();
@@ -471,7 +473,7 @@ async function testSemanticScanDraftCompletion(
     };
     const explicitCollisionDeferredId = "explicit-adapter-review";
     const candidateCollisionDeferredId = "candidate-adapter-review";
-    const coverage = {
+    const reviewState = {
       completeness: "partial",
       surfaces: [
         {
@@ -546,8 +548,8 @@ async function testSemanticScanDraftCompletion(
           codeEvidence: [{ ...codeEvidence, code: "" }],
         },
       ],
-      coverage: {
-        ...coverage,
+      reviewState: {
+        ...reviewState,
         mode: "repository",
         inventoryStrategy: "repository",
         includePaths: ["."],
@@ -584,18 +586,18 @@ async function testSemanticScanDraftCompletion(
       [
         "a whitespace-only deferred candidate identity",
         {
-          ...coverage,
+          ...reviewState,
           deferred: [{ candidateId: "  ", reason: "An identity is required." }],
         },
       ],
       [
         "a whitespace-only open question",
-        { ...coverage, openQuestions: ["  \t  "] },
+        { ...reviewState, openQuestions: ["  \t  "] },
       ],
       [
         "an open-question object without its question",
         {
-          ...coverage,
+          ...reviewState,
           openQuestions: [{ followUpPrompt: "Trace the SQL entrypoint." }],
         },
       ],
@@ -609,7 +611,7 @@ async function testSemanticScanDraftCompletion(
         [
           description,
           {
-            ...coverage,
+            ...reviewState,
             deferred: [
               {
                 candidateId,
@@ -621,7 +623,7 @@ async function testSemanticScanDraftCompletion(
         [
           `${description} alongside an explicit deferred identity`,
           {
-            ...coverage,
+            ...reviewState,
             deferred: [
               {
                 id: "explicit-safe-deferred",
@@ -640,7 +642,7 @@ async function testSemanticScanDraftCompletion(
           scanId,
           handoffClaimToken,
           findings: [finding],
-          coverage: invalidCoverage,
+          reviewState: invalidCoverage,
         });
       } catch (error) {
         assert.equal(
@@ -685,13 +687,14 @@ async function testSemanticScanDraftCompletion(
       handoffClaimToken,
       complete: false,
       findings: [finding],
-      coverage: { ...coverage, completeness: "partial" },
+      reviewState: { ...reviewState, completeness: "partial" },
     };
     requireSuccessfulTool(
       await call("record_codex_security_scan_draft", checkpoint),
     );
-    const checkpointDeferred = (await readJson(scanDirectory, "coverage.json"))
-      .deferred;
+    const checkpointDeferred = (
+      await readJson(scanDirectory, "scan-manifest.json")
+    ).scan.reviewState.deferred;
     const generatedIds = checkpointDeferred
       .slice(5, 9)
       .map(({ id }: { id: string }) => id);
@@ -732,24 +735,28 @@ async function testSemanticScanDraftCompletion(
         scanId,
         handoffClaimToken,
         findings: [finding],
-        coverage,
+        reviewState,
       }),
       `${runtimeLabel}: correct the same scan and accept exactly one draft`,
     );
-    const {
-      documentType,
-      schemaVersion,
-      scanId: coverageScanId,
-      ...savedCoverage
-    } = await readJson(scanDirectory, "coverage.json");
-    assert.equal(documentType, "codex-security.coverage");
-    assert.equal(schemaVersion, "1.0");
-    assert.equal(coverageScanId, scanId);
+    const savedManifest = await readJson(scanDirectory, "scan-manifest.json");
+    const savedCoverage = {
+      ...savedManifest.scan.reviewState,
+      mode: savedManifest.scan.mode,
+      inventoryStrategy: "directory",
+      openQuestions: [
+        { question: "Can a neighboring query API bypass parameterization?" },
+        reviewState.openQuestions[1],
+      ],
+      includePaths: savedManifest.scan.scope.includePaths,
+      excludePaths: savedManifest.scan.scope.excludePaths,
+    };
+    assert.equal(savedManifest.scan.id, scanId);
     assert.deepEqual(drafted, {
       scanId,
       findingCount: 1,
       surfaceCount: 1,
-      coverage: savedCoverage,
+      reviewState: savedCoverage,
       operation: "replace",
       status: "draft_written",
     });
@@ -804,27 +811,34 @@ async function testSemanticScanDraftCompletion(
     assert.ok(results.findings.findings[0].occurrenceId);
     assert.ok(results.findings.findings[0].fingerprints.primary);
     assert.equal(results.manifest.scan.target.kind, "directory_snapshot");
-    assert.equal(results.coverage.inventoryStrategy, "directory");
-    assert.equal(results.coverage.completeness, "partial");
-    assert.deepEqual(results.coverage.includePaths, ["."]);
-    assert.deepEqual(results.coverage.excludePaths, []);
-    assert.equal(results.coverage.surfaces[0].disposition, "reported");
-    assert.deepEqual(results.coverage.deferred, [
+    assert.equal(results.manifest.scan.mode, "repository");
+    assert.deepEqual(results.review, {
+      status: "incomplete",
+      excludedPaths: [],
+    });
+    assert.deepEqual(results.manifest.scan.scope.includePaths, ["."]);
+    assert.deepEqual(results.manifest.scan.scope.excludePaths, []);
+    const head = await readJson(scanDirectory, "checkpoint-head.json");
+    const retained = (
+      await readJson(scanDirectory, "checkpoints", head.checkpoint)
+    ).reviewState;
+    assert.equal(retained.surfaces[0].disposition, "reported");
+    assert.deepEqual(retained.deferred, [
       {
-        ...coverage.deferred[0],
+        ...reviewState.deferred[0],
         id: "candidate-deferred-query",
       },
       {
-        ...coverage.deferred[1],
+        ...reviewState.deferred[1],
         id: "candidate-reserved-query-2",
       },
-      coverage.deferred[2],
+      reviewState.deferred[2],
       {
-        ...coverage.deferred[3],
+        ...reviewState.deferred[3],
         id: "candidate-deferred-query-2",
       },
       {
-        ...coverage.deferred[4],
+        ...reviewState.deferred[4],
         id: "candidate-reserved-query-3",
       },
       {
@@ -843,16 +857,13 @@ async function testSemanticScanDraftCompletion(
         ...candidateCollisionDeferred,
         id: generatedIds[3],
       },
-      coverage.deferred[9],
+      reviewState.deferred[9],
       {
-        ...coverage.deferred[10],
+        ...reviewState.deferred[10],
         id: candidateCollisionDeferredId,
       },
     ]);
-    assert.deepEqual(results.coverage.openQuestions, [
-      { question: "Can a neighboring query API bypass parameterization?" },
-      coverage.openQuestions[1],
-    ]);
+    assert.equal("openQuestions" in retained, false);
     assert.ok(
       (await readFile(path.join(scanDirectory, "report.md"), "utf8")).length >
         0,
@@ -1344,7 +1355,7 @@ async function testDiscoveryWorkerToolList(bundle: string) {
     assert.deepEqual(tool.inputSchema.required, [
       "scanId",
       "findings",
-      "coverage",
+      "reviewState",
     ]);
     assert.equal(tool.inputSchema.additionalProperties, false);
     for (const forbidden of [
@@ -1364,12 +1375,12 @@ async function testDiscoveryWorkerToolList(bundle: string) {
     const input = {
       scanId,
       findings: [],
-      coverage: workerDraft([]).coverage,
+      reviewState: workerDraft([]).reviewState,
     };
 
     for (const forbiddenInput of [
       { ...input, scope: { includePaths: ["src"] } },
-      { ...input, coverage: { ...input.coverage, mode: "repository" } },
+      { ...input, reviewState: { ...input.reviewState, mode: "repository" } },
       {
         ...input,
         findings: [
@@ -1400,14 +1411,14 @@ async function testDiscoveryWorkerToolList(bundle: string) {
         name: tool.name,
         arguments: {
           ...input,
-          coverage: {
-            ...input.coverage,
+          reviewState: {
+            ...input.reviewState,
             deferred: [{ reason: "Review remains incomplete." }],
           },
         },
       }),
-      /complete coverage cannot contain deferred/,
-      "The Standard worker must reject invalid coverage before writing its checkpoint.",
+      /complete reviewState cannot contain deferred/,
+      "The Standard worker must reject invalid reviewState before writing its checkpoint.",
     );
     await assert.rejects(readFile(resultPath), { code: "ENOENT" });
 
@@ -1416,7 +1427,7 @@ async function testDiscoveryWorkerToolList(bundle: string) {
       scanId,
       findingCount: 0,
       surfaceCount: 0,
-      coverage: (await readJson(resultPath)).coverage,
+      reviewState: (await readJson(resultPath)).reviewState,
       operation: "replace",
       status: "draft_written",
     });
@@ -1499,7 +1510,7 @@ async function testReducerWorkerToolList(bundle: string) {
   await writeJson(workerResultPath, {
     scanId,
     findings: [workerFinding],
-    coverage: workerDraft([]).coverage,
+    reviewState: workerDraft([]).reviewState,
   });
   await writeJson(previousReducerResultPath, {
     scanId,
@@ -1550,9 +1561,9 @@ async function testReducerWorkerToolList(bundle: string) {
         assert.deepEqual(tool.inputSchema.required, ["scanId", "findings"]);
         assert.equal(tool.inputSchema.additionalProperties, false);
         assert.equal(
-          Object.hasOwn(tool.inputSchema.properties!, "coverage"),
+          Object.hasOwn(tool.inputSchema.properties!, "reviewState"),
           false,
-          "The reducer must not be asked to submit coverage.",
+          "The reducer must not be asked to submit reviewState.",
         );
       } else {
         assert.deepEqual(tool.inputSchema.required, ["maxBytes"]);
@@ -1686,9 +1697,9 @@ function assertSemanticInputProperties(schema: Record<string, unknown>) {
     [properties.scope, ["includePaths", "excludePaths"]],
     [findingSchema, ["findingId", "occurrenceId", "fingerprints"]],
   ];
-  if (properties.coverage)
+  if (properties.reviewState)
     groups.push([
-      properties.coverage,
+      properties.reviewState,
       [
         "documentType",
         "schemaVersion",

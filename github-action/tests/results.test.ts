@@ -155,7 +155,7 @@ test('unknown coverage remains a failure even when findings and reports are avai
     assert.equal(result.policyStatus, 'not-evaluated');
     assert.equal(result.sarifUploadReady, false);
     assert.equal(result.findings.length, 1);
-    assert.match(result.errors.join('\n'), /could not determine scan coverage/);
+    assert.match(result.errors.join('\n'), /could not determine whether review finished/);
   }
 });
 
@@ -399,3 +399,20 @@ test('SARIF preparation never rewrites linked report files', async (t) => {
   assert.equal((await analyzeResults(opts)).sarifUploadReady, false);
   assert.deepEqual(await readFile(target), before);
 });
+
+for (const status of ['complete', 'incomplete'] as const) {
+  test(`reads review status ${status} without a coverage file`, async (t) => {
+    const options = await fixture(t)
+    await rm(join(options.resultsDirectory, 'coverage.json'))
+    change(options, (value) => {
+      delete value.coverage
+      delete value.manifest.scan.coverageRef
+      value.review = value.manifest.scan.review = { status, excludedPaths: [] }
+    })
+    const result = await analyzeResults(options)
+    assert.equal(result.scanStatus, status === 'complete' ? 'completed' : 'incomplete')
+    assert.equal(result.paths.coveragePath, '')
+    assert.equal(result.paths.manifestPath, join(options.resultsDirectory, 'scan-manifest.json'))
+    assert.equal(result.errors.length, 0)
+  })
+}

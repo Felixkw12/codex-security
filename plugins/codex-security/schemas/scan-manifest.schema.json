@@ -22,7 +22,6 @@
         "sealedAt",
         "target",
         "scope",
-        "coverageRef",
         "findingsRef",
         "artifacts"
       ],
@@ -268,6 +267,35 @@
               }
             }
           }
+        },
+        "mode": {
+          "enum": [
+            "repository",
+            "scoped_path",
+            "diff",
+            "commit",
+            "branch_diff",
+            "working_tree",
+            "deep_repository"
+          ]
+        },
+        "review": {
+          "type": "object",
+          "description": "Review completion and exclusions used to compare findings. This is not a measure of files read.",
+          "required": ["status", "excludedPaths"],
+          "properties": {
+            "status": {
+              "enum": ["complete", "incomplete", "unknown"]
+            },
+            "excludedPaths": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "additionalProperties": false
         }
       },
       "allOf": [
@@ -289,20 +317,28 @@
           }
         },
         {
-          "properties": {
-            "artifacts": {
-              "contains": {
-                "type": "object",
-                "required": ["path"],
-                "properties": {
-                  "path": {
-                    "const": "coverage.json"
+          "if": {
+            "required": ["coverageRef"]
+          },
+          "then": {
+            "properties": {
+              "artifacts": {
+                "contains": {
+                  "type": "object",
+                  "required": ["path"],
+                  "properties": {
+                    "path": {
+                      "const": "coverage.json"
+                    }
                   }
-                }
-              },
-              "minContains": 1,
-              "maxContains": 1
+                },
+                "minContains": 1,
+                "maxContains": 1
+              }
             }
+          },
+          "else": {
+            "required": ["mode", "review"]
           }
         }
       ]

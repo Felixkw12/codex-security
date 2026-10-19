@@ -24,10 +24,10 @@ test('partial coverage summary preserves provisional findings and an unevaluated
     errors:['Deferred work: Dependency implementation unavailable.'],findings:[{severity:'high',title:'Potential extraction issue',summary:'Validation needs dependency evidence.',path:'src/extract.ts',startLine:12}]} as ScanResults;
   const inputs = parseInputs((name) => name === 'fail-on-severity' ? 'high' : '', '/checkout');
   const summary = resultSummary(result, inputs, {repository:'/checkout',scannedSha:'a'.repeat(40),analysisRef:'refs/heads/main',publishable:true,emptyDiff:false});
-  assert.match(resultTitle(result, inputs), /coverage is partial.*findings are provisional/i);
+  assert.match(resultTitle(result, inputs), /review did not finish.*findings are provisional/i);
   assert.match(summary, /\*\*Scan:\*\* incomplete · \*\*Findings policy:\*\* not-evaluated/);
   assert.match(summary, /\*\*Failure threshold:\*\* high and above/);
-  assert.match(summary, /Partial coverage alone does not fail the job/);
+  assert.match(summary, /Unfinished review alone does not fail the job/);
   assert.match(summary, /findings policy was not evaluated/);
   assert.match(summary, /This is not a completed scan/);
   assert.match(summary, /Deferred work: Dependency implementation unavailable/);
@@ -38,7 +38,7 @@ test('partial coverage summary preserves provisional findings and an unevaluated
 test('partial coverage cannot hide a required reporting failure in the title', () => {
   const inputs = parseInputs(() => '', '/checkout');
   const result = {scanStatus:'incomplete',policyStatus:'not-evaluated',reportStatus:'failed'} as ScanResults;
-  assert.match(resultTitle(result, inputs), /coverage is partial, and required reporting failed/i);
+  assert.match(resultTitle(result, inputs), /review did not finish, and required reporting failed/i);
   assert.match(resultTitle({...result, scanStatus:'failed'}, inputs), /Scan could not complete/);
 });
 

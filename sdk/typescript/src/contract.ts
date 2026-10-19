@@ -54,9 +54,10 @@ export interface ScanExpectation {
 }
 
 export interface LoadedContract {
+  mode: NonNullable<ScanManifest["scan"]["mode"]>;
   manifest: ScanManifest;
   findings: FindingsDocument;
-  coverage: CoverageDocument;
+  review: NonNullable<ScanManifest["scan"]["review"]>;
 }
 
 type LoadContractOptions = {
@@ -82,7 +83,23 @@ export async function loadContractWithScanDirectory(
   const scanDir = scanRoot.path;
   const documentDigests = new Map<string, string>();
   const payloads: Record<string, unknown> = {};
-  for (const filename of Object.keys(DOCUMENTS)) {
+  payloads["scan-manifest.json"] = await readScanJson(
+    scanDir,
+    "scan-manifest.json",
+    documentDigests,
+    options.signal,
+    scanRoot,
+  );
+  const rawManifest = payloads["scan-manifest.json"] as ScanManifest;
+  const documents = Object.fromEntries(
+    Object.entries(DOCUMENTS).filter(
+      ([name]) =>
+        name !== "coverage.json" || rawManifest.scan?.coverageRef !== undefined,
+    ),
+  );
+  for (const filename of Object.keys(documents).filter(
+    (name) => name !== "scan-manifest.json",
+  )) {
     payloads[filename] = await readScanJson(
       scanDir,
       filename as keyof typeof DOCUMENTS,
@@ -100,7 +117,7 @@ export async function loadContractWithScanDirectory(
     "date-time",
     { type: "string", validate: validRfc3339DateTime },
   );
-  for (const [filename, schemaName] of Object.entries(DOCUMENTS)) {
+  for (const [filename, schemaName] of Object.entries(documents)) {
     const schema = await readJson(
       join(options.pluginRoot, "schemas", schemaName),
       options.signal,
@@ -134,7 +151,32 @@ export async function loadContractWithScanDirectory(
   }
   const manifest = payloads["scan-manifest.json"] as ScanManifest;
   const findings = payloads["findings.json"] as FindingsDocument;
-  const coverage = payloads["coverage.json"] as CoverageDocument;
+  const coverage = payloads["coverage.json"] as CoverageDocument | undefined;
+  const review = coverage
+    ? {
+        status:
+          coverage.completeness === "partial"
+            ? ("incomplete" as const)
+            : coverage.completeness,
+        excludedPaths: coverage.explicitExclusions.map((item) => item.pattern),
+      }
+    : manifest.scan.review!;
+  const reviewDetails: CoverageDocument = coverage ?? {
+    documentType: "codex-security.coverage",
+    schemaVersion: "1.0",
+    scanId: manifest.scan.id,
+    mode: manifest.scan.mode!,
+    completeness: review.status === "incomplete" ? "partial" : review.status,
+    inventoryStrategy: "repository",
+    includePaths: manifest.scan.scope.includePaths,
+    excludePaths: manifest.scan.scope.excludePaths,
+    explicitExclusions: review.excludedPaths.map((pattern) => ({
+      pattern,
+      reason: "Excluded from review",
+    })),
+    surfaces: [],
+    deferred: [],
+  };
   if (
     options.expectedScanId !== undefined &&
     manifest.scan.id !== options.expectedScanId
@@ -145,18 +187,22 @@ export async function loadContractWithScanDirectory(
   }
   if (
     findings.scanId !== manifest.scan.id ||
-    coverage.scanId !== manifest.scan.id
+    reviewDetails.scanId !== manifest.scan.id
   ) {
     throw new ContractValidationError(
       "Canonical contract scan IDs do not match.",
     );
   }
-  if (!sameArray(coverage.includePaths, manifest.scan.scope.includePaths)) {
+  if (
+    !sameArray(reviewDetails.includePaths, manifest.scan.scope.includePaths)
+  ) {
     throw new ContractValidationError(
       "Coverage include paths do not match the manifest scope.",
     );
   }
-  if (!sameArray(coverage.excludePaths, manifest.scan.scope.excludePaths)) {
+  if (
+    !sameArray(reviewDetails.excludePaths, manifest.scan.scope.excludePaths)
+  ) {
     throw new ContractValidationError(
       "Coverage exclude paths do not match the manifest scope.",
     );
@@ -168,7 +214,7 @@ export async function loadContractWithScanDirectory(
     scanDir,
     manifest,
     findings,
-    coverage,
+    reviewDetails,
     documentDigests,
     options.signal,
     scanRoot,
@@ -176,14 +222,14 @@ export async function loadContractWithScanDirectory(
   if (options.expectation !== undefined) {
     validateExpectation(
       manifest,
-      coverage,
+      reviewDetails,
       options.expectation,
       options.workbenchValidated === true,
     );
   }
   await verifyScanRoot(scanRoot, options.signal);
   return {
-    contract: { manifest, findings, coverage },
+    contract: { manifest, findings, review, mode: reviewDetails.mode },
     scanDirectory: scanRoot.path,
   };
 }

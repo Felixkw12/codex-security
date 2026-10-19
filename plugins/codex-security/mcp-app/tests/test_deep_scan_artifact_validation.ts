@@ -132,20 +132,20 @@ async function testDiscoveryValidation(root: string) {
 
   await writeResult(worker.resultPath, {
     ...result,
-    coverage: {
-      ...result.coverage,
+    reviewState: {
+      ...result.reviewState,
       deferred: [{ reason: "Needs follow-up." }],
     },
   });
   await assert.rejects(
     validateDiscoveryArtifacts(artifacts, worker.resultPath, scanId),
-    /complete coverage cannot contain deferred/,
+    /complete reviewState cannot contain deferred/,
   );
 
   await writeResult(worker.resultPath, {
     ...result,
-    coverage: {
-      ...result.coverage,
+    reviewState: {
+      ...result.reviewState,
       surfaces: [
         { label: "Unfinished Standard review", disposition: "needs_follow_up" },
       ],
@@ -153,8 +153,8 @@ async function testDiscoveryValidation(root: string) {
   });
   await assert.rejects(
     validateDiscoveryArtifacts(artifacts, worker.resultPath, scanId),
-    /complete coverage cannot contain needs_follow_up/,
-    "reducer coverage normalization must not relax Standard discovery semantics",
+    /complete reviewState cannot contain needs_follow_up/,
+    "reducer reviewState normalization must not relax Standard discovery semantics",
   );
 
   await writeResult(worker.resultPath, {
@@ -228,7 +228,7 @@ async function testReducerValidation(root: string) {
     admitted,
     "validation returns the same reconciled result that was accepted on disk",
   );
-  assert.equal(Object.hasOwn(admitted, "coverage"), false);
+  assert.equal(Object.hasOwn(admitted, "reviewState"), false);
   assert.deepEqual(admitted.findings[1].provenance.sourceFindingIds, [
     "worker-001:1",
   ]);
@@ -484,7 +484,7 @@ async function testReducerValidation(root: string) {
   assert.equal((await validate()).newFindings, 1);
 
   const legacyPartial = draft([firstFinding], {
-    coverage: {
+    reviewState: {
       completeness: "partial",
       surfaces: [
         {
@@ -503,16 +503,16 @@ async function testReducerValidation(root: string) {
     },
   });
   for (const [label, legacyCoverage] of [
-    ["partial", legacyPartial.coverage],
+    ["partial", legacyPartial.reviewState],
     [
       "complete with pending work",
-      { ...legacyPartial.coverage, completeness: "complete" },
+      { ...legacyPartial.reviewState, completeness: "complete" },
     ],
     ["malformed", null],
   ] as const) {
     const legacyReducer = {
       ...legacyPartial,
-      coverage: legacyCoverage,
+      reviewState: legacyCoverage,
     };
     await writeResult(resultPath, legacyReducer);
     const legacyArtifact = await readFile(resultPath, "utf8");
@@ -522,7 +522,7 @@ async function testReducerValidation(root: string) {
     assert.equal(
       await readFile(resultPath, "utf8"),
       legacyArtifact,
-      `resuming a reducer with ${label} coverage ignores it without rewriting the original artifact`,
+      `resuming a reducer with ${label} reviewState ignores it without rewriting the original artifact`,
     );
   }
   await writeResult(resultPath, { ...legacyPartial, complete: false });
@@ -549,18 +549,18 @@ async function testReducerValidation(root: string) {
   await mkdir(path.dirname(previousReducerResultPath), { recursive: true });
   await writeResult(previousReducerResultPath, {
     ...legacyPartial,
-    coverage: "malformed legacy coverage",
+    reviewState: "malformed legacy reviewState",
   });
   const previousArtifact = await readFile(previousReducerResultPath, "utf8");
   assert.equal(
     (await validate(previousReducerResultPath)).newFindings,
     1,
-    "malformed previous reducer coverage is ignored and does not change finding novelty",
+    "malformed previous reducer reviewState is ignored and does not change finding novelty",
   );
   assert.equal(
     await readFile(previousReducerResultPath, "utf8"),
     previousArtifact,
-    "reading a previous reducer must not rewrite its original coverage",
+    "reading a previous reducer must not rewrite its original reviewState",
   );
 
   const renamedTitle = {
@@ -680,7 +680,7 @@ async function testEmptyDiscoveryAndReduction(root: string) {
   assert.deepEqual(
     result.result,
     { scanId, findings: [] },
-    "reducers submit and return results without coverage",
+    "reducers submit and return results without reviewState",
   );
 }
 

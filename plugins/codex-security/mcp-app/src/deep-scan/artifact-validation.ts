@@ -14,7 +14,7 @@ import {
 } from "./artifacts.js";
 import type { DeepScanArtifacts } from "./artifacts.js";
 
-export type DeepReductionInput = Omit<ScanDraftInput, "coverage">;
+export type DeepReductionInput = Omit<ScanDraftInput, "reviewState">;
 
 export interface DeepReductionSources {
   discoveries: { workerId: string; result: DeepReductionInput }[];
@@ -28,7 +28,7 @@ export interface ReducerArtifactValidation {
 
 /**
  * Check reducer findings with the Standard scan validator.
- * It requires coverage, so add an empty value and remove it after validation.
+ * It requires reviewState, so add an empty value and remove it after validation.
  */
 export function parseDeepReduction(
   input: Record<string, unknown>,
@@ -36,14 +36,14 @@ export function parseDeepReduction(
 ): DeepReductionInput {
   const standard = {
     ...input,
-    coverage: {
+    reviewState: {
       completeness: "complete",
       surfaces: [],
       explicitExclusions: [],
       deferred: [],
     },
   };
-  const { coverage: _coverage, ...parsed } = persisted
+  const { reviewState: _coverage, ...parsed } = persisted
     ? parsePersistedScanDraft(standard)
     : parseScanDraft(standard as unknown as ScanDraftInput);
   return parsed;

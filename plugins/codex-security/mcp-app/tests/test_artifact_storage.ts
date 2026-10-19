@@ -266,7 +266,7 @@ try {
     complete: false,
     findings: [],
     threatModel: { format: "markdown", content, origin: "provided" },
-    coverage: {
+    reviewState: {
       completeness: "partial",
       surfaces: [],
       explicitExclusions: [],
@@ -309,7 +309,7 @@ try {
     ...identity,
     findings: [],
     threatModel: { format: "markdown", content, origin: "provided" },
-    coverage: {
+    reviewState: {
       completeness: "complete",
       surfaces: [
         {

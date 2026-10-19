@@ -148,17 +148,17 @@ directory must be private to you (`chmod 700`).
 
 ### Read results
 
-| Result                            | Contents                                                         |
-| --------------------------------- | ---------------------------------------------------------------- |
-| `findings.findings`               | Findings from this scan.                                         |
-| `reportPath`                      | Path to the Markdown report.                                     |
-| `coverage`                        | What the scan assessed and any coverage gaps.                    |
-| `repositoryFindings`              | This scan's findings plus earlier open findings, when available. |
-| `sarifPath`                       | SARIF export path, or `null`.                                    |
-| `threatModel` / `threatModelPath` | Saved threat model and document path; either can be `null`.      |
-| `cost`                            | Estimated model usage cost, or `null` when unavailable.          |
+| Result                            | Contents                                                                |
+| --------------------------------- | ----------------------------------------------------------------------- |
+| `findings.findings`               | Findings from this scan.                                                |
+| `reportPath`                      | Path to the Markdown report.                                            |
+| `review`                          | Review status and additional excluded paths. This is not file coverage. |
+| `repositoryFindings`              | This scan's findings plus earlier open findings, when available.        |
+| `sarifPath`                       | SARIF export path, or `null`.                                           |
+| `threatModel` / `threatModelPath` | Saved threat model and document path; either can be `null`.             |
+| `cost`                            | Estimated model usage cost, or `null` when unavailable.                 |
 
-Review coverage alongside findings. A report with no findings does not establish
+Review the scan status and scope alongside findings. A report with no findings does not establish
 that the repository is secure. Reports and logs can contain source code,
 vulnerability details, and credentials; review them before sharing.
 

@@ -337,7 +337,7 @@ export function renderScanHistory(
       ];
       if (parts.length > 0) {
         lines.push(
-          `  ${strong("COVERAGE")}  ${parts.join(`  ${accent("·")}  `)}`,
+          `  ${strong("REVIEW")}  ${parts.join(`  ${accent("·")}  `)}`,
         );
       }
     }
@@ -411,7 +411,7 @@ export function renderScanHistory(
     const coverage = (result["coverage"] as JsonObject)["afterCompleteness"];
     if (coverage !== "complete") {
       lines.push(
-        `  ${paint(`⚠ Follow-up coverage is ${clean(coverage)}; resolved findings cannot be confirmed.`, 33)}`,
+        `  ${paint(`⚠ Follow-up review status is ${clean(coverage)}; resolved findings cannot be confirmed.`, 33)}`,
       );
     }
     const findings = (result["findings"] as JsonObject[]).map((entry) =>

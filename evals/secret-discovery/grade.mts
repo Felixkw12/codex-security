@@ -29,6 +29,7 @@ export interface Coverage {
 }
 export interface Result {
   findings?: Finding[];
+  reviewState?: Coverage;
   coverage?: Coverage;
   [key: string]: unknown;
 }
@@ -257,13 +258,14 @@ export function gradeResult(
     errors.push("false positives or incorrect taxonomy/locations");
   if (findings.some((finding) => !validEvidence(finding, fixture)))
     errors.push("missing or invalid code evidence");
+  const reviewState = result?.reviewState ?? result?.coverage;
   if (
-    result?.coverage?.completeness !== "complete" ||
-    result.coverage.deferred?.length ||
-    result.coverage.surfaces?.some(
+    reviewState?.completeness !== "complete" ||
+    reviewState.deferred?.length ||
+    reviewState.surfaces?.some(
       (surface) => surface.disposition === "needs_follow_up",
     ) ||
-    result.coverage.explicitExclusions?.some(({ pattern }) =>
+    reviewState.explicitExclusions?.some(({ pattern }) =>
       Object.keys(fixture.files).some((path) =>
         matchesExclusion(path, pattern, repo),
       ),

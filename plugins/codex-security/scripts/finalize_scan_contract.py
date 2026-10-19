@@ -26,6 +26,7 @@ from urllib.parse import quote, urlsplit
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import report_projection
 import threat_model_projection
+from review_state import checkpoint_review_state, review_state, review_summary
 
 SCHEMA_VERSION = "1.0"
 PRODUCER_NAME = "codex-security-plugin"
@@ -1380,8 +1381,9 @@ def _populate_unsealed_manifest_envelope(
     scan["status"] = (
         completion_binding.get("status", "completed") if completion_binding else "completed"
     )
-    scan["coverageRef"] = "coverage.json"
     scan["findingsRef"] = "findings.json"
+    if "coverageRef" in scan:
+        scan["coverageRef"] = "coverage.json"
     if completion_binding is None:
         started_at = os.environ.get("CODEX_SECURITY_STARTED_AT")
         if started_at is not None:
@@ -1765,7 +1767,7 @@ def _validate_manifest(manifest: dict[str, Any]) -> None:
         artifact_collision_keys.add(collision_key)
         _require_str(artifact, "sha256", context)
         _require_str(artifact, "mediaType", context)
-    for required_path in ("findings.json", "coverage.json"):
+    for required_path in ("findings.json", *(["coverage.json"] if "coverageRef" in scan else [])):
         if required_path not in artifact_paths:
             raise ContractError(
                 f"manifest.scan.artifacts: missing required artifact: {required_path}"
@@ -2136,6 +2138,9 @@ def _validate_canonical_schemas_before_projection(
         {"path": "findings.json", "sha256": "0" * 64, "mediaType": "application/json"},
         {"path": "coverage.json", "sha256": "0" * 64, "mediaType": "application/json"},
     ]
+    if "coverageRef" not in provisional_scan:
+        provisional_scan["mode"] = coverage["mode"]
+        provisional_scan["review"] = review_summary(coverage)
     validate_against_schema(provisional_manifest, schema_dir / "scan-manifest.schema.json")
     validate_against_schema(findings, schema_dir / "findings.schema.json")
     validate_against_schema(coverage, schema_dir / "coverage.schema.json")
@@ -2146,6 +2151,8 @@ def _validate_contract_refs(scan: dict[str, Any]) -> None:
         ("coverageRef", "coverage.json"),
         ("findingsRef", "findings.json"),
     ):
+        if field == "coverageRef" and field not in scan:
+            continue
         actual = _require_str(scan, field, "manifest.scan")
         if actual != expected:
             raise ContractError(f"manifest.scan.{field}: expected {expected!r}")
@@ -2649,17 +2656,15 @@ def _read_sealed_artifacts(
     findings, findings_bytes = _read_scan_local_json_bytes(
         scan_dir, scan["findingsRef"], scan["findingsRef"]
     )
-    coverage, coverage_bytes = _read_scan_local_json_bytes(
-        scan_dir, scan["coverageRef"], scan["coverageRef"]
-    )
-    _validate_existing_seal(
-        scan_dir,
-        scan,
-        artifact_contents={
-            scan["findingsRef"]: findings_bytes,
-            scan["coverageRef"]: coverage_bytes,
-        },
-    )
+    contents = {scan["findingsRef"]: findings_bytes}
+    if "coverageRef" in scan:
+        coverage, coverage_bytes = _read_scan_local_json_bytes(
+            scan_dir, scan["coverageRef"], scan["coverageRef"]
+        )
+        contents[scan["coverageRef"]] = coverage_bytes
+    else:
+        coverage = review_state(scan)
+    _validate_existing_seal(scan_dir, scan, artifact_contents=contents)
     return findings, coverage, findings_bytes
 
 
@@ -2702,7 +2707,7 @@ def build_sarif_projection(
     execution_successful = manifest["scan"]["status"] == "completed"
     if not execution_successful or coverage["completeness"] != "complete":
         run = sarif["runs"][0]
-        run["properties"]["codexSecurityCoverageCompleteness"] = coverage["completeness"]
+        run["properties"]["codexSecurityReviewStatus"] = review_summary(coverage)["status"]
         run["invocations"] = [
             {
                 "executionSuccessful": execution_successful,
@@ -2945,6 +2950,14 @@ def _prepare_scan_finalization(
     if scan.get("sealedAt") is None and scan.get("artifacts") == []:
         del scan["artifacts"]
     was_sealed = scan.get("sealedAt") is not None or scan.get("artifacts") is not None
+    if (
+        not was_sealed
+        and "review" not in scan
+        and "reviewState" not in scan
+        and draft_documents is None
+        and (scan_dir / "coverage.json").exists()
+    ):
+        scan["coverageRef"] = "coverage.json"
     if not was_sealed:
         _populate_unsealed_manifest_envelope(manifest, scan, completion_binding)
     _validate_contract_refs(scan)
@@ -2952,9 +2965,13 @@ def _prepare_scan_finalization(
         findings, findings_input_bytes = _read_scan_local_json_bytes(
             scan_dir, scan["findingsRef"], scan["findingsRef"]
         )
-        coverage, coverage_input_bytes = _read_scan_local_json_bytes(
-            scan_dir, scan["coverageRef"], scan["coverageRef"]
-        )
+        if "coverageRef" in scan:
+            coverage, coverage_input_bytes = _read_scan_local_json_bytes(
+                scan_dir, scan["coverageRef"], scan["coverageRef"]
+            )
+        else:
+            coverage = review_state(scan)
+            coverage_input_bytes = _json_bytes(coverage)
     else:
         findings, coverage = copy.deepcopy(draft_documents[1:])
         findings_input_bytes, coverage_input_bytes = _json_bytes(findings), _json_bytes(coverage)
@@ -2984,7 +3001,7 @@ def _prepare_scan_finalization(
         scan,
         artifact_contents={
             scan["findingsRef"]: findings_input_bytes,
-            scan["coverageRef"]: coverage_input_bytes,
+            **({scan["coverageRef"]: coverage_input_bytes} if "coverageRef" in scan else {}),
         },
     )
     scan["sealedAt"] = _require_str(scan, "completedAt", "manifest.scan")
@@ -3042,11 +3059,19 @@ def _prepare_scan_finalization(
     else:
         findings_bytes = _contract_json_bytes("findings.json", findings)
         coverage_bytes = _contract_json_bytes("coverage.json", coverage)
+        if "coverageRef" not in scan:
+            scan["mode"] = coverage["mode"]
+            scan["review"] = review_summary(coverage)
+            scan.pop("reviewState", None)
         report_markdown_bytes = _generate_report_projection(manifest, findings, coverage)
         _validate_scan_local_output_path(scan_dir, scan_dir / "report.md", "report.md")
         scan["artifacts"] = [
             _artifact_record(scan_dir, "findings.json", "application/json", findings_bytes),
-            _artifact_record(scan_dir, "coverage.json", "application/json", coverage_bytes),
+            *(
+                [_artifact_record(scan_dir, "coverage.json", "application/json", coverage_bytes)]
+                if "coverageRef" in scan
+                else []
+            ),
             *[
                 _artifact_record(scan_dir, ref, "application/octet-stream")
                 for ref in _supplementary_artifact_refs(scan, coverage)
@@ -3086,7 +3111,23 @@ def _write_prepared_scan_finalization(
     scan = _require_dict(manifest, "scan", "manifest")
     if not was_sealed:
         _write_scan_local_json(scan_dir, "findings.json", findings)
-        _write_scan_local_json(scan_dir, "coverage.json", coverage)
+        if "coverageRef" in scan:
+            _write_scan_local_json(scan_dir, "coverage.json", coverage)
+        elif "preservedSources" not in scan and not (scan_dir / "checkpoint-head.json").exists():
+            checkpoint = {
+                "scanId": scan["id"],
+                "complete": scan["status"] == "completed",
+                "scope": scan["scope"],
+                "findings": findings["findings"],
+                "reviewState": checkpoint_review_state(coverage),
+                **({"threatModel": scan["threatModel"]} if "threatModel" in scan else {}),
+            }
+            contents = _json_bytes(checkpoint)
+            name = hashlib.sha256(contents).hexdigest() + ".json"
+            write_scan_local_bytes(scan_dir, "checkpoints/" + name, contents)
+            _write_scan_local_json(scan_dir, "checkpoint-head.json", {"checkpoint": name})
+    if not was_sealed and "coverageRef" not in scan:
+        _remove_scan_local_file_if_exists(scan_dir, "coverage.json")
     write_scan_local_bytes(scan_dir, "report.md", report_markdown_bytes)
     _remove_scan_local_file_if_exists(scan_dir, "report.html")
     if not was_sealed:

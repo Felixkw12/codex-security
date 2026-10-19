@@ -33,7 +33,7 @@ assert.equal(deepReductionInputSchema.safeParse(validReduction).success, true);
 assert.equal(
   deepReductionInputSchema.safeParse(workerDraft([])).success,
   false,
-  "Deep reducer submissions no longer accept coverage",
+  "Deep reducer submissions no longer accept reviewState",
 );
 assert.equal(
   deepReductionInputSchema.safeParse({ ...validReduction, resultPath: "/tmp" })
@@ -98,7 +98,7 @@ try {
     id: "worker-001",
     result: workerDraft([shared], {
       threatModel: { summary: "Requests may reach shared code." },
-      coverage: rejectedCoverage,
+      reviewState: rejectedCoverage,
     }),
   });
   const second = await createWorker({
@@ -107,7 +107,7 @@ try {
     id: "worker-002",
     result: workerDraft([shared, independent], {
       scope: { summary: "Shared and independent request handling." },
-      coverage: { ...workerDraft([]).coverage, completeness: "unknown" },
+      reviewState: { ...workerDraft([]).reviewState, completeness: "unknown" },
     }),
   });
   const originalWorkerArtifacts = await Promise.all(
@@ -219,7 +219,7 @@ try {
   assert.deepEqual(
     await readJson(outputRoot, "checkpoints", checkpointNames[0]),
     mergedWithSources,
-    "reducer checkpoints retain the accepted findings and scope without coverage",
+    "reducer checkpoints retain the accepted findings and scope without reviewState",
   );
 
   assert.deepEqual(
@@ -227,7 +227,7 @@ try {
       [first, second].map((worker) => readFile(worker.resultPath, "utf8")),
     ),
     originalWorkerArtifacts,
-    "reduction must not rewrite raw Standard worker coverage evidence",
+    "reduction must not rewrite raw Standard worker reviewState evidence",
   );
 
   const collision = {
@@ -363,22 +363,22 @@ try {
       explicitExclusions: false,
       deferred: 42,
     },
-    "legacy coverage is no longer structured",
+    "legacy reviewState is no longer structured",
   ]) {
     const previousArtifact = JSON.stringify({
       ...enrichedPrevious,
-      coverage: legacyCoverage,
+      reviewState: legacyCoverage,
     });
     await writeFile(path.join(outputRoot, "result.json"), previousArtifact);
     assert.deepEqual(
       (await getCodexSecurityDeepReducerInputs(nextContext)).previous,
       enrichedPrevious,
-      "previous reducer coverage is ignored even when malformed; findings and scope remain intact",
+      "previous reducer reviewState is ignored even when malformed; findings and scope remain intact",
     );
     assert.equal(
       await readFile(path.join(outputRoot, "result.json"), "utf8"),
       previousArtifact,
-      "reading a previous reduction does not rewrite its legacy coverage",
+      "reading a previous reduction does not rewrite its legacy reviewState",
     );
   }
   const previousArtifact = await readFile(
@@ -388,14 +388,14 @@ try {
   await recordCodexSecurityDeepReduction(nextContext, merged);
   const preservedEnrichment = await readJson(nextOutputRoot, "result.json");
   assert.equal(
-    Object.hasOwn(preservedEnrichment, "coverage"),
+    Object.hasOwn(preservedEnrichment, "reviewState"),
     false,
-    "a subsequent accepted reduction omits the previous reducer's legacy coverage",
+    "a subsequent accepted reduction omits the previous reducer's legacy reviewState",
   );
   assert.equal(
     await readFile(path.join(outputRoot, "result.json"), "utf8"),
     previousArtifact,
-    "the original previous reduction remains available without rewriting its coverage",
+    "the original previous reduction remains available without rewriting its reviewState",
   );
   assert.equal(
     preservedEnrichment.findings[0].provenance.previousFindings[0].summary,
@@ -443,16 +443,16 @@ try {
 
   for (const invalidCoverage of [
     undefined,
-    { ...workerDraft([]).coverage, completeness: "outdated" },
+    { ...workerDraft([]).reviewState, completeness: "outdated" },
   ]) {
     await writeJson(first.resultPath, {
       ...first.result,
-      coverage: invalidCoverage,
+      reviewState: invalidCoverage,
     });
     await assert.rejects(
       getCodexSecurityDeepReducerInputs(context),
-      /coverage|completeness/,
-      "Standard worker coverage remains required and validated before projection",
+      /reviewState|completeness/,
+      "Standard worker reviewState remains required and validated before projection",
     );
   }
 
@@ -505,7 +505,7 @@ function reduction(findings: Record<string, unknown>[], extra = {}) {
 }
 
 function withSourceRefs(worker: Awaited<ReturnType<typeof createWorker>>) {
-  const { coverage: _coverage, ...result } = worker.result;
+  const { reviewState: _coverage, ...result } = worker.result;
   return {
     ...result,
     findings: worker.result.findings.map(sourceReferences(worker)),

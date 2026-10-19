@@ -359,9 +359,8 @@ export class DeepScanCoordinator {
       const draft = schedulerResult.result
         ? {
             ...structuredClone(schedulerResult.result),
-            // Readers require coverage.json. The coordinator has accepted this
-            // result, so mark it complete and leave review notes empty.
-            coverage: {
+            // The accepted aggregate has no pending parent review work.
+            reviewState: {
               completeness: "complete" as const,
               surfaces: [],
               explicitExclusions: [],
@@ -371,7 +370,7 @@ export class DeepScanCoordinator {
         : scanDraftInputSchema.parse({
             scanId: this.state.scanId,
             findings: [],
-            coverage: {
+            reviewState: {
               completeness: "partial",
               surfaces: [],
               explicitExclusions: [],

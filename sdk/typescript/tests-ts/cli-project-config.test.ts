@@ -390,7 +390,6 @@ test("bulk scans apply config and linked operator prompts, preserve CSV scope ov
       for (const [name, content] of Object.entries({
         "scan-manifest.json": result.manifest,
         "findings.json": result.findings,
-        "coverage.json": result.coverage,
         "report.md": "Synthetic report.",
       }))
         await writeFile(

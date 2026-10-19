@@ -3223,7 +3223,7 @@ describe("CLI", () => {
       'codex-security: debug: cost.updated model="gpt-5.6-sol"',
     );
     expect(stderr.text()).toContain(
-      'codex-security: debug: scan.completed coverage="complete" findings=1',
+      'codex-security: debug: scan.completed review="complete" findings=1',
     );
     expect(stderr.text()).toContain(
       "codex-security: debug: runtime.cleanup.started",
@@ -4200,7 +4200,7 @@ describe("CLI", () => {
         `  REPORT    ${result.reportPath}`,
         "",
         "  FINDINGS  1 (1 high)",
-        "  COVERAGE  complete",
+        "  REVIEW  complete",
         "  ELAPSED   6m 37s",
         "  TOKENS    unavailable uncached input, 200 cache reads, unavailable cache writes, 30 output, 1,280 total",
         "  RESULTS   /tmp/scan",
@@ -4342,7 +4342,10 @@ describe("CLI", () => {
             data: paginated
               ? expect.any(String)
               : {
-                  coverage: { completeness },
+                  review: {
+                    status:
+                      completeness === "partial" ? "incomplete" : completeness,
+                  },
                   warnings: [warning],
                 },
           });
@@ -4652,7 +4655,7 @@ describe("CLI", () => {
     expect(stderr.text()).toContain(
       "FINDINGS  4 (1 critical, 2 high, 1 informational)",
     );
-    expect(stderr.text()).toContain("COVERAGE  complete");
+    expect(stderr.text()).toContain("REVIEW  complete");
     expect(stderr.text()).toContain("ELAPSED   1s");
     expect(stderr.text()).toContain(
       "TOKENS    unavailable uncached input, 200 cache reads, unavailable cache writes, 30 output, 1,280 total",
@@ -4848,7 +4851,7 @@ describe("CLI", () => {
       "Worker delegation unavailable during file review; continuing without delegated workers.",
     );
     expect(stdout.text()).toBe("");
-    expect(stderr.text()).toContain("FINDINGS  0\n  COVERAGE  complete");
+    expect(stderr.text()).toContain("FINDINGS  0\n  REVIEW  complete");
   });
 
   test("validates a dry run without starting a scan", async () => {
@@ -5039,7 +5042,7 @@ describe("CLI", () => {
       ).toBe(2);
       expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
       expect(stderr.text()).toContain(
-        `Cannot evaluate the failure policy: coverage is ${completeness}`,
+        `Cannot evaluate the failure policy: review status is ${completeness === "partial" ? "incomplete" : completeness}`,
       );
     }
   });
@@ -5054,7 +5057,7 @@ describe("CLI", () => {
       );
       expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
       expect(stderr.text()).toContain(
-        `Scan coverage is ${completeness}; results may be incomplete.`,
+        `Review status is ${completeness === "partial" ? "incomplete" : completeness}; results may be incomplete.`,
       );
     }
   });
@@ -5087,8 +5090,8 @@ describe("CLI", () => {
           ).toBe(2);
           const envelope = JSON.parse(stdout.text());
           const message = policy
-            ? `Cannot evaluate the failure policy: coverage is ${completeness}.`
-            : `Scan coverage is ${completeness}; results may be incomplete.`;
+            ? `Cannot evaluate the failure policy: review status is ${completeness === "partial" ? "incomplete" : completeness}.`
+            : `Review status is ${completeness === "partial" ? "incomplete" : completeness}; results may be incomplete.`;
           expect(envelope).toMatchObject({
             ok: false,
             error: { code: "SCAN_FAILED", message },
@@ -5144,7 +5147,7 @@ describe("CLI", () => {
               }),
             ),
           ).toBe(2);
-          const message = `Scan coverage is ${completeness}; results may be incomplete.`;
+          const message = `Review status is ${completeness === "partial" ? "incomplete" : completeness}; results may be incomplete.`;
           expect(JSON.parse(stdout.text())).toMatchObject({
             ok: false,
             error: { code: "SCAN_FAILED", message },

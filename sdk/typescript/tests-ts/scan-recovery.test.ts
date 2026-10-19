@@ -57,7 +57,7 @@ type ScanSummary = {
 
 type SarifDocument = {
   runs: Array<{
-    properties: { codexSecurityCoverageCompleteness?: string };
+    properties: { codexSecurityReviewStatus?: string };
     results: Array<{ properties: { severity: string } }>;
     invocations?: Array<{
       executionSuccessful: boolean;
@@ -1001,13 +1001,13 @@ describe("malformed scan artifact recovery", () => {
       { id: "discarded-finding-1", reason: completed.warnings[0] },
     ]);
     const report = await readFile(join(fixture.scanDir, "report.md"), "utf8");
-    expect(report).toContain("| Coverage | partial |");
+    expect(report).toContain("| Review status | incomplete |");
     expect(report).toContain("Skipped malformed finding 1");
     const sarif = await readJson<SarifDocument>(
       join(fixture.scanDir, "exports", "results.sarif"),
     );
-    expect(sarif.runs[0]?.properties.codexSecurityCoverageCompleteness).toBe(
-      "partial",
+    expect(sarif.runs[0]?.properties.codexSecurityReviewStatus).toBe(
+      "incomplete",
     );
     expect(sarif.runs[0]?.invocations).toEqual([
       {

@@ -5715,7 +5715,7 @@ describe("runtime directories and plugin Python boundary", () => {
       await Promise.all(
         present.map((filename) =>
           copyFile(
-            join(PLUGIN_ROOT, "examples", "completed-scan", filename),
+            join(PLUGIN_ROOT, "examples", "legacy-completed-scan", filename),
             join(scanDir, filename),
           ),
         ),

@@ -8,7 +8,7 @@ A sealed terminal bundle contains these files under `<scan_dir>`:
 
 - `scan-manifest.json`: immutable terminal scan receipt after finalization
 - `findings.json`: semantic finding records retained when the scan reached its terminal outcome
-- `coverage.json`: structured coverage summary with detailed receipt references
+- `scan.review`: completion status and additional excluded paths, stored in the manifest
 
 Keep detailed evidence in scan-local artifacts and reference it from the canonical summaries.
 
@@ -37,7 +37,7 @@ Producers should use UTC ISO 8601 timestamps in the native SDK or plugin format.
 | `canceled`    | The scan stopped after an explicit cancellation; retained artifacts may be partial.                             |
 | `interrupted` | The scan stopped before normal completion because execution was interrupted; retained artifacts may be partial. |
 
-Only `completed` supports a completed-scan conclusion. For every stopped outcome, consumers must preserve retained findings and coverage while treating absence of findings as inconclusive.
+Only `completed` supports a completed-scan conclusion. For every stopped outcome, consumers must preserve retained findings and review state while treating absence of findings as inconclusive.
 
 ### Stopped Result Recovery
 
@@ -104,71 +104,21 @@ Examples:
 
 Use CWE taxonomy separately. Do not include file names, line numbers, scan IDs, or display numbering in `ruleId`.
 
-## Coverage
+## Review state
 
-`coverage.json` records scan scope and completion information. Standard and diff summaries also describe reviewed surfaces and outstanding work.
+New scans publish `scan-manifest.json` and `findings.json`. The manifest owns scan identity, mode, and configured scope. `scan.review` contains only `status` (`complete`, `incomplete`, or `unknown`) and `excludedPaths`, used when comparing scans. These values do not measure the percentage of files read.
 
-For a Deep parent scan, the host copies the configured paths into `includePaths` and `excludePaths` and sets `completeness` from the coordinator's outcome. A successful aggregate uses `complete`; `surfaces`, `explicitExclusions`, and `deferred` are empty arrays, and `openQuestions` is omitted. If the configured time limit expires before any review completes, the coordinator writes `partial` and records the explanation in `deferred`. Stopped outcomes follow the [stopped-result recovery rules](#stopped-result-recovery).
+`reviewState` is internal checkpoint data. It records candidate dispositions and unfinished tasks so recovery cannot discard pending work or revive rejected candidates. Use `completeness`, `surfaces`, `explicitExclusions`, and `deferred`, plus `resolvedDeferred` when closing a saved generic task. Do not create a surface inventory, risk labels, open-question report, or receipt files for coverage reporting.
 
-Each Deep worker writes an ordinary Standard result, including its own coverage. A reducer submits `record_codex_security_deep_reduction({ scanId, findings, scope?, threatModel? })`; its saved results and checkpoints contain the accepted findings and optional scope and threat-model context.
+For file-authored drafts, put `reviewState` inside `scan` in the unsealed manifest. Finalization preserves recovery details in checkpoints and replaces the draft state with the small `scan.review` summary. For tool-authored drafts, pass `reviewState` to `record_codex_security_scan_draft`.
 
-For Standard and diff scans, record:
+Deep reducers work on findings and do not need review state. Deep workers retain their own checkpoints. Comparison uses the later scan's review status, configured scope, and additional exclusions before classifying an absent finding as resolved.
 
-- scan mode and inventory strategy
-- included and excluded paths
-- reviewed surfaces
-- detailed receipt references
-- explicit exclusions
-- deferred work
-- completeness
-
-`mode` records the requested scan workflow:
-
-| Mode              | Meaning                                                       |
-| ----------------- | ------------------------------------------------------------- |
-| `repository`      | Repository-wide scan                                          |
-| `scoped_path`     | Scan limited to explicitly requested paths                    |
-| `diff`            | Git-backed change-set scan when no more specific mode applies |
-| `commit`          | Commit compared with its resolved baseline                    |
-| `branch_diff`     | Branch or pull-request change set compared with its baseline  |
-| `working_tree`    | Staged or unstaged local changes                              |
-| `deep_repository` | Exhaustive repeated repository-wide scan                      |
-
-`inventoryStrategy` records how the producer enumerated the reviewed content, independently of the requested scan workflow:
-
-The discovery helper's `in_scope_files.txt` input contains one UTF-8 path per line. LF and CRLF separators are accepted; filenames containing CR or LF are unsupported. Other path whitespace and spelling are preserved.
-
-For a whole-repository Deep scan, keep `inventoryStrategy` as `repository`; repeated discovery is workflow metadata, not a different inventory strategy.
-
-| Inventory strategy | Meaning                                                   |
-| ------------------ | --------------------------------------------------------- |
-| `repository`       | Repository-wide file inventory                            |
-| `scoped_path`      | Repository inventory constrained to requested paths       |
-| `diff`             | Files selected from the reviewed Git change set           |
-| `directory`        | Deterministic non-Git directory inventory                 |
-| `custom`           | Producer-defined inventory described by detailed receipts |
-
-For Standard and diff scans, use `complete` when the requested scope was fully reviewed, `partial` when in-scope work was deferred, and `unknown` when the producer cannot establish enough coverage to make that distinction.
-
-Map detailed ledger closure into completed surface summaries in this order:
-
-| Completed surface condition                                            | Disposition       |
-| ---------------------------------------------------------------------- | ----------------- |
-| At least one `reportable` row                                          | `reported`        |
-| Otherwise, at least one `deferred` row                                 | `needs_follow_up` |
-| Otherwise, at least one `suppressed` row                               | `rejected`        |
-| Otherwise, an applicable surface was checked and no candidate survived | `no_issue_found`  |
-| Otherwise, the surface is not applicable                               | `not_applicable`  |
-
-Record each explicit exclusion with a `pattern` and `reason`. Record each deferred unit with a stable `id`, a `reason`, and optional `paths` or `surfaceIds`.
-
-Detailed ledgers remain under the numbered scan artifact directories.
-Receipt references must point to regular non-symlink files under `artifacts/`.
-`coverage.json` is the structured summary for adapters and comparison.
+Legacy scans with `coverageRef` still read and verify their existing `coverage.json`. Do not modify sealed historical files.
 
 ## Canonical Report Semantics
 
-The three canonical JSON files are also the only semantic inputs to final report generation. Producers must not author `report.md`; finalization deterministically projects it after validating the canonical seal. The report remains an unsealed downstream projection and can be regenerated without changing canonical JSON or evidence artifacts.
+The two canonical JSON files are also the only semantic inputs to final report generation. Producers must not author `report.md`; finalization deterministically projects it after validating the canonical seal. The report remains an unsealed downstream projection and can be regenerated without changing canonical JSON or evidence artifacts.
 
 Record report-specific semantics without duplicating data already represented elsewhere:
 
@@ -181,8 +131,6 @@ Record report-specific semantics without duplicating data already represented el
 - finding `attackPath.reachability`: attacker, entry point, preconditions, outcome, and a concise reachability narrative.
 - finding `severity`: the assigned level plus rationale and the concrete evidence that would raise or lower it.
 - finding remediation: the existing minimal fix string plus optional tests and preventive controls.
-- coverage surfaces: optional `riskArea` and `notes` used by the Reviewed Surfaces table.
-- coverage `openQuestions`: concrete unresolved questions and optional copyable follow-up prompts.
 
 These fields are optional for compatibility with existing v1 canonical artifacts. When omitted, finalization emits explicit, deterministic fallback text derived only from the remaining canonical JSON. It never reads an existing report to recover missing semantics.
 
@@ -190,7 +138,7 @@ These fields are optional for compatibility with existing v1 canonical artifacts
 
 - `schemas/scan-manifest.schema.json`
 - `schemas/findings.schema.json`
-- `schemas/coverage.schema.json`
+- `schemas/coverage.schema.json` for legacy scans only
 
 V1 consumers ignore unknown properties for forward compatibility. Producers must still validate documented fields and should not emit undocumented properties casually.
 

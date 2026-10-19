@@ -108,7 +108,12 @@ async function completedScan(
       (name) => writeFile(join(outputDir, name), "{}\n"),
     ),
   );
-  return { coverage: { completeness } } as ScanResult;
+  return {
+    review: {
+      status: completeness === "partial" ? "incomplete" : completeness,
+      excludedPaths: [],
+    },
+  } as unknown as ScanResult;
 }
 
 const completeRun: SecurityClient["run"] = async (
@@ -756,7 +761,7 @@ describe("multiscan", () => {
           await completedScan(scanDir);
           const recovered = fakeResult([severity]);
           return {
-            coverage: recovered.coverage,
+            review: recovered.review,
             cost: recovered.cost,
             findings: recovered.findings,
           };
@@ -1124,7 +1129,7 @@ describe("multiscan", () => {
         skipped: 0,
       });
       const outputDir = join(paths.output, "artifacts", "sealed", "attempt-1");
-      const warning = `Scan coverage is ${completeness}; results may be incomplete.`;
+      const warning = `Review status is ${completeness === "partial" ? "incomplete" : completeness}; results may be incomplete.`;
       const receipts = await results(summary.resultsPath);
       expect(receipts).toMatchObject([
         {
@@ -1260,7 +1265,7 @@ describe("multiscan", () => {
           repository: "legacy",
           status: "completed_with_incomplete_coverage",
           attempt: 1,
-          warning: `Scan coverage is ${completeness}; results may be incomplete.`,
+          warning: `Review status is ${completeness === "partial" ? "incomplete" : completeness}; results may be incomplete.`,
         },
       ]);
       expect(await results(summary.resultsPath)).toEqual([receipt]);
@@ -1381,7 +1386,7 @@ describe("multiscan", () => {
         failed: 0,
         skipped: 0,
       });
-      const warning = `Scan coverage is ${completeness}; results may be incomplete.`;
+      const warning = `Review status is ${completeness === "partial" ? "incomplete" : completeness}; results may be incomplete.`;
       expect(stderr.text()).toContain(
         "sample completed_with_incomplete_coverage (attempt 1)",
       );

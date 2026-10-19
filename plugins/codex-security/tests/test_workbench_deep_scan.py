@@ -26,6 +26,7 @@ from workbench_test_support import (
     get_deep_scan,
     get_scan,
     mark_deep_coordinator_succeeded,
+    read_review_state,
     resume_deep_scan,
     run_workbench,
     save_workspace,
@@ -2928,7 +2929,7 @@ def test_failure_capped_completion_preserves_partial_results_and_exact_omissions
         "maximum": 10,
         "consolidating": True,
     }
-    assert json.loads((scan_dir / "coverage.json").read_text())["completeness"] == "partial"
+    assert read_review_state(state_dir, scan_dir)["completeness"] == "partial"
     assert len(json.loads((scan_dir / "findings.json").read_text())["findings"]) == 1
     assert (
         next(worker for worker in finished["workers"] if worker["id"] == failed_id)["status"]
@@ -3016,7 +3017,7 @@ def test_late_worker_rejection_supersedes_stopped_checkpoint_finding(tmp_path: P
         state_dir, "recover-scan-results", scan_id, environment=deep_environment(codex_home)
     )["scan"]
     final_findings = json.loads(findings_path.read_text())["findings"]
-    final_coverage = json.loads(coverage_path.read_text())
+    final_coverage = read_review_state(state_dir, scan_dir)
     assert recovered["findingCount"] == len(final_findings) == 0
     assert any(
         item.get("candidateId") == "candidate-late-rejection"

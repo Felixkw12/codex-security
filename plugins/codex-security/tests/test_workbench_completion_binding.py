@@ -20,6 +20,7 @@ from workbench_test_support import (
     get_scan,
     initialize_git_repository,
     mark_deep_coordinator_succeeded,
+    read_review_state,
     resume_deep_scan,
     run_workbench,
     save_workspace,
@@ -168,9 +169,15 @@ def _seal_draft(scan_dir: Path, target: Path) -> None:
 
 
 def _sealed_artifacts(scan_dir: Path) -> dict[str, bytes]:
+    scan = json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]
     return {
         name: (scan_dir / name).read_bytes()
-        for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
+        for name in (
+            "scan-manifest.json",
+            "findings.json",
+            "report.md",
+            *(["coverage.json"] if "coverageRef" in scan else []),
+        )
     }
 
 
@@ -260,7 +267,7 @@ def test_stopped_recovery_preserves_legacy_diff_snapshot(tmp_path: Path, kind: s
     manifest = json.loads(manifest_path.read_text())
     assert manifest["scan"]["target"]["snapshotDigest"] == legacy_digest
     assert json.loads((scan_dir / "findings.json").read_text())["findings"] == original_findings
-    assert late_review in json.loads((scan_dir / "coverage.json").read_text())["deferred"]
+    assert late_review in read_review_state(state_dir, scan_dir)["deferred"]
     sealed_artifacts = _sealed_artifacts(scan_dir)
     scan_command(state_dir, "recover-scan-results", scan_id)
     assert _sealed_artifacts(scan_dir) == sealed_artifacts
@@ -372,7 +379,7 @@ def test_cli_scan_completes_when_draft_omits_registered_scope(
     assert completed["scan"]["findingCount"] == 1
     assert completed["scan"]["reportAvailable"] is True
     manifest = json.loads(manifest_path.read_text())
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     expected_scope = {"includePaths": ["src", "tests"], "excludePaths": []}
     assert manifest["scan"]["scope"] == expected_scope
     assert coverage["includePaths"] == expected_scope["includePaths"]
@@ -569,7 +576,7 @@ def test_completion_populates_coverage_mode_from_selected_scan_mode(tmp_path: Pa
         )
         completed = scan_command(state_dir, "complete-scan", scan_id)
         assert completed["scan"]["progress"]["status"] == "complete"
-        coverage = json.loads((scan_dir / "coverage.json").read_text())
+        coverage = read_review_state(state_dir, scan_dir)
         assert coverage["mode"] == expected
 
 
@@ -581,7 +588,7 @@ def test_completion_populates_workbench_owned_unsealed_envelope(
     write_completed_contract(scan_dir, scan_id, target)
     manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
     findings = json.loads((scan_dir / "findings.json").read_text())
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     manifest["documentType"] = "wrong.manifest"
     manifest["schemaVersion"] = "wrong"
     manifest["scan"]["id"] = "wrong-scan"
@@ -645,7 +652,7 @@ def test_completion_populates_workbench_owned_unsealed_envelope(
     assert completed["scan"]["progress"]["status"] == "complete"
     sealed_manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
     sealed_findings = json.loads((scan_dir / "findings.json").read_text())
-    sealed_coverage = json.loads((scan_dir / "coverage.json").read_text())
+    sealed_coverage = read_review_state(state_dir, scan_dir)
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         stored_started_at, stored_completed_at = connection.execute(
             "SELECT started_at, completed_at FROM scans WHERE id = ?", (scan_id,)
@@ -661,7 +668,11 @@ def test_completion_populates_workbench_owned_unsealed_envelope(
     assert sealed_manifest["scan"]["startedAt"] == stored_started_at
     assert sealed_manifest["scan"]["completedAt"] == stored_completed_at
     assert sealed_manifest["scan"]["sealedAt"] == stored_completed_at
-    assert sealed_manifest["scan"]["coverageRef"] == "coverage.json"
+    if omit_metadata:
+        assert "coverageRef" not in sealed_manifest["scan"]
+        assert not (scan_dir / "coverage.json").exists()
+    else:
+        assert sealed_manifest["scan"]["coverageRef"] == "coverage.json"
     assert sealed_manifest["scan"]["findingsRef"] == "findings.json"
     assert sealed_manifest["scan"]["target"]["targetId"] == stable_target_id(target)
     assert sealed_manifest["scan"]["target"]["displayName"] == target.name
@@ -898,7 +909,7 @@ def test_deep_completion_rejects_invalid_target_even_with_recoverable_inventory(
     recovered = scan_command(state_dir, "recover-scan-results", scan_id)["scan"]
 
     assert recovered["resultsRecoveryNeeded"] is False
-    preserved_coverage = json.loads(coverage_path.read_text())
+    preserved_coverage = read_review_state(state_dir, scan_dir)
     assert preserved_coverage["inventoryStrategy"] == "repository"
     assert preserved_coverage["completeness"] == "partial"
     assert len(json.loads((scan_dir / "findings.json").read_text())["findings"]) == 1
@@ -1017,7 +1028,7 @@ def test_completion_keeps_valid_findings_and_warns_about_bad_ones(tmp_path: Path
     assert any("duplicate logical finding" in warning for warning in warnings)
     assert any("expected an object" in warning for warning in warnings)
     assert len(json.loads((scan_dir / "findings.json").read_text())["findings"]) == 1
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     assert coverage["completeness"] == "partial"
     assert coverage["surfaces"][0]["disposition"] == "needs_follow_up"
     assert len(coverage["deferred"]) == 5
@@ -1126,7 +1137,7 @@ def test_completion_retains_strongest_duplicate_finding_regardless_of_order(
             == weaker
             for original in recovered["provenance"].get("previousFindings", [])
         ), case
-        coverage = json.loads((scan_dir / "coverage.json").read_text())
+        coverage = read_review_state(state_dir, scan_dir)
         assert coverage["completeness"] == "complete", case
         assert "### No findings" not in (scan_dir / "report.md").read_text(), case
         sarif = json.loads((scan_dir / "exports/results.sarif").read_text())
@@ -1198,7 +1209,7 @@ def test_valid_checkpoint_survives_malformed_replacement_finding(tmp_path: Path)
     checkpoint = {
         "scanId": scan_id,
         "findings": copy.deepcopy(findings["findings"]),
-        "coverage": json.loads((scan_dir / "coverage.json").read_text()),
+        "coverage": read_review_state(state_dir, scan_dir),
     }
     (scan_dir / "checkpoints").mkdir()
     (scan_dir / "checkpoints" / ("a" * 64 + ".json")).write_text(json.dumps(checkpoint))
@@ -1245,7 +1256,7 @@ def test_completion_succeeds_when_all_findings_are_malformed(tmp_path: Path) -> 
     assert len(completed["scan"]["warnings"]) == 1
     assert "summary" in completed["scan"]["warnings"][0]
     assert json.loads((scan_dir / "findings.json").read_text())["findings"] == []
-    coverage = json.loads((scan_dir / "coverage.json").read_text())
+    coverage = read_review_state(state_dir, scan_dir)
     assert coverage["completeness"] == "partial"
     assert coverage["surfaces"][0]["disposition"] == "needs_follow_up"
     assert coverage["deferred"] == [
@@ -1255,11 +1266,11 @@ def test_completion_succeeds_when_all_findings_are_malformed(tmp_path: Path) -> 
         }
     ]
     report = (scan_dir / "report.md").read_text()
-    assert "| Coverage | partial |" in report
+    assert "| Review status | incomplete |" in report
     assert "Skipped malformed finding 1" in report
     sarif = json.loads((scan_dir / "exports/results.sarif").read_text())
     run = sarif["runs"][0]
-    assert run["properties"]["codexSecurityCoverageCompleteness"] == "partial"
+    assert run["properties"]["codexSecurityReviewStatus"] == "incomplete"
     assert run["invocations"][0]["executionSuccessful"] is True
     assert run["invocations"][0]["toolExecutionNotifications"] == [
         {

@@ -974,7 +974,7 @@ interface ScanOutcome {
   exitCode: number;
   data?: Record<string, unknown>;
   error?: string;
-  coverageError?: string;
+  reviewError?: string;
 }
 
 const incompleteScanEnvelopeSchema = z
@@ -1759,11 +1759,11 @@ export async function main(
     { format: "json" | "jsonl"; message: string } | undefined;
   const recordIncompleteScanOutput = (outcome: ScanOutcome, format: string) => {
     if (
-      outcome.coverageError !== undefined &&
+      outcome.reviewError !== undefined &&
       (format === "json" || format === "jsonl") &&
       argv.includes("--full-output")
     ) {
-      incompleteScanOutput = { format, message: outcome.coverageError };
+      incompleteScanOutput = { format, message: outcome.reviewError };
     }
   };
   let filteredScanFailure:
@@ -2521,7 +2521,7 @@ export async function main(
       },
     })
     .command("compare", {
-      description: "Match and compare findings and coverage between scans.",
+      description: "Match and compare findings between scans.",
       destructive: true,
       mcp: false,
       args: z.object({
@@ -4624,7 +4624,7 @@ export async function main(
                         signal: controller.signal,
                       });
                       return {
-                        coverage: contract.coverage,
+                        review: contract.review,
                         findings: contract.findings,
                         cost:
                           (scan["cost"] as unknown as ScanCost | undefined) ??
@@ -8914,7 +8914,7 @@ async function executeScan(
     targetWarnings.length === 0
       ? result.toJSON()
       : { ...result.toJSON(), warnings: targetWarnings };
-  const incomplete = result.coverage.completeness !== "complete";
+  const incomplete = result.review.status !== "complete";
   let deepScanStop: DeepScanStop | undefined;
   if (arguments_.mode === "deep") {
     deepScanStop = (await readDeepScanStop(
@@ -8936,17 +8936,17 @@ async function executeScan(
     showCost,
     deepScanStop,
   );
-  const coverageError = incomplete
+  const reviewError = incomplete
     ? threshold === undefined
-      ? `Scan coverage is ${result.coverage.completeness}; results may be incomplete.`
-      : `Cannot evaluate the failure policy: coverage is ${result.coverage.completeness}.`
+      ? `Review status is ${result.review.status}; results may be incomplete.`
+      : `Cannot evaluate the failure policy: review status is ${result.review.status}.`
     : undefined;
   const completedScan = (
     exitCode: number,
-    error = coverageError,
+    error = reviewError,
   ): ScanOutcome => {
     diagnostic("scan.completed", {
-      coverage: result.coverage.completeness,
+      review: result.review.status,
       findings: findings.length,
       scan_id: result.manifest.scan.id,
       estimated_usd: showCost ? result.cost?.estimatedUsd : undefined,
@@ -8960,7 +8960,7 @@ async function executeScan(
     return {
       exitCode,
       data: scanData,
-      ...(error === undefined ? {} : { coverageError: error }),
+      ...(error === undefined ? {} : { reviewError: error }),
     };
   };
   if (targetWarnings.length > 0) {
@@ -8969,8 +8969,8 @@ async function executeScan(
     errorOutput.write(`codex-security: ${message}\n`);
     return completedScan(2, incomplete ? message : undefined);
   }
-  if (coverageError !== undefined) {
-    errorOutput.write(`codex-security: ${coverageError}\n`);
+  if (reviewError !== undefined) {
+    errorOutput.write(`codex-security: ${reviewError}\n`);
     return completedScan(2);
   }
 
@@ -9470,7 +9470,7 @@ function printScanSummary(
         ? ""
         : `  ${paint("THREAT MODEL", "1;36")}  ${paint(errorMessage(threatModelPath), 4)}\n`) +
       `\n  ${paint("FINDINGS", 1)}  ${paint(`${findingCount}${findingSummary === "" ? "" : ` (${findingSummary})`}`, findingColor)}\n` +
-      `  ${paint("COVERAGE", 1)}  ${result.coverage.completeness}\n` +
+      `  ${paint("REVIEW", 1)}  ${result.review.status}\n` +
       (deepScanStop === undefined
         ? ""
         : `  ${paint("STOPPED", 1)}   ${deepScanStop.reason}\n`) +
