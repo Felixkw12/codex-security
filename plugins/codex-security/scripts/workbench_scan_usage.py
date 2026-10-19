@@ -86,7 +86,7 @@ def collect_scan_usage(
     completed_at: str | None = None,
     completed_turn_id: str | None = None,
 ) -> dict[str, Any]:
-    """Count only complete, attributable rollout events inside this scan's window."""
+    """Count attributable receipts and flag observable gaps inside the scan window."""
 
     roots = _scan_root_thread_ids(connection, scan, thread_id)
     worker_directories = _scan_worker_directories(connection, scan)
@@ -451,6 +451,9 @@ def _read_rollout_usage(
     response_ids: set[str] = set()
     current_turn_id: str | None = None
     completed_turn_measured = False
+    started_turns: set[str] = set()
+    closed_turns: set[str] = set()
+    measured_turns: set[str] = set()
 
     with session.path.open("rb") as source:
         for line_number, raw_line in enumerate(source, start=1):
@@ -506,12 +509,12 @@ def _read_rollout_usage(
                         warnings.add("thread_outside_scan_window")
                         return total, warnings
                     boundary_reached = True
-                    current_turn_id = payload.get("turn_id")
                 elif event.get("type") == "event_msg" and payload.get("type") == "token_count":
                     inherited_usage = _token_snapshot(payload)
                     if inherited_usage is not None:
                         previous = inherited_usage
-                continue
+                if not boundary_reached:
+                    continue
             if event.get("type") == "event_msg" and payload.get("type") == "task_started":
                 if (
                     completed_turn_id is not None
@@ -527,7 +530,39 @@ def _read_rollout_usage(
                 if payload.get("turn_id") != current_turn_id:
                     observed_response_usage = _empty_token_usage()
                 current_turn_id = payload.get("turn_id")
+                timestamp = _timestamp(event.get("timestamp"))
+                if not isinstance(current_turn_id, str) or not current_turn_id or timestamp is None:
+                    warnings.add("turn_record_invalid")
+                elif (
+                    completed_at is None
+                    or timestamp <= completed_at
+                    or current_turn_id == completed_turn_id
+                ):
+                    started_turns.add(current_turn_id)
                 continue
+            if event.get("type") == "event_msg" and payload.get("type") in {
+                "task_complete",
+                "turn_aborted",
+            }:
+                timestamp = _timestamp(event.get("timestamp"))
+                terminal_turn_id = payload.get("turn_id") or current_turn_id
+                if (
+                    not isinstance(terminal_turn_id, str)
+                    or not terminal_turn_id
+                    or timestamp is None
+                ):
+                    warnings.add("turn_record_invalid")
+                elif (
+                    completed_at is None
+                    or timestamp <= completed_at
+                    or terminal_turn_id == completed_turn_id
+                ):
+                    if timestamp >= started_at:
+                        if terminal_turn_id in started_turns:
+                            closed_turns.add(terminal_turn_id)
+                        if payload.get("type") == "turn_aborted":
+                            # Later successful work does not recover interrupted request usage.
+                            warnings.add("turn_interrupted")
             if (
                 completed_turn_id is not None
                 and event.get("type") == "event_msg"
@@ -581,6 +616,9 @@ def _read_rollout_usage(
                 response_ids.add(response_id)
                 _add_token_usage(observed_response_usage, usage)
                 turn_usage = _usage_counts(payload.get("turn_token_usage"))
+                receipt_turn_id = payload.get("turn_id")
+                if isinstance(receipt_turn_id, str):
+                    measured_turns.add(receipt_turn_id)
                 if timestamp < started_at:
                     if turn_usage is not None:
                         observed_response_usage = turn_usage
@@ -607,12 +645,14 @@ def _read_rollout_usage(
                 for key, value in snapshot.items()
             }
             previous = snapshot
-            if timestamp < started_at:
-                continue
             is_completion_turn = (
                 completed_turn_id is not None and current_turn_id == completed_turn_id
             )
             if completed_at is not None and timestamp > completed_at and not is_completion_turn:
+                continue
+            if isinstance(current_turn_id, str):
+                measured_turns.add(current_turn_id)
+            if timestamp < started_at:
                 continue
             if is_completion_turn:
                 completed_turn_measured = True
@@ -623,6 +663,8 @@ def _read_rollout_usage(
     _add_token_usage(total, response_usage if response_usage is not None else legacy_usage)
     if not boundary_reached:
         warnings.add("thread_ownership_unavailable")
+    if closed_turns - measured_turns:
+        warnings.add("token_record_missing")
     if completed_turn_id is not None and not completed_turn_measured:
         warnings.add("completion_turn_unavailable")
     return total, warnings
