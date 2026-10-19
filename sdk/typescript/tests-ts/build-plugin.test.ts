@@ -295,13 +295,13 @@ describe("bundled plugin build", () => {
             scanId: "synthetic-scan",
             manifest: { scan: {} },
             findings: { findings: [] },
-            coverage: {
+            reviewState: {
               surfaces: [], explicitExclusions: [], deferred: [],
             },
           };
           assert.equal(helpers.parseCanonicalScanDraft(input).scanId, input.scanId);
           assert.throws(() => helpers.parseCanonicalScanDraft({
-            ...input, coverage: { ...input.coverage, surfaces: "invalid" },
+            ...input, reviewState: { ...input.reviewState, surfaces: "invalid" },
           }));
           assert.equal(process.exitCode, undefined);
         `,

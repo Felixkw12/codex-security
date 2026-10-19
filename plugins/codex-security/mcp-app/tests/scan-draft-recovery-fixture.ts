@@ -64,7 +64,6 @@ export async function recordCodexSecurityScanDraft(
         },
       );
       // Retain the legacy file-authored layout for recovery compatibility tests.
-      delete draft.manifest.scan.reviewState;
       draft.manifest.scan.coverageRef = "coverage.json";
       for (const [key, name] of [
         ["findings", "findings.json"],

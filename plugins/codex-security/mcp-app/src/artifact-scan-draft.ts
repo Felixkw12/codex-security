@@ -41,18 +41,11 @@ export interface ScanDraftResult {
   warnings?: string[];
 }
 
-export interface CompletedScanResult extends Omit<
-  PreparedScanDraft,
-  "reviewState"
-> {
+export interface CompletedScanResult {
   scanId: string;
-  review: JsonObject;
-}
-
-interface PreparedScanDraft {
   manifest: JsonObject;
   findings: JsonObject;
-  reviewState: JsonObject;
+  review: JsonObject;
 }
 
 /** Host-selected Deep aggregate, separate from model-authored draft fields. */
@@ -137,7 +130,7 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
     const draft = {
       findings: { findings },
       reviewState,
-      manifest: { scan: { ...manifestScan, reviewState } },
+      manifest: { scan: manifestScan },
     };
     const checkpoint = finalDeepDraft
       ? { ...reconciled, findings: scopedFindings }
@@ -1908,19 +1901,13 @@ function parsePersistedCheckpoint(
   input: Record<string, unknown>,
 ): ScanDraftInput {
   const compatible = structuredClone(input);
-  if (
-    compatible.reviewState === undefined &&
-    compatible.coverage !== undefined
-  ) {
-    compatible.reviewState = compatible.coverage;
-    delete compatible.coverage;
-  }
   if (isObject(compatible.scope)) {
     delete compatible.scope.includePaths;
     delete compatible.scope.excludePaths;
     if (Object.keys(compatible.scope).length === 0) delete compatible.scope;
   }
-  if (isObject(compatible.reviewState)) {
+  const reviewState = compatible.reviewState ?? compatible.coverage
+  if (isObject(reviewState)) {
     for (const field of [
       "documentType",
       "schemaVersion",
@@ -1931,7 +1918,7 @@ function parsePersistedCheckpoint(
       "receiptRefs",
       "inventoryStrategy",
     ])
-      delete compatible.reviewState[field];
+      delete reviewState[field];
   }
   if (Array.isArray(compatible.findings)) {
     for (const finding of compatible.findings) {

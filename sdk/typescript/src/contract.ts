@@ -91,15 +91,12 @@ export async function loadContractWithScanDirectory(
     scanRoot,
   );
   const rawManifest = payloads["scan-manifest.json"] as ScanManifest;
-  const documents = Object.fromEntries(
-    Object.entries(DOCUMENTS).filter(
-      ([name]) =>
-        name !== "coverage.json" || rawManifest.scan?.coverageRef !== undefined,
-    ),
+  const documents = Object.entries(DOCUMENTS).filter(
+    ([name]) =>
+      name !== "coverage.json" || rawManifest.scan?.coverageRef !== undefined,
   );
-  for (const filename of Object.keys(documents).filter(
-    (name) => name !== "scan-manifest.json",
-  )) {
+  for (const [filename] of documents) {
+    if (filename === "scan-manifest.json") continue;
     payloads[filename] = await readScanJson(
       scanDir,
       filename as keyof typeof DOCUMENTS,
@@ -117,7 +114,7 @@ export async function loadContractWithScanDirectory(
     "date-time",
     { type: "string", validate: validRfc3339DateTime },
   );
-  for (const [filename, schemaName] of Object.entries(documents)) {
+  for (const [filename, schemaName] of documents) {
     const schema = await readJson(
       join(options.pluginRoot, "schemas", schemaName),
       options.signal,
@@ -152,26 +149,12 @@ export async function loadContractWithScanDirectory(
   const manifest = payloads["scan-manifest.json"] as ScanManifest;
   const findings = payloads["findings.json"] as FindingsDocument;
   const coverage = payloads["coverage.json"] as CoverageDocument | undefined;
+  const mode = coverage?.mode ?? manifest.scan.mode!;
   const review = coverage
     ? {
         excludedPaths: coverage.explicitExclusions.map((item) => item.pattern),
       }
     : manifest.scan.review!;
-  const reviewDetails: CoverageDocument = coverage ?? {
-    documentType: "codex-security.coverage",
-    schemaVersion: "1.0",
-    scanId: manifest.scan.id,
-    mode: manifest.scan.mode!,
-    inventoryStrategy: "repository",
-    includePaths: manifest.scan.scope.includePaths,
-    excludePaths: manifest.scan.scope.excludePaths,
-    explicitExclusions: review.excludedPaths.map((pattern) => ({
-      pattern,
-      reason: "Excluded from review",
-    })),
-    surfaces: [],
-    deferred: [],
-  };
   if (
     options.expectedScanId !== undefined &&
     manifest.scan.id !== options.expectedScanId
@@ -182,34 +165,36 @@ export async function loadContractWithScanDirectory(
   }
   if (
     findings.scanId !== manifest.scan.id ||
-    reviewDetails.scanId !== manifest.scan.id
+    (coverage !== undefined && coverage.scanId !== manifest.scan.id)
   ) {
     throw new ContractValidationError(
       "Canonical contract scan IDs do not match.",
     );
   }
   if (
-    !sameArray(reviewDetails.includePaths, manifest.scan.scope.includePaths)
+    coverage !== undefined &&
+    !sameArray(coverage.includePaths, manifest.scan.scope.includePaths)
   ) {
     throw new ContractValidationError(
       "Coverage include paths do not match the manifest scope.",
     );
   }
   if (
-    !sameArray(reviewDetails.excludePaths, manifest.scan.scope.excludePaths)
+    coverage !== undefined &&
+    !sameArray(coverage.excludePaths, manifest.scan.scope.excludePaths)
   ) {
     throw new ContractValidationError(
       "Coverage exclude paths do not match the manifest scope.",
     );
   }
 
-  validateCanonicalContract(manifest, findings, reviewDetails);
+  validateCanonicalContract(manifest, findings, coverage);
 
   await validateSeal(
     scanDir,
     manifest,
     findings,
-    reviewDetails,
+    coverage,
     documentDigests,
     options.signal,
     scanRoot,
@@ -217,14 +202,14 @@ export async function loadContractWithScanDirectory(
   if (options.expectation !== undefined) {
     validateExpectation(
       manifest,
-      reviewDetails,
+      mode,
       options.expectation,
       options.workbenchValidated === true,
     );
   }
   await verifyScanRoot(scanRoot, options.signal);
   return {
-    contract: { manifest, findings, review, mode: reviewDetails.mode },
+    contract: { manifest, findings, review, mode },
     scanDirectory: scanRoot.path,
   };
 }
@@ -245,7 +230,7 @@ function normalizePersistedFindings(payload: unknown): unknown {
 function validateCanonicalContract(
   manifest: ScanManifest,
   findings: FindingsDocument,
-  coverage: CoverageDocument,
+  coverage: CoverageDocument | undefined,
 ): void {
   const remote = manifest.scan.target.remote;
   if (remote !== undefined) {
@@ -301,7 +286,7 @@ function validateCanonicalContract(
     }
   }
 
-  for (const [index, deferred] of coverage.deferred.entries()) {
+  for (const [index, deferred] of (coverage?.deferred ?? []).entries()) {
     for (const [pathIndex, path] of (deferred.paths ?? []).entries()) {
       const context = `coverage.deferred[${index}].paths[${pathIndex}]`;
       try {
@@ -490,7 +475,7 @@ async function validateSeal(
   scanDir: string,
   manifest: ScanManifest,
   findings: FindingsDocument,
-  coverage: CoverageDocument,
+  coverage: CoverageDocument | undefined,
   documentDigests: ReadonlyMap<string, string>,
   signal?: AbortSignal,
   expectedRoot?: ScanRoot,
@@ -549,7 +534,7 @@ async function validateSeal(
       );
     }
   };
-  for (const surface of coverage.surfaces) {
+  for (const surface of coverage?.surfaces ?? []) {
     for (const receipt of surface.receiptRefs) {
       requireSealedReference(receipt, "Coverage receipt");
     }
@@ -587,7 +572,7 @@ async function validateSeal(
 
 function validateExpectation(
   manifest: ScanManifest,
-  coverage: CoverageDocument,
+  mode: LoadedContract["mode"],
   expectation: ScanExpectation,
   workbenchValidated = false,
 ): void {
@@ -607,9 +592,9 @@ function validateExpectation(
     expectation.target,
     expectation.mode,
   );
-  if (coverage.mode !== expectedMode) {
+  if (mode !== expectedMode) {
     throw new ContractValidationError(
-      `Coverage mode must be ${expectedMode}, got ${coverage.mode}.`,
+      `Coverage mode must be ${expectedMode}, got ${mode}.`,
     );
   }
 

@@ -138,7 +138,7 @@ export async function publishFindingsCsvToCloud(
       summary: "Findings imported from a Codex Security CSV export.",
     },
     mode: "repository",
-    review: { status: "unknown", excludedPaths: [] },
+    review: { excludedPaths: [] },
     findingsRef: "findings.json",
     artifacts: [
       {

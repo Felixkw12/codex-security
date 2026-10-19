@@ -932,19 +932,13 @@ def merge_saved_results(
     if frozen_source_digests is None or allow_frozen_legacy_parent:
         try:
             parent_manifest, parent = _read_saved_parent_result(scan_dir, scan_id)
-            # Without an accepted head, file-authored coverage is a full replacement.
-            parent_modified = (
-                (
-                    scan_dir
-                    / (
-                        "coverage.json"
-                        if uses_legacy_review(parent_manifest["scan"])
-                        else "scan-manifest.json"
-                    )
-                )
-                .lstat()
-                .st_mtime_ns
+            # Without an accepted head, a file-authored draft is a full replacement.
+            parent_file = (
+                "coverage.json"
+                if uses_legacy_review(parent_manifest["scan"])
+                else "scan-manifest.json"
             )
+            parent_modified = (scan_dir / parent_file).lstat().st_mtime_ns
             parent_is_canonical = True
         except (ContractError, OSError, ValueError) as exc:
             if not stopped:
