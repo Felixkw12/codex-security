@@ -308,7 +308,6 @@ export class FakeStore {
           scanId: this.run.scanId,
           findings: [],
           reviewState: {
-            completeness: "partial",
             surfaces: [],
             explicitExclusions: [],
             deferred: [],
@@ -697,7 +696,6 @@ export function standardScanDraft(
         ]
       : [],
     reviewState: {
-      completeness: "complete",
       surfaces: [
         {
           label: "Fixture query",

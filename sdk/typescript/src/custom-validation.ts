@@ -9,7 +9,7 @@ import {
 } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import Ajv2020 from "ajv/dist/2020.js";
-import { normalizePersistedFindings, requireScanFile } from "./contract.js";
+import { requireScanFile } from "./contract.js";
 import { IncompleteScanError, errorMessage } from "./errors.js";
 import type { CoverageDocument, FindingsDocument } from "./models.js";
 import { requirePrivateOutputDirectory } from "./runtime.js";
@@ -234,9 +234,7 @@ export async function runCustomValidation(options: {
       "The scan did not return an unsealed custom-validation draft.",
     );
   }
-  const { findings } = normalizePersistedFindings(
-    findingsDocument,
-  ) as typeof findingsDocument;
+  const { findings } = findingsDocument;
   const [common, candidatesSchema, draft] = await Promise.all([
     readSchema(options.pluginRoot, "definitions/artifact-common.schema.json"),
     readSchema(options.pluginRoot, "tools/candidate-validations.schema.json"),
@@ -246,11 +244,11 @@ export async function runCustomValidation(options: {
   const ajv = new Ajv2020({ strict: false, validateFormats: false });
   ajv.addSchema(common).addSchema(draft);
   const validFinding = ajv.compile({ $ref: `${draft.$id}#/$defs/finding` });
-  const { completeness, surfaces, explicitExclusions, deferred } = coverage;
+  const { surfaces, explicitExclusions, deferred } = coverage;
   if (
     !ajv.validate(
       { $ref: `${draft.$id}#/$defs/reviewState` },
-      { completeness, surfaces, explicitExclusions, deferred },
+      { surfaces, explicitExclusions, deferred },
     )
   )
     throw new IncompleteScanError(
@@ -395,7 +393,6 @@ export async function runCustomValidation(options: {
       decisions.set(id, values);
     }
     if (validation.disposition === "deferred") {
-      coverage.completeness = "partial";
       coverage.deferred.push({
         id: `custom-validation-${candidate.candidateId}`,
         reason:
@@ -459,6 +456,7 @@ export async function runCustomValidation(options: {
   firstSurface.receiptRefs = [
     ...new Set([...firstSurface.receiptRefs, CANDIDATES, RESULTS]),
   ];
+  delete coverage["completeness"];
   findingsDocument.findings = reported;
   manifest.scan.scope.validationMode = "custom";
   // Rewrite the captured draft, not any canonical-file edits made during validation.

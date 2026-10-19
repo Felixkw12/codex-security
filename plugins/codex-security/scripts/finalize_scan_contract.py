@@ -9,6 +9,7 @@ import csv
 import errno
 import hashlib
 import io
+import ipaddress
 import json
 import math
 import os
@@ -19,7 +20,7 @@ import struct
 import sys
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, TextIO
+from typing import Any, NamedTuple, TextIO
 from urllib.parse import quote, urlsplit
 
 # Keep sibling helpers importable when Python starts in isolated mode.
@@ -68,6 +69,7 @@ RFC3339_RE = re.compile(
     re.ASCII,
 )
 REMOTE_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+REMOTE_UNSAFE_HOST_RE = re.compile(r"[\s<>^|]")
 GITHUB_HASH_BLOCK_SIZE = 100
 GITHUB_HASH_MOD = 37
 GITHUB_HASH_MASK = (1 << 64) - 1
@@ -94,6 +96,10 @@ WINDOWS_UNSAFE_PATH_COMPONENT_RE = re.compile(
 
 class ContractError(ValueError):
     """Raised when a completed scan does not satisfy the additive contract."""
+
+
+class MissingScanLocalFileError(ContractError):
+    """Raised when a scan-local file or its containing directory is absent."""
 
 
 class RecoverableContractError(ContractError):
@@ -412,7 +418,9 @@ def _require_str(payload: dict[str, Any], key: str, context: str) -> str:
     return value
 
 
-def _require_safe_relative_path(value: str, context: str, *, allow_dot: bool = False) -> str:
+def _require_safe_relative_path(value: object, context: str, *, allow_dot: bool = False) -> str:
+    if not isinstance(value, str) or not value:
+        raise ContractError(f"{context}: expected a safe repository-relative POSIX path")
     try:
         value.encode("utf-8")
     except UnicodeEncodeError as exc:
@@ -420,8 +428,7 @@ def _require_safe_relative_path(value: str, context: str, *, allow_dot: bool = F
     path = PurePosixPath(value)
     normalized = path.as_posix()
     if (
-        not value.strip()
-        or (normalized == "." and not allow_dot)
+        (normalized == "." and not allow_dot)
         or (len(value) >= 2 and value[0].isalpha() and value[1] == ":")
         or "\\" in value
         or "\0" in value
@@ -435,7 +442,7 @@ def _require_safe_relative_path(value: str, context: str, *, allow_dot: bool = F
 
 def _require_portable_relative_path(value: str, context: str, *, allow_dot: bool = False) -> str:
     normalized = _require_safe_relative_path(value, context, allow_dot=allow_dot)
-    if any(_windows_unsafe_path_component(part) for part in value.split("/")):
+    if not value.strip() or any(_windows_unsafe_path_component(part) for part in value.split("/")):
         raise ContractError(f"{context}: expected a safe scan-relative POSIX path")
     return normalized
 
@@ -588,6 +595,9 @@ def _open_scan_local_file_with_path(
                 return backend.open_read_fd_with_path(scan_dir, relative_path, context)
             return backend.open_read_fd(scan_dir, relative_path, context), relative_path
         except OSError as exc:
+            # The Windows backend retains native ERROR_FILE/PATH_NOT_FOUND codes.
+            if exc.errno in {2, 3}:
+                raise MissingScanLocalFileError(str(exc)) from exc
             raise ContractError(str(exc)) from exc
     root_fd: int | None = None
     parent_fd: int | None = None
@@ -603,6 +613,10 @@ def _open_scan_local_file_with_path(
                 dir_fd=parent_fd,
             )
         except OSError as exc:
+            if exc.errno == errno.ENOENT:
+                raise MissingScanLocalFileError(
+                    f"{context}: expected a file inside the scan directory"
+                ) from exc
             if exc.errno == errno.ELOOP:
                 try:
                     link_target = Path(os.readlink(parts[-1], dir_fd=parent_fd))
@@ -648,7 +662,13 @@ def _require_scan_local_file(scan_dir: Path, relative_path: str, context: str) -
     os.close(descriptor)
 
 
-def _require_derived_writeup_files(scan_dir: Path, findings: dict[str, Any]) -> None:
+def _prepare_derived_writeups(
+    scan_dir: Path,
+    findings: dict[str, Any],
+    *,
+    allow_missing: bool = False,
+) -> list[str]:
+    warnings: list[str] = []
     for index, finding in enumerate(findings.get("findings", [])):
         if not isinstance(finding, dict):
             continue
@@ -657,11 +677,18 @@ def _require_derived_writeup_files(scan_dir: Path, findings: dict[str, Any]) -> 
             continue
         report_path = writeup.get("reportPath")
         if isinstance(report_path, str):
-            _require_scan_local_file(
-                scan_dir,
-                report_path,
-                f"findings[{index}].writeup.reportPath",
-            )
+            try:
+                _require_scan_local_file(
+                    scan_dir,
+                    report_path,
+                    f"findings[{index}].writeup.reportPath",
+                )
+            except MissingScanLocalFileError as exc:
+                if not allow_missing:
+                    raise
+                finding.pop("writeup")
+                warnings.append(f"Skipped missing writeup for finding {index + 1}: {exc}.")
+    return warnings
 
 
 def _require_hardening_portfolio_file(scan_dir: Path, scan: dict[str, Any]) -> None:
@@ -871,13 +898,35 @@ def _write_scan_local_json(scan_dir: Path, relative_path: str, payload: Any) -> 
 def _validate_remote(remote: str, context: str) -> None:
     if REMOTE_CONTROL_RE.search(remote):
         raise ContractError(f"{context}: expected a sanitized canonical absolute URL")
-    parsed = urlsplit(remote)
+    try:
+        parsed = urlsplit(remote)
+    except ValueError as exc:
+        # urlsplit rejects authorities with unbalanced brackets.
+        raise ContractError(f"{context}: expected a sanitized canonical absolute URL") from exc
     if "\\" in remote or not parsed.scheme or not parsed.netloc:
         raise ContractError(f"{context}: expected a sanitized canonical absolute URL")
-    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+    if "@" in parsed.netloc or parsed.query or parsed.fragment:
         raise ContractError(
             f"{context}: remote URL must not contain credentials, query, or fragment"
         )
+    # Mirrors the authority rules of the WHATWG URL parser the SDK reader applies.
+    authority = parsed.netloc
+    if authority.startswith("["):
+        try:
+            ipaddress.IPv6Address(authority.partition("]")[0][1:])
+        except ValueError as exc:
+            raise ContractError(f"{context}: expected a sanitized canonical absolute URL") from exc
+        authority = authority.partition("]")[2]
+        if authority and not authority.startswith(":"):
+            raise ContractError(f"{context}: expected a sanitized canonical absolute URL")
+    port = authority.partition(":")[2]
+    hostname = parsed.hostname
+    if (
+        not hostname
+        or REMOTE_UNSAFE_HOST_RE.search(hostname)
+        or (port and (not port.isascii() or not port.isdigit() or int(port) > 65535))
+    ):
+        raise ContractError(f"{context}: expected a sanitized canonical absolute URL")
 
 
 def parse_timestamp(value: str) -> datetime:
@@ -938,7 +987,7 @@ def _stable_id(prefix: str, *parts: str) -> str:
 
 
 def _validate_location(location: dict[str, Any], context: str) -> None:
-    _require_safe_relative_path(_require_str(location, "path", context), f"{context}.path")
+    _require_safe_relative_path(location.get("path"), f"{context}.path")
     start = location.get("startLine")
     end = location.get("endLine", start)
     if not isinstance(start, int) or start < 1:
@@ -1196,19 +1245,12 @@ def _recover_unsealed_coverage(
 ) -> None:
     schema = _read_json(schema_dir / "coverage.schema.json")
     properties = _require_dict(schema, "properties", "coverage.schema")
-    completeness = coverage.get("completeness")
-    partial = completeness not in ("complete", "partial", "unknown")
-    if partial:
-        warnings.append("Recovered malformed coverage completeness; marked coverage as partial.")
     if (
         coverage.get("mode") == "deep_repository"
         and coverage.get("inventoryStrategy") != "repository"
     ):
         coverage["inventoryStrategy"] = "repository"
-        warnings.append(
-            "Recovered malformed Deep Scan inventory strategy; marked coverage as partial."
-        )
-        partial = True
+        warnings.append("Recovered malformed Deep Scan inventory strategy.")
 
     surface_ids: set[str] = set()
     for field, label in (
@@ -1222,7 +1264,6 @@ def _recover_unsealed_coverage(
         if not isinstance(items, list):
             warnings.append(f"Skipped malformed {label} records: expected an array.")
             coverage[field] = []
-            partial = True
             continue
 
         recovered: list[dict[str, Any]] = []
@@ -1276,21 +1317,14 @@ def _recover_unsealed_coverage(
                         recovered_receipts.append(normalized_ref)
 
                     item["receiptRefs"] = recovered_receipts
-                    if surface_recovered or item["disposition"] == "needs_follow_up":
-                        if not surface_recovered and completeness != "partial":
-                            warnings.append(
-                                f"Coverage surface {index + 1} requires follow-up; "
-                                "marked coverage as partial."
-                            )
+                    if surface_recovered:
                         item["disposition"] = "needs_follow_up"
-                        partial = True
 
                 if field == "deferred":
                     _validate_deferred_paths(item, context)
                 _validate_schema_node(item, item_schema, context)
             except ContractError as exc:
                 warnings.append(f"Skipped malformed {label} {index + 1}: {exc}.")
-                partial = True
                 continue
 
             if field == "surfaces":
@@ -1306,7 +1340,6 @@ def _recover_unsealed_coverage(
             {"id": f"discarded-finding-{index}", "reason": warning}
             for index, warning in enumerate(discarded_findings, 1)
         )
-        partial = True
 
     if "resolvedDeferred" in coverage:
         try:
@@ -1319,14 +1352,6 @@ def _recover_unsealed_coverage(
         except ContractError as exc:
             coverage.pop("resolvedDeferred")
             warnings.append(f"Skipped malformed resolved deferred work: {exc}.")
-            partial = True
-
-    if coverage["deferred"] and completeness != "partial":
-        if not discarded_findings:
-            warnings.append("Coverage has deferred review work; marked coverage as partial.")
-        partial = True
-    if partial:
-        coverage["completeness"] = "partial"
 
 
 def _recover_unsealed_hardening(
@@ -1402,19 +1427,53 @@ def _populate_unsealed_manifest_envelope(
         allowed_kinds = completion_binding["allowedTargetKinds"]
         if len(allowed_kinds) == 1:
             target.setdefault("kind", allowed_kinds[0])
-        _populate_unsealed_target_binding(target, completion_binding["target"])
+        _populate_unsealed_target_binding(target, completion_binding["target"], allowed_kinds)
 
     scope = scan.setdefault("scope", {})
     if isinstance(scope, dict):
         scope.update(copy.deepcopy(completion_binding["scope"]))
 
 
+def _populate_unsealed_target_kind(
+    target: dict[str, Any],
+    target_binding: dict[str, Any],
+    allowed_kinds: Any,
+) -> None:
+    """Adopt the registered target kind when the binding owns every coordinate it needs.
+
+    The workbench, not the draft, knows how the target was registered: a scan agent
+    that infers the kind from the checkout (a clean worktree registered as
+    git_revision is the common case) used to discard the whole completed scan at the
+    seal step. The kind carries no draft-owned information when the registration
+    allows a single value, so take that value instead of failing.
+
+    Rewriting the kind also reinterprets the coordinates that kind requires, and a
+    coordinate the binding does not own survives the replacement below with whatever
+    the draft computed under its own reading of the target. Adopting git_diff without
+    a bound snapshotDigest, for example, would seal a whole-worktree digest as the
+    diff digest. Leave the kind alone whenever the binding cannot restate every
+    coordinate the registered kind requires, and let the binding check reject the
+    draft instead.
+    """
+
+    if not isinstance(allowed_kinds, list) or len(allowed_kinds) != 1:
+        return
+    registered_kind = allowed_kinds[0]
+    if not isinstance(registered_kind, str) or target.get("kind") == registered_kind:
+        return
+    if not TARGET_REQUIRED_COORDINATE_FIELDS.get(registered_kind, set()) <= target_binding.keys():
+        return
+    target["kind"] = registered_kind
+
+
 def _populate_unsealed_target_binding(
     target: dict[str, Any],
     target_binding: dict[str, Any],
+    allowed_kinds: Any = None,
 ) -> None:
     """Replace workbench-owned target coordinates without retaining incompatible drafts."""
 
+    _populate_unsealed_target_kind(target, target_binding, allowed_kinds)
     target_kind = target.get("kind")
     required_coordinates = (
         TARGET_REQUIRED_COORDINATE_FIELDS.get(target_kind, set())
@@ -1595,7 +1654,7 @@ def _validate_finding(finding: dict[str, Any], context: str) -> None:
             _require_str(evidence, "code", evidence_context)
             if evidence_key == "codeEvidence":
                 _require_safe_relative_path(
-                    _require_str(evidence, "path", evidence_context),
+                    evidence.get("path"),
                     f"{evidence_context}.path",
                 )
 
@@ -1673,7 +1732,6 @@ def _validate_coverage(manifest: dict[str, Any], coverage: dict[str, Any], scan_
     if coverage.get("scanId") != scan_id:
         raise ContractError("coverage.scanId: must match manifest scan id")
     _require_str(coverage, "mode", "coverage")
-    completeness = _require_str(coverage, "completeness", "coverage")
     _require_str(coverage, "inventoryStrategy", "coverage")
     scope = _require_dict(scan, "scope", "manifest.scan")
     if coverage.get("includePaths") != scope.get("includePaths"):
@@ -1681,7 +1739,6 @@ def _validate_coverage(manifest: dict[str, Any], coverage: dict[str, Any], scan_
     if coverage.get("excludePaths") != scope.get("excludePaths"):
         raise ContractError("coverage.excludePaths: must match manifest scope")
     surface_ids: set[str] = set()
-    has_needs_follow_up = False
     for index, surface in enumerate(_require_list(coverage, "surfaces", "coverage")):
         context = f"coverage.surfaces[{index}]"
         if not isinstance(surface, dict):
@@ -1694,7 +1751,6 @@ def _validate_coverage(manifest: dict[str, Any], coverage: dict[str, Any], scan_
         disposition = _require_str(surface, "disposition", context)
         if disposition not in DISPOSITIONS:
             raise ContractError(f"{context}.disposition: unsupported disposition: {disposition}")
-        has_needs_follow_up = has_needs_follow_up or disposition == "needs_follow_up"
         receipt_refs = surface.get("receiptRefs", [])
         if not isinstance(receipt_refs, list):
             raise ContractError(f"{context}.receiptRefs: expected an array")
@@ -1719,8 +1775,6 @@ def _validate_coverage(manifest: dict[str, Any], coverage: dict[str, Any], scan_
         if isinstance(deferred, dict):
             _validate_deferred_paths(deferred, f"coverage.deferred[{index}]")
     _validate_resolved_deferred(coverage)
-    if completeness == "complete" and (has_needs_follow_up or coverage.get("deferred")):
-        raise ContractError("coverage.completeness: complete coverage cannot have deferred work")
     _require_safe_json_value(coverage, "coverage.json")
 
 
@@ -1902,7 +1956,9 @@ def _validate_schema_node(
     if isinstance(value, str):
         if schema.get("minLength", 0) and len(value) < schema["minLength"]:
             raise ContractError(f"{context}: string is too short")
-        if "pattern" in schema and not re.fullmatch(schema["pattern"], value):
+        if "maxLength" in schema and len(value) > schema["maxLength"]:
+            raise ContractError(f"{context}: string is too long")
+        if "pattern" in schema and not re.search(schema["pattern"], value):
             raise ContractError(f"{context}: string does not match schema pattern")
         if schema.get("format") == "date-time":
             _validate_date_time(value, context)
@@ -1960,6 +2016,8 @@ def _validate_schema_node(
         additional_properties = schema.get("additionalProperties", True)
         for key, item in value.items():
             item_schema = properties.get(key)
+            if item_schema is False:
+                raise ContractError(f"{context}.{key}: unexpected schema property")
             if isinstance(item_schema, dict):
                 _validate_schema_node(item, item_schema, f"{context}.{key}", root_schema)
             elif additional_properties is False:
@@ -1976,6 +2034,38 @@ def _validate_schema_node(
 def validate_against_schema(payload: dict[str, Any], schema_path: Path) -> None:
     schema = _read_json(schema_path)
     _validate_schema_node(payload, schema, schema_path.stem, schema)
+
+
+def _validate_current_findings(findings: dict[str, Any], schema_dir: Path) -> None:
+    """Use the model's current finding contract for new completed results."""
+
+    draft = _read_json(schema_dir / "tools" / "scan-draft.schema.json")
+    common = _read_json(schema_dir / "definitions" / "artifact-common.schema.json")
+    documents = {document["$id"]: document for document in (draft, common)}
+
+    def resolve(node: Any) -> Any:
+        if isinstance(node, list):
+            return [resolve(item) for item in node]
+        if not isinstance(node, dict):
+            return node
+        resolved = {key: resolve(value) for key, value in node.items() if key != "$ref"}
+        if "$ref" in node:
+            document_id, fragment = node["$ref"].split("#", 1)
+            referenced = _resolve_schema_reference(
+                documents[document_id], f"#{fragment}", "finding schema"
+            )
+            resolved = {**resolve(referenced), **resolved}
+        return resolved
+
+    finding_schema = resolve(draft["$defs"]["finding"])
+    for index, finding in enumerate(findings["findings"]):
+        # These fields belong to the host, not the authored finding contract.
+        authored = {
+            key: value
+            for key, value in finding.items()
+            if key not in {"findingId", "occurrenceId", "fingerprints"}
+        }
+        _validate_schema_node(authored, finding_schema, f"findings.findings[{index}]")
 
 
 def _filter_unknown_legacy_evidence_refs(section: dict[str, Any], evidence_ids: set[str]) -> None:
@@ -2172,8 +2262,8 @@ def _sarif_rule(rule_id: str, findings: list[dict[str, Any]]) -> dict[str, Any]:
     tags = {"security", *categories}
     for cwe in cwes:
         match = re.fullmatch(r"CWE-([0-9]+)", cwe, re.IGNORECASE)
-        if match and int(match[1]) > 0:
-            tags.add(f"external/cwe/cwe-{int(match[1]):03d}")
+        if match and (digits := match[1].lstrip("0")):
+            tags.add(f"external/cwe/cwe-{digits.zfill(3)}")
     description = f"{name}. Categories: {', '.join(map(_sarif_label, categories))}."
     if cwes:
         description += f" Weaknesses: {', '.join(cwes)}."
@@ -2705,9 +2795,8 @@ def build_sarif_projection(
     manifest, findings, coverage, _ = _read_sealed_scan(scan_dir, schema_dir, "SARIF projection")
     sarif = build_sarif(manifest, findings, source_root)
     execution_successful = manifest["scan"]["status"] == "completed"
-    if not execution_successful or coverage["completeness"] != "complete":
+    if not execution_successful or coverage["deferred"]:
         run = sarif["runs"][0]
-        run["properties"]["codexSecurityReviewStatus"] = review_summary(coverage)["status"]
         run["invocations"] = [
             {
                 "executionSuccessful": execution_successful,
@@ -2916,15 +3005,15 @@ def _write_sarif_projection_if_possible(
         )
 
 
-PreparedScanFinalization = tuple[
-    Path,
-    Path,
-    dict[str, Any],
-    dict[str, Any],
-    dict[str, Any],
-    bool,
-    bytes,
-]
+class PreparedScanFinalization(NamedTuple):
+    scan_dir: Path
+    schema_dir: Path
+    manifest: dict[str, Any]
+    findings: dict[str, Any]
+    coverage: dict[str, Any]
+    was_sealed: bool
+    report_markdown_bytes: bytes
+    warnings: list[str]
 
 
 def _prepare_scan_finalization(
@@ -2933,12 +3022,14 @@ def _prepare_scan_finalization(
     *,
     expected_coverage_mode: str | None = None,
     completion_binding: dict[str, Any] | None = None,
-    completion_warnings: list[str] | None = None,
+    recover_unsealed: bool = False,
+    allow_missing_writeups: bool = False,
     draft_documents: tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None = None,
     finding_scope: list[tuple[str, bool]] | None = None,
 ) -> PreparedScanFinalization:
-    """Read, populate, and validate a scan without writing any output files."""
+    """Prepare validated documents and warnings without writing any output files."""
 
+    warnings: list[str] = []
     scan_dir = _require_scan_directory(scan_dir)
     schema_dir = schema_dir or Path(__file__).resolve().parent.parent / "schemas"
     manifest = (
@@ -2976,6 +3067,8 @@ def _prepare_scan_finalization(
         findings, coverage = copy.deepcopy(draft_documents[1:])
         findings_input_bytes, coverage_input_bytes = _json_bytes(findings), _json_bytes(coverage)
     if not was_sealed:
+        # Preserve legacy sealed bundles, but do not publish a completeness claim.
+        coverage.pop("completeness", None)
         _populate_unsealed_artifact_envelope(manifest, findings, coverage, completion_binding)
         # Label whole-repository Deep scans as using the repository inventory.
         if expected_coverage_mode == "deep_repository":
@@ -3010,46 +3103,70 @@ def _prepare_scan_finalization(
     findings_for_validation = (
         _legacy_sealed_findings_for_validation(findings) if was_sealed else findings
     )
-    if not was_sealed and completion_warnings is not None:
+    discarded_findings: list[str] = []
+    if not was_sealed and scan["status"] == "completed":
+        try:
+            _populate_unsealed_finding_identities(manifest, findings)
+            _validate_findings(manifest, findings)
+            _validate_current_findings(findings, schema_dir)
+        except ContractError as exc:
+            raise RecoverableContractError(
+                "Scan result contains invalid findings; repair the finding records "
+                f"before completion. {exc}"
+            ) from exc
+    elif not was_sealed and recover_unsealed:
         discarded_findings = _recover_unsealed_findings(
-            manifest, findings, schema_dir, scan_dir, completion_warnings
+            manifest, findings, schema_dir, scan_dir, warnings
         )
-        _recover_unsealed_coverage(
-            coverage, schema_dir, scan_dir, completion_warnings, discarded_findings
-        )
-        _recover_unsealed_hardening(manifest, scan_dir, completion_warnings)
     elif not was_sealed:
         _populate_unsealed_finding_identities(manifest, findings)
-    _validate_findings(manifest, findings_for_validation)
+    if not was_sealed and recover_unsealed:
+        _recover_unsealed_coverage(coverage, schema_dir, scan_dir, warnings, discarded_findings)
+        _recover_unsealed_hardening(manifest, scan_dir, warnings)
+    if was_sealed or scan["status"] != "completed":
+        _validate_findings(manifest, findings_for_validation)
     if was_sealed:
         _validate_derived_finding_identities(manifest, findings)
     _validate_coverage(manifest, coverage, scan_dir)
     _validate_canonical_schemas_before_projection(
         manifest, findings_for_validation, coverage, schema_dir
     )
-    _require_derived_writeup_files(scan_dir, findings)
     _require_hardening_portfolio_file(scan_dir, scan)
     if finding_scope is not None:
         # Accepted worker/reducer files remain immutable; only the new parent
         # projection is scoped, after the existing validation of every finding.
-        scoped_findings = [
-            finding
-            for finding in findings["findings"]
-            if any(
+        scoped_findings = []
+        excluded_findings = []
+        for finding in findings["findings"]:
+            in_scope = any(
                 PurePosixPath(location["path"]) == PurePosixPath(path)
                 if is_file
                 else path_within_scope(location["path"], path)
                 for location in finding["locations"]
                 for path, is_file in finding_scope
             )
-        ]
+            (scoped_findings if in_scope else excluded_findings).append(finding)
         if was_sealed and len(scoped_findings) != len(findings["findings"]):
             raise ContractError(
                 "The sealed Deep scan contains findings outside its requested paths; "
                 "start a new scan to produce scoped results."
             )
         if not was_sealed:
+            # Excluded findings still require safe writeups, but missing optional
+            # links should only produce warnings for findings in the final report.
+            _prepare_derived_writeups(
+                scan_dir,
+                {"findings": excluded_findings},
+                allow_missing=allow_missing_writeups,
+            )
             findings["findings"] = scoped_findings
+    warnings.extend(
+        _prepare_derived_writeups(
+            scan_dir,
+            findings,
+            allow_missing=allow_missing_writeups and not was_sealed,
+        )
+    )
     if was_sealed:
         _validate_sealed_coverage_receipts(scan, coverage)
         _validate_manifest(manifest)
@@ -3080,14 +3197,15 @@ def _prepare_scan_finalization(
         _validate_manifest(manifest)
         validate_against_schema(manifest, schema_dir / "scan-manifest.schema.json")
         _contract_json_bytes("scan-manifest.json", manifest)
-    return (
-        scan_dir,
-        schema_dir,
-        manifest,
-        findings,
-        coverage,
-        was_sealed,
-        report_markdown_bytes,
+    return PreparedScanFinalization(
+        scan_dir=scan_dir,
+        schema_dir=schema_dir,
+        manifest=manifest,
+        findings=findings,
+        coverage=coverage,
+        was_sealed=was_sealed,
+        report_markdown_bytes=report_markdown_bytes,
+        warnings=warnings,
     )
 
 
@@ -3099,49 +3217,41 @@ def _write_prepared_scan_finalization(
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Write a previously validated scan finalization result."""
 
-    (
-        scan_dir,
-        schema_dir,
-        manifest,
-        findings,
-        coverage,
-        was_sealed,
-        report_markdown_bytes,
-    ) = prepared
-    scan = _require_dict(manifest, "scan", "manifest")
-    if not was_sealed:
-        _write_scan_local_json(scan_dir, "findings.json", findings)
+    scan_dir = prepared.scan_dir
+    scan = _require_dict(prepared.manifest, "scan", "manifest")
+    if not prepared.was_sealed:
+        _write_scan_local_json(scan_dir, "findings.json", prepared.findings)
         if "coverageRef" in scan:
-            _write_scan_local_json(scan_dir, "coverage.json", coverage)
+            _write_scan_local_json(scan_dir, "coverage.json", prepared.coverage)
         elif "preservedSources" not in scan and not (scan_dir / "checkpoint-head.json").exists():
             checkpoint = {
                 "scanId": scan["id"],
                 "complete": scan["status"] == "completed",
                 "scope": scan["scope"],
-                "findings": findings["findings"],
-                "reviewState": checkpoint_review_state(coverage),
+                "findings": prepared.findings["findings"],
+                "reviewState": checkpoint_review_state(prepared.coverage),
                 **({"threatModel": scan["threatModel"]} if "threatModel" in scan else {}),
             }
             contents = _json_bytes(checkpoint)
             name = hashlib.sha256(contents).hexdigest() + ".json"
             write_scan_local_bytes(scan_dir, "checkpoints/" + name, contents)
             _write_scan_local_json(scan_dir, "checkpoint-head.json", {"checkpoint": name})
-    if not was_sealed and "coverageRef" not in scan:
+    if not prepared.was_sealed and "coverageRef" not in scan:
         _remove_scan_local_file_if_exists(scan_dir, "coverage.json")
-    write_scan_local_bytes(scan_dir, "report.md", report_markdown_bytes)
+    write_scan_local_bytes(scan_dir, "report.md", prepared.report_markdown_bytes)
     _remove_scan_local_file_if_exists(scan_dir, "report.html")
-    if not was_sealed:
-        _write_scan_local_json(scan_dir, "scan-manifest.json", manifest)
+    if not prepared.was_sealed:
+        _write_scan_local_json(scan_dir, "scan-manifest.json", prepared.manifest)
         _validate_existing_seal(scan_dir, scan)
-    _write_sarif_projection_if_possible(scan_dir, source_root, schema_dir)
-    warning = write_threat_model_projection_if_possible(scan_dir, manifest)
+    _write_sarif_projection_if_possible(scan_dir, source_root, prepared.schema_dir)
+    warning = write_threat_model_projection_if_possible(scan_dir, prepared.manifest)
     if (
         warning is not None
         and projection_warnings is not None
         and warning not in projection_warnings
     ):
         projection_warnings.append(warning)
-    return manifest, findings, coverage
+    return prepared.manifest, prepared.findings, prepared.coverage
 
 
 def finalize_scan(

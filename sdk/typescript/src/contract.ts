@@ -154,10 +154,6 @@ export async function loadContractWithScanDirectory(
   const coverage = payloads["coverage.json"] as CoverageDocument | undefined;
   const review = coverage
     ? {
-        status:
-          coverage.completeness === "partial"
-            ? ("incomplete" as const)
-            : coverage.completeness,
         excludedPaths: coverage.explicitExclusions.map((item) => item.pattern),
       }
     : manifest.scan.review!;
@@ -166,7 +162,6 @@ export async function loadContractWithScanDirectory(
     schemaVersion: "1.0",
     scanId: manifest.scan.id,
     mode: manifest.scan.mode!,
-    completeness: review.status === "incomplete" ? "partial" : review.status,
     inventoryStrategy: "repository",
     includePaths: manifest.scan.scope.includePaths,
     excludePaths: manifest.scan.scope.excludePaths,
@@ -208,7 +203,7 @@ export async function loadContractWithScanDirectory(
     );
   }
 
-  validateCanonicalContract(manifest, findings);
+  validateCanonicalContract(manifest, findings, reviewDetails);
 
   await validateSeal(
     scanDir,
@@ -235,14 +230,14 @@ export async function loadContractWithScanDirectory(
 }
 
 /** Normalize optional legacy details on a copy, without changing saved artifacts. */
-export function normalizePersistedFindings(payload: unknown): unknown {
+function normalizePersistedFindings(payload: unknown): unknown {
   const compatible = structuredClone(payload);
   if (!isRecord(compatible) || !Array.isArray(compatible["findings"])) {
     return compatible;
   }
   for (const finding of compatible["findings"]) {
     if (!isRecord(finding)) continue;
-    normalizePersistedFindingDetails(finding, "canonical");
+    normalizePersistedFindingDetails(finding);
   }
   return compatible;
 }
@@ -250,6 +245,7 @@ export function normalizePersistedFindings(payload: unknown): unknown {
 function validateCanonicalContract(
   manifest: ScanManifest,
   findings: FindingsDocument,
+  coverage: CoverageDocument,
 ): void {
   const remote = manifest.scan.target.remote;
   if (remote !== undefined) {
@@ -305,6 +301,20 @@ function validateCanonicalContract(
     }
   }
 
+  for (const [index, deferred] of coverage.deferred.entries()) {
+    for (const [pathIndex, path] of (deferred.paths ?? []).entries()) {
+      const context = `coverage.deferred[${index}].paths[${pathIndex}]`;
+      try {
+        safeRelativePath(path, context, true);
+      } catch (error) {
+        throw new ContractValidationError(
+          `${context}: expected a safe repository-relative POSIX path.`,
+          { cause: error },
+        );
+      }
+    }
+  }
+
   const findingIds = new Set<string>();
   for (const [findingIndex, finding] of findings.findings.entries()) {
     const context = `findings.findings[${findingIndex}]`;
@@ -343,6 +353,19 @@ function validateCanonicalContract(
       if ((location.endLine ?? location.startLine) < location.startLine) {
         throw new ContractValidationError(
           `${locationContext}.endLine: expected an integer >= startLine.`,
+        );
+      }
+    }
+    for (const [evidenceIndex, evidence] of (
+      finding.codeEvidence ?? []
+    ).entries()) {
+      const evidenceContext = `${context}.codeEvidence[${evidenceIndex}].path`;
+      try {
+        safeRelativePath(evidence.path, evidenceContext);
+      } catch (error) {
+        throw new ContractValidationError(
+          `${evidenceContext}: expected a safe repository-relative POSIX path.`,
+          { cause: error },
         );
       }
     }
@@ -720,12 +743,16 @@ async function verifyScanRoot(
   }
 }
 
-function safeRelativePath(value: string, context: string): string {
+function safeRelativePath(
+  value: string,
+  context: string,
+  allowDot = false,
+): string {
   const parts = value.split("/");
   if (
-    value.trim().length === 0 ||
+    value.length === 0 ||
     Buffer.from(value, "utf8").toString("utf8") !== value ||
-    value === "." ||
+    (!allowDot && value === ".") ||
     value.startsWith("/") ||
     /^[A-Za-z]:/.test(value) ||
     parts.includes("..") ||
@@ -738,7 +765,7 @@ function safeRelativePath(value: string, context: string): string {
   }
   const normalized = posix.normalize(value).replace(/\/+$/, "");
   if (
-    normalized === "." ||
+    (!allowDot && normalized === ".") ||
     normalized.startsWith("../") ||
     isAbsolute(normalized)
   ) {
@@ -751,7 +778,10 @@ function safeRelativePath(value: string, context: string): string {
 
 function portableRelativePath(value: string, context: string): string {
   const normalized = safeRelativePath(value, context);
-  if (value.split("/").some(isWindowsUnsafePathComponent)) {
+  if (
+    value.trim().length === 0 ||
+    value.split("/").some(isWindowsUnsafePathComponent)
+  ) {
     throw new ContractValidationError(
       `${context}: expected a safe scan-relative POSIX path.`,
     );
@@ -759,7 +789,7 @@ function portableRelativePath(value: string, context: string): string {
   return normalized;
 }
 
-function safeScopePath(value: string): string {
+export function safeScopePath(value: string): string {
   return value === "."
     ? value
     : safeRelativePath(value, "manifest scope include path");

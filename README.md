@@ -118,6 +118,16 @@ try {
 The [SDK guide](sdk/typescript/README.md) includes deep-scan configuration,
 validation, severity classification, owner suggestions, and result handling.
 
+## Read existing Cloud findings
+
+When Codex Security Cloud is available to your account, the Security plugin's
+`$cloud-findings` skill can read findings, reports, recorded assignment and
+verification, and scan status in Codex desktop or the Codex CLI. Cloud is an
+optional connection; local scans work without it.
+
+See [Cloud connection setup and CLI reads](sdk/typescript/README.md#read-existing-cloud-findings)
+for authentication requirements and a read-only example.
+
 ## Generate SECURITY.md
 
 Use `policy` to draft a new `SECURITY.md` or update an existing one. Use `--path`
@@ -201,9 +211,9 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.CODEX_SECURITY_API_KEY }}
 ```
 
-Findings are report-only by default. Partial scans with valid results produce a
-warning; scanner and required reporting errors fail the job. Severity thresholds
-apply to complete scans.
+Findings are report-only by default. Set a severity threshold to fail on reported
+findings at or above it. Scanner and required reporting errors fail the job;
+intentional file exclusions and investigation notes do not.
 See the [Action setup and input reference](github-action/README.md) for PR scans,
 severity thresholds, and report uploads.
 
@@ -225,11 +235,11 @@ scan artifacts remain available.
 
 ## Other providers
 
-Scans support OpenAI, Amazon Bedrock, OpenRouter, and Fireworks AI. Bedrock uses
+Scans support OpenAI, Amazon Bedrock, OpenRouter, Fireworks AI, and Cheaper Inference. Bedrock uses
 AWS credentials and does not require a separate OpenAI login. See
 [Bedrock setup](docs/bedrock.md) for AWS profiles, regions, and model access.
 
-For OpenRouter and Fireworks AI, set the provider's API key and choose a supported
+For OpenRouter, Fireworks AI, and Cheaper Inference, set the provider's API key and choose a supported
 model. See [provider configuration](sdk/typescript/docs/cli.md#native-command-authentication-and-other-providers)
 for examples.
 

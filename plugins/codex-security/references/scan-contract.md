@@ -8,7 +8,7 @@ A sealed terminal bundle contains these files under `<scan_dir>`:
 
 - `scan-manifest.json`: immutable terminal scan receipt after finalization
 - `findings.json`: semantic finding records retained when the scan reached its terminal outcome
-- `scan.review`: completion status and additional excluded paths, stored in the manifest
+- `scan.review`: additional excluded paths, stored in the manifest
 
 Keep detailed evidence in scan-local artifacts and reference it from the canonical summaries.
 
@@ -106,15 +106,64 @@ Use CWE taxonomy separately. Do not include file names, line numbers, scan IDs, 
 
 ## Review state
 
-New scans publish `scan-manifest.json` and `findings.json`. The manifest owns scan identity, mode, and configured scope. `scan.review` contains only `status` (`complete`, `incomplete`, or `unknown`) and `excludedPaths`, used when comparing scans. These values do not measure the percentage of files read.
+New scans publish `scan-manifest.json` and `findings.json`. The manifest owns scan identity, mode, and configured scope. `scan.review` contains only `excludedPaths`, used when comparing scans. These values do not measure the percentage of files read.
 
-`reviewState` is internal checkpoint data. It records candidate dispositions and unfinished tasks so recovery cannot discard pending work or revive rejected candidates. Use `completeness`, `surfaces`, `explicitExclusions`, and `deferred`, plus `resolvedDeferred` when closing a saved generic task. Do not create a surface inventory, risk labels, open-question report, or receipt files for coverage reporting.
+A Deep parent retains the configured paths and notes from accepted reviews. Worker IDs distinguish each review's surfaces and deferred items; receipt references point to the original evidence. Findings reduction does not clear pending review work. If the discovery deadline arrives before a review finishes, the host preserves valid checkpoint findings and pending work with the deadline reason. See [stopped-result recovery](#stopped-result-recovery).
 
 For file-authored drafts, put `reviewState` inside `scan` in the unsealed manifest. Finalization preserves recovery details in checkpoints and replaces the draft state with the small `scan.review` summary. For tool-authored drafts, pass `reviewState` to `record_codex_security_scan_draft`.
 
-Deep reducers work on findings and do not need review state. Deep workers retain their own checkpoints. Comparison uses the later scan's review status, configured scope, and additional exclusions before classifying an absent finding as resolved.
+Deep reducers work on findings and do not need review state. Deep workers retain their own checkpoints. Comparison uses the later scan's execution status, configured scope, and additional exclusions before classifying an absent finding as resolved.
 
-Legacy scans with `coverageRef` still read and verify their existing `coverage.json`. Do not modify sealed historical files.
+- scan mode and inventory strategy
+- included and excluded paths
+- reviewed surfaces
+- detailed receipt references
+- explicit exclusions
+- deferred work
+
+`mode` records the requested scan workflow:
+
+| Mode              | Meaning                                                       |
+| ----------------- | ------------------------------------------------------------- |
+| `repository`      | Repository-wide scan                                          |
+| `scoped_path`     | Scan limited to explicitly requested paths                    |
+| `diff`            | Git-backed change-set scan when no more specific mode applies |
+| `commit`          | Commit compared with its resolved baseline                    |
+| `branch_diff`     | Branch or pull-request change set compared with its baseline  |
+| `working_tree`    | Staged or unstaged local changes                              |
+| `deep_repository` | Exhaustive repeated repository-wide scan                      |
+
+`inventoryStrategy` records how the producer enumerated the reviewed content, independently of the requested scan workflow:
+
+The discovery helper's `in_scope_files.txt` input contains one UTF-8 path per line. LF and CRLF separators are accepted; filenames containing CR or LF are unsupported. Other path whitespace and spelling are preserved.
+
+For a whole-repository Deep scan, keep `inventoryStrategy` as `repository`; repeated discovery is workflow metadata, not a different inventory strategy.
+
+| Inventory strategy | Meaning                                                   |
+| ------------------ | --------------------------------------------------------- |
+| `repository`       | Repository-wide file inventory                            |
+| `scoped_path`      | Repository inventory constrained to requested paths       |
+| `diff`             | Files selected from the reviewed Git change set           |
+| `directory`        | Deterministic non-Git directory inventory                 |
+| `custom`           | Producer-defined inventory described by detailed receipts |
+
+Review state lists reviewed surfaces, exclusions, and follow-up work. The manifest records execution status. Existing sealed bundles retain legacy metadata unchanged.
+
+Map detailed ledger closure into completed surface summaries in this order:
+
+| Completed surface condition                                            | Disposition       |
+| ---------------------------------------------------------------------- | ----------------- |
+| At least one `reportable` row                                          | `reported`        |
+| Otherwise, at least one `deferred` row                                 | `needs_follow_up` |
+| Otherwise, at least one `suppressed` row                               | `rejected`        |
+| Otherwise, an applicable surface was checked and no candidate survived | `no_issue_found`  |
+| Otherwise, the surface is not applicable                               | `not_applicable`  |
+
+Record each explicit exclusion with a `pattern` and `reason`. Record each deferred unit with a stable `id`, a `reason`, and optional `paths` or `surfaceIds`.
+
+Detailed ledgers remain under the numbered scan artifact directories.
+Receipt references must point to regular non-symlink files under `artifacts/`.
+`scan.review` retains additional exclusions for adapters and comparison. Legacy sealed scans continue to reference their original `coverage.json`.
 
 ## Canonical Report Semantics
 
@@ -135,6 +184,8 @@ Record report-specific semantics without duplicating data already represented el
 These fields are optional for compatibility with existing v1 canonical artifacts. When omitted, finalization emits explicit, deterministic fallback text derived only from the remaining canonical JSON. It never reads an existing report to recover missing semantics.
 
 ## Schemas
+
+New completed findings must match `schemas/tools/scan-draft.schema.json`. Finalization rejects legacy field aliases, malformed optional details, and invalid semantic slugs instead of repairing them. Historical sealed reports are validated through an in-memory compatibility adapter; their saved bytes remain unchanged. Stopped-scan recovery still salvages saved evidence.
 
 - `schemas/scan-manifest.schema.json`
 - `schemas/findings.schema.json`

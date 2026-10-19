@@ -83,10 +83,7 @@ test("mock scans seal real artifacts and index shared and unique findings withou
       },
     ]);
     expect(first.findings.findings).toHaveLength(12);
-    expect(first.review.status).toBe("complete");
-    expect(await readdir(first.scanDir)).not.toContain("coverage.json");
-    expect(first.toJSON()).not.toHaveProperty("coverage");
-    expect(first.toJSON()).not.toHaveProperty("coveragePath");
+    expect(first.review).not.toHaveProperty("status");
     expect(first.manifest.scan.status).toBe("completed");
     expect(first.manifest.scan.sealedAt).toBeTruthy();
     expect(first.turnResult["mock"]).toBe(true);
@@ -290,7 +287,6 @@ test("mock scans bind clean Git, committed diff, and working-tree snapshots", as
       target: DiffTarget.refs({ base: "HEAD~1" }),
     });
     expect(diff.manifest.scan.target.kind).toBe("git_diff");
-    expect(diff.review.status).toBe("complete");
     expect(diff.manifest.scan.mode).toBe("branch_diff");
     await writeFile(
       join(repository, "example.ts"),
@@ -301,7 +297,6 @@ test("mock scans bind clean Git, committed diff, and working-tree snapshots", as
       target: DiffTarget.workingTree({}),
     });
     expect(workingTree.manifest.scan.target.kind).toBe("git_diff");
-    expect(workingTree.review.status).toBe("complete");
     expect(workingTree.manifest.scan.mode).toBe("working_tree");
   } finally {
     await client.close();

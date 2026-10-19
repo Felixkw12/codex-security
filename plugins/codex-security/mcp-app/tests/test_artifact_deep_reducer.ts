@@ -66,7 +66,6 @@ try {
   const shared = finding("shared", "src/shared.ts");
   const independent = finding("independent", "src/independent.ts");
   const rejectedCoverage = {
-    completeness: "partial",
     surfaces: [
       {
         label: "SQL route",
@@ -107,7 +106,6 @@ try {
     id: "worker-002",
     result: workerDraft([shared, independent], {
       scope: { summary: "Shared and independent request handling." },
-      reviewState: { ...workerDraft([]).reviewState, completeness: "unknown" },
     }),
   });
   const originalWorkerArtifacts = await Promise.all(
@@ -355,32 +353,7 @@ try {
   enrichedPrevious.findings[0].validation = {
     summary: "Both output routes bypass the same encoding control.",
   };
-  for (const legacyCoverage of [
-    rejectedCoverage,
-    {
-      completeness: "outdated",
-      surfaces: [null],
-      explicitExclusions: false,
-      deferred: 42,
-    },
-    "legacy reviewState is no longer structured",
-  ]) {
-    const previousArtifact = JSON.stringify({
-      ...enrichedPrevious,
-      reviewState: legacyCoverage,
-    });
-    await writeFile(path.join(outputRoot, "result.json"), previousArtifact);
-    assert.deepEqual(
-      (await getCodexSecurityDeepReducerInputs(nextContext)).previous,
-      enrichedPrevious,
-      "previous reducer reviewState is ignored even when malformed; findings and scope remain intact",
-    );
-    assert.equal(
-      await readFile(path.join(outputRoot, "result.json"), "utf8"),
-      previousArtifact,
-      "reading a previous reduction does not rewrite its legacy reviewState",
-    );
-  }
+  await writeJson(path.join(outputRoot, "result.json"), enrichedPrevious);
   const previousArtifact = await readFile(
     path.join(outputRoot, "result.json"),
     "utf8",
@@ -388,14 +361,9 @@ try {
   await recordCodexSecurityDeepReduction(nextContext, merged);
   const preservedEnrichment = await readJson(nextOutputRoot, "result.json");
   assert.equal(
-    Object.hasOwn(preservedEnrichment, "reviewState"),
-    false,
-    "a subsequent accepted reduction omits the previous reducer's legacy reviewState",
-  );
-  assert.equal(
     await readFile(path.join(outputRoot, "result.json"), "utf8"),
     previousArtifact,
-    "the original previous reduction remains available without rewriting its reviewState",
+    "the original previous reduction remains unchanged",
   );
   assert.equal(
     preservedEnrichment.findings[0].provenance.previousFindings[0].summary,
@@ -443,7 +411,7 @@ try {
 
   for (const invalidCoverage of [
     undefined,
-    { ...workerDraft([]).reviewState, completeness: "outdated" },
+    { ...workerDraft([]).reviewState, deferred: "invalid" },
   ]) {
     await writeJson(first.resultPath, {
       ...first.result,
@@ -451,7 +419,7 @@ try {
     });
     await assert.rejects(
       getCodexSecurityDeepReducerInputs(context),
-      /reviewState|completeness/,
+      /reviewState/,
       "Standard worker reviewState remains required and validated before projection",
     );
   }

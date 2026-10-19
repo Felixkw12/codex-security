@@ -23,6 +23,7 @@ def test_results_without_coverage_file(tmp_path: Path, unfinished: bool) -> None
     for key in ("coverageRef", "artifacts", "sealedAt"):
         scan.pop(key)
     state["explicitExclusions"] = [{"pattern": "vendor", "reason": "External code"}]
+    state["openQuestions"] = ["Which runtime controls apply?"]
     state["surfaces"] = [
         {
             "id": "rejected-candidate",
@@ -43,7 +44,7 @@ def test_results_without_coverage_file(tmp_path: Path, unfinished: bool) -> None
 
     finalizer.finalize_scan(scan_dir)
     result = validator.validate_contract(scan_dir)
-    expected = {"status": "incomplete" if unfinished else "complete", "excludedPaths": ["vendor"]}
+    expected = {"excludedPaths": ["vendor"]}
     assert result["review"] == expected
     assert result["manifest"]["scan"]["review"] == expected
     assert "reviewState" not in result["manifest"]["scan"]
@@ -53,21 +54,23 @@ def test_results_without_coverage_file(tmp_path: Path, unfinished: bool) -> None
     checkpoint = json.loads((scan_dir / "checkpoints" / head["checkpoint"]).read_text())
     assert checkpoint["reviewState"]["surfaces"][0]["candidateId"] == "candidate-1"
     assert checkpoint["reviewState"]["deferred"] == state["deferred"]
+    assert checkpoint["reviewState"]["openQuestions"] == [
+        {"question": "Which runtime controls apply?"}
+    ]
     assert "coverage" not in checkpoint
     report = (scan_dir / "report.md").read_text()
     assert "coverage.json" not in report
     assert "Reviewed Surfaces" not in report
-    assert "Review status" in report
+    assert "Review status" not in report
 
-    # Comparison still respects exclusions and unfinished work.
+    # Comparison respects exclusions without treating pending review as a failed scan.
     row = {"status": "complete", "target_id": "target"}
     summary_state = finalizer.review_state(result["manifest"]["scan"])
     assert not history.scan_covers_path(
         row, target_id="target", path="vendor/lib.py", coverage=summary_state
     )
-    assert (
-        history.scan_covers_path(row, target_id="target", path="src/api.py", coverage=summary_state)
-        is not unfinished
+    assert history.scan_covers_path(
+        row, target_id="target", path="src/api.py", coverage=summary_state
     )
     before = (scan_dir / "scan-manifest.json").read_bytes()
     finalizer.finalize_scan(scan_dir)

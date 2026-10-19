@@ -57,11 +57,6 @@ export interface PreparedScanPublication {
   scanDirectory: string;
   destination: LinearPublicationDestination;
   issues: PreparedPublicationIssue[];
-  /** Complete sealed membership, retained when only some findings become issues. */
-  sourceFindings?: Pick<
-    PreparedPublicationIssue,
-    "findingId" | "occurrenceId"
-  >[];
 }
 
 export function linearPublicationArguments(
@@ -142,13 +137,6 @@ export async function prepareScanPublication(
   return {
     scanId,
     scanDirectory: canonicalScanDirectory,
-    ...(classification === undefined && options.findingIds === undefined
-      ? {}
-      : {
-          sourceFindings: contract.findings.findings.map(
-            ({ findingId, occurrenceId }) => ({ findingId, occurrenceId }),
-          ),
-        }),
     destination: {
       type: options.destination,
       teamId: options.teamId,
@@ -183,7 +171,6 @@ function renderFindingDescription(
   uploadedAt: string,
   assessment?: SeverityAssessment,
 ): string {
-  const { review } = contract;
   const { scan } = contract.manifest;
   const lines = ["## Summary", "", finding.summary];
   if (assessment?.source === "rubric") {
@@ -268,7 +255,6 @@ function renderFindingDescription(
     ...(scan.scope.excludePaths.length === 0
       ? []
       : [`**Excluded scope:** ${scan.scope.excludePaths.join(", ")}`]),
-    `**Review status:** ${review.status}`,
     `**Scan mode:** ${scanMode(contract.mode)}`,
     `**Started:** ${scan.startedAt}`,
     `**Completed:** ${scan.completedAt}`,

@@ -309,7 +309,7 @@ describe("canonical scan contract", () => {
       "target_sha256_example",
     );
     expect(contract.findings.findings[0]?.severity.level).toBe("high");
-    expect(contract.review.status).toBe("complete");
+    expect(contract.review).toEqual({ excludedPaths: [] });
     expect(contract.findings.scanId).toBe(contract.manifest.scan.id);
   });
 
@@ -789,6 +789,8 @@ describe("canonical scan contract", () => {
       "artifacts/report.json.",
       "artifacts/report.json ",
       "artifacts/CON.txt",
+      " ",
+      "\u00a0",
     ]) {
       const scanDir = await copyExample();
       const path = join(scanDir, "scan-manifest.json");
@@ -856,6 +858,99 @@ describe("canonical scan contract", () => {
     await expect(
       loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
     ).resolves.toBeDefined();
+  });
+
+  test.each([" ", "  ", "\u00a0"])(
+    "preserves literal whitespace repository path %j in the contract",
+    async (path) => {
+      const scanDir = await copyExample();
+      const manifestPath = join(scanDir, "scan-manifest.json");
+      const findingsPath = join(scanDir, "findings.json");
+      const coveragePath = join(scanDir, "coverage.json");
+      const manifest = await readJson(manifestPath);
+      const findings = await readJson(findingsPath);
+      const coverage = await readJson(coveragePath);
+      manifest["scan"]["scope"]["includePaths"] = [path];
+      coverage["includePaths"] = [path];
+      findings["findings"][0]["locations"][0]["path"] = path;
+      await writeJson(manifestPath, manifest);
+      await writeJson(findingsPath, findings);
+      await writeJson(coveragePath, coverage);
+      await reseal(scanDir);
+
+      const contract = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+      expect(contract.manifest.scan.scope.includePaths).toEqual([path]);
+      expect(contract.findings.findings[0]!.locations[0]!.path).toBe(path);
+    },
+  );
+
+  test("preserves accepted paths in sealed deferred coverage", async () => {
+    const paths = [
+      ".",
+      "./",
+      "././",
+      "src",
+      "src/parser.ts",
+      "./src/parser.ts",
+      "src/./parser.ts",
+      "src//parser.ts",
+      "src/",
+      "src:parser.ts",
+      "src/a:b.py",
+      "src/.hidden",
+      "src/na\u00efve file.ts",
+      "src/\u007fparser.ts",
+      "src/\u2028parser.ts",
+      "src/\u2029parser.ts",
+      " ",
+      "\u0085",
+      "\ufeff",
+    ];
+    const scanDir = await copyExample();
+    const coveragePath = join(scanDir, "coverage.json");
+    const coverage = await readJson(coveragePath);
+    coverage["deferred"] = [
+      { id: "review", reason: "Review is incomplete.", paths },
+    ];
+    await writeJson(coveragePath, coverage);
+    await reseal(scanDir);
+    const sealedBytes = await readFile(coveragePath);
+
+    await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+    expect(await readFile(coveragePath)).toEqual(sealedBytes);
+  });
+
+  test("rejects unsafe paths in sealed deferred coverage", async () => {
+    for (const path of [
+      "",
+      "../../outside.ts",
+      "src/../outside.ts",
+      "src/..",
+      "/outside.ts",
+      "//server/share",
+      "C:/outside.ts",
+      "c:outside.ts",
+      "src\\outside.ts",
+      "src/\u0000outside.ts",
+      "src/\u0001outside.ts",
+      "src/\toutside.ts",
+      "src/outside.ts\n",
+      "src/\routside.ts",
+      "src/\u2028/../outside.ts",
+    ]) {
+      const scanDir = await copyExample();
+      const coveragePath = join(scanDir, "coverage.json");
+      const coverage = await readJson(coveragePath);
+      coverage["deferred"] = [
+        { id: "review", reason: "Review is incomplete.", paths: [path] },
+      ];
+      await writeJson(coveragePath, coverage);
+      await reseal(scanDir);
+
+      await expect(
+        loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+      ).rejects.toThrow(/coverage.*deferred/);
+    }
   });
 
   test.each([-1, 0])(
@@ -995,6 +1090,65 @@ describe("canonical scan contract", () => {
       loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
     ).rejects.toThrow("unreadable JSON document");
   });
+
+  test.each([
+    ["src/handler.py", true],
+    ["src/a:b.py", true],
+    ["report:summary.py", true],
+    ["src/name with spaces.py", true],
+    ["src/日本語.py", true],
+    ["./src//handler.py", true],
+    ["src/line\u2028separator.py", true],
+    ["../outside.py", false],
+    ["src/../../outside.py", false],
+    ["/outside.py", false],
+    ["C:/outside.py", false],
+    ["C:outside.py", false],
+    ["src\\outside.py", false],
+    [".", false],
+    ["src/\u0000outside.py", false],
+    ["src/name\t.py", false],
+  ] as const)(
+    "validates canonical code-evidence path %j",
+    async (path, valid) => {
+      const scanDir = await copyExample();
+      const findingsPath = join(scanDir, "findings.json");
+      const findings = await readJson(findingsPath);
+      findings["findings"][0]["codeEvidence"] = [
+        {
+          id: "source",
+          label: "Source",
+          path,
+          startLine: 1,
+          code: "source()",
+          explanation: "Synthetic repository evidence.",
+        },
+      ];
+      await writeJson(findingsPath, findings);
+      await reseal(scanDir);
+      const saved = await readFile(findingsPath);
+      const loaded = loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+      const exported = pythonExport(scanDir);
+      const stderr = new TextDecoder().decode(exported.stderr);
+
+      if (valid) {
+        const contract = await loaded;
+        expect(contract.findings.findings[0]?.codeEvidence?.[0]?.path).toBe(
+          path,
+        );
+        expect(exported.exitCode, stderr).toBe(0);
+      } else {
+        await expect(loaded).rejects.toThrow(
+          "codeEvidence[0].path: expected a safe repository-relative POSIX path",
+        );
+        expect(exported.exitCode).not.toBe(0);
+        expect(stderr).toContain(
+          "codeEvidence[0].path: expected a safe repository-relative POSIX path",
+        );
+      }
+      expect(await readFile(findingsPath)).toEqual(saved);
+    },
+  );
 
   test("rejects schema-valid but canonically invalid contract data", async () => {
     const cases: Array<

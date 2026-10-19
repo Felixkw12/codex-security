@@ -21,7 +21,7 @@ type CompletedResult = {
       fingerprints: { primary: string };
     })[];
   };
-  review: { status: string; excludedPaths: string[] };
+  review: { excludedPaths: string[] };
 };
 type ToolResponse = Awaited<ReturnType<Client["callTool"]>>;
 type WorkspaceResult = {
@@ -290,7 +290,6 @@ async function testCompactDiffScanCompletion(
         handoffClaimToken,
         findings: [],
         reviewState: {
-          completeness: "complete",
           surfaces: [
             {
               label: "Changed handler and removed guard",
@@ -474,7 +473,6 @@ async function testSemanticScanDraftCompletion(
     const explicitCollisionDeferredId = "explicit-adapter-review";
     const candidateCollisionDeferredId = "candidate-adapter-review";
     const reviewState = {
-      completeness: "partial",
       surfaces: [
         {
           id: "surface_sql-execution",
@@ -687,7 +685,7 @@ async function testSemanticScanDraftCompletion(
       handoffClaimToken,
       complete: false,
       findings: [finding],
-      reviewState: { ...reviewState, completeness: "partial" },
+      reviewState: { ...reviewState },
     };
     requireSuccessfulTool(
       await call("record_codex_security_scan_draft", checkpoint),
@@ -812,15 +810,17 @@ async function testSemanticScanDraftCompletion(
     assert.ok(results.findings.findings[0].fingerprints.primary);
     assert.equal(results.manifest.scan.target.kind, "directory_snapshot");
     assert.equal(results.manifest.scan.mode, "repository");
-    assert.deepEqual(results.review, {
-      status: "incomplete",
-      excludedPaths: [],
-    });
     assert.deepEqual(results.manifest.scan.scope.includePaths, ["."]);
     assert.deepEqual(results.manifest.scan.scope.excludePaths, []);
-    const head = await readJson(scanDirectory, "checkpoint-head.json");
-    const retained = (
-      await readJson(scanDirectory, "checkpoints", head.checkpoint)
+    assert.deepEqual(results.review, { excludedPaths: [] });
+    const head = JSON.parse(
+      await readFile(path.join(scanDirectory, "checkpoint-head.json"), "utf8"),
+    );
+    const retained = JSON.parse(
+      await readFile(
+        path.join(scanDirectory, "checkpoints", head.checkpoint),
+        "utf8",
+      ),
     ).reviewState;
     assert.equal(retained.surfaces[0].disposition, "reported");
     assert.deepEqual(retained.deferred, [
@@ -1212,6 +1212,8 @@ async function testParentToolList(bundle: string) {
       "record_candidate_attack_paths",
       "record_codex_security_scan_draft",
       "get_codex_security_completed_scan",
+      "get_codex_security_finding_issues",
+      "record_codex_security_finding_issues",
       "complete_codex_security_scan",
     ]) {
       assert.equal(names.has(name), true, `Missing parent MCP tool ${name}.`);
@@ -1375,7 +1377,18 @@ async function testDiscoveryWorkerToolList(bundle: string) {
     const input = {
       scanId,
       findings: [],
-      reviewState: workerDraft([]).reviewState,
+      reviewState: {
+        ...workerDraft([]).reviewState,
+        explicitExclusions: [
+          { pattern: "vendor/**", reason: "Third-party source." },
+        ],
+        deferred: [
+          {
+            id: "runtime-check",
+            reason: "Runtime confirmation remains unavailable.",
+          },
+        ],
+      },
     };
 
     for (const forbiddenInput of [
@@ -1403,22 +1416,6 @@ async function testDiscoveryWorkerToolList(bundle: string) {
       }),
       /scanId does not match/,
       "The Standard worker draft must use the coordinator-bound scan identity.",
-    );
-    await assert.rejects(readFile(resultPath), { code: "ENOENT" });
-
-    requireToolError(
-      await client.callTool({
-        name: tool.name,
-        arguments: {
-          ...input,
-          reviewState: {
-            ...input.reviewState,
-            deferred: [{ reason: "Review remains incomplete." }],
-          },
-        },
-      }),
-      /complete reviewState cannot contain deferred/,
-      "The Standard worker must reject invalid reviewState before writing its checkpoint.",
     );
     await assert.rejects(readFile(resultPath), { code: "ENOENT" });
 
@@ -1693,6 +1690,19 @@ function assertSemanticInputProperties(schema: Record<string, unknown>) {
     Record<string, unknown>
   >;
   const findingSchema = properties.findings.items as Record<string, unknown>;
+  if (properties.reviewState) {
+    assert.equal(
+      Object.hasOwn(
+        properties.reviewState.properties as object,
+        "completeness",
+      ),
+      false,
+    );
+    assert.equal(
+      (properties.reviewState.required as string[]).includes("completeness"),
+      false,
+    );
+  }
   const groups: [Record<string, unknown>, string[]][] = [
     [properties.scope, ["includePaths", "excludePaths"]],
     [findingSchema, ["findingId", "occurrenceId", "fingerprints"]],

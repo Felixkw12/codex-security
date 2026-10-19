@@ -225,8 +225,13 @@ export async function writeMockScanDraft(
           limitations: [description],
         },
         reviewState: {
-          completeness: "complete",
-          surfaces: [],
+          surfaces: EXAMPLES.map((example) => ({
+            id: `mock-${example.id}`,
+            label: `[Mock] ${example.title}`,
+            disposition: "reported",
+            receiptRefs: [],
+            notes: description,
+          })),
           explicitExclusions: [],
           deferred: [],
         },

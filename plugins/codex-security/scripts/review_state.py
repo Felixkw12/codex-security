@@ -13,7 +13,6 @@ def uses_legacy_review(scan: dict[str, Any]) -> bool:
 
 def review_summary(state: dict[str, Any]) -> dict[str, Any]:
     return {
-        "status": {"partial": "incomplete"}.get(state["completeness"], state["completeness"]),
         "excludedPaths": [item["pattern"] for item in state.get("explicitExclusions", [])],
     }
 
@@ -23,10 +22,6 @@ def review_state(scan: dict[str, Any]) -> dict[str, Any]:
     summary = scan.get("review", {})
     state = copy.deepcopy(scan.get("reviewState", {}))
     mode = scan.get("mode", "repository")
-    state.setdefault(
-        "completeness",
-        {"incomplete": "partial"}.get(summary.get("status"), summary.get("status", "unknown")),
-    )
     state.setdefault("surfaces", [])
     state.setdefault("deferred", [])
     state.setdefault(
@@ -55,18 +50,17 @@ def review_state(scan: dict[str, Any]) -> dict[str, Any]:
 def checkpoint_review_state(state: dict[str, Any]) -> dict[str, Any]:
     """Retain unfinished work and candidate outcomes, without a coverage report."""
     return {
-        "completeness": state["completeness"],
         "surfaces": [
             {key: copy.deepcopy(value) for key, value in item.items() if key != "riskArea"}
             for item in state.get("surfaces", [])
         ],
         "explicitExclusions": copy.deepcopy(state.get("explicitExclusions", [])),
         "deferred": copy.deepcopy(state.get("deferred", [])),
-        **(
-            {"resolvedDeferred": copy.deepcopy(state["resolvedDeferred"])}
-            if "resolvedDeferred" in state
-            else {}
-        ),
+        **{
+            key: copy.deepcopy(state[key])
+            for key in ("resolvedDeferred", "openQuestions")
+            if key in state
+        },
     }
 
 

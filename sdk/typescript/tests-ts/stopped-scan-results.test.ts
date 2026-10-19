@@ -256,7 +256,6 @@ test("retries a legacy stopped seal after transient publication failure", () => 
       }),
     ],
     reviewState: {
-      completeness: "partial",
       deferred: expect.arrayContaining([
         expect.objectContaining({ candidateId: "pending-validation" }),
       ]),

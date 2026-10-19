@@ -67,7 +67,6 @@ const workbenchPath = path.join(pluginRoot, "scripts", "workbench_db.py");
 const python = process.env.PYTHON?.trim() || "python3";
 const owner = "publication-test-owner";
 const reviewState: ScanDraftInput["reviewState"] = {
-  completeness: "complete",
   surfaces: [],
   explicitExclusions: [],
   deferred: [],
@@ -329,7 +328,7 @@ for (const [
     );
     assert.ok(manifest.scan.sealedAt);
     assert.deepEqual(JSON.parse(sealed.files["findings.json"]).findings, []);
-    assert.equal(manifest.scan.review.status, "complete");
+    assert.equal(manifest.scan.status, "completed");
     assert.equal(sealed.files["coverage.json"], undefined);
     assert.ok(sealed.files["report.md"]);
     for (const [name, bytes] of Object.entries(parentCheckpoints)) {
@@ -571,10 +570,7 @@ for (const claimed of [false, true]) {
     );
     await rm(report, { recursive: true });
     const interrupted = await snapshot(run);
-    assert.equal(
-      JSON.parse(interrupted.files["scan-manifest.json"]).scan.review.status,
-      "incomplete",
-    );
+
     assertToolError(
       await call(
         "record_codex_security_scan_draft",
@@ -660,7 +656,6 @@ async function assertInterleavedProgressRetained(fixture: PublicationFixture) {
     findings: [],
     reviewState: {
       ...reviewState,
-      completeness: "partial",
       deferred: [
         {
           id: "interleaved-progress",
@@ -855,7 +850,6 @@ function partial(run: DeepScanRunState, candidateId: string): ScanDraftInput {
     findings: [],
     reviewState: {
       ...reviewState,
-      completeness: "partial",
       deferred: [
         {
           candidateId,

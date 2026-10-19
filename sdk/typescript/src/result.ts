@@ -65,10 +65,6 @@ export class ScanResult {
     this.findings = options.findings;
     this.review = options.review ??
       options.manifest.scan.review ?? {
-        status:
-          options.coverage!.completeness === "partial"
-            ? "incomplete"
-            : options.coverage!.completeness,
         excludedPaths: options.coverage!.explicitExclusions.map(
           (item) => item.pattern,
         ),

@@ -674,7 +674,6 @@ runpy.run_path(sys.argv[0], run_name="__main__")
       findings: [],
       threatModel: { summary: "Synthetic test target" },
       reviewState: {
-        completeness: "complete",
         surfaces: [
           {
             id: "source",

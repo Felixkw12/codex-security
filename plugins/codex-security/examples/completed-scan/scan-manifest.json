@@ -17,12 +17,13 @@
       "version": "0.1.0"
     },
     "review": {
-      "excludedPaths": [],
-      "status": "complete"
+      "excludedPaths": []
     },
     "scope": {
       "excludePaths": [],
-      "includePaths": ["."]
+      "includePaths": [
+        "."
+      ]
     },
     "sealedAt": "2026-05-31T18:09:00Z",
     "startedAt": "2026-05-31T18:00:00Z",

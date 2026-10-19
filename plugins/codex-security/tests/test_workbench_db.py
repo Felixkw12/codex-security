@@ -26,6 +26,7 @@ from workbench_test_support import (
     fail_scan,
     get_scan,
     initialize_git_repository,
+    load_script,
     mark_handoff_delivered,
     mark_remediation_delivered,
     read_review_state,
@@ -78,7 +79,7 @@ EXPECTED_TABLES = {
     "local_finding_embeddings",
     "finding_locations",
     "finding_occurrences",
-    "finding_publications",
+    "finding_issue_receipts",
     "finding_remediation_attempts",
     "finding_repositories",
     "finding_triage",
@@ -240,14 +241,14 @@ def test_budget_exhaustion_preserves_unvalidated_discovery_as_deferred_work(
     assert manifest["scan"]["sealedAt"]
     coverage = read_review_state(state_dir, scan_dir)
     assert coverage["mode"] == "deep_repository"
-    assert coverage["completeness"] == "partial"
+
     assert coverage["deferred"][0]["id"] == "candidate-1"
     assert coverage["deferred"][0]["paths"] == ["app.py"]
     assert "cost limit" in coverage["deferred"][0]["reason"]
     assert "User input reaches a SQL statement" in coverage["deferred"][0]["reason"]
     assert coverage["surfaces"][0]["disposition"] == "needs_follow_up"
     report = (scan_dir / "report.md").read_text()
-    assert "The review did not finish. No vulnerability conclusion can be drawn." in report
+    assert "No findings were reported." in report
 
 
 def test_budget_exhaustion_preserves_authored_validated_findings(tmp_path: Path) -> None:
@@ -266,7 +267,7 @@ def test_budget_exhaustion_preserves_authored_validated_findings(tmp_path: Path)
     assert completed["findingCount"] == 1
     assert "Unsafe archive extraction" in completed["findings"][0]["title"]
     coverage = read_review_state(state_dir, scan_dir)
-    assert coverage["completeness"] == "partial"
+
     assert coverage["deferred"][0]["id"] == "candidate-1"
 
 
@@ -306,7 +307,7 @@ def test_budget_exhaustion_preserves_existing_candidate_decisions(
     assert completed["progress"]["status"] == "complete"
     assert completed["findings"] == []
     coverage = read_review_state(state_dir, scan_dir)
-    assert coverage["completeness"] == "partial"
+
     assert coverage["surfaces"][0]["disposition"] == surface_disposition
     assert any(row["id"] == "candidate-1" for row in coverage["deferred"]) is deferred
     if not deferred:
@@ -386,10 +387,7 @@ def test_budget_exhaustion_preserves_existing_deferred_work_with_one_trusted_mar
             "id": "scan-cost-limit",
             "reason": "Validation was deferred because the scan reached its cost limit.",
         }
-    assert (
-        "The review did not finish. No vulnerability conclusion can be drawn."
-        in (scan_dir / "report.md").read_text()
-    )
+    assert "No findings were reported." in (scan_dir / "report.md").read_text()
 
 
 def test_budget_exhaustion_preserves_capped_discovery(tmp_path: Path) -> None:
@@ -409,7 +407,7 @@ def test_budget_exhaustion_with_no_candidates_is_honestly_partial(tmp_path: Path
     assert completed["progress"]["status"] == "complete"
     assert completed["findings"] == []
     coverage = read_review_state(state_dir, scan_dir)
-    assert coverage["completeness"] == "partial"
+
     assert coverage["deferred"] == [
         {
             "id": "scan-cost-limit",
@@ -836,7 +834,7 @@ def test_workbench_persists_progress_and_indexes_completed_findings(tmp_path: Pa
     assert finding["codeEvidence"][0]["code"] == "destination.write_bytes(entry.read())"
     assert finding["validation"]["evidenceRefs"] == ["archive-write"]
     assert finding["evidenceExcerpt"] == "destination.write_bytes(entry.read())"
-    assert finding["attackPath"]["dataFlow"] == (
+    assert finding["attackPath"]["dataflow"] == (
         "archive entry -> destination path -> filesystem write"
     )
     assert finding["attackPath"]["impact"]["level"] == "high"
@@ -911,7 +909,9 @@ def test_workbench_persists_progress_and_indexes_completed_findings(tmp_path: Pa
             )
         }
         assert tables == EXPECTED_TABLES
-        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (47,)
+        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == (
+            len(load_script("workbench_schema").MIGRATIONS),
+        )
         assert connection.execute("SELECT COUNT(*) FROM findings").fetchone() == (1,)
         assert connection.execute("SELECT COUNT(*) FROM finding_locations").fetchone() == (1,)
 
@@ -2354,7 +2354,6 @@ def test_workbench_warns_after_working_tree_changes(tmp_path: Path) -> None:
     assert "sourceExcerpt" not in finding
     manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
     assert manifest["scan"]["target"]["snapshotDigest"] == snapshot_digest
-    assert read_review_state(state_dir, scan_dir)["completeness"] == "complete"
 
 
 def test_workbench_warns_after_working_tree_head_changes(
@@ -3234,10 +3233,15 @@ def test_workbench_preserves_dirty_git_scan_after_worktree_changes(tmp_path: Pat
         target_kind="git_revision",
         target_revision=revision,
     )
-    failed = scan_command(state_dir, "complete-scan", scan_id, check=False)
-    assert failed["returncode"] != 0
-    assert "scan.target.kind" in str(failed["stderr"])
-    assert get_scan(state_dir, scan_id)["scan"]["progress"]["status"] == "running"
+    # A draft that inferred git_revision from the checkout seals with the
+    # registered worktree kind and digest instead of discarding the scan.
+    completed = scan_command(state_dir, "complete-scan", scan_id)
+    assert completed["scan"]["progress"]["status"] == "complete"
+    manifest = json.loads(
+        (Path(str(started["results"]["scanDir"])) / "scan-manifest.json").read_text()
+    )
+    assert manifest["scan"]["target"]["kind"] == "git_worktree"
+    assert manifest["scan"]["target"]["snapshotDigest"] == contract["requiredSnapshotDigest"]
 
     started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
     scan_id = str(started["results"]["scanId"])

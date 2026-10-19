@@ -4,7 +4,7 @@ import { join, resolve } from 'node:path';
 import { isRecord, safeSourcePath, assertSafeSarif } from './sarif.js';
 
 export type Severity = 'critical' | 'high' | 'medium' | 'low' | 'informational';
-export type ScanStatus = 'completed' | 'incomplete' | 'failed' | 'skipped';
+export type ScanStatus = 'completed' | 'failed' | 'skipped';
 export type PolicyStatus = 'passed' | 'failed' | 'not-evaluated';
 export type ReportStatus = 'ready' | 'partial' | 'failed';
 export interface Finding {
@@ -146,24 +146,15 @@ export async function analyzeResults(options: ResultOptions): Promise<ScanResult
   result.estimatedCost = value.cost?.estimatedUsd;
   result.paths = {resultsDirectory: options.resultsDirectory, manifestPath: join(options.resultsDirectory, 'scan-manifest.json'),
     jsonPath: join(options.resultsDirectory, 'findings.json'), coveragePath: value.coverage ? join(options.resultsDirectory, 'coverage.json') : '', sarifPath: ''};
-  const reviewStatus = value.review?.status ?? (value.coverage?.completeness === 'partial' ? 'incomplete' : value.coverage?.completeness)
   const warnings: string[] = value.warnings ?? [];
-  // The CLI includes target-change warnings in result data even when it exits 2.
-  // Those and failed execution must not become warning-only partial scans.
-  if (options.executionFailed || value.manifest.scan.status !== 'completed' || warnings.length > 0) {
+  // Execution and severity-policy outcomes come from the CLI, not coverage notes.
+  // Target-change warnings still prevent publication of a changed checkout.
+  if (options.executionFailed || value.manifest.scan.status !== 'completed' || warnings.length > 0 ||
+      (options.exitCode !== 0 && options.exitCode !== 1)) {
     result.errors.push('CLI did not complete successfully. See the CLI diagnostics.');
-  } else if (reviewStatus === 'incomplete' && (options.exitCode === 0 || options.exitCode === 2)) {
-    result.scanStatus = 'incomplete';
-  } else if (reviewStatus === 'complete' && (options.exitCode === 0 || options.exitCode === 1)) {
+  } else {
     result.scanStatus = 'completed';
     result.policyStatus = options.exitCode === 1 ? 'failed' : 'passed';
-  } else result.errors.push(reviewStatus === 'unknown'
-    ? 'CLI could not determine whether review finished. See the CLI diagnostics.'
-    : 'CLI did not complete successfully. See the CLI diagnostics.');
-  if (reviewStatus !== 'complete' && value.coverage) {
-    for (const item of Array.isArray(value.coverage.deferred) ? value.coverage.deferred : []) if (typeof item?.reason === 'string') result.errors.push(`Deferred work: ${item.reason}`);
-    for (const item of Array.isArray(value.coverage.surfaces) ? value.coverage.surfaces : []) if (item?.disposition === 'needs_follow_up' && typeof item.label === 'string')
-      result.errors.push(`Needs follow-up: ${item.label}`);
   }
   result.errors.push(...warnings);
   const sarifPath = join(options.resultsDirectory, 'exports/results.sarif');
