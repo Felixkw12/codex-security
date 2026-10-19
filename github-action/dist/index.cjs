@@ -19688,8 +19688,10 @@ function parseInputs(read, workspace) {
     const value = str(name);
     if (!value) return void 0;
     const n = Number(value);
-    if (!Number.isFinite(n) || integer && !Number.isSafeInteger(n) || n < min || n > max)
-      throw new Error(`${name} must be ${integer ? "an integer" : "a number"} between ${min} and ${max}.`);
+    if (!Number.isFinite(n) || integer && !Number.isSafeInteger(n) || n < min || n > max) {
+      const bounds = min === Number.MIN_VALUE ? `a positive number${max < Infinity ? ` no greater than ${max}` : ""}` : `${integer ? "an integer" : "a number"} between ${min} and ${max}`;
+      throw new Error(`${name} must be ${bounds}.`);
+    }
     return n;
   };
   const list = (name) => str(name).split(/\r?\n/).map((v) => v.trim()).filter(Boolean);
@@ -19721,7 +19723,7 @@ function parseInputs(read, workspace) {
     cyberAccessProgram,
     provider,
     model,
-    effort: choice("effort", ["minimal", "low", "medium", "high", "xhigh", "max"], "xhigh"),
+    effort: str("effort", "xhigh"),
     maxCost: num("max-cost", false, Number.MIN_VALUE),
     maxTimeHours,
     failOnSeverity: choice("fail-on-severity", ["none", "low", "medium", "high", "critical"], "none"),
@@ -19746,8 +19748,7 @@ function scanArguments(inputs, target, resultsDirectory) {
     "--mode",
     inputs.mode,
     ...inputs.model ? [`--model=${inputs.model}`] : [],
-    "--effort",
-    inputs.effort,
+    `--effort=${inputs.effort}`,
     "--headless",
     "--output-dir",
     resultsDirectory,
