@@ -428,6 +428,15 @@
   },
   {
     "version": 52,
+    "name": "record severity classification review counts",
+    "statements": [
+      "ALTER TABLE finding_severity_assessments ADD COLUMN classification_runs INTEGER CHECK (classification_runs BETWEEN 1 AND 10);",
+      "ALTER TABLE scan_severity_assessments ADD COLUMN classification_runs INTEGER CHECK (classification_runs BETWEEN 1 AND 10);",
+      "ALTER TABLE scan_severity_classifications ADD COLUMN classification_runs INTEGER CHECK (classification_runs BETWEEN 1 AND 10);"
+    ]
+  },
+  {
+    "version": 53,
     "name": "persist repository identities",
     "statements": [
       "ALTER TABLE security_targets\n        ADD COLUMN repository_identity TEXT;",
@@ -442,7 +451,7 @@
     ]
   },
   {
-    "version": 53,
+    "version": 54,
     "name": "stabilize Linux repository generations",
     "statements": []
   }

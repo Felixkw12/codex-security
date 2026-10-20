@@ -413,7 +413,7 @@ test("database-info retains scan names from installed migration 42", async () =>
   await databaseInfo(directory);
   const upgraded = new DatabaseSync(databasePath);
   try {
-    assertMigrationNames(upgraded, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51);
+    assertMigrationNames(upgraded, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52);
     assert.equal(
       upgraded.prepare("SELECT name FROM scans").get()?.name,
       "Original scan",
@@ -1019,7 +1019,7 @@ with sqlite3.connect(sys.argv[2]) as database:
 `,
       fileURLToPath(new URL("../../scripts", import.meta.url)),
       databasePath,
-      String(through ?? 53),
+      String(through ?? 54),
     ],
     { encoding: "utf8" },
   );
@@ -1182,7 +1182,7 @@ test("Node initialization leaves repository migration semantics to the Python co
           actual
             .prepare("SELECT MAX(version) AS version FROM schema_migrations")
             .get()?.version,
-          53,
+          54,
         );
         assert.equal(
           actual.prepare("SELECT completion_sequence FROM scans").get()
@@ -1202,11 +1202,11 @@ test("Node repository migration-label collisions roll back without changing stor
   for (const [name, setup] of [
     [
       "identity destination",
-      "UPDATE schema_migrations SET name='persist repository identities' WHERE version=31; INSERT INTO schema_migrations VALUES(52,'persist repository identities','original')",
+      "UPDATE schema_migrations SET name='persist repository identities' WHERE version=31; INSERT INTO schema_migrations VALUES(53,'persist repository identities','original')",
     ],
     [
       "generation destination",
-      "UPDATE schema_migrations SET name='stabilize Linux repository generations' WHERE version=44; INSERT INTO schema_migrations VALUES(53,'occupied destination','retained')",
+      "UPDATE schema_migrations SET name='stabilize Linux repository generations' WHERE version=44; INSERT INTO schema_migrations VALUES(54,'occupied destination','retained')",
     ],
     [
       "identity collision after generation relocation",
@@ -1386,13 +1386,13 @@ with sqlite3.connect(sys.argv[2]) as connection:
   );
   assert.equal(
     initialized
-      .prepare("SELECT name FROM schema_migrations WHERE version=52")
+      .prepare("SELECT name FROM schema_migrations WHERE version=53")
       .get()?.name,
     "persist repository identities",
   );
   assert.equal(
     initialized
-      .prepare("SELECT name FROM schema_migrations WHERE version=53")
+      .prepare("SELECT name FROM schema_migrations WHERE version=54")
       .get(),
     undefined,
   );
@@ -1415,7 +1415,7 @@ with sqlite3.connect(sys.argv[2]) as connection:
             mode=None, status=None, query=None, limit=None, offset=0)
         scans = history.list_scans(connection, args)['scans']
         assert [scan['scanId'] for scan in scans] == ['scan'], (repository, scans)
-    assert connection.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 53
+    assert connection.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 54
 `,
       scripts,
       databasePath,
