@@ -69,6 +69,45 @@ _RESERVED_ARTIFACT_PATHS = json.loads(
 )
 
 
+from workbench.retained_coverage import (
+    _deferred_candidate_id as _deferred_candidate_id,
+)
+from workbench.retained_coverage import (
+    _deferred_rows as _deferred_rows,
+)
+from workbench.retained_coverage import (
+    _digest as _digest,
+)
+from workbench.retained_coverage import (
+    _encoded as _encoded,
+)
+from workbench.retained_coverage import (
+    _ensure_finding_identity as _ensure_finding_identity,
+)
+from workbench.retained_coverage import (
+    _finding_content as _finding_content,
+)
+from workbench.retained_coverage import (
+    _finding_key as _finding_key,
+)
+from workbench.retained_coverage import (
+    _generic_surface_updates as _generic_surface_updates,
+)
+from workbench.retained_coverage import (
+    _inherit_coverage_sources as _inherit_coverage_sources,
+)
+from workbench.retained_coverage import (
+    _merge_tied_parent_observations as _merge_tied_parent_observations,
+)
+from workbench.retained_coverage import (
+    _resolved_deferred_rows as _resolved_deferred_rows,
+)
+from workbench.retained_coverage import (
+    _retained_findings as _retained_findings,
+)
+from workbench.retained_coverage import (
+    _worker_candidate_key as _worker_candidate_key,
+)
 from workbench.saved_sources import (
     _capture_saved_source as _capture_saved_source,
 )
@@ -95,45 +134,6 @@ from workbench.saved_sources import (
 )
 from workbench.saved_sources import (
     _source_digests as _source_digests,
-)
-from workbench_saved_coverage import (
-    _deferred_candidate_id as _deferred_candidate_id,
-)
-from workbench_saved_coverage import (
-    _deferred_rows as _deferred_rows,
-)
-from workbench_saved_coverage import (
-    _digest as _digest,
-)
-from workbench_saved_coverage import (
-    _encoded as _encoded,
-)
-from workbench_saved_coverage import (
-    _ensure_finding_identity as _ensure_finding_identity,
-)
-from workbench_saved_coverage import (
-    _finding_content as _finding_content,
-)
-from workbench_saved_coverage import (
-    _finding_key as _finding_key,
-)
-from workbench_saved_coverage import (
-    _generic_surface_updates as _generic_surface_updates,
-)
-from workbench_saved_coverage import (
-    _inherit_coverage_sources as _inherit_coverage_sources,
-)
-from workbench_saved_coverage import (
-    _merge_tied_parent_observations as _merge_tied_parent_observations,
-)
-from workbench_saved_coverage import (
-    _resolved_deferred_rows as _resolved_deferred_rows,
-)
-from workbench_saved_coverage import (
-    _retained_findings as _retained_findings,
-)
-from workbench_saved_coverage import (
-    _worker_candidate_key as _worker_candidate_key,
 )
 
 
@@ -906,8 +906,8 @@ def merge_saved_results(
             output.append(retained)
         retained = output[output.index(retained)]
         record_coverage_owner(retained, item, owner, field)
+        _inherit_coverage_sources(retained, [item], coverage_sources)
         if preserve_canonical_parent:
-            _inherit_coverage_sources(retained, [item], coverage_sources)
             if id(item) in canonical_rows:
                 canonical_rows.add(id(retained))
             if field == "surfaces":
@@ -2040,10 +2040,19 @@ def merge_saved_results(
     def remember_surface_id(item: dict[str, Any], local_id: str) -> None:
         final_id = item["id"]
         surface_positions.setdefault(final_id, len(surface_positions))
+        shadowed_alias = (
+            project_worker_coverage
+            and id(item) not in named_surface_outputs
+            and (named := worker_surfaces.get((worker_row_owners.get(id(item)), local_id)))
+            is not None
+            and id(named) in named_surface_outputs
+        )
         for relative in coverage_sources.get(id(item), (item, []))[1]:
-            targets = surface_ids_by_source.setdefault((relative, local_id), [])
-            if final_id not in targets:
-                targets.append(final_id)
+            # A candidate-derived ID cannot claim a link explicitly naming another surface.
+            if not shadowed_alias:
+                targets = surface_ids_by_source.setdefault((relative, local_id), [])
+                if final_id not in targets:
+                    targets.append(final_id)
             candidate_id = item.get("candidateId")
             if isinstance(candidate_id, str):
                 key = (source_owners[relative], candidate_id)

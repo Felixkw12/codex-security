@@ -7,12 +7,9 @@ import hashlib
 import json
 import os
 import re
-import sys
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from finalize_scan_contract import (
     ContractError,
@@ -185,7 +182,7 @@ def _merge_tied_parent_observations(
         if isinstance(identity, str)
     }
     closure_schema = _read_json(
-        Path(__file__).resolve().parent.parent / "schemas" / "coverage.schema.json"
+        Path(__file__).resolve().parents[2] / "schemas" / "coverage.schema.json"
     )["properties"]["resolvedDeferred"]
     closures = {}
     for observed in (current, previous):
