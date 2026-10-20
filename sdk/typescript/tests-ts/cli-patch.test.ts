@@ -339,6 +339,7 @@ describe("scan and patch workflow", () => {
   ] as const)(
     "completes required patch output (status %i, failure %p)",
     async (codexStatus, failOutput, expectedStatus) => {
+      const directory = await fixtures.create("patch-required-output-");
       const report = "Synthetic patch report: café → fixed.\n";
       const started = Promise.withResolvers<(error?: Error) => void>();
       const stdout = new Writable({
@@ -359,14 +360,16 @@ describe("scan and patch workflow", () => {
         stdout,
         stderr.stream,
         dependencies({
-          currentDirectory: CURRENT_REPOSITORY,
+          currentDirectory: directory,
           onCodex: (_args, output) => {
             output?.stdout.write(report);
             patched = true;
             return codexStatus;
           },
-          onRepositoryCommand: (_command, args) => {
+          onRepositoryCommand: (_command, args, _repository, options) => {
             if (patched) laterCommands++;
+            if (options?.encoding === "base64") return "";
+            if (args.includes("--show-toplevel")) return directory;
             return args.includes("--name-only") ? "synthetic.ts\0" : "tree";
           },
         }),

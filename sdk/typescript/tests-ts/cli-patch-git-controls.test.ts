@@ -778,7 +778,7 @@ lines.on("line", (line) => {
     assert.equal(profiles.length, 1);
     permissionProfile = profiles[0];
     assert.match(permissionProfile, /^codex_security_patch_[a-f0-9-]+$/);
-    assert.deepEqual(request.params, { threadSource: "security_remediation", approvalPolicy: "never", sandbox: "workspace-write", config: { permissions: { [permissionProfile]: { extends: ":workspace", network: { enabled: ${configured} }, workspace_roots: ${JSON.stringify(configured ? { [extraRoot]: true } : {})}, filesystem: { [${JSON.stringify(protectedPath)}]: { ".": "read" }, ...${JSON.stringify(configured ? { ":tmpdir": {}, ":slash_tmp": {} } : {})} } } } } });
+    assert.deepEqual(request.params, { threadSource: "security_remediation", approvalPolicy: "never", sandbox: "workspace-write", config: { default_permissions: permissionProfile, permissions: { [permissionProfile]: { extends: ":workspace", network: { enabled: ${configured} }, workspace_roots: ${JSON.stringify(configured ? { [extraRoot]: true } : {})}, filesystem: { [${JSON.stringify(protectedPath)}]: { ".": "read" }, ...${JSON.stringify(configured ? { ":tmpdir": {}, ":slash_tmp": {} } : {})} } } } } });
     send({ id: 2, result: { thread: { id: "patch-thread" }, sandbox: ${JSON.stringify(policy)} } });
   } else if (request.method === "command/exec") {
     assert.deepEqual(request.params.sandboxPolicy, ${JSON.stringify(policy)});
@@ -787,6 +787,8 @@ lines.on("line", (line) => {
     assert.equal(request.params.cwd, ${JSON.stringify(directory)});
     assert.deepEqual(request.params.command, [process.execPath, "-e", ""]);
     send({ id: 5, result: { exitCode: 0, stdout: "", stderr: "" } });
+  } else if (request.method === "experimentalFeature/list") {
+    send({ id: request.id, result: { data: [{ name: "cli_daybreak", enabled: false }], nextCursor: null } });
   } else if (request.method === "turn/start") {
     assert.equal(preflight, true);
     assert.equal(request.params.threadId, "patch-thread");

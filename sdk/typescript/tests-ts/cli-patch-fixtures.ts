@@ -117,6 +117,7 @@ export async function runWorkflow(
     stderr: options.interactive,
   });
 
+  const savedFindings = new Map<string, readonly Finding[]>();
   const current = dependencies({
     currentDirectory: CURRENT_REPOSITORY,
     onCodex: (args, output) => {
@@ -124,6 +125,24 @@ export async function runWorkflow(
       return 0;
     },
     ...fixtures,
+    onWorkbench: async (...args) => {
+      const response = await fixtures.onWorkbench?.(...args);
+      const scan = response?.["scan"] as JsonObject | undefined;
+      if (
+        typeof scan?.["scanId"] === "string" &&
+        Array.isArray(scan["findings"])
+      ) {
+        savedFindings.set(
+          scan["scanId"],
+          scan["findings"] as unknown as Finding[],
+        );
+      }
+      return response ?? { scans: [] };
+    },
+    readSavedFindings:
+      fixtures.readSavedFindings ??
+      (async (scanId) =>
+        savedFindings.get(scanId) ?? fixtures.result?.findings.findings ?? []),
   });
   if (options.interactive) {
     current.confirmPatchReview = async (question) => {
