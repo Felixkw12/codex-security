@@ -58,7 +58,6 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   isDeepStrictEqual,
   parseArgs,
-  promisify,
   stripVTControlCharacters,
 } from "node:util";
 import { Cli, z } from "incur";
