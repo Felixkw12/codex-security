@@ -12,6 +12,7 @@ import {
   adaptTrackingSchema,
   isTrackingDateTime,
   isTrackingRemoteAuthority,
+  trackingPortableRelativePath,
 } from "./tracking-contract-compat.js";
 import type {
   CoverageDocument,
@@ -25,6 +26,7 @@ import {
   resolvedPathText,
 } from "./helpers/helper-files.js";
 import { decodePosixBytes, encodePosixPath } from "./helpers/posix-path.js";
+import { escapeControls } from "./helpers/json.js";
 import {
   SealedContractError as ContractValidationError,
   SealedContractSchemaError as ContractSchemaError,
@@ -46,7 +48,7 @@ type ContractProfile = "sdk" | "tracking";
 type ScanRoot = {
   path: string;
   reader: ReturnType<typeof openScanReadRoot>;
-  requirePrivateRoot: boolean;
+  profile: ContractProfile;
 };
 export interface LoadedSealedContract {
   manifest: ScanManifest;
@@ -80,7 +82,7 @@ export async function loadSealedContract(
   const scanRoot = await requireScanRoot(
     scanDirectory,
     options.signal,
-    profile === "sdk",
+    profile,
   );
   try {
     const documentDigests = new Map<string, string>();
@@ -103,6 +105,8 @@ export async function loadSealedContract(
         // Seals continue to bind the original bytes read above.
         payload = normalizePersistedFindings(payload, profile);
         validateParsedJson(payload, filename);
+      } else if (profile === "tracking" && filename === "coverage.json") {
+        payload = normalizeTrackingCoverage(payload);
       }
       let valid: boolean;
       try {
@@ -194,6 +198,25 @@ function normalizePersistedFindings(
   for (const finding of compatible["findings"]) {
     if (!isRecord(finding)) continue;
     normalizePersistedFindingDetails(finding, profile);
+  }
+  return compatible;
+}
+
+/** Tracking validates normalized receipt references but seals the original bytes. */
+function normalizeTrackingCoverage(payload: unknown): unknown {
+  const compatible = structuredClone(payload);
+  if (!isRecord(compatible) || !Array.isArray(compatible["surfaces"])) {
+    return compatible;
+  }
+  for (const [surfaceIndex, surface] of compatible["surfaces"].entries()) {
+    if (!isRecord(surface) || !Array.isArray(surface["receiptRefs"])) continue;
+    for (const [refIndex, reference] of surface["receiptRefs"].entries()) {
+      if (typeof reference !== "string") continue;
+      surface["receiptRefs"][refIndex] = trackingPortableRelativePath(
+        reference,
+        `coverage.surfaces[${surfaceIndex}].receiptRefs[${refIndex}]`,
+      );
+    }
   }
   return compatible;
 }
@@ -466,6 +489,16 @@ function safeContractPath(
   return safeRelativePath(value, context, allowDot);
 }
 
+function portableContractPath(
+  value: string,
+  context: string,
+  profile: ContractProfile,
+): string {
+  return profile === "tracking"
+    ? trackingPortableRelativePath(value, context)
+    : portableRelativePath(value, context);
+}
+
 async function validateSeal(
   root: ScanRoot,
   manifest: ScanManifest,
@@ -487,7 +520,11 @@ async function validateSeal(
   for (const [index, artifact] of scan.artifacts.entries()) {
     throwIfAborted(signal);
     const context = `manifest.scan.artifacts[${index}]`;
-    const normalized = portableRelativePath(artifact.path, `${context}.path`);
+    const normalized = portableContractPath(
+      artifact.path,
+      `${context}.path`,
+      root.profile,
+    );
     const collisionKey = normalized.toLowerCase();
     if (artifactCollisionKeys.has(collisionKey)) {
       throw new ContractValidationError(
@@ -511,7 +548,11 @@ async function validateSeal(
     if (typeof reference !== "string") {
       throw new ContractValidationError(`${context}: expected a string.`);
     }
-    const normalized = portableRelativePath(reference, context.toLowerCase());
+    const normalized = portableContractPath(
+      reference,
+      context.toLowerCase(),
+      root.profile,
+    );
     if (!normalized.startsWith("artifacts/")) {
       throw new ContractValidationError(
         `${context} must be under artifacts/: ${reference}`,
@@ -591,7 +632,7 @@ export async function readSealedScanFile(
 async function requireScanRoot(
   scanDirectory: string,
   signal?: AbortSignal,
-  requirePrivateRoot = true,
+  profile: ContractProfile = "sdk",
 ): Promise<ScanRoot> {
   throwIfAborted(signal);
   const absolute = resolve(scanDirectory);
@@ -605,13 +646,13 @@ async function requireScanRoot(
             await realpath(encodePosixPath(absolute), { encoding: "buffer" }),
           );
     throwIfAborted(signal);
-    root = { path, reader: openScanReadRoot(path), requirePrivateRoot };
+    root = { path, reader: openScanReadRoot(path), profile };
     const current = await scanDirectoryIdentity(absolute);
     const canonical = await scanDirectoryIdentity(path);
     if (!sameArray(current, identity) || !sameArray(canonical, identity)) {
       throw new Error("scan directory changed while opening");
     }
-    if (requirePrivateRoot) {
+    if (profile === "sdk") {
       try {
         await requirePrivateScanRoot(path);
       } catch (error) {
@@ -654,7 +695,7 @@ async function verifyScanRoot(
 ): Promise<void> {
   try {
     throwIfAborted(signal);
-    if (root.requirePrivateRoot) await requirePrivateScanRoot(root.path);
+    if (root.profile === "sdk") await requirePrivateScanRoot(root.path);
     root.reader.verify();
     throwIfAborted(signal);
   } catch (error) {
@@ -710,7 +751,7 @@ function openHeldFile(
   signal?: AbortSignal,
 ) {
   throwIfAborted(signal);
-  const normalized = portableRelativePath(relativePath, context);
+  const normalized = portableContractPath(relativePath, context, root.profile);
   try {
     const file = root.reader.openFile(normalized);
     if (file === null)
@@ -841,8 +882,11 @@ function parseJson(
       },
     );
   } catch (error) {
+    const message = `${path}: invalid JSON: ${String(error)}`;
     throw new ContractValidationError(
-      `${path}: invalid JSON: ${String(error)}`,
+      profile === "tracking" && error instanceof SyntaxError
+        ? escapeControls(message)
+        : message,
       { cause: error },
     );
   }
@@ -956,8 +1000,13 @@ async function loadContractValidators(
       signal,
     ).catch((error: unknown) => {
       throwIfAborted(signal);
+      const message = error instanceof Error ? error.message : String(error);
       throw new ContractSchemaError(
-        error instanceof Error ? error.message : String(error),
+        profile === "tracking" &&
+          error instanceof ContractValidationError &&
+          error.cause instanceof SyntaxError
+          ? escapeControls(message)
+          : message,
         { cause: error },
       );
     });

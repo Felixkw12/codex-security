@@ -126,6 +126,50 @@ describe("native tracking source validation", () => {
     expect(result.stderr).not.toContain("\u001b");
   });
 
+  test.each(["artifact", "schema"])(
+    "escapes controls in malformed %s JSON diagnostics while preserving credential-shaped text",
+    async (source) => {
+      const f = await fixture();
+      const pathSuffix = process.platform === "win32" ? "" : "\u001b[2J";
+      if (pathSuffix) {
+        const scanDir = f.scanDir + pathSuffix;
+        await rename(f.scanDir, scanDir);
+        f.scanDir = scanDir;
+      }
+      let pluginRoot = PLUGIN_ROOT;
+      if (source === "schema") {
+        pluginRoot = join(f.root, "copied plugin" + pathSuffix);
+        for (const directory of ["mcp", "schemas"])
+          await cp(join(PLUGIN_ROOT, directory), join(pluginRoot, directory), {
+            recursive: true,
+          });
+        await writeFile(
+          join(pluginRoot, "schemas", "findings.schema.json"),
+          "sk-test-1234\u001b[2J",
+        );
+      } else {
+        await writeFile(
+          join(f.scanDir, "findings.json"),
+          "sk-test-1234\u001b[2J",
+        );
+        await reseal(f, "findings.json");
+      }
+
+      const result = run(f, [], pluginRoot);
+      expect(result.status).toBe(2);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toStartWith("tracking source preflight failed:");
+      expect(result.stderr).toContain("invalid JSON");
+      expect(result.stderr).toContain("sk-test-1234");
+      expect(result.stderr).toContain("\\u001b[2J");
+      if (pathSuffix) {
+        const directory = source === "schema" ? "copied plugin" : "sealed scan";
+        expect(result.stderr).toContain(`${directory}\\u001b[2J`);
+      }
+      expect(result.stderr).not.toContain("\u001b");
+    },
+  );
+
   test("requires the tracking report while the SDK accepts canonical artifacts alone", async () => {
     const f = await fixture();
     await unlink(join(f.scanDir, "report.md"));

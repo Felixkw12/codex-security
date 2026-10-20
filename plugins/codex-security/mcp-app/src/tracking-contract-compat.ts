@@ -1,5 +1,11 @@
 import { isIP } from "node:net";
 import { isRecord } from "./record.js";
+import {
+  SealedContractError,
+  hasRequiredFindingText,
+  safeRelativePath,
+} from "./contract-values.js";
+import { isWindowsUnsafePathComponent } from "./windows-path.js";
 
 /** Preserve the historical meaning of these immutable schema fields. */
 export function adaptTrackingSchema(
@@ -33,6 +39,18 @@ export function adaptTrackingSchema(
             {
               path: [
                 ...scanProperties,
+                "artifacts",
+                "items",
+                "properties",
+                "path",
+              ],
+              before: "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\).+$",
+              after:
+                "^(?!/)(?![^\\n]*(?:^|/)\\.\\.(?:/|$))(?![^\\n]*\\\\)[^\\n]+$",
+            },
+            {
+              path: [
+                ...scanProperties,
                 "target",
                 "properties",
                 "snapshotDigest",
@@ -53,7 +71,23 @@ export function adaptTrackingSchema(
               after: "^[\\s\\S]*[^\\p{White_Space}\\u001c-\\u001f][\\s\\S]*$",
             },
           ]
-        : [];
+        : filename === "coverage.json"
+          ? [
+              {
+                path: [
+                  "properties",
+                  "surfaces",
+                  "items",
+                  "properties",
+                  "receiptRefs",
+                  "items",
+                ],
+                before: "^(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\)artifacts/.+$",
+                after:
+                  "^(?![^\\n]*(?:^|/)\\.\\.(?:/|$))(?![^\\n]*\\\\)artifacts/[^\\n]+$",
+              },
+            ]
+          : [];
   for (const { path, before, after } of patterns) {
     let field: unknown = schema;
     for (const key of path) {
@@ -68,6 +102,31 @@ export function adaptTrackingSchema(
       field["pattern"] = after;
     }
   }
+}
+
+/** Preserve tracking's whitespace and reserved-name checks on the original path. */
+export function trackingPortableRelativePath(
+  value: string,
+  context: string,
+): string {
+  const normalized = safeRelativePath(value, context);
+  // Python's case-insensitive I also matches dotted/dotless I; dot excludes only LF.
+  const reserved =
+    /^(?:con|prn|aux|nul|con[i\u0130\u0131]n\$|conout\$|com[1-9¹²³]|lpt[1-9¹²³])(?:\.[^\n]*)?$/iu;
+  if (
+    !hasRequiredFindingText(value) ||
+    value
+      .split("/")
+      .some(
+        (component) =>
+          isWindowsUnsafePathComponent(component) || reserved.test(component),
+      )
+  ) {
+    throw new SealedContractError(
+      `${context}: expected a safe scan-relative POSIX path.`,
+    );
+  }
+  return normalized;
 }
 
 /** Preserve tracking's raw authority checks without URL host normalization. */

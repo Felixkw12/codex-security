@@ -1,8 +1,12 @@
 import { afterEach, expect, test } from "bun:test";
-import { cp, readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { cp, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { loadContract } from "../src/contract.js";
+import {
+  loadContract,
+  readScanFile,
+  requireScanFile,
+} from "../src/contract.js";
 import type {
   CoverageDocument,
   Finding,
@@ -16,13 +20,17 @@ import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 const fixtures = createApiTestFixtures("sealed-contract-validation-");
 afterEach(fixtures.cleanup);
-const { validateTrackingSource } = (
+const { validateTrackingSource, loadSealedContract } = (
   await import(pathToFileURL(join(PLUGIN_ROOT, "mcp", "helpers.mjs")).href)
 ).default as {
   validateTrackingSource(
     scanDir: string,
     options?: { pluginRoot: string },
   ): Promise<Finding[]>;
+  loadSealedContract(
+    scanDir: string,
+    options: { pluginRoot: string; profile: "tracking" },
+  ): Promise<{ contract: { coverage: CoverageDocument } }>;
 };
 
 type Documents = {
@@ -54,6 +62,166 @@ async function saveAndSeal(documents: Documents, findingsText?: string) {
   }
   await writeJson(join(scanDir, "scan-manifest.json"), manifest);
 }
+
+async function addArtifact(documents: Documents, path: string) {
+  const filename = join(documents.scanDir, path);
+  await mkdir(dirname(filename), { recursive: true });
+  await writeFile(filename, "synthetic receipt");
+  documents.manifest.scan.artifacts.push({
+    path,
+    sha256: "",
+    mediaType: "text/plain",
+  });
+}
+
+test.each([
+  ["./artifacts/receipt.json", false],
+  [".//./artifacts/receipt.json", false],
+  ["artifacts//receipt.json", true],
+  ["artifacts/./receipt.json", true],
+  ["artifacts/receipt.json/", true],
+] as const)(
+  "preserves tracking receipt normalization and SDK admission for %s",
+  async (reference, sdkAccepts) => {
+    const documents = await fixture();
+    await addArtifact(documents, "artifacts/receipt.json");
+    documents.coverage.surfaces[0]!.receiptRefs = [reference];
+    await saveAndSeal(documents);
+    const original = await readFile(join(documents.scanDir, "coverage.json"));
+
+    await expect(validateTrackingSource(documents.scanDir)).resolves.toEqual(
+      documents.findings.findings,
+    );
+    const { contract } = await loadSealedContract(documents.scanDir, {
+      pluginRoot: PLUGIN_ROOT,
+      profile: "tracking",
+    });
+    expect(contract.coverage.surfaces[0]!.receiptRefs).toEqual([
+      "artifacts/receipt.json",
+    ]);
+    const sdk = loadContract(documents.scanDir, { pluginRoot: PLUGIN_ROOT });
+    if (sdkAccepts)
+      expect((await sdk).coverage.surfaces[0]!.receiptRefs).toEqual([
+        reference,
+      ]);
+    else await expect(sdk).rejects.toThrow("coverage.json");
+    expect(await readFile(join(documents.scanDir, "coverage.json"))).toEqual(
+      original,
+    );
+  },
+);
+
+test.each([
+  "./artifacts/../receipt.json",
+  "./artifacts/CON.txt",
+  "./artifacts/receipt.json ",
+  "./artifacts/receipt.json.",
+  "./artifacts/receipt\u001b.json",
+  "./artifacts\\receipt.json",
+  "/artifacts/receipt.json",
+  "C:/artifacts/receipt.json",
+])(
+  "rejects unsafe receipt spellings before normalization: %s",
+  async (reference) => {
+    const documents = await fixture();
+    await addArtifact(documents, "artifacts/receipt.json");
+    documents.coverage.surfaces[0]!.receiptRefs = [reference];
+    await saveAndSeal(documents);
+    await expect(validateTrackingSource(documents.scanDir)).rejects.toThrow();
+    await expect(
+      loadContract(documents.scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).rejects.toThrow();
+  },
+);
+
+test.each(["coverage", "receipt", "missing receipt"] as const)(
+  "retains original-byte seal checks after receipt normalization: %s",
+  async (changed) => {
+    const documents = await fixture();
+    await addArtifact(documents, "artifacts/receipt.json");
+    documents.coverage.surfaces[0]!.receiptRefs = ["./artifacts/receipt.json"];
+    await saveAndSeal(documents);
+    await expect(validateTrackingSource(documents.scanDir)).resolves.toEqual(
+      documents.findings.findings,
+    );
+    if (changed === "coverage") {
+      // An equivalent normalized view must not authorize different saved bytes.
+      documents.coverage.surfaces[0]!.receiptRefs = ["artifacts/receipt.json"];
+      await writeJson(
+        join(documents.scanDir, "coverage.json"),
+        documents.coverage,
+      );
+    } else if (changed === "receipt") {
+      await writeFile(
+        join(documents.scanDir, "artifacts/receipt.json"),
+        "changed",
+      );
+    } else {
+      await unlink(join(documents.scanDir, "artifacts/receipt.json"));
+    }
+    await expect(validateTrackingSource(documents.scanDir)).rejects.toThrow();
+  },
+);
+
+test.each([
+  ["BOM only", "\ufeff", true, false],
+  ["NEXT LINE only", "\u0085", false, true],
+  ["NBSP only", "\u00a0", false, false],
+  ["zero-width space only", "\u200b", true, true],
+  ["line separator", "artifacts/receipt\u2028.json", true, false],
+  ["paragraph separator", "artifacts/\u2029receipt.json", true, false],
+  ["reserved prefix without extension", "artifacts/CON\u2028", true, false],
+] as const)(
+  "preserves tracking and SDK artifact admission for %s",
+  async (_name, path, trackingAccepts, sdkAccepts) => {
+    const documents = await fixture();
+    await addArtifact(documents, path);
+    if (path.startsWith("artifacts/"))
+      documents.coverage.surfaces[0]!.receiptRefs = [path];
+    await saveAndSeal(documents);
+    const tracking = validateTrackingSource(documents.scanDir);
+    if (trackingAccepts)
+      await expect(tracking).resolves.toEqual(documents.findings.findings);
+    else await expect(tracking).rejects.toThrow();
+    const sdk = loadContract(documents.scanDir, { pluginRoot: PLUGIN_ROOT });
+    if (sdkAccepts) expect((await sdk).findings).toEqual(documents.findings);
+    else await expect(sdk).rejects.toThrow();
+    if (path === "\ufeff") {
+      await expect(
+        readScanFile(documents.scanDir, path, "supplementary artifact"),
+      ).rejects.toThrow("safe scan-relative POSIX path");
+      await expect(
+        requireScanFile(documents.scanDir, path, "supplementary artifact"),
+      ).rejects.toThrow("safe scan-relative POSIX path");
+    }
+  },
+);
+
+test.each(["CON\u0131N$", "CON\u0130N$.txt", "CON.\u2028txt", "AUX.\u2029txt"])(
+  "rejects historical tracking reserved component %s before filesystem access",
+  async (component) => {
+    const documents = await fixture();
+    documents.manifest.scan.artifacts.push({
+      path: `artifacts/${component}`,
+      sha256: "0".repeat(64),
+      mediaType: "text/plain",
+    });
+    await writeJson(
+      join(documents.scanDir, "scan-manifest.json"),
+      documents.manifest,
+    );
+    await expect(validateTrackingSource(documents.scanDir)).rejects.toThrow(
+      "safe scan-relative POSIX path",
+    );
+    await expect(
+      loadContract(documents.scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).rejects.toThrow(
+      /[\u2028\u2029]/u.test(component)
+        ? "must match pattern"
+        : "expected a file inside the scan directory",
+    );
+  },
+);
 
 const evidence = {
   id: "proof",
