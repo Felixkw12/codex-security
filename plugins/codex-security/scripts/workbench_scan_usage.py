@@ -89,6 +89,7 @@ def merge_scan_usage_fields(*observations: Mapping[str, Any]) -> dict[str, Any]:
     """Reconcile overlapping measurements without summing the same execution twice."""
 
     merged: dict[str, Any] = {}
+    latest_coverage: dict[str, Any] | None = None
     for observation in observations:
         if isinstance(observation.get("cost"), dict):
             merged["cost"] = observation["cost"]
@@ -98,8 +99,29 @@ def merge_scan_usage_fields(*observations: Mapping[str, Any]) -> dict[str, Any]:
         previous = merged.get("usage")
         if previous is None or _usage_quality(usage) >= _usage_quality(previous):
             merged["usage"] = usage
+        if usage.get("coverage") not in ("complete", "partial"):
+            continue
+        observed_at = _timestamp(usage.get("observedAt"))
+        latest_observed_at = (
+            _timestamp(latest_coverage.get("observedAt")) if latest_coverage is not None else None
+        )
+        if (
+            latest_coverage is None
+            or observed_at is None
+            or latest_observed_at is None
+            or observed_at >= latest_observed_at
+        ):
+            latest_coverage = usage
     cost = merged.get("cost")
     usage = merged.get("usage")
+    if usage is not None and latest_coverage is not None and latest_coverage is not usage:
+        usage = {**usage}
+        for field in ("coverage", "missingThreadCount", "warnings", "observedAt", "completion"):
+            if field in latest_coverage:
+                usage[field] = latest_coverage[field]
+            else:
+                usage.pop(field, None)
+        merged["usage"] = usage
     cost_warning = "cost_estimate_covers_earlier_usage"
     if (
         cost is not None
@@ -126,10 +148,15 @@ def merge_scan_usage_fields(*observations: Mapping[str, Any]) -> dict[str, Any]:
     return merged
 
 
-def _usage_quality(usage: Mapping[str, Any]) -> tuple[int, datetime]:
+def _usage_quality(
+    usage: Mapping[str, Any], *, observed_at: datetime | None = None
+) -> tuple[int, bool, datetime]:
     return (
         usage.get("totalTokens", -1),
-        _timestamp(usage.get("observedAt")) or datetime.min.replace(tzinfo=timezone.utc),
+        usage.get("cacheWriteInputTokensReported") is not False,
+        observed_at
+        or _timestamp(usage.get("observedAt"))
+        or datetime.min.replace(tzinfo=timezone.utc),
     )
 
 
@@ -253,15 +280,23 @@ def collect_scan_usage(
     runtime_receipts_used = False
     for receipt_thread_id, receipt in receipts.items():
         native = measured_threads.get(receipt_thread_id)
-        if native is None or receipt.tokens["totalTokens"] > native["totalTokens"]:
+        extends_native = native is None or receipt.tokens["totalTokens"] > native["totalTokens"]
+        fills_cache_write_usage = (
+            native is not None
+            and receipt.tokens["totalTokens"] == native["totalTokens"]
+            and native.get("cacheWriteInputTokensReported") is False
+            and receipt.tokens.get("cacheWriteInputTokensReported") is not False
+        )
+        if extends_native or fills_cache_write_usage:
             measured_threads[receipt_thread_id] = receipt.tokens
             accepted_thread_ids.add(receipt_thread_id)
-            complete_native_thread_ids.discard(receipt_thread_id)
             runtime_receipts_used = True
-            # Numeric SDK subtotals cannot establish that descendants and
-            # compaction requests are present when their rollouts are absent.
-            missing_thread_ids.add(receipt_thread_id)
-            warnings.add("worker_rollout_usage_incomplete")
+            if extends_native:
+                complete_native_thread_ids.discard(receipt_thread_id)
+                # Numeric SDK subtotals cannot establish that descendants and
+                # compaction requests are present when their rollouts are absent.
+                missing_thread_ids.add(receipt_thread_id)
+                warnings.add("worker_rollout_usage_incomplete")
             if receipt.tokens_updated_at is not None:
                 tokens_updated_at = max(
                     tokens_updated_at or receipt.tokens_updated_at, receipt.tokens_updated_at
@@ -343,7 +378,7 @@ def _worker_usage_receipts(
                 not isinstance(receipt, dict)
                 or receipt.get("schemaVersion") != 1
                 or receipt.get("source") != "codex_sdk"
-                or receipt.get("usageScope") != "turn"
+                or receipt.get("usageScope") != "thread_cumulative"
                 or receipt.get("scanId") != scan["id"]
                 or receipt.get("kind") not in ("discovery", "dedup")
                 or receipt.get("attemptId") != path.stem
@@ -366,11 +401,11 @@ def _worker_usage_receipts(
                     else f"worker-attempt:{attempt_id}"
                 )
                 continue
-            usage = receipts.setdefault(
-                thread_id, RolloutUsage(_empty_token_usage(), set(), observed, {})
-            )
-            _add_token_usage(usage.tokens, tokens)
-            usage.tokens_updated_at = max(usage.tokens_updated_at or observed, observed)
+            previous = receipts.get(thread_id)
+            if previous is None or _usage_quality(tokens, observed_at=observed) > _usage_quality(
+                previous.tokens, observed_at=previous.tokens_updated_at
+            ):
+                receipts[thread_id] = RolloutUsage(tokens, set(), observed, {})
         except (OSError, UnicodeError, ValueError) as exc:
             warnings.add("worker_usage_receipt_unavailable")
             missing.add(f"worker-attempt:{path.stem}")

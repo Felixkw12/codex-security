@@ -2068,13 +2068,39 @@ def test_scan_accounting_failure_does_not_replace_stopped_outcome(
     assert "Synthetic accounting storage failure." in capsys.readouterr().err
 
 
-def test_late_missing_worker_invalidates_saved_complete_coverage(tmp_path: Path) -> None:
+@pytest.mark.parametrize("runtime_ahead", [False, True])
+def test_late_missing_worker_invalidates_saved_complete_coverage(
+    tmp_path: Path, runtime_ahead: bool
+) -> None:
     fixture = _start_scan(tmp_path)
     counted = fixture.started_at + timedelta(microseconds=1)
     parent = _rollout(tmp_path, "scan-parent", [_token_event(counted, 21, 8)])
     _state_graph(fixture.environment, {"scan-parent": parent}, [])
+    arguments = (
+        (
+            "--cost-json",
+            json.dumps(
+                {
+                    "usage": {
+                        "coverage": "complete",
+                        "source": "codex_runtime",
+                        "threadCount": 1,
+                        "observedAt": counted.isoformat(),
+                        "tokensUpdatedAt": counted.isoformat(),
+                        **_counts(37, 0, 8),
+                    }
+                }
+            ),
+        )
+        if runtime_ahead
+        else ()
+    )
     complete = fail_scan(
-        fixture.state_dir, fixture.scan_id, "Fixture failure.", environment=fixture.environment
+        fixture.state_dir,
+        fixture.scan_id,
+        "Fixture failure.",
+        *arguments,
+        environment=fixture.environment,
     )["scan"]["usage"]
     assert complete["coverage"] == "complete"
     with sqlite3.connect(
@@ -2087,10 +2113,11 @@ def test_late_missing_worker_invalidates_saved_complete_coverage(tmp_path: Path)
     partial = fail_scan(
         fixture.state_dir, fixture.scan_id, "Fixture failure.", environment=fixture.environment
     )["scan"]["usage"]
-    assert partial["totalTokens"] == complete["totalTokens"] == 29
+    assert partial["totalTokens"] == complete["totalTokens"] == (45 if runtime_ahead else 29)
     assert partial["coverage"] == "partial"
     assert partial["missingThreadCount"] == 1
     assert partial["observedAt"] > complete["observedAt"]
+    assert partial["tokensUpdatedAt"] == complete["tokensUpdatedAt"]
 
     # A delayed complete snapshot and vanished logs cannot erase the newer gap
     # or make the retained observation appear fresh.
@@ -2104,6 +2131,40 @@ def test_late_missing_worker_invalidates_saved_complete_coverage(tmp_path: Path)
         environment=fixture.environment,
     )["scan"]["usage"]
     assert replayed == partial
+
+    _rollout(tmp_path, "scan-parent", [_token_event(counted, 21, 8)])
+    worker = _rollout(
+        tmp_path,
+        "late-worker",
+        [_token_event(counted, 0, 0)],
+        parent_thread_id="scan-parent",
+    )
+    with sqlite3.connect(
+        Path(fixture.environment["CODEX_SQLITE_HOME"]) / "state_5.sqlite"
+    ) as connection:
+        connection.execute(
+            "INSERT INTO threads (id, rollout_path) VALUES (?, ?)", ("late-worker", str(worker))
+        )
+    resolved = fail_scan(
+        fixture.state_dir, fixture.scan_id, "Fixture failure.", environment=fixture.environment
+    )["scan"]["usage"]
+    assert resolved["totalTokens"] == partial["totalTokens"]
+    assert resolved["coverage"] == "complete"
+    assert resolved.get("missingThreadCount", 0) == 0
+    assert not resolved.get("warnings")
+    assert resolved["observedAt"] > partial["observedAt"]
+
+    parent.unlink()
+    worker.unlink()
+    replayed = fail_scan(
+        fixture.state_dir,
+        fixture.scan_id,
+        "Fixture failure.",
+        "--cost-json",
+        json.dumps({"usage": partial}),
+        environment=fixture.environment,
+    )["scan"]["usage"]
+    assert replayed == resolved
 
 
 def test_completed_scan_reconciles_late_runtime_usage_envelopes(
@@ -2143,9 +2204,9 @@ def test_completed_scan_reconciles_late_runtime_usage_envelopes(
 
 @pytest.mark.parametrize(
     ("native_database", "native_worker_tokens", "unmeasured_attempt"),
-    [(False, None, True), (True, None, True), (True, 50, True), (True, 50, False)],
+    [(False, None, True), (True, None, True), (True, 150, True), (True, 150, False)],
 )
-def test_stopped_deep_scan_reconciles_distinct_worker_attempt_receipts(
+def test_stopped_deep_scan_reconciles_cumulative_worker_receipts(
     tmp_path: Path,
     native_database: bool,
     native_worker_tokens: int | None,
@@ -2156,7 +2217,7 @@ def test_stopped_deep_scan_reconciles_distinct_worker_attempt_receipts(
     timestamp = counted.isoformat()
     directory = fixture.scan_dir / "artifacts" / "deep_discovery" / "usage"
     directory.mkdir(parents=True)
-    for index, amount in enumerate([10, 20, None] if unmeasured_attempt else [10, 20]):
+    for index, amount in enumerate([100, 150, None] if unmeasured_attempt else [100, 150]):
         attempt_id = str(uuid.uuid4())
         token_counts = (
             _token_event(counted, amount, 0)["payload"]["info"]["total_token_usage"]
@@ -2168,7 +2229,7 @@ def test_stopped_deep_scan_reconciles_distinct_worker_attempt_receipts(
                 {
                     "schemaVersion": 1,
                     "source": "codex_sdk",
-                    "usageScope": "turn",
+                    "usageScope": "thread_cumulative",
                     "scanId": fixture.scan_id,
                     "workerId": "synthetic-worker",
                     "kind": "discovery",
@@ -2203,8 +2264,8 @@ def test_stopped_deep_scan_reconciles_distinct_worker_attempt_receipts(
         assert measurement["coverage"] == (
             "partial" if unmeasured_attempt or native_worker_tokens is None else "complete"
         )
-        assert measurement["totalTokens"] == (native_worker_tokens or 30)
-        assert measurement["byRole"]["workers"]["totalTokens"] == (native_worker_tokens or 30)
+        assert measurement["totalTokens"] == 150
+        assert measurement["byRole"]["workers"]["totalTokens"] == 150
         assert measurement["threadCount"] == (2 if native_database else 1)
         assert measurement.get("missingThreadCount", 0) == (
             int(unmeasured_attempt) + int(native_worker_tokens is None) + int(not native_database)
@@ -2213,6 +2274,73 @@ def test_stopped_deep_scan_reconciles_distinct_worker_attempt_receipts(
         assert measurement["source"] == (
             "codex_rollout" if native_worker_tokens is not None else "codex_runtime"
         )
+
+
+@pytest.mark.parametrize("reverse_files", [False, True])
+@pytest.mark.parametrize("native_workers", [False, True])
+def test_worker_receipts_preserve_cumulative_totals_and_known_cache_writes(
+    tmp_path: Path, reverse_files: bool, native_workers: bool
+) -> None:
+    fixture = _start_scan(tmp_path, mode="deep")
+    counted = fixture.started_at + timedelta(microseconds=1)
+    directory = fixture.scan_dir / "artifacts" / "deep_discovery" / "usage"
+    directory.mkdir(parents=True)
+    snapshots = [
+        ("first-worker", 100, 5, True, 0),
+        ("first-worker", 150, 8, True, 1),
+        ("first-worker", 150, 12, True, 2),
+        ("first-worker", 150, 0, False, 3),
+        ("second-worker", 40, 4, True, 1),
+    ]
+    for index, (thread_id, amount, cache_writes, reported, delay) in enumerate(snapshots):
+        attempt_id = str(uuid.UUID(int=len(snapshots) - index if reverse_files else index + 1))
+        tokens = _token_event(counted, amount, 0)["payload"]["info"]["total_token_usage"]
+        tokens["cache_write_input_tokens"] = cache_writes
+        if not reported:
+            tokens["cache_write_input_tokens_reported"] = False
+        (directory / f"{attempt_id}.json").write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "source": "codex_sdk",
+                    "usageScope": "thread_cumulative",
+                    "scanId": fixture.scan_id,
+                    "workerId": thread_id,
+                    "kind": "discovery",
+                    "attemptId": attempt_id,
+                    "attempt": index + 1,
+                    "resumed": index > 0,
+                    "threadId": thread_id,
+                    "startedAt": counted.isoformat(),
+                    "observedAt": (counted + timedelta(microseconds=delay)).isoformat(),
+                    "outcome": "succeeded",
+                    "usage": tokens,
+                }
+            ),
+            encoding="utf-8",
+        )
+    paths = {"scan-parent": _rollout(tmp_path, "scan-parent", [_token_event(counted, 0, 0)])}
+    edges = []
+    if native_workers:
+        for thread_id, amount in (("first-worker", 150), ("second-worker", 40)):
+            event = _token_event(counted, amount, 0)
+            event["payload"]["info"]["total_token_usage"].pop("cache_write_input_tokens")
+            paths[thread_id] = _rollout(
+                tmp_path, thread_id, [event], parent_thread_id="scan-parent"
+            )
+            edges.append(("scan-parent", thread_id))
+    _state_graph(fixture.environment, paths, edges)
+    for _ in range(2):
+        measurement = fail_scan(
+            fixture.state_dir, fixture.scan_id, "Fixture failure.", environment=fixture.environment
+        )["scan"]["usage"]
+        assert measurement["totalTokens"] == 190
+        assert measurement["cacheWriteInputTokens"] == 16
+        assert "cacheWriteInputTokensReported" not in measurement
+        assert measurement["source"] == "codex_runtime"
+        assert measurement["threadCount"] == 3
+        assert measurement["coverage"] == ("complete" if native_workers else "partial")
+        assert measurement.get("missingThreadCount", 0) == (0 if native_workers else 2)
 
 
 @pytest.mark.parametrize(
@@ -2232,7 +2360,7 @@ def test_stopped_deep_scan_reconciles_missing_sdk_receipts_with_native_usage(
                 {
                     "schemaVersion": 1,
                     "source": "codex_sdk",
-                    "usageScope": "turn",
+                    "usageScope": "thread_cumulative",
                     "scanId": fixture.scan_id,
                     "workerId": "synthetic-worker",
                     "kind": "discovery",

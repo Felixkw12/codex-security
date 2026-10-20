@@ -125,7 +125,8 @@ if (stdin.includes('ARTIFACT_TOOL_')) {
   console.log(JSON.stringify({ type: 'item.completed', item }));
 }
 console.log(JSON.stringify({ type: 'item.completed', item: { id: 'message-1', type: 'agent_message', text: 'fixture final response' } }));
-console.log(JSON.stringify({ type: 'turn.completed', usage: stdin.includes('NULL_USAGE') ? null : { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 } }));
+const completedTurns = stdin.includes('COMPLETE_THEN_HANG') && process.argv.includes('resume') ? 2 : 1;
+console.log(JSON.stringify({ type: 'turn.completed', usage: stdin.includes('NULL_USAGE') ? null : { input_tokens: completedTurns, cached_input_tokens: 0, output_tokens: completedTurns } }));
 if (stdin.includes('COMPLETE_THEN_HANG')) { setInterval(() => {}, 1_000); await new Promise(() => {}); }
 }
 `;

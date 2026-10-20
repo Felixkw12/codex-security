@@ -22,6 +22,8 @@ function assertPairedAttempts(
   const finishes = events.filter((event) => event.event === "worker_finished");
   assert.equal(starts.length, receipts.length);
   assert.equal(finishes.length, starts.length);
+  for (const receipt of receipts)
+    assert.equal(receipt.usageScope, "thread_cumulative");
   for (const start of starts) {
     const finish = finishes.find(
       (event) => event.attemptId === start.attemptId,
@@ -55,7 +57,7 @@ export async function assertWorkerRetryReceipts(
     ]),
     [
       ["failed", false, 12],
-      ["succeeded", true, 12],
+      ["succeeded", true, 24],
     ],
   );
   assertPairedAttempts(receipts, events);

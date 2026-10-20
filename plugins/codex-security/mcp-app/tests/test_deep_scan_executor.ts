@@ -3365,6 +3365,7 @@ async function testAbortPropagation() {
 
 async function testCompletedWorkerSettlesWithoutWaitingForProcessExit() {
   await completedWorkerSettlesWithoutWaitingForProcessExit();
+  await completedWorkerSettlesWithoutWaitingForProcessExit(undefined, true);
   for (const kind of ["discovery", "dedup"] as const) {
     for (const resumed of [false, true]) {
       await completedWorkerSettlesWithoutWaitingForProcessExit(kind, resumed);
@@ -3470,6 +3471,8 @@ async function completedWorkerSettlesWithoutWaitingForProcessExit(
     );
     assert.equal(result.usage?.cache_write_input_tokens, 0);
     assert.equal(result.usage?.cache_write_input_tokens_reported, false);
+    assert.equal(result.usage?.input_tokens, resumed ? 2 : 1);
+    assert.equal(result.usage?.total_tokens, resumed ? 4 : 2);
     const invocation = await readJson(fixture.markerPath);
     assert.equal(invocation.argv.includes("--profile"), kind !== undefined);
     assert.equal(invocation.argv.includes("resume"), resumed);

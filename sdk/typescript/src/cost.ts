@@ -257,34 +257,45 @@ export class ScanCostTracker {
       this.#options.onActivity === undefined
         ? undefined
         : this.#options.repository;
+    let collectionError: unknown;
     const unreadable: Array<{ session: SessionUsage; error: unknown }> = [];
     for (const directory of ["sessions", "archived_sessions"]) {
-      for await (const path of sessionFiles(
-        join(this.#options.codexHome, directory),
-        true,
-      )) {
-        let session = this.#sessions.get(path);
-        if (session === undefined) {
-          session = createSessionUsage();
-          this.#sessions.set(path, session);
+      try {
+        for await (const path of sessionFiles(
+          join(this.#options.codexHome, directory),
+          true,
+        )) {
+          let session = this.#sessions.get(path);
+          if (session === undefined) {
+            session = createSessionUsage();
+            this.#sessions.set(path, session);
+          }
+          try {
+            await readSessionUsage(
+              path,
+              session,
+              repository,
+              path.endsWith(".zst"),
+            );
+          } catch (error) {
+            if (session.threadId === null) collectionError ??= error;
+            else unreadable.push({ session, error });
+          }
         }
-        try {
-          await readSessionUsage(
-            path,
-            session,
-            repository,
-            path.endsWith(".zst"),
-          );
-        } catch (error) {
-          if (session.threadId === null) throw error;
-          unreadable.push({ session, error });
-        }
+      } catch (error) {
+        collectionError ??= error;
       }
     }
 
-    const workerReceipts = await readWorkerReceipts(
-      this.#options.scanDirectory,
-    );
+    let workerReceipts: Awaited<ReturnType<typeof readWorkerReceipts>> = {
+      usages: new Map(),
+      unknownAttempts: 0,
+    };
+    try {
+      workerReceipts = await readWorkerReceipts(this.#options.scanDirectory);
+    } catch (error) {
+      collectionError ??= error;
+    }
     const included = new Set([
       this.#threadId,
       ...this.#receipts.keys(),
@@ -330,7 +341,7 @@ export class ScanCostTracker {
       }
     } while (included.size !== previousSize);
     for (const { session, error } of unreadable) {
-      if (included.has(session.threadId!)) throw error;
+      if (included.has(session.threadId!)) collectionError ??= error;
     }
 
     const usages = new Map<string, ScanTokenUsage | null>(
@@ -347,8 +358,8 @@ export class ScanCostTracker {
       )
         usages.set(threadId, receipt);
     }
-    // SDK turns preserve a measured subtotal when a rollout is unavailable.
-    // Only a native cumulative rollout can account for compaction and children.
+    // SDK totals retain measured usage when a rollout is unavailable.
+    // Native rollouts also establish descendant coverage.
     const incomplete = new Set(workerReceipts.usages.keys());
     for (const [path, tracked] of this.#sessions) {
       const threadId = tracked.threadId;
@@ -361,12 +372,21 @@ export class ScanCostTracker {
         // Replay only newly associated sessions, including their early events.
         session = createSessionUsage();
         session.events = [];
-        await readSessionUsage(path, session, repository);
-        this.#sessions.set(path, session);
+        try {
+          await readSessionUsage(path, session, repository);
+          this.#sessions.set(path, session);
+        } catch (error) {
+          collectionError ??= error;
+          session = tracked;
+        }
       } else if (path.endsWith(".zst") && !session.compressedRead) {
         // Cold history is immutable. Decode its body only after metadata has
         // associated the thread with this scan.
-        await readSessionUsage(path, session, repository);
+        try {
+          await readSessionUsage(path, session, repository);
+        } catch (error) {
+          collectionError ??= error;
+        }
       }
       let worker: number | undefined;
       if (threadId !== this.#threadId) {
@@ -428,6 +448,8 @@ export class ScanCostTracker {
       if (incomplete.has(threadId)) missingThreadCount += 1;
       usage = addTokenUsage(usage, value);
     }
+    if (collectionError !== undefined)
+      missingThreadCount = Math.max(1, missingThreadCount);
     const complete = missingThreadCount === 0 && usage !== null;
     const cost = estimateScanCost(this.#options.model, usage);
     this.#setSnapshot(usage, cost, complete, threadCount, missingThreadCount);
@@ -435,6 +457,8 @@ export class ScanCostTracker {
       this.#reportUsage(usage);
     }
     this.#reportCost(cost, complete);
+    // Preserve every available receipt before surfacing the original read error.
+    if (collectionError !== undefined) throw collectionError;
   }
 
   #setSnapshot(
@@ -547,7 +571,7 @@ async function readWorkerReceipts(scanDirectory: string | undefined): Promise<{
         !isRecord(receipt) ||
         receipt["schemaVersion"] !== 1 ||
         receipt["source"] !== "codex_sdk" ||
-        receipt["usageScope"] !== "turn" ||
+        receipt["usageScope"] !== "thread_cumulative" ||
         typeof receipt["attemptId"] !== "string" ||
         attempts.has(receipt["attemptId"])
       )
@@ -559,9 +583,17 @@ async function readWorkerReceipts(scanDirectory: string | undefined): Promise<{
       }
       const usage = tokenUsage(receipt["usage"]);
       const existing = usages.get(receipt["threadId"]) ?? null;
+      // Native SDK completions include earlier turns of a resumed thread.
       usages.set(
         receipt["threadId"],
-        usage === null ? existing : addTokenUsage(existing, usage),
+        usage !== null &&
+          (existing === null ||
+            usage.total_tokens > existing.total_tokens ||
+            (usage.total_tokens === existing.total_tokens &&
+              existing.cache_write_input_tokens_reported === false &&
+              usage.cache_write_input_tokens_reported !== false))
+          ? usage
+          : existing,
       );
     }
   } catch (error) {

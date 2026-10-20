@@ -9,8 +9,11 @@ remote collector.
 Native `analytics` and `otel` settings keep their Codex semantics. Selected
 profiles, project settings, and explicit overrides keep their native precedence.
 Stored-account authentication forwards these settings per invocation; per-scan
-settings are not stored in the shared credential home. Discovery, reducer, and
-resumed workers inherit their scan's settings.
+settings are not merged into shared credential configuration. Discovery, reducer,
+and resumed workers inherit their scan's settings. Worker runtime snapshots live
+under the credential home denied to model tools. OTel exporter configuration can
+contain authentication headers, so it is excluded from model-readable preflight
+files and saved scan recipes while remaining available to native execution.
 
 Request metadata includes command, surface, package/plugin versions, configured
 provider family, and scan mode when available. Wrapper operations and workers add
@@ -109,7 +112,9 @@ await security.run(repository, {
 The observation contains `usage`, `cost`, `coverage`, `observedAt`, measured
 `threadCount`, and `missingThreadCount`. Coverage is `complete`, `partial`, or
 `unavailable`. An incompletely measured thread can contribute to both thread
-counts. A newly discovered worker can change complete usage to partial. The
+counts. Complete coverage means all discovered threads are accounted for;
+descendants absent from native metadata and worker receipts cannot be detected.
+A newly discovered worker can change complete usage to partial. The
 dashboard updates the qualifier and clears unavailable values. Existing
 `onUsage` and `onCost` observers retain their complete-only behavior; budget
 enforcement still uses known spending subtotals.
@@ -122,17 +127,19 @@ are preserved; their additive `outcome` distinguishes cancellation.
 
 Both live and saved collectors read plain and compressed rollouts. Deep workers
 persist a receipt per attempt before validating their output, including failed
-and canceled attempts. SDK receipts describe a turn; distinct attempts on the
-same thread are summed, then reconciled against the native thread total by
-maximum. They are never added to that same native total. Missing native evidence
+and canceled attempts. The pinned native CLI reports cumulative thread usage at
+turn completion. Receipts mark this as `usageScope: "thread_cumulative"`:
+resumed attempts on the same thread are reconciled by maximum, then compared
+with the native thread total by maximum, preserving whole cumulative snapshots.
+Separate threads are summed. Missing native evidence
 keeps worker fallback usage partial, including when the native state database is
 unavailable.
 
 Missing cache-write usage is represented with
 `cache_write_input_tokens_reported: false` in SDK token usage and
 `cacheWriteInputTokensReported: false` in saved usage. Its numeric zero is a
-placeholder, not an observed zero. SDK-defaulted zeroes without field-presence
-evidence also remain unknown. Known total usage remains usable. Cost is an
+placeholder, not an observed zero. Worker receipts also treat SDK-defaulted zeroes
+without field-presence evidence as unknown. Known total usage remains usable. Cost is an
 estimate with its existing price provenance and uncertainty, not a billing total.
 Late saved usage can exceed an earlier supplied price estimate; the warning
 `cost_estimate_covers_earlier_usage` identifies that cost subtotal.

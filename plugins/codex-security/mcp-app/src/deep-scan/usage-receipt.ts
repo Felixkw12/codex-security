@@ -14,11 +14,11 @@ export interface WorkerTokenUsage {
   total_tokens: number;
 }
 
-/** One host invocation processes one SDK turn, including resumed invocations. */
+/** One host invocation records the SDK's cumulative thread usage. */
 export interface WorkerUsageReceipt {
   schemaVersion: 1;
   source: "codex_sdk";
-  usageScope: "turn";
+  usageScope: "thread_cumulative";
   scanId: string;
   workerId: string;
   kind: DeepScanWorkerKind;

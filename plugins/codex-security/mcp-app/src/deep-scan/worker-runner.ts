@@ -396,7 +396,7 @@ export class DeepScanWorkerRunner {
       const receipt: WorkerUsageReceipt = {
         schemaVersion: 1,
         source: "codex_sdk",
-        usageScope: "turn",
+        usageScope: "thread_cumulative",
         scanId: run.scanId,
         workerId: input.workerId,
         kind: input.kind,

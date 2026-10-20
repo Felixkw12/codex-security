@@ -1279,17 +1279,20 @@ async function testMissingDiscoveryResultResumesExistingThread(
       : {}),
   });
   const originalRun = executor.run.bind(executor);
-  executor.run = async (request) => ({
-    ...(await originalRun(request)),
-    usage: {
-      input_tokens: 10,
-      cached_input_tokens: 0,
-      cache_write_input_tokens: 0,
-      output_tokens: 2,
-      reasoning_output_tokens: 1,
-      total_tokens: 12,
-    },
-  });
+  executor.run = async (request) => {
+    const completedTurns = request.resumeThreadId ? 2 : 1;
+    return {
+      ...(await originalRun(request)),
+      usage: {
+        input_tokens: 10 * completedTurns,
+        cached_input_tokens: 0,
+        cache_write_input_tokens: 0,
+        output_tokens: 2 * completedTurns,
+        reasoning_output_tokens: completedTurns,
+        total_tokens: 12 * completedTurns,
+      },
+    };
+  };
   const events: DeepScanLogEvent[] = [];
   const sleeps: number[] = [];
   const terminal = await runCoordinator(fixture, store, executor, {

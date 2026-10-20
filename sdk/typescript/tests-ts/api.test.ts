@@ -2045,14 +2045,32 @@ describe("CodexSecurity orchestration", () => {
         {
           profile: "cloud",
           analytics: { enabled: true },
-          otel: { environment: "synthetic-root" },
+          otel: {
+            environment: "synthetic-root",
+            exporter: {
+              "otlp-http": {
+                endpoint: "https://otel.example.test/v1/logs",
+                headers: { Authorization: "Bearer synthetic-otel-root" },
+              },
+            },
+          },
           responses_api_metadata: { custom_attribution: "root" },
           model_context_window: 64_000,
           model_auto_compact_token_limit: 48_000,
           profiles: {
             cloud: {
               analytics: { enabled: false },
-              otel: { environment: "synthetic-selected" },
+              otel: {
+                environment: "synthetic-selected",
+                exporter: {
+                  "otlp-http": {
+                    endpoint: "https://otel.example.test/v1/logs",
+                    headers: {
+                      Authorization: "Bearer synthetic-otel-selected",
+                    },
+                  },
+                },
+              },
               responses_api_metadata: {
                 custom_attribution: "selected",
                 codex_security_integration: "github_action",
@@ -2142,6 +2160,11 @@ describe("CodexSecurity orchestration", () => {
             resolvePluginPython: async () => "/managed/python",
             prepareOutputDir: async () => scanDir,
             repositoryRevision: async () => "deadbeef",
+            runWorkbench: async (_options, args, input) => {
+              if (args[0] === "register-cli-scan")
+                expect(input).not.toContain("synthetic-otel-");
+              return mockWorkbench(args, input);
+            },
             createCodex: (options: CodexOptions) => ({
               startThread: (threadOptions: ThreadOptions) => ({
                 id: null,
@@ -2177,6 +2200,9 @@ describe("CodexSecurity orchestration", () => {
                     await readFile(deepConfigPath, "utf8"),
                   )["worker_runtime"] as JsonObject;
                   const selected = resolveCodexProfile(overrides);
+                  expect((options.config as JsonObject)["otel"]).toEqual(
+                    selected["otel"],
+                  );
                   expect(workerConfig["analytics"]).toEqual(
                     selected["analytics"],
                   );
@@ -2234,6 +2260,9 @@ describe("CodexSecurity orchestration", () => {
                   const config = parseToml(
                     await readFile(configPath!, "utf8"),
                   ) as JsonObject;
+                  expect(JSON.stringify(config)).not.toContain(
+                    "synthetic-otel-",
+                  );
                   expect(resolveCodexProfile(config)).toMatchObject({
                     ...expectedModel,
                     model_reasoning_summary: expected,
@@ -6135,8 +6164,21 @@ describe("CodexSecurity orchestration", () => {
       "scan_example_001",
       `--message=Scan stopped: short-context budget baseline $0.00488 exceeded the $0.004 limit; estimated cost $0.00488–$0.01156 (standard, context unknown, cache writes unknown); partial output remains at ${scanDir}.`,
       "--cost-json",
-      JSON.stringify(cost),
+      expect.any(String),
     ]);
+    expect(JSON.parse(commands[4]![5]!)).toMatchObject({
+      usage: {
+        source: "codex_runtime",
+        coverage: "complete",
+        threadCount: 2,
+        missingThreadCount: 0,
+        inputTokens: 1_250,
+        cachedInputTokens: 200,
+        outputTokens: 30,
+        totalTokens: 1_280,
+      },
+      cost,
+    });
     expect(commands.some((args) => args[0] === "complete-scan")).toBe(false);
     await expect(stat(scanDir)).resolves.toBeDefined();
     await client.close();

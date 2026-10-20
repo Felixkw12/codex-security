@@ -2764,7 +2764,61 @@ describe("live scan cost tracking", () => {
     },
   );
 
-  test("retains resumed worker turn receipts and reconciles their subtotal with native totals", async () => {
+  test.each([false, true])(
+    "retains SDK usage after a collection error with prior native usage=%s",
+    async (previouslyMeasured) => {
+      const home = await codexHome();
+      if (previouslyMeasured) {
+        await writeSession(home, "scan-thread", {
+          input_tokens: 100,
+          output_tokens: 10,
+        });
+        await writeSession(
+          home,
+          "worker-thread",
+          { input_tokens: 200, output_tokens: 20 },
+          { parent: "scan-thread" },
+        );
+      }
+      const measurements: Readonly<ScanUsageMeasurement>[] = [];
+      const tracker = costTracker(home, {
+        onMeasurement: (measurement) => measurements.push(measurement),
+      });
+      tracker.start("scan-thread");
+      await tracker.refresh();
+      const originalRead = filesystem.readdir;
+      const failure = Object.assign(new Error("Session directory unreadable"), {
+        code: "EACCES",
+      });
+      const read = spyOn(filesystem, "readdir").mockImplementation(
+        async (...args) => {
+          if (args[0] === join(home, "sessions")) throw failure;
+          return Reflect.apply(originalRead, filesystem, args);
+        },
+      );
+      const usage = {
+        input_tokens: previouslyMeasured ? 1_200 : 1_000,
+        output_tokens: previouslyMeasured ? 120 : 100,
+      };
+      try {
+        await expect(
+          tracker.stop({ input_tokens: 1_000, output_tokens: 100 }),
+        ).rejects.toBe(failure);
+        expect(measurements.at(-1)).toMatchObject({
+          coverage: "partial",
+          threadCount: previouslyMeasured ? 2 : 1,
+          missingThreadCount: 1,
+          usage,
+          cost: estimateScanCost("gpt-5.6-sol", usage),
+        });
+      } finally {
+        read.mockRestore();
+        await tracker.stop().catch(() => {});
+      }
+    },
+  );
+
+  test("retains cumulative resumed worker receipts without counting earlier turns twice", async () => {
     const home = await codexHome();
     const scanDirectory = join(home, "scans", "receipts");
     const receipts = join(
@@ -2777,15 +2831,15 @@ describe("live scan cost tracking", () => {
     const parentUsage = { input_tokens: 100, output_tokens: 10 };
     await writeSession(home, "scan-thread", parentUsage);
     for (const [attemptId, input] of [
-      ["first", 200],
-      ["second", 300],
+      ["first", 100],
+      ["second", 150],
     ] as const) {
       await writeFile(
         join(receipts, `${attemptId}.json`),
         JSON.stringify({
           schemaVersion: 1,
           source: "codex_sdk",
-          usageScope: "turn",
+          usageScope: "thread_cumulative",
           attemptId,
           threadId: "resumed-worker",
           usage: { input_tokens: input, output_tokens: 10 },
@@ -2806,7 +2860,7 @@ describe("live scan cost tracking", () => {
         coverage: "partial",
         threadCount: 2,
         missingThreadCount: 1,
-        usage: { input_tokens: 600, output_tokens: 30 },
+        usage: { input_tokens: 250, output_tokens: 20 },
       },
     });
     // Re-reading the same durable attempts does not increment their usage.
@@ -2814,14 +2868,14 @@ describe("live scan cost tracking", () => {
       partial.measurement.usage,
     );
     await writeSession(home, "resumed-worker", {
-      input_tokens: 550,
-      output_tokens: 25,
+      input_tokens: 150,
+      output_tokens: 10,
     });
     expect((await tracker.stop(parentUsage)).measurement).toMatchObject({
       coverage: "complete",
       threadCount: 2,
       missingThreadCount: 0,
-      usage: { input_tokens: 650, output_tokens: 35 },
+      usage: { input_tokens: 250, output_tokens: 20 },
     });
     expect(measurements.map((measurement) => measurement.coverage)).toEqual([
       "partial",

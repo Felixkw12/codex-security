@@ -96,11 +96,7 @@ import {
   type ScanWorkerEvent,
 } from "./cost.js";
 import type { ScanTokenUsage } from "./cost-model.js";
-import {
-  measuredScanCost,
-  measurementFromUsage,
-  combineMeasurements,
-} from "./scan-measurement.js";
+import { measuredScanCost, combineMeasurements } from "./scan-measurement.js";
 import { ScanProgressTracker, type DeepScanProgress } from "./scan-progress.js";
 import { findScanSession } from "./scan-logs.js";
 import { DIRECT_DEEP_SCAN_CONTROL_USAGE, runDeepScan } from "./deep-scan.js";
@@ -871,6 +867,8 @@ export class CodexSecurity {
       ...(options.signal === undefined ? [] : [options.signal]),
     ]);
     let outputDir = "";
+    let tracker: ScanCostTracker | null = null;
+    let finalUsage: unknown;
     try {
       throwIfAborted(signal);
       const finding = standaloneFindingForPrompt(options.finding);
@@ -947,12 +945,22 @@ export class CodexSecurity {
           `permissions.${VALIDATION_PERMISSION_PROFILE}=${inlineToml(validationPermissions)}`,
         ],
       );
+      tracker = new ScanCostTracker({
+        codexHome: runtime.codexHome,
+        model: scanModelConfiguration(session.effectiveConfig).model,
+        repository: inputs.repository,
+        onMeasurement: (measurement) => {
+          if (this.#operationTelemetry !== null)
+            this.#operationTelemetry.measurement = measurement;
+        },
+      });
       const thread = codex.startThread({
         threadSource: CODEX_SECURITY_THREAD_SOURCES.validation,
         workingDirectory: outputDir,
         skipGitRepoCheck: true,
         approvalPolicy: "never",
       });
+      if (thread.id !== null) tracker.start(thread.id);
       const prompt = [
         await standaloneValidationPrompt(runtime.plugin.pluginRoot),
         `Validate only the supplied finding against repository ${jsonForPrompt(inputs.repository)}. Do not run or register a repository scan, patch source files, or publish findings.`,
@@ -969,13 +977,17 @@ export class CodexSecurity {
       const { status, finalResponse, threadId, usage } = await readCodexTurn({
         thread,
         events,
-        onEvent: () => throwIfAborted(signal, outputDir),
+        onEvent: (event) => {
+          if (
+            event.type === "thread.started" &&
+            typeof event["thread_id"] === "string"
+          ) {
+            tracker?.start(event["thread_id"]);
+          }
+          throwIfAborted(signal, outputDir);
+        },
       });
-      if (this.#operationTelemetry !== null)
-        this.#operationTelemetry.measurement = measurementFromUsage(
-          usage,
-          scanModelConfiguration(session.effectiveConfig).model,
-        );
+      finalUsage = usage;
       throwIfAborted(signal, outputDir);
       if (status !== "completed") {
         throw new CodexSecurityError("Finding validation did not complete.");
@@ -993,6 +1005,12 @@ export class CodexSecurity {
       if (this.#closed) this.#requireOpen();
       throwIfAborted(signal, outputDir);
       throw error;
+    } finally {
+      if (tracker !== null) {
+        await tracker.stop(finalUsage).catch(() => {
+          // Optional usage collection must not change validation outcomes.
+        });
+      }
     }
   }
 
@@ -5787,7 +5805,9 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
   };
   const executionConfig = (source: JsonObject): JsonObject => {
     const result: JsonObject = {};
-    for (const key of ["analytics", "otel", "responses_api_metadata"]) {
+    // OTel exporters can contain credentials. Native runtime settings retain
+    // them; model-readable preflight files and saved recipes must not.
+    for (const key of ["analytics", "responses_api_metadata"]) {
       if (Object.hasOwn(source, key))
         result[key] = structuredClone(source[key]!);
     }
