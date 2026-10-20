@@ -447,7 +447,7 @@ else {
               role === "discovery"
                 ? prepareDiscoveryExecution(session)
                 : prepareMergeExecution(session, 2);
-            const { codex } = createExecutionCodex(
+            const { codex } = await createExecutionCodex(
               { surface: "sdk", command: "scan" },
               worker,
               {
@@ -3045,7 +3045,7 @@ else {
                 role === "discovery"
                   ? prepareDiscoveryExecution(session)
                   : prepareMergeExecution(session, 2);
-              const { codex } = createExecutionCodex(
+              const { codex } = await createExecutionCodex(
                 { surface: "sdk", command: "scan" },
                 worker,
                 {},

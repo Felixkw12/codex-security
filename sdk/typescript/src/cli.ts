@@ -8890,7 +8890,7 @@ async function executeScan(
             auth,
             provider,
             hasCommandAuth(effectiveConfiguration),
-            arguments_.dryRun,
+            { preflight: arguments_.dryRun },
           );
     diagnostic("scan.configuration", {
       cli_version: VERSION,

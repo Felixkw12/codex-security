@@ -126,6 +126,7 @@ export function prepareExecutionSource(input: {
     preserveProviderEnvironment ? "auto" : input.auth,
     modelProvider,
     commandAuth,
+    { preserveProviderEnvironment },
   );
   const apiKey =
     !preserveProviderEnvironment && authentication.method === "api_key"

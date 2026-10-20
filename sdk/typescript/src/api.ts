@@ -1197,7 +1197,7 @@ export class CodexSecurity {
       options.auth,
       modelProvider,
       hasCommandAuth(configuration),
-      true,
+      { preflight: true },
     );
     if (
       authentication.method === "stored_credentials" &&
@@ -4441,6 +4441,7 @@ export class CodexSecurity {
           runtime.codexHome,
           source.preserveProviderEnvironment ? "auto" : options.auth,
           modelProvider,
+          { preserveProviderEnvironment: source.preserveProviderEnvironment },
         );
       if (
         options.safetyIdentifier !== undefined &&

@@ -99,8 +99,12 @@ test.each([
   ["synthetic", "bearer"],
   ["openrouter", "env_key"],
   ["openrouter", "bearer"],
+  ["openrouter", "http_headers"],
+  ["openrouter", "env_http_headers"],
   ["fireworks", "env_key"],
   ["fireworks", "bearer"],
+  ["fireworks", "http_headers"],
+  ["fireworks", "env_http_headers"],
 ] as const)(
   "native %s %s authentication reaches the SDK run without OpenAI credentials",
   async (providerName, kind) => {
@@ -112,12 +116,22 @@ test.each([
         const home = join(root, id);
         await mkdir(home, { mode: 0o700 });
         const key = `synthetic-${id}`;
+        const nativeCredentials: JsonObject =
+          kind === "env_key"
+            ? { env_key: "SYNTHETIC_PROVIDER_KEY" }
+            : kind === "bearer"
+              ? { experimental_bearer_token: key }
+              : kind === "http_headers"
+                ? { http_headers: { Authorization: key } }
+                : {
+                    env_http_headers: {
+                      Authorization: "SYNTHETIC_PROVIDER_KEY",
+                    },
+                  };
         const provider: JsonObject = {
           name: "Synthetic provider",
           base_url: "https://example.invalid/v1",
-          ...(kind === "env_key"
-            ? { env_key: "SYNTHETIC_PROVIDER_KEY" }
-            : { experimental_bearer_token: key }),
+          ...nativeCredentials,
         };
         const config: JsonObject = {
           model: "gpt-5.6-sol",
@@ -197,8 +211,8 @@ test.each([
           [providerName]: {
             name: "Synthetic provider",
             base_url: "https://example.invalid/v1",
-            ...(kind === "env_key"
-              ? { env_key: "SYNTHETIC_PROVIDER_KEY" }
+            ...(["env_key", "env_http_headers"].includes(kind)
+              ? nativeCredentials
               : {}),
           },
         });
@@ -206,9 +220,7 @@ test.each([
           [providerName]: {
             name: "Synthetic provider",
             base_url: "https://example.invalid/v1",
-            ...(kind === "env_key"
-              ? { env_key: "SYNTHETIC_PROVIDER_KEY" }
-              : { experimental_bearer_token: key }),
+            ...nativeCredentials,
           },
         });
         expect(JSON.stringify(observations[0]!.config)).not.toContain(key);
