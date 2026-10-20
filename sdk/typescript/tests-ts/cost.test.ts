@@ -3,7 +3,7 @@ import { runNodePython } from "./support/python-probe.js";
 import * as filesystem from "node:fs/promises";
 import { appendFile, writeFile } from "node:fs/promises";
 import * as fs from "node:fs/promises";
-import { join, parse, sep } from "node:path";
+import { dirname, join, parse, sep } from "node:path";
 import zlib from "node:zlib";
 import { Codex } from "@openai/codex-sdk";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
@@ -3059,6 +3059,72 @@ describe("live scan cost tracking", () => {
       expect(snapshot.cost?.inputTokens).toBe(1_000);
     },
   );
+
+  for (const compressed of [false, true]) {
+    test
+      .skipIf(compressed && typeof zlib.zstdCompressSync !== "function")
+      .each([false, true])(
+      `retains SDK budget receipts when a rollout changes after enumeration (compressed=${compressed}, missing=%p)`,
+      async (missing) => {
+        const home = await codexHome();
+        const costs: number[] = [];
+        const tracker = costTracker(home, {
+          maxCostUsd: 0.003,
+          onCost: (cost) => costs.push(cost.estimatedUsd),
+        });
+        tracker.start("scan-thread");
+        await tracker.stop();
+        const plain = await writeSession(home, "scan-thread", {
+          input_tokens: 1_000,
+          output_tokens: 0,
+        });
+        const contents = await fs.readFile(plain);
+        const path = `${plain}${compressed ? ".zst" : ""}`;
+        const encoded = compressed ? zlib.zstdCompressSync(contents) : contents;
+        if (compressed) {
+          await writeFile(path, encoded);
+          await fs.rm(plain);
+        }
+        let changed = false;
+        const originalRead = filesystem.readdir;
+        const reading = spyOn(filesystem, "readdir").mockImplementation(
+          async (...args) => {
+            const entries = await Reflect.apply(originalRead, filesystem, args);
+            if (!changed && args[0] === dirname(path)) {
+              changed = true;
+              await fs.rm(path);
+              if (!missing) await fs.mkdir(path);
+            }
+            return entries;
+          },
+        );
+        try {
+          const stopped = tracker.stop({ input_tokens: 500, output_tokens: 0 });
+          if (missing) {
+            expect(await stopped).toMatchObject({
+              usage: { input_tokens: 500 },
+              cost: { estimatedUsd: 0.002 },
+              measurement: { coverage: "complete" },
+            });
+            await writeFile(path, encoded);
+            expect(await tracker.stop()).toMatchObject({
+              usage: { input_tokens: 1_000 },
+              cost: { estimatedUsd: 0.004 },
+              measurement: { coverage: "complete" },
+            });
+            expect(costs).toEqual([0.002, 0.004]);
+          } else {
+            await expect(stopped).rejects.toMatchObject({ code: "EISDIR" });
+            expect(costs).toEqual([0.002]);
+          }
+          expect(changed).toBe(true);
+        } finally {
+          reading.mockRestore();
+          await tracker.stop().catch(() => {});
+        }
+      },
+    );
+  }
 
   test.each([false, true])(
     "retains SDK usage after a collection error with prior native usage=%s",

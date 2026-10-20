@@ -65,6 +65,10 @@ resume status. Terminal receipts add duration, outcome, a bounded failure catego
 and available numerical usage and result counts. Plugin version and configured
 provider family are added once the runtime is known.
 
+The terminal receipt embeds the last SDK measurement with its own `observedAt`
+and available `coverageScope`. Saved workbench accounting may reconcile later
+native evidence; terminal snapshots are not backfilled.
+
 The outcome is `completed`, `failed`, `canceled`, or `unresolved`. A hosted
 submission with unknown acceptance is unresolved. A start without a terminal
 receipt, including process loss, also remains unresolved when summarized.
@@ -135,11 +139,15 @@ enforcement still uses known spending subtotals.
 
 When available, `coverageScope` identifies every discovered thread and worker
 attempt, including missing measurements. Saved reconciliation clears a known gap
-only when a newer observation covers that entire scope. Narrower observations
-retain unresolved gaps and the union of known identities. For overlapping partial
-observations, reconciliation retains the largest reported missing-thread count;
-it cannot recover an exact combined count. Legacy observations without a scope
-cannot prove that their gaps were resolved.
+only when newer complete evidence covers that entire scope. A newer observation
+that does not encompass the retained scope leaves the maximum reported subtotal
+partial, even when both observations individually report complete. The
+`usage_scope_incomplete` warning identifies these unreconciled scope totals;
+later encompassing complete evidence clears that uncertainty. Reconciliation
+retains the union of known identities and the largest reported missing-thread
+count. Overlapping aggregates cannot establish an exact combined missing-thread
+count. Legacy observations without a scope cannot prove that their gaps were
+resolved.
 These identities belong in local records, not metric labels.
 
 Saved success, failure, and cancellation records retain numerical usage even

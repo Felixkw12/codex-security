@@ -2276,6 +2276,140 @@ def test_narrower_observations_preserve_other_thread_gaps(tmp_path: Path) -> Non
     assert replayed == complete
 
 
+def test_stopped_scan_preserves_incomparable_scope_uncertainty(tmp_path: Path) -> None:
+    fixture = _start_scan(tmp_path)
+    counted = fixture.started_at + timedelta(microseconds=1)
+    _state_graph(
+        fixture.environment,
+        {
+            "scan-parent": _rollout(tmp_path, "scan-parent", [_token_event(counted, 800, 0)]),
+            "late-worker": _rollout(
+                tmp_path,
+                "late-worker",
+                [_token_event(counted, 400, 0)],
+                parent_thread_id="scan-parent",
+            ),
+        },
+        [("scan-parent", "late-worker")],
+    )
+    # SDK usage includes 800 parent + 200 independent validation tokens, while
+    # native collection sees 800 parent + 400 late-worker tokens. Neither
+    # aggregate measures the full 1,400-token execution.
+    runtime = {
+        "coverage": "complete",
+        "coverageScope": ["thread:scan-parent", "thread:validation"],
+        "source": "codex_runtime",
+        "threadCount": 2,
+        "observedAt": counted.isoformat(),
+        **_counts(1_000, 0, 0),
+    }
+    cost = {
+        "model": "fixture-model",
+        "inputTokens": 1_000,
+        "cachedInputTokens": 0,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 0,
+        "estimatedUsd": 0.01,
+    }
+    stopped = fail_scan(
+        fixture.state_dir,
+        fixture.scan_id,
+        "Fixture failure.",
+        "--cost-json",
+        json.dumps({"usage": runtime, "cost": cost}),
+        environment=fixture.environment,
+    )["scan"]
+    usage = stopped["usage"]
+    assert usage["totalTokens"] == 1_200
+    assert usage["coverage"] == "partial"
+    assert usage["coverageScope"] == [
+        "thread:late-worker",
+        "thread:scan-parent",
+        "thread:validation",
+    ]
+    assert usage["warnings"] == [
+        "cost_estimate_covers_earlier_usage",
+        "usage_scope_incomplete",
+    ]
+    assert (
+        scan_command(
+            fixture.state_dir, "get-scan", fixture.scan_id, environment=fixture.environment
+        )["scan"]["usage"]
+        == usage
+    )
+    # Refreshing the price of this lower bound must not restore complete usage.
+    repriced = fail_scan(
+        fixture.state_dir,
+        fixture.scan_id,
+        "Fixture failure.",
+        "--cost-json",
+        json.dumps({**cost, "inputTokens": 1_200, "estimatedUsd": 0.012}),
+        environment=fixture.environment,
+    )["scan"]["usage"]
+    assert repriced["totalTokens"] == 1_200
+    assert repriced["coverage"] == "partial"
+    assert repriced["warnings"] == ["usage_scope_incomplete"]
+
+
+@pytest.mark.parametrize(
+    ("previous_threads", "previous_tokens", "new_threads", "new_tokens", "combined_tokens"),
+    [
+        (["parent", "validation"], 1_000, ["parent", "worker"], 1_200, 1_400),
+        (["parent", "validation"], 1_000, ["parent"], 1_200, 1_400),
+        (["parent", "validation", "worker"], 1_010, ["parent", "worker"], 910, 1_110),
+        (["validation"], 200, ["parent"], 800, 1_000),
+    ],
+    ids=["incomparable", "narrower-larger", "narrower-smaller", "disjoint"],
+)
+def test_newer_scoped_subtotals_need_encompassing_complete_evidence(
+    workbench_api,
+    previous_threads: list[str],
+    previous_tokens: int,
+    new_threads: list[str],
+    new_tokens: int,
+    combined_tokens: int,
+) -> None:
+    merge = workbench_api["_WORKBENCH_DB_CONTEXT"].scan_usage.merge_scan_usage_fields
+    previous = {
+        "coverage": "complete",
+        "coverageScope": [f"thread:{thread}" for thread in previous_threads],
+        "source": "codex_runtime",
+        "threadCount": len(previous_threads),
+        "observedAt": "2026-01-01T00:00:00Z",
+        **_counts(previous_tokens, 0, 0),
+    }
+    observed = {
+        "coverage": "complete",
+        "coverageScope": [f"thread:{thread}" for thread in new_threads],
+        "source": "codex_rollout",
+        "threadCount": len(new_threads),
+        "observedAt": "2026-01-01T00:00:01Z",
+        **_counts(new_tokens, 0, 0),
+    }
+    partial = merge({"usage": previous}, {"usage": observed})
+    assert partial["usage"]["totalTokens"] == max(previous_tokens, new_tokens)
+    assert partial["usage"]["coverage"] == "partial"
+    assert partial["usage"]["warnings"] == ["usage_scope_incomplete"]
+    assert partial["usage"]["coverageScope"] == sorted(
+        set(previous["coverageScope"]) | set(observed["coverageScope"])
+    )
+    assert partial["usage"]["observedAt"] == observed["observedAt"]
+    assert merge({"usage": observed}, {"usage": previous}) == partial
+    assert merge(partial, {"usage": previous}) == partial
+
+    complete = {
+        **previous,
+        "coverageScope": partial["usage"]["coverageScope"],
+        "threadCount": len(partial["usage"]["coverageScope"]),
+        "observedAt": "2026-01-01T00:00:02Z",
+        **_counts(combined_tokens, 0, 0),
+    }
+    resolved = merge(partial, {"usage": complete})
+    assert resolved["usage"] == complete
+    assert merge(resolved, partial) == resolved
+    assert merge(resolved, {"usage": observed}) == resolved
+
+
 def test_legacy_partial_without_scope_does_not_claim_resolved_coverage(workbench_api) -> None:
     merge = workbench_api["_WORKBENCH_DB_CONTEXT"].scan_usage.merge_scan_usage_fields
     partial = {

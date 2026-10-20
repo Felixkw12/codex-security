@@ -162,16 +162,21 @@ def _merge_usage_coverage(previous: dict[str, Any], observed: dict[str, Any]) ->
         and observed_scope is not None
         and set(previous_scope).issubset(observed_scope)
     )
-    unresolved_previous = previous["coverage"] == "partial" and not covers_previous
+    scope_gap = previous_scope is not None and observed_scope is not None and not covers_previous
+    unresolved_previous = (previous["coverage"] == "partial" and not covers_previous) or scope_gap
     merged = {**observed}
     if unresolved_previous:
         merged["coverage"] = "partial"
         merged["missingThreadCount"] = max(
             previous.get("missingThreadCount", 0), observed.get("missingThreadCount", 0)
         )
-        warnings = sorted(set(previous.get("warnings", [])) | set(observed.get("warnings", [])))
+        warnings = set(previous.get("warnings", [])) | set(observed.get("warnings", []))
+        if scope_gap:
+            # A newer subset can grow while still staying below the older
+            # aggregate. Neither subtotal proves complete usage for the union.
+            warnings.add("usage_scope_incomplete")
         if warnings:
-            merged["warnings"] = warnings
+            merged["warnings"] = sorted(warnings)
         if previous.get("completion", {}).get("finalized") is False:
             merged["completion"] = previous["completion"]
     if previous_scope is not None and observed_scope is not None:

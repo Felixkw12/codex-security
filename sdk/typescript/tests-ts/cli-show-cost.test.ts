@@ -190,6 +190,72 @@ test.each(
 );
 
 test.each(
+  plainProgressModes.flatMap((mode) =>
+    [false, true].flatMap((priced) =>
+      [false, true].map((changed) => ({ ...mode, priced, changed })),
+    ),
+  ),
+)(
+  "clears recovered usage coverage in $name scans (priced: $priced, changed: $changed)",
+  async (mode) => {
+    const { stderr, runCli } = createCliTest(main, { stderr: mode.tty });
+    const deps = dependencies({ environment: mode.environment });
+    let recovery = "";
+    const recoveredUsage = {
+      ...observedUsage,
+      input_tokens: observedUsage.input_tokens + (mode.changed ? 100 : 0),
+      total_tokens: observedUsage.total_tokens + (mode.changed ? 100 : 0),
+    };
+    deps.createSecurity = () =>
+      fakeSecurity(async (_repository, options = {}) => {
+        options.onScanStarted?.();
+        const measurement = {
+          usage: observedUsage,
+          cost: mode.priced ? result.cost : null,
+          coverage: "complete" as const,
+          observedAt: "2026-01-01T00:00:00Z",
+          threadCount: 1,
+          missingThreadCount: 0,
+        };
+        const initial = options.onMeasurement?.(measurement);
+        const usage = options.onUsage?.(observedUsage);
+        if (mode.priced) options.onCost?.(result.cost!);
+        await Promise.all([initial, usage]);
+        await options.onMeasurement?.({
+          ...measurement,
+          coverage: "partial",
+          missingThreadCount: 1,
+        });
+        const offset = stderr.text().length;
+        const cost = mode.priced
+          ? fakeResult([], "complete", recoveredUsage).cost
+          : null;
+        const observed = options.onMeasurement?.({
+          ...measurement,
+          usage: recoveredUsage,
+          cost,
+          threadCount: 2,
+        });
+        const updatedUsage = mode.changed
+          ? options.onUsage?.(recoveredUsage)
+          : undefined;
+        if (cost !== null) options.onCost?.(cost);
+        await Promise.all([observed, updatedUsage]);
+        recovery = stderr.text().slice(offset);
+        return result;
+      });
+    expect(await runCli(["scan", ".", "--show-cost", ...mode.args], deps)).toBe(
+      0,
+    );
+    expect(recovery).toContain(
+      `${recoveredUsage.total_tokens.toLocaleString("en-US")} total`,
+    );
+    expect(recovery).not.toContain("(partial)");
+    expect(recovery.match(/Running scan/g)).toHaveLength(1);
+  },
+);
+
+test.each(
   [[], ["--show-cost"], ["--max-cost", "20"], ["--max-cost", "0.001"]].map(
     (flags) => ({ flags }),
   ),

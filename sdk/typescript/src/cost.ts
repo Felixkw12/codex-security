@@ -709,9 +709,14 @@ async function readSessionUsage(
     if (metadataOnly && session.threadId !== null) return;
     // The full decode starts at the beginning, including metadata read earlier.
     session.eventPosition = 0;
-    for await (const line of sessionLines(path)) {
-      readSessionEvent(line, session, repository);
-      if (metadataOnly && session.threadId !== null) return;
+    try {
+      for await (const line of sessionLines(path)) {
+        readSessionEvent(line, session, repository);
+        if (metadataOnly && session.threadId !== null) return;
+      }
+    } catch (error) {
+      if (isMissingFile(error)) return;
+      throw error;
     }
     session.compressedRead = true;
     return;

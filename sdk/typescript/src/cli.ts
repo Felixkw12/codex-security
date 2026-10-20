@@ -8732,6 +8732,7 @@ async function executeScan(
   let deepConsolidating = false;
   let runningCost: Readonly<ScanCost> | null = null;
   let costUpdateCount = 0;
+  let usageUpdateCount = 0;
   let runningUsage: Readonly<ScanTokenUsage> | null = null;
   let runningCoverage: "complete" | "partial" | "unavailable" | null = null;
   let maxCostUsd = arguments_.maxCostUsd;
@@ -9046,7 +9047,7 @@ async function executeScan(
           failure_category: event.failureCategory,
           usage_coverage: event.measurement?.coverage,
         }),
-      onMeasurement: (measurement) => {
+      onMeasurement: async (measurement) => {
         const previous = runningCoverage;
         runningCoverage = measurement.coverage;
         runningUsage = measurement.usage;
@@ -9071,9 +9072,22 @@ async function executeScan(
             );
           }
           progress?.startTimer(runningMessage());
+        } else if (previous !== null && previous !== "complete") {
+          const priorUsageUpdateCount = usageUpdateCount;
+          const priorCostUpdateCount = costUpdateCount;
+          // A recovered coverage label can change without a legacy totals update.
+          await Promise.resolve();
+          if (
+            usageUpdateCount !== priorUsageUpdateCount ||
+            costUpdateCount !== priorCostUpdateCount
+          )
+            return;
+          progress?.stopTimer();
+          progress?.startTimer(runningMessage());
         }
       },
       onUsage: async (usage) => {
+        usageUpdateCount += 1;
         runningUsage = usage;
         if (dashboard !== null) {
           dashboard.setUsage(usage);
