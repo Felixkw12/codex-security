@@ -119,6 +119,28 @@ stop_after_no_new = 1
 max_discovery_runs = 2
 `,
   );
+  await writeFile(
+    path.join(codexHome, `${threadId}.jsonl`),
+    [
+      { type: "session_meta", payload: { id: threadId } },
+      {
+        type: "turn_context",
+        payload: {
+          turn_id: "active-parent-turn",
+          cyber_access_program: "daybreak_red",
+        },
+      },
+      {
+        type: "turn_context",
+        payload: {
+          turn_id: "another-parent-turn",
+          cyber_access_program: "standard",
+        },
+      },
+    ]
+      .map((record) => JSON.stringify(record))
+      .join("\n") + "\n",
+  );
   await writeFakeCodex(fakeCodexPath);
   await writeFile(
     runtimeConfigPath,
@@ -230,7 +252,12 @@ model_reasoning_summary = "none"
         "start_codex_security_deep_scan",
         { targetPath, scope: ".", userContext: "stdio lifecycle fixture" },
         threadId,
-        { model: "gpt-5.5", reasoning_effort: "xhigh" },
+        {
+          model: "gpt-5.5",
+          reasoning_effort: "xhigh",
+          thread_id: threadId,
+          turn_id: "active-parent-turn",
+        },
       ),
     );
 
@@ -274,6 +301,7 @@ model_reasoning_summary = "none"
       { code: "ENOENT" },
     );
     assert.equal(startedWorker.thread.model, "gpt-5.5");
+    assert.equal(startedWorker.cyberAccessProgram, "daybreakRed");
     assert.equal(
       startedWorker.argv.includes('model_reasoning_effort="xhigh"'),
       true,
@@ -1291,7 +1319,12 @@ function toolCall(
   name: string,
   args: Record<string, unknown>,
   threadId: string,
-  turnMetadata?: { model: string; reasoning_effort: string },
+  turnMetadata?: {
+    model: string;
+    reasoning_effort: string;
+    thread_id?: string;
+    turn_id?: string;
+  },
   sandboxState: unknown = parentSandboxState,
 ) {
   return {
@@ -1448,6 +1481,7 @@ import path from "node:path";
 let buffer = "";
 let thread;
 let input;
+let cyberAccessProgram;
 let context;
 let apiKey;
 let interrupted = false;
@@ -1461,7 +1495,7 @@ const runWorker = () => {
   context = JSON.parse(input.match(/\`\`\`json\\n([\\s\\S]*?)\\n\`\`\`/u)[1]);
   const root = thread.cwd;
   const readCoreScanReference = !context.workerLabel || readFileSync(path.join(context.pluginRoot, "references", "core-scan.md"), "utf8").length > 0;
-  appendFileSync(process.env.FAKE_CODEX_START_LOG, JSON.stringify({ pid: process.pid, argv: process.argv.slice(2), stdin: input, thread, readCoreScanReference, knowledgeBase: process.env.CODEX_SECURITY_KNOWLEDGE_BASE, hasExpectedApiKey: apiKey === "synthetic-stdio-key" && process.env.CODEX_API_KEY === "synthetic-stdio-key" }) + "\\n");
+  appendFileSync(process.env.FAKE_CODEX_START_LOG, JSON.stringify({ pid: process.pid, argv: process.argv.slice(2), stdin: input, thread, cyberAccessProgram, readCoreScanReference, knowledgeBase: process.env.CODEX_SECURITY_KNOWLEDGE_BASE, hasExpectedApiKey: apiKey === "synthetic-stdio-key" && process.env.CODEX_API_KEY === "synthetic-stdio-key" }) + "\\n");
   if (!existsSync(process.env.FAKE_CODEX_RESTART_CONTROL)) return;
   const phase = readFileSync(process.env.FAKE_CODEX_RESTART_CONTROL, "utf8");
   if (phase !== "after-restart" && context.workerLabel !== "discovery-0001") return;
@@ -1505,7 +1539,8 @@ process.stdin.on("data", (chunk) => {
       threadId = thread.threadId ?? threadId;
       result = { thread: { id: threadId } };
     } else if (message.method === "turn/start") {
-      input = message.params.input[0].text;
+      cyberAccessProgram = message.params.cyberAccessProgram;
+    input = message.params.input[0].text;
       send({ id: message.id, result: { turn: { id: turnId } } });
       notify("turn/started", { threadId, turn: { id: turnId, status: "inProgress" } });
       runWorker();

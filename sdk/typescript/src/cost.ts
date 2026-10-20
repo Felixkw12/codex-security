@@ -91,7 +91,12 @@ interface ScanCostTrackerOptions {
   scanDirectory?: string;
   maxCostUsd?: number;
   expectedFilesTotal?: number;
-  onCost?: (cost: Readonly<ScanCost>, usage: unknown) => void;
+  /** Incomplete costs are measured subtotals, usable for spending limits only. */
+  onCost?: (
+    cost: Readonly<ScanCost>,
+    usage: unknown,
+    complete: boolean,
+  ) => void;
   onUsage?: (usage: Readonly<ScanTokenUsage>) => void;
   onActivity?: (activity: ScanActivity) => void;
   onProgress?: (progress: ScanProgress) => void;
@@ -114,6 +119,7 @@ interface ObservedSessionUsage {
   completedRoot: ScanTokenUsage | null;
   rootCompleted: boolean;
   unverified: boolean;
+  complete: boolean;
   unfinishedWorkers: boolean;
   unidentifiedSessions: Set<string>;
   accountedSessions: Set<string>;
@@ -170,6 +176,7 @@ export class ScanCostTracker {
     completedRoot: null,
     rootCompleted: false,
     unverified: false,
+    complete: true,
     unfinishedWorkers: false,
     unidentifiedSessions: new Set(),
     accountedSessions: new Set(),
@@ -251,7 +258,10 @@ export class ScanCostTracker {
     });
     this.#pending = update.catch(() => {});
     await update;
-    return this.#snapshot;
+    return this.#options.maxCostUsd === undefined &&
+      !this.#observedUsage.complete
+      ? { usage: null, cost: null }
+      : this.#snapshot;
   }
 
   public async stop(fallbackUsage?: unknown): Promise<ScanCostSnapshot> {
@@ -338,7 +348,7 @@ export class ScanCostTracker {
       snapshot.cost !== null &&
       snapshot.cost.estimatedUsd > this.#options.maxCostUsd
     ) {
-      this.#reportCost(snapshot.cost);
+      this.#reportCost(snapshot.cost, observed.complete && rootUsage !== null);
       if (!finalizing) return snapshot;
     }
     if (refreshFailure !== null) {
@@ -390,6 +400,7 @@ export class ScanCostTracker {
       );
     }
     const unknownCompletedUsage =
+      !observed.complete ||
       (finalizing && fallbackUsage === null && rootUsage === null) ||
       [...this.#completedThreadUsage].some(
         ([threadId, usage]) =>
@@ -644,6 +655,7 @@ export class ScanCostTracker {
         [...(ownedPaths ?? [])].some(
           ([path, threadId]) => this.#sessions.get(path)?.threadId !== threadId,
         ),
+      complete: true,
       unfinishedWorkers: false,
       unidentifiedSessions: new Set(),
       accountedSessions: new Set(),
@@ -707,6 +719,7 @@ export class ScanCostTracker {
       }
     }
     for (const [threadId, usage] of threadUsages) {
+      if (usage === null) observed.complete = false;
       if (threadId === rootThreadId) {
         observed.root = usage;
         observed.rootCompleted = completedThreads.has(threadId);
@@ -719,6 +732,7 @@ export class ScanCostTracker {
     for (const [threadId, usage] of this.#completedThreadUsage) {
       if (accountedThreads.has(threadId)) continue;
       if (usage === null) {
+        observed.complete = false;
         observed.unverified = true;
       } else if (threadId === rootThreadId) {
         observed.root = addTokenUsage(observed.root, usage);
@@ -747,7 +761,10 @@ export class ScanCostTracker {
       ) {
         this.#snapshot = { usage, cost };
       }
-      this.#reportCost(this.#snapshot.cost);
+      this.#reportCost(
+        this.#snapshot.cost,
+        observed.complete && observed.root !== null,
+      );
     }
     const readFailure = readFailures[0];
     if (readFailure !== undefined) {
@@ -865,13 +882,13 @@ export class ScanCostTracker {
     }
   }
 
-  #reportCost(cost: ScanCost | null): void {
-    this.#reportUsage(tokenUsage(this.#snapshot.usage));
+  #reportCost(cost: ScanCost | null, complete = true): void {
+    if (complete) this.#reportUsage(tokenUsage(this.#snapshot.usage));
     if (cost === null) return;
-    const signature = JSON.stringify(cost);
+    const signature = JSON.stringify([cost, complete]);
     if (signature === this.#lastCost) return;
     this.#lastCost = signature;
-    this.#options.onCost?.(cost, this.#snapshot.usage);
+    this.#options.onCost?.(cost, this.#snapshot.usage, complete);
   }
 
   #reportUsage(usage: ScanTokenUsage | null): void {

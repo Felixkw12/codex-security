@@ -1,5 +1,6 @@
 import { chmod, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { privateWindowsOutputRoot } from "./support/windows-output-fixture.ts";
 
 export async function createFakeCodexFixture(
   createTemporaryDirectory: (prefix: string) => Promise<string>,
@@ -10,8 +11,10 @@ export async function createFakeCodexFixture(
     requiresOpenaiAuth: boolean;
   } = { account: { type: "apiKey" }, requiresOpenaiAuth: true },
   forcedLoginMethod?: string,
+  privateWindowsRoot = false,
 ) {
-  const root = await createTemporaryDirectory("codex-security-sdk-executor-");
+  let root = await createTemporaryDirectory("codex-security-sdk-executor-");
+  if (privateWindowsRoot) root = await privateWindowsOutputRoot(root);
   const markerPath = path.join(root, "invocation.json");
   const preflightMarkerPath = path.join(root, "preflight.json");
   const completionMarkerPath = path.join(root, "completed-usage.txt");
@@ -19,7 +22,7 @@ export async function createFakeCodexFixture(
   await writeFile(
     scriptPath,
     `#!/usr/bin/env node
-import { readFileSync, readdirSync, renameSync, writeFileSync as writeReceiptFile } from "node:fs";
+import { existsSync, unlinkSync, readFileSync, readdirSync, renameSync, writeFileSync as writeReceiptFile } from "node:fs";
 const writeFileSync = (path, value) => { const pending = path + "." + process.pid + ".pending"; writeReceiptFile(pending, value); renameSync(pending, path); };
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
@@ -41,10 +44,11 @@ const turnId = 'fixture-turn-id';
 let stdin = '';
 let completed = false;
 const environment = {
+  temporaryEnvironment: Object.fromEntries(["TEMP", "TMP"].map(name => [name, process.env[name]])),
   argv: process.argv.slice(2), cwd: process.cwd(), codexHome: process.env.CODEX_HOME,
   sqliteHome: process.env.CODEX_SQLITE_HOME, stateDatabase: process.env.CODEX_STATE_DB,
   cacheDirectory: process.env.XDG_CACHE_HOME, configPath: process.env.CODEX_SECURITY_CONFIG_PATH,
-  deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH,
+  deepConfigPath: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, stateDirectory: process.env.CODEX_SECURITY_STATE_DIR,
   runnerTrackingId: process.env.RUNNER_TRACKING_ID, libraryPath: process.env.LD_LIBRARY_PATH,
   providerKey: process.env.SYNTHETIC_GATEWAY_KEY, providerHeader: process.env.SYNTHETIC_HEADER_VALUE,
   gitEnvironment: Object.fromEntries(['PATH', 'CODEX_SECURITY_GIT', 'GIT_SSH_COMMAND', 'GIT_CONFIG_GLOBAL'].map(name => [name, process.env[name]])),
@@ -67,9 +71,10 @@ function capture() {
   const knowledgePath = stdin.includes('synthetic worker configuration fixture') ? process.env.CODEX_SECURITY_KNOWLEDGE_BASE : undefined;
   const knowledgeDocuments = knowledgePath === undefined ? undefined : Object.fromEntries(readdirSync(knowledgePath).map(name => [name, readFileSync(join(knowledgePath, name), 'utf8')]));
   writeFileSync(process.env.FAKE_CODEX_MARKER, JSON.stringify({
-    ...environment, ...(scopeInput === undefined ? {} : { scopeInput }), rpc, sequence, thread, turn, login, stdin, pid: process.pid, knowledgePath, knowledgeDocuments,
+    ...environment, deepConfig: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH ? readFileSync(process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH, "utf8") : undefined, ...(scopeInput === undefined ? {} : { scopeInput }), rpc, sequence, thread, turn, login, stdin, pid: process.pid, knowledgePath, knowledgeDocuments,
     mcpNodePath: process.env.CODEX_MCP_NODE_PATH, bundledTool: toolProbe?.stdout.trim(), python: process.env.PYTHON, pythonPrefix: pythonRuntime?.[0], pythonLibraryPath: pythonRuntime?.[1], runtimeEnvironment,
     originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE,
+    ...(process.argv.includes('--profile') ? {profileContents: readFileSync(join(process.env.CODEX_HOME, process.argv[process.argv.indexOf('--profile') + 1] + '.config.toml'), 'utf8')} : {}),
     ...(stdin.includes('CAPTURE_SYNTHETIC_OPENAI_AUTH') ? { openaiAuthentication: { OPENAI_API_KEY: process.env.OPENAI_API_KEY, CODEX_API_KEY: process.env.CODEX_API_KEY } } : {}),
     ...(stdin.includes('CAPTURE_SYNTHETIC_BEDROCK_AUTH') ? { bedrockAuthentication: Object.fromEntries(JSON.parse(process.env.FAKE_CODEX_BEDROCK_ENV_KEYS).map(name => [name, process.env[name]])) } : {}),
   }));
@@ -162,6 +167,17 @@ async function handle(message) {
   if (message.method === 'initialized') return;
   let result;
   if (message.method === 'initialize') result = { userAgent: 'fixture', codexHome: process.env.CODEX_HOME, platformFamily: 'unix', platformOs: 'linux' };
+  else if (message.method === 'thread/read') {
+    preflight.requests.push({ method: message.method, threadId: message.params.threadId });
+    writeFileSync(preflightMarkerPath, JSON.stringify(preflight));
+    const failOncePath = join(process.env.CODEX_HOME, message.params.threadId + '.read-fails-once');
+    if (existsSync(failOncePath)) {
+      unlinkSync(failOncePath);
+      send({ jsonrpc: '2.0', id: message.id, error: { code: -32603, message: 'synthetic parent read temporary failure' } });
+      return;
+    }
+    result = { thread: { id: message.params.threadId, path: join(process.env.CODEX_HOME, message.params.threadId + '.jsonl') } };
+  }
   else if (message.method === 'config/read') result = { config: { ...(forcedLoginMethod ? { forced_login_method: forcedLoginMethod } : {}), default_permissions: 'codex_security_deep_scan_worker', permissions: { codex_security_deep_scan_worker: preflightProfile } }, origins: {}, layers: null };
   else if (message.method === 'permissionProfile/list') result = { data: [{ id: 'codex_security_deep_scan_worker', description: null, allowed: preflightAllowed }], nextCursor: null };
   else if (message.method === 'account/read') result = accountResult;

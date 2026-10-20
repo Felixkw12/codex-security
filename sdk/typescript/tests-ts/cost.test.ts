@@ -807,6 +807,17 @@ describe("scan cost", () => {
     ).toBe(0.0042);
   });
 
+  test.each(Object.getOwnPropertyNames(Object.prototype))(
+    "does not inherit prices for unknown model %s",
+    (model) => {
+      for (const selected of [model, `openai.${model}`]) {
+        expect(
+          estimateScanCost(selected, { input_tokens: 1, output_tokens: 1 }),
+        ).toBeNull();
+      }
+    },
+  );
+
   test("does not invent prices for unknown models or incomplete usage", () => {
     for (const [model, usage] of [
       ["unknown-model", { input_tokens: 1, output_tokens: 1 }],
@@ -3272,11 +3283,14 @@ describe("live scan cost tracking", () => {
       "    if inherited is not None and index == 1:",
       "        events.append(task_event(fork['pendingTurnId']))",
       "    events.append(token_event(sample))",
+      "turn_ids = {event['payload']['turn_id'] for event in events if event.get('payload', {}).get('type') == 'task_started'}",
+      "events.extend({'type': 'event_msg', 'timestamp': stamp, 'payload': {'type': 'task_complete', 'turn_id': turn_id}} for turn_id in turn_ids)",
       "session = usage.RolloutSession(thread, parent, Path('fixture-rollout'))",
       "rollout = ''.join(json.dumps(event) + '\\n' for event in events).encode('utf-8')",
       "with patch.object(Path, 'open', return_value=io.BytesIO(rollout)):",
-      "    measured, warnings = usage._read_rollout_usage(session, started_at=datetime(2026, 7, 26, 12, tzinfo=timezone.utc), completed_at=None)",
-      "parse_scan_cost(usage.measured_scan_cost_json({'coverage': 'complete', 'source': 'codex_rollout', 'threadCount': 1, **measured}))",
+      "    result = usage._read_rollout_usage(session, started_at=datetime(2026, 7, 26, 12, tzinfo=timezone.utc), completed_at=None)",
+      "measured, warnings = result.tokens, result.warnings",
+      "parse_scan_cost(json.dumps({'usage': {'coverage': 'complete', 'source': 'codex_rollout', 'threadCount': 1, **measured}}))",
       "print(json.dumps({'usage': measured, 'warnings': sorted(warnings)}))",
     ].join("\n");
     const inheritedReset = {
@@ -3819,12 +3833,12 @@ describe("live scan cost tracking", () => {
           onCost: (cost) => costs.push(cost.estimatedUsd),
         },
         async (tracker) => {
-          expect((await tracker.refresh()).cost?.inputTokens).toBe(100);
+          expect((await tracker.refresh()).cost?.inputTokens).toBe(
+            maxCostUsd === undefined ? undefined : 100,
+          );
           const final = tracker.stop(rootUsage);
           if (maxCostUsd === undefined) {
-            await expect(final).resolves.toMatchObject({
-              cost: { inputTokens: 100, outputTokens: 10 },
-            });
+            await expect(final).resolves.toEqual({ usage: null, cost: null });
           } else {
             await expect(final).rejects.toThrow(
               "The scan cost limit could not be verified",
@@ -5091,13 +5105,13 @@ describe("live scan cost tracking", () => {
       { model: "unknown-model" },
       async (tracker, append) => {
         const prior = await tracker.stop();
-        expect(prior).toMatchObject({ usage: workerUsage, cost: null });
+        expect(prior).toEqual({ usage: null, cost: null });
         append(
           "conflicting-worker",
           accountingSession("worker-thread", [], "another-thread"),
         );
         await tracker.refresh();
-        expect(await tracker.stop({})).toBe(prior);
+        expect(await tracker.stop({})).toEqual(prior);
       },
     );
   });
@@ -5559,16 +5573,16 @@ describe("live scan cost tracking", () => {
     "%s incomplete delegated-worker usage according to the explicit budget",
     async (_result, maxCostUsd) => {
       const { tracker } = await workerScan({ workerUsage: null, maxCostUsd });
-      expect((await tracker.refresh()).cost?.inputTokens).toBe(100);
+      expect((await tracker.refresh()).cost?.inputTokens).toBe(
+        maxCostUsd === undefined ? undefined : 100,
+      );
 
       const completed = tracker.stop({
         input_tokens: 1_000,
         output_tokens: 100,
       });
       if (maxCostUsd === undefined) {
-        await expect(completed).resolves.toMatchObject({
-          cost: { inputTokens: 1_000, outputTokens: 100 },
-        });
+        await expect(completed).resolves.toEqual({ usage: null, cost: null });
       } else {
         await expect(completed).rejects.toThrow(
           "The scan cost limit could not be verified because model pricing or token usage is unavailable.",
@@ -5964,12 +5978,12 @@ describe("live scan cost tracking", () => {
             "workbench.execute('CREATE TABLE scans (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, mode TEXT NOT NULL)')",
             "workbench.execute('CREATE TABLE workspaces (id TEXT PRIMARY KEY, thread_id TEXT)')",
             "workbench.execute('CREATE TABLE deep_scan_workers (id TEXT PRIMARY KEY, scan_id TEXT NOT NULL, sdk_thread_id TEXT)')",
-            "workbench.execute('CREATE TABLE deep_scan_worker_threads (worker_id TEXT NOT NULL, sdk_thread_id TEXT NOT NULL)')",
+            "workbench.execute('CREATE TABLE deep_scan_worker_threads (scan_id TEXT NOT NULL, worker_id TEXT NOT NULL, sdk_thread_id TEXT NOT NULL)')",
             "workbench.execute('INSERT INTO scans VALUES (?, ?, ?)', ('fixture-scan', 'fixture-workspace', 'deep'))",
             "workbench.execute('INSERT INTO workspaces VALUES (?, ?)', ('fixture-workspace', 'scan-thread'))",
             "if relationship in ('independent', 'missing-file-independent', 'unobserved-independent'):",
             "    workbench.execute('INSERT INTO deep_scan_workers VALUES (?, ?, ?)', ('worker', 'fixture-scan', 'pending-thread'))",
-            "    workbench.execute('INSERT INTO deep_scan_worker_threads VALUES (?, ?)', ('worker', 'pending-thread'))",
+            "    workbench.execute('INSERT INTO deep_scan_worker_threads VALUES (?, ?, ?)', ('fixture-scan', 'worker', 'pending-thread'))",
             "workbench.commit()",
             "workbench.close()",
             "state = sqlite3.connect(Path(home) / 'state_7.sqlite')",
@@ -6972,6 +6986,100 @@ describe("live scan cost tracking", () => {
     },
   );
 
+  test("reports budget subtotals until missing worker usage becomes measured", async () => {
+    const home = await codexHome();
+    const parentUsage = { input_tokens: 1_000_000, output_tokens: 100_000 };
+    await writeUsageSession(home, "scan-thread", parentUsage);
+    const costs: Array<[number, boolean]> = [];
+    const usages: unknown[] = [];
+    const tracker = costTracker(home, {
+      onCost: (cost, _usage, complete) =>
+        costs.push([cost.estimatedUsd, complete]),
+      onUsage: (usage) => usages.push(usage),
+    });
+    tracker.start("scan-thread");
+    expect((await tracker.refresh()).cost?.estimatedUsd).toBe(6);
+
+    const worker = await writeUsageSession(
+      home,
+      "worker-thread",
+      {},
+      {
+        parent: "scan-thread",
+      },
+    );
+    expect(await tracker.refresh()).toEqual({ usage: null, cost: null });
+    expect(costs.at(-1)).toEqual([6, false]);
+    expect(usages).toHaveLength(1);
+
+    await appendFile(
+      worker,
+      jsonLines([accountingEvent({ input_tokens: 0, output_tokens: 0 })]) +
+        "\n",
+    );
+    expect((await tracker.refresh()).usage).toMatchObject({
+      ...parentUsage,
+      total_tokens: 1_100_000,
+    });
+    expect(costs.at(-1)).toEqual([6, true]);
+    expect(usages).toHaveLength(1);
+
+    await appendFile(
+      worker,
+      jsonLines([
+        accountingEvent({ input_tokens: 500_000, output_tokens: 50_000 }),
+      ]) + "\n",
+    );
+    expect((await tracker.stop(parentUsage)).usage).toMatchObject({
+      input_tokens: 1_500_000,
+      output_tokens: 150_000,
+      total_tokens: 1_650_000,
+    });
+    expect(costs).toEqual([
+      [6, true],
+      [6, false],
+      [6, true],
+      [9, true],
+    ]);
+    expect(usages).toHaveLength(2);
+  });
+
+  test("keeps independent Deep worker usage unknown until a receipt supplies it", async () => {
+    const home = await codexHome();
+    const scanDirectory = join(home, "scans", "current");
+    const parentUsage = { input_tokens: 100, output_tokens: 10 };
+    await writeUsageSession(home, "scan-thread", parentUsage, {
+      cwd: scanDirectory,
+      timestamp: "2026-07-26T12:00:00Z",
+    });
+    await writeUsageSession(
+      home,
+      "deep-worker",
+      {},
+      {
+        cwd: join(
+          scanDirectory,
+          "artifacts",
+          "deep_discovery",
+          "workers",
+          "one",
+          "output",
+        ),
+        timestamp: "2026-07-26T12:01:00Z",
+      },
+    );
+    const tracker = costTracker(home, { scanDirectory });
+    tracker.start("scan-thread");
+    expect(await tracker.refresh()).toEqual({ usage: null, cost: null });
+
+    tracker.recordUsage({ input_tokens: 50, output_tokens: 5 }, "deep-worker");
+    expect((await tracker.stop(parentUsage)).usage).toMatchObject({
+      input_tokens: 150,
+      output_tokens: 15,
+      total_tokens: 165,
+    });
+  });
+
   test.each(["receipt", "receipt-and-log", "unknown"] as const)(
     "accounts for a separate validation turn with %s usage",
     async (source) => {
@@ -7359,7 +7467,7 @@ test.each(
     const complete = {
       type: "event_msg",
       timestamp,
-      payload: { type: "task_complete" },
+      payload: { type: "task_complete", turn_id: higherUuid7Turn },
     };
     const parent = await writeUsageSession(home, scanThreadId, {
       input_tokens: 0,
@@ -7583,7 +7691,11 @@ test.each(
       }),
       timestamp,
     });
-    const complete = { type: "event_msg", payload: { type: "task_complete" } };
+    const complete = {
+      type: "event_msg",
+      timestamp,
+      payload: { type: "task_complete", turn_id: higherUuid7Turn },
+    };
     const rootUsage = {
       input_tokens: 0,
       output_tokens: 0,
@@ -7836,7 +7948,7 @@ test.each([
     const complete = {
       type: "event_msg",
       timestamp,
-      payload: { type: "task_complete" },
+      payload: { type: "task_complete", turn_id: higherUuid7Turn },
     };
     const parent = await writeUsageSession(home, scanThreadId, {
       input_tokens: 0,
@@ -8008,13 +8120,7 @@ test.each([
     { input_tokens: 1_100, output_tokens: 110 },
     { parent: scanThreadId },
   );
-  const rollout = [
-    ...ownershipRollout(replayedTurnIds),
-    {
-      type: "event_msg",
-      payload: { type: "task_complete", turn_id: higherUuid7Turn },
-    },
-  ];
+  const rollout = ownershipRollout(replayedTurnIds);
   await writeFile(rolloutPath, jsonLines(rollout) + "\n");
 
   const maxCostUsd = 0.001;
