@@ -107,7 +107,17 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           "Deep Scan cannot start a read-only worker without verified parent sandbox metadata.",
         );
       }
-      const workerProfile = workerPermissionProfile(parentSandbox);
+      const workerProfile = workerPermissionProfile(
+        request.workerUsageDirectory
+          ? {
+              ...parentSandbox,
+              literalFilesystemDenies: [
+                ...(parentSandbox.literalFilesystemDenies ?? []),
+                request.workerUsageDirectory,
+              ],
+            }
+          : parentSandbox,
+      );
       const originalCwd = process.cwd();
       const childEnv = await snapshotWorkerEnvironment();
       // Snapshot the SDK's per-scan config once for this coordinator, including resumes.

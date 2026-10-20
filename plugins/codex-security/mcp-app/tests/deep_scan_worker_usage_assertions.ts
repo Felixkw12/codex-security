@@ -4,11 +4,54 @@ import { join } from "node:path";
 import type { DeepScanLogEvent } from "../src/deep-scan/types.js";
 import type { WorkerUsageReceipt } from "../src/deep-scan/usage-receipt.js";
 import { readJson } from "./support/json.ts";
+import {
+  coordinatorFixture,
+  FakeExecutor,
+  runCoordinator,
+} from "./deep_scan_coordinator_fixture.ts";
+
+export function withCumulativeUsage(
+  executor: FakeExecutor,
+  workerUsageDirectory: string | undefined,
+) {
+  const originalRun = executor.run.bind(executor);
+  executor.run = async (request) => {
+    assert.equal(request.workerUsageDirectory, workerUsageDirectory);
+    const completedTurns = request.resumeThreadId ? 2 : 1;
+    return {
+      ...(await originalRun(request)),
+      usage: {
+        input_tokens: 10 * completedTurns,
+        cached_input_tokens: 0,
+        cache_write_input_tokens: 0,
+        output_tokens: 2 * completedTurns,
+        reasoning_output_tokens: completedTurns,
+        total_tokens: 12 * completedTurns,
+      },
+    };
+  };
+}
+
+export async function testWorkerUsageWithoutHostDirectory() {
+  const { fixture, store } = await coordinatorFixture();
+  delete fixture.run.workerUsageDirectory;
+  delete store.run.workerUsageDirectory;
+  const executor = new FakeExecutor();
+  const events: DeepScanLogEvent[] = [];
+  const terminal = await runCoordinator(fixture, store, executor, {
+    log: (event) => events.push(event),
+  });
+  assert.equal(terminal?.status, "succeeded");
+  assert.ok(events.some((event) => event.event === "worker_usage_unavailable"));
+  await assert.rejects(
+    readdir(join(fixture.run.scanDir, "artifacts", "deep_discovery", "usage")),
+    { code: "ENOENT" },
+  );
+}
 
 async function workerReceipts(
-  scanDirectory: string,
+  directory: string,
 ): Promise<WorkerUsageReceipt[]> {
-  const directory = join(scanDirectory, "artifacts", "deep_discovery", "usage");
   return Promise.all(
     (await readdir(directory)).map((name) => readJson(join(directory, name))),
   );
@@ -39,18 +82,19 @@ function assertPairedAttempts(
 }
 
 export async function assertWorkerRetryReceipts(
-  scanDirectory: string,
+  directory: string,
   events: DeepScanLogEvent[],
+  kind: "discovery" | "dedup" = "discovery",
 ) {
-  const receipts = await workerReceipts(scanDirectory);
-  const discovery = receipts
-    .filter((receipt) => receipt.kind === "discovery")
+  const receipts = await workerReceipts(directory);
+  const workers = receipts
+    .filter((receipt) => receipt.kind === kind)
     .sort((left, right) => left.attempt - right.attempt);
-  assert.equal(discovery.length, 2);
-  assert.notEqual(discovery[0].attemptId, discovery[1].attemptId);
-  assert.equal(discovery[0].threadId, discovery[1].threadId);
+  assert.equal(workers.length, 2);
+  assert.notEqual(workers[0].attemptId, workers[1].attemptId);
+  assert.equal(workers[0].threadId, workers[1].threadId);
   assert.deepEqual(
-    discovery.map((receipt) => [
+    workers.map((receipt) => [
       receipt.outcome,
       receipt.resumed,
       receipt.usage?.total_tokens,
@@ -64,11 +108,11 @@ export async function assertWorkerRetryReceipts(
 }
 
 export async function assertCanceledWorkerReceipts(
-  scanDirectory: string,
+  directory: string,
   events: DeepScanLogEvent[],
   usageReported: boolean,
 ) {
-  const receipts = await workerReceipts(scanDirectory);
+  const receipts = await workerReceipts(directory);
   assert.equal(receipts.length, 1);
   assert.equal(receipts[0].outcome, "canceled");
   if (usageReported) {

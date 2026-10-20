@@ -2,6 +2,8 @@ import { readJson, writeJson } from "./support/json.ts";
 import {
   assertWorkerRetryReceipts,
   assertCanceledWorkerReceipts,
+  testWorkerUsageWithoutHostDirectory,
+  withCumulativeUsage,
 } from "./deep_scan_worker_usage_assertions.ts";
 import type { CoordinatorOptions } from "../src/deep-scan/coordinator.js";
 import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
@@ -1278,21 +1280,7 @@ async function testMissingDiscoveryResultResumesExistingThread(
         }
       : {}),
   });
-  const originalRun = executor.run.bind(executor);
-  executor.run = async (request) => {
-    const completedTurns = request.resumeThreadId ? 2 : 1;
-    return {
-      ...(await originalRun(request)),
-      usage: {
-        input_tokens: 10 * completedTurns,
-        cached_input_tokens: 0,
-        cache_write_input_tokens: 0,
-        output_tokens: 2 * completedTurns,
-        reasoning_output_tokens: completedTurns,
-        total_tokens: 12 * completedTurns,
-      },
-    };
-  };
+  withCumulativeUsage(executor, fixture.run.workerUsageDirectory);
   const events: DeepScanLogEvent[] = [];
   const sleeps: number[] = [];
   const terminal = await runCoordinator(fixture, store, executor, {
@@ -1312,7 +1300,13 @@ async function testMissingDiscoveryResultResumesExistingThread(
     executor.discoveryThreadIds[0],
   ]);
   assert.equal(new Set(executor.discoveryThreadIds).size, 1);
-  await assertWorkerRetryReceipts(fixture.run.scanDir, events);
+  await assertWorkerRetryReceipts(fixture.run.workerUsageDirectory!, events);
+  await assert.rejects(
+    readdir(
+      path.join(fixture.run.scanDir, "artifacts", "deep_discovery", "usage"),
+    ),
+    { code: "ENOENT" },
+  );
   if (withToolFailure) {
     const message = executor.options.discoveryDiagnostics![0].message;
     assert.ok(
@@ -1494,11 +1488,14 @@ async function testMissingReducerResultResumesExistingThread(
       },
     ],
   });
+  withCumulativeUsage(executor, fixture.run.workerUsageDirectory);
+  const events: DeepScanLogEvent[] = [];
   const sleeps: number[] = [];
   const terminal = await runCoordinator(fixture, store, executor, {
     random: () => 0,
     retryDelaysMs: [1, 3, 9],
     clock: recordingClock(sleeps),
+    log: (event) => events.push(event),
   });
 
   assert.equal(terminal?.status, "succeeded");
@@ -1519,6 +1516,11 @@ async function testMissingReducerResultResumesExistingThread(
     executor.dedupThreadIds[0],
   ]);
   assert.equal(new Set(executor.dedupThreadIds).size, 1);
+  await assertWorkerRetryReceipts(
+    fixture.run.workerUsageDirectory!,
+    events,
+    "dedup",
+  );
   assert.match(
     executor.dedupContinuationPrompts[1] ?? "",
     /record_codex_security_deep_reduction\(\{ scanId, findings, threatModel\?, scope\? \}\)/,
@@ -2060,7 +2062,7 @@ async function testCancellationDropsUnvalidatedDiscoveryResult(
   const terminal = await coordinator.wait(undefined, 5_000);
   assert.equal(terminal?.status, "canceled");
   await assertCanceledWorkerReceipts(
-    fixture.run.scanDir,
+    fixture.run.workerUsageDirectory!,
     events,
     usageReported,
   );
@@ -4337,6 +4339,7 @@ try {
   await testGenericDiagnosticsPreserveMissingResultRetries();
   await testMissingDiscoveryResultResumesExistingThread();
   await testMissingDiscoveryResultResumesExistingThread(true);
+  await testWorkerUsageWithoutHostDirectory();
   await testInvalidArtifactsRetry();
   await testInvalidReducerResultRetriesFromSnapshot();
   await testInvalidReducerResultRetriesFromSnapshot(true);

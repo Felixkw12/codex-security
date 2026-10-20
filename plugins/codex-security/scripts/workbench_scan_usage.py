@@ -19,6 +19,9 @@ from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import quote
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from workbench.storage import worker_usage_directory
+
 TOKEN_FIELDS = {
     "input_tokens": "inputTokens",
     "cached_input_tokens": "cachedInputTokens",
@@ -401,10 +404,10 @@ def _worker_usage_receipts(
 ) -> tuple[dict[str, RolloutUsage], set[str], set[str]]:
     if scan["mode"] != "deep":
         return {}, set(), set()
-    directory = Path(scan["scan_dir"]) / "artifacts" / "deep_discovery" / "usage"
+    directory = worker_usage_directory(scan["id"])
     try:
         if directory.resolve(strict=True) != directory:
-            raise ValueError("Worker usage directory is not a scan-local directory.")
+            raise ValueError("Worker usage directory is not a canonical protected directory.")
     except FileNotFoundError:
         return {}, set(), set()
     except (OSError, RuntimeError, ValueError):

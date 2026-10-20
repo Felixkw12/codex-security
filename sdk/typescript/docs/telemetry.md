@@ -56,6 +56,9 @@ scans and preflight-only calls are excluded. Policy generation emits its start t
 observers immediately and buffers disk persistence until policy path validation
 establishes all protected Git stores. Policy attempts rejected before that point
 are observable only through `onTelemetry`; they do not create local state.
+Finding workflows likewise defer persistence until explicit and saved artifact
+paths have been protected. Their journal cannot write into either artifact tree,
+including when the selected artifact directory occupies the journal path.
 Each receipt has a schema version, stable event ID, random operation/attempt IDs,
 occurrence and local observation times, command, surface, package version, and
 resume status. Terminal receipts add duration, outcome, a bounded failure category,
@@ -147,7 +150,13 @@ are preserved; their additive `outcome` distinguishes cancellation.
 
 Both live and saved collectors read plain and compressed rollouts. Deep workers
 persist a receipt per attempt before validating their output, including failed
-and canceled attempts. The pinned native CLI reports cumulative thread usage at
+and canceled attempts. These receipts live under
+`codex-home/worker-usage/<scanId>/` in the host's Codex Security state directory,
+with the scan and worker permission profiles protecting the host-managed store.
+Collectors bind receipts to the selected scan and attempt; model-authored scan
+artifacts cannot introduce usage totals or authorize reading another session.
+Worker receipts remain local runtime state, subject to the host's retention and
+deletion policy. The pinned native CLI reports cumulative thread usage at
 turn completion. Receipts mark this as `usageScope: "thread_cumulative"`:
 resumed attempts on the same thread are reconciled by maximum, then compared
 with the native thread total by maximum, preserving whole cumulative snapshots.

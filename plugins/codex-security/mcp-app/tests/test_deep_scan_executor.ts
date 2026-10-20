@@ -1569,6 +1569,13 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               ? undefined
               : path.join(codexHome, `${nativeProfile}.config.toml`);
           const literalDeniedPath = `/repo/literal.key"\\雪\u007f-${index}`;
+          const workerUsageDirectory = path.join(
+            fixture.root,
+            `state-${index}`,
+            "codex-home",
+            "worker-usage",
+            `scan-${index}`,
+          );
           const parentSandbox = {
             filesystemDenies: [
               ...trustedParentSandboxWithDenials.filesystemDenies,
@@ -1627,6 +1634,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             nativeProfile,
             profilePath,
             parentSandbox,
+            workerUsageDirectory,
             permissionProfile: {
               ...deniedWorkerPermissionProfile,
               filesystem: {
@@ -1634,6 +1642,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 [deepPath]: { ".": "deny" },
                 [codexHome]: { ".": "deny" },
                 [literalDeniedPath]: { ".": "deny" },
+                [workerUsageDirectory]: { ".": "deny" },
               },
             },
             provider,
@@ -1940,6 +1949,8 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               return executor.run(
                 workerRequest(promptPath, fixture.root, {
                   attemptId: `worker-${index}-${kind}-${resumeThreadId ?? "new"}`,
+                  workerUsageDirectory:
+                    workerConfigurations[index].workerUsageDirectory,
                   kind,
                   resumeThreadId,
                   ...(resumeThreadId
@@ -2021,6 +2032,15 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 arg.startsWith("permissions.codex_security_policy"),
               ),
               false,
+            );
+            assert.equal(
+              workerConfigurations[
+                index
+              ].parentSandbox.literalFilesystemDenies.includes(
+                workerConfigurations[index].workerUsageDirectory,
+              ),
+              false,
+              "The receipt deny is scoped to this launch without changing parent settings.",
             );
             assert.equal(
               workerLaunch.environment!.CODEX_SECURITY_KNOWLEDGE_BASE,
@@ -3129,7 +3149,7 @@ export { recordCodexSecurityDeepReduction } from "./src/artifact-deep-reducer.ts
               (worker: { id: string }) => worker.id === workerId,
             );
             assert.equal(worker.attempt, 1);
-            assert.ok(worker.error.includes(persistedDiagnostic));
+            assert.ok(worker.error.includes(persistedDiagnostic), worker.error);
             assert.equal(
               (await readJson(fixture.markerPath)).argv.includes("resume"),
               false,
@@ -3173,7 +3193,7 @@ export { recordCodexSecurityDeepReduction } from "./src/artifact-deep-reducer.ts
     } finally {
       for (const [name, value] of saved) restoreEnv(name, value);
     }
-  });
+  }, null);
 }
 
 async function testOwnedArtifactToolFailureDiagnosticIsPreserved() {

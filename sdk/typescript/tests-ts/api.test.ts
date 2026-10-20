@@ -254,10 +254,17 @@ test.each(["completed", "receipt-lost", "scan-interrupted", "prompt-files"])(
       const { events } = await readOperationTelemetry(
         environment.CODEX_SECURITY_STATE_DIR,
       );
+      const starts = events.filter((event) => event.type === "attempt_started");
+      expect(starts).toHaveLength(2);
       const terminal = events.filter(
         (event) => event.type === "attempt_finished",
       );
       expect(terminal).toHaveLength(2);
+      for (const start of starts) {
+        expect(
+          terminal.find((event) => event.attemptId === start.attemptId),
+        ).toMatchObject({ operationId: start.operationId });
+      }
       expect(summarizeOperationTelemetry(events).reusedAttempts).toBe(
         scenario === "scan-interrupted" ? 0 : 1,
       );

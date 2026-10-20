@@ -1,6 +1,13 @@
 import { afterEach, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { access, appendFile, mkdir, writeFile } from "node:fs/promises";
+import {
+  access,
+  appendFile,
+  mkdir,
+  readdir,
+  rename,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import {
   OperationTelemetry,
@@ -10,6 +17,7 @@ import {
 } from "../src/operation-telemetry.js";
 import { TestClient } from "./support/api-client.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { workflowFixture } from "./support/workflow-fixture.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures("telemetry-");
 afterEach(cleanup);
@@ -55,6 +63,116 @@ test("journals early failures without copying target paths or diagnostic text", 
     "missing-synthetic-repository",
   );
 });
+
+test("rejected workflow state paths leave sealed artifacts unchanged", async () => {
+  await using fixture = await workflowFixture();
+  const state = join(fixture.scanDir, "state");
+  const entries = await readdir(fixture.scanDir, { recursive: true });
+  const observed: OperationTelemetryEvent[] = [];
+  const client = new TestClient(
+    {},
+    {
+      environment: {
+        ...fixture.environment,
+        CODEX_SECURITY_STATE_DIR: state,
+      },
+      createOperationTelemetry: (options) => new OperationTelemetry(options),
+    },
+  );
+  try {
+    await expect(
+      client.run(fixture.repository, {
+        mode: "standard",
+        workflowId: "synthetic-workflow",
+        outputDir: fixture.scanDir,
+        onTelemetry: (event) => observed.push(event),
+      }),
+    ).rejects.toThrow(
+      "Workflow state must be outside the sealed scan artifacts.",
+    );
+  } finally {
+    await client.close();
+  }
+  expect((await readdir(fixture.scanDir, { recursive: true })).sort()).toEqual(
+    entries.sort(),
+  );
+  await expect(access(state)).rejects.toThrow();
+  expect(observed.map((event) => event.type)).toEqual([
+    "attempt_started",
+    "attempt_finished",
+  ]);
+  expect(observed[1]).toMatchObject({
+    outcome: "failed",
+    collection: { persisted: 0, writeFailures: 0 },
+  });
+});
+
+test.each(["explicit", "saved"] as const)(
+  "%s workflow artifacts cannot become the journal directory",
+  async (source) => {
+    await using fixture = await workflowFixture();
+    const state = fixture.environment.CODEX_SECURITY_STATE_DIR;
+    await mkdir(state, { mode: 0o700 });
+    const scanDir = join(state, "telemetry");
+    await rename(fixture.scanDir, scanDir);
+    const entries = await readdir(scanDir, { recursive: true });
+    const observed: OperationTelemetryEvent[] = [];
+    const warnings: string[] = [];
+    const client = new TestClient(
+      {},
+      {
+        environment: {
+          ...fixture.environment,
+          CODEX_SECURITY_STATE_DIR: state,
+        },
+        createOperationTelemetry: (options) => new OperationTelemetry(options),
+        runWorkbench: async () => ({
+          workflow: {
+            id: "synthetic-workflow",
+            scanId: fixture.document.scanId,
+            scanDir,
+            stages: {
+              scan: {
+                status: "completed",
+                result: {
+                  threadId: "synthetic-thread",
+                  turnResult: { status: "completed" },
+                },
+              },
+              publish: { status: "pending" },
+              dedupe: { status: "pending" },
+            },
+          },
+        }),
+      },
+    );
+    try {
+      const result = await client.run(fixture.repository, {
+        mode: "standard",
+        workflowId: "synthetic-workflow",
+        ...(source === "explicit" ? { outputDir: scanDir } : {}),
+        onTelemetry: (event) => observed.push(event),
+        onWarning: (message) => warnings.push(message),
+      });
+      expect(result.manifest.scan.id).toBe(fixture.document.scanId);
+    } finally {
+      await client.close();
+    }
+    expect((await readdir(scanDir, { recursive: true })).sort()).toEqual(
+      entries.sort(),
+    );
+    expect(observed.map((event) => event.type)).toEqual([
+      "attempt_started",
+      "attempt_finished",
+    ]);
+    expect(observed[1]).toMatchObject({
+      outcome: "completed",
+      reusedResult: true,
+      collection: { persisted: 0, writeFailures: 1 },
+    });
+    expect(warnings).toHaveLength(1);
+  },
+);
 
 test("resume keeps the operation identity and replay deduplicates terminal receipts", async () => {
   const directory = await temporaryDirectory();

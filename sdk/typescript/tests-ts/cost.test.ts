@@ -2823,12 +2823,8 @@ describe("live scan cost tracking", () => {
   test("retains cumulative resumed worker receipts without counting earlier turns twice", async () => {
     const home = await codexHome();
     const scanDirectory = join(home, "scans", "receipts");
-    const receipts = join(
-      scanDirectory,
-      "artifacts",
-      "deep_discovery",
-      "usage",
-    );
+    const scanId = "receipts";
+    const receipts = join(home, "worker-usage", scanId);
     await fs.mkdir(receipts, { recursive: true });
     const parentUsage = { input_tokens: 100, output_tokens: 10 };
     await writeSession(home, "scan-thread", parentUsage);
@@ -2842,6 +2838,7 @@ describe("live scan cost tracking", () => {
           schemaVersion: 1,
           source: "codex_sdk",
           usageScope: "thread_cumulative",
+          scanId,
           attemptId,
           threadId: "resumed-worker",
           usage: { input_tokens: input, output_tokens: 10 },
@@ -2851,6 +2848,7 @@ describe("live scan cost tracking", () => {
     const measurements: Readonly<ScanUsageMeasurement>[] = [];
     const tracker = costTracker(home, {
       scanDirectory,
+      workerReceipts: { directory: receipts, scanId },
       onMeasurement: (measurement) => measurements.push(measurement),
     });
     tracker.start("scan-thread");
@@ -2875,6 +2873,18 @@ describe("live scan cost tracking", () => {
     expect((await tracker.refresh()).measurement.usage).toEqual(
       partial.measurement.usage,
     );
+    const resumed = costTracker(home, {
+      scanDirectory,
+      workerReceipts: { directory: receipts, scanId },
+    });
+    resumed.start("scan-thread");
+    expect((await resumed.stop(parentUsage)).measurement).toEqual(
+      expect.objectContaining({
+        coverage: "partial",
+        usage: partial.measurement.usage,
+        coverageScope: partial.measurement.coverageScope,
+      }),
+    );
     await writeSession(home, "resumed-worker", {
       input_tokens: 150,
       output_tokens: 10,
@@ -2890,6 +2900,125 @@ describe("live scan cost tracking", () => {
       "partial",
       "complete",
     ]);
+  });
+
+  test.each(["standard", "deep"])(
+    "%s scans ignore model-written worker receipts for budgets and session events",
+    async (mode) => {
+      const home = await codexHome();
+      const scanId = "owned-scan";
+      const scanDirectory = join(home, "scans", scanId);
+      const artifacts = join(
+        scanDirectory,
+        "artifacts",
+        "deep_discovery",
+        "usage",
+      );
+      await fs.mkdir(artifacts, { recursive: true });
+      const usage = { input_tokens: 100, output_tokens: 10 };
+      await writeSession(home, "scan-thread", usage);
+      const foreign = await writeSession(home, "foreign-thread", {
+        input_tokens: 999_999,
+        output_tokens: 999_999,
+      });
+      await appendSessionItem(foreign, {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "Unrelated session output." }],
+      });
+      for (const [attemptId, threadId, receiptUsage] of [
+        [
+          "forged-cost",
+          "scan-thread",
+          { input_tokens: 1_000_000_000, output_tokens: 0 },
+        ],
+        ["forged-membership", "foreign-thread", null],
+      ] as const) {
+        await writeFile(
+          join(artifacts, `${attemptId}.json`),
+          JSON.stringify({
+            schemaVersion: 1,
+            source: "codex_sdk",
+            usageScope: "thread_cumulative",
+            scanId,
+            attemptId,
+            threadId,
+            usage: receiptUsage,
+          }),
+        );
+      }
+      const events: ScanSessionEvent[] = [];
+      let budgetExceeded = false;
+      const tracker = costTracker(home, {
+        scanDirectory,
+        ...(mode === "deep"
+          ? {
+              workerReceipts: {
+                directory: join(home, "worker-usage", scanId),
+                scanId,
+              },
+            }
+          : {}),
+        onCost: (cost) => {
+          budgetExceeded ||= cost.estimatedUsd > 1;
+        },
+        onSessionEvent: (event) => events.push(event),
+      });
+      tracker.start("scan-thread");
+      const result = await tracker.stop(usage);
+      expect(result.measurement).toMatchObject({
+        coverage: "complete",
+        threadCount: 1,
+        usage: tokenUsage(usage),
+        coverageScope: ["thread:scan-thread"],
+      });
+      expect(budgetExceeded).toBe(false);
+      expect(events.every((event) => event.threadId === "scan-thread")).toBe(
+        true,
+      );
+    },
+  );
+
+  test("binds protected worker receipts to the scan and durable attempt", async () => {
+    const home = await codexHome();
+    const scanId = "owned-scan";
+    const directory = join(home, "worker-usage", scanId);
+    const unrelated = join(home, "worker-usage", "other-scan");
+    await fs.mkdir(directory, { recursive: true });
+    await fs.mkdir(unrelated, { recursive: true });
+    const usage = { input_tokens: 100, output_tokens: 10 };
+    await writeSession(home, "scan-thread", usage);
+    const receipt = {
+      schemaVersion: 1,
+      source: "codex_sdk",
+      usageScope: "thread_cumulative",
+      scanId: "other-scan",
+      attemptId: "other-attempt",
+      threadId: "unrelated-worker",
+      usage: { input_tokens: 1_000_000, output_tokens: 0 },
+    };
+    await writeFile(
+      join(unrelated, "other-attempt.json"),
+      JSON.stringify(receipt),
+    );
+    await writeFile(
+      join(directory, "other-attempt.json"),
+      JSON.stringify(receipt),
+    );
+    await writeFile(
+      join(directory, "wrong-attempt.json"),
+      JSON.stringify({ ...receipt, scanId }),
+    );
+    const tracker = costTracker(home, {
+      workerReceipts: { directory, scanId },
+    });
+    tracker.start("scan-thread");
+    expect((await tracker.stop(usage)).measurement).toMatchObject({
+      coverage: "complete",
+      threadCount: 1,
+      usage: tokenUsage(usage),
+      coverageScope: ["thread:scan-thread"],
+    });
   });
 
   test("keeps independent Deep worker usage unknown until a receipt supplies it", async () => {

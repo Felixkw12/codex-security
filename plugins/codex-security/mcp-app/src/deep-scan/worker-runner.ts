@@ -428,7 +428,12 @@ export class DeepScanWorkerRunner {
       const persistUsage = async () => {
         receipt.observedAt = new Date(this.options.clock.now()).toISOString();
         try {
-          await writeWorkerUsageReceipt(run.scanDir, receipt);
+          if (!run.workerUsageDirectory) {
+            throw new Error(
+              "The host did not provide a worker usage directory.",
+            );
+          }
+          await writeWorkerUsageReceipt(run.workerUsageDirectory, receipt);
         } catch (error) {
           this.log({
             event: "worker_usage_unavailable",
@@ -468,6 +473,7 @@ export class DeepScanWorkerRunner {
       try {
         const result = await this.options.executor.run({
           attemptId,
+          workerUsageDirectory: run.workerUsageDirectory,
           kind: input.kind,
           promptPath: executionPromptPath,
           // Discovery workers write only to their isolated directory. Reducers

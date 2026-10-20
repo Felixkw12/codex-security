@@ -762,8 +762,13 @@ export class CodexSecurity {
       this.#dependencies.runWorkbench,
       this.config.pythonPath,
     );
-    if (options.outputDir !== undefined)
+    const artifactRoots: string[] = [];
+    if (options.outputDir !== undefined) {
       await workflow.protectArtifacts(options.outputDir);
+      artifactRoots.push(
+        await canonicalConfigPath(expandHome(options.outputDir)),
+      );
+    }
     const state = await workflow.bind({
       repositoryPath: local.repository,
       scanRequestDigest: workflowDigest({
@@ -784,12 +789,19 @@ export class CodexSecurity {
         },
       }),
     });
+    if (state.scanId && state.scanDir) {
+      await workflow.protectArtifacts(state.scanDir);
+      artifactRoots.push(await canonicalConfigPath(expandHome(state.scanDir)));
+    }
+    await this.#operationTelemetry?.activatePersistence([
+      ...local.protectedRoots,
+      ...artifactRoots,
+    ]);
     type ScanMetadata = Pick<
       ScanResultOptions,
       "threadId" | "turnResult" | "sarifPath" | "repositoryFindings"
     >;
     if (state.scanId && state.scanDir) {
-      await workflow.protectArtifacts(state.scanDir);
       let metadata = state.stages.scan.result as ScanMetadata | undefined;
       let completed = state.stages.scan.status === "completed";
       if (!completed) {
@@ -2085,6 +2097,10 @@ export class CodexSecurity {
           costAbortController.abort(error);
           return;
         }
+        if (error instanceof AggregateError) {
+          for (const cause of error.errors) reportTrackingError(cause);
+          return;
+        }
         if (
           isRecord(error) &&
           (error["code"] === "EACCES" || error["code"] === "EPERM") &&
@@ -2100,122 +2116,6 @@ export class CodexSecurity {
           "onWarning",
         )(`Could not track scan activity: ${errorMessage(error)}`);
       };
-      const tracker = new ScanCostTracker({
-        codexHome: runtime.codexHome,
-        model,
-        repository: repo,
-        scanDirectory: scanDir,
-        maxCostUsd: options.maxCostUsd,
-        onMeasurement: (measurement) => {
-          latestMeasurement = measurement;
-          if (this.#operationTelemetry !== null)
-            this.#operationTelemetry.measurement = measurement;
-          notifyObserver(options, "onMeasurement")(measurement);
-        },
-        onUsage:
-          options.onUsage === undefined
-            ? undefined
-            : (usage) => notifyObserver(options, "onUsage")(usage),
-        onActivity:
-          options.onActivity === undefined
-            ? undefined
-            : (activity) => notifyObserver(options, "onActivity")(activity),
-        onWorkerEvent:
-          options.onWorkerEvent === undefined
-            ? undefined
-            : (event) => notifyObserver(options, "onWorkerEvent")(event),
-        onSessionEvent:
-          options.onSessionEvent === undefined
-            ? undefined
-            : (event) => notifyObserver(options, "onSessionEvent")(event),
-        onProgress:
-          options.onProgress === undefined
-            ? undefined
-            : (progress) =>
-                reportProgress({
-                  ...progress,
-                  // Worker counts belong to the parent scan's current phase.
-                  phase: mode === "deep" ? progress.phase : latestPhase,
-                }),
-        onCost:
-          options.onCost === undefined && options.maxCostUsd === undefined
-            ? undefined
-            : (cost, complete) => {
-                latestCost = cost;
-                latestCostComplete = complete;
-                if (complete)
-                  notifyObserver(options, "onCost")(cost, maxCostUsd);
-                if (
-                  maxCostUsd !== undefined &&
-                  cost.estimatedUsd > maxCostUsd
-                ) {
-                  costAbortController.abort(
-                    new ScanCostLimitExceededError(maxCostUsd, cost, scanDir),
-                  );
-                  return;
-                }
-                const request = options.onBudgetApproaching;
-                if (
-                  request === undefined ||
-                  maxCostUsd === undefined ||
-                  budgetSignal.aborted ||
-                  notifiedLimit === maxCostUsd ||
-                  cost.estimatedUsd < maxCostUsd * 0.8
-                )
-                  return;
-                const limit = maxCostUsd;
-                notifiedLimit = limit;
-                void Promise.resolve()
-                  .then(async () => {
-                    if (budgetSignal.aborted) return;
-                    const next = await request({
-                      maxCostUsd: limit,
-                      cost,
-                      signal: budgetSignal,
-                    });
-                    if (
-                      next === undefined ||
-                      budgetSignal.aborted ||
-                      activeScan === null
-                    )
-                      return;
-                    if (
-                      !Number.isFinite(next) ||
-                      next <= Math.max(limit, latestCost!.estimatedUsd)
-                    ) {
-                      throw new CodexSecurityError(
-                        "The new cost limit must exceed the current limit and estimated cost.",
-                      );
-                    }
-                    await workbench(
-                      { ...activeScan.options, signal: budgetSignal },
-                      workbenchArgs("set-scan-cost-limit", {
-                        scanId: activeScan.id,
-                        maxCostUsd: String(next),
-                      }),
-                    );
-                    if (budgetSignal.aborted) return;
-                    maxCostUsd = next;
-                    if (latestCostComplete)
-                      notifyObserver(options, "onCost")(
-                        latestCost!,
-                        maxCostUsd,
-                      );
-                  })
-                  .catch((error: unknown) => {
-                    if (!budgetSignal.aborted) {
-                      notifyObserver(
-                        options,
-                        "onWarning",
-                      )(
-                        `Could not increase scan cost limit: ${errorMessage(error)}`,
-                      );
-                    }
-                  });
-              },
-        onError: reportTrackingError,
-      });
-      costTracker = tracker;
       const scanKnowledge =
         knowledgeBase === null ? undefined : options.knowledgeBaseSnapshot;
       const recipe = scanRecipe({
@@ -2369,6 +2269,134 @@ export class CodexSecurity {
           "The Codex Security workbench returned an invalid scan registration.",
         );
       }
+      const tracker = new ScanCostTracker({
+        codexHome: runtime.codexHome,
+        model,
+        repository: repo,
+        scanDirectory: scanDir,
+        ...(mode === "deep"
+          ? {
+              workerReceipts: {
+                directory: join(
+                  await canonicalConfigPath(join(stateDirectory, "codex-home")),
+                  "worker-usage",
+                  scanId,
+                ),
+                scanId,
+              },
+            }
+          : {}),
+        maxCostUsd: options.maxCostUsd,
+        onMeasurement: (measurement) => {
+          latestMeasurement = measurement;
+          if (this.#operationTelemetry !== null)
+            this.#operationTelemetry.measurement = measurement;
+          notifyObserver(options, "onMeasurement")(measurement);
+        },
+        onUsage:
+          options.onUsage === undefined
+            ? undefined
+            : (usage) => notifyObserver(options, "onUsage")(usage),
+        onActivity:
+          options.onActivity === undefined
+            ? undefined
+            : (activity) => notifyObserver(options, "onActivity")(activity),
+        onWorkerEvent:
+          options.onWorkerEvent === undefined
+            ? undefined
+            : (event) => notifyObserver(options, "onWorkerEvent")(event),
+        onSessionEvent:
+          options.onSessionEvent === undefined
+            ? undefined
+            : (event) => notifyObserver(options, "onSessionEvent")(event),
+        onProgress:
+          options.onProgress === undefined
+            ? undefined
+            : (progress) =>
+                reportProgress({
+                  ...progress,
+                  // Worker counts belong to the parent scan's current phase.
+                  phase: mode === "deep" ? progress.phase : latestPhase,
+                }),
+        onCost:
+          options.onCost === undefined && options.maxCostUsd === undefined
+            ? undefined
+            : (cost, complete) => {
+                latestCost = cost;
+                latestCostComplete = complete;
+                if (complete)
+                  notifyObserver(options, "onCost")(cost, maxCostUsd);
+                if (
+                  maxCostUsd !== undefined &&
+                  cost.estimatedUsd > maxCostUsd
+                ) {
+                  costAbortController.abort(
+                    new ScanCostLimitExceededError(maxCostUsd, cost, scanDir),
+                  );
+                  return;
+                }
+                const request = options.onBudgetApproaching;
+                if (
+                  request === undefined ||
+                  maxCostUsd === undefined ||
+                  budgetSignal.aborted ||
+                  notifiedLimit === maxCostUsd ||
+                  cost.estimatedUsd < maxCostUsd * 0.8
+                )
+                  return;
+                const limit = maxCostUsd;
+                notifiedLimit = limit;
+                void Promise.resolve()
+                  .then(async () => {
+                    if (budgetSignal.aborted) return;
+                    const next = await request({
+                      maxCostUsd: limit,
+                      cost,
+                      signal: budgetSignal,
+                    });
+                    if (
+                      next === undefined ||
+                      budgetSignal.aborted ||
+                      activeScan === null
+                    )
+                      return;
+                    if (
+                      !Number.isFinite(next) ||
+                      next <= Math.max(limit, latestCost!.estimatedUsd)
+                    ) {
+                      throw new CodexSecurityError(
+                        "The new cost limit must exceed the current limit and estimated cost.",
+                      );
+                    }
+                    await workbench(
+                      { ...activeScan.options, signal: budgetSignal },
+                      workbenchArgs("set-scan-cost-limit", {
+                        scanId: activeScan.id,
+                        maxCostUsd: String(next),
+                      }),
+                    );
+                    if (budgetSignal.aborted) return;
+                    maxCostUsd = next;
+                    if (latestCostComplete)
+                      notifyObserver(options, "onCost")(
+                        latestCost!,
+                        maxCostUsd,
+                      );
+                  })
+                  .catch((error: unknown) => {
+                    if (!budgetSignal.aborted) {
+                      notifyObserver(
+                        options,
+                        "onWarning",
+                      )(
+                        `Could not increase scan cost limit: ${errorMessage(error)}`,
+                      );
+                    }
+                  });
+              },
+        onError: reportTrackingError,
+      });
+      costTracker = tracker;
       const targetRevision =
         registeredRevision === "unversioned" ? null : registeredRevision;
       const registeredFileCount = registration["scopeFileCount"];
@@ -3496,7 +3524,10 @@ export class CodexSecurity {
               this.#dependencies.environment,
             ),
             command: telemetry.command,
-            deferPersistence: telemetry.command === "policy",
+            deferPersistence:
+              telemetry.command === "policy" ||
+              (telemetry.command === "scan" &&
+                telemetry.options.workflowId !== undefined),
             surface: this.#surface,
             mode: telemetry.mode,
             resumeScanId: telemetry.options.resumeScanId,

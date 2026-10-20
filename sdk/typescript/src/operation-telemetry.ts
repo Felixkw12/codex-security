@@ -121,7 +121,7 @@ export class OperationTelemetry {
     await this.#emit("attempt_started");
   }
 
-  /** Policy discovery supplies all nested Git storage roots before any writes. */
+  /** Callers establish repository and artifact protection before any writes. */
   async activatePersistence(protectedRoots: readonly string[]): Promise<void> {
     if (!this.#deferred || this.#finished) return;
     this.#deferred = false;

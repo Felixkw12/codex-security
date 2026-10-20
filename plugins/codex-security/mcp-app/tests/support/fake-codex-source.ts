@@ -10,7 +10,11 @@ export function fakeCodexSource(
 import { existsSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
-const preflightProfile = process.env.FAKE_CODEX_PREFLIGHT_PROFILE ? JSON.parse(process.env.FAKE_CODEX_PREFLIGHT_PROFILE) : ${JSON.stringify(preflightProfile)};
+const preflightProfile = process.env.FAKE_CODEX_PREFLIGHT_PROFILE ? JSON.parse(process.env.FAKE_CODEX_PREFLIGHT_PROFILE) : ${
+    preflightProfile === null
+      ? `(await import(${JSON.stringify(import.meta.resolve("smol-toml"))})).parse(process.argv.find(arg => arg.startsWith('permissions.codex_security_deep_scan_worker=')) ?? '').permissions?.codex_security_deep_scan_worker`
+      : JSON.stringify(preflightProfile)
+  };
 const preflightAllowed = ${JSON.stringify(preflightAllowed)};
 const accountResult = ${JSON.stringify(accountResult)};
 const preflightMarkerPath = process.env.FAKE_CODEX_PREFLIGHT_MARKER ?? ${JSON.stringify(preflightMarkerPath)};

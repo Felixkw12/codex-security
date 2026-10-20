@@ -76,6 +76,8 @@ export interface CodexWorkerArtifactContext {
 /** Transport-neutral contract for one top-level Codex worker. */
 export interface CodexWorkerRequest {
   attemptId?: string;
+  /** Host-bound receipt storage, excluded from model filesystem access. */
+  workerUsageDirectory?: string;
   kind: DeepScanWorkerKind;
   promptPath: string;
   workingDirectory: string;

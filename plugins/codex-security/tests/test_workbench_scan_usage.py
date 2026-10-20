@@ -43,6 +43,10 @@ class ScanFixture:
     diff_target: dict[str, Any] | None = None
 
 
+def _worker_usage_directory(fixture: ScanFixture) -> Path:
+    return fixture.state_dir / "codex-home" / "worker-usage" / fixture.scan_id
+
+
 def _start_scan(tmp_path: Path, *, mode: str = "standard") -> ScanFixture:
     state_dir = tmp_path / "workbench-state"
     target = tmp_path / "target"
@@ -2399,6 +2403,96 @@ def test_completed_scan_reconciles_late_runtime_usage_envelopes(
         assert "cost" not in reconciled
 
 
+@pytest.mark.parametrize("mode", ["standard", "deep"])
+def test_model_artifact_worker_receipts_do_not_affect_saved_usage(
+    tmp_path: Path, mode: str
+) -> None:
+    fixture = _start_scan(tmp_path, mode=mode)
+    counted = fixture.started_at + timedelta(microseconds=1)
+    directory = fixture.scan_dir / "artifacts" / "deep_discovery" / "usage"
+    directory.mkdir(parents=True)
+    for thread_id in ["scan-parent", "unrelated-worker"]:
+        attempt_id = str(uuid.uuid4())
+        (directory / f"{attempt_id}.json").write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "source": "codex_sdk",
+                    "usageScope": "thread_cumulative",
+                    "scanId": fixture.scan_id,
+                    "kind": "discovery",
+                    "attemptId": attempt_id,
+                    "threadId": thread_id,
+                    "startedAt": counted.isoformat(),
+                    "observedAt": counted.isoformat(),
+                    "usage": _token_event(counted, 1_000_000, 0)["payload"]["info"][
+                        "total_token_usage"
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+    _state_graph(
+        fixture.environment,
+        {
+            "scan-parent": _rollout(tmp_path, "scan-parent", [_token_event(counted, 10, 2)]),
+            "unrelated-worker": _rollout(
+                tmp_path, "unrelated-worker", [_token_event(counted, 1_000_000, 0)]
+            ),
+        },
+        [],
+    )
+    measurement = fail_scan(
+        fixture.state_dir, fixture.scan_id, "Fixture failure.", environment=fixture.environment
+    )["scan"]["usage"]
+    assert measurement["coverage"] == "complete"
+    assert measurement["totalTokens"] == 12
+    assert measurement["threadCount"] == 1
+    assert measurement["coverageScope"] == ["thread:scan-parent"]
+
+
+def test_deep_worker_receipt_storage_is_isolated_between_scans(tmp_path: Path) -> None:
+    fixture = _start_scan(tmp_path, mode="deep")
+    counted = fixture.started_at + timedelta(microseconds=1)
+    directory = _worker_usage_directory(fixture)
+    directory.mkdir(parents=True)
+    another_scan = str(uuid.uuid4())
+    unrelated_directory = directory.parent / another_scan
+    unrelated_directory.mkdir()
+    attempt_id = str(uuid.uuid4())
+    receipt = {
+        "schemaVersion": 1,
+        "source": "codex_sdk",
+        "usageScope": "thread_cumulative",
+        "scanId": another_scan,
+        "kind": "discovery",
+        "attemptId": attempt_id,
+        "threadId": "unrelated-worker",
+        "startedAt": counted.isoformat(),
+        "observedAt": counted.isoformat(),
+        "usage": _token_event(counted, 1_000_000, 0)["payload"]["info"]["total_token_usage"],
+    }
+    (unrelated_directory / f"{attempt_id}.json").write_text(json.dumps(receipt), encoding="utf-8")
+    _state_graph(
+        fixture.environment,
+        {"scan-parent": _rollout(tmp_path, "scan-parent", [_token_event(counted, 10, 2)])},
+        [],
+    )
+    measurement = fail_scan(
+        fixture.state_dir, fixture.scan_id, "Fixture failure.", environment=fixture.environment
+    )["scan"]["usage"]
+    assert measurement["coverage"] == "complete"
+    assert measurement["totalTokens"] == 12
+    assert measurement["coverageScope"] == ["thread:scan-parent"]
+    # A misplaced host receipt also cannot attribute another scan's usage here.
+    (directory / f"{attempt_id}.json").write_text(json.dumps(receipt), encoding="utf-8")
+    measurement = fail_scan(
+        fixture.state_dir, fixture.scan_id, "Fixture failure.", environment=fixture.environment
+    )["scan"]["usage"]
+    assert measurement["totalTokens"] == 12
+    assert "thread:unrelated-worker" not in measurement["coverageScope"]
+
+
 @pytest.mark.parametrize(
     ("native_database", "native_worker_tokens", "unmeasured_attempt"),
     [(False, None, True), (True, None, True), (True, 150, True), (True, 150, False)],
@@ -2412,7 +2506,7 @@ def test_stopped_deep_scan_reconciles_cumulative_worker_receipts(
     fixture = _start_scan(tmp_path, mode="deep")
     counted = fixture.started_at + timedelta(microseconds=1)
     timestamp = counted.isoformat()
-    directory = fixture.scan_dir / "artifacts" / "deep_discovery" / "usage"
+    directory = _worker_usage_directory(fixture)
     directory.mkdir(parents=True)
     for index, amount in enumerate([100, 150, None] if unmeasured_attempt else [100, 150]):
         attempt_id = str(uuid.uuid4())
@@ -2480,7 +2574,7 @@ def test_worker_receipts_preserve_cumulative_totals_and_known_cache_writes(
 ) -> None:
     fixture = _start_scan(tmp_path, mode="deep")
     counted = fixture.started_at + timedelta(microseconds=1)
-    directory = fixture.scan_dir / "artifacts" / "deep_discovery" / "usage"
+    directory = _worker_usage_directory(fixture)
     directory.mkdir(parents=True)
     snapshots = [
         ("first-worker", 100, 5, True, 0),
@@ -2549,7 +2643,7 @@ def test_stopped_deep_scan_reconciles_missing_sdk_receipts_with_native_usage(
 ) -> None:
     fixture = _start_scan(tmp_path, mode="deep")
     counted = fixture.started_at + timedelta(microseconds=1)
-    directory = fixture.scan_dir / "artifacts" / "deep_discovery" / "usage"
+    directory = _worker_usage_directory(fixture)
     directory.mkdir(parents=True)
     for amount in [None, 30] if native_state == "sdk_subtotal_larger" else [None]:
         attempt_id = str(uuid.uuid4())

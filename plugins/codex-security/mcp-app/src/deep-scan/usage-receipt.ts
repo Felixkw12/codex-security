@@ -1,5 +1,5 @@
 import { promises as fs } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { requireArtifactRoot } from "../artifact-io.js";
 import { writeJsonAtomic } from "./artifacts.js";
 import type { DeepScanWorkerKind } from "./types.js";
@@ -85,22 +85,18 @@ export function workerTokenUsage(
 }
 
 export async function writeWorkerUsageReceipt(
-  scanDirectory: string,
+  directory: string,
   receipt: WorkerUsageReceipt,
 ): Promise<void> {
-  const artifacts = await requireArtifactRoot(
-    join(scanDirectory, "artifacts"),
-    "Worker usage",
-  );
-  const deep = join(artifacts, "deep_discovery");
-  await fs.mkdir(deep, { recursive: true, mode: 0o700 });
-  await requireArtifactRoot(deep, "Worker usage");
-  const directory = join(deep, "usage");
-  await fs
-    .mkdir(directory, { mode: 0o700 })
-    .catch((error: NodeJS.ErrnoException) => {
-      if (error.code !== "EEXIST") throw error;
-    });
-  await requireArtifactRoot(directory, "Worker usage");
+  const privateHome = dirname(dirname(directory));
+  await requireArtifactRoot(dirname(privateHome), "Worker usage");
+  for (const path of [privateHome, dirname(directory), directory]) {
+    await fs
+      .mkdir(path, { mode: 0o700 })
+      .catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== "EEXIST") throw error;
+      });
+    await requireArtifactRoot(path, "Worker usage");
+  }
   await writeJsonAtomic(join(directory, `${receipt.attemptId}.json`), receipt);
 }

@@ -10,6 +10,7 @@ import {
 import { join, relative, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { isRecord } from "./record.js";
+import { errorMessage } from "./errors.js";
 import { sessionLines } from "./session-lines.js";
 import {
   estimateScanCost,
@@ -64,6 +65,8 @@ interface ScanCostTrackerOptions {
   model: string;
   repository?: string;
   scanDirectory?: string;
+  /** Host-bound store outside model-writable scan artifacts, for Deep scans only. */
+  workerReceipts?: { directory: string; scanId: string };
   maxCostUsd?: number;
   expectedFilesTotal?: number;
   /** Incomplete costs are measured subtotals, usable for spending limits only. */
@@ -260,7 +263,7 @@ export class ScanCostTracker {
       this.#options.onActivity === undefined
         ? undefined
         : this.#options.repository;
-    let collectionError: unknown;
+    const collectionErrors: unknown[] = [];
     const unreadable: Array<{ session: SessionUsage; error: unknown }> = [];
     for (const directory of ["sessions", "archived_sessions"]) {
       try {
@@ -281,12 +284,12 @@ export class ScanCostTracker {
               path.endsWith(".zst"),
             );
           } catch (error) {
-            if (session.threadId === null) collectionError ??= error;
+            if (session.threadId === null) collectionErrors.push(error);
             else unreadable.push({ session, error });
           }
         }
       } catch (error) {
-        collectionError ??= error;
+        collectionErrors.push(error);
       }
     }
 
@@ -296,9 +299,9 @@ export class ScanCostTracker {
       attemptIds: new Set(),
     };
     try {
-      workerReceipts = await readWorkerReceipts(this.#options.scanDirectory);
+      workerReceipts = await readWorkerReceipts(this.#options.workerReceipts);
     } catch (error) {
-      collectionError ??= error;
+      collectionErrors.push(error);
     }
     const included = new Set([
       this.#threadId,
@@ -345,7 +348,7 @@ export class ScanCostTracker {
       }
     } while (included.size !== previousSize);
     for (const { session, error } of unreadable) {
-      if (included.has(session.threadId!)) collectionError ??= error;
+      if (included.has(session.threadId!)) collectionErrors.push(error);
     }
 
     const usages = new Map<string, ScanTokenUsage | null>(
@@ -380,7 +383,7 @@ export class ScanCostTracker {
           await readSessionUsage(path, session, repository);
           this.#sessions.set(path, session);
         } catch (error) {
-          collectionError ??= error;
+          collectionErrors.push(error);
           session = tracked;
         }
       } else if (path.endsWith(".zst") && !session.compressedRead) {
@@ -389,7 +392,7 @@ export class ScanCostTracker {
         try {
           await readSessionUsage(path, session, repository);
         } catch (error) {
-          collectionError ??= error;
+          collectionErrors.push(error);
         }
       }
       let worker: number | undefined;
@@ -452,7 +455,7 @@ export class ScanCostTracker {
       if (incomplete.has(threadId)) missingThreadCount += 1;
       usage = addTokenUsage(usage, value);
     }
-    if (collectionError !== undefined)
+    if (collectionErrors.length > 0)
       missingThreadCount = Math.max(1, missingThreadCount);
     const complete = missingThreadCount === 0 && usage !== null;
     const cost = estimateScanCost(this.#options.model, usage);
@@ -462,7 +465,7 @@ export class ScanCostTracker {
       complete,
       threadCount,
       missingThreadCount,
-      collectionError === undefined
+      collectionErrors.length === 0
         ? [
             ...[...included].map((id) => `thread:${id}`),
             ...[...workerReceipts.attemptIds].map(
@@ -475,8 +478,13 @@ export class ScanCostTracker {
       this.#reportUsage(usage);
     }
     this.#reportCost(cost, complete);
-    // Preserve every available receipt before surfacing the original read error.
-    if (collectionError !== undefined) throw collectionError;
+    // Preserve measured usage and every diagnostic when several logs fail together.
+    if (collectionErrors.length === 1) throw collectionErrors[0];
+    if (collectionErrors.length > 1)
+      throw new AggregateError(
+        collectionErrors,
+        collectionErrors.map(errorMessage).join("\n"),
+      );
   }
 
   #setSnapshot(
@@ -564,7 +572,9 @@ export class ScanCostTracker {
   }
 }
 
-async function readWorkerReceipts(scanDirectory: string | undefined): Promise<{
+async function readWorkerReceipts(
+  store: ScanCostTrackerOptions["workerReceipts"],
+): Promise<{
   usages: Map<string, ScanTokenUsage | null>;
   unknownAttempts: number;
   attemptIds: Set<string>;
@@ -572,8 +582,8 @@ async function readWorkerReceipts(scanDirectory: string | undefined): Promise<{
   const usages = new Map<string, ScanTokenUsage | null>();
   const attempts = new Set<string>();
   const result = { usages, unknownAttempts: 0, attemptIds: attempts };
-  if (scanDirectory === undefined) return result;
-  const directory = join(scanDirectory, "artifacts", "deep_discovery", "usage");
+  if (store === undefined) return result;
+  const { directory, scanId } = store;
   try {
     const directoryInfo = await lstat(directory);
     if (
@@ -593,7 +603,9 @@ async function readWorkerReceipts(scanDirectory: string | undefined): Promise<{
         receipt["schemaVersion"] !== 1 ||
         receipt["source"] !== "codex_sdk" ||
         receipt["usageScope"] !== "thread_cumulative" ||
+        receipt["scanId"] !== scanId ||
         typeof receipt["attemptId"] !== "string" ||
+        entry.name !== `${receipt["attemptId"]}.json` ||
         attempts.has(receipt["attemptId"])
       )
         continue;
