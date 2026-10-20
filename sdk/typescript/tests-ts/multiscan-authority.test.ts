@@ -120,7 +120,7 @@ async function fixture(registerOnly = false) {
           mode: scan.mode ?? "standard",
           target,
           config: {},
-          scanRequestDigest: scanRequestDigest(config, scan),
+          scanRequestDigest: scanRequestDigest(config, scan, checkout),
         },
         userContext: scan.scanPrompt,
       },

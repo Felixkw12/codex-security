@@ -15,12 +15,17 @@ import { scanRequestDigest } from "../src/finding-workflow.js";
 import { resolvePluginPython } from "../src/runtime.js";
 import { ScanResult } from "../src/result.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { pathToFileURL } from "node:url";
 import { afterEach, expect, test, mock } from "bun:test";
 import { ScanCostTracker } from "../src/cost.js";
 import type { ScanTokenUsage } from "../src/index.js";
 import { CodexSecurity, type ScanOptions } from "../src/api.js";
 import { main } from "../src/cli.js";
-import type { CodexSecurityConfig, JsonObject } from "../src/config.js";
+import {
+  mergedCodexConfig,
+  type CodexSecurityConfig,
+  type JsonObject,
+} from "../src/config.js";
 import type { ProjectConfigInput } from "../src/project-config-schema.js";
 import { readProjectConfig } from "../src/project-config.js";
 import { dependencies, fakeResult, fakeSecurity } from "./cli-fixtures.js";
@@ -62,6 +67,45 @@ async function fixture(input: ProjectConfigInput | string) {
   return { root, repository, configDirectory, config };
 }
 
+async function bulkInventory(
+  input: Awaited<ReturnType<typeof fixture>>,
+  rowModes: readonly string[],
+) {
+  execFileSync("git", ["init", "-q", input.repository]);
+  execFileSync("git", [
+    "-C",
+    input.repository,
+    "-c",
+    "user.name=Test",
+    "-c",
+    "user.email=test@example.test",
+    "-c",
+    "commit.gpgsign=false",
+    "commit",
+    "--allow-empty",
+    "-qm",
+    "fixture",
+  ]);
+  const revision = execFileSync(
+    "git",
+    ["-C", input.repository, "rev-parse", "HEAD"],
+    { encoding: "utf8" },
+  ).trim();
+  const csv = join(input.root, "repositories.csv");
+  await writeFile(
+    csv,
+    [
+      "id,repository,revision,mode",
+      ...rowModes.map(
+        (mode, index) =>
+          `source-${index},${input.repository},${revision},${mode}`,
+      ),
+      "",
+    ].join("\n"),
+  );
+  return csv;
+}
+
 test.each([
   [undefined, "./node_modules"],
   ["starter.json", "./node_modules"],
@@ -87,6 +131,46 @@ test.each([
     const contents = await readFile(path, "utf8");
     expect(await runCapturedCli(main, args, deps)).toBe(2);
     expect(await readFile(path, "utf8")).toBe(contents);
+  },
+);
+
+test.each(["yaml", "json"])(
+  "init preserves URI-sensitive directory names in the %s schema reference",
+  async (extension) => {
+    const input = await fixture({});
+    const workspace = join(
+      input.root,
+      process.platform === "win32"
+        ? "project #draft %25"
+        : 'project #draft %25 ?review: "quoted"',
+    );
+    const schemaDirectory = join(
+      workspace,
+      "node_modules",
+      "@openai",
+      "codex-security",
+      "schemas",
+    );
+    await mkdir(schemaDirectory, { recursive: true });
+    const schema = join(schemaDirectory, "project-config.schema.json");
+    const contents = '{"type":"object"}\n';
+    await writeFile(schema, contents);
+    const path = join(input.configDirectory, `starter.${extension}`);
+
+    expect(
+      await runCapturedCli(
+        main,
+        ["init", path, "--json"],
+        dependencies({ currentDirectory: workspace }),
+      ),
+    ).toBe(0);
+
+    const selected = await readProjectConfig(path);
+    const reference = new URL(selected.input.$schema!, pathToFileURL(path));
+    expect(reference.hash).toBe("");
+    expect(reference.search).toBe("");
+    expect(await readFile(reference, "utf8")).toBe(contents);
+    expect(reference.href).toBe(pathToFileURL(schema).href);
   },
 );
 
@@ -329,6 +413,53 @@ test.each(["instructions_file", "validation_file"] as const)(
   },
 );
 
+test.each([
+  ["standard", [""], { max_time_minutes: 6000 }, undefined],
+  [
+    "deep",
+    ["standard"],
+    { max_time_minutes: 15, deep: { max_time_hours: 2 } },
+    undefined,
+  ],
+  [
+    "standard",
+    ["standard", "deep"],
+    { max_time_minutes: 15, deep: { max_time_hours: 2 } },
+    "Conflicting",
+  ],
+  ["deep", [""], { max_time_minutes: 6000 }, "5760 minutes"],
+] as const)(
+  "bulk time settings use effective row modes: default %s, rows %j",
+  async (defaultMode, rowModes, time, message) => {
+    const input = await fixture({
+      scan: { mode: defaultMode, ...time },
+      output: { directory: "../batch-results" },
+    });
+    const csv = await bulkInventory(input, rowModes);
+    const selected: ScanOptions[] = [];
+    const { runCli, stderr } = createCliTest(main);
+    const result = await runCli(
+      ["bulk-scan", csv, "-c", input.config, "--json"],
+      dependencies({
+        currentDirectory: input.root,
+        onTurn: (_repository, options) => selected.push(options),
+      }),
+    );
+    expect(result, stderr.text()).toBe(message ? 2 : 0);
+    if (message) {
+      expect(stderr.text()).toContain(message);
+      expect(selected).toEqual([]);
+    } else {
+      expect(selected).toHaveLength(1);
+      expect(selected[0]).toMatchObject({
+        mode: "standard",
+        maxTimeMinutes: time.max_time_minutes,
+      });
+      expect(selected[0]?.maxTimeHours).toBeUndefined();
+    }
+  },
+);
+
 test("bulk scans apply config and linked operator prompts, preserve CSV scope overrides, and retain the policy on resume", async () => {
   const config: ProjectConfigInput = {
     auth: "api-key",
@@ -429,7 +560,7 @@ test("bulk scans apply config and linked operator prompts, preserve CSV scope ov
             mode: options.mode,
             target,
             config: native.codexOverrides,
-            scanRequestDigest: scanRequestDigest(native, options),
+            scanRequestDigest: scanRequestDigest(native, options, root),
           },
           userContext: options.scanPrompt,
         }),
@@ -552,7 +683,9 @@ test("bulk scans apply config and linked operator prompts, preserve CSV scope ov
   });
   expect(selected.find((options) => options.mode === "standard")).toMatchObject(
     {
-      target: ["lib"],
+      target: [
+        join(input.root, "batch-results", "checkouts", "standard", "lib"),
+      ],
       auth: "api-key",
       maxCostUsd: 3,
       failureSeverity: "high",
@@ -644,7 +777,7 @@ test.each(["standard", "deep"] as const)(
     const selected = onTurn.mock.lastCall?.[1];
     expect(selected).toMatchObject({
       mode,
-      target: ["lib"],
+      target: [join(input.repository, "lib")],
       scanPrompt: "Review synthetic boundaries.",
       failureSeverity: "high",
       maxCostUsd: 7,
@@ -1126,6 +1259,48 @@ test("a malformed selected file fails before constructing a client", async () =>
   });
 });
 
+test("dry-run reports native defaults restored by a CLI table", async () => {
+  const input = await fixture({
+    codex: { features: { multi_agent_v2: null } },
+  });
+  const onConfig = mock<(config: CodexSecurityConfig) => void>();
+  const { stdout, runCli } = createCliTest(main);
+  expect(
+    await runCli(
+      [
+        "scan",
+        input.repository,
+        "-c",
+        input.config,
+        "--codex",
+        "features.multi_agent_v2.max_concurrent_threads_per_session=2",
+        "--dry-run",
+        "--json",
+      ],
+      dependencies({
+        currentDirectory: input.repository,
+        onConfig,
+        onRun: throwing("Dry-run must not start a scan"),
+      }),
+    ),
+  ).toBe(0);
+  expect(JSON.parse(stdout.text())).toMatchObject({
+    dryRun: true,
+    projectConfig: {
+      sources: {
+        "codex.features.multi_agent_v2.enabled": "default",
+        "codex.features.multi_agent_v2.max_concurrent_threads_per_session":
+          "cli",
+      },
+    },
+  });
+  expect(
+    (await mergedCodexConfig(onConfig.mock.lastCall![0]))["features"],
+  ).toMatchObject({
+    multi_agent_v2: { enabled: true, max_concurrent_threads_per_session: 2 },
+  });
+});
+
 test("dry-run uses the real SDK without initializing its runtime and reports provenance", async () => {
   const input = await fixture({
     scan: {
@@ -1296,6 +1471,9 @@ test("rerun restores all saved deep settings and authentication without loading 
 
 test.each([
   [{ requiresScanPrompt: true }, "additional instructions"],
+  [{ maxTimeMinutes: 0 }, "invalid investigation time limit"],
+  [{ maxTimeMinutes: "15" }, "invalid investigation time limit"],
+  [{ maxTimeMinutes: 1e12 }, "deadline within the supported date range"],
   [
     { mode: "deep", deepScan: { workers: 7 }, deepScanResolved: true },
     "missing resolved deep scan settings",
@@ -1311,11 +1489,11 @@ test.each([
       config: {},
       ...extra,
     };
-    const stderr = captureCli(main, "stderr");
+    const { stdout, stderr, runCli } = createCliTest(main);
     const onRun = mock();
     expect(
-      await stderr.run(
-        ["scans", "rerun", "saved", "--json"],
+      await runCli(
+        ["scans", "rerun", "saved", "--json", "--full-output"],
         dependencies({
           currentDirectory: input.repository,
           onWorkbench: async () => ({ recipe }),
@@ -1324,6 +1502,10 @@ test.each([
       ),
     ).toBe(2);
     expect(stderr.text()).toContain(message);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      ok: false,
+      error: { message: expect.stringContaining(message) },
+    });
     expect(onRun).not.toHaveBeenCalled();
   },
 );
@@ -1359,7 +1541,9 @@ test.each([
           codexHome: input.root,
           model,
           onUsage: options?.onUsage,
-          onCost: options?.onCost,
+          onCost: (cost, complete) => {
+            if (complete) options?.onCost?.(cost);
+          },
         });
         tracker.start("synthetic-scan-thread");
         await tracker.stop(usage);

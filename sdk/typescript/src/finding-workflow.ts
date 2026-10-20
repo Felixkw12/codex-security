@@ -60,12 +60,21 @@ export function workflowDigest(value: unknown): string {
 export function scanRequestDigest(
   config: CodexSecurityConfig,
   options: ScanOptions,
+  repository?: string,
 ): string {
   return workflowDigest({
     config,
     options: {
       ...options,
-      target: options.target ?? "repository",
+      target:
+        repository !== undefined && Array.isArray(options.target)
+          ? options.target.map(
+              (path) =>
+                relative(repository, resolve(repository, path))
+                  .split(sep)
+                  .join("/") || ".",
+            )
+          : (options.target ?? "repository"),
       mode: options.mode ?? DEFAULT_SCAN_MODE,
       // Prepared campaign context is identified by its staged names and text.
       knowledgeBasePaths:
