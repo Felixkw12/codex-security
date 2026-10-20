@@ -162,13 +162,93 @@ describe("native tracking source validation", () => {
       expect(result.stderr).toContain("invalid JSON");
       expect(result.stderr).toContain("sk-test-1234");
       expect(result.stderr).toContain("\\u001b[2J");
-      if (pathSuffix) {
-        const directory = source === "schema" ? "copied plugin" : "sealed scan";
-        expect(result.stderr).toContain(`${directory}\\u001b[2J`);
+      if (source === "schema" && pathSuffix) {
+        expect(result.stderr).toContain("copied plugin\\u001b[2J");
+      } else if (source === "artifact") {
+        expect(result.stderr).toStartWith(
+          "tracking source preflight failed: findings.json:",
+        );
       }
       expect(result.stderr).not.toContain("\u001b");
     },
   );
+
+  test.each([
+    [
+      "invalid UTF-8",
+      Buffer.from([0xff]),
+      "findings.json: unreadable JSON document.",
+    ],
+    ["a top-level array", "[]", "findings.json: expected a JSON object."],
+    [
+      "a non-finite number",
+      '{"extension":1e400}',
+      'findings.json["extension"]: non-finite JSON numbers are not supported.',
+    ],
+  ] as const)(
+    "uses relative scan document context for %s",
+    async (_case, contents, detail) => {
+      const f = await fixture();
+      const pathSuffix = process.platform === "win32" ? "" : "\u001b[2J";
+      if (pathSuffix) {
+        const scanDir = f.scanDir + pathSuffix;
+        await rename(f.scanDir, scanDir);
+        f.scanDir = scanDir;
+      }
+      await writeFile(join(f.scanDir, "findings.json"), contents);
+      await reseal(f, "findings.json");
+
+      const sdkLoad = loadContract(f.scanDir, { pluginRoot: PLUGIN_ROOT });
+      await expect(sdkLoad).rejects.toThrow(f.scanDir);
+      await expect(sdkLoad).rejects.toThrow(detail);
+
+      const result = run(f);
+      expect(result.status).toBe(2);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toStartWith("tracking source preflight failed:");
+      expect(result.stderr).toContain(detail);
+      expect(result.stderr).not.toContain("\u001b");
+      expect(result.stderr).toStartWith(
+        "tracking source preflight failed: findings.json",
+      );
+    },
+  );
+
+  test("escapes schema I/O context while preserving SDK diagnostics and causes", async () => {
+    const f = await fixture();
+    const pathSuffix = process.platform === "win32" ? "" : "\u001b[2J";
+    const pluginRoot = join(f.root, "copied plugin-sk-test-1234" + pathSuffix);
+    for (const directory of ["mcp", "schemas"])
+      await cp(join(PLUGIN_ROOT, directory), join(pluginRoot, directory), {
+        recursive: true,
+      });
+    const schemaPath = join(pluginRoot, "schemas", "findings.schema.json");
+    await unlink(schemaPath);
+    await mkdir(schemaPath);
+
+    const underlyingError = {
+      message: `${schemaPath}: unreadable JSON document.`,
+      cause: { code: "EISDIR", errno: expect.any(Number) },
+    };
+    const sdkLoad = loadContract(f.scanDir, { pluginRoot });
+    await expect(sdkLoad).rejects.toThrow(schemaPath);
+    await expect(sdkLoad).rejects.toMatchObject({ cause: underlyingError });
+    const trackingLoad = validateTrackingSource(f.scanDir, { pluginRoot });
+    await expect(trackingLoad).rejects.toMatchObject({
+      cause: underlyingError,
+    });
+
+    const result = run(f, [], pluginRoot);
+    expect(result.status).toBe(2);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toStartWith("tracking source preflight failed:");
+    expect(result.stderr).toContain(
+      "findings.schema.json: unreadable JSON document.",
+    );
+    expect(result.stderr).toContain("sk-test-1234");
+    expect(result.stderr).not.toContain("\u001b");
+    expect(result.stderr).toContain(schemaPath.replaceAll("\u001b", "\\u001b"));
+  });
 
   test("requires the tracking report while the SDK accepts canonical artifacts alone", async () => {
     const f = await fixture();

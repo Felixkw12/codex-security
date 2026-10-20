@@ -815,7 +815,11 @@ async function readScanJson(
 ): Promise<Record<string, unknown>> {
   const bytes = await readHeldFile(root, relativePath, relativePath, signal);
   documentDigests.set(relativePath, hash("sha256", bytes));
-  return parseJson(join(root.path, relativePath), bytes, profile);
+  return parseJson(
+    profile === "tracking" ? relativePath : join(root.path, relativePath),
+    bytes,
+    profile,
+  );
 }
 
 async function sha256ScanFile(
@@ -1010,7 +1014,9 @@ async function loadContractValidators(
       throw new ContractSchemaError(
         profile === "tracking" &&
           error instanceof ContractValidationError &&
-          error.cause instanceof SyntaxError
+          (error.cause instanceof SyntaxError ||
+            (error.cause instanceof Error &&
+              ("errno" in error.cause || "winerror" in error.cause)))
           ? escapeControls(message)
           : message,
         { cause: error },
