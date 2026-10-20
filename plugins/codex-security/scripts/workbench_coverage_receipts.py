@@ -153,7 +153,14 @@ def resolve_coverage_receipts(
     def qualified_receipt(ref: Any) -> Any:
         if not isinstance(ref, str):
             return ref
-        ref = Path(ref).as_posix()
+        try:
+            normalized = _require_portable_relative_path(ref, "Worker coverage receipt")
+        except ContractError:
+            return ref  # Leave malformed references to per-record recovery.
+        if not normalized.startswith("artifacts/"):
+            # A worker prefix must not make result.json a valid coverage receipt.
+            return ref
+        ref = normalized
         provenance = item.get("provenance")
         inherited_scan_refs = (
             provenance.get("scanReceiptRefs", []) if isinstance(provenance, dict) else []
