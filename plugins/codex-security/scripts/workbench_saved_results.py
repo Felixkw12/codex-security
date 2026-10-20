@@ -10,9 +10,8 @@ import json
 import os
 import re
 import sqlite3
-import stat
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -31,9 +30,10 @@ from finalize_scan_contract import (
     _read_saved_threat_model,
     _read_scan_local_json,
     _read_scan_local_json_bytes,
-    _read_scan_local_json_with_metadata,
     _recover_unsealed_findings,
     _remove_scan_local_file_if_exists,
+    _require_portable_relative_path,
+    _require_str,
     _validate_completion_binding,
     _validate_resolved_deferred,
     _validate_schema_node,
@@ -43,6 +43,83 @@ from finalize_scan_contract import (
     open_scan_local_file_descriptor,
     write_scan_local_bytes,
     write_threat_model_projection_if_possible,
+)
+from workbench.saved_coverage import (
+    _prepare_worker_coverage_recovery,
+    _project_worker_coverage_row,
+    _saved_coverage_id,
+)
+from workbench.saved_sources import (
+    _accepted_source_digests as _accepted_source_digests,
+)
+from workbench.saved_sources import (
+    _capture_saved_source as _capture_saved_source,
+)
+from workbench.saved_sources import (
+    _checkpoint_head_directory as _checkpoint_head_directory,
+)
+from workbench.saved_sources import (
+    _checkpoint_paths as _checkpoint_paths,
+)
+from workbench.saved_sources import (
+    _children as _children,
+)
+from workbench.saved_sources import (
+    _digest as _digest,
+)
+from workbench.saved_sources import (
+    _encode_retained_sources as _encode_retained_sources,
+)
+from workbench.saved_sources import (
+    _encoded as _encoded,
+)
+from workbench.saved_sources import (
+    _freeze_source_times as _freeze_source_times,
+)
+from workbench.saved_sources import (
+    _frozen_source_times as _frozen_source_times,
+)
+from workbench.saved_sources import (
+    _is_source_order_snapshot as _is_source_order_snapshot,
+)
+from workbench.saved_sources import (
+    _latest_successful_reducer as _latest_successful_reducer,
+)
+from workbench.saved_sources import (
+    _parent_scan_draft as _parent_scan_draft,
+)
+from workbench.saved_sources import (
+    _read_saved_parent_result as _read_saved_parent_result,
+)
+from workbench.saved_sources import (
+    _read_saved_result as _read_saved_result,
+)
+from workbench.saved_sources import (
+    _recovery_source_digests as _recovery_source_digests,
+)
+from workbench.saved_sources import (
+    _retained_source_state as _retained_source_state,
+)
+from workbench.saved_sources import (
+    _saved_result_paths as _saved_result_paths,
+)
+from workbench.saved_sources import (
+    _saved_results_changed as _saved_results_changed,
+)
+from workbench.saved_sources import (
+    _saved_workers as _saved_workers,
+)
+from workbench.saved_sources import (
+    _source_digests as _source_digests,
+)
+from workbench.saved_sources import (
+    _worker_checkpoint_head as _worker_checkpoint_head,
+)
+from workbench.saved_sources import (
+    _worker_checkpoint_heads as _worker_checkpoint_heads,
+)
+from workbench.saved_sources import (
+    _worker_outputs as _worker_outputs,
 )
 from workbench_constants import PHASES
 from workbench_source_coverage import retain_unmerged_review_coverage
@@ -144,545 +221,6 @@ def validate_sealed_budget_draft(
         )
     except ContractError as exc:
         raise SystemExit(str(exc)) from exc
-
-
-def _encoded(value: Any) -> bytes:
-    return json.dumps(
-        value, ensure_ascii=True, allow_nan=False, sort_keys=True, separators=(",", ":")
-    ).encode()
-
-
-def _digest(value: Any) -> str:
-    return hashlib.sha256(_encoded(value)).hexdigest()
-
-
-def _children(scan_dir: Path, relative: str) -> list[str]:
-    cursor = scan_dir
-    for part in Path(relative).parts:
-        if part in {"..", "."}:
-            return []
-        cursor = cursor / part
-        try:
-            if not stat.S_ISDIR(cursor.lstat().st_mode):
-                return []
-        except FileNotFoundError:
-            return []
-    return sorted(child.name for child in cursor.iterdir())
-
-
-def _saved_workers(connection: Any, scan_id: str) -> list[dict[str, Any]]:
-    rows = connection.execute(
-        "SELECT worker.*, attempt.accepted_result_path FROM deep_scan_workers AS worker "
-        "LEFT JOIN deep_scan_attempts AS attempt "
-        "ON attempt.worker_id = worker.id AND attempt.attempt = worker.attempt "
-        "WHERE worker.scan_id = ? ORDER BY worker.created_at, worker.id",
-        (scan_id,),
-    ).fetchall()
-    return [
-        {
-            **dict(row),
-            "result_manifest_path": row["accepted_result_path"] or row["result_manifest_path"],
-        }
-        for row in rows
-    ]
-
-
-def _accepted_source_digests(connection: Any, scan_id: str) -> dict[str, str]:
-    return {
-        row["accepted_result_path"]: row["accepted_result_sha256"]
-        for row in connection.execute(
-            "SELECT accepted_result_path, accepted_result_sha256 FROM deep_scan_attempts "
-            "WHERE scan_id = ? AND accepted_result_path IS NOT NULL "
-            "AND accepted_result_sha256 IS NOT NULL",
-            (scan_id,),
-        )
-    }
-
-
-def _latest_successful_reducer(workers: list[Any]) -> Any | None:
-    return max(
-        (
-            worker
-            for worker in workers
-            if worker["kind"] == "dedup"
-            and worker["status"] == "succeeded"
-            and worker["result_manifest_path"]
-        ),
-        key=lambda worker: (worker["completed_at"] or "", worker["id"]),
-        default=None,
-    )
-
-
-def _checkpoint_paths(scan_dir: Path, directory: str) -> list[str]:
-    return [
-        f"{directory}/{name}"
-        for name in _children(scan_dir, directory)
-        if re.fullmatch(r"[0-9a-f]{64}\.json", name)
-    ]
-
-
-def _worker_outputs(scan_dir: Path, worker: Any) -> list[tuple[str, int]]:
-    output = Path(worker["artifact_dir"]).relative_to(scan_dir)
-    attempts = (output.parent if output.name == "output" else output) / "attempts"
-    archived = [
-        ((attempts / name).as_posix(), int(name.split("-")[1]))
-        for name in _children(scan_dir, attempts.as_posix())
-        if re.fullmatch(r"attempt-\d+", name)
-    ]
-    attempt = int(worker["attempt"] or 0) if "attempt" in worker.keys() else 0
-    if worker["kind"] == "discovery" and not attempt:
-        attempt = max((attempt for _, attempt in archived), default=0) + 1
-    return [(output.as_posix(), attempt), *archived]
-
-
-def _saved_result_paths(scan_dir: Path, workers: list[Any]) -> Iterator[tuple[str, str | None]]:
-    latest_reducer = _latest_successful_reducer(workers)
-    yield "checkpoint-head.json", None
-    for directory in ("checkpoint-heads", "checkpoints"):
-        yield from ((path, None) for path in _checkpoint_paths(scan_dir, directory))
-    for worker in workers:
-        if worker["kind"] not in {"dedup", "discovery"}:
-            continue
-        try:
-            outputs = _worker_outputs(scan_dir, worker)
-        except (TypeError, ValueError):
-            continue
-        for directory, _ in outputs:
-            if worker["kind"] == "discovery":
-                yield f"{directory}/checkpoint-head.json", worker["kind"]
-                yield from (
-                    (path, worker["kind"])
-                    for path in _checkpoint_paths(scan_dir, f"{directory}/checkpoint-heads")
-                )
-            checkpoint_paths = _checkpoint_paths(scan_dir, f"{directory}/checkpoints")
-            if worker["kind"] == "discovery" or checkpoint_paths:
-                yield f"{directory}/result.json", worker["kind"]
-                yield from ((path, worker["kind"]) for path in checkpoint_paths)
-        if worker["result_manifest_path"] and (
-            worker["kind"] == "discovery"
-            or (latest_reducer is not None and worker["id"] == latest_reducer["id"])
-        ):
-            try:
-                yield (
-                    Path(worker["result_manifest_path"]).relative_to(scan_dir).as_posix(),
-                    worker["kind"],
-                )
-            except ValueError:
-                continue
-
-
-def _checkpoint_head_directory(relative: str) -> Path | None:
-    path = Path(relative)
-    if path.name == "checkpoint-head.json":
-        return path.parent
-    if path.parent.name == "checkpoint-heads":
-        return path.parent.parent
-    return None
-
-
-def _capture_saved_source(
-    scan_dir: Path,
-    relative: str,
-    scan_id: str,
-    *,
-    kind: str | None = None,
-    snapshot_head: bool = True,
-    write: bool = True,
-    accepted_source_digests: dict[str, str] | None = None,
-) -> dict[str, tuple[str, int]]:
-    if not snapshot_head or Path(relative).name != "checkpoint-head.json":
-        _, digest, observed = _read_saved_result(
-            scan_dir, relative, scan_id, kind=kind, accepted_source_digests=accepted_source_digests
-        )
-        return {relative: (digest, observed)}
-    head, _, observed = _read_saved_result(
-        scan_dir, relative, scan_id, accepted_source_digests=accepted_source_digests
-    )
-    observation = {"checkpoint": head["checkpoint"], "observedAtNs": str(observed)}
-    directory = Path(relative).parent
-    selected = (directory / "checkpoints" / observation["checkpoint"]).as_posix()
-    _, selected_digest, selected_time = _read_saved_result(
-        scan_dir, selected, scan_id, accepted_source_digests=accepted_source_digests
-    )
-    digest = _digest(observation)
-    snapshot = (directory / "checkpoint-heads" / f"{digest}.json").as_posix()
-    # Capture the selected file even if the worker created it after directory enumeration.
-    if write and not (scan_dir / snapshot).exists():
-        write_scan_local_bytes(scan_dir, snapshot, _encoded(observation))
-    return {
-        snapshot: (digest, int(observation["observedAtNs"])),
-        selected: (selected_digest, selected_time),
-    }
-
-
-def _is_source_order_snapshot(relative: str) -> bool:
-    path = Path(relative)
-    return path.parent == Path("source-order") and bool(
-        re.fullmatch(r"[0-9a-f]{64}\.json", path.name)
-    )
-
-
-def _read_saved_result(
-    scan_dir: Path,
-    relative: str,
-    scan_id: str,
-    *,
-    kind: str | None = None,
-    accepted_source_digests: dict[str, str] | None = None,
-) -> tuple[dict[str, Any], str, int]:
-    draft, contents, metadata = _read_scan_local_json_with_metadata(
-        scan_dir, relative, "Saved scan checkpoint"
-    )
-    expected = (accepted_source_digests or {}).get(str(scan_dir / relative))
-    if expected is not None and hashlib.sha256(contents).hexdigest() != expected:
-        raise ContractError("checkpoint changed after acceptance")
-    directory = _checkpoint_head_directory(relative)
-    if directory is not None:
-        checkpoint = draft.get("checkpoint")
-        if not isinstance(checkpoint, str) or not re.fullmatch(r"[0-9a-f]{64}\.json", checkpoint):
-            raise ContractError("checkpoint head does not name a saved checkpoint")
-        _read_saved_result(
-            scan_dir,
-            (directory / "checkpoints" / checkpoint).as_posix(),
-            scan_id,
-            accepted_source_digests=accepted_source_digests,
-        )
-        if Path(relative).name == "checkpoint-head.json":
-            return draft, _digest([draft, metadata.st_mtime_ns]), metadata.st_mtime_ns
-        observed = draft.get("observedAtNs")
-        if not isinstance(observed, str) or not re.fullmatch(r"-?[0-9]+", observed):
-            raise ContractError("checkpoint head has no observation time")
-        return draft, _digest(draft), int(observed)
-    if draft.get("scanId") != scan_id:
-        raise ContractError("checkpoint belongs to a different scan")
-    if not _is_source_order_snapshot(relative) and (
-        not isinstance(draft.get("findings"), list)
-        or not isinstance(
-            draft.get("sourceCoverage", draft.get("coverage", {}))
-            if kind == "dedup"
-            else draft.get("coverage"),
-            dict,
-        )
-    ):
-        raise ContractError("checkpoint has no semantic findings or coverage")
-    return draft, _digest(draft), metadata.st_mtime_ns
-
-
-def _frozen_source_times(scan_dir: Path, scan_id: str, sources: dict[str, str]) -> dict[str, int]:
-    times: dict[str, int] = {}
-    snapshots = [path for path in sources if _is_source_order_snapshot(path)]
-    for path in snapshots:
-        record, digest, _ = _read_saved_result(scan_dir, path, scan_id)
-        if digest != sources[path] or not isinstance(record.get("sources"), dict):
-            raise ContractError("saved source ordering changed after the scan stopped")
-        for relative, observation in record["sources"].items():
-            if (
-                not isinstance(observation, dict)
-                or relative not in sources
-                or observation.get("digest") != sources[relative]
-                or not isinstance(observation.get("observedAtNs"), str)
-                or not re.fullmatch(r"-?[0-9]+", observation["observedAtNs"])
-            ):
-                raise ContractError("saved source ordering does not match its frozen sources")
-            observed = int(observation["observedAtNs"])
-            if relative in times and times[relative] != observed:
-                raise ContractError("saved source ordering has conflicting observations")
-            times[relative] = observed
-    if snapshots and sources.keys() - set(snapshots) - times.keys():
-        raise ContractError("saved source ordering is incomplete")
-    return times
-
-
-def _freeze_source_times(
-    scan_dir: Path, scan_id: str, sources: dict[str, str], times: dict[str, int]
-) -> None:
-    # Identical result rewrites must not change the order of frozen review evidence.
-    observations = {
-        path: {"digest": digest, "observedAtNs": str(times[path])}
-        for path, digest in sources.items()
-        if not _is_source_order_snapshot(path)
-    }
-    if not observations:
-        return
-    record = {"scanId": scan_id, "sources": observations}
-    digest = _digest(record)
-    path = f"source-order/{digest}.json"
-    if not (scan_dir / path).exists():
-        write_scan_local_bytes(scan_dir, path, _encoded(record))
-    if _read_saved_result(scan_dir, path, scan_id)[1] != digest:
-        raise ContractError("saved source ordering does not match its digest")
-    sources[path] = digest
-
-
-def _parent_scan_draft(
-    scan_id: str,
-    parent_scan: dict[str, Any],
-    findings: dict[str, Any],
-    coverage: dict[str, Any],
-) -> dict[str, Any]:
-    parent = {
-        "scanId": scan_id,
-        "findings": findings.get("findings"),
-        "coverage": coverage,
-        **{
-            key: parent_scan[key]
-            for key in ("scope", "threatModel", "complete")
-            if key in parent_scan
-        },
-    }
-    if not isinstance(parent["findings"], list):
-        raise ContractError("Saved parent draft has no findings array")
-    return parent
-
-
-def _worker_checkpoint_head(
-    scan_dir: Path,
-    directory: str,
-    scan_id: str,
-    accepted_source_digests: dict[str, str] | None = None,
-) -> str | None:
-    relative = f"{directory}/checkpoint-head.json"
-    try:
-        (scan_dir / relative).lstat()
-    except FileNotFoundError:
-        return None
-    head = _read_scan_local_json(scan_dir, relative, "Saved worker checkpoint head")
-    name = head.get("checkpoint")
-    if not isinstance(name, str) or not re.fullmatch(r"[0-9a-f]{64}\.json", name):
-        raise ContractError("Saved worker checkpoint head is invalid.")
-    checkpoint = f"{directory}/checkpoints/{name}"
-    # A committed head precedes replacement of result.json. Do not fall back to
-    # that older result if the selected checkpoint cannot be read.
-    _read_saved_result(
-        scan_dir, checkpoint, scan_id, accepted_source_digests=accepted_source_digests
-    )
-    return checkpoint
-
-
-def _worker_checkpoint_heads(
-    scan_dir: Path,
-    workers: list[Any],
-    scan_id: str,
-    accepted_source_digests: dict[str, str] | None = None,
-) -> dict[str, str]:
-    heads: dict[str, str] = {}
-    for worker in workers:
-        if worker["kind"] != "discovery":
-            continue
-        try:
-            output = Path(worker["artifact_dir"]).relative_to(scan_dir)
-        except (TypeError, ValueError):
-            continue
-        attempts = (output.parent if output.name == "output" else output) / "attempts"
-        directories = [output] + [
-            attempts / name
-            for name in _children(scan_dir, attempts.as_posix())
-            if re.fullmatch(r"attempt-\d+", name)
-        ]
-        for directory in directories:
-            relative = directory.as_posix()
-            head = _worker_checkpoint_head(scan_dir, relative, scan_id, accepted_source_digests)
-            if head is not None:
-                heads[relative] = head
-    return heads
-
-
-def _read_saved_parent_result(
-    scan_dir: Path, scan_id: str
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    manifest = _read_scan_local_json(scan_dir, "scan-manifest.json", "Saved parent manifest")
-    findings = _read_scan_local_json(scan_dir, "findings.json", "Saved parent findings")
-    coverage = _read_scan_local_json(scan_dir, "coverage.json", "Saved parent coverage")
-    parent_scan = manifest.get("scan")
-    if not isinstance(parent_scan, dict):
-        raise ContractError("Saved parent manifest has no scan object")
-    if (parent_scan.get("sealedAt") or parent_scan.get("artifacts")) and (
-        parent_scan.get("id", scan_id) != scan_id
-        or findings.get("scanId", scan_id) != scan_id
-        or coverage.get("scanId", scan_id) != scan_id
-    ):
-        raise ContractError("Saved parent documents belong to a different scan")
-    return manifest, _parent_scan_draft(scan_id, parent_scan, findings, coverage)
-
-
-def _source_digests(value: Any, error: str) -> dict[str, str]:
-    if not isinstance(value, dict) or not all(
-        isinstance(relative, str) and isinstance(digest, str) for relative, digest in value.items()
-    ):
-        raise ContractError(error)
-    return value
-
-
-def _retained_source_state(value: Any) -> tuple[dict[str, str], str | None]:
-    if isinstance(value, dict) and isinstance(value.get("sources"), dict):
-        sources = _source_digests(
-            value["sources"], "Saved stopped-scan source digests are malformed."
-        )
-        model_source = value.get("threatModelSource")
-        if not isinstance(model_source, str) or model_source not in sources:
-            raise ContractError("Saved stopped-scan model source is outside its checkpoint set.")
-        return sources, model_source
-    return _source_digests(value, "Saved stopped-scan source digests are malformed."), None
-
-
-def _encode_retained_sources(sources: dict[str, str], model_source: list[str]) -> str:
-    state = {"sources": sources, "threatModelSource": model_source[0]} if model_source else sources
-    return json.dumps(state, sort_keys=True)
-
-
-def _saved_results_changed(db: Any, connection: Any, scan: Any) -> bool:
-    try:
-        scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
-        manifest_path = db.artifact_path(scan_dir, db.ARTIFACTS["manifest"], required=False)
-        workers = _saved_workers(connection, scan["id"])
-        accepted_digests = _accepted_source_digests(connection, scan["id"])
-        paths = dict(_saved_result_paths(scan_dir, workers))
-        frozen_sources = scan["retained_source_digests_json"]
-
-        def has_saved_source() -> bool:
-            for path in paths:
-                try:
-                    _read_saved_result(
-                        scan_dir,
-                        path,
-                        scan["id"],
-                        kind=paths[path],
-                        accepted_source_digests=accepted_digests,
-                    )
-                    return True
-                except (ContractError, OSError, ValueError):
-                    continue
-            return False
-
-        if manifest_path is None:
-            if frozen_sources is not None:
-                return bool(_retained_source_state(json.loads(frozen_sources))[0])
-            return has_saved_source()
-        if scan["seal_manifest_digest"] is None:
-            try:
-                _read_saved_parent_result(scan_dir, scan["id"])
-                return True
-            except (ContractError, OSError, ValueError):
-                pass
-            return has_saved_source()
-        manifest = _read_scan_local_json(
-            scan_dir,
-            manifest_path.relative_to(scan_dir).as_posix(),
-            "Saved scan manifest",
-        )
-        manifest_scan = manifest.get("scan")
-        if not isinstance(manifest_scan, dict):
-            return True
-        published_sources = _source_digests(
-            manifest_scan.get("preservedSources", {}),
-            "Published scan source digests are malformed.",
-        )
-        if _worker_checkpoint_heads(
-            scan_dir, workers, scan["id"], accepted_digests
-        ) != manifest_scan.get("preservedCheckpointHeads", {}):
-            return True
-        current_sources = dict(published_sources)
-        paths.update({path: None for path in published_sources if _is_source_order_snapshot(path)})
-        for path in paths:
-            try:
-                captured = _capture_saved_source(
-                    scan_dir,
-                    path,
-                    scan["id"],
-                    kind=paths[path],
-                    accepted_source_digests=accepted_digests,
-                    snapshot_head=path not in published_sources,
-                    write=False,
-                )
-                current_sources.update({path: value[0] for path, value in captured.items()})
-            except (ContractError, OSError, ValueError):
-                continue
-        return current_sources != published_sources
-    except (ContractError, OSError, SystemExit, ValueError):
-        return False
-
-
-def _recovery_source_digests(
-    db: Any, connection: Any, scan: Any
-) -> tuple[dict[str, str], bool, dict[str, str]]:
-    scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
-    frozen_sources: dict[str, str] | None = None
-    include_parent = True
-    raw_frozen_sources = scan["retained_source_digests_json"]
-    if raw_frozen_sources is not None:
-        frozen_sources, _ = _retained_source_state(json.loads(raw_frozen_sources))
-        include_parent = False
-
-    manifest_path = db.artifact_path(scan_dir, db.ARTIFACTS["manifest"], required=False)
-    if manifest_path is not None:
-        manifest = _read_scan_local_json(
-            scan_dir,
-            manifest_path.relative_to(scan_dir).as_posix(),
-            "Saved scan manifest",
-        )
-        manifest_scan = manifest.get("scan")
-        if not isinstance(manifest_scan, dict):
-            raise ContractError("Saved scan manifest has no scan object")
-        if scan["seal_manifest_digest"] is not None or (
-            manifest_scan.get("sealedAt") is not None or manifest_scan.get("artifacts") is not None
-        ):
-            if "preservedSources" in manifest_scan:
-                published_sources = _source_digests(
-                    manifest_scan["preservedSources"],
-                    "Published scan source digests are malformed.",
-                )
-                include_parent = not published_sources
-                if published_sources:
-                    if frozen_sources is not None and frozen_sources != published_sources:
-                        raise ContractError(
-                            "Stopped scan sources changed after terminal publication."
-                        )
-                    frozen_sources = published_sources
-                elif frozen_sources is None:
-                    frozen_sources = {}
-            else:
-                include_parent = True
-
-    workers = _saved_workers(connection, scan["id"])
-    accepted_digests = _accepted_source_digests(connection, scan["id"])
-    checkpoint_heads = _worker_checkpoint_heads(scan_dir, workers, scan["id"], accepted_digests)
-    paths = dict(_saved_result_paths(scan_dir, workers))
-    recovery_sources = dict(frozen_sources or {})
-    source_times = _frozen_source_times(scan_dir, scan["id"], recovery_sources)
-    for relative, expected_digest in recovery_sources.items():
-        try:
-            _, digest, observed = _read_saved_result(
-                scan_dir,
-                relative,
-                scan["id"],
-                kind=paths.get(relative),
-                accepted_source_digests=accepted_digests,
-            )
-        except (ContractError, OSError, ValueError) as exc:
-            raise ContractError("Frozen stopped-scan checkpoint set is incomplete.") from exc
-        if digest != expected_digest:
-            raise ContractError("checkpoint changed after the scan stopped")
-        if not _is_source_order_snapshot(relative):
-            source_times.setdefault(relative, observed)
-
-    for relative in paths.keys() - recovery_sources.keys():
-        try:
-            captured = _capture_saved_source(
-                scan_dir,
-                relative,
-                scan["id"],
-                kind=paths[relative],
-                accepted_source_digests=accepted_digests,
-            )
-        except (ContractError, OSError, ValueError):
-            continue
-        for path, (digest, observed) in captured.items():
-            if path in recovery_sources and recovery_sources[path] != digest:
-                raise ContractError("checkpoint changed after the scan stopped")
-            recovery_sources[path] = digest
-            source_times.setdefault(path, observed)
-    _freeze_source_times(scan_dir, scan["id"], recovery_sources, source_times)
-    return recovery_sources, include_parent, checkpoint_heads
 
 
 def scan_results_recovery_needed(db: Any, connection: Any, scan: Any) -> bool:
@@ -891,10 +429,6 @@ def _merge_tied_parent_observations(
     return merged
 
 
-def _saved_coverage_id(item: dict[str, Any]) -> str:
-    return item.get("candidateId") or f"saved-{_digest(item)[:16]}"
-
-
 def _deferred_candidate_id(
     row: dict[str, Any],
     owner: str | None,
@@ -920,9 +454,27 @@ def _generic_surface_updates(
     surface_schema: dict[str, Any],
     deferred_rows: dict[str, list[Any]],
     ambiguous_deferred: set[tuple[str | None, str]],
-) -> tuple[set[int], list[dict[str, Any]]]:
-    if not closed_deferred and not reopened_generic:
+    *,
+    surface_is_retained: Callable[[str, str | None, dict[str, Any]], bool],
+    eligible_receipt_sources: set[str],
+    receipt_root: Path | None = None,
+    receipt_warnings: list[str] | None = None,
+    fallback_surfaces: list[dict[str, Any]] | None = None,
+) -> tuple[set[int], list[tuple[str | None, dict[str, Any], set[int]]]]:
+    if not closed_deferred and not reopened_generic and receipt_root is None:
         return set(), []
+
+    def receipt_error(ref: Any) -> ContractError | None:
+        if receipt_root is None or not isinstance(ref, str):
+            return ContractError("Saved coverage receipt is unavailable.")
+        try:
+            descriptor = open_scan_local_file_descriptor(
+                receipt_root, ref, "Saved coverage receipt"
+            )
+            os.close(descriptor)
+        except ContractError as exc:
+            return exc
+        return None
 
     def linked(row: dict[str, Any], identity: str | None) -> bool:
         surface_ids = row.get("surfaceIds", [])
@@ -937,7 +489,51 @@ def _generic_surface_updates(
             if isinstance(row, dict) and isinstance(row.get("id"), str):
                 saved_surfaces.setdefault((owner, row["id"]), []).append((relative, row))
     replaced: set[int] = set()
-    updates: list[dict[str, Any]] = []
+    updates: list[tuple[str | None, dict[str, Any], set[int]]] = []
+    # Current selections across all surfaces take precedence over historical refs.
+    receipt_paths: dict[str, str] = {}
+    retained_surfaces: dict[tuple[str | None, str], dict[str, Any]] = {}
+    if receipt_root is not None:
+        receipt_surfaces: list[tuple[str | None, dict[str, Any]]] = []
+        for key, matches in saved_surfaces.items():
+            retained = [
+                match for match in matches if surface_is_retained(match[0], key[0], match[1])
+            ]
+            if not retained:
+                continue
+            latest_source, latest_surface = max(retained, key=lambda match: source_order[match[0]])
+            retained_surfaces[key] = latest_surface
+            receipt_surfaces.extend(
+                (key[0], row)
+                for relative, row in retained
+                if source_order[relative] == source_order[latest_source]
+            )
+        for relative, draft, owner in sources:
+            rows = draft["coverage"].get("surfaces", [])
+            for row in rows if isinstance(rows, list) else []:
+                if (
+                    isinstance(row, dict)
+                    and "id" not in row
+                    and surface_is_retained(relative, owner, row)
+                ):
+                    receipt_surfaces.append((owner, row))
+        receipt_surfaces.extend((None, row) for row in fallback_surfaces or [])
+        for owner, latest_surface in receipt_surfaces:
+            # Recovery repairs disposition and receipts before validating row
+            # metadata. A row discarded there cannot reserve a receipt spelling.
+            metadata = _project_worker_coverage_row(latest_surface, owner, "surfaces")
+            metadata.setdefault("id", _saved_coverage_id(metadata))
+            metadata.update(disposition="needs_follow_up", receiptRefs=[])
+            try:
+                _require_str(metadata, "id", "coverage.surfaces")
+                _validate_schema_node(metadata, surface_schema, "coverage.surfaces")
+            except ContractError:
+                continue
+            refs = latest_surface.get("receiptRefs", [])
+            for ref in refs if isinstance(refs, list) else []:
+                if receipt_error(ref) is None:
+                    normalized = _require_portable_relative_path(ref, "Saved coverage receipt")
+                    receipt_paths.setdefault(normalized.lower(), normalized)
     for relative, draft, owner in sources:
         closed_ids = {
             identity
@@ -949,7 +545,7 @@ def _generic_surface_updates(
             for (saved_owner, identity), (_, _, source) in active_deferred.items()
             if saved_owner == owner and source == relative and (owner, identity) in reopened_generic
         }
-        if not closed_ids and not reopened_ids:
+        if not closed_ids and not reopened_ids and receipt_root is None:
             continue
         current = draft["coverage"].get("surfaces", [])
         for surface in current if isinstance(current, list) else []:
@@ -957,12 +553,18 @@ def _generic_surface_updates(
                 continue
             reopening = surface.get("disposition") == "needs_follow_up"
             work_ids = reopened_ids if reopening else closed_ids
-            if not work_ids:
+            repair_only = not work_ids
+            if repair_only and receipt_root is None:
                 continue
             identity = surface.get("id")
             if not isinstance(identity, str):
                 continue
             matches = saved_surfaces[(owner, identity)]
+            # Receipt repair alone cannot close or reopen a saved surface.
+            if repair_only and any(
+                row.get("disposition") != surface.get("disposition") for _, row in matches
+            ):
+                continue
             # Older writers could assign one ID to distinct surfaces in a draft.
             # A closure cannot identify which of those observations it replaces.
             by_source = dict(matches)
@@ -1009,27 +611,93 @@ def _generic_surface_updates(
                 continue
             # An accepted checkpoint can update a saved surface by ID without
             # optional surfaceIds links on its generic task.
-            latest_surface = max(matches, key=lambda match: source_order[match[0]])[1]
-            update = copy.deepcopy(latest_surface)
-            refs = update.setdefault("receiptRefs", [])
+            receipt_matches = [
+                (saved_path, row)
+                for saved_path, row in matches
+                if receipt_root is None
+                or saved_path in eligible_receipt_sources
+                or surface_is_retained(saved_path, owner, row)
+            ]
+            if not receipt_matches:
+                continue
+            latest_surface = max(receipt_matches, key=lambda match: source_order[match[0]])[1]
+            target = retained_surfaces.get((owner, identity)) if repair_only else latest_surface
+            if target is None:
+                continue
+            update = copy.deepcopy(target)
+            # Historical evidence can repair a retained row without promoting
+            # an unselected observation's label, notes, or other metadata.
+            refs = copy.deepcopy(latest_surface.get("receiptRefs", []))
+            update["receiptRefs"] = refs
+            replaced_receipt = False
+            replacement_paths = dict(receipt_paths)
             if isinstance(refs, list):
-                for _, row in matches:
+                repaired = (
+                    not reopening and bool(refs) and all(receipt_error(ref) is None for ref in refs)
+                )
+                if repaired:
+                    for ref in refs:
+                        normalized = _require_portable_relative_path(ref, "Saved coverage receipt")
+                        key = normalized.lower()
+                        if key in replacement_paths and replacement_paths[key] != normalized:
+                            repaired = False
+                            break
+                        replacement_paths[key] = normalized
+                for _, row in receipt_matches:
                     previous_refs = row.get("receiptRefs", [])
                     for ref in previous_refs if isinstance(previous_refs, list) else []:
                         if ref not in refs:
+                            failure = receipt_error(ref) if repaired else None
+                            replaceable = failure is not None and isinstance(
+                                failure.__cause__, FileNotFoundError
+                            )
+                            if repaired and isinstance(ref, str):
+                                try:
+                                    normalized = _require_portable_relative_path(
+                                        ref, "Saved coverage receipt"
+                                    )
+                                except ContractError as error:
+                                    failure = error
+                                    replaceable = True
+                                else:
+                                    key = normalized.lower()
+                                    previous = replacement_paths.get(key)
+                                    if previous is not None and previous != normalized:
+                                        failure = ContractError(
+                                            f"Saved coverage receipt: duplicate artifact path: {previous} and {normalized}"
+                                        )
+                                        replaceable = True
+                                    elif not replaceable:
+                                        replacement_paths[key] = normalized
+                            if replaceable:
+                                replaced_receipt = True
+                                if receipt_warnings is not None:
+                                    receipt_warnings.append(
+                                        f"Replaced invalid saved coverage receipt {ref}: {failure}"
+                                    )
+                                continue
                             refs.append(ref)
+            if repair_only and not replaced_receipt:
+                continue
             try:
                 _validate_schema_node(update, surface_schema, "coverage.surfaces")
             except ContractError:
                 continue
-            replaced.update(
+            replaced_sources = {
                 id(row)
                 for _, row in matches
                 if reopening
                 or row.get("disposition") in {"needs_follow_up", surface.get("disposition")}
+            }
+            replaced.update(replaced_sources)
+            existing = next(
+                (entry for entry in updates if entry[0] == owner and entry[1] == update), None
             )
-            if update not in updates:
-                updates.append(update)
+            if existing is None:
+                receipt_paths.update(replacement_paths)
+                updates.append((owner, update, replaced_sources))
+            else:
+                existing[2].update(replaced_sources)
     return replaced, updates
 
 
@@ -1087,6 +755,7 @@ def merge_saved_results(
     accepted_source_digests: dict[str, str] | None = None,
     frozen_model_source: str | None = None,
     selected_model_source: list[str] | None = None,
+    project_worker_coverage: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None:
     """Read only bound parent/worker files; return an unsealed loss-preserving union."""
     initial_warnings = set(warnings)
@@ -1374,6 +1043,70 @@ def merge_saved_results(
                 parent_is_canonical = False
     if parent is None and latest_reducer is not None:
         parent = drafts_by_path[latest_reducer]
+
+    project_worker_coverage, surface_links = _prepare_worker_coverage_recovery(
+        sources, parent, source_order, enabled=project_worker_coverage
+    )
+    # Keep the actual retained row even when recovery adds previous findings.
+    linked_surface_sources = {id(surface) for _, _, surface, _, _ in surface_links}
+    linked_surface_outputs: dict[int, dict[str, Any]] = {}
+    worker_row_owners: dict[int, str] = {}
+    worker_surface_outputs: dict[tuple[str, str], dict[int, dict[str, Any]]] = {}
+
+    def record_coverage_owner(retained: Any, item: Any, owner: str | None, field: str) -> None:
+        # Parent aggregates can carry worker metadata without originating in
+        # that worker's retained source. Track the actual source of output rows.
+        if project_worker_coverage and owner is not None and isinstance(retained, dict):
+            worker_row_owners[id(retained)] = owner
+            if field == "surfaces" and isinstance(item.get("id"), str):
+                worker_surface_outputs.setdefault((owner, item["id"]), {})[id(retained)] = retained
+
+    def append_coverage_row(output: list[Any], item: Any, owner: str | None, field: str) -> Any:
+        retained = _project_worker_coverage_row(
+            item, owner if project_worker_coverage else None, field
+        )
+        if retained not in output:
+            output.append(retained)
+        retained = output[output.index(retained)]
+        record_coverage_owner(retained, item, owner, field)
+        return retained
+
+    def linked_tasks(
+        task: dict[str, Any],
+        published_id: str,
+        source_task: dict[str, Any] | None,
+        candidates: list[tuple[str | None, Any]],
+    ) -> list[Any]:
+        expected = (
+            _project_worker_coverage_row(source_task, source_task["workerId"], "deferred")
+            if source_task is not None
+            else None
+        )
+        return [
+            retained
+            for owner, retained in candidates
+            if retained == task
+            or (
+                expected is not None
+                and owner == expected["workerId"]
+                and isinstance(retained, dict)
+                and retained.get("id") == expected.get("id")
+                and isinstance(retained.get("surfaceIds"), list)
+                and published_id in retained["surfaceIds"]
+            )
+        ]
+
+    def linked_surface(surface, outputs, named_outputs):
+        retained = outputs.get(id(surface))
+        if (
+            retained is None
+            and isinstance(owner := surface.get("workerId"), str)
+            and isinstance(identity := surface.get("id"), str)
+        ):
+            matches = named_outputs.get((owner, identity), {})
+            if len(matches) == 1:
+                retained = next(iter(matches.values()))
+        return retained
 
     all_sources = ([("parent", parent, None)] if parent else []) + sources
     # Older checkpoints can omit IDs already assigned in their published output.
@@ -1764,91 +1497,6 @@ def merge_saved_results(
                             represented_candidate_history.setdefault(candidate_key, set()).add(
                                 _digest(_finding_content(original["finding"]))
                             )
-    replaced_surfaces, surface_updates = _generic_surface_updates(
-        all_sources,
-        source_order,
-        closed_deferred,
-        active_deferred,
-        resolved,
-        reopened_generic,
-        coverage_schema["surfaces"]["items"],
-        deferred_rows,
-        ambiguous_deferred,
-    )
-    replaced_rows = {
-        "surfaces": replaced_surfaces,
-        "deferred": {
-            id(row)
-            for relative, _, owner in all_sources
-            for row in deferred_rows[relative]
-            if isinstance(row, dict)
-            and isinstance(identity := row.get("id"), str)
-            and (key := (owner, identity)) not in candidate_ids
-            and key not in ambiguous_deferred
-            and (updated := accepted_deferred_orders.get(key)) is not None
-            and updated > source_order[relative]
-        },
-    }
-    for field, replaced in replaced_rows.items():
-        if parent and isinstance(coverage.get(field), list):
-            previous = parent["coverage"].get(field, [])
-            if isinstance(previous, list):
-                removed_parent = [row for row in previous if id(row) in replaced]
-                coverage[field] = [row for row in coverage[field] if row not in removed_parent]
-    if isinstance(coverage.get("surfaces"), list):
-        for surface in surface_updates:
-            if surface not in coverage["surfaces"]:
-                coverage["surfaces"].append(surface)
-        for surface in coverage["surfaces"]:
-            if isinstance(surface, dict):
-                surface.setdefault("receiptRefs", [])
-
-    # Reopened work survives a superseded checkpoint, but current candidate
-    # outcomes still apply. Parent closures cannot remove another worker's row.
-    for owner, item in reopened_rows:
-        if (identity := _deferred_candidate_id(item, owner, ambiguous_deferred)) is not None and (
-            owner,
-            identity,
-        ) in resolved:
-            continue
-        pending = coverage.setdefault("deferred", [])
-        if isinstance(pending, list) and item not in pending:
-            pending.append(copy.deepcopy(item))
-    ambiguous_surface_ids = {
-        (owner, identity)
-        for owner, row in reopened_rows
-        if isinstance(row.get("id"), str)
-        and (owner, row["id"]) in ambiguous_deferred
-        and not any(key in row for key in ("candidateId", "candidate", "finding"))
-        for identity in [
-            row["id"],
-            *(row.get("surfaceIds", []) if isinstance(row.get("surfaceIds", []), list) else []),
-        ]
-        if isinstance(identity, str)
-    }
-    for _, draft, owner in all_sources:
-        surfaces = draft["coverage"].get("surfaces", [])
-        by_id: dict[str, dict[str, Any]] = {}
-        for surface in surfaces if isinstance(surfaces, list) else []:
-            if not isinstance(surface, dict) or not isinstance(identity := surface.get("id"), str):
-                continue
-            if identity in by_id and surface != by_id[identity]:
-                ambiguous_surface_ids.add((owner, identity))
-            by_id[identity] = surface
-    for _, draft, owner in all_sources:
-        surfaces = draft["coverage"].get("surfaces", [])
-        for surface in surfaces if isinstance(surfaces, list) else []:
-            if (
-                isinstance(surface, dict)
-                and isinstance(surface.get("id"), str)
-                and (owner, surface["id"]) in ambiguous_surface_ids
-                and surface.get("disposition") == "needs_follow_up"
-                and not any(key in surface for key in ("candidateId", "candidate", "finding"))
-                and isinstance(coverage.get("surfaces"), list)
-            ):
-                retained_surface = {**surface, "receiptRefs": surface.get("receiptRefs", [])}
-                if retained_surface not in coverage["surfaces"]:
-                    coverage["surfaces"].append(copy.deepcopy(retained_surface))
     selected_terminal_orders: dict[str, tuple[int, int]] = {}
     for relative, draft, worker_id in sources:
         if (
@@ -1867,7 +1515,11 @@ def merge_saved_results(
             terminal_worker_orders[worker_id] = max(
                 terminal_worker_orders.get(worker_id, order), order
             )
-    for relative, draft, worker_id in all_sources:
+
+    def source_coverage_selection(
+        relative: str,
+        worker_id: str | None,
+    ) -> tuple[bool, set[str], bool, bool]:
         worker_result_order = terminal_worker_orders.get(worker_id)
         selected_coverage_superseded = worker_id in selected_terminal_orders and (
             source_order[relative] < selected_terminal_orders[worker_id]
@@ -1909,6 +1561,227 @@ def merge_saved_results(
             and source_order[relative] >= accepted_order
             and any(isinstance(row, dict) for row in deferred_rows[relative])
         )
+        return selected_coverage_superseded, selected_candidates, superseded, retain_pending
+
+    def coverage_row_is_retained(
+        field: str,
+        item: Any,
+        worker_id: str | None,
+        selection: tuple[bool, set[str], bool, bool],
+        relative: str,
+    ) -> bool:
+        selected_coverage_superseded, selected_candidates, superseded, retain_pending = selection
+        # A selected terminal checkpoint replaces ordinary coverage, while
+        # candidate evidence and pending tasks retain their own reconciliation.
+        if (
+            selected_coverage_superseded
+            and field != "deferred"
+            and not (
+                isinstance(item, dict)
+                and any(key in item for key in ("candidateId", "candidate", "finding"))
+            )
+        ):
+            return False
+        # A selected outcome must retain its evidence even if its result write failed.
+        if (
+            superseded
+            and relative != accepted_reducer
+            and not (
+                isinstance(item, dict)
+                and (
+                    (field == "deferred" and retain_pending)
+                    or (
+                        isinstance(item.get("candidateId"), str)
+                        and item["candidateId"] in selected_candidates
+                        and item.get("disposition")
+                        == resolved.get((worker_id, item["candidateId"]))
+                    )
+                )
+            )
+        ):
+            return False
+        if (
+            isinstance(item, dict)
+            and isinstance(
+                identity := _deferred_candidate_id(item, worker_id, ambiguous_deferred)
+                if field == "deferred"
+                else item.get("candidateId"),
+                str,
+            )
+            and coverage_candidate(worker_id, item, identity) in resolved
+            and (field == "deferred" or item.get("disposition") == "needs_follow_up")
+        ):
+            return False
+        return True
+
+    ambiguous_surface_ids = {
+        (owner, identity)
+        for owner, row in reopened_rows
+        if isinstance(row.get("id"), str)
+        and (owner, row["id"]) in ambiguous_deferred
+        and not any(key in row for key in ("candidateId", "candidate", "finding"))
+        for identity in [
+            row["id"],
+            *(row.get("surfaceIds", []) if isinstance(row.get("surfaceIds", []), list) else []),
+        ]
+        if isinstance(identity, str)
+    }
+    for _, draft, owner in all_sources:
+        surfaces = draft["coverage"].get("surfaces", [])
+        by_id: dict[str, dict[str, Any]] = {}
+        for surface in surfaces if isinstance(surfaces, list) else []:
+            if not isinstance(surface, dict) or not isinstance(identity := surface.get("id"), str):
+                continue
+            if identity in by_id and surface != by_id[identity]:
+                ambiguous_surface_ids.add((owner, identity))
+            by_id[identity] = surface
+
+    replaced_deferred = {
+        id(row)
+        for relative, _, owner in all_sources
+        for row in deferred_rows[relative]
+        if isinstance(row, dict)
+        and isinstance(identity := row.get("id"), str)
+        and (key := (owner, identity)) not in candidate_ids
+        and key not in ambiguous_deferred
+        and (updated := accepted_deferred_orders.get(key)) is not None
+        and updated > source_order[relative]
+    }
+    fallback_surfaces = []
+    if surface_links and isinstance(coverage.get("surfaces"), list):
+        # Plan the surviving associations before historical receipts can claim
+        # a spelling needed by a surface that must be restored for its task.
+        prospective_tasks = []
+        prospective_surfaces = {}
+        prospective_named = {}
+        for relative, draft, owner in all_sources:
+            selection = source_coverage_selection(relative, owner)
+            for row in deferred_rows[relative]:
+                if (
+                    coverage_row_is_retained("deferred", row, owner, selection, relative)
+                    and id(row) not in replaced_deferred
+                    and not (
+                        isinstance(row, dict)
+                        and isinstance(row.get("id"), str)
+                        and (owner, row["id"]) in closed_deferred
+                    )
+                ):
+                    prospective_tasks.append(
+                        (owner, _project_worker_coverage_row(row, owner, "deferred"))
+                    )
+            rows = draft["coverage"].get("surfaces", [])
+            for row in rows if isinstance(rows, list) else []:
+                if owner is None or not isinstance(row, dict):
+                    continue
+                emitted = coverage_row_is_retained("surfaces", row, owner, selection, relative)
+                ambiguous = (
+                    isinstance(row.get("id"), str)
+                    and (owner, row["id"]) in ambiguous_surface_ids
+                    and row.get("disposition") == "needs_follow_up"
+                    and not any(key in row for key in ("candidateId", "candidate", "finding"))
+                )
+                if not emitted and not ambiguous:
+                    continue
+                projected = _project_worker_coverage_row(row, owner, "surfaces")
+                if isinstance(row.get("id"), str):
+                    named = prospective_named.setdefault((owner, row["id"]), {})
+                    projected = next(
+                        (existing for existing in named.values() if existing == projected),
+                        projected,
+                    )
+                    named[id(projected)] = projected
+                if emitted:
+                    prospective_surfaces[id(row)] = projected
+        prospective_tasks.extend(
+            (owner, _project_worker_coverage_row(row, owner, "deferred"))
+            for owner, row in reopened_rows
+            if (owner, _deferred_candidate_id(row, owner, ambiguous_deferred)) not in resolved
+        )
+        bound = {
+            (id(retained), published_id)
+            for task, published_id, surface, _, task_source in surface_links
+            if linked_surface(surface, prospective_surfaces, prospective_named) is not None
+            for retained in linked_tasks(task, published_id, task_source, prospective_tasks)
+        }
+        for task, published_id, _, parent_surface, task_source in surface_links:
+            for retained in linked_tasks(task, published_id, task_source, prospective_tasks):
+                key = (id(retained), published_id)
+                if key not in bound:
+                    fallback_surfaces.append(parent_surface)
+                    bound.add(key)
+
+    replaced_surfaces, surface_updates = _generic_surface_updates(
+        all_sources,
+        source_order,
+        closed_deferred,
+        active_deferred,
+        resolved,
+        reopened_generic,
+        coverage_schema["surfaces"]["items"],
+        deferred_rows,
+        ambiguous_deferred,
+        receipt_root=scan_dir if project_worker_coverage else None,
+        receipt_warnings=warnings,
+        fallback_surfaces=fallback_surfaces,
+        surface_is_retained=lambda relative, owner, row: coverage_row_is_retained(
+            "surfaces", row, owner, source_coverage_selection(relative, owner), relative
+        ),
+        eligible_receipt_sources={
+            relative
+            for relative, draft, _ in all_sources
+            if draft.get("complete") is not False or relative in selected_observations
+        },
+    )
+    replaced_rows = {
+        "surfaces": replaced_surfaces,
+        "deferred": replaced_deferred,
+    }
+    for field, replaced in replaced_rows.items():
+        if parent and isinstance(coverage.get(field), list):
+            previous = parent["coverage"].get(field, [])
+            if isinstance(previous, list):
+                removed_parent = [row for row in previous if id(row) in replaced]
+                coverage[field] = [row for row in coverage[field] if row not in removed_parent]
+    if isinstance(coverage.get("surfaces"), list):
+        for owner, surface, replaced_sources in surface_updates:
+            retained = append_coverage_row(coverage["surfaces"], surface, owner, "surfaces")
+            for source_id in replaced_sources & linked_surface_sources:
+                linked_surface_outputs[source_id] = retained
+        for surface in coverage["surfaces"]:
+            if isinstance(surface, dict):
+                surface.setdefault("receiptRefs", [])
+
+    # Reopened work survives a superseded checkpoint, but current candidate
+    # outcomes still apply. Parent closures cannot remove another worker's row.
+    for owner, item in reopened_rows:
+        if (identity := _deferred_candidate_id(item, owner, ambiguous_deferred)) is not None and (
+            owner,
+            identity,
+        ) in resolved:
+            continue
+        pending = coverage.setdefault("deferred", [])
+        if isinstance(pending, list):
+            append_coverage_row(pending, item, owner, "deferred")
+    for _, draft, owner in all_sources:
+        surfaces = draft["coverage"].get("surfaces", [])
+        for surface in surfaces if isinstance(surfaces, list) else []:
+            if (
+                isinstance(surface, dict)
+                and isinstance(surface.get("id"), str)
+                and (owner, surface["id"]) in ambiguous_surface_ids
+                and surface.get("disposition") == "needs_follow_up"
+                and not any(key in surface for key in ("candidateId", "candidate", "finding"))
+                and isinstance(coverage.get("surfaces"), list)
+            ):
+                append_coverage_row(
+                    coverage["surfaces"],
+                    {**surface, "receiptRefs": surface.get("receiptRefs", [])},
+                    owner,
+                    "surfaces",
+                )
+    for relative, draft, worker_id in all_sources:
+        selection = source_coverage_selection(relative, worker_id)
+        selected_coverage_superseded, selected_candidates, superseded, retain_pending = selection
         skip_superseded_findings = (
             superseded
             and not stopped
@@ -2123,34 +1996,8 @@ def merge_saved_results(
                 # recovery and warnings rather than silently changing its contract.
                 continue
             for item in items:
-                # A selected terminal checkpoint replaces ordinary coverage, while
-                # candidate evidence and pending tasks retain their own reconciliation.
-                if (
-                    selected_coverage_superseded
-                    and field != "deferred"
-                    and not (
-                        isinstance(item, dict)
-                        and any(key in item for key in ("candidateId", "candidate", "finding"))
-                    )
-                ):
-                    continue
-                # A selected outcome must retain its evidence even if its result write failed.
-                if (
-                    superseded
-                    and relative != accepted_reducer
-                    and not (
-                        isinstance(item, dict)
-                        and (
-                            (field == "deferred" and retain_pending)
-                            or (
-                                isinstance(item.get("candidateId"), str)
-                                and item["candidateId"] in selected_candidates
-                                and item.get("disposition")
-                                == resolved.get((worker_id, item["candidateId"]))
-                            )
-                        )
-                    )
-                ):
+                source_item = item
+                if not coverage_row_is_retained(field, item, worker_id, selection, relative):
                     continue
                 if id(item) in replaced_rows.get(field, ()):
                     continue
@@ -2182,31 +2029,29 @@ def merge_saved_results(
                             for previous in history
                         ):
                             history.append(copy.deepcopy(finding))
-                if (
-                    isinstance(item, dict)
-                    and isinstance(
-                        identity := _deferred_candidate_id(item, worker_id, ambiguous_deferred)
-                        if field == "deferred"
-                        else item.get("candidateId"),
-                        str,
-                    )
-                    and coverage_candidate(worker_id, item, identity) in resolved
-                    and (field == "deferred" or item.get("disposition") == "needs_follow_up")
-                ):
-                    continue
                 if field == "surfaces" and isinstance(item, dict):
                     item = {**item, "receiptRefs": item.get("receiptRefs", [])}
                 if isinstance(item, dict) and "id" not in item:
                     semantic_item = dict(item)
-                    if any(
-                        isinstance(existing, dict)
-                        and {key: value for key, value in existing.items() if key != "id"}
-                        == semantic_item
-                        for existing in output
-                    ):
+                    existing = next(
+                        (
+                            row
+                            for row in output
+                            if isinstance(row, dict)
+                            and {key: value for key, value in row.items() if key != "id"}
+                            == semantic_item
+                        ),
+                        None,
+                    )
+                    if existing is not None:
+                        if project_worker_coverage and worker_id is not None:
+                            worker_row_owners[id(existing)] = worker_id
+                        if field == "surfaces" and id(source_item) in linked_surface_sources:
+                            linked_surface_outputs[id(source_item)] = existing
                         continue
-                if item not in output:
-                    output.append(copy.deepcopy(item))
+                retained = append_coverage_row(output, item, worker_id, field)
+                if field == "surfaces" and id(source_item) in linked_surface_sources:
+                    linked_surface_outputs[id(source_item)] = retained
 
     identities: dict[str, str] = {}
     for finding in findings:
@@ -2221,9 +2066,77 @@ def merge_saved_results(
             finding.setdefault("provenance", {})["preservedIdentity"] = copy.deepcopy(identity)
             identity["instance"] = f"{identity.get('instance', 'saved')}-{variant[:16]}"
         identities[key] = variant
+    # Bind links to retained output objects before their IDs become unique.
+    # Candidate metadata can give an anonymous row the same preliminary ID as
+    # another surface, so only the final surface ID can be used for its links.
+    retained_surface_links: dict[int, tuple[dict[str, Any], dict[str, dict[str, Any]]]] = {}
+    output_tasks = coverage.get("deferred", [])
+    task_candidates = [
+        (worker_row_owners.get(id(row)), row)
+        for row in (output_tasks if isinstance(output_tasks, list) else [])
+    ]
+    for task, published_id, surface, _, task_source in surface_links:
+        retained_surface = linked_surface(surface, linked_surface_outputs, worker_surface_outputs)
+        if retained_surface is None or not isinstance(retained_surface.get("id"), str):
+            continue
+        for retained_task in linked_tasks(task, published_id, task_source, task_candidates):
+            _, links = retained_surface_links.setdefault(id(retained_task), (retained_task, {}))
+            links.setdefault(published_id, retained_surface)
+    # A newer worker checkpoint may omit a surface still needed by a retained
+    # task. Restore its parent copy only when no worker replacement survived.
+    for task, published_id, surface, parent_surface, task_source in surface_links:
+        for retained_task in linked_tasks(task, published_id, task_source, task_candidates):
+            _, links = retained_surface_links.setdefault(id(retained_task), (retained_task, {}))
+            if published_id not in links and isinstance(coverage.get("surfaces"), list):
+                retained_surface = append_coverage_row(
+                    coverage["surfaces"], parent_surface, None, "surfaces"
+                )
+                record_coverage_owner(
+                    retained_surface, surface, surface.get("workerId"), "surfaces"
+                )
+                links[published_id] = retained_surface
+    if project_worker_coverage:
+        worker_surfaces: dict[tuple[str, str], dict[str, Any]] = {}
+        named_surface_outputs = {
+            identity for outputs in worker_surface_outputs.values() for identity in outputs
+        }
+        surfaces = coverage.get("surfaces", [])
+        for surface in surfaces if isinstance(surfaces, list) else []:
+            if not isinstance(surface, dict):
+                continue
+            owner, identity = worker_row_owners.get(id(surface)), surface.get("id")
+            if isinstance(owner, str) and isinstance(identity, str):
+                key = (owner, identity)
+                existing = worker_surfaces.get(key)
+                # An anonymous candidate ID can collide with an explicit surface ID.
+                # Bind a named worker link to the explicitly named source.
+                if existing is None or (
+                    id(surface) in named_surface_outputs
+                    and id(existing) not in named_surface_outputs
+                ):
+                    worker_surfaces[key] = surface
+        for task in output_tasks if isinstance(output_tasks, list) else []:
+            if (
+                not isinstance(task, dict)
+                or (owner := worker_row_owners.get(id(task))) is None
+                or not isinstance(task.get("surfaceIds"), list)
+            ):
+                continue
+            for identity in task["surfaceIds"]:
+                if (
+                    isinstance(identity, str)
+                    and (surface := worker_surfaces.get((owner, identity))) is not None
+                ):
+                    _, links = retained_surface_links.setdefault(id(task), (task, {}))
+                    links.setdefault(identity, surface)
     for field in ("surfaces", "explicitExclusions", "deferred"):
         used: set[str] = set()
         items = coverage.setdefault(field, [])
+        reserved = {
+            row["id"]
+            for row in (items if isinstance(items, list) else [])
+            if isinstance(row, dict) and isinstance(row.get("id"), str)
+        }
         for item in items if isinstance(items, list) else []:
             if not isinstance(item, dict):
                 continue
@@ -2236,10 +2149,22 @@ def merge_saved_results(
                 # Preserve malformed rows for per-record recovery, including frozen replay.
                 continue
             if item["id"] in used:
-                item["id"] = f"{item['id']}-{_digest(item)[:16]}"
+                if project_worker_coverage:
+                    base = item["id"]
+                    suffix = 2
+                    while item["id"] in used or item["id"] in reserved:
+                        item["id"] = f"{base}-{suffix}"
+                        suffix += 1
+                else:
+                    item["id"] = f"{item['id']}-{_digest(item)[:16]}"
             used.add(item["id"])
             if field == "surfaces":
                 item.setdefault("receiptRefs", [])
+    for task, links in retained_surface_links.values():
+        task["surfaceIds"] = [
+            links[identity]["id"] if isinstance(identity, str) and identity in links else identity
+            for identity in task["surfaceIds"]
+        ]
     coverage.pop("completeness", None)
     if stopped:
         if not isinstance(coverage.get("deferred"), list):
@@ -2540,6 +2465,7 @@ def preserve_deep_deadline_draft(db: Any, connection: Any, scan: Any) -> Iterato
                     "The configured discovery time limit elapsed before any source review completed. "
                     "Saved findings and pending review were preserved without a completed reduction."
                 ),
+                project_worker_coverage=True,
             )
             if documents is None:
                 raise ContractError("Deep Scan deadline has no saved parent draft.")
@@ -2740,6 +2666,7 @@ def preserve_scan_results_locked(
         accepted_source_digests=_accepted_source_digests(connection, scan_id),
         frozen_model_source=model_source[0] if model_source else None,
         selected_model_source=model_source,
+        project_worker_coverage=scan["mode"] == "deep",
         allow_frozen_legacy_parent=(
             include_parent_with_recovery
             or (

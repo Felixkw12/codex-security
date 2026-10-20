@@ -10,7 +10,10 @@ import {
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
 import { setTimeout } from "node:timers/promises";
-import { runDeepScan } from "../src/deep-scan.js";
+import {
+  DIRECT_DEEP_SCAN_CONTROL_USAGE,
+  runDeepScan,
+} from "../src/deep-scan.js";
 import { ScanCostTracker } from "../src/cost.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
@@ -151,6 +154,11 @@ test("isolates direct engine credentials and runtime snapshots across concurrent
       run.map((event) => event.type),
       ["thread.started", "turn.completed"],
     );
+  const firstUsage = events[0]![1]!["usage"] as Record<string, number>;
+  const secondUsage = events[1]![1]!["usage"] as Record<string, number>;
+  firstUsage["input_tokens"] = 100;
+  assert.equal(secondUsage["input_tokens"], 0);
+  assert.equal(DIRECT_DEEP_SCAN_CONTROL_USAGE.input_tokens, 0);
 });
 
 test("preserves complete worker usage and cost after direct engine completion", async () => {
@@ -281,6 +289,18 @@ test("preserves complete worker usage and cost after direct engine completion", 
     startedAt: "2026-07-26T12:00:00.000Z",
     completedAt: null,
   }));
+  tracker.recordUsage(DIRECT_DEEP_SCAN_CONTROL_USAGE, "engine-session");
+  tracker.start("engine-session");
+  const running = await tracker.refresh();
+  await writeSession(
+    codexHome,
+    "waiting-session",
+    {},
+    {
+      parent: "engine-session",
+    },
+  );
+  assert.deepEqual(await tracker.refresh(), { usage: null, cost: null });
   tracker.recordUsage(
     {
       input_tokens: 0,
@@ -288,10 +308,8 @@ test("preserves complete worker usage and cost after direct engine completion", 
       cache_write_input_tokens: 0,
       output_tokens: 0,
     },
-    "engine-session",
+    "waiting-session",
   );
-  tracker.start("engine-session");
-  const running = await tracker.refresh();
   const completed = (await events.next()).value;
   assert.equal(completed?.type, "turn.completed");
   const final = await tracker.stop(completed?.["usage"]);

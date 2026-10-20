@@ -33,6 +33,7 @@ from workbench_saved_results import (
     _worker_checkpoint_head,
 )
 from workbench_scan_usage import capture_scan_usage_owner
+from workbench_source_scopes import capture_source_scopes
 from workbench_target import (
     directory_snapshot_regular_file_count,
 )
@@ -1025,6 +1026,11 @@ def begin_deep_scan_for_target(
                 terminal["id"],
                 start_disposition="joined",
             )
+        source_scopes = capture_source_scopes(
+            target,
+            (revision, target_snapshot_digest, target_device, target_inode),
+            [scope],
+        )
         config = effective_deep_scan_config(args)
         workflow_version = optional_text(args.workflow_version, maximum=256)
         if workflow_version is None:
@@ -1070,6 +1076,7 @@ def begin_deep_scan_for_target(
             scope=scope,
             diff_target=None,
             target_identity=target_identity,
+            source_scopes=source_scopes,
             target_root=target_root,
             target_summary=None,
             scope_file_count=scope_file_count,

@@ -224,10 +224,10 @@ export function applyMigrations(
         );
       } else if (item.version === 16) backfill = repairStableTargets(database);
       else if (applied.has(item.version)) {
-        if ([2, 12, 13, 26, 28, 31, 32, 47].includes(item.version))
+        if ([2, 12, 13, 26, 28, 31, 32, 42, 47, 50].includes(item.version))
           repairAdditive(database, item.version);
         else if (item.version === 11) repairDeepScan(database);
-        else if (item.version >= 50 && item.version <= 55) {
+        else if (item.version >= 52 && item.version <= 57) {
           // Restore recorded extensions when the base Deep tables were recreated.
           // Data updates from an already applied migration must not run again.
           for (const statement of item.statements) {

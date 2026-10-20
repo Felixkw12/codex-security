@@ -186,12 +186,16 @@ export async function verifyScanRoot(
   }
 }
 
-export function safeRelativePath(value: string, context: string): string {
+export function safeRelativePath(
+  value: string,
+  context: string,
+  allowDot = false,
+): string {
   const parts = value.split("/");
   if (
     value.length === 0 ||
     Buffer.from(value, "utf8").toString("utf8") !== value ||
-    value === "." ||
+    (!allowDot && value === ".") ||
     value.startsWith("/") ||
     /^[A-Za-z]:/.test(value) ||
     parts.includes("..") ||
@@ -204,7 +208,7 @@ export function safeRelativePath(value: string, context: string): string {
   }
   const normalized = posix.normalize(value).replace(/\/+$/, "");
   if (
-    normalized === "." ||
+    (!allowDot && normalized === ".") ||
     normalized.startsWith("../") ||
     isAbsolute(normalized)
   ) {

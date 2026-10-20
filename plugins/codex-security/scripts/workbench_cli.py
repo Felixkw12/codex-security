@@ -310,13 +310,7 @@ def parse_args(description: str, *, execution_settings: bool = False) -> argpars
     subparsers.add_parser("database-info")
     subparsers.add_parser("finding-workflow")
     subparsers.add_parser("local-dedupe")
-    arguments = sys.argv[1:]
-    if "--user-context-stdin" in arguments:
-        if arguments.count("--user-context-stdin") != 1 or "--user-context" in arguments:
-            parser.error("pass exactly one user-context transport")
-        index = arguments.index("--user-context-stdin")
-        arguments[index] = "--user-context=" + sys.stdin.buffer.read().decode("utf-8")
-    args = parser.parse_args(arguments)
+    args = parser.parse_args()
     if execution_settings:
         args.require_execution_settings = True
         if args.command == "begin-deep-scan":
@@ -325,6 +319,9 @@ def parse_args(description: str, *, execution_settings: bool = False) -> argpars
             args.execution_settings = payload["executionSettings"]
             args.user_context = payload.get("userContext")
             args.user_context_stdin = False
+    if getattr(args, "user_context_stdin", False):
+        args.user_context = sys.stdin.buffer.read().decode("utf-8")
+        args.user_context_stdin = False
     return args
 
 

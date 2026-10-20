@@ -28,6 +28,7 @@ import {
   captureDeepScanExecutionSettings,
 } from "./src/deep-scan/recovery-settings.js";
 import { startDeepScanEngine } from "./src/deep-scan/engine.js";
+import type { DeepScanParentTurn } from "./src/deep-scan/permission-profile-preflight.js";
 import {
   CODEX_SANDBOX_STATE_META_CAPABILITY,
   resolveDeepWorkerParentSandbox,
@@ -1002,6 +1003,7 @@ export function createCodexSecurityServer(): McpServer {
             runWorkbench,
             ...modelSettings,
             parentSandbox,
+            parentTurn: codexParentTurnFromExtra(extra),
             pythonCommand: await resolvePythonCommand(),
             pluginRoot: PLUGIN_ROOT,
             log: logDeepScanEvent,
@@ -2274,6 +2276,20 @@ function codexTurnMetadataFromExtra(extra: unknown): JsonObject | undefined {
   const metadata = requestMetadataFromExtra(extra);
   return isJsonObject(metadata?.["x-codex-turn-metadata"])
     ? metadata["x-codex-turn-metadata"]
+    : undefined;
+}
+
+function codexParentTurnFromExtra(
+  extra: unknown,
+): DeepScanParentTurn | undefined {
+  const metadata = codexTurnMetadataFromExtra(extra);
+  const threadId = metadata?.thread_id;
+  const turnId = metadata?.turn_id;
+  return typeof threadId === "string" &&
+    threadId &&
+    typeof turnId === "string" &&
+    turnId
+    ? { threadId, turnId }
     : undefined;
 }
 

@@ -95,7 +95,8 @@ interface ScanCostTrackerOptions {
   scanDirectory?: string;
   maxCostUsd?: number;
   expectedFilesTotal?: number;
-  onCost?: (cost: Readonly<ScanCost>) => void;
+  /** Incomplete costs are measured subtotals, usable for spending limits only. */
+  onCost?: (cost: Readonly<ScanCost>, complete: boolean) => void;
   // Only reported when the full public estimate is unavailable.
   onCostLowerBound?: (cost: Readonly<ScanCost>) => void;
   onUsage?: (usage: Readonly<ScanTokenUsage>) => void;
@@ -501,6 +502,9 @@ export class ScanCostTracker {
         usages.set(threadId, session.counterUsage);
       }
       const receipt = usages.get(threadId);
+      // A discovered thread without a receipt has unknown usage, not zero.
+      // Retain it so a parent-only subtotal cannot appear to be complete.
+      if (receipt === undefined) usages.set(threadId, null);
       if (
         session.usage !== null &&
         (session.usage.total_tokens > (receipt?.total_tokens ?? -1) ||
@@ -623,7 +627,7 @@ export class ScanCostTracker {
     this.#snapshot = missingUsage
       ? { usage: null, cost: null }
       : { usage: measured, cost };
-    this.#reportUsage(tokenUsage(measured));
+    if (!missingUsage) this.#reportUsage(tokenUsage(measured));
     this.#reportCost(
       cost,
       measured,
@@ -685,7 +689,6 @@ export class ScanCostTracker {
     lowerBoundOnly = false,
   ): void {
     if (cost === null || lowerBoundOnly) {
-      if (this.#options.onCostLowerBound === undefined) return;
       const receiptCost = cost
         ? { ...cost, coverage: "partial" as const }
         : estimateScanCostLowerBound(this.#options.model, usage);
@@ -701,13 +704,16 @@ export class ScanCostTracker {
       const signature = JSON.stringify(lowerBound);
       if (signature === this.#lastCostLowerBound) return;
       this.#lastCostLowerBound = signature;
-      this.#options.onCostLowerBound(lowerBound);
+      this.#options.onCostLowerBound?.(lowerBound);
+      this.#lastCost = JSON.stringify([lowerBound, false]);
+      this.#options.onCost?.(lowerBound, false);
       return;
     }
-    const signature = JSON.stringify(cost);
+    const signature = JSON.stringify([cost, true]);
     if (signature === this.#lastCost) return;
     this.#lastCost = signature;
-    this.#options.onCost?.(cost);
+    this.#lastCostLowerBound = null;
+    this.#options.onCost?.(cost, true);
   }
 
   #reportUsage(usage: ScanTokenUsage | null): void {
