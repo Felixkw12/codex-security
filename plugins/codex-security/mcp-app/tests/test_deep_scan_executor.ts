@@ -3468,6 +3468,8 @@ async function completedWorkerSettlesWithoutWaitingForProcessExit(
       result.threadId,
       resumed ? "fixture-resumed-thread-id" : "fixture-thread-id",
     );
+    assert.equal(result.usage?.cache_write_input_tokens, 0);
+    assert.equal(result.usage?.cache_write_input_tokens_reported, false);
     const invocation = await readJson(fixture.markerPath);
     assert.equal(invocation.argv.includes("--profile"), kind !== undefined);
     assert.equal(invocation.argv.includes("resume"), resumed);

@@ -198,6 +198,7 @@ def collect_scan_usage(
     tokens_updated_at = None
     accepted_thread_ids: set[str] = set()
     measured_threads: dict[str, dict[str, int]] = {}
+    complete_native_thread_ids: set[str] = set()
     excluded_thread_ids: set[str] = set()
     for session in sessions:
         if session.parent_thread_id in excluded_thread_ids:
@@ -242,6 +243,8 @@ def collect_scan_usage(
             missing_thread_ids.add(session.thread_id)
             continue
         measured_threads[session.thread_id] = usage.tokens
+        if not usage.warnings:
+            complete_native_thread_ids.add(session.thread_id)
         if usage.tokens_updated_at is not None:
             tokens_updated_at = max(
                 tokens_updated_at or usage.tokens_updated_at, usage.tokens_updated_at
@@ -253,6 +256,7 @@ def collect_scan_usage(
         if native is None or receipt.tokens["totalTokens"] > native["totalTokens"]:
             measured_threads[receipt_thread_id] = receipt.tokens
             accepted_thread_ids.add(receipt_thread_id)
+            complete_native_thread_ids.discard(receipt_thread_id)
             runtime_receipts_used = True
             # Numeric SDK subtotals cannot establish that descendants and
             # compaction requests are present when their rollouts are absent.
@@ -262,8 +266,9 @@ def collect_scan_usage(
                 tokens_updated_at = max(
                     tokens_updated_at or receipt.tokens_updated_at, receipt.tokens_updated_at
                 )
-    if missing_receipts:
-        missing_thread_ids.update(missing_receipts)
+    unresolved_receipts = missing_receipts - complete_native_thread_ids
+    if unresolved_receipts:
+        missing_thread_ids.update(unresolved_receipts)
         warnings.add("worker_usage_unavailable")
     if not accepted_thread_ids:
         return _unavailable_usage("scan_thread_unavailable", warnings=warnings)
@@ -540,8 +545,8 @@ def _discover_rollout_sessions(
                 continue
             if root not in roots:
                 try:
-                    with path.open("rb") as source:
-                        metadata = json.loads(source.readline())
+                    with _rollout_lines(path) as source:
+                        metadata = json.loads(next(source, b""))
                 except (OSError, ValueError):
                     missing_thread_ids.add(root)
                     warnings.add("rollout_unavailable")

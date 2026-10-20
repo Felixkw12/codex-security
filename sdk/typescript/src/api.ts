@@ -3187,8 +3187,8 @@ export class CodexSecurity {
         }
         try {
           const canceled =
-            (signal.aborted &&
-              !(failure instanceof ScanCostLimitExceededError)) ||
+            this.#abortController.signal.aborted ||
+            options.signal?.aborted === true ||
             (failure instanceof ScanExecutionError &&
               failure.result.status === "canceled");
           const measured =
@@ -3530,8 +3530,6 @@ export class CodexSecurity {
       const canceled =
         this.#abortController.signal.aborted ||
         telemetry?.options.signal?.aborted === true ||
-        (error instanceof ScanInterruptedError &&
-          !(error instanceof ScanCostLimitExceededError)) ||
         (error instanceof ScanExecutionError &&
           error.result.status === "canceled");
       if (!invoked) release();

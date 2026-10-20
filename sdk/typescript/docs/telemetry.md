@@ -131,7 +131,8 @@ unavailable.
 Missing cache-write usage is represented with
 `cache_write_input_tokens_reported: false` in SDK token usage and
 `cacheWriteInputTokensReported: false` in saved usage. Its numeric zero is a
-placeholder, not an observed zero. Known total usage remains usable. Cost is an
+placeholder, not an observed zero. SDK-defaulted zeroes without field-presence
+evidence also remain unknown. Known total usage remains usable. Cost is an
 estimate with its existing price provenance and uncertainty, not a billing total.
 Late saved usage can exceed an earlier supplied price estimate; the warning
 `cost_estimate_covers_earlier_usage` identifies that cost subtotal.

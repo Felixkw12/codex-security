@@ -34,7 +34,10 @@ export interface WorkerUsageReceipt {
 }
 
 /** Retain numeric usage only; model and diagnostic text are not receipt fields. */
-export function workerTokenUsage(value: unknown): WorkerTokenUsage | null {
+export function workerTokenUsage(
+  value: unknown,
+  cacheWritesMayBeDefaulted = false,
+): WorkerTokenUsage | null {
   if (value === null || typeof value !== "object") return null;
   const raw = value as Record<string, unknown>;
   const input = raw.input_tokens;
@@ -74,6 +77,7 @@ export function workerTokenUsage(value: unknown): WorkerTokenUsage | null {
     ...usage,
     total_tokens: usage.input_tokens + usage.output_tokens,
     ...(raw.cache_write_input_tokens_reported === false ||
+    (cacheWritesMayBeDefaulted && usage.cache_write_input_tokens === 0) ||
     (raw.cache_write_input_tokens == null && raw.cache_write_tokens == null)
       ? { cache_write_input_tokens_reported: false as const }
       : {}),

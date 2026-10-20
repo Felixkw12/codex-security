@@ -275,6 +275,10 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
               ...codexOptions,
               profileName: runtimeSettings.nativeProfile,
             });
+      // The pinned SDK defaults missing cache writes to zero; native profiles
+      // preserve field presence before defaulting in our profile adapter.
+      const readUsage = (value: unknown) =>
+        workerTokenUsage(value, runtimeSettings.nativeProfile === undefined);
       const threadOptions = {
         ...(this.modelSettings.model
           ? { model: this.modelSettings.model }
@@ -323,7 +327,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
               turnId = event.turn_id;
             if (event.type === "turn.completed") {
               try {
-                await request.onUsage?.(workerTokenUsage(event.usage), turnId);
+                await request.onUsage?.(readUsage(event.usage), turnId);
               } catch {
                 // Retaining optional usage must not change turn acceptance.
               }
@@ -366,7 +370,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         return {
           threadId: turn.threadId ?? thread.id ?? undefined,
           ...(turnId === undefined ? {} : { turnId }),
-          usage: workerTokenUsage(turn.usage),
+          usage: readUsage(turn.usage),
           ...(diagnostics.length > 0 ? { diagnostics } : {}),
         };
       } finally {

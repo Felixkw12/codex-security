@@ -107,7 +107,14 @@ async function publishScanToCustomAttempt(
   let invoked = false;
   const publish = async (): Promise<CustomPublicationResult> => {
     invoked = true;
-    if (!options.dryRun) {
+    const client = options.dryRun
+      ? null
+      : new FindingsClient(
+          options.findingsUrl,
+          options.signal,
+          dependencies.fetch,
+        );
+    if (client !== null) {
       telemetry.attempted = true;
       telemetry.counts.submitted = findings.findings.length;
       // The bulk API acknowledges IDs; it does not distinguish inserts from upserts.
@@ -117,13 +124,10 @@ async function publishScanToCustomAttempt(
       telemetry.counts.failed = null;
       telemetry.outcome = "indeterminate";
     }
-    const findingIds = options.dryRun
-      ? findings.findings.map((finding) => finding.findingId)
-      : await new FindingsClient(
-          options.findingsUrl,
-          options.signal,
-          dependencies.fetch,
-        ).publish(findings.findings, repositoryId);
+    const findingIds =
+      client === null
+        ? findings.findings.map((finding) => finding.findingId)
+        : await client.publish(findings.findings, repositoryId);
     telemetry.outcome = options.dryRun ? "preview" : "completed";
     telemetry.counts.acknowledged = options.dryRun ? 0 : findingIds.length;
     telemetry.counts.failed = 0;

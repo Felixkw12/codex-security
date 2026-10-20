@@ -173,6 +173,7 @@ def _rollout(
     session_started_at: datetime | None = None,
     copied_events: list[dict[str, Any]] | None = None,
     originator: str | None = None,
+    compressed: bool = False,
 ) -> Path:
     directory = root / "rollouts"
     directory.mkdir(exist_ok=True)
@@ -216,7 +217,32 @@ def _rollout(
         "".join(f"{json.dumps(item, separators=(',', ':'))}\n" for item in records),
         encoding="utf-8",
     )
-    return rollout.resolve()
+    return _compress_rollout(rollout) if compressed else rollout.resolve()
+
+
+def _compress_rollout(rollout: Path) -> Path:
+    result = subprocess.run(
+        [
+            "node",
+            "--input-type=module",
+            "-e",
+            (
+                "import fs from 'node:fs'; import zlib from 'node:zlib';"
+                "if (!zlib.zstdCompressSync) process.exit(77);"
+                "process.stdout.write(zlib.zstdCompressSync(fs.readFileSync(process.argv[1])));"
+            ),
+            str(rollout),
+        ],
+        check=False,
+        capture_output=True,
+    )
+    if result.returncode == 77:
+        pytest.skip("This Node runtime does not support Zstandard compression.")
+    result.check_returncode()
+    compressed = rollout.with_suffix(".jsonl.zst")
+    compressed.write_bytes(result.stdout)
+    rollout.unlink()
+    return compressed.resolve()
 
 
 def _allowance_event(timestamp: datetime, percent: int, limit: str = "codex") -> dict[str, Any]:
@@ -992,29 +1018,8 @@ def test_completion_distinguishes_missing_cache_writes_from_zero(
 def test_completion_reads_compressed_rollout_usage(tmp_path: Path) -> None:
     fixture = _start_scan(tmp_path)
     counted = fixture.started_at + timedelta(microseconds=1)
-    parent = _rollout(tmp_path, "scan-parent", [_token_event(counted, 21, 8)])
-    compressed = parent.with_suffix(".jsonl.zst")
-    result = subprocess.run(
-        [
-            "node",
-            "--input-type=module",
-            "-e",
-            (
-                "import fs from 'node:fs'; import zlib from 'node:zlib';"
-                "if (!zlib.zstdCompressSync) process.exit(77);"
-                "process.stdout.write(zlib.zstdCompressSync(fs.readFileSync(process.argv[1])));"
-            ),
-            str(parent),
-        ],
-        check=False,
-        capture_output=True,
-    )
-    if result.returncode == 77:
-        pytest.skip("This Node runtime does not support Zstandard compression.")
-    result.check_returncode()
-    compressed.write_bytes(result.stdout)
-    parent.unlink()
-    _state_graph(fixture.environment, {"scan-parent": compressed}, [])
+    parent = _rollout(tmp_path, "scan-parent", [_token_event(counted, 21, 8)], compressed=True)
+    _state_graph(fixture.environment, {"scan-parent": parent}, [])
     measurement = _complete_scan(fixture)["scan"]["usage"]
     assert measurement["totalTokens"] == 29
     assert measurement["coverage"] == "complete"
@@ -2210,6 +2215,80 @@ def test_stopped_deep_scan_reconciles_distinct_worker_attempt_receipts(
         )
 
 
+@pytest.mark.parametrize(
+    "native_state", ["complete", "partial", "absent", "unknown_thread", "sdk_subtotal_larger"]
+)
+def test_stopped_deep_scan_reconciles_missing_sdk_receipts_with_native_usage(
+    tmp_path: Path, native_state: str
+) -> None:
+    fixture = _start_scan(tmp_path, mode="deep")
+    counted = fixture.started_at + timedelta(microseconds=1)
+    directory = fixture.scan_dir / "artifacts" / "deep_discovery" / "usage"
+    directory.mkdir(parents=True)
+    for amount in [None, 30] if native_state == "sdk_subtotal_larger" else [None]:
+        attempt_id = str(uuid.uuid4())
+        (directory / f"{attempt_id}.json").write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "source": "codex_sdk",
+                    "usageScope": "turn",
+                    "scanId": fixture.scan_id,
+                    "workerId": "synthetic-worker",
+                    "kind": "discovery",
+                    "attemptId": attempt_id,
+                    "attempt": 1 if amount is None else 2,
+                    "resumed": amount is not None,
+                    "threadId": None if native_state == "unknown_thread" else "receipt-worker",
+                    "startedAt": counted.isoformat(),
+                    "observedAt": counted.isoformat(),
+                    "outcome": "failed",
+                    "usage": (
+                        _token_event(counted, amount, 0)["payload"]["info"]["total_token_usage"]
+                        if amount is not None
+                        else None
+                    ),
+                }
+            ),
+            encoding="utf-8",
+        )
+    parent = _rollout(tmp_path, "scan-parent", [_token_event(counted, 0, 0)])
+    worker = parent.with_name("receipt-worker.jsonl")
+    _state_graph(
+        fixture.environment,
+        {"scan-parent": parent, "receipt-worker": worker},
+        [("scan-parent", "receipt-worker")],
+    )
+    initial = fail_scan(
+        fixture.state_dir, fixture.scan_id, "Fixture failure.", environment=fixture.environment
+    )["scan"]["usage"]
+    assert initial["coverage"] == "partial"
+    assert "worker_usage_unavailable" in initial["warnings"]
+
+    if native_state != "absent":
+        _rollout(
+            tmp_path,
+            "receipt-worker",
+            [_token_event(counted, 20, 5)],
+            parent_thread_id="scan-parent",
+            include_task_complete=native_state != "partial",
+        )
+    for _ in range(2):
+        measurement = fail_scan(
+            fixture.state_dir, fixture.scan_id, "Fixture failure.", environment=fixture.environment
+        )["scan"]["usage"]
+        assert measurement["coverage"] == ("complete" if native_state == "complete" else "partial")
+        assert measurement["totalTokens"] == (
+            30 if native_state == "sdk_subtotal_larger" else 0 if native_state == "absent" else 25
+        )
+        assert measurement.get("missingThreadCount", 0) == int(native_state != "complete")
+        assert ("worker_usage_unavailable" in measurement.get("warnings", [])) == (
+            native_state != "complete"
+        )
+        if native_state == "partial":
+            assert "turn_in_progress" in measurement["warnings"]
+
+
 def test_cancel_scan_retains_runtime_usage_on_repeated_cancellation(tmp_path: Path) -> None:
     fixture = _start_scan(tmp_path)
     runtime = {
@@ -2235,7 +2314,10 @@ def test_cancel_scan_retains_runtime_usage_on_repeated_cancellation(tmp_path: Pa
 
 
 @pytest.mark.parametrize("worker_kind", ["discovery", "dedup"])
-def test_completion_recovers_replaced_deep_worker_threads(tmp_path: Path, worker_kind: str) -> None:
+@pytest.mark.parametrize("compressed", [False, True])
+def test_completion_recovers_replaced_deep_worker_threads(
+    tmp_path: Path, worker_kind: str, compressed: bool
+) -> None:
     fixture = _start_scan(tmp_path, mode="deep")
     fixture = replace(
         fixture,
@@ -2296,12 +2378,14 @@ def test_completion_recovers_replaced_deep_worker_threads(tmp_path: Path, worker
                 "sdk-first-attempt",
                 [_token_event(counted, 20, 5)],
                 session_started_at=fixture.started_at.replace(microsecond=500000),
+                compressed=compressed,
             ),
             "sdk-first-child": _rollout(
                 tmp_path,
                 "sdk-first-child",
                 [_token_event(counted, 7, 2)],
                 parent_thread_id="sdk-first-attempt",
+                compressed=compressed,
             ),
             "sdk-current-attempt": _rollout(
                 tmp_path,
@@ -2321,6 +2405,7 @@ def test_completion_recovers_replaced_deep_worker_threads(tmp_path: Path, worker
                 "boundary-archived-worker",
                 [_token_event(boundary_predecessor, 100, 10)],
                 session_started_at=boundary_predecessor,
+                compressed=compressed,
             ),
             "boundary-archived-child": tmp_path / "boundary-archived-child.jsonl",
             "later-worker": _rollout(tmp_path, "later-worker", [_token_event(after_scan, 100, 10)]),

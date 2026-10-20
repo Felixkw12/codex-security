@@ -89,25 +89,59 @@ test("publishes complete sealed findings with their repository ID to a custom ba
   expect(await readFile(join(scan, "findings.json"), "utf8")).toBe(source);
 });
 
-test("dry-run previews the complete upload without HTTP or credentials", async () => {
+test.each(["http://localhost:3000", "synthetic-invalid-url"])(
+  "dry-run previews the complete upload without HTTP or credentials (%s)",
+  async (findingsUrl) => {
+    const { scan, document } = await fixture();
+    const result = await publishScanToCustom(
+      scan,
+      { findingsUrl, dryRun: true },
+      {
+        fetch: rejecting("dry-run must not send a request"),
+      },
+    );
+    expect(result).toEqual({
+      scanId: document.scanId,
+      repositoryId: "target_sha256_example",
+      findingIds: document.findings.map((finding) => finding.findingId),
+      findingCount: document.findings.length,
+      dryRun: true,
+      findings: document.findings,
+      telemetry: expect.objectContaining({
+        destination: "custom",
+        outcome: "preview",
+        attempted: false,
+        counts: {
+          selected: document.findings.length,
+          submitted: 0,
+          created: 0,
+          reused: 0,
+          acknowledged: 0,
+          failed: 0,
+        },
+      }),
+    });
+  },
+);
+
+test("invalid publication URLs report a local failure before any submission", async () => {
   const { scan, document } = await fixture();
-  const result = await publishScanToCustom(
-    scan,
-    { findingsUrl: "http://localhost:3000", dryRun: true },
-    {
-      fetch: rejecting("dry-run must not send a request"),
-    },
-  );
-  expect(result).toEqual({
-    scanId: document.scanId,
-    repositoryId: "target_sha256_example",
-    findingIds: document.findings.map((finding) => finding.findingId),
-    findingCount: document.findings.length,
-    dryRun: true,
-    findings: document.findings,
-    telemetry: expect.objectContaining({
-      destination: "custom",
-      outcome: "preview",
+  const observations: PublicationTelemetry[] = [];
+  const fetchMock = mock(rejecting("Invalid URL must not send a request"));
+  await expect(
+    publishScanToCustom(
+      scan,
+      {
+        findingsUrl: "synthetic-invalid-url",
+        onTelemetry: (event) => observations.push(event),
+      },
+      { fetch: fetchMock },
+    ),
+  ).rejects.toThrow(TypeError);
+  expect(fetchMock).not.toHaveBeenCalled();
+  expect(observations).toEqual([
+    expect.objectContaining({
+      outcome: "failed",
       attempted: false,
       counts: {
         selected: document.findings.length,
@@ -118,7 +152,7 @@ test("dry-run previews the complete upload without HTTP or credentials", async (
         failed: 0,
       },
     }),
-  });
+  ]);
 });
 
 test("does not retry failed uploads or report incomplete receipts as successful", async () => {

@@ -53,6 +53,7 @@ import {
 } from "../src/api.js";
 import {
   OperationTelemetry,
+  type OperationTelemetryEvent,
   readOperationTelemetry,
   summarizeOperationTelemetry,
 } from "../src/operation-telemetry.js";
@@ -4239,15 +4240,23 @@ describe("CodexSecurity orchestration", () => {
       const { root, repository, codexHome, scanDir } = await scanDirectories();
       await writeFile(join(codexHome, "sessions"), "not a directory");
       const commands: string[] = [];
+      let failureArguments: readonly string[] | undefined;
       const warnings: string[] = [];
+      const telemetry: Readonly<OperationTelemetryEvent>[] = [];
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
+        createOperationTelemetry: (options) =>
+          new OperationTelemetry({
+            ...options,
+            directory: join(root, "telemetry-state"),
+          }),
         runWorkbench: async (
           _options: unknown,
           args: readonly string[],
           input?: string,
         ): Promise<JsonObject> => {
           commands.push(args[0]!);
+          if (args[0] === "fail-scan") failureArguments = args;
           return mockWorkbench(args, input);
         },
         createCodex: completedCodex(root),
@@ -4256,11 +4265,16 @@ describe("CodexSecurity orchestration", () => {
       const scan = client.run(repository, {
         ...(enforceCostLimit ? { maxCostUsd: 1 } : {}),
         onActivity: () => {},
+        onTelemetry: (event) => telemetry.push(event),
         onWarning: (warning) => warnings.push(warning),
       });
       if (enforceCostLimit) {
         await expect(scan).rejects.toThrow("interrupted");
         expect(commands).toContain("fail-scan");
+        expect(commands).not.toContain("cancel-scan");
+        expect(failureArguments).toContainEqual(
+          expect.stringMatching(/^--message=.+/),
+        );
       } else {
         await expect(scan).resolves.toMatchObject({ threadId: "thread-1" });
         expect(warnings).toContainEqual(
@@ -4268,6 +4282,14 @@ describe("CodexSecurity orchestration", () => {
         );
         expect(commands).toContain("complete-scan");
       }
+      expect(
+        telemetry.filter((event) => event.type === "attempt_finished"),
+      ).toMatchObject([
+        {
+          outcome: enforceCostLimit ? "failed" : "completed",
+          ...(enforceCostLimit ? { failureCategory: "execution" } : {}),
+        },
+      ]);
       await client.close();
     },
   );
