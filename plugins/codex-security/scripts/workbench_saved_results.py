@@ -66,6 +66,42 @@ _RESERVED_ARTIFACT_PATHS = json.loads(
 )
 
 
+from workbench.retained_coverage import (
+    _deferred_candidate_id as _deferred_candidate_id,
+)
+from workbench.retained_coverage import (
+    _deferred_rows as _deferred_rows,
+)
+from workbench.retained_coverage import (
+    _digest as _digest,
+)
+from workbench.retained_coverage import (
+    _encoded as _encoded,
+)
+from workbench.retained_coverage import (
+    _ensure_finding_identity as _ensure_finding_identity,
+)
+from workbench.retained_coverage import (
+    _finding_content as _finding_content,
+)
+from workbench.retained_coverage import (
+    _finding_key as _finding_key,
+)
+from workbench.retained_coverage import (
+    _generic_surface_updates as _generic_surface_updates,
+)
+from workbench.retained_coverage import (
+    _merge_tied_parent_observations as _merge_tied_parent_observations,
+)
+from workbench.retained_coverage import (
+    _resolved_deferred_rows as _resolved_deferred_rows,
+)
+from workbench.retained_coverage import (
+    _retained_findings as _retained_findings,
+)
+from workbench.retained_coverage import (
+    _worker_candidate_key as _worker_candidate_key,
+)
 from workbench.saved_sources import (
     _capture_saved_source as _capture_saved_source,
 )
@@ -92,42 +128,6 @@ from workbench.saved_sources import (
 )
 from workbench.saved_sources import (
     _source_digests as _source_digests,
-)
-from workbench_saved_coverage import (
-    _deferred_candidate_id as _deferred_candidate_id,
-)
-from workbench_saved_coverage import (
-    _deferred_rows as _deferred_rows,
-)
-from workbench_saved_coverage import (
-    _digest as _digest,
-)
-from workbench_saved_coverage import (
-    _encoded as _encoded,
-)
-from workbench_saved_coverage import (
-    _ensure_finding_identity as _ensure_finding_identity,
-)
-from workbench_saved_coverage import (
-    _finding_content as _finding_content,
-)
-from workbench_saved_coverage import (
-    _finding_key as _finding_key,
-)
-from workbench_saved_coverage import (
-    _generic_surface_updates as _generic_surface_updates,
-)
-from workbench_saved_coverage import (
-    _merge_tied_parent_observations as _merge_tied_parent_observations,
-)
-from workbench_saved_coverage import (
-    _resolved_deferred_rows as _resolved_deferred_rows,
-)
-from workbench_saved_coverage import (
-    _retained_findings as _retained_findings,
-)
-from workbench_saved_coverage import (
-    _worker_candidate_key as _worker_candidate_key,
 )
 
 

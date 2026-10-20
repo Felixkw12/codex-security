@@ -13,7 +13,7 @@ from finalize_scan_contract import (
     _read_scan_local_json_with_metadata,
     write_scan_local_bytes,
 )
-from workbench_saved_coverage import _digest, _encoded
+from workbench.retained_coverage import _digest, _encoded
 
 
 def _checkpoint_head_directory(relative: str) -> Path | None:
