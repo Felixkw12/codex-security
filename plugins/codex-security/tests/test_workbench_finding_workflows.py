@@ -542,9 +542,12 @@ def test_optional_review_snapshot_disables_cache_for_unreadable_entries(
         )
 
 
-def test_optional_evidence_snapshot_includes_git_metadata(workbench_api, workbench_db, tmp_path):
+@pytest.mark.parametrize("metadata_name", [".git", ".svn"])
+def test_optional_evidence_snapshot_includes_source_metadata(
+    workbench_api, workbench_db, tmp_path, metadata_name
+):
     evidence = tmp_path / "evidence"
-    metadata = evidence / ".git"
+    metadata = evidence / metadata_name
     metadata.mkdir(parents=True)
     (evidence / "proof.txt").write_text("Original proof.\n")
     head = metadata / "HEAD"
