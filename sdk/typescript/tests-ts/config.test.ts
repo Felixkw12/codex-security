@@ -32,7 +32,15 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures(
   false,
 );
 
-afterEach(cleanup);
+let sandboxFixtureUsed = false;
+
+afterEach(async () => {
+  if (sandboxFixtureUsed) {
+    await waitForWindowsSandboxSetup();
+    sandboxFixtureUsed = false;
+  }
+  await cleanup();
+});
 
 test("inline Codex overrides preserve literal keys and string values", () => {
   const metadata = {
@@ -158,11 +166,51 @@ async function sandboxFailureDetails(codexHome: string, details: string) {
   } catch (error) {
     details += `\nCould not read native sandbox logs: ${String(error)}`;
   }
-  console.log(details);
   return details;
 }
 
+async function waitForWindowsSandboxSetup() {
+  if (process.platform !== "win32") return;
+
+  // Codex applies read ACLs in a background worker shared across Codex homes.
+  // Finish that work before deleting its fixture or creating another workspace.
+  const result = Bun.spawnSync(
+    [
+      join(
+        process.env["SystemRoot"] ?? "C:\\Windows",
+        "System32",
+        "WindowsPowerShell",
+        "v1.0",
+        "powershell.exe",
+      ),
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      `
+$ErrorActionPreference = 'Stop'
+try {
+  $mutex = [System.Threading.Mutex]::OpenExisting('Local\\CodexSandboxReadAcl')
+} catch [System.Threading.WaitHandleCannotBeOpenedException] {
+  exit 0
+}
+try {
+  if (-not $mutex.WaitOne(30000)) {
+    throw 'Codex sandbox read ACL setup did not finish within 30 seconds'
+  }
+  $mutex.ReleaseMutex()
+} finally {
+  $mutex.Dispose()
+}`,
+    ],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+}
+
 async function scanSandboxFixture() {
+  await waitForWindowsSandboxSetup();
+  sandboxFixtureUsed = true;
   const root = await temporaryDirectory();
   const stateDirectory = join(root, "state");
   const codexHome = await prepareCodexSecurityCredentialHome({
