@@ -3882,6 +3882,7 @@ export async function main(
           maxCost: ScanSettingsSchema.shape.maxCostUsd.describe(
             "Stop above AMOUNT in estimated USD; the dashboard offers increases near the limit.",
           ),
+          ownerSuggestions: ScanSettingsSchema.shape.ownerSuggestions,
           showCost: SHOW_COST_OPTION,
           headless: z
             .boolean()
@@ -6743,6 +6744,13 @@ async function prepareScanArgumentsFromRecipe(
       "The saved scan recipe is missing resolved deep scan settings.",
     );
   }
+  const ownerSuggestions = ScanSettingsSchema.shape.ownerSuggestions.safeParse(
+    recipe["ownerSuggestions"],
+  );
+  if (!ownerSuggestions.success)
+    throw new CodexSecurityError(
+      "The saved scan recipe contains an invalid owner suggestions setting.",
+    );
   const auth = z.enum(SCAN_AUTH_MODES).optional().safeParse(recipe["auth"]);
   const cyberAccessProgram =
     ScanSettingsSchema.shape.cyberAccessProgram.safeParse(
@@ -6790,6 +6798,7 @@ async function prepareScanArgumentsFromRecipe(
     repository,
     auth: auth.data ?? DEFAULT_SCAN_AUTH,
     cyberAccessProgram: cyberAccessProgram.data,
+    ownerSuggestions: ownerSuggestions.data,
     // Saved scopes contain literal repository names, not home-relative inputs.
     target:
       paths.length > 0
