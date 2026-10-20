@@ -2076,7 +2076,9 @@ export class CodexSecurity {
                     ...progress,
                     // Only worker counts use the last accepted parent phase.
                     phase:
-                      source !== undefined || mode === "deep"
+                      mode === "deep" ||
+                      (source !== undefined &&
+                        (source.reconciled !== true || !source.worker))
                         ? progress.phase
                         : latestPhase,
                   },

@@ -99,7 +99,7 @@ export type ParentProgressSource =
       reconciled?: false;
       inventory?: never;
     }
-  | { reconciled: true; inventory?: true };
+  | { reconciled: true; inventory?: true; worker?: true };
 
 interface ParentProgressMarker {
   progress: ScanProgress;
@@ -2136,6 +2136,7 @@ export class ScanCostTracker {
     if (duplicate) return inventoryWitness;
     this.#options.onProgress?.(progress, {
       reconciled: true,
+      ...(displaySource?.owner === "worker" ? { worker: true } : {}),
       // Recovered prefix scope can invalidate coverage even when a later
       // inventory restores the same total. Synchronize the API's count too.
       ...(inventoryReconciled ? { inventory: true } : {}),

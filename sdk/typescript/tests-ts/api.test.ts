@@ -6185,7 +6185,7 @@ describe("CodexSecurity orchestration", () => {
     ["tool-only old inventory", false, true, false, 8, 9, 1, 1],
     ["late upward inventory proof", false, true, true, 8, 9, 1, 1],
     [
-      "pending validation remains newer than inventory proof",
+      "pending worker coverage remains newer than inventory proof",
       false,
       true,
       true,
@@ -6313,8 +6313,9 @@ describe("CodexSecurity orchestration", () => {
                   output: marker(
                     workerCount,
                     workerTotal,
-                    _scenario ===
-                      "pending validation remains newer than inventory proof"
+                    _scenario === "live inventory readmits pending worker" ||
+                      _scenario ===
+                        "pending worker coverage remains newer than inventory proof"
                       ? "validation"
                       : "discovery",
                   ),
@@ -6389,11 +6390,7 @@ describe("CodexSecurity orchestration", () => {
           return;
         }
         expect(updates.at(-1)).toEqual({
-          phase:
-            _scenario ===
-            "pending validation remains newer than inventory proof"
-              ? "validation"
-              : "discovery",
+          phase: "discovery",
           filesCompleted: Math.max(
             2,
             workerTotal <= correctedTotal ? workerCount : 0,
