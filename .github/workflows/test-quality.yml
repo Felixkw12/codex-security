@@ -52,10 +52,11 @@ jobs:
         id: windows-temp
         shell: pwsh
         run: ./sdk/typescript/scripts/prepare-windows-test-root.ps1
-      - name: Reproduce the failing shard with the CI runner and package
+      - name: Exercise repeated private policy workspaces
+        working-directory: sdk/typescript
         env:
           TEMP: ${{ steps.windows-temp.outputs.path }}
           TMP: ${{ steps.windows-temp.outputs.path }}
           TMPDIR: ${{ steps.windows-temp.outputs.path }}
           CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "false"
-        run: node --experimental-strip-types sdk/typescript/scripts/run-ci-tests.mts 3/7 --seed=13523
+        run: bun test --timeout 120000 --rerun-each=5 --seed=13523 tests-ts/config.test.ts
