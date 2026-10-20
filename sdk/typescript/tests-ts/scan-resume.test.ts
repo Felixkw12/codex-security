@@ -842,10 +842,11 @@ test("reader resumes a saved budget selection without model work", async () => {
       })),
     },
   );
-  expect(code, stderr.text()).toBe(2);
+  expect(code, stderr.text()).toBe(0);
   expect(stdout.text(), stderr.text()).not.toBe("");
   const result = JSON.parse(stdout.text());
   expect(result.manifest.scan.id).toBe(f.scanId);
+  expect(result.manifest.scan.status).toBe("completed");
   expect(result.manifest.scan.sealedAt).toBeString();
   expect(result.coverage).not.toHaveProperty("completeness");
   const conserved = Bun.spawnSync(

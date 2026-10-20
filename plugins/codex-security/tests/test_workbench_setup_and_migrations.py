@@ -93,11 +93,12 @@ EXPECTED_MIGRATIONS = [
     (49, "index finding issue receipt ownership"),
     (50, "persist authorized source excerpt scopes"),
     (51, "preserve deep scan worker thread history"),
-    (52, "retain deep scan attempts and exact merge inputs"),
-    (53, "persist selected deep scan finalization input"),
-    (54, "freeze stopped scan checkpoint selections"),
-    (55, "bind original deep scan parent usage turn"),
-    (56, "bind original deep scan execution settings"),
+    (52, "record severity classification review counts"),
+    (53, "retain deep scan attempts and exact merge inputs"),
+    (54, "persist selected deep scan finalization input"),
+    (55, "freeze stopped scan checkpoint selections"),
+    (56, "bind original deep scan parent usage turn"),
+    (57, "bind original deep scan execution settings"),
 ]
 
 
@@ -2928,20 +2929,26 @@ def test_workbench_reconciles_profile_and_public_warning_histories(
         ) is supported
 
 
-@pytest.mark.parametrize("legacy_version", [48, 51, "published"])
+@pytest.mark.parametrize("legacy_version", [48, 51, "published", "branch"])
 def test_local_cache_upgrade_preserves_deep_scan_migration_history(
     legacy_version: int | str,
 ) -> None:
     current = SCHEMA.MIGRATIONS
-    published = legacy_version == "published"
+    published = isinstance(legacy_version, str)
+    branch = legacy_version == "branch"
     historical = tuple(
-        migration for migration in current if migration[0] <= (46 if published else 43)
+        migration
+        for migration in current
+        if migration[0] <= (47 if branch else 46 if published else 43)
     )
+
+    def historical_version(version: int) -> int:
+        return version - (5 if branch else 6 if published or version == 57 else 8)
+
     historical += tuple(
-        (version - 5 if published or version == 56 else version - 7, name, sql)
+        (historical_version(version), name, sql)
         for version, name, sql in current
-        if 52 <= version <= 56
-        and (published or (version - 7 if version < 56 else version - 5) <= legacy_version)
+        if 53 <= version <= 57 and (published or historical_version(version) <= legacy_version)
     )
     connection, apply_migrations = create_historical_database(1, historical)
     connection.execute(
@@ -2978,9 +2985,10 @@ def test_local_cache_upgrade_preserves_deep_scan_migration_history(
             if row["name"].startswith("deep_scan_")
         }
         assert upgraded_tables["deep_scan_runs"].count(", discovery_user_context_json TEXT") == 1
-        upgraded_tables["deep_scan_runs"] = upgraded_tables["deep_scan_runs"].replace(
-            ", discovery_user_context_json TEXT", "", 1
-        )
+        if not branch:
+            upgraded_tables["deep_scan_runs"] = upgraded_tables["deep_scan_runs"].replace(
+                ", discovery_user_context_json TEXT", "", 1
+            )
         if legacy_version == 48:
             assert upgraded_tables["deep_scan_runs"].count(", execution_settings_json TEXT") == 1
             upgraded_tables["deep_scan_runs"] = upgraded_tables["deep_scan_runs"].replace(

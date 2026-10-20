@@ -444,6 +444,15 @@
   },
   {
     "version": 52,
+    "name": "record severity classification review counts",
+    "statements": [
+      "ALTER TABLE finding_severity_assessments ADD COLUMN classification_runs INTEGER CHECK (classification_runs BETWEEN 1 AND 10);",
+      "ALTER TABLE scan_severity_assessments ADD COLUMN classification_runs INTEGER CHECK (classification_runs BETWEEN 1 AND 10);",
+      "ALTER TABLE scan_severity_classifications ADD COLUMN classification_runs INTEGER CHECK (classification_runs BETWEEN 1 AND 10);"
+    ]
+  },
+  {
+    "version": 53,
     "name": "retain deep scan attempts and exact merge inputs",
     "statements": [
       "CREATE TABLE deep_scan_attempts (\n            scan_id TEXT NOT NULL REFERENCES deep_scan_runs(scan_id) ON DELETE CASCADE,\n            worker_id TEXT NOT NULL REFERENCES deep_scan_workers(id) ON DELETE CASCADE,\n            attempt INTEGER NOT NULL,\n            status TEXT NOT NULL,\n            started_at TEXT NOT NULL,\n            completed_at TEXT,\n            end_reason TEXT,\n            error_message TEXT,\n            accepted_result_path TEXT,\n            accepted_result_sha256 TEXT,\n            receipt_json TEXT,\n            PRIMARY KEY (worker_id, attempt)\n        );",
@@ -455,28 +464,28 @@
     ]
   },
   {
-    "version": 53,
+    "version": 54,
     "name": "persist selected deep scan finalization input",
     "statements": [
       "ALTER TABLE deep_scan_runs ADD COLUMN finalization_input_json TEXT;"
     ]
   },
   {
-    "version": 54,
+    "version": 55,
     "name": "freeze stopped scan checkpoint selections",
     "statements": [
       "ALTER TABLE scans ADD COLUMN retained_checkpoint_heads_json TEXT;"
     ]
   },
   {
-    "version": 55,
+    "version": 56,
     "name": "bind original deep scan parent usage turn",
     "statements": [
       "ALTER TABLE deep_scan_runs ADD COLUMN usage_owner_json TEXT;"
     ]
   },
   {
-    "version": 56,
+    "version": 57,
     "name": "bind original deep scan execution settings",
     "statements": [
       "ALTER TABLE deep_scan_runs ADD COLUMN execution_settings_json TEXT;"
