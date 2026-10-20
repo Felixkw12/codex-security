@@ -187,7 +187,7 @@ def test_recovery_preserves_descriptive_provenance(
     assert result.read_bytes() == original
     if not retained:
         expected["workerId"] = worker_id
-        if field != "openQuestions":
+        if field != "openQuestions" and not (field == "explicitExclusions" and "id" in item):
             expected["id"] = f"{worker_id}/{item.get('id', 0)}"
         if field == "deferred":
             expected["surfaceIds"] = [f"{worker_id}/source-surface"]
@@ -2220,10 +2220,12 @@ def test_retry_nonsurface_occurrences_survive_supported_parent_projection(
     for index, (actual, expected) in enumerate(zip(recovered, projected, strict=True)):
         if index >= retained:
             expected["workerId"] = worker_id
-            if field != "openQuestions":
-                assert actual["id"] == f"{worker_id}/{items[index].get('id', index)}"
-        assert {key: value for key, value in actual.items() if key != "id"} == {
-            key: value for key, value in expected.items() if key != "id"
-        }
+            if field != "openQuestions" and not (
+                field == "explicitExclusions" and "id" in items[index]
+            ):
+                expected["id"] = f"{worker_id}/{items[index].get('id', index)}"
+        if "id" not in expected:
+            actual = {key: value for key, value in actual.items() if key != "id"}
+        assert actual == expected
     for path, saved in originals.items():
         assert path.read_bytes() == saved

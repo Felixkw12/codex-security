@@ -618,7 +618,6 @@ def merge_saved_results(
 
     retained_surface_ids: dict[tuple[str, str, int], dict[str, Any]] = {}
     missing_surface_aliases: dict[tuple[str, str], str] = {}
-    # Reuse each saved occurrence's projection.
     retained_records: dict[tuple[str, str, str, int], dict[str, Any] | None] = {}
     matched_records: dict[tuple[str, str, str], list[tuple[Any, int]]] = {}
 
@@ -702,11 +701,11 @@ def merge_saved_results(
                         else value
                         for value in original["surfaceIds"]
                     ]
-                    for value in (source, original):
-                        links = value.get("surfaceIds")
-                        if isinstance(links, list) and all(isinstance(link, str) for link in links):
-                            value["surfaceIds"] = sorted(set(links))
+                links_key = {"surfaces": "receiptRefs", "deferred": "surfaceIds"}.get(field)
                 for value in (source, original):
+                    links = value.get(links_key)
+                    if isinstance(links, list) and all(isinstance(link, str) for link in links):
+                        value[links_key] = sorted(set(links))
                     value.pop("workerId", None)
                     descriptions = value.pop("provenance", None)
                     if isinstance(descriptions, dict):
@@ -2002,6 +2001,7 @@ def merge_saved_results(
                 retained = retained_coverage_record("surfaces", row, worker, relative, index)
                 if retained is None:
                     retained = retained_coverage_record("surfaces", surface, worker, relative)
+                    surface = retained or surface
                 if retained is not None:
                     retained = append_coverage_row(
                         coverage["surfaces"],

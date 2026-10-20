@@ -270,6 +270,7 @@ export async function recordCodexSecurityWorkerScanDraft(
       context.filePaths,
     ),
   };
+  requireFiniteNumbers(scoped);
   if (!resolvedDeferred(scoped.coverage).length)
     await saveScanDraftCheckpoint(context, scoped, false);
   const archived = await readArchivedWorkerCheckpoints(context);
@@ -558,7 +559,8 @@ export async function preserveScanDraft(
 }> {
   requireFiniteNumbers(input);
   const warnings: string[] = [];
-  const repairReceipts = saveCheckpoint || context.layout !== "worker";
+  const copyArchivedReceipts = saveCheckpoint || context.layout !== "worker";
+  const repairReceipts = copyArchivedReceipts || archivedSources !== undefined;
   const currentCheckpointName = scanDraftCheckpointName(input);
   const requiresClosureValidation = resolvedDeferred(input.coverage).length > 0;
   if (saveCheckpoint && !requiresClosureValidation)
@@ -622,12 +624,11 @@ export async function preserveScanDraft(
           const components = receipt
             .split("/")
             .filter((part) => part !== "" && part !== ".");
-          const retained = [
-            "artifacts",
-            "archived-receipts",
-            attempt,
-            ...components,
-          ].join("/");
+          const retained = copyArchivedReceipts
+            ? ["artifacts", "archived-receipts", attempt, ...components].join(
+                "/",
+              )
+            : `${archivePrefix}${attempt}/${components.join("/")}`;
           archivedReceipts.set(retained, {
             context: {
               ...context,
@@ -967,7 +968,7 @@ export async function preserveScanDraft(
         const key = normalized.toLowerCase();
         const origin = archivedReceipts.get(ref);
         if (
-          !origin &&
+          (!origin || !copyArchivedReceipts) &&
           selectedReceiptsBySurface.get(row.id as string)?.has(ref)
         ) {
           if (!receiptPaths.has(key)) receiptPaths.set(key, normalized);
@@ -1081,7 +1082,7 @@ export async function preserveScanDraft(
           );
           continue;
         }
-        if (origin) {
+        if (origin && copyArchivedReceipts) {
           const destination = await artifactDestination(
             context,
             coverageReceiptComponents(ref),

@@ -1121,10 +1121,35 @@ async function testPartialWorkerCoverageSurvivesParentCompletion() {
     const coverage = await readJson(run.scanDir, "coverage.json");
     for (const field of ["surfaces", "explicitExclusions", "deferred"]) {
       assert.equal(coverage[field].length, 4, field);
+    }
+    for (const field of ["surfaces", "deferred"]) {
       assert.equal(
         new Set(coverage[field].map((row: { id: string }) => row.id)).size,
         4,
         field,
+      );
+    }
+    const workers = new Set<string>(
+      coverage.surfaces.map((row: { workerId: string }) => row.workerId),
+    );
+    assert.equal(workers.size, 2);
+    for (const workerId of workers) {
+      assert.deepEqual(
+        coverage.explicitExclusions
+          .filter((row: { workerId: string }) => row.workerId === workerId)
+          .map((row: { id: string; pattern: string; reason: string }) => ({
+            id: row.id,
+            pattern: row.pattern,
+            reason: row.reason,
+          })),
+        [
+          { id: "1", pattern: "vendor/**", reason: "Third-party source." },
+          {
+            id: `${workerId}/1-2`,
+            pattern: "generated/**",
+            reason: "Generated output.",
+          },
+        ],
       );
     }
     assert.equal(coverage.openQuestions.length, 2);
@@ -1647,6 +1672,7 @@ async function testReceiptRepairSurvivesStoppedRecovery(
           runWorkbench,
           signal,
           publication,
+          draft.coverage.resolvedDeferred,
         );
       },
     });
