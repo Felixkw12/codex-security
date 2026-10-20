@@ -28,6 +28,11 @@ async function savedEvidence() {
   );
   try {
     await mkdir(repository);
+    await mkdir(join(repository, "src"));
+    await writeFile(
+      join(repository, "src/extract.py"),
+      "synthetic_source();\n",
+    );
     await mkdir(scanDir, { mode: 0o700 });
     const registered = await workbench(
       scanRegistrationArguments(repository, scanDir),
@@ -142,13 +147,19 @@ test("saved patch and verification tasks receive complete sealed evidence and li
     const received: Finding[] = [];
     const current = dependencies({
       onWorkbench: fixture.workbench,
-      onRepositoryCommand: (_command, args) =>
-        args.includes("--name-only") ? "src/extract.py\0" : "",
-      onCodex: (_args, output) => {
+      onRepositoryCommand: () => {
+        throw new Error("fatal: not a git repository");
+      },
+      onCodex: async (_args, output) => {
         const findings = JSON.parse(
           output!.appServer!.prompt.split("\n").at(-1)!,
         ) as Finding[];
         received.push(...findings);
+        if (command === "patch")
+          await writeFile(
+            join(fixture.repository, "src/extract.py"),
+            "synthetic_safe_source();\n",
+          );
         output!.stdout.write(
           JSON.stringify(
             command === "patch"
