@@ -80,7 +80,7 @@ describe("abortable", () => {
   );
 
   test.each([false, true])(
-    "preserves operation ordering with a signal: %s",
+    "preserves operation ordering with a signal: %p",
     async (withSignal) => {
       const controller = new AbortController();
       const order: string[] = [];
