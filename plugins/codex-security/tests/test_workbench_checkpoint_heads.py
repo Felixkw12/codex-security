@@ -78,7 +78,8 @@ def test_late_head_changes_require_explicit_recovery(
     assert any("/checkpoint-heads/" in path for path in frozen)
     assert not any(path.endswith("checkpoint-head.json") for path in frozen)
     assert not any(
-        row["id"] == "review" or row.get("provenance", {}).get("sourceId") == "review"
+        row["id"] in {"review", f"{worker_id}/review"}
+        or row.get("provenance", {}).get("sourceId") == "review"
         for row in json.loads((scan_dir / "coverage.json").read_text())["deferred"]
     )
     assert get_scan(state, scan_id)["scan"]["resultsRecoveryNeeded"] is False
@@ -98,6 +99,8 @@ def test_late_head_changes_require_explicit_recovery(
             id=f"{worker_id}-attempt-1-deferred-1",
             provenance={"workerId": worker_id, "attempt": 1, "sourceId": "review"},
         )
+    else:
+        expected.update(id=f"{worker_id}/review", workerId=worker_id)
     assert (expected in coverage["deferred"]) is (selection == "reopened")
     published = manifest_path.read_bytes()
     scan_command(state, "recover-scan-results", scan_id, environment=environment)

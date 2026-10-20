@@ -1221,7 +1221,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
     else
       assert.match(
         prior[0].receiptRefs[0],
-        /\/attempts\/attempt-01\/artifacts\/prior\.txt$/,
+        /\/(?:attempts|archived-receipts)\/attempt-01\/artifacts\/prior\.txt$/,
       );
     assert.equal(
       await readFile(path.join(run.scanDir, prior[0].receiptRefs[0]), "utf8"),

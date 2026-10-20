@@ -678,7 +678,7 @@ for (const archived of [false, true]) {
         await mkdir(path.dirname(archive), { recursive: true });
         await rename(f.workerRoot, archive);
         await mkdir(f.workerRoot);
-        prefix = path.relative(f.root, archive).split(path.sep).join("/");
+        prefix = `${f.prefix}/artifacts/archived-receipts/attempt-01`;
       }
       await recordCodexSecurityWorkerScanDraft(
         f.worker,
@@ -742,7 +742,10 @@ for (const complete of [false, true]) {
             await mkdir(f.workerRoot);
             await recordCodexSecurityWorkerScanDraft(f.worker, workerDraft([]));
           }
-          const expected = `${path.relative(f.root, output).split(path.sep).join("/")}/${ref}`;
+          const expected =
+            archived && !lost
+              ? `${f.prefix}/artifacts/archived-receipts/attempt-01/${ref}`
+              : `${path.relative(f.root, output).split(path.sep).join("/")}/${ref}`;
           if (complete) {
             const sources = await readDeepReductionSources(f.reducer);
             assert.deepEqual(
@@ -826,17 +829,13 @@ for (const spelling of ["original", "returned"] as const) {
                 "attempts",
                 `attempt-0${attempt}`,
               );
-              const archivePrefix = path
-                .relative(f.root, archive)
-                .split(path.sep)
-                .join("/");
               const priorResult = await readFile(
                 path.join(f.workerRoot, "result.json"),
                 "utf8",
               );
               await archiveDirectory(f.workerRoot, archive);
               if (ownedRef.startsWith(`${f.prefix}/`))
-                ownedRef = `${archivePrefix}/${ref}`;
+                ownedRef = `${f.prefix}/artifacts/archived-receipts/attempt-0${attempt}/${ownedRef.slice(f.prefix.length + 1)}`;
               const retained =
                 observation === "same" || observation === "notes";
               if (newLocal) {

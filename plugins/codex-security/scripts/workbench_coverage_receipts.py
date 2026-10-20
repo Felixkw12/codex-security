@@ -11,10 +11,13 @@ from typing import Any
 
 from finalize_scan_contract import (
     ContractError,
+    _require_portable_relative_path,
+    _require_str,
     _validate_schema_node,
     open_scan_local_file_descriptor,
     path_within_scope,
 )
+from workbench.saved_coverage import _project_worker_coverage_row, _saved_coverage_id
 
 
 def _checkpoint_head_directory(relative: str) -> Path | None:
@@ -192,9 +195,27 @@ def _generic_surface_updates(
     record_source: Any,
     record_order: Any,
     surface_receipts: Any,
+    *,
+    surface_is_retained: Any = None,
+    eligible_receipt_sources: set[str] | None = None,
+    receipt_root: Path | None = None,
+    receipt_warnings: list[str] | None = None,
+    fallback_surfaces: list[dict[str, Any]] | None = None,
 ) -> tuple[set[int], list[tuple[str, str | None, dict[str, Any], dict[str, Any]]]]:
-    if not closed_deferred and not reopened_generic:
+    if not closed_deferred and not reopened_generic and receipt_root is None:
         return set(), []
+
+    def receipt_error(ref: Any) -> ContractError | None:
+        if receipt_root is None or not isinstance(ref, str):
+            return ContractError("Saved coverage receipt is unavailable.")
+        try:
+            descriptor = open_scan_local_file_descriptor(
+                receipt_root, ref, "Saved coverage receipt"
+            )
+            os.close(descriptor)
+        except ContractError as exc:
+            return exc
+        return None
 
     def record_key(field: str, owner: str | None, row: dict[str, Any]) -> tuple[str | None, Any]:
         source_owner, original = record_source(field, owner, row)
@@ -218,6 +239,53 @@ def _generic_surface_updates(
                 )
     replaced: set[int] = set()
     updates: list[tuple[str, str | None, dict[str, Any], dict[str, Any]]] = []
+    # Current selections across all surfaces take precedence over historical refs.
+    receipt_paths: dict[str, str] = {}
+    retained_surfaces: dict[tuple[str | None, str], dict[str, Any]] = {}
+    if receipt_root is not None:
+        receipt_surfaces: list[tuple[str | None, dict[str, Any]]] = []
+        for key, matches in saved_surfaces.items():
+            retained = [
+                match for match in matches if surface_is_retained(match[0], key[0], match[1])
+            ]
+            if not retained:
+                continue
+            latest_source, latest_surface = max(
+                retained, key=lambda match: record_order(match[0], key[0], match[1])
+            )
+            retained_surfaces[key] = latest_surface
+            receipt_surfaces.extend(
+                (key[0], row)
+                for relative, row in retained
+                if record_order(relative, key[0], row)
+                == record_order(latest_source, key[0], latest_surface)
+            )
+        for relative, draft, owner in sources:
+            rows = draft["coverage"].get("surfaces", [])
+            for row in rows if isinstance(rows, list) else []:
+                if (
+                    isinstance(row, dict)
+                    and "id" not in row
+                    and surface_is_retained(relative, owner, row)
+                ):
+                    receipt_surfaces.append((owner, row))
+        receipt_surfaces.extend((None, row) for row in fallback_surfaces or [])
+        for owner, latest_surface in receipt_surfaces:
+            # Recovery repairs disposition and receipts before validating row
+            # metadata. A row discarded there cannot reserve a receipt spelling.
+            metadata = _project_worker_coverage_row(latest_surface, owner, "surfaces")
+            metadata.setdefault("id", _saved_coverage_id(metadata))
+            metadata.update(disposition="needs_follow_up", receiptRefs=[])
+            try:
+                _require_str(metadata, "id", "coverage.surfaces")
+                _validate_schema_node(metadata, surface_schema, "coverage.surfaces")
+            except ContractError:
+                continue
+            refs = latest_surface.get("receiptRefs", [])
+            for ref in refs if isinstance(refs, list) else []:
+                if receipt_error(ref) is None:
+                    normalized = _require_portable_relative_path(ref, "Saved coverage receipt")
+                    receipt_paths.setdefault(normalized.lower(), normalized)
     for relative, draft, owner in sources:
         current = draft["coverage"].get("surfaces", [])
         for surface in current if isinstance(current, list) else []:
@@ -234,15 +302,21 @@ def _generic_surface_updates(
                 for (saved_owner, identity), (_, _, source) in active_deferred.items()
                 if saved_owner == surface_owner
                 and source == relative
-                and (saved_owner, identity) in reopened_generic
+                and (owner, identity) in reopened_generic
             }
             reopening = surface.get("disposition") == "needs_follow_up"
             work_ids = reopened_ids if reopening else closed_ids
-            if not work_ids:
+            repair_only = not work_ids
+            if repair_only and receipt_root is None:
                 continue
             if not isinstance(identity, str):
                 continue
             matches = saved_surfaces[(surface_owner, identity)]
+            # Receipt repair alone cannot close or reopen a saved surface.
+            if repair_only and any(
+                row.get("disposition") != surface.get("disposition") for _, row in matches
+            ):
+                continue
             # Older writers could assign one ID to distinct surfaces in a draft.
             # A closure cannot identify which of those observations it replaces.
             by_source = dict(matches)
@@ -262,12 +336,12 @@ def _generic_surface_updates(
                 continue
 
             if not reopening and any(
-                record_key("deferred", saved_owner, row)[0] == surface_owner
+                saved_owner == surface_owner
                 and (
                     not isinstance(row.get("id") or row.get("candidateId"), str)
                     or (
                         isinstance(row.get("id"), str)
-                        and record_key("deferred", saved_owner, row) in ambiguous_deferred
+                        and (owner, row["id"]) in ambiguous_deferred
                         and not any(key in row for key in ("candidateId", "candidate", "finding"))
                     )
                 )
@@ -279,11 +353,10 @@ def _generic_surface_updates(
                 continue
             if not reopening and any(
                 saved_owner == surface_owner
-                and (saved_owner, deferred_id) not in closed_deferred
+                and (owner, deferred_id) not in closed_deferred
                 and (
-                    (candidate_id := _deferred_candidate_id(row, saved_owner, ambiguous_deferred))
-                    is None
-                    or (saved_owner, candidate_id) not in resolved_candidates
+                    (candidate_id := _deferred_candidate_id(row, owner, ambiguous_deferred)) is None
+                    or (owner, candidate_id) not in resolved_candidates
                 )
                 and linked(row, identity, saved_owner)
                 for (saved_owner, deferred_id), (_, row, _) in active_deferred.items()
@@ -291,29 +364,91 @@ def _generic_surface_updates(
                 continue
             # An accepted checkpoint can update a saved surface by ID without
             # optional surfaceIds links on its generic task.
+            receipt_matches = [
+                (saved_path, row)
+                for saved_path, row in matches
+                if receipt_root is None
+                or saved_path in eligible_receipt_sources
+                or surface_is_retained(saved_path, owner, row)
+            ]
+            if not receipt_matches:
+                continue
             latest_relative, latest_surface = max(
-                matches, key=lambda match: record_order(match[0], surface_owner, match[1])
+                receipt_matches, key=lambda match: record_order(match[0], surface_owner, match[1])
             )
-            update = copy.deepcopy(latest_surface)
+            target = (
+                retained_surfaces.get((surface_owner, identity)) if repair_only else latest_surface
+            )
+            if target is None:
+                continue
+            update = copy.deepcopy(target)
+            # Historical evidence can repair a retained row without promoting
+            # an unselected observation's label, notes, or other metadata.
             refs = copy.deepcopy(surface_receipts(latest_relative, latest_surface))
             update["receiptRefs"] = refs
+            replaced_receipt = False
+            replacement_paths = dict(receipt_paths)
             if isinstance(refs, list):
-                for saved_relative, row in matches:
+                repaired = (
+                    not reopening and bool(refs) and all(receipt_error(ref) is None for ref in refs)
+                )
+                if repaired:
+                    for ref in refs:
+                        normalized = _require_portable_relative_path(ref, "Saved coverage receipt")
+                        key = normalized.lower()
+                        if key in replacement_paths and replacement_paths[key] != normalized:
+                            repaired = False
+                            break
+                        replacement_paths[key] = normalized
+                for saved_relative, row in receipt_matches:
                     previous_refs = surface_receipts(saved_relative, row)
                     for ref in previous_refs if isinstance(previous_refs, list) else []:
                         if ref not in refs:
+                            failure = receipt_error(ref) if repaired else None
+                            replaceable = failure is not None and isinstance(
+                                failure.__cause__, FileNotFoundError
+                            )
+                            if repaired and isinstance(ref, str):
+                                try:
+                                    normalized = _require_portable_relative_path(
+                                        ref, "Saved coverage receipt"
+                                    )
+                                except ContractError as error:
+                                    failure = error
+                                    replaceable = True
+                                else:
+                                    key = normalized.lower()
+                                    previous = replacement_paths.get(key)
+                                    if previous is not None and previous != normalized:
+                                        failure = ContractError(
+                                            f"Saved coverage receipt: duplicate artifact path: {previous} and {normalized}"
+                                        )
+                                        replaceable = True
+                                    elif not replaceable:
+                                        replacement_paths[key] = normalized
+                            if replaceable:
+                                replaced_receipt = True
+                                if receipt_warnings is not None:
+                                    receipt_warnings.append(
+                                        f"Replaced invalid saved coverage receipt {ref}: {failure}"
+                                    )
+                                continue
                             refs.append(ref)
+            if repair_only and not replaced_receipt:
+                continue
             try:
                 _validate_schema_node(update, surface_schema, "coverage.surfaces")
             except ContractError:
                 continue
-            replaced.update(
+            replaced_sources = {
                 id(row)
                 for _, row in matches
                 if reopening
                 or row.get("disposition") in {"needs_follow_up", surface.get("disposition")}
-            )
+            }
+            replaced.update(replaced_sources)
             entry = (latest_relative, owner, latest_surface, update)
             if entry not in updates:
+                receipt_paths.update(replacement_paths)
                 updates.append(entry)
     return replaced, updates

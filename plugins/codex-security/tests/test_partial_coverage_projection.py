@@ -343,7 +343,8 @@ def test_missing_accepted_result_does_not_project_an_archived_attempt(
     surface = next(
         item for item in coverage["surfaces"] if item["label"] == "Prior unfinished review"
     )
-    assert surface["id"] == "prior-surface"
+    assert surface["id"] == f"{worker_id}/prior-surface"
+    assert surface["workerId"] == worker_id
     assert "provenance" not in surface
     assert surface["receiptRefs"] == [receipt.relative_to(scan.scan_dir).as_posix()]
     assert len(coverage.get("reviews", [])) == int(parent_review)
@@ -421,7 +422,15 @@ def test_failed_worker_reviews_do_not_replace_accepted_reviews(
     coverage = json.loads(coverage_path.read_text())
     assert coverage["reviews"] == [review]
     for field in ("surfaces", "deferred", "explicitExclusions", "openQuestions"):
-        assert all(item in coverage[field] for item in drafts["failed"]["coverage"][field])
+        for item in drafts["failed"]["coverage"][field]:
+            expected = {**item, "workerId": failed.parent.name}
+            if field != "openQuestions":
+                expected["id"] = f"{failed.parent.name}/{item['id']}"
+            if field == "deferred":
+                expected["surfaceIds"] = [
+                    f"{failed.parent.name}/{surface_id}" for surface_id in item["surfaceIds"]
+                ]
+            assert expected in coverage[field]
     assert any(
         item.get("reason") == "accepted source needs proof." for item in coverage["deferred"]
     )

@@ -479,7 +479,7 @@ def test_split_deferred_rows_keep_distinct_ids_in_frozen_recovery(
     close_first: bool,
 ):
     state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
-    _, result_path = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    worker_id, result_path = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
     combined = {
         "id": "combined-review",
         "reason": "Review remains.",
@@ -527,8 +527,13 @@ def test_split_deferred_rows_keep_distinct_ids_in_frozen_recovery(
         assert len(retained) == (1 if close_first and explicit_ids else 2)
         assert len({row["id"] for row in retained}) == len(retained)
         if explicit_ids:
-            assert {row["id"] for row in retained} == expected_ids
-        assert all(row["id"] != combined["id"] for row in retained)
+            assert {row["id"] for row in retained} == {
+                f"{worker_id}/{identity}" for identity in expected_ids
+            }
+        assert all(
+            row["id"] not in {combined["id"], f"{worker_id}/{combined['id']}"} for row in retained
+        )
+        assert all(row["workerId"] == worker_id for row in retained)
         if payload_field:
             assert all(row[payload_field] == combined[payload_field] for row in retained)
     assert replay == first_coverage
@@ -590,12 +595,20 @@ def test_unnamed_observation_does_not_replace_saved_context(
             "id": f"{worker_id}-attempt-1-deferred-1",
             "provenance": {"workerId": worker_id, "attempt": 1, "sourceId": broad["id"]},
         }
+    elif layout == "worker":
+        expected = {**expected, "id": f"{worker_id}/{expected['id']}", "workerId": worker_id}
+    expected_raw = {**raw_row, "workerId": worker_id} if layout == "worker" else raw_row
     for coverage in (first_coverage, replay):
         pending = [row for row in coverage["deferred"] if row["id"] != "scan-stopped"]
         assert expected in pending
+        if layout == "worker":
+            assert all(
+                row.get("workerId", row.get("provenance", {}).get("workerId")) == worker_id
+                for row in pending
+            )
         unnamed = [row for row in pending if row.get("id") != expected["id"]]
         assert len(unnamed) == 1
-        assert {key: value for key, value in unnamed[0].items() if key != "id"} == raw_row
+        assert {key: value for key, value in unnamed[0].items() if key != "id"} == expected_raw
         assert "candidateId" not in unnamed[0]
     assert replay == first_coverage
 
