@@ -18,6 +18,7 @@ import { privateDirectoryProof } from "./proof-windows-acl.mjs";
 import { processProof } from "./proof-process-windows.mjs";
 import { wideProcessProof } from "./proof-windows-wide.mjs";
 import { windowsFileSystem } from "./windows-files.mjs";
+import { scanReadProof } from "./proof-scan-read.mjs";
 import {
   loadWindowsBinding,
   windowsFlags as flags,
@@ -394,6 +395,7 @@ try {
         architecture: process.arch,
         nodeApi: 8,
         handles,
+        scanReads: scanReadProof(),
         privateDirectories,
         wideProcessAndPaths,
         childProcesses: await processProof(
