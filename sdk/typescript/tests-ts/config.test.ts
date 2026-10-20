@@ -158,6 +158,7 @@ async function sandboxFailureDetails(codexHome: string, details: string) {
   } catch (error) {
     details += `\nCould not read native sandbox logs: ${String(error)}`;
   }
+  console.log(details);
   return details;
 }
 
