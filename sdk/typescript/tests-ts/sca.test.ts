@@ -1,3 +1,4 @@
+import { requestMetadata } from "./support/request-metadata.js";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import * as childProcess from "node:child_process";
@@ -1820,6 +1821,9 @@ test.each([
       default_permissions: "codex_security_dependencies",
       features: { plugins: false, apps: false },
       mcp_servers: {},
+    });
+    expect(requestMetadata(captured.codex!.configOverrides)).toMatchObject({
+      codex_security_command: "dependencies",
     });
     expect(captured.thread).toMatchObject({
       threadSource: "security_dependency_triage",
