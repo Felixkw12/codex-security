@@ -3262,6 +3262,156 @@ describe("live scan cost tracking", () => {
     ]);
   });
 
+  test.each([
+    "EIO",
+    "ENOENT",
+    "invalid",
+    "missing-file",
+    "missing-directory",
+  ] as const)(
+    "retains measured worker receipts through %s collection failures",
+    async (failure) => {
+      const home = await codexHome();
+      const scanId = "receipt-recovery";
+      const directory = join(home, "worker-usage", scanId);
+      await fs.mkdir(directory, { recursive: true });
+      const save = async (
+        attemptId: string,
+        threadId: string | null,
+        usage: { input_tokens: number; output_tokens: number } | null,
+      ) =>
+        writeFile(
+          join(directory, `${attemptId}.json`),
+          JSON.stringify({
+            schemaVersion: 1,
+            source: "codex_sdk",
+            usageScope: "thread_cumulative",
+            scanId,
+            attemptId,
+            threadId,
+            usage,
+          }),
+        );
+      await save("earlier", "worker", { input_tokens: 500, output_tokens: 5 });
+      await save("latest", "worker", {
+        input_tokens: 1_000,
+        output_tokens: 10,
+      });
+      await save("unknown", null, null);
+      const measurements: Readonly<ScanUsageMeasurement>[] = [];
+      const tracker = costTracker(home, {
+        workerReceipts: { directory, scanId },
+        maxCostUsd: 1,
+        onMeasurement: (measurement) => measurements.push(measurement),
+      });
+      tracker.start("scan-thread");
+      const before = (
+        await tracker.stop({ input_tokens: 100, output_tokens: 1 })
+      ).measurement;
+      expect(before).toMatchObject({
+        coverage: "partial",
+        threadCount: 2,
+        missingThreadCount: 2,
+        usage: { total_tokens: 1_111 },
+        cost: { inputTokens: 1_100, outputTokens: 11, estimatedUsd: 0.00462 },
+      });
+      const latest = join(directory, "latest.json");
+      const originalRead = filesystem.readFile;
+      const reading =
+        failure === "EIO" || failure === "ENOENT"
+          ? spyOn(filesystem, "readFile").mockImplementation((async (
+              ...args: Parameters<typeof filesystem.readFile>
+            ) => {
+              if (args[0] === latest)
+                throw Object.assign(new Error(`Synthetic receipt ${failure}`), {
+                  code: failure,
+                });
+              return Reflect.apply(originalRead, filesystem, args);
+            }) as typeof filesystem.readFile)
+          : null;
+      let moved = false;
+      try {
+        if (failure === "invalid") await writeFile(latest, "{invalid");
+        if (failure === "missing-file") await fs.rm(latest);
+        if (failure === "missing-directory") {
+          await fs.rename(directory, `${directory}-unavailable`);
+          moved = true;
+        }
+        const update = tracker.refresh();
+        if (failure === "EIO")
+          await expect(update).rejects.toMatchObject({ code: "EIO" });
+        else if (failure === "invalid")
+          await expect(update).rejects.toBeInstanceOf(SyntaxError);
+        else await update;
+        expect(measurements.at(-1)).toMatchObject({
+          coverage: "partial",
+          threadCount: 2,
+          missingThreadCount: 2,
+          usage: before.usage,
+          cost: before.cost,
+        });
+        expect(measurements.at(-1)?.coverageScope).toEqual(
+          failure === "EIO" || failure === "invalid"
+            ? undefined
+            : before.coverageScope,
+        );
+        reading?.mockRestore();
+        if (moved) {
+          await fs.rename(`${directory}-unavailable`, directory);
+          moved = false;
+        }
+        await save("latest", "worker", {
+          input_tokens: 1_200,
+          output_tokens: 12,
+        });
+        await save("unknown", "other-worker", {
+          input_tokens: 0,
+          output_tokens: 0,
+        });
+        await writeSession(home, "worker", {
+          input_tokens: 1_200,
+          output_tokens: 12,
+        });
+        await writeSession(home, "other-worker", {
+          input_tokens: 0,
+          output_tokens: 0,
+        });
+        const recovered = (await tracker.stop()).measurement;
+        expect(recovered).toMatchObject({
+          coverage: "complete",
+          threadCount: 3,
+          missingThreadCount: 0,
+          usage: {
+            input_tokens: 1_300,
+            output_tokens: 13,
+            total_tokens: 1_313,
+          },
+          cost: { inputTokens: 1_300, outputTokens: 13, estimatedUsd: 0.00546 },
+          coverageScope: [
+            "thread:other-worker",
+            "thread:scan-thread",
+            "thread:worker",
+            "worker-attempt:earlier",
+            "worker-attempt:latest",
+            "worker-attempt:unknown",
+          ],
+        });
+        await fs.rm(latest);
+        expect((await tracker.stop()).measurement).toMatchObject({
+          coverage: "complete",
+          missingThreadCount: 0,
+          usage: recovered.usage,
+          cost: recovered.cost,
+          coverageScope: recovered.coverageScope,
+        });
+      } finally {
+        reading?.mockRestore();
+        if (moved) await fs.rename(`${directory}-unavailable`, directory);
+        await tracker.stop().catch(() => {});
+      }
+    },
+  );
+
   test.each(["standard", "deep"])(
     "%s scans ignore model-written worker receipts for budgets and session events",
     async (mode) => {

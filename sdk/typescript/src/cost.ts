@@ -62,6 +62,11 @@ type SessionUsage = ReturnType<typeof createSessionUsage> & {
   events?: SessionObservation<Record<string, unknown>>[];
 };
 
+type WorkerReceipt = {
+  threadId: string | null;
+  usage: ScanTokenUsage | null;
+};
+
 function sessionObservation<T>(
   session: SessionUsage,
   value: T,
@@ -141,6 +146,7 @@ export class ScanCostTracker {
   readonly #options: ScanCostTrackerOptions;
   readonly #sessions = new Map<string, SessionUsage>();
   readonly #receipts = new Map<string, ScanTokenUsage | null>();
+  readonly #workerReceipts = new Map<string, WorkerReceipt>();
   readonly #workers = new Map<string, number>();
   readonly #workerProgress = new Map<string, number>();
   readonly #reportedProgress = new Set<string>();
@@ -307,16 +313,11 @@ export class ScanCostTracker {
       }
     }
 
-    let workerReceipts: Awaited<ReturnType<typeof readWorkerReceipts>> = {
-      usages: new Map(),
-      unknownAttempts: 0,
-      attemptIds: new Set(),
-    };
-    try {
-      workerReceipts = await readWorkerReceipts(this.#options.workerReceipts);
-    } catch (error) {
-      collectionErrors.push(error);
-    }
+    const workerReceipts = await readWorkerReceipts(
+      this.#options.workerReceipts,
+      this.#workerReceipts,
+    );
+    collectionErrors.push(...workerReceipts.errors);
     const included = new Set([
       this.#threadId,
       ...this.#receipts.keys(),
@@ -611,14 +612,21 @@ export class ScanCostTracker {
 
 async function readWorkerReceipts(
   store: ScanCostTrackerOptions["workerReceipts"],
+  retained: Map<string, WorkerReceipt>,
 ): Promise<{
   usages: Map<string, ScanTokenUsage | null>;
   unknownAttempts: number;
   attemptIds: Set<string>;
+  errors: unknown[];
 }> {
   const usages = new Map<string, ScanTokenUsage | null>();
   const attempts = new Set<string>();
-  const result = { usages, unknownAttempts: 0, attemptIds: attempts };
+  const result = {
+    usages,
+    unknownAttempts: 0,
+    attemptIds: attempts,
+    errors: [] as unknown[],
+  };
   if (store === undefined) return result;
   const { directory, scanId } = store;
   try {
@@ -632,9 +640,15 @@ async function readWorkerReceipts(
       );
     for (const entry of await readdir(directory, { withFileTypes: true })) {
       if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
-      const receipt: unknown = JSON.parse(
-        await readFile(join(directory, entry.name), "utf8"),
-      );
+      let receipt: unknown;
+      try {
+        receipt = JSON.parse(
+          await readFile(join(directory, entry.name), "utf8"),
+        );
+      } catch (error) {
+        if (isMissingFile(error)) continue;
+        throw error;
+      }
       if (
         !isRecord(receipt) ||
         receipt["schemaVersion"] !== 1 ||
@@ -647,27 +661,36 @@ async function readWorkerReceipts(
       )
         continue;
       attempts.add(receipt["attemptId"]);
-      if (typeof receipt["threadId"] !== "string") {
-        result.unknownAttempts += 1;
-        continue;
-      }
-      const usage = tokenUsage(receipt["usage"]);
-      const existing = usages.get(receipt["threadId"]) ?? null;
-      // Native SDK completions include earlier turns of a resumed thread.
-      usages.set(
-        receipt["threadId"],
-        usage !== null &&
-          (existing === null ||
-            usage.total_tokens > existing.total_tokens ||
-            (usage.total_tokens === existing.total_tokens &&
-              existing.cache_write_input_tokens_reported === false &&
-              usage.cache_write_input_tokens_reported !== false))
-          ? usage
-          : existing,
-      );
+      retained.set(receipt["attemptId"], {
+        threadId:
+          typeof receipt["threadId"] === "string" ? receipt["threadId"] : null,
+        usage: tokenUsage(receipt["usage"]),
+      });
     }
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    if (!isMissingFile(error)) result.errors.push(error);
+  }
+  // As with native sessions, a later read failure cannot erase observed usage.
+  // Keep attempts separate so a worker's initial unknown identity can resolve.
+  for (const [attemptId, { threadId, usage }] of retained) {
+    attempts.add(attemptId);
+    if (threadId === null) {
+      result.unknownAttempts += 1;
+      continue;
+    }
+    const existing = usages.get(threadId) ?? null;
+    // Native SDK completions include earlier turns of a resumed thread.
+    usages.set(
+      threadId,
+      usage !== null &&
+        (existing === null ||
+          usage.total_tokens > existing.total_tokens ||
+          (usage.total_tokens === existing.total_tokens &&
+            existing.cache_write_input_tokens_reported === false &&
+            usage.cache_write_input_tokens_reported !== false))
+        ? usage
+        : existing,
+    );
   }
   return result;
 }
