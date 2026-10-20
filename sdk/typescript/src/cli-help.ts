@@ -43,6 +43,7 @@ const SCAN_GROUPS: readonly Group[] = [
       "format",
       "json",
       "full-output",
+      "owner-suggestions",
       "max-cost",
       "max-time",
       "show-cost",
