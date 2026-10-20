@@ -153,7 +153,7 @@ async function scopeCandidates(repo: string, scope: string): Promise<string[]> {
       });
     const files: string[] = [];
     if (!ignored)
-      for (const path of walk(scope)) {
+      for (const path of walk(scope, false, true)) {
         if (
           ignoreNames.some((name) => path.endsWith(sep + name)) &&
           isIgnoreFile(path)

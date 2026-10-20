@@ -2151,6 +2151,31 @@ for (const command of ["make-repo-scope-input"])
         },
       );
 
+test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+  "missing-tool fallback retains readable files beside unreadable directories",
+  () => {
+    const f = fixture();
+    rmSync(join(f.repo, ".git"), { recursive: true });
+    f.write("readable.py");
+    f.write("blocked/private.py");
+    const blocked = join(f.repo, "blocked");
+    chmodSync(blocked, 0);
+    try {
+      const result = f.run("make-repo-scope-input", f.scopeArgs(), {
+        ...process.env,
+        CODEX_SECURITY_GIT: "",
+        PATH: f.root,
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(JSON.parse(readFileSync(f.out, "utf8"))).toEqual({
+        path: "readable.py",
+      });
+    } finally {
+      chmodSync(blocked, 0o700);
+    }
+  },
+);
+
 for (const name of [".gitignore", ".ignore", ".rgignore"])
   for (const location of ["ancestor", "descendant"])
     test.skipIf(process.platform === "win32")(
