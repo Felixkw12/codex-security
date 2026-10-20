@@ -998,7 +998,7 @@ def test_rejected_completion_preserves_committed_state_before_corrected_retry(
     failed = scan_command(state_dir, command, scan_id, check=False)
 
     assert failed["returncode"] != 0
-    assert ("target.kind" if defect == "target" else "coverage") in failed["stderr"]
+    assert ("target.remote" if defect == "target" else "coverage") in failed["stderr"]
     assert committed_state() == previous_committed
     assert {
         path.name: (path.read_bytes(), path.stat().st_mtime_ns)
@@ -1461,7 +1461,7 @@ def test_stopped_recovery_preserves_findings_with_invalid_or_duplicate_writeups(
     fail_scan(state_dir, scan_id, "Finding writeups could not be repaired.")
     completed = get_scan(state_dir, scan_id)
 
-    assert completed["scan"]["progress"]["status"] == "complete"
+    assert completed["scan"]["progress"]["status"] == "failed"
     assert completed["scan"]["findingCount"] == 8
     warnings = completed["scan"]["warnings"]
     assert len(warnings) == 6
@@ -1495,7 +1495,7 @@ def test_stopped_recovery_preserves_findings_with_invalid_or_duplicate_writeups(
 
 
 @pytest.mark.parametrize("replacement_directory", ["original", "replacement"])
-def test_completion_tracks_writeup_directories_after_stronger_finding_replacement(
+def test_stopped_recovery_tracks_writeup_directories_after_stronger_finding_replacement(
     tmp_path: Path, replacement_directory: str
 ) -> None:
     state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(tmp_path)
@@ -1517,9 +1517,14 @@ def test_completion_tracks_writeup_directories_after_stronger_finding_replacemen
         path.write_text("# Verified finding\n")
     findings_path.write_text(json.dumps(findings))
 
-    completed = run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
+    rejected = scan_command(state_dir, "complete-scan", scan_id, check=False)
+    assert rejected["returncode"] != 0
+    assert "duplicate occurrence identity" in rejected["stderr"]
+    assert json.loads(findings_path.read_text()) == findings
+    fail_scan(state_dir, scan_id, "Duplicate findings could not be resolved.")
+    completed = get_scan(state_dir, scan_id)
 
-    assert completed["scan"]["progress"]["status"] == "complete"
+    assert completed["scan"]["progress"]["status"] == "failed"
     assert completed["scan"]["findingCount"] == 2
     warnings = completed["scan"]["warnings"]
     assert len(warnings) == 1
@@ -1708,9 +1713,9 @@ def test_completion_recovers_malformed_coverage_rows(tmp_path: Path) -> None:
 
     assert len(sealed_coverage["surfaces"]) == 1
     assert sealed_coverage["surfaces"][0]["disposition"] == "needs_follow_up"
-    assert sealed_coverage["explicitExclusions"] == [
-        {"pattern": "docs/", "reason": "Documentation only."}
-    ]
+    [exclusion] = sealed_coverage["explicitExclusions"]
+    assert isinstance(exclusion.pop("id"), str)
+    assert exclusion == {"pattern": "docs/", "reason": "Documentation only."}
     assert sealed_coverage["deferred"] == [
         {
             "id": "deferred_archive_review",

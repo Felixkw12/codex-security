@@ -254,13 +254,16 @@ def test_deep_completion_keeps_strict_validation_for_committed_findings(tmp_path
         scan["scanId"],
         input_text=json.dumps({"documents": documents}),
     )
+    original = {
+        name: (directory / name).read_bytes()
+        for name in ("scan-manifest.json", "findings.json", "coverage.json")
+    }
     result = run_workbench(state, "complete-scan", "--scan-id", scan["scanId"], check=False)
     assert result["returncode"] != 0
     assert "severity" in result["stderr"]
     scan = run_workbench(state, "get-scan", "--scan-id", scan["scanId"])["scan"]
-    assert scan["progress"]["status"] == "failed"
-    manifest = json.loads((directory / "scan-manifest.json").read_text())["scan"]
-    assert manifest["status"] == "failed"
+    assert scan["progress"]["status"] == "running"
+    assert {name: (directory / name).read_bytes() for name in original} == original
 
 
 def test_flat_source_materialization_retains_originals_and_accepted_revisions(workbench_api):

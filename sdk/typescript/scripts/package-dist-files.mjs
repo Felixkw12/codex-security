@@ -37,6 +37,7 @@ const distModules = [
   "scan-progress",
   "deep-scan",
   "deep-config",
+  "deep-progress",
   "deep-scan-defaults",
   "project-config",
   "project-config-schema",

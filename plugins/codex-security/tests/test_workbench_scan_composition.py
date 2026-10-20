@@ -2847,7 +2847,8 @@ def test_public_finding_history_does_not_traverse_internal_passes(
     assert not compared["matchingInputs"].get("knownFindingGroups")
     assert compared["summary"]["persisting"] == 0
     assert compared["summary"]["new"] == 1
-    assert compared["summary"]["resolved"] == 1
+    assert compared["summary"]["resolved"] == 0
+    assert compared["summary"]["not_observed"] == 1
     assert len(run_workbench(state, "list-global-findings")["findings"]) == 2
     for scan in (before, after):
         saved = run_workbench(state, "get-scan", "--scan-id", scan["scanId"])["scan"]
