@@ -64,6 +64,7 @@ from workbench_constants import (
     DELIVERED_ACTION_LEASE_SECONDS,
     DIFF_TARGET_KINDS,
     EMPTY_GIT_TREE,
+    EMPTY_GIT_TREES,
     FINDINGS_RESULT_LIMIT,
     SQLITE_RETRY_ATTEMPTS,
 )
@@ -88,6 +89,12 @@ from workbench_schema import (
 )
 from workbench_schema import (
     sql_statements as sql_statements,
+)
+from workbench_source_scopes import (
+    capture_source_scopes,
+    expected_target_kinds,
+    public_scan_recipe,
+    requested_scan_paths,
 )
 from workbench_target import (
     clean_worktree_content_digest,
@@ -325,7 +332,7 @@ def require_diff_target(
             None,
         )
         if parent_line is None:
-            parent = EMPTY_GIT_TREE
+            parent = EMPTY_GIT_TREES[git_output(target, "rev-parse", "--show-object-format")]
         else:
             parent = resolve_git_commit(
                 target,
@@ -406,27 +413,6 @@ def require_scannable_target(target: Path) -> None:
         raise SystemExit(
             "Codex Security requires a checked-out worktree, not a bare Git repository."
         )
-
-
-def expected_target_kinds(scan: sqlite3.Row) -> list[str]:
-    if scan["mode"] == "diff":
-        return ["git_diff"]
-    if scan["target_revision"] == "unversioned":
-        return ["directory_snapshot"]
-    if scan["target_snapshot_digest"] is None:
-        return ["git_worktree", "git_revision"]
-    if scan["target_snapshot_digest"] == clean_worktree_content_digest():
-        return ["git_revision"]
-    return ["git_worktree"]
-
-
-def requested_scan_paths(scan: sqlite3.Row) -> list[str]:
-    if "recipe_json" in scan.keys() and scan["recipe_json"] is not None:
-        recipe = json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json)
-        target = recipe["target"]
-        if target["kind"] == "paths":
-            return target["paths"]
-    return [scan["scope"]]
 
 
 def requested_scan_file_paths(scan: sqlite3.Row) -> list[str]:
@@ -854,6 +840,12 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
             diff_target,
             metadata=target_metadata,
         )
+        source_scopes = capture_source_scopes(
+            target,
+            target_identity,
+            [scope],
+            diff_target_kind=diff_target["kind"] if diff_target is not None else None,
+        )
         target_root = scan_target_root(args.scan_root, target)
         create_private_directory(target_root)
         if manages_transaction:
@@ -902,6 +894,7 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
             scope=scope,
             diff_target=diff_target,
             target_identity=target_identity,
+            source_scopes=source_scopes,
             target_root=target_root,
             target_summary=target_summary,
             scope_file_count=scope_file_count,
@@ -946,6 +939,12 @@ def _start_prompt_driven_scan(
     )
     diff_identity = scan_diff_identity(diff_target)
     target_identity = scan_target_identity(target, diff_target)
+    source_scopes = capture_source_scopes(
+        target,
+        target_identity,
+        [scope],
+        diff_target_kind=diff_target["kind"] if diff_target is not None else None,
+    )
     target_root = scan_target_root(args.scan_root, target)
 
     busy_timeout = int(connection.execute("PRAGMA busy_timeout").fetchone()[0])
@@ -1058,6 +1057,7 @@ def _start_prompt_driven_scan(
                 scope=scope,
                 diff_target=diff_target,
                 target_identity=target_identity,
+                source_scopes=source_scopes,
                 target_root=target_root,
                 target_summary=target_summary,
                 scope_file_count=scope_file_count,
@@ -1173,12 +1173,18 @@ def finalize_scan_usage(connection: sqlite3.Connection, args: argparse.Namespace
                 completed_turn_id=args.turn_id,
             )
             if usage["coverage"] == "unavailable":
-                return scan_context(connection, scan_id)
-            if args.turn_status != "completed":
-                if usage["coverage"] == "complete":
-                    usage["coverage"] = "partial"
-                usage["warnings"] = [*usage.get("warnings", []), f"scan_turn_{args.turn_status}"]
-            usage["completion"] = {**completion, "finalized": True}
+                if not usage.get("accountRateLimits"):
+                    return scan_context(connection, scan_id)
+                usage = {**stored["usage"], "accountRateLimits": usage["accountRateLimits"]}
+            else:
+                if args.turn_status != "completed":
+                    if usage["coverage"] == "complete":
+                        usage["coverage"] = "partial"
+                    usage["warnings"] = [
+                        *usage.get("warnings", []),
+                        f"scan_turn_{args.turn_status}",
+                    ]
+                usage["completion"] = {**completion, "finalized": True}
             cost_json = parse_scan_cost(json.dumps({**stored, "usage": usage}))
             with connection:
                 connection.execute(
@@ -1626,13 +1632,15 @@ def complete_scan_locked(
         context["targetWarnings"] = target_warnings
         return context
 
-    if cost_json is None:
-        measured_usage = scan_usage.collect_scan_usage(
+    cost_fields = scan_usage.stored_scan_cost_fields(cost_json)
+    if "usage" not in cost_fields:
+        cost_fields["usage"] = scan_usage.collect_scan_usage(
             connection,
             scan,
             thread_id=thread_id,
             completed_at=completion_timestamp,
         )
+        measured_usage = cost_fields["usage"]
         if thread_id is not None and turn_id is not None:
             measured_usage["completion"] = {
                 "threadId": thread_id,
@@ -1641,11 +1649,10 @@ def complete_scan_locked(
             }
             if measured_usage["coverage"] == "complete":
                 measured_usage["coverage"] = "partial"
-            measured_usage["warnings"] = [
-                *measured_usage.get("warnings", []),
-                "turn_in_progress",
-            ]
-        cost_json = parse_scan_cost(scan_usage.measured_scan_cost_json(measured_usage))
+            measured_usage["warnings"] = sorted(
+                {*measured_usage.get("warnings", []), "turn_in_progress"}
+            )
+    cost_json = parse_scan_cost(json.dumps(cost_fields))
     connection.execute("BEGIN IMMEDIATE")
     with connection:
         timestamp = manifest["scan"]["completedAt"]
@@ -1741,6 +1748,7 @@ def register_cli_scan(
     recipe = parse_scan_recipe(recipe_json, repository)
     requested_target = recipe["target"]
     paths = requested_target["paths"]
+    recipe.pop("_codexSecurityFileScopes", None)
     # Capture host-observed kinds once; resumes and publication use the saved recipe.
     recipe.pop("scopeFilePaths", None)
     if file_paths := [path for path in paths if (repository / path).is_file()]:
@@ -1762,6 +1770,12 @@ def register_cli_scan(
             diff_target["contentDigest"] = worktree_content_digest(repository)
     mode = "diff" if diff_target is not None else recipe["mode"]
     target_identity = scan_target_identity(repository, diff_target)
+    source_scopes = capture_source_scopes(
+        repository,
+        target_identity,
+        paths or ["."],
+        diff_target_kind=diff_target["kind"] if diff_target is not None else None,
+    )
     scope_file_count = (
         directory_snapshot_regular_file_count(repository)
         if not paths
@@ -1832,6 +1846,7 @@ def register_cli_scan(
                 scope=scope,
                 diff_target=diff_target,
                 target_identity=target_identity,
+                source_scopes=source_scopes,
                 target_root=scan_dir.parent,
                 target_summary=None,
                 scope_file_count=scope_file_count,
@@ -2767,7 +2782,7 @@ def scan_context(
     }
     if scan["recipe_json"] is not None:
         context["parentScanId"] = scan["parent_scan_id"]
-        context["recipe"] = json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json)
+        context["recipe"] = public_scan_recipe(scan)
     return context
 
 
@@ -3119,7 +3134,7 @@ def backfill_legacy_finding_details(connection: sqlite3.Connection, scan: sqlite
     updates = []
     for row in legacy_rows:
         finding = by_occurrence.get(row["id"])
-        if not legacy_finding_matches(row, finding):
+        if not finding_results.legacy_finding_matches(row, finding):
             continue
         updates.append(
             (
@@ -3158,19 +3173,6 @@ def backfill_legacy_finding_details(connection: sqlite3.Connection, scan: sqlite
                 "UPDATE scans SET seal_manifest_digest = ? WHERE id = ?",
                 (manifest_digest, scan["id"]),
             )
-
-
-def legacy_finding_matches(row: sqlite3.Row, finding: Any) -> bool:
-    if not isinstance(finding, dict):
-        return False
-    return (
-        finding.get("findingId") == row["finding_id"]
-        and finding.get("title") == row["title"]
-        and finding.get("summary") == row["summary"]
-        and finding.get("remediation") == row["remediation"]
-        and finding["severity"]["level"] == row["severity"]
-        and finding["confidence"]["level"] == row["confidence"]
-    )
 
 
 def finding_result(

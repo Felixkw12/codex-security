@@ -25,13 +25,27 @@ from workbench_constants import (
     FINDING_SUMMARY_BYTES,
     FINDING_TITLE_BYTES,
 )
-from workbench_source_excerpt import finding_source_excerpt, safe_source_path
+from workbench_source_excerpt import finding_source_excerpt
+from workbench_source_scopes import requested_scan_paths, safe_source_path
 from workbench_target import require_scan_target_identity
 from workbench_validation import bounded_output_text
 
 FINDING_ARTIFACT_DIRECTORIES_LIMIT = 80
 FINDING_ARTIFACTS_LIMIT = 40
 FINDING_WRITEUP_REPORT_PATH = re.compile(r"^findings/([a-z0-9][a-z0-9._-]*)/\1\.md$")
+
+
+def legacy_finding_matches(row: sqlite3.Row, finding: Any) -> bool:
+    if not isinstance(finding, dict):
+        return False
+    return (
+        finding.get("findingId") == row["finding_id"]
+        and finding.get("title") == row["title"]
+        and finding.get("summary") == row["summary"]
+        and finding.get("remediation") == row["remediation"]
+        and finding["severity"]["level"] == row["severity"]
+        and finding["confidence"]["level"] == row["confidence"]
+    )
 
 
 def finding_result(
@@ -68,6 +82,7 @@ def finding_result(
     severity = details.get("severity")
     severity = severity if isinstance(severity, dict) else {}
     locations = []
+    excerpt_locations = []
     try:
         target = require_scan_target_identity(scan, target_path=scan["target_path"])
     except SystemExit:
@@ -115,6 +130,8 @@ def finding_result(
                 if full_details
                 else bounded_output_text(absolute_path, FINDING_ABSOLUTE_PATH_BYTES)
             )
+        if location["path"] == row["relative_path"]:
+            excerpt_locations.append(location.copy())
         locations.append(location)
     triage = finding_triage_result(connection, occurrence["id"], indexed_finding)
     result = {
@@ -172,7 +189,9 @@ def finding_result(
     if matches or result.get("occurrenceCount", 0) > 1:
         result["knownSince"] = known_since
         result["knownScanIds"] = known_scan_ids
-    source_excerpt = finding_source_excerpt(scan, target, locations)
+    source_excerpt = finding_source_excerpt(
+        scan, target, excerpt_locations, requested_scan_paths(scan)
+    )
     if source_excerpt:
         result["sourceExcerpt"] = source_excerpt
     artifact_paths = finding_artifact_paths(Path(scan["scan_dir"]), details)
