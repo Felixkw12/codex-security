@@ -20,7 +20,10 @@ import type {
 } from "./models.js";
 import { openScanReadRoot, windowsBinding } from "./native.js";
 import { widePath, windowsFileSystem } from "../../native/windows-files.mjs";
-import { resolvedPathText } from "./helpers/helper-files.js";
+import {
+  filesystemErrorMessage,
+  resolvedPathText,
+} from "./helpers/helper-files.js";
 import { decodePosixBytes, encodePosixPath } from "./helpers/posix-path.js";
 import {
   SealedContractError as ContractValidationError,
@@ -704,7 +707,7 @@ function openHeldFile(
     return file;
   } catch (error) {
     throw new ContractValidationError(
-      `${context}: expected a file inside the scan directory.`,
+      `${context}: expected a file inside the scan directory. ${filesystemErrorMessage(error)}`,
       { cause: error },
     );
   }
