@@ -1,42 +1,29 @@
-<!-- release-version: 0.4.0 -->
+<!-- release-version: 0.5.1 -->
 
 <!-- release-section: highlights:start -->
 
 ## Highlights
 
-Codex Security 0.4.0 adds hosted Standard scan execution and improves token
-accounting, bulk-scan recovery, and report formatting. The minor version marks
-the removal of obsolete ranking helpers; direct helper users should follow the
-migration guidance below.
+Codex Security 0.5.1 adds hosted patch generation and fix verification, and improves saved-scan replay, Deep Scan recovery, and Windows setup.
 
-- Hosts can run Standard repository or path scans through the TypeScript
-  `runHostedScan(input, { executor, signal, onEvent })` API or the
-  `codex-security scan --host` JSON-RPC adapter. Hosted execution is opt-in and
-  requires a host-provided executor, frozen checkout, and explicit model and
-  storage settings. Hosts own authorization, cancellation, and durable execution
-  state. See the [hosted scan guide](https://github.com/openai/codex-security/blob/npm-v0.4.0/sdk/typescript/docs/hosted-scans.md).
-  ([#1559](https://github.com/openai/codex-security/pull/1559))
-- Scan token totals include recorded usage from earlier Deep Scan worker
-  attempts and context compaction without counting resumed history twice.
-  The SDK and compatible hosts can finish accounting for the final response
-  after report generation. Missing records remain marked incomplete or
-  unavailable rather than being presented as an exact total.
-  ([#1657](https://github.com/openai/codex-security/pull/1657))
-- Bulk scans preserve successful results and original scan failures when
-  temporary-checkout cleanup fails. Cleanup errors are reported separately, and
-  reusing a completed scan can retry its recorded cleanup without another scan.
-  ([#1433](https://github.com/openai/codex-security/pull/1433))
-- Reports render malformed evidence ranges as a valid single line or just the
-  path. Finding text beginning with tilde fences or parenthesized list markers
-  no longer changes the formatting of surrounding report sections. These fixes
-  preserve the underlying findings.
-  ([#1656](https://github.com/openai/codex-security/pull/1656),
-  [#1604](https://github.com/openai/codex-security/pull/1604))
-- The package includes Codex CLI/SDK 0.163.0 and restores the **Codex Security**
-  display name in plugin listings, prompts, and tool labels. The npm package
-  remains `@openai/codex-security`, with the `cs` and `codex-security` commands.
-  ([#1670](https://github.com/openai/codex-security/pull/1670),
-  [#1681](https://github.com/openai/codex-security/pull/1681))
+- **Hosted patching and verification.** Integrations can generate patches and independently verify candidate fixes through `runHostedRemediation()` and its JSON-RPC adapter using a supplied executor. Hosts own checkout isolation, sandbox enforcement, candidate patch identity, and publication. See the [hosted remediation guide](https://github.com/openai/codex-security/blob/npm-v0.5.1/sdk/typescript/docs/hosted-remediation.md). ([#1684](https://github.com/openai/codex-security/pull/1684))
+- **Saved scan settings.** Daybreak selections persist across scans and remediation, including fresh and resumed Deep Scan workers. Saved Bedrock scans retain the effective AWS region and profile, and inline patches preserve the selected profile's provider settings. Severity classification uses the saved repository to select helpers. ([#1740](https://github.com/openai/codex-security/pull/1740), [#1811](https://github.com/openai/codex-security/pull/1811), [#1810](https://github.com/openai/codex-security/pull/1810), [#1815](https://github.com/openai/codex-security/pull/1815))
+- **Deep Scan recovery and progress.** Reports retain accepted worker coverage and its original evidence, including coverage recovered after cancellation or a discovery deadline. Standard and diff scans refresh phase and review counts from saved state even when the model emits no new progress markers. ([#1593](https://github.com/openai/codex-security/pull/1593), [#1757](https://github.com/openai/codex-security/pull/1757))
+- **Windows setup.** Runtime preparation uses private workspaces in the state directory so elevated-sandbox permissions on `TEMP` do not prevent scans from starting. Policy generation supports the default elevated Windows sandbox; see the access details below. Update notices also recognize global installations managed by nvm-windows. ([#1803](https://github.com/openai/codex-security/pull/1803), [#1741](https://github.com/openai/codex-security/pull/1741), [#1801](https://github.com/openai/codex-security/pull/1801))
+- **Reliable command results.** Optional logging, update notices, and scratch cleanup no longer override completed scan, import, or publication outcomes. Failed commands do not print success output, and patch and verification commands wait for required output writes to finish. ([#1800](https://github.com/openai/codex-security/pull/1800), [#1818](https://github.com/openai/codex-security/pull/1818), [#1824](https://github.com/openai/codex-security/pull/1824), [#1826](https://github.com/openai/codex-security/pull/1826), [#1775](https://github.com/openai/codex-security/pull/1775), [#1777](https://github.com/openai/codex-security/pull/1777))
+
+<details>
+<summary>Other fixes</summary>
+
+- Saved scopes, component scans, CSV imports, and activity displays preserve literal paths. Helper values beginning with `-` and literal TOML strings retain their values. ([#1812](https://github.com/openai/codex-security/pull/1812), [#1814](https://github.com/openai/codex-security/pull/1814), [#1786](https://github.com/openai/codex-security/pull/1786), [#1827](https://github.com/openai/codex-security/pull/1827), [#1809](https://github.com/openai/codex-security/pull/1809), [#1792](https://github.com/openai/codex-security/pull/1792))
+- Basic patching supports Git repositories before their first commit. Directory inventories exclude `.svn` metadata, and component scans include tracked files matched by `.gitignore`. ([#1552](https://github.com/openai/codex-security/pull/1552), [#1768](https://github.com/openai/codex-security/pull/1768))
+- Scan history, feedback selection, and automatic matching consistently use scan start times when choosing and comparing results. ([#1772](https://github.com/openai/codex-security/pull/1772), [#1774](https://github.com/openai/codex-security/pull/1774), [#1776](https://github.com/openai/codex-security/pull/1776), [#1779](https://github.com/openai/codex-security/pull/1779))
+- SARIF exports preserve sealed scan artifacts. CSV processing preserves large quoted fields and finalized Deep Scan candidate metadata. ([#1769](https://github.com/openai/codex-security/pull/1769), [#1785](https://github.com/openai/codex-security/pull/1785), [#1828](https://github.com/openai/codex-security/pull/1828))
+- Canceled fix verification restores an already applied patch's state. Deduplication reviews retry temporary Codex rate-limit errors, and cancellation is honored around embedding callbacks and saved result writes. ([#1819](https://github.com/openai/codex-security/pull/1819), [#1767](https://github.com/openai/codex-security/pull/1767), [#1789](https://github.com/openai/codex-security/pull/1789), [#1821](https://github.com/openai/codex-security/pull/1821))
+- Runtime telemetry preserves analytics and OpenTelemetry controls across workers and remediation. ([#1691](https://github.com/openai/codex-security/pull/1691))
+- Release automation waits for npm, installed-package checks, the GitHub Action, and container publication. Containers retain their place in the publication queue. ([#1796](https://github.com/openai/codex-security/pull/1796), [#1806](https://github.com/openai/codex-security/pull/1806))
+
+</details>
 
 <!-- release-section: highlights:end -->
 
@@ -44,41 +31,26 @@ migration guidance below.
 
 ## Upgrade notes
 
-### Scripts and custom workflows that invoke ranking helpers
+### Windows policy generation
 
-The following plugin helper commands are removed:
+With the elevated Windows sandbox, policy generation can read other local source, including sibling components. The policy prompt retains the selected component's scope. Credential, configuration, and Git metadata denials, read-only access, and disabled network access remain enforced. Explicit sandbox choices and Unix read scope are unchanged. ([#1741](https://github.com/openai/codex-security/pull/1741))
 
-- `make-repo-rank-input` and `select-deep-review-input`
-- `make-rank-shards`, `validate-rank-shard`, and `merge-rank-outputs`
-- `make-rank-pool-plan`, `validate-rank-worker`, and `validate-rank-pool`
+### Saved scans of SVN working copies
 
-Remove the ranking, shard/pool scheduling, and ranked-selection stages from
-custom workflows. Generate the scoped inventory and review every selected file:
+Directory scans and patch identities now exclude `.svn` metadata. If a saved scan or patch included that metadata and no longer matches its source, restart the scan or regenerate the patch. Git diff and working-tree scans still require Git. ([#1552](https://github.com/openai/codex-security/pull/1552))
 
-1. For explicit repository scopes, use
-   `scripts/generate_rank_input.py make-repo-scope-input --repo <repo_root> --scopes-file <scopes_json> --out <output_jsonl>`
-   with your Python interpreter and the script from the installed plugin.
-   The scopes file is a JSON array, such as `["src", "tests"]`; use `["."]`
-   for the whole repository instead of the old default `--scope .`.
-   Output rows contain only `path`, for example `{"path":"src/example.ts"}`.
-   Update your consumer to resolve each path against the repository root and
-   read that file directly. If it requires a `path`/`area` review worklist,
-   convert every row to `{"path":"src/example.ts","area":"repository"}`.
-   This inventory contains no `area` or `preview` fields and cannot be passed
-   directly to `copy-deep-review-input`.
-2. For Git diffs, retain `make-diff-rank-input` with its existing revision or
-   local-patch arguments. Copy all candidate rows into the review worklist with
-   `scripts/launch_codex_security_mcp --helper copy-deep-review-input --rank-input <input_jsonl> --out <review_jsonl>`.
-   On Windows, use the `.cmd` launcher.
-3. Review the entire resulting worklist instead of selecting a ranked subset.
-   `bind-repo-scopes` and the retained diff helpers keep their existing
-   arguments and worklist formats.
+### Custom component and CSV scan clients
 
-See the [scoped review reference](https://github.com/openai/codex-security/blob/npm-v0.4.0/plugins/codex-security/skills/security-scan/references/scan-artifacts-and-ledger.md#scoped-deep-review)
-for commands, scope inputs, and Windows invocation details.
-([#1607](https://github.com/openai/codex-security/pull/1607))
+Custom component clients and clients handling explicit CSV scopes now receive absolute scan targets. Component callers intentionally using home shorthand should supply an absolute path inside the repository. Saved plans and receipts retain their existing formats, and completed campaign receipts remain reusable. ([#1814](https://github.com/openai/codex-security/pull/1814))
 
-Normal CLI and SDK scans do not need this helper migration. Hosted execution is
-opt-in; existing local scans continue to use their current execution path.
+### GitHub Action
+
+The Marketplace display name is now **OpenAI Codex Security**. Use `openai/codex-security@action-v0.5.1`, or pin the full distribution commit recorded in the Action release manifest. The npm package name remains `@openai/codex-security`. Marketplace publication is a separate step after the automated release. ([#1797](https://github.com/openai/codex-security/pull/1797))
+
+### Upgrading from earlier releases
+
+If upgrading from before 0.5.0, also review the [0.5.0 upgrade notes](https://github.com/openai/codex-security/releases/tag/npm-v0.5.0), including custom capability-preflight integrations and selected-profile approval settings.
+
+If upgrading from before 0.4.0, upgrade CLI and plugin installations together when they share a Codex Security state directory. The shared issue-history migration preserves existing Linear receipts, but older publishers cannot write to the migrated database. ([#1426](https://github.com/openai/codex-security/pull/1426))
 
 <!-- release-section: upgrades:end -->
