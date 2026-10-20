@@ -585,6 +585,7 @@ describe("custom validation", () => {
             ...args,
           ]);
         git("init", "-q");
+        git("config", "--local", "core.autocrlf", "false");
         git("add", ".");
         git("commit", "-qm", "base");
         await writeFile(

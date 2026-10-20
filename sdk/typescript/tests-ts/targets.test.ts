@@ -50,6 +50,7 @@ async function repository(name = "repo"): Promise<string> {
   await mkdir(join(repo, "src"), { recursive: true });
   await writeFile(join(repo, "src", "app.ts"), "export const ok = true;\n");
   git(repo, "init", "-b", "main");
+  git(repo, "config", "--local", "core.autocrlf", "false");
   git(repo, "config", "user.email", "test@example.com");
   git(repo, "config", "user.name", "Test");
   git(repo, "add", ".");

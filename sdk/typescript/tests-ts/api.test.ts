@@ -2975,6 +2975,14 @@ describe("CodexSecurity orchestration", () => {
     const linked = join(root, "linked");
     await mkdir(normal, { mode: 0o700 });
     execFileSync("git", ["init", "-q", normal]);
+    execFileSync("git", [
+      "-C",
+      normal,
+      "config",
+      "--local",
+      "core.autocrlf",
+      "false",
+    ]);
     await writeFile(join(normal, "tracked.txt"), "tracked\n");
     execFileSync("git", ["-C", normal, "add", "."]);
     execFileSync("git", [
@@ -3072,6 +3080,14 @@ describe("CodexSecurity orchestration", () => {
   test("scrubs Git overrides from direct target normalization", async () => {
     const { root, repository } = await repositoryDirectories();
     execFileSync("git", ["init", "-q", repository]);
+    execFileSync("git", [
+      "-C",
+      repository,
+      "config",
+      "--local",
+      "core.autocrlf",
+      "false",
+    ]);
     await writeFile(join(repository, "tracked.txt"), "tracked\n");
     execFileSync("git", ["-C", repository, "add", "."]);
     execFileSync("git", [
@@ -7519,6 +7535,9 @@ describe("CodexSecurity orchestration", () => {
     await mkdir(ignored);
     await mkdir(vendored);
     execFileSync("git", ["init", "-q"], { cwd: repository });
+    execFileSync("git", ["config", "--local", "core.autocrlf", "false"], {
+      cwd: repository,
+    });
     await Promise.all([
       writeFile(
         join(repository, ".gitignore"),
