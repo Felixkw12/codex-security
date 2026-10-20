@@ -428,6 +428,67 @@ describe("scan and patch workflow", () => {
     ).toMatchObject({ type: "string" });
   });
 
+  test.each([
+    [0, false, 0],
+    [0, true, 2],
+    [130, true, 130],
+    [143, true, 143],
+  ] as const)(
+    "completes required patch output (status %i, failure %p)",
+    async (codexStatus, failOutput, expectedStatus) => {
+      const report = "Synthetic patch report: café → fixed.\n";
+      const started = Promise.withResolvers<(error?: Error) => void>();
+      const stdout = new Writable({
+        highWaterMark: 1,
+        write(_chunk, _encoding, callback) {
+          started.resolve(callback);
+        },
+      });
+      const failure = new Error("Synthetic patch output failure");
+      const emitted = failOutput
+        ? new Promise<Error>((resolve) => stdout.once("error", resolve))
+        : undefined;
+      const stderr = capture();
+      let patched = false;
+      let laterCommands = 0;
+      const operation = main(
+        ["patch", "Synthetic finding"],
+        stdout,
+        stderr.stream,
+        dependencies({
+          currentDirectory: CURRENT_REPOSITORY,
+          onCodex: (_args, output) => {
+            output?.stdout.write(report);
+            patched = true;
+            return codexStatus;
+          },
+          onRepositoryCommand: (_command, args) => {
+            if (patched) laterCommands++;
+            return args.includes("--name-only") ? "synthetic.ts\0" : "tree";
+          },
+        }),
+      );
+      const complete = await started.promise;
+      const commandsBeforeCompletion = laterCommands;
+      complete(failOutput ? failure : undefined);
+      expect(await operation).toBe(expectedStatus);
+      expect(commandsBeforeCompletion).toBe(0);
+      expect(patched).toBe(true);
+      if (failOutput) {
+        expect(await emitted).toBe(failure);
+        expect(laterCommands).toBe(0);
+        expect(stderr.text()).toContain(failure.message);
+        expect(stderr.text()).not.toContain("Patch applied.");
+      } else {
+        expect(laterCommands).toBeGreaterThan(0);
+        expect(stderr.text()).toContain("Patch applied. Files changed: 1.");
+        expect(stdout.writableEnded).toBe(false);
+      }
+      expect(stdout.listenerCount("error")).toBe(0);
+      stdout.destroy();
+    },
+  );
+
   test.each(["literal", "file", "linear"])(
     "passes custom validation instructions to the %s patch task",
     async (source) => {
@@ -518,6 +579,7 @@ describe("scan and patch workflow", () => {
         ],
         {
           currentDirectory: directory,
+          result,
           onWorkbench: () => savedScan(result, "scan-1", repository),
           onCodex: async (args, output) => {
             calls++;
@@ -595,6 +657,7 @@ describe("scan and patch workflow", () => {
           ],
           {
             currentDirectory: directory,
+            result,
             onWorkbench: () => savedScan(result, "scan-1", repository),
             onCodex: (args, output) => {
               started = true;
@@ -723,6 +786,7 @@ describe("scan and patch workflow", () => {
         "--json",
       ],
       {
+        result,
         onWorkbench: () => savedScan(result),
         onRepositoryCommand: (command, args) => {
           repositoryCommands.push({ command, args });
@@ -795,6 +859,8 @@ describe("scan and patch workflow", () => {
           "--codex",
           "analytics.enabled=false",
           "--codex",
+          "daybreak=true",
+          "--codex",
           'model_provider="synthetic.gateway"',
           "--codex",
           'model_providers={"synthetic.gateway"={name="Synthetic",base_url="https://gateway.example.test/v1",wire_api="responses",env_key="SYNTHETIC_KEY"}}',
@@ -805,6 +871,7 @@ describe("scan and patch workflow", () => {
             expect(args).toContain('model="gpt-6.1-sol"');
             expect(args).toContain('model_reasoning_effort="max"');
             expect(args).toContain("analytics.enabled=false");
+            expect(args).toContain("daybreak=true");
             expect(args).toContain('model_provider="synthetic.gateway"');
             expect(output?.modelProvider).toBe("synthetic.gateway");
             expect(output?.codexOverrides).toMatchObject({
@@ -1278,9 +1345,9 @@ describe("scan and patch workflow", () => {
         "--auth",
         "chatgpt",
         "--model",
-        "gpt-5.6-terra",
+        'synthetic-"model"\\雪\u007f',
         "--effort",
-        "high",
+        'future-"effort"\\雪\u007f',
         "--json",
       ],
       {
@@ -1301,8 +1368,16 @@ describe("scan and patch workflow", () => {
       },
     );
     expect(chatgpt.exitCode).toBe(0);
-    expect(invocation).toContain('model="gpt-5.6-terra"');
-    expect(invocation).toContain('model_reasoning_effort="high"');
+    expect(
+      parseToml(invocation.find((value) => value.startsWith("model="))!),
+    ).toEqual({ model: 'synthetic-"model"\\雪\u007f' });
+    expect(
+      parseToml(
+        invocation.find((value) =>
+          value.startsWith("model_reasoning_effort="),
+        )!,
+      ),
+    ).toEqual({ model_reasoning_effort: 'future-"effort"\\雪\u007f' });
     expect(authentication).toBe("chatgpt");
 
     const attributed = await runWorkflow(
@@ -1581,6 +1656,7 @@ describe("scan and patch workflow", () => {
 
         const fixtures: Parameters<typeof dependencies>[0] = {
           currentDirectory: repository,
+          result,
           onWorkbench: () => savedScan(result, "scan-1", repository),
           onCodex: async (args, output) => {
             modelCalls += 1;
@@ -2113,6 +2189,7 @@ describe("scan and patch workflow", () => {
     const outcome = await runWorkflow(
       ["patch", "--scan", "scan-1", "--severity", "high", "--json"],
       {
+        result,
         onWorkbench: (args): JsonObject => {
           expect(args).toEqual(["get-scan", "--scan-id", "scan-1"]);
           return savedScan(result);
@@ -2210,6 +2287,7 @@ describe("scan and patch workflow", () => {
         ["patch", "--scan", "scan-1", "--create-pr", "--json"],
         {
           environment,
+          result,
           onWorkbench: () => savedScan(result),
           onRepositoryCommand: (command, args, target) => {
             expect(target).toBe(SAVED_REPOSITORY);
@@ -2440,6 +2518,7 @@ describe("scan and patch workflow", () => {
               "--json",
             ],
         {
+          result,
           onWorkbench: () => savedScan(result),
           onRepositoryCommand: (command, args) => {
             if (command === "git") {
@@ -2499,6 +2578,7 @@ describe("scan and patch workflow", () => {
       const outcome = await runWorkflow(
         ["patch", "--scan", "scan-1", "--create-pr", "--json"],
         {
+          result,
           onWorkbench: () => savedScan(result),
           onRepositoryCommand: (command, args) => {
             if (command === "git") {
@@ -2570,6 +2650,7 @@ describe("scan and patch workflow", () => {
     const calls: Array<readonly string[]> = [];
     let patched: Finding[] = [];
     const outcome = await runWorkflow(["patch", "occ_1"], {
+      result,
       onWorkbench: (args): JsonObject => {
         calls.push(args);
         if (args[0] === "list-global-findings") {
@@ -2599,6 +2680,7 @@ describe("scan and patch workflow", () => {
     const calls: Array<readonly string[]> = [];
     const outcome = await runWorkflow(["patch", "--scan", "latest"], {
       currentDirectory: SAVED_REPOSITORY,
+      result,
       onWorkbench: (args): JsonObject => {
         calls.push(args);
         if (args[0] === "list-scans") {
@@ -2619,6 +2701,7 @@ describe("scan and patch workflow", () => {
     const patched: Finding[] = [];
     const calls: Array<readonly string[]> = [];
     const outcome = await runWorkflow(["patch", "--scan", "scan-1"], {
+      result,
       onWorkbench: (args): JsonObject => {
         calls.push(args);
         if (args[0] === "get-scan") {
