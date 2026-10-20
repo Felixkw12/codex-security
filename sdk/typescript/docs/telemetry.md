@@ -137,6 +137,10 @@ dashboard updates the qualifier and clears unavailable values. Existing
 `onUsage` and `onCost` observers retain their complete-only behavior; budget
 enforcement still uses known spending subtotals.
 
+Coverage applies to the tracked scan threads. Post-scan owner suggestions,
+finding comparisons, and severity-review helpers do not contribute usage to
+these scan/component subtotals.
+
 When available, `coverageScope` identifies every discovered thread and worker
 attempt, including missing measurements. Saved reconciliation clears a known gap
 only when newer complete evidence covers that entire scope. A newer observation
