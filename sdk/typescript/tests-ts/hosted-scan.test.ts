@@ -17,6 +17,7 @@ import { runHostedScanProtocol } from "../src/hosted-scan-protocol.js";
 import { runHostProtocol } from "../src/host-protocol.js";
 import { CodexSecurity, runHostedScan } from "../src/index.js";
 import * as config from "../src/config.js";
+import { readOperationTelemetry } from "../src/operation-telemetry.js";
 import * as hostedScan from "../src/hosted-scan.js";
 import {
   ScanExecutionEventSchema,
@@ -795,6 +796,40 @@ test.each([
   },
 );
 
+test.each([undefined, "measured-host-session"])(
+  "failed hosted scans report measured usage with session %p",
+  async (sessionId) => {
+    const input = await fixture();
+    const terminal = await runHostedScan(input, {
+      executor: {
+        async run(request) {
+          return receipt(request, {
+            status: "failed",
+            sessionId,
+            usage: {
+              input_tokens: 123,
+              cached_input_tokens: 0,
+              output_tokens: 7,
+            },
+            message: "Synthetic measured failure",
+          });
+        },
+      },
+    });
+    expect(terminal.status).toBe("failed");
+    const journal = await readOperationTelemetry(input.stateDirectory);
+    expect(
+      journal.events.find((event) => event.type === "attempt_finished"),
+    ).toMatchObject({
+      outcome: "failed",
+      measurement: {
+        coverage: "complete",
+        usage: { input_tokens: 123, output_tokens: 7, total_tokens: 130 },
+      },
+    });
+  },
+);
+
 test("failed hosted config preparation removes its temporary runtime home", async () => {
   const input = await fixture();
   const executor = noExecution();
@@ -996,7 +1031,7 @@ test("cancellation after registration retains scan identity before executor disp
     {
       scanId: result.scanId,
       scanDir: result.outputDirectory,
-      progress: { status: "failed" },
+      progress: { status: "canceled" },
     },
   ]);
 });

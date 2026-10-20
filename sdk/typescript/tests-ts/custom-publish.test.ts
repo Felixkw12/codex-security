@@ -1,11 +1,13 @@
 import { chmod, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { setImmediate as nextTurn } from "node:timers/promises";
 import { afterEach, expect, test, mock } from "bun:test";
 import { publishScanToCustomInternal as publishScanToCustom } from "../src/custom-publish.js";
 import type { FindingsDocument } from "../src/models.js";
 import { copyCompletedScanFixture } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { rejecting } from "./support/errors.js";
+import type { PublicationTelemetry } from "../src/publication-telemetry.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures(
   "custom-publish-",
@@ -26,6 +28,7 @@ test("publishes complete sealed findings with their repository ID to a custom ba
   const { scan, source, document } = await fixture();
   const controller = new AbortController();
   const ids = document.findings.map((finding) => finding.findingId);
+  const observations: PublicationTelemetry[] = [];
   const fetchMock = mock(async (url: URL, options: RequestInit) => {
     expect(String(url)).toBe("http://synthetic.test/service/v1/bulk/findings");
     expect(options).toEqual({
@@ -45,6 +48,7 @@ test("publishes complete sealed findings with their repository ID to a custom ba
       findingsUrl: "http://synthetic.test/service",
       expectedScanId: document.scanId,
       signal: controller.signal,
+      onTelemetry: (event) => observations.push(event),
     },
     {
       fetch: fetchMock,
@@ -55,7 +59,32 @@ test("publishes complete sealed findings with their repository ID to a custom ba
     repositoryId: "target_sha256_example",
     findingIds: ids,
     findingCount: ids.length,
+    telemetry: expect.objectContaining({
+      destination: "custom",
+      outcome: "completed",
+      attempted: true,
+      counts: {
+        selected: ids.length,
+        submitted: ids.length,
+        created: null,
+        reused: null,
+        acknowledged: ids.length,
+        failed: 0,
+      },
+    }),
   });
+  expect(observations).toEqual([result.telemetry!]);
+  expect(Object.keys(result.telemetry!).sort()).toEqual([
+    "attemptId",
+    "attempted",
+    "counts",
+    "destination",
+    "durationMs",
+    "observedAt",
+    "outcome",
+    "schemaVersion",
+    "startedAt",
+  ]);
   expect(fetchMock).toHaveBeenCalledTimes(1);
   expect(await readFile(join(scan, "findings.json"), "utf8")).toBe(source);
 });
@@ -76,6 +105,19 @@ test("dry-run previews the complete upload without HTTP or credentials", async (
     findingCount: document.findings.length,
     dryRun: true,
     findings: document.findings,
+    telemetry: expect.objectContaining({
+      destination: "custom",
+      outcome: "preview",
+      attempted: false,
+      counts: {
+        selected: document.findings.length,
+        submitted: 0,
+        created: 0,
+        reused: 0,
+        acknowledged: 0,
+        failed: 0,
+      },
+    }),
   });
 });
 
@@ -90,18 +132,80 @@ test("does not retry failed uploads or report incomplete receipts as successful"
     const fetchMock = mock(async () => {
       return Response.json(receipt, { status });
     });
+    const observed: PublicationTelemetry[] = [];
     await expect(
       publishScanToCustom(
         scan,
-        { findingsUrl: "http://synthetic.test" },
+        {
+          findingsUrl: "http://synthetic.test",
+          onTelemetry: (event) => observed.push(event),
+        },
         {
           fetch: fetchMock,
         },
       ),
     ).rejects.toThrow(message);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(observed).toEqual([
+      expect.objectContaining({
+        outcome: "indeterminate",
+        attempted: true,
+        counts: expect.objectContaining({
+          acknowledged: null,
+          created: null,
+          failed: null,
+        }),
+      }),
+    ]);
   }
 });
+
+test.each(["failed", "canceled"] as const)(
+  "observes custom publication %s before preparation without replacing the error",
+  async (outcome) => {
+    const controller = new AbortController();
+    const reason = new Error("Synthetic cancellation");
+    if (outcome === "canceled") controller.abort(reason);
+    const observed: PublicationTelemetry[] = [];
+    const result = publishScanToCustom("/synthetic/missing/scan", {
+      findingsUrl: "http://synthetic.test",
+      signal: controller.signal,
+      onTelemetry: (event) => {
+        observed.push(event);
+        throw new Error("Synthetic observer failure");
+      },
+    });
+    await expect(result).rejects.toThrow();
+    expect(observed).toEqual([
+      expect.objectContaining({
+        outcome,
+        attempted: false,
+        counts: expect.objectContaining({ selected: null, submitted: 0 }),
+      }),
+    ]);
+  },
+);
+
+test.each(["throw", "reject", "pending"] as const)(
+  "publication telemetry observers do not change preview results (%s)",
+  async (behavior) => {
+    const { scan } = await fixture();
+    const observer = mock(() => {
+      if (behavior === "throw") throw new Error("Synthetic observer failure");
+      if (behavior === "reject")
+        return Promise.reject(new Error("Synthetic observer rejection"));
+      return new Promise<void>(() => {});
+    });
+    const result = await publishScanToCustom(scan, {
+      findingsUrl: "http://synthetic.test",
+      dryRun: true,
+      onTelemetry: observer,
+    });
+    await nextTurn();
+    expect(result.telemetry?.outcome).toBe("preview");
+    expect(observer).toHaveBeenCalledTimes(1);
+  },
+);
 
 test("rejects mismatched or changed sealed artifacts before publication, including dry-run", async () => {
   const { scan, source } = await fixture();

@@ -1,6 +1,7 @@
 import type { DeepReducerContext } from "../artifact-io.js";
 import type { WorkbenchDeepScanStore } from "./store.js";
 import type { z } from "zod";
+import type { WorkerTokenUsage } from "./usage-receipt.js";
 import type {
   configSchema,
   dedupInputSchema,
@@ -74,6 +75,7 @@ export interface CodexWorkerArtifactContext {
 
 /** Transport-neutral contract for one top-level Codex worker. */
 export interface CodexWorkerRequest {
+  attemptId?: string;
   kind: DeepScanWorkerKind;
   promptPath: string;
   workingDirectory: string;
@@ -84,10 +86,23 @@ export interface CodexWorkerRequest {
   artifactContext?: CodexWorkerArtifactContext;
   onThreadStarted?: (threadId: string) => Promise<void> | void;
   onNonRetryableError?: (error: Error) => void;
+  onAttribution?: (attribution: WorkerAttribution) => void;
+  onUsage?: (
+    usage: WorkerTokenUsage | null,
+    turnId?: string,
+  ) => Promise<void> | void;
+}
+
+export interface WorkerAttribution {
+  operationId?: string;
+  attemptId: string;
+  parentAttemptId?: string;
 }
 
 export interface CodexWorkerResult {
   threadId?: string;
+  turnId?: string;
+  usage?: WorkerTokenUsage | null;
   diagnostics?: CodexWorkerDiagnostic[];
 }
 
@@ -123,6 +138,14 @@ export interface DeepScanLogEvent {
   pass?: number;
   reason?: string;
   total?: number;
+  timestamp?: string;
+  durationMs?: number;
+  outcome?: "succeeded" | "failed" | "canceled";
+  retry?: boolean;
+  resumed?: boolean;
+  attemptId?: string;
+  operationId?: string;
+  parentAttemptId?: string;
 }
 
 export type DeepScanLogger = (event: DeepScanLogEvent) => void;

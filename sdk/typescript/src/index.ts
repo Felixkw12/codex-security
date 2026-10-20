@@ -88,7 +88,12 @@ export type {
   ComponentPlanningOptions,
 } from "./component-plan.js";
 export { estimateScanCost } from "./cost.js";
-export type { ScanCost, ScanSessionEvent, ScanWorkerEvent } from "./cost.js";
+export type {
+  ScanCost,
+  ScanSessionEvent,
+  ScanWorkerEvent,
+  ScanUsageMeasurement,
+} from "./cost.js";
 export type { ScanTokenUsage } from "./cost-model.js";
 export type { DeepScanProgress } from "./scan-progress.js";
 export type { CustomValidationResult } from "./custom-validation.js";
@@ -198,10 +203,18 @@ export type {
 export type { DeduplicationRefusal } from "./deduplication/deduplication.js";
 export type { FindingEmbeddingBinding } from "./deduplication/local.js";
 export type {
+  PublicationTelemetry,
+  PublicationTelemetryObserver,
+} from "./publication-telemetry.js";
+export type {
   DeduplicationDiagnostic,
   DeduplicationDiagnosticObserver,
 } from "./deduplication/diagnostics.js";
-export type { FindingEmbedder } from "./server/embeddings.js";
+export type {
+  FindingEmbedder,
+  EmbeddingUsageObservation,
+  EmbeddingUsageObserver,
+} from "./server/embeddings.js";
 export { importGitHubCodeScanningAlerts } from "./github.js";
 export type {
   GitHubCodeScanningImportOptions,
@@ -272,3 +285,13 @@ export type {
   ValidateRecordsOptions,
   ValidationReviewRequest,
 } from "./validation-records.js";
+
+export {
+  readOperationTelemetry,
+  summarizeOperationTelemetry,
+} from "./operation-telemetry.js";
+export type {
+  OperationTelemetryEvent,
+  OperationOutcome,
+  OperationFailureCategory,
+} from "./operation-telemetry.js";

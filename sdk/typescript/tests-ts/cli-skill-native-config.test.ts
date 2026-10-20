@@ -1,11 +1,19 @@
 import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline";
 import { expect, test } from "bun:test";
+import { parse as parseToml } from "smol-toml";
 import { runCodexSkillCommand } from "../src/cli.js";
 import {
   inlineToml,
@@ -17,6 +25,7 @@ import {
   resolveCodexCommand,
 } from "../src/runtime.js";
 import { capture } from "./cli-fixtures.js";
+import { readOperationTelemetry } from "../src/operation-telemetry.js";
 
 test.each([0, 23])(
   "native configuration fixture preserves early exit %s with its input still open",
@@ -174,10 +183,16 @@ async function withStoredApiKey(
     ambientHome: string;
     sharedHome: string;
     repository: string;
-    run: (overrides?: JsonObject) => Promise<{
+    run: (
+      overrides?: JsonObject,
+      options?: { inheritAnalytics?: boolean; auth?: "auto" | "api-key" },
+    ) => Promise<{
       daybreak: boolean | null;
       daybreakEnabled: boolean | null;
       daybreakFeatures: Record<string, boolean | null>;
+      analytics: JsonObject | null;
+      otel: JsonObject | null;
+      requestMetadata: JsonObject | null;
     }>;
   }) => Promise<void>,
 ): Promise<void> {
@@ -214,7 +229,7 @@ async function withStoredApiKey(
       ambientHome,
       sharedHome,
       repository,
-      run: async (overrides = {}) => {
+      run: async (overrides = {}, options = {}) => {
         const stdout = capture();
         const stderr = capture();
         const status = await runCodexSkillCommand(
@@ -225,8 +240,9 @@ async function withStoredApiKey(
             "app-server",
             "--disable",
             "plugins",
-            "--config",
-            "analytics.enabled=false",
+            ...(options.inheritAnalytics
+              ? []
+              : ["--config", "analytics.enabled=false"]),
             ...Object.entries(overrides).flatMap(([key, value]) => [
               "--config",
               `${key}=${inlineToml(value)}`,
@@ -234,7 +250,7 @@ async function withStoredApiKey(
           ],
           {
             command,
-            auth: "auto",
+            auth: options.auth ?? "auto",
             codexOverrides: overrides,
             directory: repository,
             stdout: stdout.stream,
@@ -252,7 +268,12 @@ async function withStoredApiKey(
             },
           },
           { command: process.execPath },
-          environment,
+          {
+            ...environment,
+            ...(options.auth === "api-key"
+              ? { OPENAI_API_KEY: "SYNTHETIC_KEY" }
+              : {}),
+          },
         );
         expect(status, stderr.text()).toBe(0);
         return JSON.parse(stdout.text());
@@ -262,6 +283,150 @@ async function withStoredApiKey(
     await rm(root, { recursive: true, force: true });
   }
 }
+
+test.each(["patch", "verify-fix"] as const)(
+  "%s preserves ambient telemetry profiles and explicit overrides without sharing them",
+  async (command) => {
+    await withStoredApiKey(
+      command,
+      async ({
+        root,
+        environment,
+        ambientHome,
+        sharedHome,
+        repository,
+        run,
+      }) => {
+        environment["SYNTHETIC_CONFIG_OBSERVATIONS"] = join(
+          root,
+          "native-config.jsonl",
+        );
+        const configPath = join(ambientHome, "config.toml");
+        const telemetry = {
+          analytics: { enabled: false },
+          otel: {
+            environment: "synthetic-selected",
+            exporter: "none",
+            log_user_prompt: false,
+          },
+          responses_api_metadata: {
+            "team.tag": "selected",
+            root_only: "root",
+            selected_only: "selected",
+          },
+        };
+        await writeCodexConfig(configPath, {
+          analytics: { enabled: true },
+          otel: { environment: "synthetic-root", exporter: "none" },
+          responses_api_metadata: { "team.tag": "root", root_only: "root" },
+          projects: { [repository]: { trust_level: "trusted" } },
+          profile: "selected",
+          profiles: { selected: telemetry },
+        });
+        // Compare actual native project precedence, including ignored telemetry
+        // keys, instead of reimplementing which project settings Codex permits.
+        await writeCodexConfig(join(repository, ".codex", "config.toml"), {
+          analytics: { enabled: false },
+          otel: { environment: "synthetic-project", exporter: "none" },
+          responses_api_metadata: { "project.tag": "project" },
+        });
+        const inherited = await run({}, { inheritAnalytics: true });
+        const records = await readOperationTelemetry(
+          environment["CODEX_SECURITY_STATE_DIR"]!,
+        );
+        expect(records.events.map((event) => event.type)).toEqual([
+          "attempt_started",
+          "attempt_finished",
+        ]);
+        expect(records.events[1]).toMatchObject({
+          command,
+          outcome: "completed",
+        });
+        expect(inherited.requestMetadata).toMatchObject({
+          codex_security_operation_id: records.events[0]!.operationId,
+          codex_security_attempt_id: records.events[0]!.attemptId,
+        });
+        expect(inherited).toMatchObject({
+          analytics: telemetry.analytics,
+          otel: telemetry.otel,
+          requestMetadata: telemetry.responses_api_metadata,
+        });
+        const launches = (
+          await readFile(environment["SYNTHETIC_CONFIG_OBSERVATIONS"], "utf8")
+        )
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line));
+        expect(launches.length).toBeGreaterThanOrEqual(2);
+        for (const launch of launches) {
+          expect(launch.analytics).toEqual(telemetry.analytics);
+          expect(launch.otel).toMatchObject(telemetry.otel);
+          expect(launch.metadata).toMatchObject(
+            telemetry.responses_api_metadata,
+          );
+        }
+        const explicit = {
+          analytics: { enabled: false },
+          otel: { environment: "synthetic-explicit", exporter: "none" },
+          responses_api_metadata: {
+            "team.tag": "explicit",
+            codex_security_command: command,
+          },
+        };
+        const configured = await run(explicit, { inheritAnalytics: true });
+        expect(configured).toMatchObject({
+          analytics: explicit.analytics,
+          otel: { ...telemetry.otel, ...explicit.otel },
+          requestMetadata: {
+            ...telemetry.responses_api_metadata,
+            ...explicit.responses_api_metadata,
+          },
+        });
+        const shared = parseToml(
+          await readFile(join(sharedHome, "config.toml"), "utf8"),
+        );
+        for (const key of ["analytics", "otel", "responses_api_metadata"])
+          expect(shared).not.toHaveProperty(key);
+
+        // A subsequent invocation must not retain the earlier ambient profile.
+        await writeCodexConfig(configPath, {
+          analytics: { enabled: false },
+          otel: { environment: "synthetic-next", exporter: "none" },
+        });
+        const next = await run({}, { inheritAnalytics: true });
+        expect(next.otel?.["environment"]).toBe("synthetic-next");
+        expect(next.requestMetadata ?? {}).not.toHaveProperty("selected_only");
+      },
+    );
+  },
+);
+
+test("stored and API-key patches preserve the same ambient telemetry controls", async () => {
+  await withStoredApiKey("patch", async ({ ambientHome, run }) => {
+    await writeCodexConfig(join(ambientHome, "config.toml"), {
+      analytics: { enabled: false },
+      otel: {
+        environment: "synthetic-auth-independent",
+        exporter: "none",
+        log_user_prompt: false,
+      },
+      responses_api_metadata: { "team.tag": "synthetic-ambient" },
+    });
+    const stored = await run({}, { inheritAnalytics: true });
+    const apiKey = await run({}, { inheritAnalytics: true, auth: "api-key" });
+    for (const key of ["analytics", "otel"] as const)
+      expect(stored[key]).toEqual(apiKey[key]);
+    expect(stored.requestMetadata).toMatchObject({
+      "team.tag": "synthetic-ambient",
+    });
+    expect(apiKey.requestMetadata).toMatchObject({
+      "team.tag": "synthetic-ambient",
+    });
+    expect(stored.requestMetadata?.["codex_security_attempt_id"]).not.toBe(
+      apiKey.requestMetadata?.["codex_security_attempt_id"],
+    );
+  });
+});
 
 test.each(
   (["patch", "verify-fix"] as const).flatMap((command) =>
@@ -341,7 +506,14 @@ test.each(["patch", "verify-fix"] as const)(
         daybreakFeatures: disabledDaybreakFeatures,
       });
       await writeCodexConfig(configPath, {});
-      expect(await run()).toEqual(baseline);
+      const next = await run();
+      expect({ ...next, requestMetadata: undefined }).toEqual({
+        ...baseline,
+        requestMetadata: undefined,
+      });
+      expect(next.requestMetadata?.["codex_security_attempt_id"]).not.toBe(
+        baseline.requestMetadata?.["codex_security_attempt_id"],
+      );
     });
   },
 );
@@ -402,6 +574,13 @@ test.each(["omitted", "omitted with changed gates", "explicit"] as const)(
                   api_key_cyber_access_programs: true,
                   api_key_model_discovery: true,
                 },
+                analytics: { enabled: false },
+                otel: {
+                  environment: "synthetic-worker",
+                  exporter: "none",
+                  log_user_prompt: false,
+                },
+                responses_api_metadata: { "synthetic.tag": "worker" },
               };
         await writeCodexConfig(scanConfig, {});
         await writeCodexConfig(workerConfig, { worker_runtime: workerRuntime });
@@ -488,6 +667,7 @@ test.each(["omitted", "omitted with changed gates", "explicit"] as const)(
             cli_auth_credentials_store: "file",
             features: { plugins: false },
             analytics: { enabled: false },
+            otel: { environment: "synthetic-shared", exporter: "none" },
           });
           // The first worker initializes the executor's per-scan snapshot.
           const { threadId, resumed, ...baseline } = await worker("discovery");
@@ -497,6 +677,12 @@ test.each(["omitted", "omitted with changed gates", "explicit"] as const)(
           expect(baseline.daybreak).toBe(
             settings === "explicit" ? false : null,
           );
+          expect(baseline.telemetry).toEqual({
+            analyticsEnabled: false,
+            environment:
+              settings === "explicit" ? "synthetic-worker" : "synthetic-shared",
+            metadataTag: settings === "explicit" ? "worker" : null,
+          });
           if (settings === "explicit")
             expect(baseline.daybreakFeatures).toEqual(
               workerRuntime["features"],
@@ -512,6 +698,9 @@ test.each(["omitted", "omitted with changed gates", "explicit"] as const)(
           await writeCodexConfig(join(ambientHome, "config.toml"), {
             daybreak: true,
             ...(features === undefined ? {} : { features }),
+            analytics: { enabled: false },
+            otel: { environment: "synthetic-patch", exporter: "none" },
+            responses_api_metadata: { "synthetic.tag": "patch" },
           });
           expect(await run()).toMatchObject({
             daybreak: true,

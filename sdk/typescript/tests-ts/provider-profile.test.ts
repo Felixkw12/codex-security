@@ -59,6 +59,69 @@ const startupProviders = {
   "synthetic.gateway": startupProvider,
 };
 
+test("native preflight preserves profile telemetry per invocation without persisting it", async () => {
+  const home = await temporaryDirectory();
+  const sharedConfig =
+    '[analytics]\nenabled = false\n[otel]\nexporter = "none"\nenvironment = "synthetic-shared"\n';
+  await writeFile(join(home, "config.toml"), sharedConfig);
+  const { readDeepScanRuntimeConfig } = await import(
+    pathToFileURL(
+      join(
+        await bundledPluginRoot(),
+        "mcp",
+        "permission-profile-preflight.mjs",
+      ),
+    ).href
+  );
+  const native = await providerPreflightCommand(resolveCodexCommand({}), {
+    analytics: { enabled: false },
+    otel: { exporter: "none", environment: "synthetic-root" },
+    profile: "selected",
+    profiles: {
+      selected: {
+        otel: { environment: "synthetic-selected", log_user_prompt: false },
+        responses_api_metadata: { "synthetic.tag": "selected" },
+      },
+    },
+  });
+  const read = async (args: readonly string[] | undefined) =>
+    await readDeepScanRuntimeConfig({
+      codexPath: native.command,
+      commandArgs: args,
+      cwd: home,
+      configOverrides: [],
+      env: {
+        PATH: process.env["PATH"] ?? "",
+        ...(process.env["SystemRoot"] === undefined
+          ? {}
+          : { SystemRoot: process.env["SystemRoot"] }),
+        ...(process.env["TMPDIR"] === undefined
+          ? {}
+          : { TMPDIR: process.env["TMPDIR"] }),
+        HOME: home,
+        CODEX_HOME: home,
+      },
+      signal: new AbortController().signal,
+      context: "helper",
+    });
+  const effective = await read(native.args);
+  expect(effective.analytics).toEqual({ enabled: false });
+  expect(effective.otel).toMatchObject({
+    exporter: "none",
+    environment: "synthetic-selected",
+    log_user_prompt: false,
+  });
+  expect(effective.responses_api_metadata).toEqual({
+    "synthetic.tag": "selected",
+  });
+  expect(await readFile(join(home, "config.toml"), "utf8")).toBe(sharedConfig);
+  const next = await read(
+    (await providerPreflightCommand(resolveCodexCommand({}), {})).args,
+  );
+  expect(next.otel.environment).toBe("synthetic-shared");
+  expect(next.responses_api_metadata ?? null).toBeNull();
+});
+
 test.each([
   [
     "explicit custom",

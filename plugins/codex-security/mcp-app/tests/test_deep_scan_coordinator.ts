@@ -1,10 +1,15 @@
 import { readJson, writeJson } from "./support/json.ts";
+import {
+  assertWorkerRetryReceipts,
+  assertCanceledWorkerReceipts,
+} from "./deep_scan_worker_usage_assertions.ts";
 import type { CoordinatorOptions } from "../src/deep-scan/coordinator.js";
 import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
 import type {
   DeepScanConfig,
   DeepScanRunState,
   CodexWorkerDiagnostic,
+  CodexWorkerRequest,
   PersistedDeepScanWorker,
   DeepScanLogEvent,
 } from "../src/deep-scan/types.js";
@@ -1273,11 +1278,28 @@ async function testMissingDiscoveryResultResumesExistingThread(
         }
       : {}),
   });
+  const originalRun = executor.run.bind(executor);
+  executor.run = async (request) => ({
+    ...(await originalRun(request)),
+    usage: {
+      input_tokens: 10,
+      cached_input_tokens: 0,
+      cache_write_input_tokens: 0,
+      output_tokens: 2,
+      reasoning_output_tokens: 1,
+      total_tokens: 12,
+    },
+  });
+  const events: DeepScanLogEvent[] = [];
   const sleeps: number[] = [];
   const terminal = await runCoordinator(fixture, store, executor, {
     random: () => 0,
     retryDelaysMs: [1, 3, 9],
     clock: recordingClock(sleeps),
+    log: (event) => {
+      events.push(event);
+      if (withToolFailure) throw new Error("Synthetic log sink failure");
+    },
   });
 
   assert.equal(terminal?.status, "succeeded");
@@ -1287,6 +1309,7 @@ async function testMissingDiscoveryResultResumesExistingThread(
     executor.discoveryThreadIds[0],
   ]);
   assert.equal(new Set(executor.discoveryThreadIds).size, 1);
+  await assertWorkerRetryReceipts(fixture.run.scanDir, events);
   if (withToolFailure) {
     const message = executor.options.discoveryDiagnostics![0].message;
     assert.ok(
@@ -1991,14 +2014,36 @@ async function testWaiterDetachAndCancellation() {
   );
 }
 
-async function testCancellationDropsUnvalidatedDiscoveryResult() {
+async function testCancellationDropsUnvalidatedDiscoveryResult(
+  usageReported = false,
+) {
   const { fixture, store } = await coordinatorFixture();
   const executor = new FakeExecutor({ blockDiscoveryAfterWrite: true });
+  let reportUsage: CodexWorkerRequest["onUsage"];
+  const originalRun = executor.run.bind(executor);
+  executor.run = (request) => {
+    reportUsage = request.onUsage;
+    return originalRun(request);
+  };
+  const events: DeepScanLogEvent[] = [];
   const coordinator = createCoordinator(fixture, store, executor, {
     threadId: "checkpoint-owner",
+    log: (event) => events.push(event),
   });
   coordinator.start();
   await executor.discoveryArtifactsWritten.promise;
+  if (usageReported)
+    await reportUsage?.(
+      {
+        input_tokens: 10,
+        cached_input_tokens: 0,
+        cache_write_input_tokens: 0,
+        output_tokens: 2,
+        reasoning_output_tokens: 1,
+        total_tokens: 12,
+      },
+      "synthetic-turn",
+    );
   const worker = [...store.workers.values()].find(
     (candidate) => candidate.kind === "discovery",
   );
@@ -2011,6 +2056,11 @@ async function testCancellationDropsUnvalidatedDiscoveryResult() {
   coordinator.cancel("fixture canceled before host validation");
   const terminal = await coordinator.wait(undefined, 5_000);
   assert.equal(terminal?.status, "canceled");
+  await assertCanceledWorkerReceipts(
+    fixture.run.scanDir,
+    events,
+    usageReported,
+  );
   await assert.rejects(
     readFile(path.join(worker!.artifactDir, "result.json")),
     {
@@ -4312,6 +4362,7 @@ try {
   await testThreeValidationAttemptsKeepPriorPromptsImmutable();
   await testWaiterDetachAndCancellation();
   await testCancellationDropsUnvalidatedDiscoveryResult();
+  await testCancellationDropsUnvalidatedDiscoveryResult(true);
   await testCancellationDuringDiscoveryAcceptanceRejectsLateSuccess();
   await testRegistryEvictionAndExternalFailure();
   await testStoppedPublicationFailurePreservesOriginalDiagnostic();

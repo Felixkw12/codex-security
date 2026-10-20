@@ -1870,6 +1870,19 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
       const nodePaths = settings.map((_, index) =>
         path.join(fixture.root, `selected node ${index}`, "node"),
       );
+      await Promise.all(
+        settings.map(async (_, index) => {
+          const directory = path.join(
+            fixture.root,
+            `plugin-${index}`,
+            ".codex-plugin",
+          );
+          await mkdir(directory, { recursive: true });
+          await writeJson(path.join(directory, "plugin.json"), {
+            version: `9.9.${index}`,
+          });
+        }),
+      );
 
       const executors = settings.map(
         (modelSettings, index) =>
@@ -1926,6 +1939,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               );
               return executor.run(
                 workerRequest(promptPath, fixture.root, {
+                  attemptId: `worker-${index}-${kind}-${resumeThreadId ?? "new"}`,
                   kind,
                   resumeThreadId,
                   ...(resumeThreadId
@@ -2125,9 +2139,19 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                   codex_security_surface: "plugin",
                   codex_security_command: "scan",
                   codex_security_scan_mode: "deep",
+                  codex_security_plugin_version: `9.9.${index}`,
                   ...workerConfigurations[index].telemetry
                     .responses_api_metadata,
                   codex_security_worker_role: kind,
+                  codex_security_operation_id:
+                    workerConfigurations[index].telemetry.responses_api_metadata
+                      ?.codex_security_operation_id ??
+                    `fixture-scan-${model ?? "inherited"}`,
+                  codex_security_attempt_id: `worker-${index}-${kind}-${resumeThreadId ?? "new"}`,
+                  ...(workerConfigurations[index].telemetry
+                    .responses_api_metadata?.codex_security_attempt_id
+                    ? { codex_security_parent_attempt_id: `parent-${index}` }
+                    : {}),
                 },
               },
             );

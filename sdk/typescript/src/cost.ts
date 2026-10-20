@@ -1,8 +1,16 @@
 import { parseJson } from "./value.js";
-import { open, readdir, stat } from "node:fs/promises";
-import { join } from "node:path";
+import {
+  lstat,
+  open,
+  readFile,
+  readdir,
+  realpath,
+  stat,
+} from "node:fs/promises";
+import { join, relative, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { isRecord } from "./record.js";
+import { sessionLines } from "./session-lines.js";
 import {
   estimateScanCost,
   tokenUsage,
@@ -61,6 +69,7 @@ interface ScanCostTrackerOptions {
   /** Incomplete costs are measured subtotals, usable for spending limits only. */
   onCost?: (cost: Readonly<ScanCost>, complete: boolean) => void;
   onUsage?: (usage: Readonly<ScanTokenUsage>) => void;
+  onMeasurement?: (measurement: Readonly<ScanUsageMeasurement>) => void;
   onActivity?: (activity: ScanActivity) => void;
   onProgress?: (progress: ScanProgress) => void;
   onSessionEvent?: (event: ScanSessionEvent) => void;
@@ -68,9 +77,19 @@ interface ScanCostTrackerOptions {
   onError?: (error: unknown) => void;
 }
 
-interface ScanCostSnapshot {
+export interface ScanUsageMeasurement {
+  usage: Readonly<ScanTokenUsage> | null;
+  cost: Readonly<ScanCost> | null;
+  coverage: "complete" | "partial" | "unavailable";
+  observedAt: string;
+  threadCount: number;
+  missingThreadCount: number;
+}
+
+export interface ScanCostSnapshot {
   usage: unknown;
   cost: ScanCost | null;
+  measurement: ScanUsageMeasurement;
 }
 
 const COST_POLL_INTERVAL_MS = 100;
@@ -82,6 +101,7 @@ function createSessionUsage() {
     decoder: new StringDecoder("utf8"),
     pendingLine: [] as string[],
     unreadable: false,
+    compressedRead: false,
     threadId: null as string | null,
     parentThreadId: null as string | null,
     workingDirectory: null as string | null,
@@ -113,9 +133,21 @@ export class ScanCostTracker {
   #observingWorkers = true;
   #timer: NodeJS.Timeout | null = null;
   #pending: Promise<void> = Promise.resolve();
-  #snapshot: ScanCostSnapshot = { usage: null, cost: null };
+  #snapshot: ScanCostSnapshot = {
+    usage: null,
+    cost: null,
+    measurement: {
+      usage: null,
+      cost: null,
+      coverage: "unavailable",
+      observedAt: new Date().toISOString(),
+      threadCount: 0,
+      missingThreadCount: 0,
+    },
+  };
   #lastCost: string | null = null;
   #lastUsage: string | null = null;
+  #lastMeasurement: string | null = null;
   #highestFilesCompleted = 0;
   #expectedFilesTotal: number | undefined;
 
@@ -142,6 +174,7 @@ export class ScanCostTracker {
       this.#options.maxCostUsd === undefined &&
       this.#options.onCost === undefined &&
       this.#options.onUsage === undefined &&
+      this.#options.onMeasurement === undefined &&
       this.#options.onActivity === undefined &&
       this.#options.onProgress === undefined &&
       this.#options.onSessionEvent === undefined &&
@@ -176,7 +209,19 @@ export class ScanCostTracker {
 
   public async refresh(): Promise<ScanCostSnapshot> {
     const update = this.#pending.then(async () => {
-      await this.#readSessions();
+      try {
+        await this.#readSessions();
+      } catch (error) {
+        const previous = this.#snapshot.measurement;
+        this.#setSnapshot(
+          previous.usage,
+          previous.cost,
+          false,
+          previous.threadCount,
+          Math.max(1, previous.missingThreadCount),
+        );
+        throw error;
+      }
     });
     this.#pending = update.catch(() => {});
     await update;
@@ -192,11 +237,16 @@ export class ScanCostTracker {
     } finally {
       this.#observingWorkers = false;
     }
-    if (this.#receipts.size > 0 || this.#snapshot.usage !== null)
+    if (
+      this.#receipts.size > 0 ||
+      this.#snapshot.measurement.usage !== null ||
+      this.#snapshot.measurement.missingThreadCount > 0
+    )
       return this.#snapshot;
     const cost = estimateScanCost(this.#options.model, fallbackUsage);
-    this.#snapshot = { usage: fallbackUsage ?? null, cost };
-    this.#reportUsage(tokenUsage(fallbackUsage));
+    const usage = tokenUsage(fallbackUsage);
+    this.#setSnapshot(usage, cost, usage !== null, usage === null ? 0 : 1, 0);
+    this.#reportUsage(usage);
     this.#reportCost(cost);
     return this.#snapshot;
   }
@@ -208,23 +258,38 @@ export class ScanCostTracker {
         ? undefined
         : this.#options.repository;
     const unreadable: Array<{ session: SessionUsage; error: unknown }> = [];
-    for await (const path of sessionFiles(
-      join(this.#options.codexHome, "sessions"),
-    )) {
-      let session = this.#sessions.get(path);
-      if (session === undefined) {
-        session = createSessionUsage();
-        this.#sessions.set(path, session);
-      }
-      try {
-        await readSessionUsage(path, session, repository);
-      } catch (error) {
-        if (session.threadId === null) throw error;
-        unreadable.push({ session, error });
+    for (const directory of ["sessions", "archived_sessions"]) {
+      for await (const path of sessionFiles(
+        join(this.#options.codexHome, directory),
+        true,
+      )) {
+        let session = this.#sessions.get(path);
+        if (session === undefined) {
+          session = createSessionUsage();
+          this.#sessions.set(path, session);
+        }
+        try {
+          await readSessionUsage(
+            path,
+            session,
+            repository,
+            path.endsWith(".zst"),
+          );
+        } catch (error) {
+          if (session.threadId === null) throw error;
+          unreadable.push({ session, error });
+        }
       }
     }
 
-    const included = new Set([this.#threadId, ...this.#receipts.keys()]);
+    const workerReceipts = await readWorkerReceipts(
+      this.#options.scanDirectory,
+    );
+    const included = new Set([
+      this.#threadId,
+      ...this.#receipts.keys(),
+      ...workerReceipts.usages.keys(),
+    ]);
     if (this.#options.scanDirectory !== undefined) {
       const scanStartedAt =
         [...this.#sessions.values()].find(
@@ -268,7 +333,23 @@ export class ScanCostTracker {
       if (included.has(session.threadId!)) throw error;
     }
 
-    const usages = new Map(this.#receipts);
+    const usages = new Map<string, ScanTokenUsage | null>(
+      [...included].map((threadId) => [
+        threadId,
+        this.#receipts.get(threadId) ?? null,
+      ]),
+    );
+    for (const [threadId, receipt] of workerReceipts.usages) {
+      const current = usages.get(threadId);
+      if (
+        receipt !== null &&
+        receipt.total_tokens > (current?.total_tokens ?? -1)
+      )
+        usages.set(threadId, receipt);
+    }
+    // SDK turns preserve a measured subtotal when a rollout is unavailable.
+    // Only a native cumulative rollout can account for compaction and children.
+    const incomplete = new Set(workerReceipts.usages.keys());
     for (const [path, tracked] of this.#sessions) {
       const threadId = tracked.threadId;
       if (threadId === null || !included.has(threadId)) continue;
@@ -282,6 +363,10 @@ export class ScanCostTracker {
         session.events = [];
         await readSessionUsage(path, session, repository);
         this.#sessions.set(path, session);
+      } else if (path.endsWith(".zst") && !session.compressedRead) {
+        // Cold history is immutable. Decode its body only after metadata has
+        // associated the thread with this scan.
+        await readSessionUsage(path, session, repository);
       }
       let worker: number | undefined;
       if (threadId !== this.#threadId) {
@@ -312,6 +397,12 @@ export class ScanCostTracker {
         this.#reportWorkerProgress(session);
       }
       const receipt = usages.get(threadId);
+      if (
+        session.usage !== null &&
+        session.usage.total_tokens >=
+          (workerReceipts.usages.get(threadId)?.total_tokens ?? 0)
+      )
+        incomplete.delete(threadId);
       // A discovered thread without a receipt has unknown usage, not zero.
       // Retain it so a parent-only subtotal cannot appear to be complete.
       if (receipt === undefined) usages.set(threadId, null);
@@ -326,22 +417,51 @@ export class ScanCostTracker {
       }
     }
     let usage: ScanTokenUsage | null = null;
-    let complete = true;
-    for (const value of usages.values()) {
+    let missingThreadCount = workerReceipts.unknownAttempts;
+    let threadCount = 0;
+    for (const [threadId, value] of usages) {
       if (value === null) {
-        complete = false;
+        missingThreadCount += 1;
         continue;
       }
+      threadCount += 1;
+      if (incomplete.has(threadId)) missingThreadCount += 1;
       usage = addTokenUsage(usage, value);
     }
-    if (!complete) this.#snapshot = { usage: null, cost: null };
-    if (usage === null) return;
+    const complete = missingThreadCount === 0 && usage !== null;
     const cost = estimateScanCost(this.#options.model, usage);
+    this.#setSnapshot(usage, cost, complete, threadCount, missingThreadCount);
     if (complete) {
-      this.#snapshot = { usage, cost };
       this.#reportUsage(usage);
     }
     this.#reportCost(cost, complete);
+  }
+
+  #setSnapshot(
+    usage: ScanTokenUsage | null,
+    cost: ScanCost | null,
+    complete: boolean,
+    threadCount: number,
+    missingThreadCount: number,
+  ): void {
+    const data = {
+      usage,
+      cost,
+      coverage:
+        usage === null ? "unavailable" : complete ? "complete" : "partial",
+      threadCount,
+      missingThreadCount,
+    } as const;
+    const measurement = { ...data, observedAt: new Date().toISOString() };
+    this.#snapshot = {
+      usage: complete ? usage : null,
+      cost: complete ? cost : null,
+      measurement,
+    };
+    const signature = JSON.stringify(data);
+    if (signature === this.#lastMeasurement) return;
+    this.#lastMeasurement = signature;
+    this.#options.onMeasurement?.(measurement);
   }
 
   #reportWorkerProgress(session: SessionUsage): void {
@@ -400,6 +520,56 @@ export class ScanCostTracker {
   }
 }
 
+async function readWorkerReceipts(scanDirectory: string | undefined): Promise<{
+  usages: Map<string, ScanTokenUsage | null>;
+  unknownAttempts: number;
+}> {
+  const usages = new Map<string, ScanTokenUsage | null>();
+  const result = { usages, unknownAttempts: 0 };
+  if (scanDirectory === undefined) return result;
+  const directory = join(scanDirectory, "artifacts", "deep_discovery", "usage");
+  try {
+    const directoryInfo = await lstat(directory);
+    if (
+      !directoryInfo.isDirectory() ||
+      relative(resolve(directory), await realpath(directory)) !== ""
+    )
+      throw new Error(
+        `Worker usage directory must use a canonical directory: ${directory}`,
+      );
+    const attempts = new Set<string>();
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+      const receipt: unknown = JSON.parse(
+        await readFile(join(directory, entry.name), "utf8"),
+      );
+      if (
+        !isRecord(receipt) ||
+        receipt["schemaVersion"] !== 1 ||
+        receipt["source"] !== "codex_sdk" ||
+        receipt["usageScope"] !== "turn" ||
+        typeof receipt["attemptId"] !== "string" ||
+        attempts.has(receipt["attemptId"])
+      )
+        continue;
+      attempts.add(receipt["attemptId"]);
+      if (typeof receipt["threadId"] !== "string") {
+        result.unknownAttempts += 1;
+        continue;
+      }
+      const usage = tokenUsage(receipt["usage"]);
+      const existing = usages.get(receipt["threadId"]) ?? null;
+      usages.set(
+        receipt["threadId"],
+        usage === null ? existing : addTokenUsage(existing, usage),
+      );
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  return result;
+}
+
 export async function* sessionFiles(
   directory: string,
   compressed = false,
@@ -429,8 +599,19 @@ async function readSessionUsage(
   path: string,
   session: SessionUsage,
   repository?: string,
+  metadataOnly = false,
 ): Promise<void> {
   if (session.unreadable) return;
+  if (path.endsWith(".zst")) {
+    if (session.compressedRead) return;
+    if (metadataOnly && session.threadId !== null) return;
+    for await (const line of sessionLines(path)) {
+      readSessionEvent(line, session, repository);
+      if (metadataOnly && session.threadId !== null) return;
+    }
+    session.compressedRead = true;
+    return;
+  }
   let file;
   try {
     if ((await stat(path)).size === session.offset) return;
@@ -770,7 +951,7 @@ function sessionProgressUpdates(
   return scanProgressUpdatesFromText(output);
 }
 
-function addTokenUsage(
+export function addTokenUsage(
   previous: ScanTokenUsage | null,
   next: ScanTokenUsage,
 ): ScanTokenUsage {

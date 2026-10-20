@@ -1,0 +1,173 @@
+# Telemetry and measurement
+
+Codex Security keeps model-request attribution, native analytics, local usage
+accounting, and host-owned telemetry export separate. It does not configure a new
+remote collector.
+
+## Controls and collection
+
+Native `analytics` and `otel` settings keep their Codex semantics. Selected
+profiles, project settings, and explicit overrides keep their native precedence.
+Stored-account authentication forwards these settings per invocation; per-scan
+settings are not stored in the shared credential home. Discovery, reducer, and
+resumed workers inherit their scan's settings.
+
+Request metadata includes command, surface, package/plugin versions, configured
+provider family, and scan mode when available. Wrapper operations and workers add
+opaque operation, attempt, and parent-attempt IDs. IDs are join keys, not metric
+labels. Hosted execution receives the same attribution in
+`request.runtime.requestMetadata`; the executor owns forwarding it to its runtime.
+Native analytics opt-out does not remove request attribution or configure an OTel
+exporter. Hosted schema and checkout preparation precede the SDK invocation;
+rejections at that boundary remain the host's responsibility to record.
+
+Local operational receipts are saved under `telemetry/` in the existing Codex
+Security state directory. These are local history, not an analytics upload.
+Removing that directory removes these receipts and their resume bindings.
+Receipts are never written inside the protected repository; a journal failure
+remains observable and does not override the main operation.
+Retention and remote deletion in a host's collector remain the host's
+responsibility. Existing scan output, diagnostics, and explicit feedback retain
+their existing behavior.
+
+## Operation receipts
+
+SDK `run`, `patch`, `validate`, and `generatePolicy` capture an `attempt_started`
+receipt at invocation and one `attempt_finished` receipt on settlement. Local
+initialization can delay start delivery; its occurrence time remains the original
+invocation time. Inference preparation waits for that initialization.
+CLI scans use the SDK path. Standalone CLI patch, validation, verification, and
+patch-risk assessment also record native invocation starts and outcomes. Mock
+scans and preflight-only calls are excluded. Policy generation emits its start to
+observers immediately and buffers disk persistence until policy path validation
+establishes all protected Git stores. Policy attempts rejected before that point
+are observable only through `onTelemetry`; they do not create local state.
+Each receipt has a schema version, stable event ID, random operation/attempt IDs,
+occurrence and local observation times, command, surface, package version, and
+resume status. Terminal receipts add duration, outcome, a bounded failure category,
+and available numerical usage and result counts. Plugin version and configured
+provider family are added once the runtime is known.
+
+The outcome is `completed`, `failed`, `canceled`, or `unresolved`. A hosted
+submission with unknown acceptance is unresolved. A start without a terminal
+receipt, including process loss, also remains unresolved when summarized.
+Completion describes operation execution; finding counts do not measure accuracy.
+A terminal `reusedResult: true` identifies a cached workflow return. The summary
+counts these as `reusedAttempts`; exclude them from new-work, finding-yield, and
+usage-coverage denominators. Older receipts without the field have unrecorded
+reuse status. Surface and deferred counts are model-reported workflow coverage.
+
+Resuming a saved scan keeps its operation ID but creates a new attempt ID.
+`usageScopeId` identifies cumulative accounting across those attempts. Do not sum
+resumed cumulative receipts. The supplied summary takes the maximum observed cost
+per usage scope; separate retry scans have separate scopes.
+
+```ts
+import {
+  readOperationTelemetry,
+  summarizeOperationTelemetry,
+} from "@openai/codex-security";
+
+const { events, parseFailures } = await readOperationTelemetry(stateDirectory);
+const summary = summarizeOperationTelemetry(events);
+console.log({ ...summary, parseFailures });
+```
+
+The reader reports corrupt/truncated records separately from usable receipts. The
+summary deduplicates event IDs, counts attempts and logical operations separately,
+retains unresolved attempts, and reports usage coverage and priced-attempt counts
+beside observed cost. Duration samples can be pooled into histograms or
+percentiles; do not average percentiles from separate groups.
+
+`onTelemetry` is an optional SDK observer for these same receipts. An observer
+cannot delay or fail a scan. It is not an acknowledgement from a remote collector.
+A host needing delivery across restarts should replay the local journal, dedupe
+by event ID, and checkpoint only after its collector acknowledges acceptance.
+Ingestion should add its own timestamp while preserving `occurredAt`.
+Journal write failures reach the warning observer; receipt collection counters
+describe local persistence only. They do not claim remote acceptance.
+
+Track collector pending, accepted, retried, dropped/expired, duplicate, and late
+records at the integration that owns delivery. Reconcile emitted event IDs against
+accepted IDs there. Local tests exercise failed writes, replay, duplicate
+terminals, corrupt tails, and unclosed attempts; they do not establish a
+production collector's loss rate.
+
+## Usage and completeness
+
+Prefer `onMeasurement` when displaying or collecting live usage:
+
+```ts
+await security.run(repository, {
+  onMeasurement(measurement) {
+    // usage and cost may be null; partial values are observed subtotals.
+    display(measurement.usage, measurement.cost, measurement.coverage);
+  },
+});
+```
+
+The observation contains `usage`, `cost`, `coverage`, `observedAt`, measured
+`threadCount`, and `missingThreadCount`. Coverage is `complete`, `partial`, or
+`unavailable`. An incompletely measured thread can contribute to both thread
+counts. A newly discovered worker can change complete usage to partial. The
+dashboard updates the qualifier and clears unavailable values. Existing
+`onUsage` and `onCost` observers retain their complete-only behavior; budget
+enforcement still uses known spending subtotals.
+
+Saved success, failure, and cancellation records retain numerical usage even
+without a model price. Repeated terminal updates reconcile late observations
+without changing the saved outcome or summing overlapping receipts. Component
+and bulk receipts also keep failed/canceled usage. Legacy receipt status values
+are preserved; their additive `outcome` distinguishes cancellation.
+
+Both live and saved collectors read plain and compressed rollouts. Deep workers
+persist a receipt per attempt before validating their output, including failed
+and canceled attempts. SDK receipts describe a turn; distinct attempts on the
+same thread are summed, then reconciled against the native thread total by
+maximum. They are never added to that same native total. Missing native evidence
+keeps worker fallback usage partial, including when the native state database is
+unavailable.
+
+Missing cache-write usage is represented with
+`cache_write_input_tokens_reported: false` in SDK token usage and
+`cacheWriteInputTokensReported: false` in saved usage. Its numeric zero is a
+placeholder, not an observed zero. Known total usage remains usable. Cost is an
+estimate with its existing price provenance and uncertainty, not a billing total.
+Late saved usage can exceed an earlier supplied price estimate; the warning
+`cost_estimate_covers_earlier_usage` identifies that cost subtotal.
+
+Embedding batch usage is observed separately through `onEmbeddingUsage`. Provider
+input tokens can be unknown; local token estimates do not replace a missing
+provider receipt. Publication telemetry uses existing publication results and
+receipts, with destination family, duration, outcome, and counts. An upsert
+acknowledgement does not establish whether a finding was newly created or reused;
+those counts remain unknown when the integration cannot distinguish them.
+
+## Reporting and data selection
+
+Routine operation telemetry contains no source, prompts, model output, finding
+text, paths, repository URLs, account IDs, raw exceptions, or full configuration.
+This field selection does not redact or change existing diagnostic text.
+
+Use bounded dimensions such as command, surface, scan mode, worker role, outcome,
+and provider family. Keep correlation IDs out of metric labels. Report the
+population, sample count, missingness, and relevant version/workload cohorts with
+every comparison:
+
+- Reliability: terminal outcomes per eligible attempt, unresolved rate, and
+  eventual operation success separately.
+- Performance: attempt duration distributions, separating cancellation and
+  incomplete work.
+- Cost: all observed usage scopes, including failed attempts, divided by useful
+  completed outcomes; show partial-usage and unknown-price rates alongside.
+- Caching: cache-read/write shares only where the required breakdown is observed.
+- Worker efficiency: attempts, retries, duration, usage coverage, and accepted
+  output by role.
+- Quality: reviewed true-positive share among adjudicated findings, with review
+  coverage. Unreviewed findings are unknown. Publication and patch outcomes are
+  separate signals.
+
+The latest closed false positives used as scan context are a selected sample,
+not a false-positive-rate denominator. Recall requires held-out labeled
+evaluations or independent representative review; production finding counts
+cannot establish it.

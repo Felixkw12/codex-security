@@ -24,7 +24,7 @@ import Papa from "papaparse";
 import type { CodexSecurity } from "./api.js";
 import type { CodexSecurityConfig } from "./config.js";
 import { ContractSchemaError, loadContract } from "./contract.js";
-import type { ScanCost } from "./cost.js";
+import type { ScanCost, ScanUsageMeasurement } from "./cost.js";
 import { deepScanOptions } from "./deep-config.js";
 import { readThreatModelPath } from "./artifact-export.js";
 import {
@@ -73,9 +73,12 @@ type MultiscanTask = ReturnType<typeof parseInventory>[number];
 interface MultiscanReceipt extends MultiscanTask {
   status: "completed" | "failed";
   attempt: number;
+  operationId?: string;
   outputDir: string;
   threatModelPath?: string;
   cost?: ScanCost;
+  measurement?: Readonly<ScanUsageMeasurement>;
+  outcome?: "completed" | "failed" | "canceled";
   error?: string;
   warnings?: string[];
   policyFailed?: boolean;
@@ -422,6 +425,7 @@ async function runCampaign(
       if (task === undefined) return;
       const knowledge = knowledgeByMode[task.mode];
       const history = receipts.get(task.id.toLowerCase());
+      const operationId = history?.scan?.operationId ?? randomUUID();
       let maxAttempt = history?.maxAttempt ?? 0;
       let recoveryAttempt = history?.scan?.attempt ?? 0;
       const artifactRoot = join(output, "artifacts", task.id);
@@ -449,6 +453,7 @@ async function runCampaign(
         const runWarnings: string[] = [];
         let attemptPolicyFailed: boolean | undefined;
         let cost: Readonly<ScanCost> | null = null;
+        let measurement: Readonly<ScanUsageMeasurement> | null = null;
         let threatModelPath: string | null | undefined;
         let exhaustedBudget = false;
         let requiresRecovery = false;
@@ -560,6 +565,7 @@ async function runCampaign(
                 ? { knowledgeBasePaths: options.knowledgeBasePaths }
                 : {}),
               mode: task.mode,
+              telemetryContext: { operationId },
               outputDir: scanDir,
               ...(scanPrompt ? { scanPrompt } : {}),
               ...(options.validationPrompt === undefined
@@ -571,6 +577,10 @@ async function runCampaign(
               ...(options.maxCostUsd === undefined
                 ? {}
                 : { maxCostUsd: options.maxCostUsd }),
+              onMeasurement: (value) => {
+                measurement = value;
+                cost = value.cost;
+              },
               onWarning: (warning) => {
                 runWarnings.push(warning);
                 notifyProgress(options, {
@@ -596,7 +606,9 @@ async function runCampaign(
           if (result.manifest.scan.status !== "completed")
             throw new Error(`Multiscan scan ${result.manifest.scan.status}.`);
         } catch (error) {
-          if (options.signal?.aborted === true) options.signal.throwIfAborted();
+          // Recovery retains its resumable attempt and checkout; SDK telemetry records cancellation.
+          if (options.signal?.aborted && options.recoverScan !== undefined)
+            options.signal.throwIfAborted();
           if (error instanceof ScanCostLimitExceededError) {
             cost = error.cost;
             exhaustedBudget = true;
@@ -620,7 +632,7 @@ async function runCampaign(
           threatModelPath = await readThreatModelPath(scanDir, {
             pythonPath: options.config.pythonPath,
             protectedRoot,
-            signal: options.signal,
+            signal: options.signal?.aborted ? undefined : options.signal,
           });
         const recoveryCheckout =
           options.recoverScan !== undefined && failure === undefined
@@ -630,9 +642,12 @@ async function runCampaign(
           ...task,
           status,
           attempt,
+          operationId,
           outputDir: scanDir,
           ...(threatModelPath === null ? {} : { threatModelPath }),
           ...(cost === null ? {} : { cost }),
+          ...(measurement === null ? {} : { measurement }),
+          outcome: options.signal?.aborted ? "canceled" : status,
           ...(reportedError === undefined ? {} : { error: reportedError }),
           ...(recoveryCheckout !== undefined
             ? { cleanupPending: "recovery-checkout" }
@@ -648,6 +663,7 @@ async function runCampaign(
           appendReceipt(ledger, receiptLine),
         );
         await receiptTail;
+        options.signal?.throwIfAborted();
         if (recoveryCheckout !== undefined) {
           reportedError = await removeCheckout(recoveryCheckout);
         }

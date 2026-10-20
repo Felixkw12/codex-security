@@ -1179,7 +1179,7 @@ def finalize_scan_usage(connection: sqlite3.Connection, args: argparse.Namespace
         if completion["threadId"] != args.thread_id or completion["turnId"] != args.turn_id:
             raise SystemExit("The scan usage belongs to a different completion turn.")
         if not completion["finalized"]:
-            usage = scan_usage.collect_scan_usage(
+            usage = scan_usage.collect_scan_usage_safely(
                 connection,
                 scan,
                 thread_id=args.thread_id,
@@ -1647,7 +1647,7 @@ def complete_scan_locked(
 
     cost_fields = scan_usage.stored_scan_cost_fields(cost_json)
     if "usage" not in cost_fields:
-        cost_fields["usage"] = scan_usage.collect_scan_usage(
+        cost_fields["usage"] = scan_usage.collect_scan_usage_safely(
             connection,
             scan,
             thread_id=thread_id,

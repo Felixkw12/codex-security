@@ -22,6 +22,8 @@ export interface ScanExecutionRequest {
     outputDirectory: string;
     /** Runtime context only. Credentials belong to the host executor. */
     environment: Record<string, string>;
+    /** Per-attempt attribution; IDs are for correlation, not metric labels. */
+    requestMetadata?: Readonly<Record<string, string>>;
   };
 }
 

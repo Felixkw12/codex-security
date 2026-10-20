@@ -4,6 +4,7 @@ import * as filesystem from "node:fs/promises";
 import { appendFile, writeFile } from "node:fs/promises";
 import * as fs from "node:fs/promises";
 import { join, parse, sep } from "node:path";
+import zlib from "node:zlib";
 import { Codex } from "@openai/codex-sdk";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import {
@@ -11,6 +12,7 @@ import {
   ScanCostTracker,
   type ScanSessionEvent,
   type ScanWorkerEvent,
+  type ScanUsageMeasurement,
 } from "../src/cost.js";
 import type { ScanActivity } from "../src/scan-activity.js";
 import { formatTokenUsage, tokenUsage } from "../src/cost-model.js";
@@ -205,7 +207,7 @@ describe("scan cost", () => {
       model: "gpt-6-astra",
     });
     tracker.start(scanThreadId);
-    expect((await tracker.stop()).usage).toEqual(ownedSdkUsage);
+    expect((await tracker.stop()).measurement.usage).toEqual(ownedSdkUsage);
     expect(readPythonRolloutUsage(BUNDLED_PLUGIN_ROOT, path)).toEqual({
       usage: ownedPythonUsage,
       warnings: [],
@@ -1773,8 +1775,8 @@ describe("live scan cost tracking", () => {
     const python = readPythonRolloutUsage(BUNDLED_PLUGIN_ROOT, rolloutPath);
 
     expect({
-      trackedUsage: tracked.usage,
-      estimatedUsd: tracked.cost?.estimatedUsd,
+      trackedUsage: tracked.measurement.usage,
+      estimatedUsd: tracked.measurement.cost?.estimatedUsd,
       python,
     }).toMatchObject({
       trackedUsage: ownedSdkUsage,
@@ -1784,6 +1786,8 @@ describe("live scan cost tracking", () => {
         warnings: [],
       },
     });
+    expect(tracked.measurement.coverage).toBe("partial");
+    expect(tracked.measurement.missingThreadCount).toBe(1);
     expect(observedCosts.length).toBeGreaterThan(0);
     expect(observedCosts.every((cost) => cost < maxCostUsd)).toBe(true);
     const forwardedTurnIds = forwardedEvents.flatMap(({ event }) => {
@@ -2623,9 +2627,11 @@ describe("live scan cost tracking", () => {
     await writeSession(home, "scan-thread", parentUsage);
     const costs: Array<[number, boolean]> = [];
     const usages: unknown[] = [];
+    const measurements: Readonly<ScanUsageMeasurement>[] = [];
     const tracker = costTracker(home, {
       onCost: (cost, complete) => costs.push([cost.estimatedUsd, complete]),
       onUsage: (usage) => usages.push(usage),
+      onMeasurement: (measurement) => measurements.push(measurement),
     });
     tracker.start("scan-thread");
     expect((await tracker.refresh()).cost?.estimatedUsd).toBe(6);
@@ -2638,9 +2644,15 @@ describe("live scan cost tracking", () => {
         parent: "scan-thread",
       },
     );
-    expect(await tracker.refresh()).toEqual({ usage: null, cost: null });
+    expect(await tracker.refresh()).toMatchObject({ usage: null, cost: null });
     expect(costs.at(-1)).toEqual([6, false]);
     expect(usages).toHaveLength(1);
+    expect(measurements.at(-1)).toMatchObject({
+      coverage: "partial",
+      threadCount: 1,
+      missingThreadCount: 1,
+      usage: { input_tokens: 1_000_000 },
+    });
 
     await appendFile(
       worker,
@@ -2652,6 +2664,11 @@ describe("live scan cost tracking", () => {
       total_tokens: 1_100_000,
     });
     expect(costs.at(-1)).toEqual([6, true]);
+    expect(measurements.at(-1)).toMatchObject({
+      coverage: "complete",
+      threadCount: 2,
+      missingThreadCount: 0,
+    });
     expect(usages).toHaveLength(1);
 
     await appendFile(
@@ -2672,6 +2689,144 @@ describe("live scan cost tracking", () => {
       [9, true],
     ]);
     expect(usages).toHaveLength(2);
+  });
+
+  test.skipIf(typeof zlib.zstdCompressSync !== "function").each([true, false])(
+    "counts compressed independent workers in active and archived sessions once (native=%s)",
+    async (native) => {
+      const home = await codexHome();
+      const scanDirectory = join(home, "scans", "compressed");
+      const parentUsage = { input_tokens: 100, output_tokens: 10 };
+      await writeSession(home, "scan-thread", parentUsage, {
+        timestamp: "2026-07-26T12:00:00Z",
+      });
+      const worker = await writeSession(
+        home,
+        "compressed-worker",
+        {
+          input_tokens: 900,
+          output_tokens: 90,
+        },
+        {
+          cwd: join(
+            scanDirectory,
+            "artifacts",
+            "deep_discovery",
+            "workers",
+            "one",
+            "output",
+          ),
+          timestamp: "2026-07-26T12:01:00Z",
+        },
+      );
+      const compressed = zlib.zstdCompressSync(await fs.readFile(worker));
+      await writeFile(`${worker}.zst`, compressed);
+      const archive = join(home, "archived_sessions");
+      await fs.mkdir(archive);
+      await writeFile(join(archive, "rollout-copy.jsonl.zst"), compressed);
+      await writeFile(
+        join(archive, "rollout-unrelated.jsonl.zst"),
+        zlib.zstdCompressSync(
+          Buffer.from(
+            JSON.stringify({
+              type: "session_meta",
+              payload: { id: "unrelated-history" },
+            }) +
+              "\nnot a valid event; unrelated historical bodies must not be parsed\n",
+          ),
+        ),
+      );
+      await fs.unlink(worker);
+      const tracker = costTracker(home, { scanDirectory });
+      tracker.start("scan-thread");
+      const original = Object.getOwnPropertyDescriptor(
+        zlib,
+        "createZstdDecompress",
+      );
+      if (!native)
+        Object.defineProperty(zlib, "createZstdDecompress", {
+          value: undefined,
+        });
+      let snapshot;
+      try {
+        snapshot = await tracker.stop(parentUsage);
+      } finally {
+        if (original)
+          Object.defineProperty(zlib, "createZstdDecompress", original);
+      }
+      expect(snapshot.measurement).toMatchObject({
+        coverage: "complete",
+        threadCount: 2,
+        missingThreadCount: 0,
+        usage: { input_tokens: 1_000, output_tokens: 100 },
+      });
+      expect(snapshot.cost?.inputTokens).toBe(1_000);
+    },
+  );
+
+  test("retains resumed worker turn receipts and reconciles their subtotal with native totals", async () => {
+    const home = await codexHome();
+    const scanDirectory = join(home, "scans", "receipts");
+    const receipts = join(
+      scanDirectory,
+      "artifacts",
+      "deep_discovery",
+      "usage",
+    );
+    await fs.mkdir(receipts, { recursive: true });
+    const parentUsage = { input_tokens: 100, output_tokens: 10 };
+    await writeSession(home, "scan-thread", parentUsage);
+    for (const [attemptId, input] of [
+      ["first", 200],
+      ["second", 300],
+    ] as const) {
+      await writeFile(
+        join(receipts, `${attemptId}.json`),
+        JSON.stringify({
+          schemaVersion: 1,
+          source: "codex_sdk",
+          usageScope: "turn",
+          attemptId,
+          threadId: "resumed-worker",
+          usage: { input_tokens: input, output_tokens: 10 },
+        }),
+      );
+    }
+    const measurements: Readonly<ScanUsageMeasurement>[] = [];
+    const tracker = costTracker(home, {
+      scanDirectory,
+      onMeasurement: (measurement) => measurements.push(measurement),
+    });
+    tracker.start("scan-thread");
+    const partial = await tracker.refresh();
+    expect(partial).toMatchObject({
+      usage: null,
+      cost: null,
+      measurement: {
+        coverage: "partial",
+        threadCount: 2,
+        missingThreadCount: 1,
+        usage: { input_tokens: 600, output_tokens: 30 },
+      },
+    });
+    // Re-reading the same durable attempts does not increment their usage.
+    expect((await tracker.refresh()).measurement.usage).toEqual(
+      partial.measurement.usage,
+    );
+    await writeSession(home, "resumed-worker", {
+      input_tokens: 550,
+      output_tokens: 25,
+    });
+    expect((await tracker.stop(parentUsage)).measurement).toMatchObject({
+      coverage: "complete",
+      threadCount: 2,
+      missingThreadCount: 0,
+      usage: { input_tokens: 650, output_tokens: 35 },
+    });
+    expect(measurements.map((measurement) => measurement.coverage)).toEqual([
+      "partial",
+      "complete",
+    ]);
   });
 
   test("keeps independent Deep worker usage unknown until a receipt supplies it", async () => {
@@ -2700,7 +2855,7 @@ describe("live scan cost tracking", () => {
     );
     const tracker = costTracker(home, { scanDirectory });
     tracker.start("scan-thread");
-    expect(await tracker.refresh()).toEqual({ usage: null, cost: null });
+    expect(await tracker.refresh()).toMatchObject({ usage: null, cost: null });
 
     tracker.recordUsage({ input_tokens: 50, output_tokens: 5 }, "deep-worker");
     expect((await tracker.stop(parentUsage)).usage).toMatchObject({
@@ -2728,7 +2883,7 @@ describe("live scan cost tracking", () => {
         output_tokens: 0,
       });
       if (source === "unknown")
-        expect(snapshot).toEqual({ usage: null, cost: null });
+        expect(snapshot).toMatchObject({ usage: null, cost: null });
       else expect(snapshot.cost?.inputTokens).toBe(1_500);
     },
   );

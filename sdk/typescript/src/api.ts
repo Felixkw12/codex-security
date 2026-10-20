@@ -91,10 +91,16 @@ import {
   estimateScanCost,
   ScanCostTracker,
   type ScanCost,
+  type ScanUsageMeasurement,
   type ScanSessionEvent,
   type ScanWorkerEvent,
 } from "./cost.js";
 import type { ScanTokenUsage } from "./cost-model.js";
+import {
+  measuredScanCost,
+  measurementFromUsage,
+  combineMeasurements,
+} from "./scan-measurement.js";
 import { ScanProgressTracker, type DeepScanProgress } from "./scan-progress.js";
 import { findScanSession } from "./scan-logs.js";
 import { DIRECT_DEEP_SCAN_CONTROL_USAGE, runDeepScan } from "./deep-scan.js";
@@ -142,6 +148,7 @@ import {
   AuthenticationRequiredError,
   CodexSecurityError,
   ConfigurationError,
+  InvalidTargetError,
   IncompleteScanError,
   OutputDirectoryError,
   OutputDirectoryNotEmptyError,
@@ -199,6 +206,10 @@ import {
 } from "./worker-progress.js";
 import { CODEX_SECURITY_THREAD_SOURCES } from "./thread-source.js";
 import { codexSecurityRequestContext } from "./request-metadata.js";
+import {
+  OperationTelemetry,
+  type OperationTelemetryEvent,
+} from "./operation-telemetry.js";
 import { CODEX_EXECUTABLE_VERSION, CODEX_SDK_VERSION } from "./version.js";
 import { bundledCodexSdkEnvironment } from "./codex-sdk-environment.js";
 import {
@@ -330,6 +341,12 @@ export interface ScanOptions extends ScanSettings {
   parentScanId?: string;
   expectedPluginVersion?: string;
   onCost?: (cost: Readonly<ScanCost>, maxCostUsd?: number) => void;
+  /** Observed subtotals and coverage changes, including loss of completeness. */
+  onMeasurement?: (measurement: Readonly<ScanUsageMeasurement>) => void;
+  /** Content-free local operation receipts. Hosts own remote export and acknowledgement. */
+  onTelemetry?: (event: Readonly<OperationTelemetryEvent>) => void;
+  /** @internal Correlate composed attempts without using repository identity. */
+  telemetryContext?: { operationId: string; parentAttemptId?: string };
   /** Observed tokens, including models without a price estimate. */
   onUsage?: (usage: Readonly<ScanTokenUsage>) => void;
   onBudgetApproaching?: (
@@ -372,7 +389,7 @@ export interface ScanOptions extends ScanSettings {
 
 export interface ValidationOptions extends Pick<
   ScanOptions,
-  "auth" | "outputDir" | "signal"
+  "auth" | "outputDir" | "signal" | "onTelemetry" | "onObserverError"
 > {
   repositoryPath: string;
   /** Finding text or a JSON-serializable object. Strings are never file paths. */
@@ -405,6 +422,8 @@ export interface PatchOptions extends Pick<
   | "onActivity"
   | "onSessionEvent"
   | "onCost"
+  | "onMeasurement"
+  | "onTelemetry"
   | "onReconnect"
   | "onWarning"
   | "onObserverError"
@@ -557,6 +576,8 @@ type ScanObserverName =
   | "onAuthentication"
   | "onCost"
   | "onUsage"
+  | "onMeasurement"
+  | "onTelemetry"
   | "onOutputArchived"
   | "onOutputDirReady"
   | "onScanRegistered"
@@ -611,6 +632,9 @@ interface CodexSecurityRuntimeOptions {
 }
 
 interface ClientDependencies {
+  createOperationTelemetry?: (
+    options: ConstructorParameters<typeof OperationTelemetry>[0],
+  ) => OperationTelemetry | null;
   /** Explicit hosted execution; never falls back to createCodex. */
   hostedScan?: {
     executor: ScanExecutor;
@@ -672,6 +696,8 @@ export class CodexSecurity {
   readonly #loginHandles = new Set<CodexLoginHandle>();
   readonly #abortController = new AbortController();
   #activeOperation: Promise<unknown> | null = null;
+  #operationTelemetry: OperationTelemetry | null = null;
+  #operationTelemetryStart: Promise<void> | null = null;
   #runtime: PreparedRuntime | null = null;
   #runtimeCredentialSource: "api_key" | "stored_credentials" | null = null;
   #closed = false;
@@ -703,10 +729,19 @@ export class CodexSecurity {
       throw new CodexSecurityError(
         "Use runHostedScan with an executor for hosted execution.",
       );
-    return await this.#trackOperation(() =>
-      options.workflowId === undefined
-        ? this.#run(repository, { ...options })
-        : this.#runWorkflow(repository, { ...options }, options.workflowId),
+    return await this.#trackOperation(
+      () =>
+        options.workflowId === undefined
+          ? this.#run(repository, { ...options })
+          : this.#runWorkflow(repository, { ...options }, options.workflowId),
+      options.mock
+        ? undefined
+        : {
+            command: "scan",
+            repository,
+            options,
+            mode: options.mode ?? DEFAULT_SCAN_MODE,
+          },
     );
   }
 
@@ -781,7 +816,7 @@ export class CodexSecurity {
         await workflow.bind({ artifactDigest: workflowDigest(contract) });
         metadata ??= { threadId: "", turnResult: { status: "completed" } };
         await workflow.complete("scan", metadata);
-        return new ScanResult({
+        const result = new ScanResult({
           ...contract,
           scanDir: state.scanDir,
           ...metadata,
@@ -791,6 +826,9 @@ export class CodexSecurity {
             signal,
           }),
         });
+        if (this.#operationTelemetry !== null)
+          this.#operationTelemetry.reusedResult = true;
+        return result;
       }
     }
     await workflow.begin("scan");
@@ -820,7 +858,11 @@ export class CodexSecurity {
   }
 
   public async validate(options: ValidationOptions): Promise<ValidationResult> {
-    return await this.#trackOperation(() => this.#validate(options));
+    return await this.#trackOperation(() => this.#validate(options), {
+      command: "validate",
+      repository: options.repositoryPath,
+      options,
+    });
   }
 
   async #validate(options: ValidationOptions): Promise<ValidationResult> {
@@ -924,11 +966,16 @@ export class CodexSecurity {
           target: "openapi-3.0",
         }),
       });
-      const { status, finalResponse, threadId } = await readCodexTurn({
+      const { status, finalResponse, threadId, usage } = await readCodexTurn({
         thread,
         events,
         onEvent: () => throwIfAborted(signal, outputDir),
       });
+      if (this.#operationTelemetry !== null)
+        this.#operationTelemetry.measurement = measurementFromUsage(
+          usage,
+          scanModelConfiguration(session.effectiveConfig).model,
+        );
       throwIfAborted(signal, outputDir);
       if (status !== "completed") {
         throw new CodexSecurityError("Finding validation did not complete.");
@@ -950,7 +997,11 @@ export class CodexSecurity {
   }
 
   public async patch(options: PatchOptions): Promise<PatchResult> {
-    return await this.#trackOperation(() => this.#patch(options));
+    return await this.#trackOperation(() => this.#patch(options), {
+      command: "patch",
+      repository: options.repositoryPath,
+      options,
+    });
   }
 
   async #patch(options: PatchOptions): Promise<PatchResult> {
@@ -1022,6 +1073,11 @@ export class CodexSecurity {
         codexHome: session.runtime.codexHome,
         model,
         repository,
+        onMeasurement: (measurement) => {
+          if (this.#operationTelemetry !== null)
+            this.#operationTelemetry.measurement = measurement;
+          notifyObserver(options, "onMeasurement")(measurement);
+        },
         onActivity:
           options.onActivity === undefined
             ? undefined
@@ -1229,8 +1285,9 @@ export class CodexSecurity {
     repository: string,
     options: SecurityPolicyOptions = {},
   ): Promise<SecurityPolicyDraft> {
-    return await this.#trackOperation(() =>
-      this.#generatePolicy(repository, options),
+    return await this.#trackOperation(
+      () => this.#generatePolicy(repository, options),
+      { command: "policy", repository, options },
     ).catch(rethrowPolicyOutputError);
   }
 
@@ -1279,6 +1336,7 @@ export class CodexSecurity {
     let knowledgeBase: PreparedKnowledgeBase | null = null;
     let accumulatedCost: ScanCost | null = null;
     let completeCost = true;
+    const stageMeasurements = new Map<string, Readonly<ScanUsageMeasurement>>();
     const warn = (message: string): void =>
       notifyObserver(options, "onWarning")(message);
     try {
@@ -1288,6 +1346,9 @@ export class CodexSecurity {
         signal,
       );
       const inputs = await this.#validatePolicyInputs(target, options, signal);
+      await this.#operationTelemetry?.activatePersistence(
+        inputs.protectedRoots,
+      );
       const snapshot = await readSecurityPolicySnapshot(
         target,
         signal,
@@ -1449,6 +1510,7 @@ export class CodexSecurity {
         stage: SecurityPolicyStage,
         prompt: string,
       ): Promise<SecurityPolicyStageResult> => {
+        const measurementId = randomUUID();
         const thread = codex.startThread({
           workingDirectory: outputDir,
           additionalDirectories: policyReadRoots,
@@ -1463,6 +1525,14 @@ export class CodexSecurity {
           repository: target.repository,
           scanDirectory: outputDir,
           maxCostUsd: options.maxCostUsd,
+          onMeasurement: (measurement) => {
+            stageMeasurements.set(measurementId, measurement);
+            if (this.#operationTelemetry !== null)
+              this.#operationTelemetry.measurement = combineMeasurements(
+                [...stageMeasurements.values()],
+                model.model,
+              );
+          },
           onCost:
             options.onCost === undefined && options.maxCostUsd === undefined
               ? undefined
@@ -1605,6 +1675,7 @@ export class CodexSecurity {
     let maxCostUsd = options.maxCostUsd;
     let latestCost: Readonly<ScanCost> | null = null;
     let latestCostComplete = false;
+    let latestMeasurement: Readonly<ScanUsageMeasurement> | null = null;
     let notifiedLimit: number | undefined;
     let scanDir = "";
     let targetPathsFile: string | null = null;
@@ -1852,6 +1923,7 @@ export class CodexSecurity {
       const workerSnapshot: JsonObject = {
         ...workerRuntimeConfig,
         responses_api_metadata: codexSecurityRequestContext(effectiveConfig, {
+          ...this.#operationTelemetry?.context,
           surface: this.#surface,
           command: "scan",
           pluginVersion: runtime.plugin.version,
@@ -2016,6 +2088,12 @@ export class CodexSecurity {
         repository: repo,
         scanDirectory: scanDir,
         maxCostUsd: options.maxCostUsd,
+        onMeasurement: (measurement) => {
+          latestMeasurement = measurement;
+          if (this.#operationTelemetry !== null)
+            this.#operationTelemetry.measurement = measurement;
+          notifyObserver(options, "onMeasurement")(measurement);
+        },
         onUsage:
           options.onUsage === undefined
             ? undefined
@@ -2294,6 +2372,7 @@ export class CodexSecurity {
         });
       }
       activeScan = { id: scanId, options: workbenchOptions };
+      await this.#operationTelemetry?.bindScan(scanId);
       notifyObserver(
         options,
         "onScanRegistered",
@@ -2956,7 +3035,21 @@ export class CodexSecurity {
       }
       return result;
     } catch (error) {
-      const snapshot = await costTracker?.stop().catch(() => null);
+      // Hosted terminal failures can carry the only receipt for consumed tokens.
+      if (
+        error instanceof ScanExecutionError &&
+        error.result.usage !== undefined
+      ) {
+        if (error.result.sessionId !== undefined) {
+          costTracker?.start(error.result.sessionId);
+          costTracker?.recordUsage(error.result.usage, error.result.sessionId);
+        }
+      }
+      const snapshot = await costTracker
+        ?.stop(
+          error instanceof ScanExecutionError ? error.result.usage : undefined,
+        )
+        .catch(() => null);
       if (artifactRestorationFailure !== null) throw artifactRestorationFailure;
       const terminalTurnStatus = terminalScanTurnStatus();
       let failure =
@@ -3093,14 +3186,22 @@ export class CodexSecurity {
           }).catch(() => undefined);
         }
         try {
+          const canceled =
+            (signal.aborted &&
+              !(failure instanceof ScanCostLimitExceededError)) ||
+            (failure instanceof ScanExecutionError &&
+              failure.result.status === "canceled");
+          const measured =
+            measuredScanCost(snapshot?.measurement ?? latestMeasurement) ??
+            snapshot?.cost;
           await workbench({ ...activeScan.options, signal: undefined }, [
-            "fail-scan",
+            canceled ? "cancel-scan" : "fail-scan",
             "--scan-id",
             activeScan.id,
-            `--message=${errorMessage(failure).slice(0, 2400)}`,
-            ...(snapshot?.cost
-              ? ["--cost-json", JSON.stringify(snapshot.cost)]
-              : []),
+            ...(canceled
+              ? []
+              : [`--message=${errorMessage(failure).slice(0, 2400)}`]),
+            ...(measured ? ["--cost-json", JSON.stringify(measured)] : []),
           ]);
         } catch {}
       }
@@ -3331,7 +3432,15 @@ export class CodexSecurity {
     this.#runtimeCredentialSource = source;
   }
 
-  async #trackOperation<T>(operation: () => Promise<T>): Promise<T> {
+  async #trackOperation<T>(
+    operation: () => Promise<T>,
+    telemetry?: {
+      command: OperationTelemetryEvent["command"];
+      repository: string;
+      options: ScanOptions;
+      mode?: ScanMode;
+    },
+  ): Promise<T> {
     this.#requireOpen();
     if (this.#activeOperation !== null) {
       throw new CodexSecurityError(
@@ -3340,13 +3449,118 @@ export class CodexSecurity {
     }
     const activeOperation = Promise.withResolvers<void>();
     this.#activeOperation = activeOperation.promise;
-    try {
-      return await operation();
-    } finally {
+    let journal: OperationTelemetry | null = null;
+    let journalStarted: Promise<void> | null = null;
+    let invoked = false;
+    const release = () => {
       if (this.#activeOperation === activeOperation.promise) {
+        this.#operationTelemetry = null;
+        this.#operationTelemetryStart = null;
         this.#activeOperation = null;
       }
       activeOperation.resolve();
+    };
+    try {
+      if (telemetry !== undefined) {
+        try {
+          journal = (
+            this.#dependencies.createOperationTelemetry ??
+            ((options) => new OperationTelemetry(options))
+          )({
+            directory: codexSecurityStateDirectory(
+              this.#dependencies.environment,
+            ),
+            protectedRepository: expandHome(
+              telemetry.repository,
+              this.#dependencies.environment,
+            ),
+            command: telemetry.command,
+            deferPersistence: telemetry.command === "policy",
+            surface: this.#surface,
+            mode: telemetry.mode,
+            resumeScanId: telemetry.options.resumeScanId,
+            context: telemetry.options.telemetryContext,
+            onEvent: notifyObserver(telemetry.options, "onTelemetry"),
+            onError: (error) =>
+              notifyObserver(
+                telemetry.options,
+                "onWarning",
+              )(`Could not save operation telemetry: ${errorMessage(error)}`),
+          });
+          this.#operationTelemetry = journal;
+          journalStarted =
+            journal?.start().catch((error: unknown) => {
+              notifyObserver(
+                telemetry.options,
+                "onWarning",
+              )(`Could not start operation telemetry: ${errorMessage(error)}`);
+            }) ?? null;
+          this.#operationTelemetryStart = journalStarted;
+        } catch (error) {
+          notifyObserver(
+            telemetry.options,
+            "onWarning",
+          )(`Could not start operation telemetry: ${errorMessage(error)}`);
+        }
+      }
+      // Preserve synchronous serialization and operation-slot registration.
+      const pending = operation();
+      invoked = true;
+      const result = await pending;
+      await journalStarted;
+      await journal?.finish(
+        "completed",
+        result instanceof ScanResult
+          ? {
+              findingCount: result.findings.findings.length,
+              reviewedSurfaceCount: result.coverage.surfaces.filter(
+                (surface) => surface.disposition !== "needs_follow_up",
+              ).length,
+              deferredCount: result.coverage.deferred.length,
+              artifactComplete: result.manifest.scan.status === "completed",
+            }
+          : telemetry?.command === "validate"
+            ? {
+                validationDisposition: (result as ValidationResult).disposition,
+              }
+            : {},
+      );
+      return result;
+    } catch (error) {
+      const canceled =
+        this.#abortController.signal.aborted ||
+        telemetry?.options.signal?.aborted === true ||
+        (error instanceof ScanInterruptedError &&
+          !(error instanceof ScanCostLimitExceededError)) ||
+        (error instanceof ScanExecutionError &&
+          error.result.status === "canceled");
+      if (!invoked) release();
+      await journalStarted;
+      await journal?.finish(
+        error instanceof ScanExecutionError &&
+          error.result.status === "acceptance_unknown"
+          ? "unresolved"
+          : canceled
+            ? "canceled"
+            : "failed",
+        {
+          failureCategory: canceled
+            ? "canceled"
+            : error instanceof ScanCostLimitExceededError
+              ? "budget"
+              : error instanceof AuthenticationRequiredError
+                ? "authentication"
+                : error instanceof ConfigurationError
+                  ? "configuration"
+                  : error instanceof InvalidTargetError ||
+                      error instanceof OutputDirectoryError
+                    ? "input"
+                    : "execution",
+        },
+      );
+      throw error;
+    } finally {
+      release();
     }
   }
 
@@ -3363,6 +3577,20 @@ export class CodexSecurity {
     environment: ProcessEnvironment;
     codexOptions: CodexOptions & { nativeProfile?: string };
   }> {
+    const requestContext = codexSecurityRequestContext(
+      config ?? session.sessionConfig,
+      {
+        surface: this.#surface,
+        command,
+        pluginVersion: session.runtime.plugin.version,
+        mode,
+        ...this.#operationTelemetry?.context,
+      },
+    );
+    this.#operationTelemetry?.describe({
+      pluginVersion: session.runtime.plugin.version,
+      providerFamily: requestContext.metadata["codex_security_provider"],
+    });
     const hosted = this.#dependencies.hostedScan;
     if (hosted !== undefined) {
       const environment = {
@@ -3397,6 +3625,7 @@ export class CodexSecurity {
                     stateDirectory: runtimePaths["CODEX_SECURITY_STATE_DIR"]!,
                     outputDirectory: runtimePaths["CODEX_SECURITY_SCAN_DIR"]!,
                     environment,
+                    requestMetadata: requestContext.metadata,
                   },
                 };
                 // A transport failure is terminal; only the host can reconcile
@@ -3501,15 +3730,6 @@ export class CodexSecurity {
         ...configOverrides,
       ];
     }
-    const requestContext = codexSecurityRequestContext(
-      config ?? sessionConfig,
-      {
-        surface: this.#surface,
-        command,
-        pluginVersion: runtime.plugin.version,
-        mode,
-      },
-    );
     delete sdkCodexConfig["responses_api_metadata"];
     const configuredCodexPath = environmentValue(
       this.#dependencies.environment,
@@ -3569,6 +3789,8 @@ export class CodexSecurity {
     temporaryRoot?: string,
     deepScan = false,
   ): Promise<PreparedSession> {
+    if (this.#operationTelemetryStart !== null)
+      await this.#operationTelemetryStart;
     if (this.#dependencies.hostedScan !== undefined) {
       // Hosted scans use only the explicitly selected bundle and configuration.
       // No local auth, Codex subprocess, provider profile, or ambient config.
@@ -5567,6 +5789,10 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
   };
   const executionConfig = (source: JsonObject): JsonObject => {
     const result: JsonObject = {};
+    for (const key of ["analytics", "otel", "responses_api_metadata"]) {
+      if (Object.hasOwn(source, key))
+        result[key] = structuredClone(source[key]!);
+    }
     if (typeof source["daybreak"] === "boolean") {
       result["daybreak"] = source["daybreak"];
     }

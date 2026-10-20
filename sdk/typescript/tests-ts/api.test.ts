@@ -52,6 +52,11 @@ import {
   initialCredentialsAvailable,
 } from "../src/api.js";
 import {
+  OperationTelemetry,
+  readOperationTelemetry,
+  summarizeOperationTelemetry,
+} from "../src/operation-telemetry.js";
+import {
   CHEAPERINFERENCE_CODEX_PROVIDER,
   DEFAULT_CODEX_CONFIG,
   FIREWORKS_CODEX_PROVIDER,
@@ -165,6 +170,7 @@ test.each(["completed", "receipt-lost", "scan-interrupted", "prompt-files"])(
       return TestClient.withDependencies({
         environment,
         ...scanRuntimeDependencies(codexHome, scanDir),
+        createOperationTelemetry: (options) => new OperationTelemetry(options),
         runWorkbench: async (options, args, input) => {
           if (args[0] === "finding-workflow") {
             const payload = JSON.parse(input!);
@@ -244,6 +250,28 @@ test.each(["completed", "receipt-lost", "scan-interrupted", "prompt-files"])(
       );
       if (original) expect(result.toJSON()).toEqual(original);
       expect(modelCalls).toBe(scenario === "scan-interrupted" ? 2 : 1);
+      const { events } = await readOperationTelemetry(
+        environment.CODEX_SECURITY_STATE_DIR,
+      );
+      const terminal = events.filter(
+        (event) => event.type === "attempt_finished",
+      );
+      expect(terminal).toHaveLength(2);
+      expect(summarizeOperationTelemetry(events).reusedAttempts).toBe(
+        scenario === "scan-interrupted" ? 0 : 1,
+      );
+      const reused = terminal.find((event) => event.reusedResult === true);
+      if (scenario === "scan-interrupted") {
+        expect(terminal.every((event) => event.reusedResult === false)).toBe(
+          true,
+        );
+      } else {
+        expect(reused).toMatchObject({
+          outcome: "completed",
+          findingCount: result.findings.findings.length,
+        });
+        expect(reused?.measurement).toBeUndefined();
+      }
       expect(
         (await new FindingWorkflow(workflowId, environment).get())?.stages.scan
           .status,
