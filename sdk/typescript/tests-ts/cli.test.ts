@@ -43,6 +43,7 @@ import {
 import { scanPreflightCodexConfig } from "../src/api.js";
 import { CODEX_EXECUTABLE_VERSION, CODEX_SDK_VERSION } from "../src/version.js";
 import {
+  CHEAPERINFERENCE_CODEX_PROVIDER,
   DEFAULT_CODEX_CONFIG,
   FIREWORKS_CODEX_PROVIDER,
   OPENROUTER_CODEX_PROVIDER,
@@ -299,6 +300,7 @@ describe("CLI", () => {
           stopAfterNoNew: { type: "integer" },
           maxDiscoveryRuns: { type: "integer" },
           maxTimeHours: { type: "number", maximum: 96 },
+          maxTime: { type: "number" },
           model: { type: "string" },
           verbose: { type: "boolean" },
           showCost: { type: "boolean", default: false },
@@ -307,7 +309,13 @@ describe("CLI", () => {
             minLength: 1,
           },
           provider: {
-            enum: ["openai", "openrouter", "fireworks", "amazon-bedrock"],
+            enum: [
+              "openai",
+              "openrouter",
+              "fireworks",
+              "cheaperinference",
+              "amazon-bedrock",
+            ],
           },
           failOnSeverity: { enum: ["critical", "high", "medium", "low"] },
           patch: { type: "boolean" },
@@ -2039,6 +2047,39 @@ describe("CLI", () => {
     },
   );
 
+  test("shows saved review counts even when the phase and file counts do not change", async () => {
+    const { stderr, runCli } = createCliTest(main);
+    const deps = dependencies({
+      scanProgress: [
+        { phase: "preflight", filesCompleted: 0, filesTotal: 8 },
+        {
+          phase: "validation",
+          filesCompleted: 0,
+          filesTotal: 8,
+          reviewItems: { completed: 11, total: 13 },
+        },
+        {
+          phase: "validation",
+          filesCompleted: 0,
+          filesTotal: 8,
+          reviewItems: { completed: 13, total: 13 },
+        },
+      ],
+    });
+    deps.setInterval = mock(fakeInterval);
+    expect(await runCli(["scan", ".", "--headless"], deps)).toBe(0);
+    expect(stderr.text()).toContain(
+      "Scan phase: validating findings (11/13 reviews).",
+    );
+    expect(stderr.text()).toContain(
+      "Scan phase: validating findings (13/13 reviews).",
+    );
+    expect(stderr.text()).toContain(
+      "Running scan: validating findings | Reviews: 13/13",
+    );
+    expect(stderr.text()).not.toContain("Files: 13/13");
+  });
+
   test("uses plain scan progress in headless, CI, and noninteractive terminals", async () => {
     for (const { options, environment, isTTY } of [
       { options: ["--headless"], environment: {}, isTTY: true },
@@ -2487,23 +2528,37 @@ describe("CLI", () => {
   });
 
   test("rejects CSV stdout when JSON output is requested", async () => {
-    const exportFindings = mock(resolving(new Uint8Array()));
-    const { stdout, stderr, runCli } = createCliTest(main);
+    for (const exportFormat of [
+      ["--export-format", "csv"],
+      ["--export-format=csv"],
+      ["--exportFormat", "csv"],
+      ["--exportFormat=csv"],
+    ]) {
+      for (const format of [
+        ["--json"],
+        ["--format", "json"],
+        ["--format=json"],
+        ["--format", "jsonl"],
+        ["--format=jsonl"],
+      ]) {
+        const exportFindings = mock(resolving(new Uint8Array()));
+        const { stdout, stderr, runCli } = createCliTest(main);
+        const deps = dependencies();
+        deps.exportFindings = exportFindings;
 
-    const deps = dependencies();
-    deps.exportFindings = exportFindings;
-
-    expect(
-      await runCli(
-        ["export", "scan", "--export-format", "csv", "--output", "-", "--json"],
-        deps,
-      ),
-    ).toBe(2);
-    expect(exportFindings).not.toHaveBeenCalled();
-    expect(stdout.text()).toBe("");
-    expect(stderr.text()).toContain(
-      "CSV stdout cannot be combined with JSON output",
-    );
+        expect(
+          await runCli(
+            ["export", "scan", ...exportFormat, "--output", "-", ...format],
+            deps,
+          ),
+        ).toBe(2);
+        expect(exportFindings).not.toHaveBeenCalled();
+        expect(stdout.text()).toBe("");
+        expect(stderr.text()).toContain(
+          "CSV stdout cannot be combined with JSON output",
+        );
+      }
+    }
   });
 
   test("prints export help without initializing Codex", async () => {
@@ -2553,6 +2608,7 @@ describe("CLI", () => {
       "--stop-after-no-new <count>",
       "--max-discovery-runs <count>",
       "--max-time-hours <hours>",
+      "--max-time <minutes>",
       "--headless",
       "--model <model>",
       "--provider <provider>",
@@ -2677,6 +2733,13 @@ describe("CLI", () => {
       "accounts/fireworks/models/gpt-oss-120b",
       "accounts/fireworks/models/llama-v3p3-70b-instruct",
       FIREWORKS_CODEX_PROVIDER,
+    ],
+    [
+      "Cheaper Inference",
+      "cheaperinference",
+      "gpt-5.4",
+      "claude-sonnet-5",
+      CHEAPERINFERENCE_CODEX_PROVIDER,
     ],
   ] as const)(
     "routes scans through %s",
@@ -2819,6 +2882,29 @@ describe("CLI", () => {
       expect(target).toEqual(expected);
     }
   });
+
+  test.each([
+    [[], 0.5],
+    [["--diff", "HEAD"], 15],
+    [["--mode", "deep"], 90],
+  ] as const)(
+    "passes investigation minutes to the SDK: %j",
+    async (scope, minutes) => {
+      let selected: ScanOptions | undefined;
+      expect(
+        await runCapturedCli(
+          main,
+          ["scan", ".", ...scope, "--max-time", String(minutes)],
+          dependencies({
+            onTurn: (_repository, options) => {
+              selected = options;
+            },
+          }),
+        ),
+      ).toBe(0);
+      expect(selected?.maxTimeMinutes).toBe(minutes);
+    },
+  );
 
   test("parses TOML override literals and rejects conflicts", () => {
     expect(
@@ -2975,6 +3061,26 @@ describe("CLI", () => {
       [["scan", ".", "--base", "HEAD"], "--base requires --working-tree"],
       [["scan", ".", "--archive-existing"], "requires --output-dir"],
       [["scan", ".", "--max-cost=0"], "expected number to be >0"],
+      [["scan", ".", "--max-time=0"], "expected number to be >0"],
+      [["scan", ".", "--max-time=-1"], "expected number to be >0"],
+      [
+        ["scan", ".", "--max-time=1e12"],
+        "deadline within the supported date range",
+      ],
+      [["scan", ".", "--mode", "deep", "--max-time", "5761"], "5760 minutes"],
+      [
+        [
+          "scan",
+          ".",
+          "--mode",
+          "deep",
+          "--max-time",
+          "15",
+          "--max-time-hours",
+          "1",
+        ],
+        "Conflicting",
+      ],
       [["scan", ".", "--workers", "2"], "Deep scan settings require deep mode"],
       [
         ["scan", ".", "--max-time-hours", "1.5"],
@@ -3030,6 +3136,7 @@ describe("CLI", () => {
       [["scan", ".", "--effort", "--dry-run"], "Missing value for flag"],
       [["scan", ".", "--output-dir", "--dry-run"], "Missing value for flag"],
       [["scan", ".", "--max-cost", "--dry-run"], "Missing value for flag"],
+      [["scan", ".", "--max-time", "--dry-run"], "Missing value for flag"],
       [
         ["scan", ".", "--max-time-hours", "--dry-run"],
         "Missing value for flag",
