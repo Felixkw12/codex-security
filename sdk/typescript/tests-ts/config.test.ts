@@ -1,4 +1,4 @@
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { parse } from "smol-toml";
@@ -144,6 +144,21 @@ function macOsSandboxUnavailable(): boolean {
     new TextDecoder().decode(result.stderr).trim() ===
       "sandbox-exec: sandbox_apply: Operation not permitted"
   );
+}
+
+async function sandboxFailureDetails(codexHome: string, details: string) {
+  if (process.platform !== "win32") return details;
+  const directory = join(codexHome, ".sandbox");
+  try {
+    for (const name of (await readdir(directory)).sort()) {
+      if (/^sandbox\.\d{4}-\d{2}-\d{2}\.log$/u.test(name)) {
+        details += `\n${name}:\n${await readFile(join(directory, name), "utf8")}`;
+      }
+    }
+  } catch (error) {
+    details += `\nCould not read native sandbox logs: ${String(error)}`;
+  }
+  return details;
 }
 
 async function scanSandboxFixture() {
@@ -583,7 +598,7 @@ describe("Codex configuration", () => {
           return;
         }
         throw new Error(
-          `The pinned Codex CLI rejected an allowed scan write: ${details}`,
+          `The pinned Codex CLI rejected an allowed scan write: ${await sandboxFailureDetails(codexHome, details)}`,
         );
       }
       expect(await readFile(allowed, "utf8")).toBe("probe");
@@ -751,7 +766,7 @@ describe("Codex configuration", () => {
           return;
         }
         throw new Error(
-          `The pinned Codex CLI rejected an allowed policy read: ${details}`,
+          `The pinned Codex CLI rejected an allowed policy read: ${await sandboxFailureDetails(codexHome, details)}`,
         );
       }
       expect(new TextDecoder().decode(read.stdout)).toBe("original");
