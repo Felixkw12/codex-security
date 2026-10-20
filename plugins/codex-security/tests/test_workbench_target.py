@@ -1580,6 +1580,23 @@ def test_copy_retains_alias_rooted_gitlink_exclusions(
         assert not (copied / "submodule").exists()
 
 
+@pytest.mark.cross_platform
+def test_candidate_sources_disambiguate_revision_from_worktree_filename(tmp_path: Path) -> None:
+    target = tmp_path / "repository"
+    revision = initialize_git_repository(target)
+    (target / revision).write_text("synthetic revision-named file\n")
+    subprocess.run(["git", "rm", "-q", "README.md"], cwd=target, check=True)
+
+    sources = WORKBENCH_TARGET["candidate_source_lines"](
+        target,
+        {"kind": "working_tree", "baseRevision": revision, "headRevision": revision},
+        ["README.md"],
+        ["README.md"],
+    )
+
+    assert sources == {"README.md": {"path": "README.md", "lineCount": 1}}
+
+
 @pytest.mark.parametrize("replacement", ["directory", "ignored_file", "link"])
 @pytest.mark.parametrize("case_insensitive", [False, True])
 def test_deleted_candidate_sources_keep_base_blob_when_path_is_recreated(

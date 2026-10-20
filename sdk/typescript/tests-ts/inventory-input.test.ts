@@ -1795,6 +1795,29 @@ test("preview trimming handles a full sample of leading blank lines", () => {
   expect(f.localRows()[0]!.preview).toBe("kept");
 });
 
+test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+  "scoped inventory skips unreadable descendants of a tracked file replaced by a directory",
+  () => {
+    const f = fixture();
+    f.write("ordinary.py");
+    f.write("replacement");
+    f.commit();
+    rmSync(join(f.repo, "replacement"));
+    f.write("replacement/readable.py");
+    f.write("replacement/blocked/private.py");
+    const blocked = join(f.repo, "replacement", "blocked");
+    chmodSync(blocked, 0);
+    try {
+      expect(f.rows().map((row) => row.path)).toEqual([
+        "ordinary.py",
+        "replacement/readable.py",
+      ]);
+    } finally {
+      chmodSync(blocked, 0o700);
+    }
+  },
+);
+
 for (const command of ["make-repo-scope-input"])
   test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
     `${command} reports unreadable tracked directories without replacing output`,

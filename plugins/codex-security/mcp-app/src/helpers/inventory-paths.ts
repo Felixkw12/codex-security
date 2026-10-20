@@ -106,12 +106,22 @@ export function linkedParent(scope: string, path: string): boolean {
   return false;
 }
 export const sourceMetadata = new Set([".git", ".svn"]);
-export function* walk(path: string, skipMetadata = false): Iterable<string> {
-  const names = windows
-    ? windowsFiles()
-        .entriesWithTypes(Buffer.from(path, "utf16le"))
-        .map((entry) => entry.name)
-    : readdirSync(fsPath(path), { encoding: "buffer" });
+export function* walk(
+  path: string,
+  skipMetadata = false,
+  ignoreDirectoryReadErrors = false,
+): Iterable<string> {
+  let names: Buffer[];
+  try {
+    names = windows
+      ? windowsFiles()
+          .entriesWithTypes(Buffer.from(path, "utf16le"))
+          .map((entry) => entry.name)
+      : readdirSync(fsPath(path), { encoding: "buffer" });
+  } catch (error) {
+    if (!ignoreDirectoryReadErrors) throw error;
+    return;
+  }
   const children = names
     .map((name) =>
       windows ? name.toString("utf16le") : decodePosixBytes(name),
@@ -125,7 +135,7 @@ export function* walk(path: string, skipMetadata = false): Iterable<string> {
       info.isDirectory() &&
       !("isNameSurrogate" in info && info.isNameSurrogate())
     )
-      yield* walk(child, skipMetadata);
+      yield* walk(child, skipMetadata, ignoreDirectoryReadErrors);
   }
 }
 export function executable(path: string): boolean {

@@ -538,7 +538,7 @@ export async function directoryPaths(
         nestedRoot.status === 0 && sameFile(gitLine(nestedRoot.stdout), path)
           ? await directoryPaths(path)
           : undefined;
-      for (const child of nested ?? walk(path, true)) found.add(child);
+      for (const child of nested ?? walk(path, true, true)) found.add(child);
     }
   }
   return [...found];

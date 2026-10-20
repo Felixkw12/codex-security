@@ -1,5 +1,4 @@
 import {
-  fakeCodexSource,
   workerGitEnvironment,
   expectedGitEnvironment,
   restoreEnv,
