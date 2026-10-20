@@ -460,7 +460,7 @@ for (const previewVersion of [34, 40, 41, 42, 43, 44, 48]) {
       assert.equal(
         upgraded
           .prepare(
-            "SELECT applied_at FROM schema_migrations WHERE version = 51",
+            "SELECT applied_at FROM schema_migrations WHERE version = 50",
           )
           .get()?.applied_at,
         "original",

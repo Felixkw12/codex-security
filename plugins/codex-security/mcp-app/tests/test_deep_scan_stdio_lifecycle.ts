@@ -1534,6 +1534,8 @@ process.stdin.on("data", (chunk) => {
     } else if (message.method === "account/login/start") {
       apiKey = message.params.apiKey;
       result = { type: "apiKey" };
+    } else if (message.method === "thread/read") {
+      result = { thread: { id: message.params.threadId, path: path.join(process.env.CODEX_HOME, message.params.threadId + ".jsonl") } };
     } else if (message.method === "thread/start" || message.method === "thread/resume") {
       thread = message.params;
       threadId = thread.threadId ?? threadId;
