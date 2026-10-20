@@ -1,5 +1,6 @@
 import { parseJson } from "../helpers/json";
 import { openWorkbenchDatabase, workbenchDatabasePath } from "./database";
+import { localDedupe, type LocalDedupeRequest } from "./local-dedupe";
 import {
   listStoredFindings,
   storeFindings,
@@ -75,12 +76,19 @@ export async function workbenchCommand(
     workbenchDatabasePath(stateDirectory),
     {
       deferred:
+        command !== "local-dedupe" &&
         command !== "store-findings" &&
         command !== "store-dedupe-groups" &&
         command !== "severity-classification",
     },
   );
   try {
+    if (command === "local-dedupe")
+      return localDedupe(
+        database,
+        payload as LocalDedupeRequest,
+        new Date().toISOString(),
+      );
     if (command === "severity-classification")
       return severityCheckpoint(
         database,
