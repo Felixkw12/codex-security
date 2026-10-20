@@ -1106,6 +1106,300 @@ describe("live scan cost tracking", () => {
     expect(events).toHaveLength(6);
   });
 
+  for (const compressed of [false, true]) {
+    test
+      .skipIf(compressed && typeof zlib.zstdCompressSync !== "function")
+      .each(["initial copies", "copy", "move"] as const)(
+      `forwards archived session events once after %s (compressed=${compressed})`,
+      async (mode) => {
+        const { home, worker } = await workerSessionFixture();
+        const message = {
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "Checking the next file." }],
+          },
+        };
+        const call = {
+          type: "response_item",
+          payload: {
+            type: "function_call",
+            name: "exec_command",
+            call_id: "call-one",
+            arguments: '{"cmd":"pwd"}',
+          },
+        };
+        // Identical messages at different positions are separate real events.
+        await appendFile(worker, jsonLines([message, call, message]) + "\n");
+        const contents = await fs.readFile(worker);
+        const expected = contents
+          .toString()
+          .trimEnd()
+          .split("\n")
+          .map((line) => JSON.parse(line) as Record<string, unknown>);
+        const archive = join(home, "archived_sessions");
+        await fs.mkdir(archive);
+        const archived = join(archive, "rollout-worker.jsonl");
+        const copy = () =>
+          writeFile(
+            `${archived}${compressed ? ".zst" : ""}`,
+            compressed ? zlib.zstdCompressSync(contents) : contents,
+          );
+        if (mode === "initial copies") await copy();
+        const events: ScanSessionEvent[] = [];
+        const tracker = costTracker(home, {
+          onSessionEvent: (event) => events.push(event),
+        });
+        const workerEvents = () =>
+          events
+            .filter((event) => event.threadId === "worker-thread")
+            .map((event) => event.event);
+        tracker.start("scan-thread");
+        try {
+          await tracker.refresh();
+          expect(workerEvents()).toEqual(expected);
+          if (mode !== "initial copies") await copy();
+          if (mode === "move") await fs.unlink(worker);
+          await tracker.refresh();
+          expect(workerEvents()).toEqual(expected);
+
+          // Resuming cold history materializes the same bytes before appending.
+          if (compressed) await writeFile(archived, contents);
+          const continuation = [
+            message,
+            {
+              type: "response_item",
+              payload: {
+                type: "function_call_output",
+                call_id: "call-one",
+                output: "/synthetic/repository",
+              },
+            },
+          ];
+          await appendFile(archived, jsonLines(continuation) + "\n");
+          expected.push(...continuation);
+          await tracker.refresh();
+          expect(workerEvents()).toEqual(expected);
+
+          // A lagging copy catching up must not replay the new suffix.
+          if (mode !== "move") {
+            await appendFile(worker, jsonLines(continuation) + "\n");
+            await tracker.refresh();
+            expect(workerEvents()).toEqual(expected);
+          }
+          const latest = [
+            message,
+            legacyUsageRecord({ input_tokens: 400, output_tokens: 40 }),
+          ];
+          await appendFile(
+            mode === "move" ? archived : worker,
+            jsonLines(latest) + "\n",
+          );
+          expected.push(...latest);
+          const snapshot = await tracker.refresh();
+          expect(workerEvents()).toEqual(expected);
+          expect(snapshot.measurement).toMatchObject({
+            coverage: "complete",
+            threadCount: 2,
+            usage: { input_tokens: 500, output_tokens: 50 },
+          });
+          await tracker.refresh();
+          expect(workerEvents()).toEqual(expected);
+        } finally {
+          await tracker.stop();
+        }
+      },
+    );
+  }
+
+  test("forwards a new rollout generation for an existing thread", async () => {
+    const home = await codexHome();
+    const usage = { input_tokens: 100, output_tokens: 10 };
+    await writeSession(home, "scan-thread", usage);
+    const worker = await writeSession(home, "worker-thread", usage, {
+      parent: "scan-thread",
+      timestamp: "2026-07-26T12:00:00.000Z",
+    });
+    const events: ScanSessionEvent[] = [];
+    const tracker = costTracker(home, {
+      onSessionEvent: (event) => events.push(event),
+    });
+    tracker.start("scan-thread");
+    try {
+      await tracker.refresh();
+      const oldEvents = events
+        .filter((event) => event.threadId === "worker-thread")
+        .map((event) => event.event);
+      expect(oldEvents).toHaveLength(2);
+      // Revert keeps the thread ID but creates a new rollout and timestamp.
+      const metadata = oldEvents[0]!;
+      const newEvents = [
+        {
+          ...metadata,
+          payload: {
+            ...(metadata["payload"] as Record<string, unknown>),
+            timestamp: "2026-07-26T12:01:00.000Z",
+          },
+        },
+        oldEvents[1]!,
+      ];
+      await writeFile(
+        `${worker.slice(0, -6)}_reverted.jsonl`,
+        jsonLines(newEvents) + "\n",
+      );
+      await tracker.refresh();
+      await tracker.refresh();
+      expect(
+        events
+          .filter((event) => event.threadId === "worker-thread")
+          .map((event) => event.event),
+      ).toEqual([...oldEvents, ...newEvents]);
+    } finally {
+      await tracker.stop();
+    }
+  });
+
+  test("does not replay stale worker activity or progress from archived copies", async () => {
+    const { home, worker } = await workerSessionFixture();
+    const otherWorker = await writeSession(
+      home,
+      "second-worker",
+      { input_tokens: 100, output_tokens: 10 },
+      { parent: "scan-thread" },
+    );
+    await appendSessionItem(worker, {
+      type: "function_call",
+      name: "exec_command",
+      call_id: "call-one",
+      arguments: '{"cmd":"pwd"}',
+    });
+    await appendSessionItem(worker, progressMessage(1, 8));
+    const stale = await fs.readFile(worker);
+    const activities: ScanActivity[] = [];
+    const progress: ScanProgress[] = [];
+    const tracker = costTracker(home, {
+      repository: "/synthetic/repository",
+      expectedFilesTotal: 16,
+      onActivity: (activity) => activities.push(activity),
+      onProgress: (update) => progress.push(update),
+    });
+    tracker.start("scan-thread");
+    try {
+      await tracker.refresh();
+      await appendSessionItem(worker, {
+        type: "function_call_output",
+        call_id: "call-one",
+        output: "/synthetic/repository",
+      });
+      await appendSessionItem(worker, progressMessage(3, 8));
+      await tracker.refresh();
+      const archive = join(home, "archived_sessions");
+      await fs.mkdir(archive);
+      await writeFile(join(archive, "rollout-worker.jsonl"), stale);
+      await tracker.refresh();
+      await appendSessionItem(otherWorker, progressMessage(1, 8));
+      await tracker.refresh();
+      expect({
+        toolStatuses: activities
+          .filter((activity) => activity.id === "worker-thread:call-one")
+          .map((activity) => activity.status),
+        completedFiles: progress.map((update) => update.filesCompleted),
+      }).toEqual({
+        toolStatuses: ["running", "completed"],
+        completedFiles: [1, 3, 4],
+      });
+    } finally {
+      await tracker.stop();
+    }
+  });
+
+  test("recovers raw session events after their replay read fails", async () => {
+    const { home, worker } = await workerSessionFixture();
+    await appendSessionItem(worker, {
+      type: "function_call",
+      name: "exec_command",
+      call_id: "call-one",
+      arguments: '{"cmd":"pwd"}',
+    });
+    await appendSessionItem(worker, progressMessage(1));
+    const expected = (await fs.readFile(worker, "utf8"))
+      .trimEnd()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    let denied = true;
+    let reads = 0;
+    const opened = filesystem.open;
+    const opening = spyOn(filesystem, "open").mockImplementation(
+      async (...args: Parameters<typeof filesystem.open>) => {
+        if (String(args[0]) === worker && ++reads > 1 && denied) {
+          throw Object.assign(new Error("Synthetic replay read failure"), {
+            code: "EACCES",
+            syscall: "open",
+            path: worker,
+          });
+        }
+        return await opened(...args);
+      },
+    );
+    const events: ScanSessionEvent[] = [];
+    const activities: ScanActivity[] = [];
+    const progress: ScanProgress[] = [];
+    const tracker = costTracker(home, {
+      repository: "/synthetic/repository",
+      onSessionEvent: (event) => events.push(event),
+      onActivity: (activity) => activities.push(activity),
+      onProgress: (update) => progress.push(update),
+    });
+    const workerEvents = () =>
+      events
+        .filter((event) => event.threadId === "worker-thread")
+        .map((event) => event.event);
+    const toolStatuses = () =>
+      activities
+        .filter((activity) => activity.id === "worker-thread:call-one")
+        .map((activity) => activity.status);
+    tracker.start("scan-thread");
+    try {
+      await expect(tracker.refresh()).rejects.toMatchObject({ code: "EACCES" });
+      expect(workerEvents()).toEqual([]);
+      expect(toolStatuses()).toEqual(["running"]);
+      expect(progress.map((update) => update.filesCompleted)).toEqual([1]);
+
+      denied = false;
+      const snapshot = await tracker.refresh();
+      expect(workerEvents()).toEqual(expected);
+      expect(toolStatuses()).toEqual(["running"]);
+      expect(progress.map((update) => update.filesCompleted)).toEqual([1]);
+      expect(snapshot.measurement).toMatchObject({
+        coverage: "complete",
+        usage: { input_tokens: 200, output_tokens: 20 },
+      });
+      const continuation = [
+        {
+          type: "response_item",
+          payload: {
+            type: "function_call_output",
+            call_id: "call-one",
+            output: "/synthetic/repository",
+          },
+        },
+        { type: "response_item", payload: progressMessage(0) },
+        { type: "response_item", payload: progressMessage(2) },
+      ];
+      await appendFile(worker, jsonLines(continuation) + "\n");
+      await tracker.refresh();
+      await tracker.refresh();
+      expect(workerEvents()).toEqual([...expected, ...continuation]);
+      expect(toolStatuses()).toEqual(["running", "completed"]);
+      expect(progress.map((update) => update.filesCompleted)).toEqual([1, 2]);
+    } finally {
+      denied = false;
+      opening.mockRestore();
+      await tracker.stop();
+    }
+  });
+
   test.each(["parent", "main"] as const)(
     "replays early worker events when the %s session arrives later",
     async (missing) => {

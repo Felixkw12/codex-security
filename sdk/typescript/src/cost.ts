@@ -56,9 +56,18 @@ function createSessionReasoning(id: string, text = "") {
   return { id, text, raw: false, activity: null as ScanActivity | null };
 }
 
+type SessionObservation<T> = { position: number; value: T };
+
 type SessionUsage = ReturnType<typeof createSessionUsage> & {
-  events?: Record<string, unknown>[];
+  events?: SessionObservation<Record<string, unknown>>[];
 };
+
+function sessionObservation<T>(
+  session: SessionUsage,
+  value: T,
+): SessionObservation<T> {
+  return { position: session.eventPosition, value };
+}
 
 interface ScanCostTrackerOptions {
   codexHome: string;
@@ -116,9 +125,10 @@ function createSessionUsage() {
     usage: null as ScanTokenUsage | null,
     responseUsage: null as ScanTokenUsage | null,
     responseIds: new Set<string>(),
+    eventPosition: 0,
     calls: new Map<string, ScanActivity>(),
-    activities: [] as ScanActivity[],
-    progress: [] as ScanProgress[],
+    activities: [] as SessionObservation<ScanActivity>[],
+    progress: [] as SessionObservation<ScanProgress>[],
     filesCompleted: 0,
     filesTotal: null as number | null,
     prose: new Set<string>(),
@@ -134,6 +144,10 @@ export class ScanCostTracker {
   readonly #workers = new Map<string, number>();
   readonly #workerProgress = new Map<string, number>();
   readonly #reportedProgress = new Set<string>();
+  readonly #reportedSessionPositions = new Map<
+    string,
+    { events: number; activities: number; progress: number }
+  >();
   #threadId: string | null = null;
   #observingWorkers = true;
   #timer: NodeJS.Timeout | null = null;
@@ -405,7 +419,17 @@ export class ScanCostTracker {
             this.#options.onWorkerEvent?.({ kind: "observed", worker });
         }
       }
-      for (const event of session.events?.splice(0) ?? []) {
+      // Archives and compressed copies retain the same append-only event order.
+      // A new rollout for the same thread has a new initial metadata timestamp.
+      const eventStream = JSON.stringify([threadId, session.startedAt]);
+      const reported = this.#reportedSessionPositions.get(eventStream) ?? {
+        events: 0,
+        activities: 0,
+        progress: 0,
+      };
+      for (const { position, value: event } of session.events?.splice(0) ??
+        []) {
+        if (position <= reported.events) continue;
         this.#options.onSessionEvent?.({
           threadId,
           parentThreadId: session.parentThreadId,
@@ -413,16 +437,28 @@ export class ScanCostTracker {
           event,
         });
       }
+      // A failed replay can leave activity/progress available without raw events.
+      if (session.events !== undefined)
+        reported.events = Math.max(reported.events, session.eventPosition);
       if (worker !== undefined) {
-        for (const activity of session.activities.splice(0)) {
+        for (const { position, value: activity } of session.activities.splice(
+          0,
+        )) {
+          if (position <= reported.activities) continue;
           this.#options.onActivity?.({
             ...activity,
             id: `${threadId}:${activity.id}`,
             worker,
           });
         }
-        this.#reportWorkerProgress(session);
+        reported.activities = Math.max(
+          reported.activities,
+          session.eventPosition,
+        );
+        this.#reportWorkerProgress(session, reported.progress);
+        reported.progress = Math.max(reported.progress, session.eventPosition);
       }
+      this.#reportedSessionPositions.set(eventStream, reported);
       const receipt = usages.get(threadId);
       if (
         session.usage !== null &&
@@ -516,11 +552,11 @@ export class ScanCostTracker {
     this.#options.onMeasurement?.(measurement);
   }
 
-  #reportWorkerProgress(session: SessionUsage): void {
+  #reportWorkerProgress(session: SessionUsage, reported: number): void {
     if (this.#options.onProgress === undefined || session.threadId === null) {
       return;
     }
-    for (const progress of session.progress.splice(0)) {
+    for (const { position, value: progress } of session.progress.splice(0)) {
       const expectedFilesTotal = this.#expectedFilesTotal;
       if (
         (expectedFilesTotal !== undefined &&
@@ -533,6 +569,7 @@ export class ScanCostTracker {
       }
       session.filesTotal = progress.filesTotal;
       session.filesCompleted = progress.filesCompleted;
+      if (position <= reported) continue;
       this.#workerProgress.set(session.threadId, progress.filesCompleted);
       const filesCompleted = Math.min(
         expectedFilesTotal ?? Number.MAX_SAFE_INTEGER,
@@ -670,6 +707,8 @@ async function readSessionUsage(
   if (path.endsWith(".zst")) {
     if (session.compressedRead) return;
     if (metadataOnly && session.threadId !== null) return;
+    // The full decode starts at the beginning, including metadata read earlier.
+    session.eventPosition = 0;
     for await (const line of sessionLines(path)) {
       readSessionEvent(line, session, repository);
       if (metadataOnly && session.threadId !== null) return;
@@ -724,11 +763,13 @@ function readSessionEvent(
   if (line.length === 0) return;
   const event = parseJson(() => line);
   if (!isRecord(event) || !isRecord(event["payload"])) return;
+  session.eventPosition += 1;
   const payload = event["payload"];
   if (event["type"] === "session_meta") {
     if (session.threadId !== null) {
       session.replaying = payload["id"] !== session.threadId;
-      if (!session.replaying) session.events?.push(event);
+      if (!session.replaying)
+        session.events?.push(sessionObservation(session, event));
       return;
     }
     if (typeof payload["id"] === "string") {
@@ -739,7 +780,7 @@ function readSessionEvent(
     }
     session.startedAt = sessionStartedAt(payload["timestamp"]);
     session.parentThreadId = sessionParentThreadId(payload);
-    session.events?.push(event);
+    session.events?.push(sessionObservation(session, event));
     return;
   }
   if (session.replaying) {
@@ -753,11 +794,11 @@ function readSessionEvent(
       sessionOwnsTurn(session, payload)
     ) {
       session.replaying = false;
-      session.events?.push(event);
+      session.events?.push(sessionObservation(session, event));
     }
     return;
   }
-  session.events?.push(event);
+  session.events?.push(sessionObservation(session, event));
   if (event["type"] === "token_usage_record") {
     const responseId = payload["response_id"];
     if (
@@ -787,7 +828,11 @@ function readSessionEvent(
     return;
   }
   if (event["type"] === "response_item") {
-    session.progress.push(...sessionProgressUpdates(payload));
+    session.progress.push(
+      ...sessionProgressUpdates(payload).map((progress) =>
+        sessionObservation(session, progress),
+      ),
+    );
     if (repository === undefined) return;
     if (
       payload["type"] === "reasoning" &&
@@ -852,7 +897,7 @@ function readSessionEvent(
       if (activity.status === "running") {
         session.calls.set(activity.id, activity);
       }
-      session.activities.push(activity);
+      session.activities.push(sessionObservation(session, activity));
       return;
     }
     if (
@@ -862,10 +907,12 @@ function readSessionEvent(
     ) {
       const call = session.calls.get(payload["call_id"]);
       if (call !== undefined) {
-        session.activities.push({
-          ...call,
-          status: payload["status"] === "failed" ? "failed" : "completed",
-        });
+        session.activities.push(
+          sessionObservation(session, {
+            ...call,
+            status: payload["status"] === "failed" ? "failed" : "completed",
+          }),
+        );
         session.calls.delete(call.id);
       }
     }
@@ -883,7 +930,11 @@ function readSessionEvent(
       payload["type"] === "agent_message" &&
       typeof payload["message"] === "string"
     ) {
-      session.progress.push(...scanProgressUpdatesFromText(payload["message"]));
+      session.progress.push(
+        ...scanProgressUpdatesFromText(payload["message"]).map((progress) =>
+          sessionObservation(session, progress),
+        ),
+      );
     }
     if (repository === undefined) return;
     if (payload["type"] !== "agent_message") {
@@ -897,7 +948,7 @@ function readSessionEvent(
       !session.prose.has(`${activity.kind}:${activity.description}`)
     ) {
       session.prose.add(`${activity.kind}:${activity.description}`);
-      session.activities.push(activity);
+      session.activities.push(sessionObservation(session, activity));
     }
     return;
   }
@@ -989,7 +1040,7 @@ function recordReasoningActivity(
   }
   reasoning.activity = activity;
   session.prose.add(`${activity.kind}:${activity.description}`);
-  session.activities.push(activity);
+  session.activities.push(sessionObservation(session, activity));
 }
 
 function sessionProgressUpdates(
