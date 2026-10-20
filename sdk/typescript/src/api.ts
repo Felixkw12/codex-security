@@ -122,6 +122,7 @@ import {
 } from "@openai/codex-sdk";
 import { z } from "zod";
 import { readThreatModelPath } from "./artifact-export.js";
+import type { HostedScanOptions } from "./hosted-scan.js";
 import {
   createProviderProfile,
   createReplayProfile,
@@ -261,6 +262,7 @@ import {
   disabledMcpServers,
   matchCompletedScan,
   matchScanFindingsInternal,
+  type ReadOnlyCodexOptions,
 } from "./scan-comparison.js";
 import { type ScanProgress, type ScanWorkerStatus } from "./worker-progress.js";
 import { CODEX_SECURITY_THREAD_SOURCES } from "./thread-source.js";
@@ -617,6 +619,7 @@ interface ClientDependencies {
   /** Explicit hosted execution; never falls back to createCodex. */
   hostedScan?: {
     executor: ScanExecutor;
+    ownerCodex: NonNullable<HostedScanOptions["ownerCodex"]>;
     context: Pick<
       ScanExecutionRequest,
       "repository" | "revision" | "scope" | "identity"
@@ -757,7 +760,12 @@ export class CodexSecurity {
     });
     type ScanMetadata = Pick<
       ScanResultOptions,
-      "threadId" | "turnResult" | "sarifPath" | "repositoryFindings"
+      | "threadId"
+      | "turnResult"
+      | "sarifPath"
+      | "repositoryFindings"
+      | "ownerSuggestionsPath"
+      | "ownerSuggestionsError"
     >;
     if (state.scanId && state.scanDir) {
       await workflow.protectArtifacts(state.scanDir);
@@ -769,7 +777,7 @@ export class CodexSecurity {
           (scan["progress"] as JsonObject | undefined)?.["status"] ===
           "complete";
         if (completed)
-          metadata = {
+          metadata ??= {
             threadId: (scan["continuationThreadId"] as string) ?? "",
             turnResult: { status: "completed" },
           };
@@ -796,8 +804,17 @@ export class CodexSecurity {
       }
     }
     await workflow.begin("scan");
+    let metadata: ScanMetadata | undefined;
     try {
       const result = await this.#run(repository, options, local);
+      metadata = {
+        threadId: result.threadId,
+        turnResult: result.turnResult,
+        sarifPath: result.sarifPath,
+        repositoryFindings: result.repositoryFindings,
+        ownerSuggestionsPath: result.ownerSuggestionsPath,
+        ownerSuggestionsError: result.ownerSuggestionsError,
+      };
       await workflow.protectArtifacts(result.scanDir);
       await workflow.bind({
         scanId: result.manifest.scan.id,
@@ -808,15 +825,10 @@ export class CodexSecurity {
           coverage: result.coverage,
         }),
       });
-      await workflow.complete("scan", {
-        threadId: result.threadId,
-        turnResult: result.turnResult,
-        sarifPath: result.sarifPath,
-        repositoryFindings: result.repositoryFindings,
-      } satisfies ScanMetadata);
+      await workflow.complete("scan", metadata);
       return result;
     } catch (error) {
-      await workflow.fail("scan", error);
+      await workflow.fail("scan", error, metadata);
       throw error;
     }
   }
@@ -1815,6 +1827,7 @@ export class CodexSecurity {
         options.resumeScanId ?? options.registeredScan?.scanId;
       if (
         resumeScanId !== undefined &&
+        !options.ownerSuggestions &&
         !options.postScanPrompt?.trim() &&
         (await hasSealedScanArtifacts(requestedOutput!, signal))
       ) {
@@ -3113,6 +3126,125 @@ export class CodexSecurity {
           );
         }
       }
+      const inferenceOptions = (
+        command: "compare" | "suggest-owners",
+      ): ReadOnlyCodexOptions => {
+        const inference: ReadOnlyCodexOptions = {
+          environment,
+          config: {
+            ...this.config,
+            codexOverrides: {
+              ...resolveCodexProfile(
+                deepMerge({ ...session.runtimeConfig }, effectiveConfig),
+              ),
+              responses_api_metadata: {
+                ...codexSecurityRequestContext(effectiveConfig, {
+                  surface: this.#surface,
+                  command: "scan",
+                  pluginVersion: runtime.plugin.version,
+                  mode,
+                }).metadata,
+              },
+            },
+          },
+          model,
+          cyberAccessProgram: options.cyberAccessProgram,
+          signal,
+        };
+        const hosted = this.#dependencies.hostedScan;
+        if (hosted !== undefined)
+          return { ...inference, codex: hosted.ownerCodex };
+        const matchingPermissions = (
+          session.sessionConfig["permissions"] as JsonObject
+        )[SCAN_PERMISSION_PROFILE] as JsonObject;
+        return {
+          ...inference,
+          createCodex: async ({ config, configOverrides }) => {
+            const matcherConfig = config as JsonObject;
+            const release = await lockExecutionConfiguration(
+              session,
+              session.sessionConfig,
+              signal,
+            );
+            try {
+              matcherConfig["mcp_servers"] = await disabledMcpServers(
+                await providerPreflightCommand(
+                  executionCommand(session.source),
+                  matcherConfig,
+                ),
+                matcherConfig,
+                definedEnvironment(environment),
+                { signal, workingDirectory: repo },
+              );
+            } finally {
+              await release?.();
+            }
+            const { codex } = await this.#createSessionCodex(
+              session,
+              command,
+              runtimePaths,
+              matcherConfig,
+              configOverrides,
+              git,
+            );
+            return {
+              startThread(threadOptions) {
+                const thread = codex.startThread(threadOptions);
+                return {
+                  async run(input, turnOptions) {
+                    const turn = await readCodexTurn({
+                      thread,
+                      events: (await thread.runStreamed(input, turnOptions))
+                        .events,
+                    });
+                    return { finalResponse: turn.finalResponse };
+                  },
+                };
+              },
+            };
+          },
+          inheritedPermissions: {
+            filesystem: matchingPermissions["filesystem"] as JsonObject,
+            network: { enabled: false },
+          },
+          preserveProviderEnvironment:
+            session.source.preserveProviderEnvironment,
+        };
+      };
+      if (options.ownerSuggestions && !options.deepScanPass) {
+        try {
+          if (options.maxCostUsd !== undefined)
+            throw new Error(
+              "Owner suggestions are unavailable when maxCostUsd is set.",
+            );
+          const { writeScanOwnerSuggestions } =
+            await import("./scan-owner-suggestions.js");
+          const writer = await prepareArtifactRestorer(
+            workbenchOptions,
+            scanDir,
+          );
+          result.ownerSuggestionsPath = await writeScanOwnerSuggestions(
+            repo,
+            result,
+            writer,
+            {
+              ...inferenceOptions("suggest-owners"),
+              auth: options.auth,
+              reasoningEffort: scanModelConfiguration(session.sessionConfig)
+                .reasoningEffort,
+            },
+            this.#surface,
+          );
+        } catch (error) {
+          result.ownerSuggestionsError = errorMessage(error);
+          notifyObserver(
+            "onWarning",
+            options.onWarning,
+            options.onObserverError,
+            `Could not generate owner suggestions: ${errorMessage(error)}`,
+          );
+        }
+      }
       if (this.#dependencies.hostedScan !== undefined) return result;
       if (!options.deepScanPass)
         try {
@@ -3124,9 +3256,6 @@ export class CodexSecurity {
             "all",
           );
           if (previousFindings !== undefined) {
-            const matchingPermissions = (
-              session.sessionConfig["permissions"] as JsonObject
-            )[SCAN_PERMISSION_PROFILE] as JsonObject;
             await matchCompletedScan({
               scanId,
               repository: repo,
@@ -3150,76 +3279,7 @@ export class CodexSecurity {
                     singleTurn: options.maxCostUsd !== undefined,
                   },
                 ),
-              environment,
-              config: {
-                ...this.config,
-                codexOverrides: {
-                  ...resolveCodexProfile(
-                    deepMerge({ ...session.runtimeConfig }, effectiveConfig),
-                  ),
-                  responses_api_metadata: {
-                    ...codexSecurityRequestContext(effectiveConfig, {
-                      surface: this.#surface,
-                      command: "scan",
-                      pluginVersion: runtime.plugin.version,
-                      mode,
-                    }).metadata,
-                  },
-                },
-              },
-              createCodex: async ({ config, configOverrides }) => {
-                const matcherConfig = config as JsonObject;
-                const release = await lockExecutionConfiguration(
-                  session,
-                  session.sessionConfig,
-                  signal,
-                );
-                try {
-                  matcherConfig["mcp_servers"] = await disabledMcpServers(
-                    await providerPreflightCommand(
-                      executionCommand(session.source),
-                      matcherConfig,
-                    ),
-                    matcherConfig,
-                    definedEnvironment(environment),
-                    { signal, workingDirectory: repo },
-                  );
-                } finally {
-                  await release?.();
-                }
-                const { codex } = await this.#createSessionCodex(
-                  session,
-                  "compare",
-                  runtimePaths,
-                  matcherConfig,
-                  configOverrides,
-                  git,
-                );
-                return {
-                  startThread(threadOptions) {
-                    const thread = codex.startThread(threadOptions);
-                    return {
-                      async run(input, turnOptions) {
-                        const turn = await readCodexTurn({
-                          thread,
-                          events: (await thread.runStreamed(input, turnOptions))
-                            .events,
-                        });
-                        return { finalResponse: turn.finalResponse };
-                      },
-                    };
-                  },
-                };
-              },
-              model,
-              cyberAccessProgram: options.cyberAccessProgram,
-              signal,
-              inheritedPermissions: {
-                filesystem: matchingPermissions["filesystem"] as JsonObject,
-                network: { enabled: false },
-              },
-              preserveProviderEnvironment:
-                session.source.preserveProviderEnvironment,
+              ...inferenceOptions("compare"),
             });
             result.repositoryFindings = (await listRepositoryFindings(
               runWorkbench,
@@ -4372,6 +4432,7 @@ export class CodexSecurity {
               maxTimeMinutes: options.maxTimeMinutes,
               auth: options.auth,
               cyberAccessProgram: options.cyberAccessProgram,
+              ownerSuggestions: options.ownerSuggestions,
             }),
             mock: true,
           },
@@ -4873,6 +4934,7 @@ async function prepareSavedScanRecipe({
     | "maxTimeMinutes"
     | "auth"
     | "cyberAccessProgram"
+    | "ownerSuggestions"
     | "scanPrompt"
     | "safetyIdentifier"
     | "postScanPrompt"
@@ -4904,6 +4966,7 @@ async function prepareSavedScanRecipe({
     deepScan,
     auth: options.auth,
     cyberAccessProgram: options.cyberAccessProgram,
+    ownerSuggestions: options.ownerSuggestions,
   });
   recipe["scanInputs"] = scanInputIdentity(options.scanPrompt, scanKnowledge);
   if (knowledgeBaseSha256 !== undefined)
@@ -4985,6 +5048,7 @@ function scanRecipe({
   deepScan,
   auth,
   cyberAccessProgram,
+  ownerSuggestions,
 }: {
   repository: string;
   target: NormalizedTarget;
@@ -4999,6 +5063,7 @@ function scanRecipe({
   deepScan?: Required<DeepScanOptions>;
   auth?: ScanAuthMode;
   cyberAccessProgram?: ScanSettings["cyberAccessProgram"];
+  ownerSuggestions?: boolean;
 }): JsonObject {
   return {
     repository,
@@ -5007,6 +5072,7 @@ function scanRecipe({
     ...(repositoryRevision === null ? {} : { repositoryRevision }),
     pluginVersion,
     config,
+    ...(ownerSuggestions === undefined ? {} : { ownerSuggestions }),
     ...(auth === undefined ? {} : { auth }),
     ...(cyberAccessProgram === undefined ? {} : { cyberAccessProgram }),
     ...(failOnSeverity === undefined ? {} : { failOnSeverity }),

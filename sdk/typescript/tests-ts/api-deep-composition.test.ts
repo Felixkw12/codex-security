@@ -1,3 +1,4 @@
+import * as ownerArtifacts from "../src/scan-owner-suggestions.js";
 import { restoreReplayProfile } from "../src/provider-profile.js";
 import type { SemanticScan, SemanticFinding } from "../src/semantic-models.js";
 import { randomUUID } from "node:crypto";
@@ -226,6 +227,8 @@ test.each([
     requiredCost: true,
   },
   { budget: false },
+  { budget: false, ownerOutcome: "success", ownerResume: true },
+  { budget: false, ownerOutcome: "failure" },
   { budget: true },
   { budget: true, firstChildBudget: true },
   { budget: false, native: "discovery" },
@@ -259,6 +262,8 @@ test.each([
   ),
 ] as {
   budget: boolean;
+  ownerOutcome?: "success" | "failure";
+  ownerResume?: boolean;
   firstChildBudget?: boolean;
   partialCheckpoint?: boolean;
   completedCleanup?: boolean;
@@ -271,6 +276,8 @@ test.each([
   "Deep composes sealed ordinary scans and preserves a budgeted parent: %j",
   async ({
     budget,
+    ownerOutcome,
+    ownerResume,
     firstChildBudget,
     partialCheckpoint,
     completedCleanup,
@@ -638,6 +645,17 @@ process.exit(0);
             }
             if (args[0] === "get-cli-scan-resume")
               workbenches.set(result["scanId"] as string, options);
+            if (
+              ownerResume &&
+              !interrupted &&
+              args[0] === "prepare-scan-completion" &&
+              registrations.get(id!)?.["mode"] === "deep"
+            ) {
+              interrupted = true;
+              controller.abort(
+                new ScanTransportClosedError("mcp_transport_closed"),
+              );
+            }
             if (
               native === "sealed" &&
               !interrupted &&
@@ -1191,9 +1209,28 @@ process.exit(0);
     const progressObserverFailure = new Error(
       "synthetic progress observer failure",
     );
+    const ownerSpy = ownerOutcome
+      ? spyOn(ownerArtifacts, "writeScanOwnerSuggestions").mockImplementation(
+          async (_repository, result, writer, options) => {
+            expect(result.coverage.mode).toBe("deep_repository");
+            expect(result.findings.findings).toHaveLength(1);
+            expect(
+              options.config?.codexOverrides?.["responses_api_metadata"],
+            ).toMatchObject({ codex_security_scan_mode: "deep" });
+            expect(options.inheritedPermissions?.network).toEqual({
+              enabled: false,
+            });
+            if (ownerOutcome === "failure")
+              throw new Error("Synthetic composed owner failure");
+            await writer.restore("owner-suggestions.json", Buffer.from("{}\n"));
+            return join(result.scanDir, "owner-suggestions.json");
+          },
+        )
+      : undefined;
     try {
       const scanOptions: ScanOptions = {
         mode: "deep",
+        ownerSuggestions: ownerOutcome ? true : undefined,
         cyberAccessProgram: "daybreak_blue",
         preserveProviderEnvironment: provider !== undefined,
         workers: 1,
@@ -1571,7 +1608,49 @@ process.exit(0);
           }
         }
       }
+      let completedTurnsBeforeOwnerResume: number | undefined;
+      if (ownerResume) {
+        await expect(run()).rejects.toBeInstanceOf(ScanTransportClosedError);
+        expect(ownerSpy).not.toHaveBeenCalled();
+        const parent = [...registrations.values()].find(
+          ({ mode }) => mode === "deep",
+        )!;
+        const saved = await runWorkbench(commandOptions, [
+          "get-scan",
+          "--scan-id",
+          parent["scanId"] as string,
+        ]);
+        expect(saved["scan"]).toMatchObject({
+          progress: { status: "running" },
+        });
+        // Resume the sealed result after losing the completion transport, without a follow-up turn.
+        scanOptions.resumeScanId = parent["scanId"] as string;
+        scanOptions.postScanPrompt = "";
+        controller = new AbortController();
+        completedTurnsBeforeOwnerResume = turns.length;
+      }
       const result = await run();
+      if (completedTurnsBeforeOwnerResume !== undefined)
+        expect(turns).toHaveLength(completedTurnsBeforeOwnerResume);
+      if (ownerOutcome) {
+        expect(ownerSpy).toHaveBeenCalledTimes(1);
+        expect(result.ownerSuggestionsPath).toBe(
+          ownerOutcome === "success"
+            ? join(scanDir, "owner-suggestions.json")
+            : undefined,
+        );
+        expect(result.ownerSuggestionsError).toBe(
+          ownerOutcome === "failure"
+            ? "Synthetic composed owner failure"
+            : undefined,
+        );
+        for (const registration of registrations.values()) {
+          const recipe = registration["recipe"] as JsonObject;
+          expect(recipe["ownerSuggestions"]).toBe(
+            registration["mode"] === "deep" ? true : undefined,
+          );
+        }
+      }
       for (const observed of workerRuns) {
         const labels = new Map<string, number>();
         for (const event of observed.sessions) {
@@ -1846,8 +1925,8 @@ process.exit(0);
       ).toHaveLength(1);
       expect(
         turns.filter((turn) => turn.prompt === "Post-scan instructions once."),
-      ).toHaveLength(budget ? 0 : 1);
-      if (!budget) {
+      ).toHaveLength(budget || ownerResume ? 0 : 1);
+      if (!budget && !ownerResume) {
         const saved = await runWorkbench(commandOptions, [
           "get-scan",
           "--scan-id",
@@ -1880,6 +1959,7 @@ process.exit(0);
         await client.close();
       } finally {
         loginSpawn?.mockRestore();
+        ownerSpy?.mockRestore();
       }
     }
     if (prepareNative) {
