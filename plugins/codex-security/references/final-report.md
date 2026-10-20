@@ -60,7 +60,11 @@ On explicit cancellation, stop additional model work. Use retained results and e
 
 Link the generated `report.md` as the primary readable result. Mention material limitations and specific follow-up work; offer export, patching, or tracking only when relevant to the request. Do not initiate additional external actions or scans without authorization.
 
-After completion, report `usage.totalTokens`, `usage.inputTokens`, and `usage.cachedInputTokens` only when `usage.coverage` is `complete` and `usage.completion.finalized` is not `false`. Otherwise leave final-turn usage to the host or say it is unavailable; do not estimate, report zero, or present preliminary counts as final. Usage metadata does not justify changing sealed artifacts.
+After `complete_codex_security_scan` succeeds, report its latest `usage`. When `usage.completion.finalized` is `false`, leave the token total to the host: it finalizes usage after this turn ends, including the final response. Do not quote that preliminary count as a final total or an "at least" estimate. Otherwise, report total tokens, input tokens (including cached input), and cached input tokens. Label partial coverage as "at least X tokens; some usage unavailable" and explain its warnings. If usage is unavailable, say so instead of reporting zero. Retain any separate cost estimate.
+
+Include the parent/worker split when `byRole` is present. Use `window` and `tokensUpdatedAt` to explain the measured period. For account allowance, use the latest `accountRateLimits` entry for each limit and quote its `observedAt`. These account-wide readings can include other work. Use window duration to identify weekly limits, not the primary/secondary label. Empty readings or null windows mean allowance was not observed. Saved readings are historical. This metadata provides no conversion between tokens, estimated API cost, and subscription allowance.
+
+Token usage is workbench metadata. Do not modify sealed scan artifacts or the deterministic report to add it.
 
 For Codex app rendering, emit one `::code-comment` per surviving finding and none otherwise. Keep its title, explanation, and location consistent with the canonical finding. Map `critical`, `high`, `medium`, and `low` to priorities 0, 1, 2, and 3 respectively:
 
