@@ -1714,7 +1714,8 @@ def test_completion_recovers_malformed_coverage_rows(tmp_path: Path) -> None:
     assert len(sealed_coverage["surfaces"]) == 1
     assert sealed_coverage["surfaces"][0]["disposition"] == "needs_follow_up"
     [exclusion] = sealed_coverage["explicitExclusions"]
-    assert isinstance(exclusion.pop("id"), str)
+    exclusion_id = exclusion.pop("id")
+    assert isinstance(exclusion_id, str)
     assert exclusion == {"pattern": "docs/", "reason": "Documentation only."}
     assert sealed_coverage["deferred"] == [
         {

@@ -14,6 +14,7 @@ import {
 } from "../../src/runtime.js";
 import { prepareSemanticScanDraft } from "../../src/scan-semantics.js";
 import { ScanTransportClosedError } from "../../src/scan-execution.js";
+import { CODEX_SECURITY_THREAD_SOURCES } from "../../src/thread-source.js";
 import { semanticCoverage, semanticFinding } from "../helpers/semantic-scan.js";
 import { createApiTestFixtures } from "./api-events.js";
 import { tokenUsageEvent, writeSession } from "./usage-rollout.js";
@@ -496,6 +497,15 @@ export function createDeepApiFixtures() {
                     }
                     let response = "Completed";
                     if (
+                      threadOptions.threadSource ===
+                      CODEX_SECURITY_THREAD_SOURCES.suggestOwners
+                    ) {
+                      response = JSON.stringify({
+                        identityIndex: -1,
+                        reason: "Synthetic owner inference abstains.",
+                        evidenceIds: [],
+                      });
+                    } else if (
                       record.mode === "deep" &&
                       !prompt.endsWith("Write follow-up notes")
                     ) {

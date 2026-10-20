@@ -23,6 +23,8 @@ import { stringify as stringifyToml } from "smol-toml";
 import { CodexSecurity } from "../src/api.js";
 import type { JsonObject } from "../src/config.js";
 import { runWorkbench } from "../src/runtime.js";
+import { CODEX_SECURITY_THREAD_SOURCES } from "../src/thread-source.js";
+import { git } from "./git-fixture.js";
 
 import { ScanTransportClosedError } from "../src/scan-execution.js";
 import { ScanInterruptedError } from "../src/errors.js";
@@ -241,6 +243,77 @@ test("shared matching reads evidence through the prepared parent session", async
     h.completedPrompts.some((prompt) => prompt.includes('"content":')),
   ).toBe(true);
   expect(result.cost).not.toBeNull();
+});
+
+test("owner inference enriches only the completed Deep parent using its prepared session", async () => {
+  const h = await fixture();
+  git(h.repository, "init", "-q");
+  git(h.repository, "add", ".");
+  git(h.repository, "commit", "-qm", "Synthetic owner fixture");
+  h.mergeDuplicates();
+  await using client = h.makeClient();
+  const result = await client.run(h.repository, {
+    ...h.options,
+    ownerSuggestions: true,
+  });
+  expect(result.ownerSuggestionsError).toBeUndefined();
+  expect(result.ownerSuggestionsPath).toBe(
+    join(h.outputDir, "owner-suggestions.json"),
+  );
+  expect(h.preparations()).toBe(1);
+  const ownerTurns = h.launches.filter(
+    ({ threadOptions }) =>
+      threadOptions.threadSource ===
+      CODEX_SECURITY_THREAD_SOURCES.suggestOwners,
+  );
+  expect(ownerTurns).toHaveLength(1);
+  const owner = ownerTurns[0]!;
+  expect(owner.options.env!["CODEX_SECURITY_SCAN_ID"]).toBe(
+    result.manifest.scan.id,
+  );
+  expect(h.records.get(result.manifest.scan.id)?.mode).toBe("deep");
+  expect(owner.options.env!["SYNTHETIC_SETTING"]).toBe("captured");
+  expect(owner.threadOptions).toMatchObject({
+    approvalPolicy: "never",
+    networkAccessEnabled: false,
+    webSearchMode: "disabled",
+  });
+  const configuration = effectiveCodexConfiguration(owner.options);
+  expect(configuration).toMatchObject({
+    model: "gpt-6-astra",
+    model_reasoning_effort: "high",
+    features: { shell_tool: false, unified_exec: false, plugins: false },
+  });
+  expect(
+    (configuration["permissions"] as JsonObject)[
+      configuration["default_permissions"] as string
+    ],
+  ).toMatchObject({
+    filesystem: { [join(h.root, "private")]: "deny" },
+    network: { enabled: false },
+  });
+  expect(
+    JSON.parse(await readFile(result.ownerSuggestionsPath!, "utf8")),
+  ).toMatchObject({
+    results: [
+      {
+        findingId: result.findings.findings[0]!.findingId,
+        status: "abstained",
+        reason: "Synthetic owner inference abstains.",
+      },
+    ],
+  });
+  for (const record of h.records.values()) {
+    if (record.mode !== "standard") continue;
+    await expect(
+      readFile(
+        join(
+          record.registration["scanDir"] as string,
+          "owner-suggestions.json",
+        ),
+      ),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  }
 });
 
 test.each([

@@ -47,6 +47,8 @@ export interface ScanResultOptions {
   sarifPath?: string | null;
   threatModelPath?: string | null;
   repositoryFindings?: readonly RepositoryFinding[];
+  ownerSuggestionsPath?: string;
+  ownerSuggestionsError?: string;
 }
 
 export class ScanResult {
@@ -61,6 +63,8 @@ export class ScanResult {
   public readonly sarifPath: string | null;
   public readonly threatModelPath: string | null;
   public repositoryFindings: readonly RepositoryFinding[] | undefined;
+  public ownerSuggestionsPath: string | undefined;
+  public ownerSuggestionsError: string | undefined;
 
   public constructor(options: ScanResultOptions) {
     this.manifest = options.manifest;
@@ -70,6 +74,8 @@ export class ScanResult {
     this.threadId = options.threadId;
     this.turnResult = options.turnResult;
     this.repositoryFindings = options.repositoryFindings;
+    this.ownerSuggestionsPath = options.ownerSuggestionsPath;
+    this.ownerSuggestionsError = options.ownerSuggestionsError;
     this.threatModelPath = options.threatModelPath ?? null;
     this.cost =
       options.cost === undefined
@@ -134,6 +140,12 @@ export class ScanResult {
     return {
       manifest: this.manifest,
       repositoryFindings: this.repositoryFindings,
+      ...(this.ownerSuggestionsPath === undefined
+        ? {}
+        : { ownerSuggestionsPath: this.ownerSuggestionsPath }),
+      ...(this.ownerSuggestionsError === undefined
+        ? {}
+        : { ownerSuggestionsError: this.ownerSuggestionsError }),
       findings: this.findings,
       coverage: this.coverage,
       scanDir: this.scanDir,
