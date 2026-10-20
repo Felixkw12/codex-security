@@ -239,6 +239,7 @@ test.each(
       {
         currentDirectory: directory,
         environment,
+        result,
         onWorkbench: () => savedScan(result, "scan-1", target),
         onRepositoryCommand: (command, args, cwd, options) =>
           runGitRepositoryCommand(command, args, cwd, {
@@ -347,6 +348,7 @@ test.each(["absolute", "relative", "relative configuration"])(
       {
         currentDirectory: component,
         environment,
+        result,
         onWorkbench: () => savedScan(result, "scan-1", component),
         onRepositoryCommand: (command, args, cwd, options) => {
           const context = {
@@ -524,6 +526,7 @@ test.each(["absolute", "relative"] as const)(
     const outcome = await runWorkflow(["patch", "--scan", "scan-1", "--json"], {
       currentDirectory: directory,
       environment,
+      result,
       onWorkbench: () => savedScan(result, "scan-1", directory),
       onRepositoryCommand: (command, args, cwd, options) => {
         const common = options?.environment?.["GIT_COMMON_DIR"];
@@ -650,6 +653,7 @@ for (const selection of [
     const outcome = await runWorkflow(["patch", "--scan", "scan-1", "--json"], {
       currentDirectory: directory,
       environment,
+      result,
       onWorkbench: () => savedScan(result, "scan-1", directory),
       onRepositoryCommand: (command, args, cwd, options) => {
         const value = options?.environment?.["GIT_COMMON_DIR"];

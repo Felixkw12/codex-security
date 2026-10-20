@@ -56,6 +56,7 @@ test.each([
       ["patch", "--scan", "scan-1", "--create-pr", "--json"],
       {
         currentDirectory: directory,
+        result,
         onWorkbench: () => savedScan(result, "scan-1", selected),
         onRepositoryCommand: (command, args, cwd, options) => {
           if (command !== "git")

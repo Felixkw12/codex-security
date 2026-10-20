@@ -64,6 +64,7 @@ describe("patch change tracking", () => {
         ["patch", "--scan", "scan-1", "--create-pr", "--json"],
         {
           currentDirectory: directory,
+          result,
           onWorkbench: () => savedScan(result, "scan-1", directory),
           onCodex,
           onRepositoryCommand: (command, args, cwd, options) =>
@@ -131,6 +132,7 @@ describe("patch change tracking", () => {
         ["patch", "--scan", "scan-1", "--create-pr", "--json"],
         {
           currentDirectory: directory,
+          result,
           onWorkbench: () => savedScan(result, "scan-1", directory),
           onCodex,
           onRepositoryCommand: (command, args, cwd, options) =>
@@ -393,6 +395,7 @@ process.exit(result.status ?? 1);
         ["patch", "--scan", "scan-1", "--create-pr", "--json"],
         {
           currentDirectory: directory,
+          result,
           onWorkbench: () => savedScan(result, "scan-1", directory),
           onCodex,
           onRepositoryCommand: async (command, args, cwd, options) => {
@@ -750,6 +753,7 @@ process.exit(result.status ?? 1);
         {
           currentDirectory: directory,
           environment,
+          result,
           onWorkbench: () => savedScan(result, "scan-1", directory),
           onRepositoryCommand: (command, args, cwd, options) => {
             if (command === "git") {

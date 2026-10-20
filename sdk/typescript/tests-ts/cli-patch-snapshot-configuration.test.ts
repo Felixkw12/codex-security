@@ -296,6 +296,7 @@ test("saved findings rebaseline with the same nested filter configuration", asyn
     {
       currentDirectory: directory,
       environment,
+      result,
       onWorkbench: () => savedScan(result, "scan-1", directory),
       onRepositoryCommand: (command, args, cwd, options) =>
         runGitRepositoryCommand(command, args, cwd, {
