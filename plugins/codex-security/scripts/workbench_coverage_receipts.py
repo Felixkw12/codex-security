@@ -454,7 +454,7 @@ def _generic_surface_updates(
                 or row.get("disposition") in {"needs_follow_up", surface.get("disposition")}
             }
             replaced.update(replaced_sources)
-            entry = (latest_relative, owner, latest_surface, update)
+            entry = (latest_relative, surface_owner, latest_surface, update)
             if entry not in updates:
                 receipt_paths.update(replacement_paths)
                 updates.append(entry)

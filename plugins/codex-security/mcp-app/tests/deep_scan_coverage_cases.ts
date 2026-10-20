@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { readJson, writeJson } from "./support/json.ts";
 import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
@@ -20,7 +21,7 @@ export async function testSuccessfulDeepCoveragePreservesWorkerReviewStatus() {
   const reviewed = { label: "Reviewed query", disposition: "no_issue_found" };
   const workerReviewed = {
     ...reviewed,
-    receiptRefs: ["artifacts/missing-worker-receipt.md"],
+    receiptRefs: ["artifacts/review.md"],
   };
   const followUp = {
     label: "Worker follow-up",
@@ -29,6 +30,12 @@ export async function testSuccessfulDeepCoveragePreservesWorkerReviewStatus() {
   executor.run = async (request) => {
     const outcome = await run(request);
     if (request.kind !== "discovery") return outcome;
+    const receiptPath = path.join(
+      request.artifactContext!.root,
+      workerReviewed.receiptRefs[0],
+    );
+    await mkdir(path.dirname(receiptPath), { recursive: true });
+    await writeFile(receiptPath, "Independent source review receipt.\n");
     const resultPath = path.join(request.artifactContext!.root, "result.json");
     const draft = await readJson(resultPath);
     draft.coverage = {

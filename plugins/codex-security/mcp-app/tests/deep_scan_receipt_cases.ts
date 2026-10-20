@@ -12,6 +12,7 @@ import type {
 import { readJson } from "./support/json.ts";
 import {
   coordinatorFixture,
+  eventually,
   FakeExecutor,
   promptContext,
   standardScanDraft,
@@ -42,6 +43,7 @@ export async function testSharedReceiptSurvivesWorkerRetry() {
     const executor = {
       async run(request: CodexWorkerRequest): Promise<CodexWorkerResult> {
         if (request.kind !== "discovery") {
+          await archived.promise;
           restore.resolve();
           return reducer.run(request);
         }
@@ -68,6 +70,15 @@ export async function testSharedReceiptSurvivesWorkerRetry() {
             await writeFile(shared, "Synthetic stable review evidence.\n");
             published.resolve(request.workingDirectory);
             await recorded.promise;
+            // Admission validates receipt files before a later retry can archive them.
+            await eventually(
+              () =>
+                [...store.workers.values()].filter(
+                  (worker) =>
+                    worker.kind === "discovery" &&
+                    worker.status === "succeeded",
+                ).length === 2,
+            );
             return {};
           }
           await recordCodexSecurityWorkerScanDraft(
@@ -115,7 +126,6 @@ export async function testSharedReceiptSurvivesWorkerRetry() {
           );
         }
         if (++recordedCount === 2) recorded.resolve();
-        await archived.promise;
         return {};
       },
     };

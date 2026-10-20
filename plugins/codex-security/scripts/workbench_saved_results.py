@@ -23,7 +23,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from finalize_scan_contract import (
     ContractError,
     _finding_strength,
-    _normalize_unsealed_open_questions,
     _populate_unsealed_artifact_envelope,
     _populate_unsealed_manifest_envelope,
     _prepare_scan_finalization,
@@ -1021,28 +1020,7 @@ def merge_saved_results(
         return result
 
     def retained_coverage_record(field: str, item: dict[str, Any]) -> dict[str, Any] | None:
-        item = canonical_coverage_record(field, item)
-        if field == "surfaces":
-            # Canonical IDs can change while source content and ownership stay the same.
-            item = {key: value for key, value in item.items() if key != "id"}
-        records = coverage.get(field, [])
-        for record in records if isinstance(records, list) else []:
-            if not isinstance(record, dict):
-                continue
-            original = dict(canonical_coverage_record(field, record))
-            if "id" not in item:
-                original.pop("id", None)  # Canonical publication can assign an ID.
-            if field == "openQuestions":
-                # Compare the same canonical form that publication writes.
-                previous_question = {"openQuestions": [original]}
-                source_question = {"openQuestions": [item]}
-                _normalize_unsealed_open_questions(previous_question)
-                _normalize_unsealed_open_questions(source_question)
-                if previous_question == source_question:
-                    return record
-            elif original == item:
-                return record
-        return None
+        return projection.retained_record(coverage, field, item, canonical_coverage_record)
 
     reconciled_surface_ids: dict[tuple[str | None, str], str] = {}
 
@@ -2113,7 +2091,13 @@ def merge_saved_results(
         for relative, owner, source_surface, surface in surface_updates:
             original_surface = surface
             # Generic updates already resolve each receipt at its saved source.
-            surface = project_record("surfaces", surface, source_surface, receipts_resolved=True)
+            surface = projection.repair_reviewed_surface(
+                coverage,
+                projected_coverage if parent_is_canonical else {},
+                workers_by_id.get(owner),
+                source_surface,
+                surface,
+            ) or project_record("surfaces", surface, source_surface, receipts_resolved=True)
             reconciled_surface_ids[record_key("surfaces", owner, source_surface)] = surface["id"]
             if surface not in coverage["surfaces"] and (
                 surface is original_surface or retained_coverage_record("surfaces", surface) is None

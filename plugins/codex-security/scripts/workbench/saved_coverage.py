@@ -283,6 +283,30 @@ class SavedCoverageProjection:
         )
         return retained
 
+    def retained_record(self, coverage, field, item, canonical_record):
+        item = canonical_record(field, item)
+        if field == "surfaces":
+            # Canonical IDs can change while source content and ownership stay the same.
+            item = {key: value for key, value in item.items() if key != "id"}
+        records = coverage.get(field, [])
+        for record in records if isinstance(records, list) else []:
+            if not isinstance(record, dict):
+                continue
+            original = dict(canonical_record(field, record))
+            if "id" not in item:
+                original.pop("id", None)  # Canonical publication can assign an ID.
+            if field == "openQuestions":
+                # Compare the same canonical form that publication writes.
+                previous_question = {"openQuestions": [original]}
+                source_question = {"openQuestions": [item]}
+                _normalize_unsealed_open_questions(previous_question)
+                _normalize_unsealed_open_questions(source_question)
+                if previous_question == source_question:
+                    return record
+            elif original == item:
+                return record
+        return None
+
     def linked_surface(self, surface, outputs, named_outputs):
         retained = outputs.get(id(surface))
         owner = self.source_owner_by_id.get(id(surface), surface.get("workerId"))
@@ -291,6 +315,58 @@ class SavedCoverageProjection:
             if len(matches) == 1:
                 retained = next(iter(matches.values()))
         return retained
+
+    def is_reviewed_worker(self, canonical, worker):
+        if (
+            worker is None
+            or not {"status", "merge_state", "attempt"}.issubset(worker.keys())
+            or worker["status"] != "succeeded"
+            or worker["merge_state"] != "merged"
+        ):
+            return False
+        reviews = canonical.get("reviews", [])
+        return any(
+            isinstance(review, dict)
+            and review.get("workerId") == worker["id"]
+            and review.get("attempt") == worker["attempt"]
+            for review in (reviews if isinstance(reviews, list) else [])
+        )
+
+    def repair_reviewed_surface(self, coverage, canonical, worker, source, surface):
+        if not self.is_reviewed_worker(canonical, worker):
+            return None
+        published = next(
+            (
+                row
+                for row in canonical.get("surfaces", [])
+                if isinstance(row, dict)
+                and isinstance(provenance := row.get("provenance"), dict)
+                and provenance.get("workerId") == worker["id"]
+                and provenance.get("attempt") == worker["attempt"]
+                and provenance.get("sourceId") == surface.get("id")
+                and row.get("disposition") == surface.get("disposition")
+            ),
+            None,
+        )
+        if published is None:
+            return None
+        retained = next(
+            (
+                row
+                for row in coverage["surfaces"]
+                if row.get("id") == published.get("id")
+                and row.get("provenance") == published.get("provenance")
+            ),
+            None,
+        )
+        if retained is None:
+            retained = copy.deepcopy(published)
+        # Receipt repair can recover earlier evidence without replacing the
+        # accepted surface's identity, disposition, or host-owned provenance.
+        retained["receiptRefs"] = surface["receiptRefs"]
+        return self.retain_coverage_row(
+            coverage["surfaces"], retained, worker["id"], "surfaces", source, True
+        )
 
     def linked_tasks(self, task, published_id, source_task, candidates):
         expected = None
