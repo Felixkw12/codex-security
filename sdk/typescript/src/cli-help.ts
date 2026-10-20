@@ -38,6 +38,7 @@ const SCAN_GROUPS: readonly Group[] = [
       "output-dir",
       "archive-existing",
       "max-cost",
+      "max-time",
       "show-cost",
       "fail-on-severity",
       "headless",
@@ -64,6 +65,9 @@ const PUBLISH_GROUPS: readonly Group[] = [
 ];
 
 const VALUE_LABELS: Record<string, string> = {
+  context: "text",
+  "context-file": "file",
+  "output-schema": "file",
   config: "file",
   path: "path",
   "knowledge-base": "path",
@@ -81,6 +85,7 @@ const VALUE_LABELS: Record<string, string> = {
   python: "path",
   codex: "key=value",
   "max-cost": "usd",
+  "max-time": "minutes",
   "max-time-hours": "hours",
   "fail-on-severity": "level",
   "patch-severity": "level",

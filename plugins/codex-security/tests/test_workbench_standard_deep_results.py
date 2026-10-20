@@ -116,7 +116,7 @@ def test_stopped_scan_ignores_late_checkpoints_until_explicit_recovery(
     assert stopped["progress"]["status"] == ("canceled" if termination == "canceled" else "failed")
     assert stopped["findingCount"] == 1
     coverage = json.loads((scan_dir / "coverage.json").read_text())
-    assert coverage["completeness"] == "partial"
+    assert "completeness" not in coverage
     assert any(item.get("candidateId") == "pending-query" for item in coverage["deferred"])
     assert result_path.read_text() == "{incomplete"
     assert (
@@ -787,6 +787,7 @@ def test_canceled_scan_retries_failed_publication_from_frozen_sources(
 ) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = scan_fixture(tmp_path)
     finding = finding_fixture(relative_path="app.py")
+    finding["severity"]["changeConditions"] = ["Raise if the service becomes internet-reachable."]
     checkpoint = {
         "scanId": scan_id,
         "complete": False,
@@ -856,6 +857,9 @@ def test_canceled_scan_retries_failed_publication_from_frozen_sources(
     )["scan"]
     assert preserved["findingCount"] == 1
     assert preserved["findings"][0]["locations"][0]["startLine"] != 91
+    assert preserved["findings"][0]["severity"]["changeConditions"] == (
+        "Raise if the service becomes internet-reachable."
+    )
     assert json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["status"] == "canceled"
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         warnings = json.loads(

@@ -36,6 +36,8 @@ const {
   deepScanPermissionProfileFallbackError,
   preflightDeepScanWorkerPermissionProfile,
   readDeepScanRuntimeConfig,
+  readDeepScanParentCyberAccessProgram,
+  prepareCliDeepScanSession,
 } = await importSource(
   path.join(
     import.meta.dirname,
@@ -85,6 +87,177 @@ await testSpawnErrorFailsClosed();
 await testMissingWorkerDirectoryRemainsRetryable();
 await testAbortKillsPreflightChild();
 await testAbortPreservesCallerReason();
+await testDirectScanSession();
+await testParentTurnCyberAccessProgram();
+
+async function testParentTurnCyberAccessProgram() {
+  const parentTurn = {
+    threadId: "fixture-parent-thread",
+    turnId: "fixture-current-turn",
+  };
+  const context = (turnId: string, program: unknown) => ({
+    type: "turn_context",
+    payload: {
+      turn_id: turnId,
+      ...(program === undefined ? {} : { cyber_access_program: program }),
+    },
+  });
+  const read = (fixture: PreflightFixture) =>
+    readDeepScanParentCyberAccessProgram({
+      codexPath: fixture.codexPath,
+      cwd: fixture.cwd,
+      configOverrides: rawOverrides,
+      parentTurn,
+      signal: new AbortController().signal,
+    });
+  for (const program of [
+    "standard",
+    "daybreak_blue",
+    "daybreak_red",
+    "future_program",
+    null,
+    undefined,
+  ]) {
+    await withFakeCodex(
+      {
+        parentRollout: [
+          context("fixture-older-turn", "daybreak_blue"),
+          context(parentTurn.turnId, program),
+          context("fixture-newer-turn", "daybreak_red"),
+        ],
+      },
+      async (fixture) => {
+        assert.equal(await read(fixture), program ?? undefined);
+        const calls = await readJsonLines(fixture.callsPath);
+        assert.deepEqual(
+          calls.map((call) => call.method),
+          ["initialize", "initialized", "thread/read"],
+        );
+        assert.deepEqual(calls[2].params, {
+          threadId: parentTurn.threadId,
+          includeTurns: false,
+        });
+      },
+    );
+  }
+  for (const scenario of [
+    { parentRollout: [context("fixture-other-turn", "daybreak_blue")] },
+    { parentPathUnavailable: true },
+    {
+      returnedParentThreadId: "fixture-other-thread",
+      parentRollout: [context(parentTurn.turnId, "daybreak_blue")],
+    },
+  ]) {
+    await withFakeCodex(scenario, async (fixture) => {
+      assert.equal(await read(fixture), undefined);
+    });
+  }
+  await withFakeCodex(
+    {
+      methodErrors: {
+        "thread/read": {
+          code: -32600,
+          message: `thread not loaded: ${parentTurn.threadId}`,
+        },
+      },
+    },
+    async (fixture) => {
+      assert.equal(await read(fixture), undefined);
+    },
+  );
+  await withFakeCodex(
+    {
+      methodErrors: {
+        "thread/read": {
+          code: -32000,
+          message: "Synthetic native read failure",
+        },
+      },
+      stderr: "Synthetic native stderr detail",
+    },
+    async (fixture) => {
+      await assert.rejects(read(fixture), (error: Error) => {
+        assert.match(error.message, /Synthetic native read failure/);
+        assert.match(error.message, /Synthetic native stderr detail/);
+        return true;
+      });
+    },
+  );
+  await withFakeCodex({}, async (fixture) => {
+    await assert.rejects(read(fixture), { code: "ENOENT" });
+  });
+}
+
+async function testDirectScanSession() {
+  const permissionProfile = {
+    type: "managed",
+    file_system: {
+      type: "restricted",
+      entries: [
+        { path: { type: "special", value: { kind: "root" } }, access: "read" },
+        {
+          path: {
+            type: "path",
+            path: path.resolve("synthetic", "private [home]"),
+          },
+          access: "deny",
+        },
+      ],
+    },
+    network: "restricted",
+  };
+  await withFakeCodex(
+    { parentPermissionProfile: permissionProfile },
+    async (fixture) => {
+      const result = await prepareCliDeepScanSession({
+        codexPath: fixture.codexPath,
+        commandArgs: ["--config", 'model_provider="synthetic_provider"'],
+        cwd: fixture.cwd,
+        configOverrides: ['model_reasoning_effort="high"'],
+        prompt: "Review the supplied synthetic repository.",
+        signal: new AbortController().signal,
+      });
+      assert.deepEqual(result, {
+        threadId: "new-scan-thread",
+        model: "synthetic-model",
+        reasoningEffort: "high",
+        permissionProfile,
+      });
+      const calls = await readJsonLines(fixture.callsPath);
+      assert.deepEqual(
+        calls.map((call) => call.method),
+        ["initialize", "initialized", "thread/start", "thread/inject_items"],
+      );
+      assert.deepEqual(calls[2].params, {
+        cwd: fixture.cwd,
+        threadSource: "security_scan",
+        ephemeral: false,
+      });
+      assert.equal(
+        calls[3].params.items[0].content[0].text,
+        "Review the supplied synthetic repository.",
+      );
+      const argv = await readJson(fixture.argvPath);
+      assert.equal(
+        argv[argv.indexOf("--config") + 1],
+        'model_provider="synthetic_provider"',
+      );
+      assert.equal(argv.includes("--profile"), false);
+    },
+  );
+  await withFakeCodex({ parentPermissionProfile: null }, async (fixture) => {
+    await assert.rejects(
+      prepareCliDeepScanSession({
+        codexPath: fixture.codexPath,
+        cwd: fixture.cwd,
+        configOverrides: [],
+        prompt: "Synthetic scan.",
+        signal: new AbortController().signal,
+      }),
+      /effective permissions/,
+    );
+  });
+}
 
 async function testAllowedProfileAndRawArgv() {
   await withFakeCodex(
@@ -608,26 +781,50 @@ async function testUnexpectedTerminationRemainsRetryable() {
 }
 
 async function testStdioFailuresRemainRetryable() {
-  for (const stream of ["stdin", "stdout"] as const) {
+  for (const stream of ["stdin", "stdout", "write callback"] as const) {
     await withFakeCodex(
       { hangAt: "initialize" },
       async ({ codexPath, cwd, readyPath, terminatedPath, children }) => {
         const running = preflight(codexPath, cwd);
         await waitForFile(readyPath);
         assert.equal(children.length, 1);
-        children[0][stream]!.destroy(
-          new Error("SECRET_REPOSITORY_PATH=/repo/private"),
-        );
-        await assert.rejects(
-          running,
-          (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
-            error?.name === "Error" &&
-            error.message.includes(JSON.stringify(codexPath)) &&
-            error.message.includes(
-              "could not exchange app-server JSON-RPC over stdio",
-            ) &&
-            error.message.includes("SECRET_REPOSITORY_PATH"),
-        );
+        const stdin = children[0].stdin!;
+        const originalWrite = stdin.write;
+        try {
+          if (stream === "write callback") {
+            stdin.write = ((
+              _message: unknown,
+              callback: (error: Error) => void,
+            ) => {
+              queueMicrotask(() =>
+                callback(new Error("SECRET_REPOSITORY_PATH=/repo/private")),
+              );
+              return false;
+            }) as typeof stdin.write;
+            children[0].stdout!.emit(
+              "data",
+              Buffer.from('{"jsonrpc":"2.0","id":1,"result":{}}\n'),
+            );
+          } else {
+            children[0][stream]!.destroy(
+              new Error("SECRET_REPOSITORY_PATH=/repo/private"),
+            );
+          }
+          await assert.rejects(
+            running,
+            (
+              error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException },
+            ) =>
+              error?.name === "Error" &&
+              error.message.includes(JSON.stringify(codexPath)) &&
+              error.message.includes(
+                "could not exchange app-server JSON-RPC over stdio",
+              ) &&
+              error.message.includes("SECRET_REPOSITORY_PATH"),
+          );
+        } finally {
+          stdin.write = originalWrite;
+        }
         await assertPreflightStopped(children, terminatedPath);
       },
     );
@@ -1065,6 +1262,31 @@ function handle(message) {
   }
   if (message.method === "initialize") {
     send(message.id, { userAgent: "fixture", codexHome: "/fixture", platformFamily: "unix", platformOs: "macos" });
+    return;
+  }
+  if (message.method === "thread/start") {
+    send(message.id, {
+      thread: { id: 'new-scan-thread', path: scenario.callsPath + '.session.jsonl' },
+      model: 'synthetic-model', reasoningEffort: 'high',
+    });
+    return;
+  }
+  if (message.method === "thread/read") {
+    const path = scenario.callsPath + '.parent.jsonl';
+    if (scenario.parentRollout !== undefined) {
+      writeFileSync(path, scenario.parentRollout.map((item) => JSON.stringify(item)).join("\\n") + "\\n");
+    }
+    send(message.id, { thread: {
+      id: scenario.returnedParentThreadId ?? message.params.threadId,
+      path: scenario.parentPathUnavailable ? null : path,
+    } });
+    return;
+  }
+  if (message.method === "thread/inject_items") {
+    writeFileSync(scenario.callsPath + '.session.jsonl', JSON.stringify({
+      type: 'turn_context', payload: scenario.parentPermissionProfile ? { permission_profile: scenario.parentPermissionProfile } : {},
+    }) + "\\n");
+    send(message.id, {});
     return;
   }
   if (message.method === "config/read") {

@@ -125,7 +125,7 @@ def test_explicit_recovery_materializes_unfrozen_composition_after_checkpoint_fa
     assert recovered["findingCount"] == 1
     assert not recovered["resultsRecoveryNeeded"]
     assert recovered["findings"][0]["title"] == findings["findings"][0]["title"]
-    assert json.loads((parent_dir / "coverage.json").read_text())["completeness"] == "partial"
+    assert "completeness" not in json.loads((parent_dir / "coverage.json").read_text())
     retained = json.loads((parent_dir / "findings.json").read_text())["findings"][0]
     report = parent_dir / retained["writeup"]["reportPath"]
     assert report.read_bytes() == (report_dir / "proof.md").read_bytes()
@@ -1049,7 +1049,7 @@ def test_parent_reads_completed_child_after_registration_checkpoint_crash(tmp_pa
     assert context["scan"]["progress"]["status"] == "complete"
     assert context["scan"]["findingCount"] == 1
     assert context["scan"]["progress"]["independentReviews"]["consolidating"] is False
-    assert json.loads((parent_dir / "coverage.json").read_text())["completeness"] == "complete"
+    assert "completeness" not in json.loads((parent_dir / "coverage.json").read_text())
     assert json.loads((parent_dir / CHECKPOINT).read_text()) == saved
     indexed = run_workbench(state, "list-global-findings")["findings"]
     assert len(indexed) == 1
@@ -1451,7 +1451,7 @@ def test_native_cancel_retains_accepted_and_later_unmerged_findings(
         == json.loads(later_bytes["findings.json"])["findings"][0]
     )
     coverage = json.loads((parent_dir / "coverage.json").read_text())
-    assert coverage["completeness"] == "partial"
+    assert "completeness" not in coverage
     assert any(row["reason"].startswith("Accepted pass still") for row in coverage["deferred"])
     assert any("artifacts/deep-scan/passes/pass-2" in row["reason"] for row in coverage["deferred"])
     for child, directory, protected in children:
@@ -1648,7 +1648,7 @@ def test_terminal_scoped_parent_preserves_unmerged_child_results(
     assert manifest["scan"]["scope"] == manifest_before["scan"]["scope"]
     assert coverage["mode"] == "scoped_path"
     assert coverage["includePaths"] == ["src"]
-    assert coverage["completeness"] == "partial"
+    assert "completeness" not in coverage
     assert submitted_coverage["deferred"][0] in coverage["deferred"]
     assert (parent_dir / CHECKPOINT).read_bytes() == checkpoint_bytes
     for name, contents in prepared.items():
@@ -1985,7 +1985,7 @@ def test_cancel_before_first_merge_preserves_ordinary_children(
     ]
     retained = json.loads((parent_dir / "findings.json").read_text())["findings"]
     coverage = json.loads((parent_dir / "coverage.json").read_text())
-    assert coverage["completeness"] == "partial"
+    assert "completeness" not in coverage
     for child, directory, original, protected in children:
         source_id = f"{child['scanId']}:0"
         finding = next(

@@ -6,7 +6,14 @@ import {
   CodexSecurity,
   type ScanOptions,
 } from "../../../../sdk/typescript/src/api.js";
-import type { JsonObject } from "../../../../sdk/typescript/src/config.js";
+import {
+  inlineToml,
+  type JsonObject,
+} from "../../../../sdk/typescript/src/config.js";
+import {
+  readDeepScanParentCyberAccessProgram,
+  type DeepScanParentTurn,
+} from "./deep-scan/permission-profile-preflight.js";
 import {
   ScanSettingsSchema,
   type DeepScanOptions,
@@ -44,6 +51,7 @@ export interface NativeScanInput {
   model?: string;
   reasoningEffort?: string;
   parentSandbox: NativeParentSandbox;
+  parentTurn?: DeepScanParentTurn;
   stateDirectory?: string;
 }
 
@@ -272,6 +280,32 @@ export async function prepareNativeScan(
         { ...ambientInput, command: command! },
         signal,
       );
+  if (!publicationOnly && input.parentTurn) {
+    const parentProgram = await readDeepScanParentCyberAccessProgram({
+      codexPath: command!.command,
+      cwd: input.scan.targetPath,
+      configOverrides: Object.entries(ambientExecution.configuration).map(
+        ([name, value]) => `${name}=${inlineToml(value)}`,
+      ),
+      env: Object.fromEntries(
+        Object.entries(ambientExecution.environment).filter(
+          (entry): entry is [string, string] => entry[1] !== undefined,
+        ),
+      ),
+      signal: signal ?? new AbortController().signal,
+      parentTurn: input.parentTurn,
+    });
+    if (parentProgram !== undefined) {
+      options.cyberAccessProgram = parentProgram;
+      const configuredFeatures = ambientExecution.configuration["features"];
+      const features = isRecord(configuredFeatures) ? configuredFeatures : {};
+      if (features["api_key_cyber_access_programs"] === undefined)
+        ambientExecution.configuration["features"] = {
+          ...features,
+          api_key_cyber_access_programs: true,
+        };
+    }
+  }
   options.auth = ambientExecution.auth;
   const selectedEnvironment = ambientExecution.environment;
   const configuredProvider = ambientExecution.preserveProviderEnvironment;

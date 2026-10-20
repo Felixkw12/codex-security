@@ -4,17 +4,24 @@ import runpy
 import sqlite3
 from pathlib import Path
 
+import pytest
 
-def test_composition_preview_history_preserves_rows_and_migration_timestamps() -> None:
+
+@pytest.mark.parametrize(
+    ("shared_version", "relocations"),
+    [(41, ((42, 43), (43, 52), (44, 53))), (47, ((48, 52), (49, 53)))],
+)
+def test_composition_preview_history_preserves_rows_and_migration_timestamps(
+    shared_version, relocations
+) -> None:
     schema = runpy.run_path(
         str(Path(__file__).resolve().parents[1] / "scripts" / "workbench_schema.py")
     )
     current = schema["MIGRATIONS"]
     by_version = {version: (name, sql) for version, name, sql in current}
-    # These were the three migrations in the published composition preview,
-    # before the main history added scan names and embedding-cache migrations.
-    previous = tuple(row for row in current if row[0] <= 41) + tuple(
-        (old, *by_version[new]) for old, new in ((42, 43), (43, 48), (44, 49))
+    # Both published composition histories must retain their original data and receipts.
+    previous = tuple(row for row in current if row[0] <= shared_version) + tuple(
+        (old, *by_version[new]) for old, new in relocations
     )
     original_time = "2026-01-01T00:00:00Z"
     upgrade_time = "2026-02-01T00:00:00Z"
@@ -63,9 +70,12 @@ def test_composition_preview_history_preserves_rows_and_migration_timestamps() -
             row["version"]: (row["name"], row["applied_at"])
             for row in connection.execute("SELECT * FROM schema_migrations")
         }
-        for old, new in ((42, 43), (43, 48), (44, 49)):
+        for old, new in relocations:
             assert history[new] == (previous[old - 1][1], original_time)
-        assert history[42] == (by_version[42][0], upgrade_time)
+        assert history[42] == (
+            by_version[42][0],
+            original_time if shared_version >= 42 else upgrade_time,
+        )
         assert [row["name"] for row in connection.execute("PRAGMA index_list(scans)")].count(
             "scans_by_composition_parent"
         ) == 1

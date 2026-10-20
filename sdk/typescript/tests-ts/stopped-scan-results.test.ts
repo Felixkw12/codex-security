@@ -291,6 +291,30 @@ test("retries a legacy stopped seal after transient publication failure", () => 
     expect(checkpointDigest).toMatch(/^[0-9a-f]{64}$/);
     expect(checkpointPath.split("/")[1]).toBe(`${checkpointDigest}.json`);
   }
+  expect(recovered.head.checkpoint).toBe(`${recovered.snapshotDigest}.json`);
+  expect(recovered.headPath).toBe(
+    `checkpoint-heads/${recovered.headDigest}.json`,
+  );
+  expect(recovered.frozenAfterSuccess).toMatchObject({
+    [`checkpoints/${recovered.head.checkpoint}`]: recovered.snapshotDigest,
+    [recovered.headPath]: recovered.headDigest,
+  });
+  expect(recovered.snapshot.coverage).not.toHaveProperty("completeness");
+  expect(recovered.snapshot).toMatchObject({
+    scanId: recovered.scanId,
+    findings: [
+      expect.objectContaining({
+        provenance: expect.objectContaining({
+          candidateId: "checkpoint-candidate",
+        }),
+      }),
+    ],
+    coverage: {
+      deferred: expect.arrayContaining([
+        expect.objectContaining({ candidateId: "pending-validation" }),
+      ]),
+    },
+  });
 }, 30_000);
 
 test("preserves distinct instances from one ordinary scan candidate", () => {

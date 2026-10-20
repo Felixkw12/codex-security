@@ -412,8 +412,7 @@ export async function runDeepScans(
         if (
           executionSignal.aborted ||
           error instanceof ScanPermissionError ||
-          (error !== validationError &&
-            isCodexCybersecurityPolicyRefusal(error))
+          (error !== validationError && isCodexNonRetryableFailure(error))
         )
           throw error;
         const failures = (state.mergeFailures = (state.mergeFailures ?? 0) + 1);
@@ -500,7 +499,7 @@ export async function runDeepScans(
           if (
             error instanceof ScanCostTrackingError ||
             error instanceof ScanPermissionError ||
-            isCodexCybersecurityPolicyRefusal(error)
+            isCodexNonRetryableFailure(error)
           )
             externalStop.abort(error);
           if (discoverySignal.aborted) throw error;
@@ -621,7 +620,7 @@ export async function runDeepScans(
               executionSignal.reason !== consecutiveErrorLimit &&
               !(executionSignal.reason instanceof ScanCostTrackingError) &&
               !(executionSignal.reason instanceof ScanPermissionError) &&
-              !isCodexCybersecurityPolicyRefusal(executionSignal.reason)
+              !isCodexNonRetryableFailure(executionSignal.reason)
             ? "canceled"
             : "failed",
     );
@@ -636,10 +635,20 @@ export async function runDeepScans(
   }
 }
 
-function isCodexCybersecurityPolicyRefusal(error: unknown): boolean {
+function isCodexNonRetryableFailure(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  // SDK diagnostics can include repository text; match complete runtime refusals.
+  // SDK diagnostics can include repository text; match native terminal responses.
+  if (
+    message.startsWith("You’ve hit your usage limit.") ||
+    message.startsWith("You’ve hit your usage limit for ")
+  )
+    return true;
   return [
+    "Quota exceeded. Check your plan and billing details.",
+    "Your workspace is out of credits. Add credits to continue.",
+    "Your workspace is out of credits. Ask your workspace owner to refill in order to continue.",
+    "You hit your spend cap set in your workspace. Increase your spend cap to continue.",
+    "You hit your spend cap set by the owner of your workspace. Ask an owner to increase your spend cap to continue.",
     "cyber_policy",
     "Request rejected: cyber_policy.",
     "Request flagged for possible cybersecurity risk.",

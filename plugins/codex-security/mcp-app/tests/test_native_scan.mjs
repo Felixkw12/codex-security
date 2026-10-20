@@ -91,7 +91,7 @@ async function collectNativeEvents(thread, prompt, options) {
   return collected;
 }
 
-function syntheticPermissionAppServer() {
+function syntheticPermissionAppServer(parentPath) {
   return `function servePermissionProfiles() {
   const { parse } = require(${JSON.stringify(createRequire(import.meta.url).resolve("smol-toml"))});
   const config = {};
@@ -110,7 +110,7 @@ function syntheticPermissionAppServer() {
   const scenario = process.env.NATIVE_PROFILE_SCENARIO
     ? fs.readFileSync(process.env.NATIVE_PROFILE_SCENARIO, "utf8").trim() : "valid";
   const selected = config.default_permissions;
-  const profile = config.permissions[selected];
+  const profile = config.permissions?.[selected] ?? { filesystem: {}, network: {} };
   profile.description = "Synthetic profile description";
   profile.network.fixtureNull = null;
   if (scenario === "substituted-default") config.default_permissions = ":read-only";
@@ -132,6 +132,7 @@ function syntheticPermissionAppServer() {
     let result;
     if (request.method === "initialize") result = {};
     else if (request.method === "config/read") result = { config };
+    else if (request.method === "thread/read") result = { thread: { id: request.params.threadId, path: ${JSON.stringify(parentPath ?? null)} } };
     else if (request.method === "permissionProfile/list") result = request.params?.cursor === "selected-page"
       ? { data: [{ id: selected, allowed: scenario !== "disallowed" }], nextCursor: null }
       : { data: [{ id: "other-profile", allowed: true }], nextCursor: "selected-page" };
@@ -815,6 +816,8 @@ test(
     const keys = [
       "PATH",
       "CODEX_HOME",
+      "CODEX_API_KEY",
+      "OPENAI_API_KEY",
       "CODEX_CLI_PATH",
       "CODEX_SECURITY_CONFIG_PATH",
       "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
@@ -854,6 +857,8 @@ test(
       );
       Object.assign(process.env, {
         CODEX_HOME: root,
+        CODEX_API_KEY: "synthetic-source-key",
+        OPENAI_API_KEY: "synthetic-other-key",
         PATH: [repositoryBin, `${root}/alias/link/..`, selectedTools].join(
           delimiter,
         ),
@@ -867,10 +872,20 @@ test(
       );
       process.env.CODEX_SECURITY_CONFIG_PATH = selectedConfig;
       await writeFile(
+        join(root, "parent.jsonl"),
+        JSON.stringify({
+          type: "turn_context",
+          payload: {
+            turn_id: "synthetic-parent-turn",
+            cyber_access_program: "daybreak_red",
+          },
+        }) + "\n",
+      );
+      await writeFile(
         executable,
         `#!${process.execPath}
 const fs = require("node:fs");
-${syntheticPermissionAppServer()}
+${syntheticPermissionAppServer(join(root, "parent.jsonl"))}
 if (process.argv.includes("app-server")) {
   servePermissionProfiles();
 } else {
@@ -887,8 +902,10 @@ if (process.argv.includes("app-server")) {
       for (const [role, programSource] of [
         ["discovery", "recipe"],
         ["discovery", "config"],
+        ["discovery", "parent"],
         ["merge", "recipe"],
         ["merge", "config"],
+        ["merge", "parent"],
       ]) {
         if (programSource === "recipe") {
           process.env.CODEX_CLI_PATH = `${relative(process.cwd(), root)}/alias/link/../codex`;
@@ -896,7 +913,7 @@ if (process.argv.includes("app-server")) {
           delete process.env.CODEX_CLI_PATH;
         }
         const selectedProgram =
-          programSource === "recipe" ? "daybreak_red" : "daybreak_blue";
+          programSource === "config" ? "daybreak_blue" : "daybreak_red";
         const cwd = join(root, `${role}-${programSource}`);
         await mkdir(cwd);
         const config = scanRuntimeCodexConfig(
@@ -913,6 +930,18 @@ if (process.argv.includes("app-server")) {
         const native = await prepareNativeScan({
           ...input(),
           scan: { ...input().scan, targetPath: target },
+          ...(programSource === "parent"
+            ? {
+                parentTurn: {
+                  threadId: "synthetic-parent-thread",
+                  turnId: "synthetic-parent-turn",
+                },
+                recipe: {
+                  auth: "api-key",
+                  cyberAccessProgram: "daybreak_blue",
+                },
+              }
+            : {}),
           ...(programSource === "recipe"
             ? {
                 recipe: {
@@ -922,6 +951,14 @@ if (process.argv.includes("app-server")) {
               }
             : {}),
         });
+        if (programSource === "parent") {
+          assert.equal(native.options.cyberAccessProgram, "daybreak_red");
+          assert.equal(
+            native.client.config.codexOverrides.features
+              .api_key_cyber_access_programs,
+            true,
+          );
+        }
         const selectedEnvironment = native.client.dependencies.environment;
         assert.equal(selectedEnvironment.CODEX_CLI_PATH, executable);
         assert.equal(
@@ -948,6 +985,7 @@ if (process.argv.includes("app-server")) {
           env: {
             ...selectedEnvironment,
             CODEX_HOME: root,
+            OPENAI_API_KEY: "synthetic-other-key",
             CODEX_API_KEY: "synthetic-stale-key",
             NATIVE_PROFILE_CAPTURE: capture,
             NATIVE_PROFILE_MARKER: role,
@@ -993,7 +1031,7 @@ if (process.argv.includes("app-server")) {
             assert.deepEqual(process.gitEnvironment, gitEnvironment);
             assert.equal(process.marker, role);
             assert.equal(process.codex, "synthetic-final-key");
-            assert.equal(process.openai, undefined);
+            assert.equal(process.openai, "synthetic-other-key");
           }
         }
       }
@@ -2037,6 +2075,7 @@ test("native rejoin restores bound knowledge without overwriting its snapshot", 
   await writeFile(document, "Original synthetic architecture.\n");
   const restoreEnvironment = captureEnvironment([
     "CODEX_HOME",
+    "CODEX_API_KEY",
     "CODEX_CLI_PATH",
     "CODEX_SECURITY_KNOWLEDGE_BASE",
     "CODEX_SECURITY_CONFIG_PATH",
@@ -2045,6 +2084,7 @@ test("native rejoin restores bound knowledge without overwriting its snapshot", 
   try {
     Object.assign(process.env, {
       CODEX_HOME: home,
+      CODEX_API_KEY: "synthetic-knowledge-key",
       CODEX_CLI_PATH: process.execPath,
       CODEX_SECURITY_KNOWLEDGE_BASE: document,
     });

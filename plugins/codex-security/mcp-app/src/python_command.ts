@@ -115,7 +115,7 @@ export function runPythonWithInput(
   label: string,
 ): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn(python, args, {
+    const child = spawn(python, ["-B", ...args], {
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     });
@@ -150,6 +150,7 @@ export function workbenchCommandTimeout(command: string | undefined): number {
     "fail-scan",
     "complete-scan",
     "export-findings",
+    "finding-issues",
     "get-scan",
     "get-workspace",
     "inspect-setup",

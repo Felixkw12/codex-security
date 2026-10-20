@@ -1,3 +1,7 @@
+import { cp } from "node:fs/promises";
+import { PLUGIN_ROOT } from "./plugin-root.js";
+import { TestClient } from "./support/api-client.js";
+import { preparedRuntime, codexFactory } from "./support/api-events.js";
 import { afterEach, expect, test } from "bun:test";
 import { stringify as stringifyToml } from "smol-toml";
 import { spawn } from "node:child_process";
@@ -96,4 +100,37 @@ test("native override tables retain inherited features and MCP servers", async (
   });
   expect(config.mcp_servers["codex-security"].enabled).toBe(false);
   expect(await readFile(join(home, "config.toml"), "utf8")).toBe(original);
+});
+
+test("standard scans do not require Deep Scan plugin capabilities", async () => {
+  const root = await temporaryDirectory();
+  const repository = join(root, "repository");
+  const plugin = join(root, "custom-plugin");
+  const home = join(root, "codex-home");
+  await mkdir(repository);
+  await mkdir(home, { mode: 0o700 });
+  await cp(PLUGIN_ROOT, plugin, { recursive: true });
+  const manifestPath = join(plugin, ".codex-plugin", "plugin.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  delete manifest.codexSecurity;
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  const runtime = preparedRuntime(home);
+  const client = TestClient.withDependencies({
+    prepareRuntime: async () => ({
+      ...runtime,
+      deepScanConfigPath: undefined,
+      plugin: { ...runtime.plugin, pluginRoot: plugin, installedRoot: plugin },
+    }),
+    resolvePluginPython: async () => "/managed/python",
+    createCodex: codexFactory(async () => {
+      throw new Error("standard scan started");
+    }),
+  });
+  try {
+    await expect(
+      client.run(repository, { outputDir: join(root, "scan") }),
+    ).rejects.toThrow("standard scan started");
+  } finally {
+    await client.close();
+  }
 });

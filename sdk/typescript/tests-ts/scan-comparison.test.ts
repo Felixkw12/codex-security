@@ -1,3 +1,4 @@
+import { runReadOnlyCodex } from "../src/scan-comparison.js";
 import { once } from "node:events";
 import * as childProcess from "node:child_process";
 import { spawn } from "node:child_process";
@@ -2298,6 +2299,7 @@ process.exit(0);
           codex_security_surface: "sdk",
           codex_security_command: "compare",
           codex_security_package_version: VERSION,
+          ...(withProfile ? { codex_security_provider: "custom" } : {}),
         },
       });
       const parsed = await runCodexCommand(
@@ -2452,6 +2454,11 @@ process.exit(0);
             codex_security_surface: "sdk",
             codex_security_command: "compare",
             codex_security_package_version: VERSION,
+            codex_security_provider: ["fireworks", "amazon-bedrock"].includes(
+              selection,
+            )
+              ? selection
+              : "custom",
           },
           default_permissions: "codex_security_deep_scan_worker",
           permissions: {
@@ -2927,6 +2934,331 @@ process.exit(0);
         startThread.mockRestore();
         profileClient.spy.mockRestore();
         spawnSpy.mockRestore();
+      }
+    },
+  );
+
+  test.each([
+    [
+      "OPENAI_API_KEY",
+      { OPENAI_API_KEY: "synthetic-openai-key" },
+      "synthetic-openai-key",
+    ],
+    [
+      "CODEX_API_KEY",
+      { CODEX_API_KEY: "synthetic-codex-key" },
+      "synthetic-codex-key",
+    ],
+    [
+      "OPENAI_API_KEY precedence",
+      {
+        OPENAI_API_KEY: "synthetic-openai-key",
+        CODEX_API_KEY: "synthetic-codex-key",
+      },
+      "synthetic-openai-key",
+    ],
+    [
+      "blank OPENAI_API_KEY fallback",
+      { OPENAI_API_KEY: " \t ", CODEX_API_KEY: "synthetic-codex-key" },
+      "synthetic-codex-key",
+    ],
+    ["no environment key", {}, undefined],
+  ] as const)(
+    "supplies %s authentication to Codex matching",
+    async (_name, keys, expected) => {
+      const home = await temporaryDirectory("codex-security-matcher-auth-");
+      let captured: CodexOptions | undefined;
+      const { codex } = fakeCodex({ matches: [], uncertain: [] });
+      const startThread = observeCodexOptions(codex, (options) => {
+        captured = options;
+      });
+      try {
+        await matchScanFindings(
+          { before: [finding("before")], after: [finding("after")] },
+          {
+            environment: {
+              PATH: process.env["PATH"],
+              SystemRoot: process.env["SystemRoot"],
+              CODEX_HOME: home,
+              CODEX_SECURITY_STATE_DIR: join(home, "state"),
+              ...keys,
+            },
+            workingDirectory: home,
+          },
+        );
+        expect(startThread).toHaveBeenCalledTimes(1);
+        expect(captured?.apiKey).toBe(expected);
+      } finally {
+        startThread.mockRestore();
+      }
+    },
+  );
+
+  test.each([
+    "unselected",
+    "default",
+    "home",
+    "overrides",
+    "override-profile",
+    "toggle-only",
+  ])(
+    "preserves Cyber selection and %s feature gates at read-only SDK boundaries",
+    async (selection) => {
+      const home = await temporaryDirectory("codex-security-cyber-helper-");
+      const disabled = {
+        cli_daybreak: false,
+        api_key_cyber_access_programs: false,
+        api_key_model_discovery: false,
+        shell_tool: true,
+      };
+      const profile = {
+        daybreak: true,
+        profile: "selected",
+        features: { cli_daybreak: true, api_key_cyber_access_programs: true },
+        profiles: { selected: { daybreak: false, features: disabled } },
+      };
+      await writeFile(
+        join(home, "config.toml"),
+        stringify(selection === "home" ? { features: disabled } : {}),
+      );
+      const options: ScanComparisonOptions = {
+        cyberAccessProgram:
+          selection === "unselected" || selection === "toggle-only"
+            ? undefined
+            : ("daybreak_blue" as const),
+        environment: {
+          PATH: process.env["PATH"],
+          SystemRoot: process.env["SystemRoot"],
+          CODEX_HOME: home,
+          CODEX_SECURITY_STATE_DIR: join(home, "state"),
+          OPENAI_API_KEY: "synthetic-key",
+        },
+        workingDirectory: home,
+        ...(selection === "home"
+          ? { config: { codexOverrides: { daybreak: true } } }
+          : selection === "overrides" || selection === "toggle-only"
+            ? {
+                config: {
+                  codexOverrides: { daybreak: true, features: disabled },
+                },
+              }
+            : selection === "override-profile"
+              ? { config: { codexOverrides: profile } }
+              : {}),
+      };
+      let captured: CodexOptions | undefined;
+      const { codex, calls } = fakeCodex({ matches: [], uncertain: [] });
+      const startThread = observeCodexOptions(codex, (options) => {
+        captured = options;
+      });
+      try {
+        for (const helper of ["matching", "planning"]) {
+          if (helper === "matching") {
+            await matchScanFindings(
+              { before: [finding("before")], after: [finding("after")] },
+              options,
+            );
+          } else {
+            await runReadOnlyCodex("Plan components.", {}, options, {
+              surface: "cli",
+              command: "scan-components",
+              threadSource: "security_scan",
+            });
+          }
+          expect(calls.turnOptions?.cyberAccessProgram).toBe(
+            options.cyberAccessProgram,
+          );
+          const features = captured?.config?.["features"] as Record<
+            string,
+            unknown
+          >;
+          expect(captured?.config?.["daybreak"]).toBe(
+            selection === "unselected" || selection === "default"
+              ? undefined
+              : selection !== "override-profile",
+          );
+          expect(features["cli_daybreak"]).toBe(
+            selection === "unselected" || selection === "default"
+              ? undefined
+              : false,
+          );
+          expect(features["api_key_cyber_access_programs"]).toBe(
+            selection === "unselected" ? undefined : selection === "default",
+          );
+          expect(features["api_key_model_discovery"]).toBe(
+            selection === "unselected" || selection === "default"
+              ? undefined
+              : false,
+          );
+          expect(features).toMatchObject({
+            shell_tool: false,
+            plugins: false,
+            multi_agent: false,
+            unified_exec: false,
+          });
+        }
+        expect(startThread).toHaveBeenCalledTimes(2);
+      } finally {
+        startThread.mockRestore();
+      }
+    },
+  );
+
+  test.each(["home", "home-override", "profile", "overrides", "override-away"])(
+    "preserves native command auth selection from %s",
+    async (selection) => {
+      const root = await temporaryDirectory(
+        "codex-security-command-comparison-",
+      );
+      const home =
+        selection === "home" && process.platform !== "win32"
+          ? join(root, " selected home ")
+          : root;
+      if (home !== root) {
+        await mkdir(home, { mode: 0o700 });
+        await mkdir(home.trim());
+        await writeFile(
+          join(home.trim(), "config.toml"),
+          'model_provider = "openai"\n',
+        );
+      }
+      const commandAuth = selection !== "override-away";
+      const provider = {
+        name: "Synthetic",
+        wire_api: "responses",
+        base_url: "https://provider.example/v1",
+        auth: {
+          command: "./synthetic-auth",
+          args: ["original"],
+          refresh_interval_ms: 1234,
+        },
+      };
+      const config = {
+        ...(selection === "home-override"
+          ? { windows: { sandbox: "unelevated" } }
+          : {}),
+        model_provider:
+          selection === "overrides" || selection === "profile"
+            ? "openai"
+            : "synthetic.provider",
+        model_providers: { "synthetic.provider": provider },
+      };
+      const contents = stringify(config);
+      await writeFile(join(home, "config.toml"), contents);
+      const environment = {
+        PATH: process.env["PATH"],
+        SystemRoot: process.env["SystemRoot"],
+        CODEX_HOME: relative(process.cwd(), home),
+        OPENAI_API_KEY: "synthetic-ambient-key",
+        CODEX_API_KEY: "synthetic-other-key",
+      };
+      let captured: CodexOptions | undefined;
+      let threadOptions: ThreadOptions | undefined;
+      const profileClient = captureProfileClient();
+      const { codex } = fakeCodex({ matches: [], uncertain: [] });
+      const startThread = spyOn(
+        Codex.prototype,
+        "startThread",
+      ).mockImplementation(function (this: Codex, options) {
+        captured = (this as unknown as { options: CodexOptions }).options;
+        threadOptions = options;
+        return codex.startThread(options!) as ReturnType<Codex["startThread"]>;
+      });
+      try {
+        await matchScanFindings(
+          { before: [finding("before")], after: [finding("after")] },
+          {
+            environment,
+            workingDirectory: home,
+            ...(selection === "overrides"
+              ? {
+                  config: {
+                    codexOverrides: {
+                      model_provider: "synthetic.provider",
+                      model_providers: {
+                        "synthetic.provider": {
+                          auth: { args: ["override"], cwd: "~/helpers" },
+                        },
+                      },
+                    },
+                  },
+                }
+              : selection === "override-away"
+                ? { config: { codexOverrides: { model_provider: "openai" } } }
+                : selection === "profile"
+                  ? {
+                      config: {
+                        codexOverrides: {
+                          profile: "review",
+                          profiles: {
+                            review: { model_provider: "synthetic.provider" },
+                          },
+                        },
+                      },
+                    }
+                  : {}),
+          },
+        );
+        expect(captured?.env?.["CODEX_HOME"]).toBe(home);
+        if (selection === "profile") {
+          expect(captured?.config?.["model_provider"]).toBe(
+            "synthetic.provider",
+          );
+          expect(captured?.config).not.toHaveProperty("profile");
+          expect(captured?.config).not.toHaveProperty("profiles");
+        }
+        if (commandAuth) {
+          expect(captured?.config?.["windows"]).toEqual({
+            sandbox: selection === "home-override" ? "unelevated" : "elevated",
+          });
+          expect(captured?.env).not.toHaveProperty("OPENAI_API_KEY");
+          expect(captured?.env).not.toHaveProperty("CODEX_API_KEY");
+          expect(captured?.apiKey).toBeUndefined();
+          expect(profileClient.profiles).toHaveLength(1);
+          expect(profileClient.profiles[0]!.config).toEqual({
+            model_providers: {
+              "synthetic.provider": {
+                ...provider,
+                auth: {
+                  ...provider.auth,
+                  cwd: selection === "overrides" ? "~/helpers" : home,
+                  args: selection === "overrides" ? ["override"] : ["original"],
+                },
+              },
+            },
+          });
+          await expect(
+            readFile(profileClient.profiles[0]!.path, "utf8"),
+          ).rejects.toMatchObject({ code: "ENOENT" });
+        } else {
+          expect(captured?.env?.["OPENAI_API_KEY"]).toBe(
+            "synthetic-ambient-key",
+          );
+          expect(captured?.config?.["model_provider"]).toBe("openai");
+          expect(parse(captured!.configOverrides!.join("\n"))).toEqual({
+            responses_api_metadata: {
+              codex_security_surface: "sdk",
+              codex_security_command: "compare",
+              codex_security_package_version: VERSION,
+              codex_security_provider: "openai",
+            },
+          });
+          expect(profileClient.profiles).toHaveLength(0);
+        }
+        expect(threadOptions).toMatchObject({
+          workingDirectory: home,
+          approvalPolicy: "never",
+          networkAccessEnabled: false,
+        });
+        expect(threadOptions?.sandboxMode).toBe(
+          commandAuth ? undefined : "read-only",
+        );
+        expect(await readFile(join(home, "config.toml"), "utf8")).toBe(
+          contents,
+        );
+      } finally {
+        profileClient.spy.mockRestore();
+        startThread.mockRestore();
       }
     },
   );

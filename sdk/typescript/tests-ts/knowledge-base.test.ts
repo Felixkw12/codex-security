@@ -85,9 +85,15 @@ function docx(
   secondLine?: string,
   breakElement = "<w:br/>",
 ): Uint8Array {
+  return docxBody(
+    `<w:p><w:r><w:t>${text}</w:t>${secondLine === undefined ? "" : `${breakElement}<w:t>${secondLine}</w:t>`}</w:r></w:p>`,
+  );
+}
+
+function docxBody(body: string): Uint8Array {
   return zipSync({
     "word/document.xml": strToU8(
-      `<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>${text}</w:t>${secondLine === undefined ? "" : `${breakElement}<w:t>${secondLine}</w:t>`}</w:r></w:p></w:body></w:document>`,
+      `<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${body}</w:body></w:document>`,
     ),
   });
 }
@@ -637,6 +643,409 @@ describe("scan knowledge bases", () => {
       }
     },
   );
+
+  test("prepares nested supported documents and retains requested source roots", async () => {
+    const root = await temporaryDirectory();
+    const nested = join(root, "architecture", "threats");
+    const scope = join(root, "scope.md");
+    await mkdir(nested, { recursive: true });
+    await writeFile(scope, "Ignore local debug endpoints.");
+    await writeFile(join(nested, "deployment.MARKDOWN"), "Public API gateway.");
+    await writeFile(join(nested, "notes.txt"), "Prioritize SSRF.");
+    await mkdir(join(root, ".git"));
+    await writeFile(join(root, ".git", "config"), "Repository metadata.");
+    await writeFile(join(nested, ".git"), "gitdir: /synthetic/metadata");
+    await writeFile(join(root, "ignored.bin"), new Uint8Array([0, 1, 2]));
+    await writeFile(join(root, "invalid-utf8.bin"), new Uint8Array([0xff]));
+
+    const knowledgeBase = await prepareKnowledgeBase([scope, root, scope]);
+    temporaryDirectories.push(knowledgeBase.path);
+
+    expect(knowledgeBase.sources).toEqual([scope, root]);
+    expect((await readdir(knowledgeBase.path)).sort()).toEqual([
+      "0-scope.md.txt",
+      "1-deployment.MARKDOWN.txt",
+      "2-notes.txt.txt",
+    ]);
+    const documents = await extractedDocuments(knowledgeBase.path);
+    expect(documents).toContain("Ignore local debug endpoints.");
+    expect(documents).toContain("Public API gateway.");
+    expect(documents).toContain("Prioritize SSRF.");
+    expect(knowledgeBase.path.startsWith(root)).toBe(false);
+    if (process.platform !== "win32") {
+      expect((await stat(knowledgeBase.path)).mode & 0o777).toBe(0o700);
+      for (const name of await readdir(knowledgeBase.path)) {
+        expect((await stat(join(knowledgeBase.path, name))).mode & 0o777).toBe(
+          0o600,
+        );
+      }
+    }
+  });
+
+  test.each([
+    ["context.json", '{"service":"Public API"}'],
+    ["results.sarif", '{"version":"2.1.0","runs":[]}'],
+    ["deployment.yaml", "service: public-api\n"],
+    ["context.custom", "Boundary: café → gateway\n"],
+    ["CONTEXT", "Public API gateway.\n"],
+  ])("accepts %s directly and in nested directories", async (name, text) => {
+    const root = await temporaryDirectory();
+    const nested = join(root, "nested");
+    await mkdir(nested);
+    const source = join(nested, name);
+    await writeFile(source, text);
+
+    for (const paths of [[source], [root], [root, source]]) {
+      const knowledgeBase = await prepareKnowledgeBase(paths);
+      temporaryDirectories.push(knowledgeBase.path);
+      expect(await extractedDocuments(knowledgeBase.path)).toEqual([text]);
+      expect(knowledgeBase.sources).toEqual(paths);
+    }
+  });
+
+  test.each([
+    ["ASCII at the staging boundary", `${"a".repeat(246)}.md`],
+    ["ASCII beyond the staging boundary", `${"a".repeat(247)}.md`],
+    ["ASCII at the source boundary", `${"a".repeat(252)}.md`],
+    ["multibyte UTF-8", `${"文".repeat(83)}.md`],
+  ])("stages long filenames: %s", async (_description, name) => {
+    const root = await temporaryDirectory();
+    const paths: string[] = [];
+    const contents: string[] = [];
+    for (let index = 0; index < 11; index++) {
+      const directory = join(root, String(index));
+      await mkdir(directory);
+      const source = join(directory, name);
+      const text = `Document ${index}.`;
+      await writeFile(source, text);
+      paths.push(source);
+      contents.push(text);
+    }
+    const scope = join(root, "scope.md");
+    await writeFile(scope, "Review application boundaries.");
+    paths.push(scope);
+    contents.push("Review application boundaries.");
+
+    const knowledgeBase = await prepareKnowledgeBase(paths);
+    temporaryDirectories.push(knowledgeBase.path);
+
+    expect(knowledgeBase.sources).toEqual(paths);
+    expect((await extractedDocuments(knowledgeBase.path)).sort()).toEqual(
+      [...contents].sort(),
+    );
+    expect(
+      await readFile(join(knowledgeBase.path, "11-scope.md.txt"), "utf8"),
+    ).toBe("Review application boundaries.");
+    await knowledgeBase.cleanup();
+    await expect(stat(knowledgeBase.path)).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    expect(
+      await Promise.all(paths.map((path) => readFile(path, "utf8"))),
+    ).toEqual(contents);
+  });
+
+  test("cancels recursive discovery before staging knowledge-base documents", async () => {
+    const root = await temporaryDirectory();
+    const nested = join(root, "nested", "deeper");
+    await mkdir(nested, { recursive: true });
+    await writeFile(join(nested, "scope.md"), "Review application boundaries.");
+
+    const controller = new AbortController();
+    const reason = new Error("Knowledge-base discovery canceled.");
+    let checks = 0;
+    const signalSpy = spyOn(controller.signal, "throwIfAborted");
+    signalSpy.mockImplementation(() => {
+      if (++checks === 8) controller.abort(reason);
+      if (controller.signal.aborted) throw controller.signal.reason;
+    });
+    const temporarySpy = spyOn(os, "tmpdir");
+
+    try {
+      const prepared = prepareKnowledgeBase([root], controller.signal).then(
+        (knowledgeBase) => {
+          temporaryDirectories.push(knowledgeBase.path);
+          return knowledgeBase;
+        },
+      );
+      await expect(prepared).rejects.toBe(reason);
+      expect(temporarySpy).not.toHaveBeenCalled();
+    } finally {
+      signalSpy.mockRestore();
+      temporarySpy.mockRestore();
+    }
+  });
+
+  test("handles large nested document listings without argument overflow", async () => {
+    const root = await temporaryDirectory();
+    const nested = join(root, "nested");
+    await mkdir(nested);
+    await writeFile(join(nested, "scope.md"), "Review application boundaries.");
+    const originalReaddir = filesystem.readdir;
+    const listingSpy = spyOn(filesystem, "readdir").mockImplementation(
+      async (...args) => {
+        const entries = await Reflect.apply(originalReaddir, filesystem, args);
+        return args[0] === nested ? Array(700_000).fill(entries[0]) : entries;
+      },
+    );
+
+    let knowledgeBase;
+    try {
+      knowledgeBase = await prepareKnowledgeBase([root]);
+      temporaryDirectories.push(knowledgeBase.path);
+    } finally {
+      listingSpy.mockRestore();
+    }
+
+    expect(await extractedDocuments(knowledgeBase.path)).toEqual([
+      "Review application boundaries.",
+    ]);
+  });
+
+  test("removes staged documents when knowledge-base preparation is canceled", async () => {
+    const root = await temporaryDirectory();
+    const staging = join(root, "staging");
+    await mkdir(staging);
+    const first = join(root, "first.md");
+    const second = join(root, "second.md");
+    await writeFile(first, "First document.");
+    await writeFile(second, "Second document.");
+
+    const controller = new AbortController();
+    const reason = new Error("Knowledge-base preparation canceled.");
+    const originalWriteFile = filesystem.writeFile;
+    let staged = false;
+    const writeSpy = spyOn(filesystem, "writeFile").mockImplementation(
+      async (...args) => {
+        await Reflect.apply(originalWriteFile, filesystem, args);
+        staged = true;
+        controller.abort(reason);
+      },
+    );
+
+    try {
+      await expect(
+        prepareKnowledgeBase([first, second], controller.signal, staging),
+      ).rejects.toBe(reason);
+      expect(staged).toBe(true);
+      expect(await readdir(staging)).toEqual([]);
+    } finally {
+      writeSpy.mockRestore();
+    }
+  });
+
+  test("expands ~ in requested paths and leaves absolute and ~user paths alone", async () => {
+    const home = await temporaryDirectory();
+    const documents = join(home, "docs");
+    await mkdir(documents, { recursive: true });
+    await writeFile(join(documents, "scope.md"), "Review the payment service.");
+    const previousHome = process.env["HOME"];
+    const previousUserProfile = process.env["USERPROFILE"];
+    process.env["HOME"] = home;
+    process.env["USERPROFILE"] = home;
+    try {
+      const expanded = await prepareKnowledgeBase(["~/docs"]);
+      temporaryDirectories.push(expanded.path);
+      expect(expanded.sources).toEqual([documents]);
+
+      const bare = await prepareKnowledgeBase(["~"]);
+      temporaryDirectories.push(bare.path);
+      expect(bare.sources).toEqual([home]);
+
+      const absolute = await prepareKnowledgeBase([documents]);
+      temporaryDirectories.push(absolute.path);
+      expect(absolute.sources).toEqual([documents]);
+
+      expect(expandHome("~other/docs")).toBe("~other/docs");
+    } finally {
+      if (previousHome === undefined) delete process.env["HOME"];
+      else process.env["HOME"] = previousHome;
+      if (previousUserProfile === undefined) delete process.env["USERPROFILE"];
+      else process.env["USERPROFILE"] = previousUserProfile;
+    }
+  });
+
+  test("extracts searchable text from PDFs and DOCX documents", async () => {
+    const root = await temporaryDirectory();
+    await writeFile(
+      join(root, "architecture.pdf"),
+      pdf("Payment service boundary"),
+    );
+    await writeFile(
+      join(root, "threat-model.docx"),
+      docx("SSRF &amp; IDOR", "Review authentication"),
+    );
+    await writeFile(
+      join(root, "paired-break.docx"),
+      docx("Authorization", "Review permissions", "<w:br></w:br>"),
+    );
+    await writeFile(
+      join(root, "carriage-return.docx"),
+      docx("Authentication", "Review sessions", "<w:cr/>"),
+    );
+    await writeFile(
+      join(root, "paired-tab.docx"),
+      docx("Role", "Capability", "<w:tab></w:tab>"),
+    );
+    await writeFile(
+      join(root, "self-closing-tab.docx"),
+      docx("User", "Permission", "<w:tab/>"),
+    );
+    await writeFile(
+      join(root, "tracked-change.docx"),
+      docxBody(
+        '<w:p><w:r><w:t xml:space="preserve">Admin API is </w:t></w:r>' +
+          '<w:del w:id="1" w:author="Example Author"><w:r><w:delText>public</w:delText></w:r></w:del>' +
+          "<w:r><w:t>internal only</w:t></w:r></w:p>",
+      ),
+    );
+    await writeFile(
+      join(root, "field-code.docx"),
+      docxBody(
+        '<w:p><w:r><w:t xml:space="preserve">See </w:t><w:fldChar w:fldCharType="begin"/></w:r>' +
+          '<w:r><w:instrText xml:space="preserve"> HYPERLINK "https://example.com/runbook" </w:instrText></w:r>' +
+          '<w:r><w:fldChar w:fldCharType="separate"/><w:t>the runbook</w:t><w:fldChar w:fldCharType="end"/></w:r></w:p>',
+      ),
+    );
+
+    const knowledgeBase = await prepareKnowledgeBase([root]);
+    temporaryDirectories.push(knowledgeBase.path);
+    const documents = await extractedDocuments(knowledgeBase.path);
+
+    expect(documents).toContain("Payment service boundary");
+    expect(documents).toContain("SSRF & IDOR\nReview authentication\n");
+    expect(documents).toContain("Authorization\nReview permissions\n");
+    expect(documents).toContain("Authentication\nReview sessions\n");
+    expect(documents).toContain("Role\tCapability\n");
+    expect(documents).toContain("User\tPermission\n");
+    expect(documents).toContain("Admin API is internal only\n");
+    expect(documents).toContain("See the runbook\n");
+  });
+
+  test.each([
+    [
+      "an unclosed text-box field inside a main-story field result",
+      '<w:p><w:r><w:fldChar w:fldCharType="begin"/><w:instrText>HYPERLINK "https://example.com"</w:instrText>' +
+        '<w:fldChar w:fldCharType="separate"/><w:t>Main-before </w:t></w:r>' +
+        '<w:r><w:pict xmlns:v="urn:schemas-microsoft-com:vml"><v:rect id="TextBox1" style="width:180pt;height:72pt"><v:textbox><w:txbxContent>' +
+        '<w:p><w:r><w:fldChar w:fldCharType="begin"/><w:instrText>AUTHOR</w:instrText><w:t>Text-box guidance.</w:t></w:r></w:p>' +
+        "</w:txbxContent></v:textbox></v:rect></w:pict></w:r>" +
+        '<w:r><w:fldChar w:fldCharType="end"/><w:instrText>Main-after</w:instrText></w:r></w:p>',
+      "Main-before Text-box guidance.\nMain-after\n",
+    ],
+    [
+      "independent fields in sibling text boxes",
+      "<w:p><w:r><w:t>Main-before </w:t></w:r>" +
+        '<w:r><w:pict xmlns:v="urn:schemas-microsoft-com:vml"><v:rect id="TextBox1" style="width:180pt;height:72pt"><v:textbox><w:txbxContent>' +
+        '<w:p><w:r><w:fldChar w:fldCharType="begin"/><w:instrText>AUTHOR</w:instrText><w:t>First text-box guidance.</w:t></w:r></w:p>' +
+        "</w:txbxContent></v:textbox></v:rect></w:pict></w:r>" +
+        '<w:r><w:pict xmlns:v="urn:schemas-microsoft-com:vml"><v:rect id="TextBox2" style="width:180pt;height:72pt"><v:textbox><w:txbxContent>' +
+        '<w:p><w:r><w:t>Second text-box guidance.</w:t><w:fldChar w:fldCharType="end"/></w:r></w:p>' +
+        "</w:txbxContent></v:textbox></v:rect></w:pict></w:r>" +
+        "<w:r><w:t>Main-after</w:t></w:r></w:p>",
+      "Main-before First text-box guidance.\nSecond text-box guidance.\nMain-after\n",
+    ],
+    [
+      "ordinary runs after an unclosed field",
+      '<w:p><w:r><w:fldChar w:fldCharType="begin"/><w:instrText>AUTHOR</w:instrText></w:r></w:p>' +
+        "<w:p><w:r><w:t>Require authorization</w:t></w:r></w:p>",
+      "\nRequire authorization\n",
+    ],
+    [
+      "nested field results inside an unclosed field",
+      '<w:p><w:r><w:fldChar w:fldCharType="begin"/><w:instrText>IF </w:instrText>' +
+        '<w:fldChar w:fldCharType="begin"/><w:instrText>AUTHOR</w:instrText>' +
+        '<w:fldChar w:fldCharType="separate"/><w:t>Example Author</w:t><w:fldChar w:fldCharType="end"/>' +
+        "<w:t> requires authorization</w:t></w:r></w:p>",
+      "Example Author requires authorization\n",
+    ],
+    [
+      "literal markup in standalone instruction text",
+      "<w:p><w:r><w:instrText><![CDATA[Require <authorization> &amp; audit]]></w:instrText></w:r></w:p>",
+      "Require <authorization> &amp; audit\n",
+    ],
+    [
+      "field markup in XML comments",
+      '<w:p><w:r><w:t>Require<!-- <w:fldChar w:fldCharType="begin"/> --></w:t>' +
+        "<w:instrText> authorization</w:instrText></w:r></w:p>",
+      "Require authorization\n",
+    ],
+    [
+      "CDATA instructions and character references in field attributes",
+      '<w:p><w:r><w:fldChar w:fldCharType="beg&#105;n"/>' +
+        '<w:instrText><![CDATA[HYPERLINK "https://example.com/runbook"]]></w:instrText>' +
+        '<w:fldChar w:fldCharType="separate"/><w:t>Read &amp; audit</w:t>' +
+        '<w:fldChar w:fldCharType="end"/></w:r></w:p>',
+      "Read & audit\n",
+    ],
+    [
+      "standalone instruction text",
+      "<w:p><w:r><w:t>Require </w:t><w:instrText>authorization</w:instrText><w:t> before access</w:t></w:r></w:p>",
+      "Require authorization before access\n",
+    ],
+    [
+      "instruction text used as a field result",
+      '<w:p><w:r><w:fldChar w:fldCharType="begin"/><w:instrText>AUTHOR</w:instrText>' +
+        '<w:fldChar w:fldCharType="separate"/><w:instrText>Example Author</w:instrText>' +
+        '<w:fldChar w:fldCharType="end"/></w:r></w:p>',
+      "Example Author\n",
+    ],
+    [
+      "nested fields within outer instructions",
+      '<w:p><w:r><w:fldChar w:fldCharType="begin"/><w:instrText>IF </w:instrText>' +
+        '<w:fldChar w:fldCharType="begin"/><w:instrText>AUTHOR</w:instrText>' +
+        '<w:fldChar w:fldCharType="separate"/><w:t>Example Author</w:t><w:fldChar w:fldCharType="end"/>' +
+        '<w:instrText> = "Example Author" "internal" "public"</w:instrText>' +
+        '<w:fldChar w:fldCharType="separate"/><w:t>internal</w:t><w:fldChar w:fldCharType="end"/></w:r></w:p>',
+      "internal\n",
+    ],
+    [
+      "nested fields within an outer result",
+      '<w:p><w:r><w:fldChar w:fldCharType="begin"/><w:instrText>IF 1 = 1</w:instrText>' +
+        '<w:fldChar w:fldCharType="separate"/><w:t>See </w:t>' +
+        '<w:fldChar w:fldCharType="begin"/><w:instrText>HYPERLINK "https://example.com/runbook"</w:instrText>' +
+        '<w:fldChar w:fldCharType="separate"/><w:t>the runbook</w:t><w:fldChar w:fldCharType="end"/>' +
+        '<w:instrText> before access</w:instrText><w:fldChar w:fldCharType="end"/></w:r></w:p>',
+      "See the runbook before access\n",
+    ],
+    [
+      "field results spanning paragraphs",
+      '<w:p><w:r><w:fldChar w:fldCharType="begin"/><w:instrText>TOC</w:instrText>' +
+        '<w:fldChar w:fldCharType="separate"/><w:t>First result paragraph</w:t></w:r></w:p>' +
+        '<w:p><w:r><w:instrText>Second result paragraph</w:instrText><w:fldChar w:fldCharType="end"/></w:r></w:p>',
+      "First result paragraph\nSecond result paragraph\n",
+    ],
+    [
+      "a field without a result followed by standalone instruction text",
+      '<w:p><w:r><w:fldChar w:fldCharType="begin"/><w:instrText>XE "authorization"</w:instrText>' +
+        '<w:fldChar w:fldCharType="end"/><w:instrText>Visible scope</w:instrText></w:r></w:p>',
+      "Visible scope\n",
+    ],
+    [
+      "deleted field separators and instructions",
+      '<w:p><w:r><w:fldChar w:fldCharType="begin"/><w:instrText>IF </w:instrText></w:r>' +
+        '<w:del w:id="2" w:author="Example Author"><w:r><w:fldChar w:fldCharType="separate"/>' +
+        "<w:delInstrText>old instruction</w:delInstrText></w:r></w:del>" +
+        '<w:r><w:instrText>1 = 1 "internal" "public"</w:instrText><w:fldChar w:fldCharType="separate"/>' +
+        '<w:t>internal</w:t><w:fldChar w:fldCharType="end"/></w:r></w:p>',
+      "internal\n",
+    ],
+    [
+      "deleted field beginnings before standalone instruction text",
+      '<w:p><w:del w:id="3" w:author="Example Author"><w:r><w:fldChar w:fldCharType="begin"/>' +
+        "<w:delInstrText>removed field</w:delInstrText></w:r></w:del>" +
+        "<w:r><w:instrText>Visible scope</w:instrText></w:r></w:p>",
+      "Visible scope\n",
+    ],
+  ])("preserves DOCX text with %s", async (_description, body, expected) => {
+    const root = await temporaryDirectory();
+    const source = join(root, "field-context.docx");
+    await writeFile(source, docxBody(body));
+
+    const snapshot = await readKnowledgeBaseSnapshot([source]);
+
+    expect(Object.values(snapshot.documents)).toEqual([expected]);
+  });
 
   test.each([
     ["preparation", prepareKnowledgeBase],

@@ -2026,7 +2026,7 @@ describe("ordinary scan composition", () => {
       else {
         await runDeepScans(h.input);
         expect((await h.checkpoint()).terminalReason).toBe("saturated");
-        expect(h.published.at(-1)!.coverage["completeness"]).toBe("partial");
+        expect(h.published.at(-1)!.coverage).not.toHaveProperty("completeness");
       }
       expect(h.calls).toHaveLength(
         (resumed ? 0 : requireCost && !executed ? 2 : 4) + (stopped ? 0 : 1),
@@ -2077,6 +2077,10 @@ describe("ordinary scan composition", () => {
 
   test.each([
     "metering",
+    "Quota exceeded. Check your plan and billing details.",
+    "Your workspace is out of credits. Add credits to continue.",
+    "You’ve hit your usage limit. Try again later.",
+    "You’ve hit your usage limit for this model. Try again later.",
     "permission before registration",
     "permission after registration",
     "Request flagged for possible cybersecurity risk.",
@@ -2320,7 +2324,7 @@ describe("ordinary scan composition", () => {
       ],
     ).toHaveLength(1);
     expect(h.published.at(-1)).toEqual(state.aggregate!);
-    expect(h.published.at(-1)!.coverage["completeness"]).toBe("partial");
+    expect(h.published.at(-1)!.coverage).not.toHaveProperty("completeness");
     expect(h.published.at(-1)!.coverage["deferred"]).toHaveLength(1);
     expect(h.metrics().closed).toBe(2);
   });
@@ -2438,7 +2442,7 @@ test("caps an expired empty composition without requesting a model merge", async
   expect(h.mergeInputs).toEqual([]);
   expect(result.terminalReason).toBe("capped");
   expect(result.aggregate?.findings).toEqual([]);
-  expect(result.aggregate?.coverage["completeness"]).toBe("partial");
+  expect(result.aggregate?.coverage).not.toHaveProperty("completeness");
   expect(h.published).toHaveLength(1);
 });
 

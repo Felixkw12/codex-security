@@ -272,6 +272,8 @@ describe("delegated scan attribution", () => {
               : "gpt-5.6-sol"
             : undefined;
           const program = surface === "cli" ? programs[0] : programs[1];
+          const daybreak =
+            endpointSource === "unset" ? undefined : surface === "cli";
           const endpoint =
             endpointSource === "unset"
               ? undefined
@@ -312,9 +314,20 @@ describe("delegated scan attribution", () => {
             {
               pluginPath: PLUGIN_ROOT,
               codexOverrides: {
+                ...(daybreak === undefined || endpointSource === "profile-only"
+                  ? {}
+                  : {
+                      daybreak:
+                        endpointSource === "profile-override"
+                          ? !daybreak
+                          : daybreak,
+                    }),
                 analytics: { enabled: surface === "sdk" },
+                otel: { environment: `synthetic-${surface}` },
                 responses_api_metadata: {
                   custom_attribution: surface,
+                  "team.tag": `synthetic-${surface}`,
+                  codex_security_integration: "github_action",
                   codex_security_surface: "spoofed",
                   codex_security_command: "spoofed",
                   codex_security_package_version: "spoofed",
@@ -326,10 +339,15 @@ describe("delegated scan attribution", () => {
                   ? {
                       profile: "selected",
                       profiles: {
-                        selected:
-                          profileEndpoint === undefined
+                        selected: {
+                          ...(profileEndpoint === undefined
                             ? {}
-                            : { openai_base_url: profileEndpoint },
+                            : { openai_base_url: profileEndpoint }),
+                          ...(endpointSource === "profile-only" ||
+                          endpointSource === "profile-override"
+                            ? { daybreak }
+                            : {}),
+                        },
                         unselected: {
                           openai_base_url: "https://unused.example.test/v1",
                         },

@@ -21,7 +21,7 @@ async function summary(
 ) {
   const stdout = capture();
   const stderr = capture();
-  const result = options?.result ?? fakeResult(["high"], "partial");
+  const result = options?.result ?? fakeResult(["high"]);
   expect(
     await main(
       ["scan", ...args, "--json"],
@@ -29,7 +29,7 @@ async function summary(
       stderr.stream,
       dependencies({ ...options, result }),
     ),
-  ).toBe(result.coverage.completeness === "complete" ? 0 : 2);
+  ).toBe(0);
   expect(JSON.parse(stdout.text())).toEqual(result.toJSON());
   return stderr.text();
 }
@@ -68,15 +68,15 @@ describe("deep scan completion summary", () => {
       "time limit",
       {
         passes: [{}, {}, {}],
-        config: { maxDiscoveryRuns: 40, maxTimeHours: 0.5 },
+        config: { maxDiscoveryRuns: 40, maxTimeHours: 0.119 / 60 },
       },
-      "0.5-hour time limit",
-      "higher --max-time-hours",
+      "0.119-minute time limit",
+      "--max-time greater than 0.119",
     ],
     [
       "maximum time limit",
       { passes: [{}, {}, {}], startedAt: "2025-12-28T01:00:00Z" },
-      "96-hour time limit",
+      "5760-minute time limit",
       "rerun with --path",
     ],
     [
@@ -88,7 +88,7 @@ describe("deep scan completion summary", () => {
   ] as const)("explains %s", async (_name, overrides, reason, next) => {
     const directory = await mkdtemp(join(tmpdir(), "deep-summary-"));
     const result = new ScanResult({
-      ...fakeResult(["high"], "partial"),
+      ...fakeResult(["high"]),
       scanDir: directory,
     });
     await mkdir(join(directory, "artifacts/deep-scan"), { recursive: true });

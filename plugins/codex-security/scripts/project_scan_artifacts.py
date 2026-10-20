@@ -186,9 +186,10 @@ def project_scan_artifacts(
 
 
 def project_completed_scan(request: ProjectionRequest) -> ProjectedScan:
-    source_directory, _, manifest, findings, coverage, sealed, _ = _prepare_scan_finalization(
-        Path(request["sourceDirectory"])
-    )
+    prepared = _prepare_scan_finalization(Path(request["sourceDirectory"]))
+    source_directory = prepared.scan_dir
+    manifest, findings, coverage = prepared.manifest, prepared.findings, prepared.coverage
+    sealed = prepared.was_sealed
     scan = manifest["scan"]
     if scan["id"] != request["sourceScanId"]:
         raise ContractError("Scan projection source does not match the requested scan")

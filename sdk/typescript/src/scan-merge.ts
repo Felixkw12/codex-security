@@ -247,14 +247,6 @@ export function combineScanCoverage(
 ): SemanticCoverage {
   const completed = [...(priorCoverage ? [priorCoverage] : []), ...inputs];
   const coverage: SemanticCoverage = {
-    completeness:
-      completed.length === 0 ||
-      unresolved.length > 0 ||
-      completed.some((source) => source.completeness === "partial")
-        ? "partial"
-        : completed.some((source) => source.completeness === "unknown")
-          ? "unknown"
-          : "complete",
     surfaces: [],
     explicitExclusions: [],
     deferred: [],
@@ -263,6 +255,7 @@ export function combineScanCoverage(
     "surfaces",
     "explicitExclusions",
     "deferred",
+    "resolvedDeferred",
     "openQuestions",
   ] as const)
     coverage[field] = exactUnion(

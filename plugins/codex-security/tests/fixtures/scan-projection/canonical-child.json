@@ -198,7 +198,6 @@
     }
   ],
   "coverage": {
-    "completeness": "partial",
     "surfaces": [
       {
         "id": "surface",
@@ -330,7 +329,6 @@
       }
     ],
     "coverage": {
-      "completeness": "partial",
       "surfaces": [
         {
           "id": "@CHILD@/surface",

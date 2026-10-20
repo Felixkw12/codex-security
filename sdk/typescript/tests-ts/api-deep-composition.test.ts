@@ -359,7 +359,23 @@ test.each([
             CODEX_API_KEY: customProvider ? undefined : "synthetic-native-key",
           }),
     };
+    const inheritedSettings = {
+      openai_base_url: "https://endpoint.example.test/v1",
+      web_search: "cached",
+      model_instructions_file: "instructions.md",
+      experimental_compact_prompt_file: "compact.md",
+      model_catalog_json: "models.json",
+      sqlite_home: "sqlite",
+    };
+    const expectedSettings = () => ({
+      ...inheritedSettings,
+      model_instructions_file: join(scanDir, "instructions.md"),
+      experimental_compact_prompt_file: join(scanDir, "compact.md"),
+      model_catalog_json: join(scanDir, "models.json"),
+      sqlite_home: join(scanDir, "sqlite"),
+    });
     const nativeSettings = {
+      ...inheritedSettings,
       model: "gpt-6-astra",
       model_reasoning_effort: "ultra",
       service_tier: "priority",
@@ -557,6 +573,7 @@ process.exit(0);
         prepared?.client.config ?? {
           pluginPath: pluginRoot,
           codexOverrides: {
+            ...inheritedSettings,
             model: "gpt-6-astra",
             model_reasoning_effort: "ultra",
             service_tier: "priority",
@@ -772,7 +789,10 @@ process.exit(0);
                       model_providers: providerDefinitions,
                       ...publicSettings
                     } = nativeSettings;
-                    expect(options.config).toMatchObject(publicSettings);
+                    expect(options.config).toMatchObject({
+                      ...publicSettings,
+                      ...expectedSettings(),
+                    });
                     if (providerDefinitions !== undefined) {
                       expect(options.config).not.toHaveProperty(
                         "model_providers",
@@ -889,6 +909,10 @@ process.exit(0);
                               output: "synthetic-worker",
                             },
                           },
+                          tokenUsageEvent({
+                            input_tokens: 10,
+                            output_tokens: 3,
+                          }),
                         ]
                           .map((event) => JSON.stringify(event))
                           .join("\n") + "\n",
@@ -983,9 +1007,6 @@ process.exit(0);
                         ...(partialCheckpoint ? { complete: false } : {}),
                         findings: childFindings as SemanticFinding[],
                         coverage: {
-                          completeness: partialCheckpoint
-                            ? "partial"
-                            : "complete",
                           surfaces: [],
                           explicitExclusions: [],
                           deferred: partialCheckpoint
@@ -1273,7 +1294,7 @@ process.exit(0);
         const coverage = JSON.parse(
           await readFile(join(scanDir, "coverage.json"), "utf8"),
         );
-        expect(coverage.completeness).toBe("partial");
+        expect(coverage).not.toHaveProperty("completeness");
         if (partialCheckpoint) {
           expect(controller.signal.aborted).toBe(true);
           expect(checkpointSignal!.aborted).toBe(!completedCleanup);
@@ -1572,11 +1593,13 @@ process.exit(0);
         expect(updates.every((update) => update.filesTotal === 4)).toBe(true);
         expect(Math.max(...counts)).toBeLessThanOrEqual(3);
       }
-      expect(progressRuns.flat()).toContainEqual({
-        phase: "discovery",
-        filesCompleted: 3,
-        filesTotal: 4,
-      });
+      expect(progressRuns.flat()).toContainEqual(
+        expect.objectContaining({
+          phase: "discovery",
+          filesCompleted: 3,
+          filesTotal: 4,
+        }),
+      );
       if (savedExecutionThread)
         expect(result.threadId).toBe(savedExecutionThread);
       if (sealedArtifacts) {
@@ -1585,9 +1608,7 @@ process.exit(0);
         expect(result.manifest.scan.producer.version).toBe(version);
       }
       expect(result.findings.findings).toHaveLength(budget ? 2 : 1);
-      expect(result.coverage.completeness).toBe(
-        budget ? "partial" : "complete",
-      );
+      expect(result.coverage).not.toHaveProperty("completeness");
       const checkpoint = JSON.parse(
         await readFile(join(scanDir, DEEP_SCAN_CHECKPOINT), "utf8"),
       );
@@ -1642,6 +1663,10 @@ process.exit(0);
         );
       }
       for (const turn of turns) {
+        expect(turn.config).toMatchObject(expectedSettings());
+        expect(turn.environment["CODEX_SQLITE_HOME"]).toBe(
+          join(scanDir, "sqlite"),
+        );
         const servers = (turn.config as JsonObject | undefined)?.[
           "mcp_servers"
         ] as JsonObject | undefined;

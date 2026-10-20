@@ -3,7 +3,12 @@ import type { ScanOptions } from "./api.js";
 import type { ScanMode } from "./targets.js";
 import type { ScanCost, ScanCostTracker } from "./cost.js";
 import type { WorkbenchCommandOptions, runWorkbench } from "./runtime.js";
-import type { ScanProgress } from "./worker-progress.js";
+import {
+  scanPhaseSchema,
+  type ScanProgress,
+  type ScanWorkerStatus,
+} from "./worker-progress.js";
+import type { SavedScanProgress } from "./scan-progress.js";
 import {
   CodexSecurityError,
   ScanCostLimitExceededError,
@@ -33,19 +38,22 @@ export function createScanCostReporter({
   budgetSignal: AbortSignal;
   getActiveScan: () => { id: string; options: WorkbenchCommandOptions } | null;
   workbench: typeof runWorkbench;
-}): (cost: Readonly<ScanCost>) => void {
+}): (cost: Readonly<ScanCost>, complete?: boolean) => void {
   let maxCostUsd = options.maxCostUsd;
   let latestCost: Readonly<ScanCost> | null = null;
   let notifiedLimit: number | undefined;
-  return (cost: Readonly<ScanCost>): void => {
+  let latestCostComplete = false;
+  return (cost: Readonly<ScanCost>, complete = true): void => {
     latestCost = cost;
-    notifyObserver(
-      "onCost",
-      options.onCost,
-      options.onObserverError,
-      cost,
-      maxCostUsd,
-    );
+    latestCostComplete = complete;
+    if (complete)
+      notifyObserver(
+        "onCost",
+        options.onCost,
+        options.onObserverError,
+        cost,
+        maxCostUsd,
+      );
     if (maxCostUsd !== undefined && cost.estimatedUsd > maxCostUsd) {
       costAbortController.abort(
         new ScanCostLimitExceededError(maxCostUsd, cost, scanDir),
@@ -91,13 +99,14 @@ export function createScanCostReporter({
         );
         if (budgetSignal.aborted) return;
         maxCostUsd = next;
-        notifyObserver(
-          "onCost",
-          options.onCost,
-          options.onObserverError,
-          latestCost!,
-          maxCostUsd,
-        );
+        if (latestCostComplete)
+          notifyObserver(
+            "onCost",
+            options.onCost,
+            options.onObserverError,
+            latestCost!,
+            maxCostUsd,
+          );
       })
       .catch((error: unknown) => {
         if (!budgetSignal.aborted) {
@@ -115,12 +124,14 @@ export function createScanCostReporter({
 export class ScanProgressReporter {
   scopeFileCount: number | null = null;
   reviewedFileCount = 0;
+  phase: ScanProgress["phase"] = "preflight";
+  reviewItems: ScanProgress["reviewItems"];
 
   constructor(
     private readonly mode: ScanMode,
     private readonly options: Pick<
       ScanOptions,
-      "onProgress" | "onObserverError"
+      "onProgress" | "onWorkerStatus" | "onObserverError"
     >,
   ) {}
 
@@ -132,13 +143,61 @@ export class ScanProgressReporter {
     )
       return;
     this.reviewedFileCount = progress.filesCompleted;
+    if (
+      this.mode === "deep" ||
+      scanPhaseSchema.options.indexOf(progress.phase) >
+        scanPhaseSchema.options.indexOf(this.phase)
+    )
+      this.phase = progress.phase;
     notifyObserver(
       "onProgress",
       this.options.onProgress,
       this.options.onObserverError,
-      { ...progress, filesTotal: this.scopeFileCount },
+      {
+        ...progress,
+        phase: this.phase,
+        filesTotal: this.scopeFileCount,
+        ...(this.reviewItems === undefined
+          ? {}
+          : { reviewItems: this.reviewItems }),
+      },
     );
   };
+
+  readonly worker = (status: ScanWorkerStatus): void => {
+    if (this.mode !== "deep") {
+      const phase =
+        status.phase === "ranking" || status.phase === "file_review"
+          ? "discovery"
+          : status.phase;
+      if (
+        scanPhaseSchema.options.indexOf(phase) <
+        scanPhaseSchema.options.indexOf(this.phase)
+      )
+        return;
+      this.phase = phase;
+    }
+    notifyObserver(
+      "onWorkerStatus",
+      this.options.onWorkerStatus,
+      this.options.onObserverError,
+      status,
+    );
+  };
+
+  fromSaved(progress: SavedScanProgress, tracker: ScanCostTracker): void {
+    this.reviewItems = progress.reviewItems;
+    if (this.scopeFileCount === null && progress.filesTotal !== null) {
+      this.scopeFileCount = progress.filesTotal;
+      tracker.setExpectedFilesTotal(this.scopeFileCount);
+    }
+    if (this.scopeFileCount !== null)
+      this.report({
+        phase: progress.phase,
+        filesCompleted: this.reviewedFileCount,
+        filesTotal: this.scopeFileCount,
+      });
+  }
 
   preflight(fileCount: number | null, tracker: ScanCostTracker): void {
     this.scopeFileCount = fileCount;

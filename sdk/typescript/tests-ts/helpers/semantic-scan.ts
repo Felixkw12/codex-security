@@ -27,7 +27,6 @@ export function semanticCoverage(
   overrides: Partial<SemanticCoverage> = {},
 ): SemanticCoverage {
   return {
-    completeness: "complete",
     surfaces: [],
     explicitExclusions: [],
     deferred: [],

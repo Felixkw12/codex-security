@@ -39,7 +39,6 @@ test.each([false, true])(
         handoffClaimToken: "synthetic-claim",
         findings: [],
         coverage: {
-          completeness: "complete",
           surfaces: [],
           explicitExclusions: [],
           deferred: [],
@@ -59,5 +58,38 @@ test.each([false, true])(
       name.endsWith(".checkpoint.json"),
     )![1];
     expect(checkpoint).not.toHaveProperty("handoffClaimToken");
+  },
+);
+
+test.each([Infinity, -Infinity, NaN])(
+  "authored non-finite values fail before staging or workbench publication: %p",
+  async (measurement) => {
+    const writes: string[] = [];
+    const input = {
+      scanId: "synthetic-scan",
+      findings: [],
+      threatModel: { summary: "Synthetic boundary review.", audit: { measurement } },
+      coverage: { surfaces: [], explicitExclusions: [], deferred: [] },
+    };
+    const original = structuredClone(input);
+    await expect(
+      writeSemanticScanDraft(
+        {
+          scanDir: "/synthetic/scan",
+          contract: { mode: "standard" },
+          writer: {
+            async restore(path) {
+              writes.push(path);
+            },
+          },
+          async workbench() {
+            writes.push("workbench");
+          },
+        },
+        input,
+      ),
+    ).rejects.toThrow("Stored finding JSON cannot contain non-finite numbers.");
+    expect(writes).toEqual([]);
+    expect(input).toEqual(original);
   },
 );

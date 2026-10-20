@@ -273,7 +273,6 @@ try {
     findings: [],
     threatModel: { format: "markdown", content, origin: "provided" },
     coverage: {
-      completeness: "partial",
       surfaces: [],
       explicitExclusions: [],
       deferred: [],
@@ -316,7 +315,6 @@ try {
     findings: [],
     threatModel: { format: "markdown", content, origin: "provided" },
     coverage: {
-      completeness: "complete",
       surfaces: [
         {
           id: "example",

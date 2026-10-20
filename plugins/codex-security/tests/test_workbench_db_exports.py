@@ -64,7 +64,7 @@ def test_stopped_scan_keeps_saved_findings_and_exports(tmp_path: Path, terminati
         json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["status"]
         == expected_status
     )
-    assert json.loads((scan_dir / "coverage.json").read_text())["completeness"] == "partial"
+
     for export_format in ("json", "csv", "sarif"):
         exported = scan_command(state_dir, "export-findings", scan_id, "--format", export_format)
         assert Path(str(exported["export"]["path"])).is_file()
@@ -96,7 +96,7 @@ def test_late_parent_draft_is_retained_without_mutating_frozen_stopped_seal(
     stopped = get_scan(state_dir, scan_id)["scan"]
     seal = (scan_dir / "scan-manifest.json").read_bytes()
     documents["findings"]["findings"][0]["identity"]["anchor"] = "late-independent-finding"
-    documents["coverage"]["completeness"] = "partial"
+
     documents["coverage"]["deferred"] = [
         {"id": "late-review", "reason": "This review completed after cancellation."}
     ]
@@ -156,7 +156,7 @@ def test_canceled_scan_does_not_accept_checkpoints_written_after_cancellation(
         "scanId": scan_id,
         "complete": False,
         "findings": [late_finding],
-        "coverage": {"completeness": "partial", "surfaces": []},
+        "coverage": {"surfaces": []},
     }
     write_checkpoint(scan_dir / "checkpoints", checkpoint)
 
@@ -374,7 +374,7 @@ def test_frozen_stopped_results_ignore_late_foreign_checkpoint_warning(tmp_path:
         "scanId": str(uuid.uuid4()),
         "complete": False,
         "findings": [],
-        "coverage": {"completeness": "partial"},
+        "coverage": {"surfaces": [], "explicitExclusions": [], "deferred": []},
     }
     write_checkpoint(scan_dir / "checkpoints", foreign)
 
@@ -415,7 +415,7 @@ def test_final_candidate_disposition_supersedes_pending_checkpoint(
     completed = scan_command(state_dir, "complete-scan", scan_id)["scan"]
     final_coverage = json.loads((scan_dir / "coverage.json").read_text())
     assert completed["progress"]["status"] == "complete"
-    assert final_coverage["completeness"] == "complete"
+
     assert not any(item.get("candidateId") == "candidate-x" for item in final_coverage["deferred"])
     assert any(
         item.get("candidateId") == "candidate-x" and item["disposition"] == disposition
@@ -463,7 +463,7 @@ def test_model_only_draft_is_available_before_findings_and_survives_stop(
     }
     documents["manifest"]["scan"].update(threatModel=model, complete=False)
     documents["findings"]["findings"] = []
-    documents["coverage"].update(completeness="partial", surfaces=[])
+    documents["coverage"].update(surfaces=[])
     draft = scan_dir / "drafts" / f"{uuid.uuid4()}.json"
     draft.parent.mkdir()
     draft.write_text(json.dumps(documents))
@@ -746,8 +746,14 @@ def test_completed_findings_export_inside_scan_directory(tmp_path: Path) -> None
     ),
     ids=("candidate-id", "blank-candidate-id", "report-id", "ledger-row-id"),
 )
+@pytest.mark.parametrize("replace_after_finalize", (False, True), ids=("saved", "replaced"))
 def test_deep_csv_export_adds_only_candidate_id_column(
-    tmp_path: Path, extensions: dict[str, str], expected_candidate_id: str
+    tmp_path: Path,
+    extensions: dict[str, str],
+    expected_candidate_id: str,
+    replace_after_finalize: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    workbench_api,
 ) -> None:
     state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
@@ -777,8 +783,38 @@ def test_deep_csv_export_adds_only_candidate_id_column(
     finding["extensions"] = extensions
     findings_path.write_text(json.dumps(findings_document))
 
-    scan_command(state_dir, "complete-scan", scan_id)
-    exported = scan_command(state_dir, "export-findings", scan_id, "--format", "csv")["export"]
+    completed = scan_command(state_dir, "complete-scan", scan_id)["scan"]
+    set_triage(
+        state_dir,
+        completed["findings"][0]["occurrenceId"],
+        "closed",
+        "--close-reason",
+        "wont_fix",
+        "--note",
+        "Accepted after review.",
+    )
+    if replace_after_finalize:
+        publication = workbench_api["publication"]
+        finalize = publication.finalize_scan
+
+        def replace_finalized_document(*args, **kwargs):
+            result = finalize(*args, **kwargs)
+            replacement = copy.deepcopy(result[1])
+            replacement["findings"][0]["extensions"] = {"candidateId": "DSS-replaced"}
+            replacement["findings"][0]["title"] = "Replaced title"
+            findings_path.write_text(json.dumps(replacement))
+            return result
+
+        monkeypatch.setattr(publication, "finalize_scan", replace_finalized_document)
+        with closing(sqlite3.connect(state_dir / "workbench.sqlite3")) as connection:
+            connection.row_factory = sqlite3.Row
+            exported = publication.export_findings(
+                workbench_api["_WORKBENCH_PUBLICATION_CONTEXT"],
+                connection,
+                SimpleNamespace(scan_id=scan_id, format="csv"),
+            )["export"]
+    else:
+        exported = scan_command(state_dir, "export-findings", scan_id, "--format", "csv")["export"]
     with Path(exported["path"]).open(newline="") as source:
         reader = csv.DictReader(source)
         rows = list(reader)
@@ -802,6 +838,8 @@ def test_deep_csv_export_adds_only_candidate_id_column(
     assert len(rows) == 1
     assert rows[0]["candidate_id"] == expected_candidate_id
     assert rows[0]["title"] == original_title
+    assert rows[0]["status"] == "closed"
+    assert rows[0]["close_reason"] == "wont_fix"
     assert "report_id" not in rows[0]
     assert "detailed_writeup" not in rows[0]
 
@@ -1285,7 +1323,7 @@ def test_parent_draft_preserves_reconciled_candidate_identity_before_publication
         )
     }
     documents["findings"]["findings"] = []
-    documents["coverage"].update(completeness="partial", surfaces=[], deferred=[])
+    documents["coverage"].update(surfaces=[], deferred=[])
     for identity in ("review-a", "review-b"):
         documents["coverage"]["deferred"].append(
             {
@@ -1298,7 +1336,6 @@ def test_parent_draft_preserves_reconciled_candidate_identity_before_publication
         "scanId": scan_id,
         "findings": [],
         "coverage": saved_coverage(
-            completeness="partial",
             deferred=[
                 {key: value for key, value in row.items() if key != "id"}
                 for row in documents["coverage"]["deferred"]

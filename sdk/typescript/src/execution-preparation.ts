@@ -2,7 +2,7 @@ import { restoreReplayProfile } from "./provider-profile.js";
 import { readFile, realpath } from "node:fs/promises";
 import { parse as parseToml } from "smol-toml";
 import { accountStatus, configuredCodexHome } from "./auth.js";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { bundledCodexSdkEnvironment } from "./codex-sdk-environment.js";
 import {
   Codex,
@@ -40,6 +40,7 @@ import {
   codexSecurityStateDirectory,
   environmentWithGit,
   executablePathForSpawn,
+  expandHome,
   pluginExecutionEnvironment,
   cleanupSdkDirectory,
   createIsolatedHome,
@@ -51,7 +52,7 @@ import {
   type PluginInstall,
   type ProcessEnvironment,
 } from "./runtime.js";
-import { codexSecurityRequestMetadata } from "./request-metadata.js";
+import { codexSecurityRequestContext } from "./request-metadata.js";
 import {
   createProfileCodex,
   providerPreflightCommand,
@@ -68,6 +69,7 @@ export type ExecutionPolicy = "ordinary" | "discovery" | "merge";
 interface ExecutionClient {
   surface: "cli" | "sdk";
   command: string;
+  mode?: import("./targets.js").ScanMode;
   createCodex?: (
     options: CodexOptions & { nativeProfile?: string },
   ) => CodexClientLike | Promise<CodexClientLike>;
@@ -75,7 +77,7 @@ interface ExecutionClient {
 
 /** One per-scan snapshot; worker construction never consults a mutable parent environment. */
 export interface ExecutionSource {
-  readonly command: CodexCommand;
+  readonly command?: CodexCommand;
   readonly configuration: JsonObject;
   readonly environment: ProcessEnvironment;
   readonly authentication: ScanAuthentication;
@@ -85,6 +87,14 @@ export interface ExecutionSource {
     | null;
   readonly apiKey: string | null;
   readonly preserveProviderEnvironment: boolean;
+}
+
+export function executionCommand(source: ExecutionSource): CodexCommand {
+  if (source.command === undefined)
+    throw new CodexSecurityError(
+      "Hosted execution does not provide a local Codex command.",
+    );
+  return source.command;
 }
 
 export function prepareExecutionSource(input: {
@@ -230,7 +240,7 @@ export async function createExecutionCodex(
     ...environmentWithGit(
       pluginExecutionEnvironment(python, {
         ...withoutCodexHome(scanEnvironment),
-        CODEX_CLI_PATH: session.source.command.command,
+        CODEX_CLI_PATH: executionCommand(session.source).command,
       }),
       git,
     ),
@@ -256,18 +266,23 @@ export async function createExecutionCodex(
     (session.policy !== "ordinary" ||
       session.inheritedPermissions !== undefined) &&
     client.createCodex === undefined;
-  if (session.inheritedPermissions !== undefined || checkPermissions) {
+  if (
+    session.inheritedPermissions !== undefined ||
+    checkPermissions ||
+    client.command === "patch"
+  ) {
     const permissions = sessionConfig["permissions"] as JsonObject;
     configOverrides = [
       ...configOverrides,
       `permissions.${SCAN_PERMISSION_PROFILE}=${inlineToml(permissions[SCAN_PERMISSION_PROFILE]!)}`,
     ];
   }
-  const configuredResponsesMetadata = isRecord(
-    sdkCodexConfig["responses_api_metadata"],
-  )
-    ? sdkCodexConfig["responses_api_metadata"]
-    : {};
+  const requestContext = codexSecurityRequestContext(config ?? sessionConfig, {
+    surface: client.surface,
+    command: client.command,
+    pluginVersion: runtime.plugin.version,
+    mode: client.mode,
+  });
   const configuredCodexPath = environmentValue(
     session.source.environment,
     "CODEX_CLI_PATH",
@@ -275,7 +290,7 @@ export async function createExecutionCodex(
   let codexPathOverride =
     !checkPermissions && configuredCodexPath === undefined
       ? undefined
-      : session.source.command.command;
+      : executionCommand(session.source).command;
   let sdkEnvironment = definedEnvironment(
     preserveProviderEnvironment
       ? environment
@@ -293,24 +308,13 @@ export async function createExecutionCodex(
       sdkEnvironment,
     );
   }
-  const metadata = {
-    ...configuredResponsesMetadata,
-    ...codexSecurityRequestMetadata(
-      client.surface,
-      client.command,
-      runtime.plugin.version,
-    ),
-  };
   delete sdkCodexConfig["responses_api_metadata"];
   const codexOptions: CodexOptions = {
     ...(codexPathOverride === undefined
       ? {}
       : { codexPathOverride: executablePathForSpawn(codexPathOverride) }),
     ...(externalProvider !== null || apiKey === null ? {} : { apiKey }),
-    configOverrides: [
-      `responses_api_metadata=${inlineToml(metadata)}`,
-      ...configOverrides,
-    ],
+    configOverrides: [requestContext.configOverride, ...configOverrides],
     env: sdkEnvironment,
     config: sdkCodexConfig as NonNullable<CodexOptions["config"]>,
   };
@@ -329,7 +333,7 @@ export async function createExecutionCodex(
         : await createProfileCodex(codexOptions, runtime.providerProfile.name);
     if (checkPermissions) {
       const preflightCommand = await providerPreflightCommand(
-        { command: session.source.command.command },
+        { command: executionCommand(session.source).command },
         config ?? sessionConfig,
       );
       const providerOverrides = (preflightCommand.args ?? []).filter(
@@ -569,6 +573,26 @@ export async function nativeScanConfiguration(
   if (input.reasoningEffort)
     config["model_reasoning_effort"] = input.reasoningEffort;
   return config;
+}
+
+/** Resolve native paths before composed workers change their working directory. */
+export function resolveExecutionPaths(
+  config: JsonObject,
+  workingDirectory: string,
+  environment: ProcessEnvironment,
+): JsonObject {
+  const resolved = resolveCodexProfile(config);
+  for (const key of [
+    "model_instructions_file",
+    "experimental_compact_prompt_file",
+    "model_catalog_json",
+    "sqlite_home",
+  ]) {
+    const path = resolved[key];
+    if (typeof path === "string")
+      resolved[key] = resolve(workingDirectory, expandHome(path, environment));
+  }
+  return resolved;
 }
 
 function deepWorkerConfig(sessionConfig: JsonObject): JsonObject {

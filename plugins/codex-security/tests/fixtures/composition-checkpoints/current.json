@@ -62,7 +62,6 @@
       }
     ],
     "coverage": {
-      "completeness": "partial",
       "surfaces": [
         {
           "id": "child/api",

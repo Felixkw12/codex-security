@@ -16,6 +16,7 @@ import {
   ScanTransportClosedError,
 } from "./scan-execution.js";
 import { ScanCostTrackingError } from "./deep-scan.js";
+import { ScanExecutionError } from "./scan-executor.js";
 import type { ScanExpectation } from "./contract.js";
 import type { ScanResult } from "./result.js";
 import {
@@ -51,6 +52,7 @@ interface ScanEventRunOptions {
   model?: string;
   expectedFilesTotal?: number;
   onFinalize?: (usage: unknown) => Promise<unknown>;
+  onTurnStatus?: (status: "completed" | "failed") => void;
   onThreadStarted?: (threadId: string) => Promise<void> | void;
   onScanStarted?: () => void;
   onTrustedAccessStatus?: (status: ScanTrustedAccessStatus) => void;
@@ -102,7 +104,11 @@ function throwScanFailure(
 ): never {
   if (options.signal.reason instanceof ScanCostLimitExceededError)
     throw options.signal.reason;
-  if (options.signal.aborted && !(error instanceof ScanInterruptedError)) {
+  if (
+    options.signal.aborted &&
+    !(error instanceof ScanInterruptedError) &&
+    !(error instanceof ScanExecutionError)
+  ) {
     throw new ScanInterruptedError(
       `Codex Security scan was interrupted; partial output remains at ${options.scanDir}.`,
       options.scanDir,
@@ -153,6 +159,9 @@ export async function runScanTurn(
       thread: options.thread,
       events: options.events,
       onEvent: async (event) => {
+        if (event.type === "turn.completed")
+          options.onTurnStatus?.("completed");
+        if (event.type === "turn.failed") options.onTurnStatus?.("failed");
         if (
           !tacStatusReported &&
           options.modelProvider !== "amazon-bedrock" &&

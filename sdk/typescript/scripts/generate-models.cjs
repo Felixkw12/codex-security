@@ -88,7 +88,6 @@ async function generate() {
       'export type AttackPathReachability = Extract<NonNullable<FindingAttackPath["reachability"]>, object>;',
       'export type FindingProvenance = Finding["provenance"];',
       'export type CoverageMode = CoverageDocument["mode"];',
-      'export type CoverageCompleteness = CoverageDocument["completeness"];',
       'export type InventoryStrategy = CoverageDocument["inventoryStrategy"];',
       'export type CoverageSurface = CoverageDocument["surfaces"][number];',
       'export type SurfaceDisposition = CoverageSurface["disposition"];',
@@ -138,7 +137,7 @@ async function generateSemanticModels() {
 Promise.all([
   generate().then((document) => ["models.ts", document]),
   generateSemanticModels().then((document) => ["semantic-models.ts", document]),
-  ...["finding-normalization", "workbench-arguments"].map((name) =>
+  ...["workbench-arguments", "executable-path"].map((name) =>
     Promise.resolve([
       `${name}.ts`,
       `/* Generated from plugin ${name}.ts. Run \`pnpm generate:models\`. */\n` +

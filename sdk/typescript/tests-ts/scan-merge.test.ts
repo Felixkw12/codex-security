@@ -247,7 +247,7 @@ test("combines coverage without namespacing twice or mutating completed inputs",
     [one.draft.coverage, two.draft.coverage],
     ["Unfinished pass."],
   );
-  expect(combined.completeness).toBe("partial");
+  expect(combined).not.toHaveProperty("completeness");
   expect(combined.surfaces).toEqual(one.draft.coverage.surfaces);
   expect(combined.deferred).toEqual([
     { reason: "Pending review." },
@@ -256,14 +256,15 @@ test("combines coverage without namespacing twice or mutating completed inputs",
   expect(combined.openQuestions).toEqual(["Question?"]);
   combined.surfaces[0]!.label = "changed";
   expect(one).toEqual(original);
-  expect(
-    combineScanCoverage([], [], semanticCoverage({ completeness: "unknown" }))
-      .completeness,
-  ).toBe("unknown");
-  expect(combineScanCoverage([two.draft.coverage]).completeness).toBe(
-    "complete",
+  const legacy = semanticCoverage({ completeness: "unknown" });
+  expect(combineScanCoverage([], [], legacy)).not.toHaveProperty(
+    "completeness",
   );
-  expect(combineScanCoverage([]).completeness).toBe("partial");
+  expect(legacy["completeness"]).toBe("unknown");
+  expect(combineScanCoverage([two.draft.coverage])).not.toHaveProperty(
+    "completeness",
+  );
+  expect(combineScanCoverage([])).not.toHaveProperty("completeness");
 });
 
 test("combines large coverage on Node without argument limits", async () => {

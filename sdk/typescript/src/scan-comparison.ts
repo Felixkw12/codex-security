@@ -25,7 +25,6 @@ import {
   DEFAULT_CODEX_CONFIG,
   deepMerge,
   hasCommandAuth,
-  inlineToml,
   mergedCodexConfig,
   normalizeLegacyWindowsSandboxOverride,
   resolveCodexProfile,
@@ -39,7 +38,7 @@ import {
 } from "./config.js";
 import { prepareReadOnlyExecution } from "./execution-preparation.js";
 import { CodexSecurityError, ConfigurationError } from "./errors.js";
-import { codexSecurityRequestMetadata } from "./request-metadata.js";
+import { codexSecurityRequestContext } from "./request-metadata.js";
 import {
   createProfileCodex,
   createProviderProfile,
@@ -549,17 +548,15 @@ async function startPreparedReadOnlyCodexThread(
   );
   const inheritedFeatures = resolveCodexProfile(prepared.config)["features"] as
     JsonObject | undefined;
-  const metadata = {
-    ...(prepared.config["responses_api_metadata"] as JsonObject | undefined),
-    ...codexSecurityRequestMetadata(
-      runtimeOptions.surface,
-      runtimeOptions.command,
-    ),
-  };
+  const requestContext = codexSecurityRequestContext(prepared.config, {
+    surface: runtimeOptions.surface,
+    command: runtimeOptions.command,
+    providerResolved: prepared.config["model_provider"] !== undefined,
+  });
   delete prepared.config["responses_api_metadata"];
   const configOverrides = [
     ...prepared.overrides,
-    `responses_api_metadata=${inlineToml(metadata)}`,
+    requestContext.configOverride,
   ];
   const codex = await options.createCodex!({
     ...(configOverrides.length ? { configOverrides } : {}),
@@ -569,11 +566,14 @@ async function startPreparedReadOnlyCodexThread(
       project_doc_max_bytes: 0,
       features: {
         ...Object.fromEntries(
-          ["api_key_cyber_access_programs", "api_key_model_discovery"].flatMap(
-            (name) =>
-              inheritedFeatures?.[name] === undefined
-                ? []
-                : [[name, inheritedFeatures[name]]],
+          [
+            "cli_daybreak",
+            "api_key_cyber_access_programs",
+            "api_key_model_discovery",
+          ].flatMap((name) =>
+            inheritedFeatures?.[name] === undefined
+              ? []
+              : [[name, inheritedFeatures[name]]],
           ),
         ),
         apps: false,
@@ -674,15 +674,21 @@ async function startReadOnlyCodexThread(
     );
   }
   const sdkConfig = structuredCodexConfig(config);
-  const requestMetadata = {
-    ...(homeExecutionConfig["responses_api_metadata"] as
-      JsonObject | undefined),
-    ...(sdkConfig["responses_api_metadata"] as JsonObject | undefined),
-    ...codexSecurityRequestMetadata(
-      runtimeOptions.surface,
-      runtimeOptions.command,
-    ),
-  };
+  const requestContext = codexSecurityRequestContext(
+    {
+      ...sdkConfig,
+      responses_api_metadata: {
+        ...(homeExecutionConfig["responses_api_metadata"] as
+          JsonObject | undefined),
+        ...(sdkConfig["responses_api_metadata"] as JsonObject | undefined),
+      },
+    },
+    {
+      surface: runtimeOptions.surface,
+      command: runtimeOptions.command,
+      providerResolved: sdkConfig["model_provider"] !== undefined,
+    },
+  );
   delete sdkConfig["responses_api_metadata"];
   delete sdkConfig["default_permissions"];
   const providerSettings = commandAuth ? providerConfig : (config ?? {});
@@ -705,11 +711,7 @@ async function startReadOnlyCodexThread(
   if (options.inheritedPermissions !== undefined)
     delete threadOptions.sandboxMode;
   const codexOptions: CodexOptions = {
-    // A single table preserves literal keys that the SDK would split on dots.
-    configOverrides: [
-      ...prepared.overrides,
-      `responses_api_metadata=${inlineToml(requestMetadata)}`,
-    ],
+    configOverrides: [...prepared.overrides, requestContext.configOverride],
     codexPathOverride: executablePathForSpawn(command.command),
     env: environment,
     // The SDK forwards its apiKey option as CODEX_API_KEY for Codex exec.
@@ -731,11 +733,14 @@ async function startReadOnlyCodexThread(
       project_doc_max_bytes: 0,
       features: {
         ...Object.fromEntries(
-          ["api_key_cyber_access_programs", "api_key_model_discovery"].flatMap(
-            (name) =>
-              effectiveFeatures?.[name] === undefined
-                ? []
-                : [[name, effectiveFeatures[name]]],
+          [
+            "cli_daybreak",
+            "api_key_cyber_access_programs",
+            "api_key_model_discovery",
+          ].flatMap((name) =>
+            effectiveFeatures?.[name] === undefined
+              ? []
+              : [[name, effectiveFeatures[name]]],
           ),
         ),
         apps: false,

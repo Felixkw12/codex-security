@@ -47,6 +47,7 @@ export function semanticScanDraft(
     "excludePaths",
     "receiptRefs",
     "inventoryStrategy",
+    "completeness",
   ])
     delete semanticCoverage[field];
   return {
@@ -219,10 +220,7 @@ export function scanFindingIdentity(source: JsonObject): string {
   ]);
 }
 
-export function validateFindingSemantics(
-  findings: SemanticFinding[],
-  enforceLegacyEvidenceBounds = true,
-): void {
+export function validateFindingSemantics(findings: SemanticFinding[]): void {
   for (const [findingIndex, finding] of findings.entries()) {
     const severity = finding.severity;
     if (
@@ -250,7 +248,6 @@ export function validateFindingSemantics(
     const evidenceIds = new Set<string>();
     for (const [evidenceName, evidenceCatalog] of [
       ["codeEvidence", finding["codeEvidence"]],
-      ["code_evidence", finding["code_evidence"]],
     ] as const) {
       for (const [evidenceIndex, evidence] of (
         evidenceCatalog ?? []
@@ -264,7 +261,6 @@ export function validateFindingSemantics(
         }
         evidenceIds.add(id);
         if (
-          (evidenceName === "codeEvidence" || enforceLegacyEvidenceBounds) &&
           typeof evidence["endLine"] === "number" &&
           evidence["endLine"] < (evidence["startLine"] as number)
         ) {
@@ -278,17 +274,11 @@ export function validateFindingSemantics(
 
     const referencedSections: Array<[string, unknown]> = [
       ["rootCause", finding["rootCause"]],
-      ["root_cause", finding["root_cause"]],
       ["validation", finding["validation"]],
       ["attackPath", finding["attackPath"]],
     ];
     if (isObject(finding["attackPath"])) {
-      for (const sectionName of [
-        "dataFlow",
-        "dataflow",
-        "data_flow",
-        "reachability",
-      ]) {
+      for (const sectionName of ["dataflow", "reachability"]) {
         referencedSections.push([
           `attackPath.${sectionName}`,
           finding["attackPath"][sectionName],
@@ -297,7 +287,7 @@ export function validateFindingSemantics(
     }
     for (const [sectionName, section] of referencedSections) {
       if (!isObject(section)) continue;
-      for (const referencesName of ["evidenceRefs", "evidence_refs"]) {
+      for (const referencesName of ["evidenceRefs"]) {
         const references = section[referencesName];
         if (references === undefined) continue;
         if (
@@ -314,24 +304,6 @@ export function validateFindingSemantics(
         }
       }
     }
-  }
-}
-
-export function validateCoverageSemantics(coverage: SemanticCoverage): void {
-  if (coverage["completeness"] !== "complete") return;
-  if (coverage.deferred.length > 0) {
-    throw new Error(
-      "scan draft: complete coverage cannot contain deferred work.",
-    );
-  }
-  if (
-    coverage.surfaces.some(
-      (surface) => surface["disposition"] === "needs_follow_up",
-    )
-  ) {
-    throw new Error(
-      "scan draft: complete coverage cannot contain needs_follow_up surfaces.",
-    );
   }
 }
 
@@ -357,7 +329,6 @@ type PreparedFinding = SemanticFinding & {
 type PreparedCoverage = Pick<
   CoverageDocument,
   | "mode"
-  | "completeness"
   | "inventoryStrategy"
   | "includePaths"
   | "excludePaths"
@@ -747,7 +718,7 @@ function semanticIdentifier(value: string, fallback: string): string {
     .replace(/[\u0300-\u036f]/gu, "")
     .toLowerCase()
     .replace(/[^a-z0-9._/-]+/gu, "-")
-    .replace(/^-+|-+$/gu, "");
+    .replace(/^[^a-z0-9]+|-+$/gu, "");
   return identifier || fallback;
 }
 

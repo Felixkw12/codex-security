@@ -26,6 +26,7 @@ export async function writeSemanticScanDraft(
   draft: SemanticScan,
 ): Promise<void> {
   const scoped = scopedDeepDraft(options.contract, draft);
+  requireFiniteNumbers(scoped);
   await writePreparedScanDraft(
     options,
     scoped,
@@ -71,4 +72,13 @@ export async function writePreparedScanDraft(
       ? []
       : ["--claim-token", options.claimToken]),
   ]);
+}
+
+function requireFiniteNumbers(value: unknown): void {
+  if (typeof value === "number" && !Number.isFinite(value))
+    throw new TypeError(
+      "Stored finding JSON cannot contain non-finite numbers.",
+    );
+  if (value !== null && typeof value === "object")
+    for (const item of Object.values(value)) requireFiniteNumbers(item);
 }

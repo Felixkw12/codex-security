@@ -71,7 +71,6 @@ export function scanPrompt(
   target: NormalizedTarget,
   skillName: string,
   scanId: string,
-  hasConfigPath = false,
   hasKnowledgeBase = false,
   additionalPrompt?: string,
   enforceCostLimit = false,
@@ -123,11 +122,6 @@ export function scanPrompt(
           'After the file inventory, after each fully reviewed file batch, and when entering each later phase, emit one standalone CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8} line in a completed command output or agent message. Use the actual phase and file counts. Never count unread or partially reviewed files.',
           'Every delegated review assignment must say: After each completed batch, emit CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8} on its own line using your worker-local reviewed and assigned file counts.',
         ]),
-    ...(hasConfigPath
-      ? [
-          `For normal config-preflight helper calls, append --config ${shellEnvironmentReference("CODEX_SECURITY_CONFIG_PATH")} so preflight reads the sanitized active runtime config. Preserve the documented runtime and --effective-config arguments for session-only values.`,
-        ]
-      : []),
     ...(hasKnowledgeBase
       ? [
           `The ${shellEnvironmentReference("CODEX_SECURITY_KNOWLEDGE_BASE")} environment variable contains primary documents about the project and its organization, including their architecture, threat model, and policies. These documents are a source of truth and override conflicting SECURITY.md guidance, generated threat models, and other sources, except explicit user instructions.`,
@@ -139,7 +133,7 @@ export function scanPrompt(
     ...(skillName === "security-scan" || enforceCostLimit || customValidation
       ? [
           "During the audit, checkpoint the unsealed canonical scan-manifest.json, findings.json, and coverage.json before combining or revalidating returned baseline or investigator results and after each validation decision. Reuse these same files; do not wait for the final report or depend on a draft MCP tool.",
-          "For unfinished checkpoints, set scan.complete to false and coverage.completeness to partial. Keep validated findings in findings; preserve pending candidates in coverage.deferred with a stable candidateId, their original payload under candidate, evidence, counterevidence, and a meaningful reason. Do not present pending work as validated.",
+          "For unfinished checkpoints, set scan.complete to false. Keep validated findings in findings; preserve pending candidates in coverage.deferred with a stable candidateId, their original payload under candidate, evidence, counterevidence, and a meaningful reason. Do not present pending work as validated.",
           "Write the final canonical scan-manifest.json, findings.json, and coverage.json with the provisional scan.complete marker removed, retaining truthful coverage and any deferred work. Do not finalize or seal them; the SDK workbench owns authoritative metadata, finalization, report generation, and sealing.",
         ]
       : [

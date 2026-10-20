@@ -46,7 +46,7 @@ export type TextOrSummary =
       outcome?: Text;
       transformations?: TextList;
       evidenceRefs?: TextList;
-      evidence_refs?: TextList;
+      evidence_refs?: never;
       [k: string]: unknown;
     };
 export type FindingAssessment =
@@ -68,7 +68,7 @@ export type FindingReachability =
       outcome?: Text;
       preconditions?: TextList;
       evidenceRefs?: TextList;
-      evidence_refs?: TextList;
+      evidence_refs?: never;
       [k: string]: unknown;
     };
 
@@ -118,26 +118,18 @@ export interface Finding {
     [k: string]: unknown;
   };
   codeEvidence?: CodeEvidence[];
-  code_evidence?: LegacyCodeEvidence[];
+  code_evidence?: never;
   rootCause?:
     | Text
     | {
         summary: Text;
-        code?: Text;
-        language?: Text;
+        code?: never;
+        language?: never;
         evidenceRefs?: TextList;
+        evidence_refs?: never;
         [k: string]: unknown;
       };
-  root_cause?:
-    | Text
-    | {
-        summary?: Text;
-        code?: Text;
-        language?: Text;
-        evidenceRefs?: TextList;
-        evidence_refs?: TextList;
-        [k: string]: unknown;
-      };
+  root_cause?: never;
   remediation: Text;
   validation?: FindingValidation | null;
   attackPath?: FindingAttackPath | null;
@@ -217,17 +209,12 @@ export interface CodeEvidence {
   explanation: Text;
   [k: string]: unknown;
 }
-export interface LegacyCodeEvidence {
-  id: Text;
-  code: Text;
-  [k: string]: unknown;
-}
 export interface FindingValidation {
   assertions?: TextList;
   counterEvidence?: TextList;
   evidence?: Text | TextList;
   evidenceRefs?: TextList;
-  evidence_refs?: TextList;
+  evidence_refs?: never;
   limitations?: TextList;
   method?: Text;
   status?: Text | null;
@@ -240,11 +227,11 @@ export interface FindingAttackPath {
   assumptions?: TextList;
   blindspots?: TextList;
   controls?: TextList;
-  dataFlow?: TextOrSummary;
-  data_flow?: TextOrSummary;
+  dataFlow?: never;
+  data_flow?: never;
   dataflow?: TextOrSummary;
   evidenceRefs?: TextList;
-  evidence_refs?: TextList;
+  evidence_refs?: never;
   impact?: FindingAssessment | null;
   likelihood?: FindingAssessment | null;
   limitations?: TextList;
@@ -262,10 +249,6 @@ export interface Coverage {
   includePaths?: never;
   excludePaths?: never;
   receiptRefs?: never;
-  /**
-   * Use partial if any work is deferred or any surface needs follow-up; use complete only when no such work remains.
-   */
-  completeness: "complete" | "partial" | "unknown";
   inventoryStrategy?: never;
   surfaces: Surface[];
   explicitExclusions: {

@@ -51,9 +51,9 @@ class FinalizeScanContractTest(ScanFixtureTestCase):
         self.coverage["scanId"] = "scan_001"
         self.coverage["includePaths"] = ["src/"]
 
-    def write_sealed_scan(self) -> None:
+    def write_sealed_scan(self) -> tuple[dict, dict, dict]:
         self.write_scan()
-        FINALIZER.finalize_scan(self.scan_dir)
+        return FINALIZER.finalize_scan(self.scan_dir)
 
     def compatible_finding(self, findings: dict) -> dict:
         original = copy.deepcopy(findings)
@@ -83,7 +83,7 @@ class FinalizeScanContractTest(ScanFixtureTestCase):
     @skipIf(os.name == "nt", "POSIX source filenames")
     def test_sarif_hashes_source_names_that_are_not_portable_artifact_names(self) -> None:
         source_root = self.scan_dir / "source"
-        for name in ("aux.c", "con.py", "src/a:b.c", "what?.md"):
+        for name in ("aux.c", "con.py", "src/a:b.c", "what?.md", " ", "\u00a0"):
             with self.subTest(name=name):
                 source = source_root / name
                 source.parent.mkdir(parents=True, exist_ok=True)
@@ -156,10 +156,7 @@ The extraction root is not enforced.
                 "targetId": "target_sha256_example",
                 "displayName": "example/repo",
                 "revision": "deadbeef",
-                "snapshotDigest": (
-                    "codex-security-snapshot/v1:sha256:"
-                    "0000000000000000000000000000000000000000000000000000000000000000"
-                ),
+                "snapshotDigest": "codex-security-snapshot/v1:sha256:" + "0" * 64,
             },
             "allowedTargetKinds": ["git_worktree"],
             "scope": {"includePaths": ["src/"], "excludePaths": []},
@@ -202,6 +199,11 @@ The extraction root is not enforced.
             "\n".join(f"line {index}" for index in range(1, 60)), encoding="utf-8"
         )
         return source_root
+
+    def sarif_result(self, finding: dict, source_root: Path) -> dict:
+        return FINALIZER.build_sarif(self.manifest, {"findings": [finding]}, source_root)["runs"][
+            0
+        ]["results"][0]
 
     def export_csv(self) -> csv.DictReader:
         self.findings["findings"] = [copy.deepcopy(self.finding)]
@@ -395,6 +397,18 @@ The extraction root is not enforced.
 
         self.assertEqual(accepted, findings)
         self.assertEqual(path.read_bytes(), compact)
+
+    @pytest.mark.cross_platform
+    def test_sealed_legacy_coverage_remains_readable_and_unchanged(self) -> None:
+        _, _, coverage = self.write_sealed_scan()
+        coverage["completeness"] = "partial"
+        self.rewrite_sealed_artifact("coverage.json", coverage)
+        original = self.scan_file_bytes(*CANONICAL_FILES)
+
+        _, _, retained = FINALIZER.finalize_scan(self.scan_dir)
+
+        self.assertEqual(retained["completeness"], "partial")
+        self.assertEqual(self.scan_file_bytes(*CANONICAL_FILES), original)
 
     @pytest.mark.cross_platform
     def test_sealed_rerun_accepts_legacy_unknown_evidence_references(self) -> None:
@@ -673,6 +687,11 @@ The extraction root is not enforced.
         with self.assertRaisesRegex(FINALIZER.ContractError, "expected a file inside"):
             FINALIZER.finalize_scan(self.scan_dir)
 
+        with self.assertRaisesRegex(FINALIZER.ContractError, "expected a file inside"):
+            FINALIZER._prepare_scan_finalization(
+                self.scan_dir, finding_scope=[("unrelated", False)]
+            )
+
         writeup_path = self.scan_dir / report_path
         writeup_path.parent.mkdir(parents=True)
         writeup_path.mkdir()
@@ -685,6 +704,10 @@ The extraction root is not enforced.
         writeup_path.unlink()
         with self.assertRaisesRegex(FINALIZER.ContractError, "expected a file inside"):
             FINALIZER.finalize_scan(self.scan_dir)
+        sealed_files = self.scan_file_bytes(*CANONICAL_FILES)
+        with self.assertRaises(FINALIZER.ContractError):
+            FINALIZER._prepare_scan_finalization(self.scan_dir, allow_missing_writeups=True)
+        self.assertEqual(self.scan_file_bytes(*CANONICAL_FILES), sealed_files)
 
     def test_finalize_requires_hardening_portfolio_to_be_regular_scan_local_file(self) -> None:
         portfolio_path = "hardening/hardening.md"
@@ -1540,6 +1563,7 @@ The extraction root is not enforced.
             "Authenticated uploaders can trigger extraction.",
             "Reachable file overwrite crosses the extraction boundary.",
             "Reject ../ entry paths in an extraction unit test.",
+            "Use a shared containment-checking extraction helper.",
             "Path traversal",
             "Do other archive formats use the same sink?",
         ):
@@ -1560,18 +1584,69 @@ The extraction root is not enforced.
         self.assertNotIn(stale_status, report)
         self.assertNotIn("Runtime or test status", report)
 
-    def test_finalize_accepts_legacy_unstructured_report_semantics(self) -> None:
+    @pytest.mark.cross_platform
+    def test_new_findings_use_current_fields_without_coercion(self) -> None:
+        invalid_details = [
+            {"code_evidence": []},
+            {"root_cause": "A legacy cause."},
+            {"rootCause": {"summary": "Cause.", "code": "legacy()"}},
+            {"rootCause": {"summary": "Cause.", "language": "python"}},
+            {"rootCause": {"summary": "Cause.", "evidence_refs": []}},
+            {"attackPath": {"dataFlow": "source -> sink"}},
+            {"attackPath": {"data_flow": "source -> sink"}},
+            {"attackPath": {"evidence_refs": []}},
+            {"attackPath": {"dataflow": {"evidence_refs": []}}},
+            {"attackPath": {"reachability": {"evidence_refs": []}}},
+            {"validation": {"evidence_refs": []}},
+            {"validation": {"assertions": "A scalar assertion."}},
+            {"severity": {"level": "high", "changeConditions": ["A list condition."]}},
+            {"remediationTests": "A scalar test."},
+            {"preventiveControls": [42]},
+        ]
+        for details in invalid_details:
+            with self.subTest(details=details):
+                self.findings["findings"] = [{**copy.deepcopy(self.finding), **details}]
+                self.write_scan()
+                before = self.scan_file_bytes(*CANONICAL_FILES, "report.md")
+                with self.assertRaisesRegex(
+                    FINALIZER.RecoverableContractError, "Scan result contains invalid findings"
+                ):
+                    FINALIZER.finalize_scan(self.scan_dir)
+                self.assertEqual(self.scan_file_bytes(*CANONICAL_FILES, "report.md"), before)
+
+    def test_finalize_accepts_current_text_or_object_report_semantics(self) -> None:
         finding = self.findings["findings"][0]
-        finding["validation"] = {"evidence": "legacy validation evidence"}
-        finding["attackPath"] = {"dataflow": "legacy data flow"}
+        finding["rootCause"] = "The extraction destination is not contained."
+        finding["validation"] = {"evidence": "A traversal input escapes the destination."}
+        finding["attackPath"] = {"dataflow": "archive entry -> filesystem write"}
         self.write_scan()
 
         FINALIZER.finalize_scan(self.scan_dir)
 
         report = (self.scan_dir / "report.md").read_text(encoding="utf-8")
-        self.assertIn("Validation details were not recorded separately.", report)
-        self.assertIn("legacy validation evidence", report)
-        self.assertIn("legacy data flow", report)
+        self.assertIn("The extraction destination is not contained.", report)
+        self.assertIn("A traversal input escapes the destination.", report)
+        self.assertIn(r"archive entry -\> filesystem write", report)
+
+    @pytest.mark.cross_platform
+    def test_finalize_renders_embedded_evidence_with_null_end_line(self) -> None:
+        self.findings["findings"][0]["validation"] = {
+            "codeEvidence": [
+                {
+                    "label": "Source control",
+                    "path": "src/evidence.py",
+                    "startLine": 37,
+                    "endLine": None,
+                    "code": "handle(request)",
+                }
+            ]
+        }
+        self.write_scan()
+
+        FINALIZER.finalize_scan(self.scan_dir)
+
+        report = (self.scan_dir / "report.md").read_text(encoding="utf-8")
+        self.assertIn("**Source control** — `src/evidence.py:37`\n", report)
 
     @pytest.mark.cross_platform
     def test_report_projection_preserves_data_flow_aliases_and_scalar_reachability(self) -> None:
@@ -1626,37 +1701,12 @@ The extraction root is not enforced.
         ):
             FINALIZER.finalize_scan(self.scan_dir)
 
-    def test_finalize_rejects_unknown_root_cause_alias_evidence_reference(self) -> None:
-        finding = self.findings["findings"][0]
-        finding["root_cause"] = {
-            "summary": "The write occurs before containment is checked.",
-            "evidenceRefs": ["missing-evidence"],
-        }
-        self.write_scan()
-
-        with self.assertRaisesRegex(
-            FINALIZER.ContractError,
-            "root_cause.evidenceRefs: unknown code-evidence ids: missing-evidence",
-        ):
-            FINALIZER.finalize_scan(self.scan_dir)
-
-    def test_finalize_rejects_unknown_snake_case_code_evidence_reference(self) -> None:
-        finding = self.findings["findings"][0]
-        finding["validation"] = {"evidence_refs": ["missing-evidence"]}
-        self.write_scan()
-
-        with self.assertRaisesRegex(
-            FINALIZER.ContractError,
-            "validation.evidence_refs: unknown code-evidence ids: missing-evidence",
-        ):
-            FINALIZER.finalize_scan(self.scan_dir)
-
     @pytest.mark.cross_platform
     def test_finalize_rejects_unknown_nested_code_evidence_reference(self) -> None:
         finding = self.findings["findings"][0]
         finding["attackPath"] = {
             "dataflow": {"evidenceRefs": ["missing-dataflow-evidence"]},
-            "reachability": {"evidence_refs": ["missing-reachability-evidence"]},
+            "reachability": {"evidenceRefs": ["missing-reachability-evidence"]},
         }
         self.write_scan()
 
@@ -1664,47 +1714,6 @@ The extraction root is not enforced.
             FINALIZER.ContractError,
             "attackPath.dataflow.evidenceRefs: unknown code-evidence ids: "
             "missing-dataflow-evidence",
-        ):
-            FINALIZER.finalize_scan(self.scan_dir)
-
-    @pytest.mark.cross_platform
-    def test_finalize_accepts_nested_reference_to_legacy_code_evidence(self) -> None:
-        finding = self.findings["findings"][0]
-        finding["code_evidence"] = [
-            {
-                "id": "legacy-source",
-                "code": "entry_path = archive_entry.name",
-            }
-        ]
-        finding["attackPath"] = {"dataflow": {"evidence_refs": ["legacy-source"]}}
-        self.write_scan()
-
-        _, findings, _ = FINALIZER.finalize_scan(self.scan_dir)
-
-        self.assertEqual(
-            findings["findings"][0]["attackPath"]["dataflow"]["evidence_refs"],
-            ["legacy-source"],
-        )
-
-    @pytest.mark.cross_platform
-    def test_finalize_rejects_duplicate_ids_across_code_evidence_aliases(self) -> None:
-        finding = self.findings["findings"][0]
-        finding["codeEvidence"] = [
-            {
-                "id": "shared-source",
-                "label": "Canonical source",
-                "path": "src/extract.py",
-                "startLine": 41,
-                "code": "canonical_source()",
-                "explanation": "Canonical snippet.",
-            }
-        ]
-        finding["code_evidence"] = [{"id": "shared-source", "code": "conflicting_legacy_source()"}]
-        self.write_scan()
-
-        with self.assertRaisesRegex(
-            FINALIZER.ContractError,
-            r"code_evidence\[0\]\.id: duplicate code-evidence id",
         ):
             FINALIZER.finalize_scan(self.scan_dir)
 
@@ -1789,6 +1798,26 @@ The extraction root is not enforced.
             pass
 
     @pytest.mark.cross_platform
+    def test_sealed_rerun_renders_legacy_evidence_with_reversed_bounds(self) -> None:
+        self.write_sealed_scan()
+        findings = self.read_json("findings.json")
+        finding = findings["findings"][0]
+        finding["code_evidence"] = [
+            {
+                "id": "legacy-source",
+                "label": "Source control",
+                "location": {"path": "src/evidence.py", "startLine": 48, "endLine": 47},
+                "code": "handle(request)",
+            }
+        ]
+        finding["validation"] = {"evidenceRefs": ["legacy-source"]}
+        with self.preserving_sealed_findings(findings):
+            pass
+
+        report = (self.scan_dir / "report.md").read_text(encoding="utf-8")
+        self.assertIn("**Source control** — `src/evidence.py:48`\n", report)
+
+    @pytest.mark.cross_platform
     def test_sealed_rerun_ignores_malformed_legacy_evidence_rows(self) -> None:
         self.write_sealed_scan()
         findings = self.read_json("findings.json")
@@ -1806,38 +1835,6 @@ The extraction root is not enforced.
                 self.compatible_finding(findings)["code_evidence"],
                 [{"id": "legacy-source", "code": "legacy_source()"}],
             )
-
-    def test_unsealed_scan_rejects_malformed_legacy_evidence_rows(self) -> None:
-        self.findings["findings"][0]["code_evidence"] = [None]
-        self.write_scan()
-
-        with self.assertRaisesRegex(
-            FINALIZER.ContractError,
-            r"code_evidence\[0\]: expected an object",
-        ):
-            FINALIZER.finalize_scan(self.scan_dir)
-
-    def test_unsealed_scan_rejects_nullable_legacy_evidence_catalog(self) -> None:
-        self.findings["findings"][0]["code_evidence"] = None
-        self.write_scan()
-
-        with self.assertRaisesRegex(
-            FINALIZER.ContractError,
-            "code_evidence: expected an array",
-        ):
-            FINALIZER.finalize_scan(self.scan_dir)
-
-    def test_unsealed_scan_rejects_legacy_scalar_finding_details(self) -> None:
-        self.findings["findings"][0]["validation"] = {
-            "assertions": "The destination escapes the extraction root."
-        }
-        self.write_scan()
-
-        with self.assertRaisesRegex(
-            FINALIZER.ContractError,
-            "validation.assertions: expected schema type array",
-        ):
-            FINALIZER.finalize_scan(self.scan_dir)
 
     @pytest.mark.cross_platform
     def test_sealed_rerun_accepts_legacy_sequence_attack_path_details(self) -> None:
@@ -1973,7 +1970,7 @@ The extraction root is not enforced.
                         "import": {"format": format, "sourceRef": source_ref}
                     }
                     self.findings["findings"] = []
-                    self.coverage["completeness"] = "unknown"
+
                     self.coverage["surfaces"] = (
                         [
                             {
@@ -2029,7 +2026,7 @@ The extraction root is not enforced.
 
     def test_rejects_missing_or_unsafe_import_source(self) -> None:
         self.findings["findings"] = []
-        self.coverage["completeness"] = "unknown"
+
         self.coverage["surfaces"] = []
         for source_ref in ("artifacts/import/missing.json", "../source.json", "findings.json"):
             with self.subTest(source_ref=source_ref):
@@ -2043,7 +2040,7 @@ The extraction root is not enforced.
         source_ref = "artifacts/import/source.json"
         self.manifest["scan"]["extensions"] = {"import": {"sourceRef": source_ref}}
         self.findings["findings"] = []
-        self.coverage["completeness"] = "unknown"
+
         self.coverage["surfaces"] = []
         self.write_scan()
         source_path = self.scan_dir / source_ref
@@ -2089,10 +2086,8 @@ The extraction root is not enforced.
         with self.assertRaisesRegex(FINALIZER.ContractError, "missing from sealed artifacts"):
             FINALIZER.finalize_scan(self.scan_dir)
 
-        warnings: list[str] = []
         with self.assertRaisesRegex(FINALIZER.ContractError, "missing from sealed artifacts"):
-            FINALIZER._prepare_scan_finalization(self.scan_dir, completion_warnings=warnings)
-        self.assertEqual(warnings, [])
+            FINALIZER._prepare_scan_finalization(self.scan_dir, recover_unsealed=True)
 
     def test_fingerprint_survives_line_movement_and_file_rename(self) -> None:
         renamed = copy.deepcopy(self.finding)
@@ -2181,27 +2176,31 @@ The extraction root is not enforced.
         self.assertEqual(finding["fingerprints"]["algorithm"], "codex-security/v1")
         self.assertNotEqual(finding["fingerprints"]["primary"], "codex-security/v0:sha256:example")
 
-    def test_recovery_normalizes_severity_change_condition_lists(self) -> None:
+    def test_stopped_recovery_normalizes_severity_change_condition_lists(self) -> None:
         self.findings["findings"][0]["severity"]["changeConditions"] = [
             " Raise if the vulnerable path becomes internet-reachable. ",
             "Lower if the input is constrained before parsing.",
         ]
         self.write_scan()
-        warnings: list[str] = []
 
-        prepared = FINALIZER._prepare_scan_finalization(self.scan_dir, completion_warnings=warnings)
+        prepared = FINALIZER._prepare_scan_finalization(
+            self.scan_dir,
+            completion_binding={**self.completion_binding(), "status": "interrupted"},
+            recover_unsealed=True,
+        )
 
-        finding = prepared[3]["findings"][0]
+        finding = prepared.findings["findings"][0]
         self.assertEqual(
             finding["severity"]["changeConditions"],
             "Raise if the vulnerable path becomes internet-reachable. "
             "Lower if the input is constrained before parsing.",
         )
-        self.assertEqual(warnings, ["Recovered finding 1: normalized severity change conditions."])
-        self.assertEqual(prepared[4]["completeness"], "complete")
+        self.assertEqual(
+            prepared.warnings, ["Recovered finding 1: normalized severity change conditions."]
+        )
 
     @pytest.mark.cross_platform
-    def test_recovery_ranks_legacy_and_canonical_code_evidence_equally(self) -> None:
+    def test_stopped_recovery_ranks_legacy_and_canonical_code_evidence_equally(self) -> None:
         canonical_evidence = {
             "id": "canonical-source",
             "label": "Canonical source",
@@ -2224,22 +2223,23 @@ The extraction root is not enforced.
                 second["root_cause"] = None
                 self.findings["findings"] = [first, second]
                 self.write_scan()
-                warnings: list[str] = []
 
                 prepared = FINALIZER._prepare_scan_finalization(
-                    self.scan_dir, completion_warnings=warnings
+                    self.scan_dir,
+                    completion_binding={**self.completion_binding(), "status": "interrupted"},
+                    recover_unsealed=True,
                 )
 
-                self.assertEqual(prepared[3]["findings"][0]["summary"], "SECOND")
-                self.assertIsNone(prepared[3]["findings"][0]["root_cause"])
-                self.assertEqual(prepared[3]["findings"][0][evidence_field], [evidence])
+                self.assertEqual(prepared.findings["findings"][0]["summary"], "SECOND")
+                self.assertIsNone(prepared.findings["findings"][0]["root_cause"])
+                self.assertEqual(prepared.findings["findings"][0][evidence_field], [evidence])
                 self.assertEqual(
-                    warnings,
+                    prepared.warnings,
                     ["Recovered finding 2: retained stronger duplicate logical finding."],
                 )
 
     @pytest.mark.cross_platform
-    def test_recovery_ranks_embedded_root_cause_evidence(self) -> None:
+    def test_stopped_recovery_ranks_embedded_root_cause_evidence(self) -> None:
         for name, root_cause in (
             (
                 "embedded",
@@ -2262,42 +2262,22 @@ The extraction root is not enforced.
                 second["rootCause"] = root_cause
                 self.findings["findings"] = [first, second]
                 self.write_scan()
-                warnings: list[str] = []
 
                 prepared = FINALIZER._prepare_scan_finalization(
-                    self.scan_dir, completion_warnings=warnings
+                    self.scan_dir,
+                    completion_binding={**self.completion_binding(), "status": "interrupted"},
+                    recover_unsealed=True,
                 )
 
-                self.assertEqual(prepared[3]["findings"][0]["summary"], "SECOND")
+                self.assertEqual(prepared.findings["findings"][0]["summary"], "SECOND")
                 self.assertEqual(
-                    warnings,
+                    prepared.warnings,
                     ["Recovered finding 2: retained stronger duplicate logical finding."],
                 )
 
-    def test_recovery_rejects_malformed_severity_change_condition_lists(self) -> None:
-        for change_conditions in ([], ["  "], ["Valid condition.", 1], ["\ud800"]):
-            with self.subTest(change_conditions=repr(change_conditions)):
-                self.findings["findings"][0]["severity"]["changeConditions"] = change_conditions
-                self.write_scan()
-                warnings: list[str] = []
-
-                prepared = FINALIZER._prepare_scan_finalization(
-                    self.scan_dir, completion_warnings=warnings
-                )
-
-                self.assertEqual(prepared[3]["findings"], [])
-                self.assertEqual(prepared[4]["completeness"], "partial")
-                self.assertEqual(len(warnings), 1)
-                self.assertIn("severity.changeConditions", warnings[0])
-
-    def test_unsealed_invalid_anchor_stays_strict_without_recovery(self) -> None:
-        self.findings["findings"][0]["identity"]["anchor"] = "Invalid Anchor"
-        self.write_scan()
-
-        with self.assertRaisesRegex(FINALIZER.ContractError, "stable lowercase semantic slug"):
-            FINALIZER.finalize_scan(self.scan_dir)
-
-    def test_recovery_preserves_finding_with_malformed_optional_remediation_fields(self) -> None:
+    def test_stopped_recovery_preserves_finding_with_malformed_optional_remediation_fields(
+        self,
+    ) -> None:
         for field, value in (
             ("remediationTests", "Reject unsafe archive paths."),
             ("remediationTests", [{"test": "Reject unsafe archive paths."}]),
@@ -2306,38 +2286,23 @@ The extraction root is not enforced.
             with self.subTest(field=field, value=value):
                 self.findings["findings"][0][field] = value
                 self.write_scan()
-                warnings: list[str] = []
 
-                _, _, _, findings, coverage, _, _ = FINALIZER._prepare_scan_finalization(
+                prepared = FINALIZER._prepare_scan_finalization(
                     self.scan_dir,
-                    completion_warnings=warnings,
+                    completion_binding={**self.completion_binding(), "status": "interrupted"},
+                    recover_unsealed=True,
                 )
 
-                self.assertEqual(len(findings["findings"]), 1)
-                self.assertNotIn(field, findings["findings"][0])
-                self.assertEqual(coverage["completeness"], "complete")
+                self.assertEqual(len(prepared.findings["findings"]), 1)
+                self.assertNotIn(field, prepared.findings["findings"][0])
+
                 self.assertTrue(
-                    any(warning.startswith(f"Skipped malformed {field}") for warning in warnings)
+                    any(
+                        warning.startswith(f"Skipped malformed {field}")
+                        for warning in prepared.warnings
+                    )
                 )
                 self.findings["findings"][0].pop(field)
-
-    def test_recovery_keeps_valid_optional_remediation_fields(self) -> None:
-        finding = self.findings["findings"][0]
-        finding["remediationTests"] = ["Reject unsafe archive paths."]
-        finding["preventiveControls"] = ["Validate every archive path."]
-        self.write_scan()
-        warnings: list[str] = []
-
-        _, _, _, findings, _, _, _ = FINALIZER._prepare_scan_finalization(
-            self.scan_dir,
-            completion_warnings=warnings,
-        )
-
-        self.assertEqual(findings["findings"][0]["remediationTests"], finding["remediationTests"])
-        self.assertEqual(
-            findings["findings"][0]["preventiveControls"], finding["preventiveControls"]
-        )
-        self.assertFalse(warnings)
 
     def test_recovery_publishes_findings_without_unsafe_deferred_paths(self) -> None:
         valid = {"id": "review", "reason": "Repository review is incomplete.", "paths": ["."]}
@@ -2349,9 +2314,8 @@ The extraction root is not enforced.
             with self.subTest(status=status):
                 self.write_scan()
                 binding = {**self.completion_binding(), "status": status}
-                warnings: list[str] = []
                 prepared = FINALIZER._prepare_scan_finalization(
-                    self.scan_dir, completion_binding=binding, completion_warnings=warnings
+                    self.scan_dir, completion_binding=binding, recover_unsealed=True
                 )
                 manifest, findings, coverage = FINALIZER._write_prepared_scan_finalization(prepared)
 
@@ -2359,11 +2323,11 @@ The extraction root is not enforced.
                 self.assertEqual(len(findings["findings"]), 1)
                 self.assertEqual(findings["findings"][0]["title"], self.finding["title"])
                 self.assertEqual(coverage["deferred"], [valid])
-                self.assertEqual(coverage["completeness"], "partial")
+
                 self.assertTrue(
                     any(
                         "Skipped malformed deferred coverage item 1" in warning
-                        for warning in warnings
+                        for warning in prepared.warnings
                     )
                 )
                 self.assertEqual(self.read_json("findings.json"), findings)
@@ -2403,6 +2367,55 @@ The extraction root is not enforced.
                 ):
                     FINALIZER.finalize_scan(self.scan_dir)
 
+    def test_rejects_remote_unsupported_port(self) -> None:
+        for remote in ("https://example.com:bad/repo", "https://example.com:99999/repo"):
+            with self.subTest(remote=remote):
+                self.manifest["scan"]["target"]["remote"] = remote
+                self.write_scan()
+                with self.assertRaisesRegex(
+                    FINALIZER.ContractError, "expected a sanitized canonical absolute URL"
+                ):
+                    FINALIZER.finalize_scan(self.scan_dir)
+
+    def test_rejects_remote_unsafe_authority(self) -> None:
+        for remote in (
+            "https://exa mple.com/repo",
+            "https://example.com>/repo",
+            "https://exa^mple.com/repo",
+            "https://exa|mple.com/repo",
+            "https://:8022/repo",
+            "https://a:b:80/repo",
+            "https://[::1/repo",
+            "https://[example]/repo",
+        ):
+            with self.subTest(remote=remote):
+                self.manifest["scan"]["target"]["remote"] = remote
+                self.write_scan()
+                with self.assertRaisesRegex(
+                    FINALIZER.ContractError, "expected a sanitized canonical absolute URL"
+                ):
+                    FINALIZER.finalize_scan(self.scan_dir)
+
+    def test_rejects_remote_bare_userinfo_separator(self) -> None:
+        self.manifest["scan"]["target"]["remote"] = "https://@example.com/repo"
+        self.write_scan()
+        with self.assertRaisesRegex(FINALIZER.ContractError, "must not contain credentials"):
+            FINALIZER.finalize_scan(self.scan_dir)
+
+    def test_seals_remote_port_and_ipv6_authority(self) -> None:
+        for remote in (
+            "https://example.com:8022/repo",
+            "https://example.com:/repo",
+            "https://[::1]:8022/repo",
+            "https://[::ffff:1.2.3.4]/repo",
+        ):
+            with self.subTest(remote=remote):
+                self.manifest["scan"]["target"]["remote"] = remote
+                self.write_scan()
+                FINALIZER.finalize_scan(self.scan_dir)
+                manifest = self.read_json("scan-manifest.json")
+                self.assertEqual(manifest["scan"]["target"]["remote"], remote)
+
     def test_rejects_repository_root_finding_location(self) -> None:
         self.findings["findings"][0]["locations"][0]["path"] = "."
         self.write_scan()
@@ -2419,6 +2432,43 @@ The extraction root is not enforced.
         self.assertEqual(
             self.read_json("scan-manifest.json")["scan"]["scope"]["includePaths"], ["."]
         )
+
+    def test_preserves_literal_repository_paths(self) -> None:
+        for path in (" ", "  ", "\u00a0", "src/a:b.py", "report:summary.py"):
+            with self.subTest(path=path):
+                self.manifest["scan"]["scope"]["includePaths"] = [path]
+                self.coverage["includePaths"] = [path]
+                self.coverage["deferred"] = [
+                    {"id": "review", "reason": "Review is incomplete.", "paths": [path]}
+                ]
+                self.findings["findings"][0]["locations"] = [{"path": path, "startLine": 1}]
+                self.findings["findings"][0]["codeEvidence"] = [
+                    {
+                        "id": "source",
+                        "label": "Source",
+                        "path": path,
+                        "startLine": 1,
+                        "code": "source()",
+                        "explanation": "Repository-relative evidence.",
+                    }
+                ]
+                self.write_scan()
+                manifest, findings, coverage = FINALIZER.finalize_scan(self.scan_dir)
+                self.assertEqual(manifest["scan"]["scope"]["includePaths"], [path])
+                self.assertEqual(coverage["includePaths"], [path])
+                self.assertEqual(coverage["deferred"][0]["paths"], [path])
+                self.assertEqual(findings["findings"][0]["locations"][0]["path"], path)
+                self.assertEqual(findings["findings"][0]["codeEvidence"][0]["path"], path)
+                if path.isascii() and path.isspace():
+                    self.assertIn(
+                        f'- Included paths: `"{path}"`',
+                        (self.scan_dir / "report.md").read_text(encoding="utf-8"),
+                    )
+
+    def test_rejects_whitespace_only_artifact_paths(self) -> None:
+        for path in (" ", "  ", "\u00a0"):
+            with self.subTest(path=path), self.assertRaises(FINALIZER.ContractError):
+                FINALIZER._require_portable_relative_path(path, "artifact")
 
     def test_rejects_missing_coverage_receipt(self) -> None:
         self.coverage["surfaces"][0]["receiptRefs"] = ["artifacts/02_discovery/work_ledger.jsonl"]
@@ -2462,55 +2512,78 @@ The extraction root is not enforced.
             with self.assertRaisesRegex(FINALIZER.ContractError, "inside the scan directory"):
                 FINALIZER.finalize_scan(self.scan_dir)
 
-    def test_rejects_complete_coverage_with_needs_follow_up_surface(self) -> None:
+    def test_finalizes_review_notes_and_discards_old_outcome_labels(self) -> None:
+        self.coverage["completeness"] = "partial"
         self.coverage["surfaces"][0]["disposition"] = "needs_follow_up"
-        self.write_scan()
-        with self.assertRaisesRegex(FINALIZER.ContractError, "cannot have deferred work"):
-            FINALIZER.finalize_scan(self.scan_dir)
-
-    def test_rejects_complete_coverage_with_deferred_work(self) -> None:
         self.coverage["deferred"] = [
             {
                 "id": "deferred_archive_review",
-                "reason": "Archive extraction review was not completed.",
+                "reason": "Runtime verification remains unavailable.",
             }
         ]
         self.write_scan()
-        with self.assertRaisesRegex(FINALIZER.ContractError, "cannot have deferred work"):
-            FINALIZER.finalize_scan(self.scan_dir)
+
+        manifest, _, coverage = FINALIZER.finalize_scan(self.scan_dir)
+
+        self.assertEqual(manifest["scan"]["status"], "completed")
+        self.assertNotIn("completeness", coverage)
+        self.assertEqual(coverage["deferred"], self.coverage["deferred"])
+        self.assertEqual(coverage["surfaces"][0]["disposition"], "needs_follow_up")
+
+    def write_code_evidence_scan(self, path: str) -> None:
+        self.findings["findings"][0]["codeEvidence"] = [
+            {
+                "id": "source",
+                "label": "Source",
+                "path": path,
+                "startLine": 1,
+                "code": "source()",
+                "explanation": "Synthetic source evidence.",
+            }
+        ]
+        self.write_scan()
 
     def test_rejects_unsafe_code_evidence_paths(self) -> None:
         for path in ("../../outside.ts", "/outside.ts", r"C:\outside.ts"):
             with self.subTest(path=path):
-                self.findings["findings"][0]["codeEvidence"] = [
-                    {
-                        "id": "source",
-                        "label": "Source",
-                        "path": path,
-                        "startLine": 1,
-                        "code": "source()",
-                        "explanation": "Synthetic source evidence.",
-                    }
-                ]
-                self.write_scan()
+                self.write_code_evidence_scan(path)
                 with self.assertRaisesRegex(
                     FINALIZER.ContractError,
                     r"codeEvidence\[0\]\.path: expected a safe repository-relative POSIX path",
                 ):
                     FINALIZER.finalize_scan(self.scan_dir)
 
-    def test_rejects_unsafe_deferred_paths(self) -> None:
-        self.coverage["completeness"] = "partial"
-        for path in ("../../outside.ts", "/outside.ts", r"C:\outside.ts"):
+    def test_accepts_code_evidence_with_posix_colon_names(self) -> None:
+        for path in ("src/a:b.py", "report:summary.py"):
             with self.subTest(path=path):
+                self.write_code_evidence_scan(path)
+                _, findings, _ = FINALIZER.finalize_scan(self.scan_dir)
+                self.assertEqual(findings["findings"][0]["codeEvidence"][0]["path"], path)
+
+    def test_rejects_unsafe_deferred_paths(self) -> None:
+        for path in (
+            "",
+            "../../outside.ts",
+            "src/../outside.ts",
+            "src/..",
+            "/outside.ts",
+            "//server/share",
+            "C:/outside.ts",
+            "c:outside.ts",
+            "src\\outside.ts",
+            "src/\u0000outside.ts",
+            "src/\u0001outside.ts",
+            "src/\toutside.ts",
+            "src/outside.ts\n",
+            "src/\routside.ts",
+            "src/\u2028/../outside.ts",
+        ):
+            with self.subTest(path=repr(path)):
                 self.coverage["deferred"] = [
                     {"id": "review", "reason": "Review is incomplete.", "paths": [path]}
                 ]
                 self.write_scan()
-                with self.assertRaisesRegex(
-                    FINALIZER.ContractError,
-                    r"deferred\[0\]\.paths\[0\]: expected a safe repository-relative POSIX path",
-                ):
+                with self.assertRaisesRegex(FINALIZER.ContractError, r"coverage.*deferred"):
                     FINALIZER.finalize_scan(self.scan_dir)
 
     def test_accepts_safe_code_evidence_and_deferred_paths(self) -> None:
@@ -2524,8 +2597,28 @@ The extraction root is not enforced.
                 "explanation": "Repository-relative evidence.",
             }
         ]
-        self.coverage["completeness"] = "partial"
-        for path in (".", "src", "src/extract.py", "src/a:b.py"):
+
+        for path in (
+            ".",
+            "./",
+            "././",
+            "src",
+            "src/parser.ts",
+            "./src/parser.ts",
+            "src/./parser.ts",
+            "src//parser.ts",
+            "src/",
+            "src:parser.ts",
+            "src/a:b.py",
+            "src/.hidden",
+            "src/na\u00efve file.ts",
+            "src/\u007fparser.ts",
+            "src/\u2028parser.ts",
+            "src/\u2029parser.ts",
+            " ",
+            "\u0085",
+            "\ufeff",
+        ):
             with self.subTest(path=path):
                 self.coverage["deferred"] = [
                     {"id": "review", "reason": "Review is incomplete.", "paths": [path]}
@@ -2982,7 +3075,7 @@ The extraction root is not enforced.
     def test_sarif_emits_github_line_hash_when_source_is_available(self) -> None:
         source_root = self.write_line_hash_source()
         sarif_finding = self.sarif_finding("semantic-fingerprint")
-        result = FINALIZER._sarif_result(sarif_finding, 0, source_root)
+        result = self.sarif_result(sarif_finding, source_root)
         fingerprints = result["partialFingerprints"]
         self.assertEqual(fingerprints["codexSecurity/v1"], "semantic-fingerprint")
         self.assertEqual(fingerprints["primaryLocationLineHash"], "614150a715d5311d:1")
@@ -2997,7 +3090,7 @@ The extraction root is not enforced.
             mock.patch.object(FINALIZER, "_is_windows", return_value=True),
             mock.patch.object(FINALIZER, "_windows_scan_local_files", return_value=backend),
         ):
-            result = FINALIZER._sarif_result(sarif_finding, 0, source_root)
+            result = self.sarif_result(sarif_finding, source_root)
 
         backend.open_read_fd.assert_called_once_with(
             source_root, "src/extract.py", "source file src/extract.py"
@@ -3017,14 +3110,14 @@ The extraction root is not enforced.
         sarif_finding = self.sarif_finding("semantic-fingerprint")
         sarif_finding["locations"] = [
             {"path": "src/route.py", "startLine": 1, "role": "entrypoint/wrapper"},
-            {"path": "src/control.py", "startLine": 1, "role": "root_control"},
+            {"path": "./src//control.py", "startLine": 1, "role": "root_control"},
         ]
 
-        result = FINALIZER._sarif_result(sarif_finding, 0, source_root)
+        result = self.sarif_result(sarif_finding, source_root)
 
         self.assertEqual(
             result["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
-            "src/control.py",
+            "./src//control.py",
         )
         self.assertEqual(
             result["partialFingerprints"]["primaryLocationLineHash"], "41499a4b14756ba2:1"
@@ -3036,7 +3129,7 @@ The extraction root is not enforced.
         source_path.parent.mkdir(parents=True)
         source_path.write_bytes(b"\n" * 40 + b"invalid: \xff\n")
         sarif_finding = self.sarif_finding("semantic-fingerprint")
-        result = FINALIZER._sarif_result(sarif_finding, 0, source_root)
+        result = self.sarif_result(sarif_finding, source_root)
         self.assertIn("primaryLocationLineHash", result["partialFingerprints"])
 
     def test_sarif_line_hash_skips_symlink_source(self) -> None:
@@ -3050,7 +3143,7 @@ The extraction root is not enforced.
             )
             source_path.symlink_to(external_path)
             sarif_finding = self.sarif_finding("semantic-fingerprint")
-            result = FINALIZER._sarif_result(sarif_finding, 0, source_root)
+            result = self.sarif_result(sarif_finding, source_root)
         self.assertNotIn("primaryLocationLineHash", result["partialFingerprints"])
 
     @skipUnless(hasattr(os, "mkfifo"), "requires FIFO support")
@@ -3111,7 +3204,7 @@ The extraction root is not enforced.
         source_root = self.write_line_hash_source()
         sarif_finding = self.sarif_finding("semantic-fingerprint")
         with mock.patch.object(FINALIZER, "_github_line_hashes", side_effect=PermissionError):
-            result = FINALIZER._sarif_result(sarif_finding, 0, source_root)
+            result = self.sarif_result(sarif_finding, source_root)
         self.assertNotIn("primaryLocationLineHash", result["partialFingerprints"])
 
     def test_sarif_line_hash_streams_source(self) -> None:
@@ -3145,6 +3238,54 @@ The extraction root is not enforced.
         for result in results:
             self.assertIn("primaryLocationLineHash", result["partialFingerprints"])
 
+    def test_sarif_keeps_captured_hash_when_source_root_changes(self) -> None:
+        read_hashes = FINALIZER._github_line_hashes_for_source
+        for change in ("disappear", "retarget"):
+            with self.subTest(change=change):
+                source_root = self.write_line_hash_source()
+                moved_root = source_root.with_name(f"moved-source-{change}")
+
+                def read_then_move(
+                    *args, source_root=source_root, moved_root=moved_root, change=change
+                ):
+                    hashes = read_hashes(*args)
+                    source_root.rename(moved_root)
+                    if change == "retarget":
+                        replacement = self.scan_dir / "replacement"
+                        (replacement / "src").mkdir(parents=True)
+                        (replacement / "src" / "extract.py").write_text(
+                            "replacement source\n" * 41, encoding="utf-8"
+                        )
+                        source_root.symlink_to(replacement, target_is_directory=True)
+                    return hashes
+
+                with mock.patch.object(
+                    FINALIZER, "_github_line_hashes_for_source", side_effect=read_then_move
+                ) as source_reads:
+                    result = self.sarif_result(
+                        self.sarif_finding("semantic-fingerprint"), source_root
+                    )
+
+                self.assertEqual(
+                    result["partialFingerprints"]["primaryLocationLineHash"], "614150a715d5311d:1"
+                )
+                self.assertEqual(source_reads.call_count, 1)
+
+    def test_sarif_does_not_retry_source_root_that_appears_after_capture(self) -> None:
+        source_root = self.scan_dir / "source"
+        sarif_rule = FINALIZER._sarif_rule
+
+        def create_source_then_render_rule(*args):
+            self.write_line_hash_source()
+            return sarif_rule(*args)
+
+        with mock.patch.object(
+            FINALIZER, "_sarif_rule", side_effect=create_source_then_render_rule
+        ):
+            result = self.sarif_result(self.sarif_finding("semantic-fingerprint"), source_root)
+
+        self.assertNotIn("primaryLocationLineHash", result["partialFingerprints"])
+
     def test_sarif_caches_line_hashes_per_source_file(self) -> None:
         source_root = self.write_line_hash_source()
         findings = []
@@ -3163,26 +3304,6 @@ The extraction root is not enforced.
 
 
 CANONICAL_FILES = ("scan-manifest.json", "findings.json", "coverage.json")
-
-
-@pytest.mark.parametrize(("expected", "value"), [("integer", 1), ("number", 1.5)])
-def test_schema_numeric_types_do_not_accept_booleans(expected, value) -> None:
-    schema = {"type": expected}
-    FINALIZER._validate_schema_node(value, schema, "value")
-    with pytest.raises(FINALIZER.ContractError, match="expected schema type"):
-        FINALIZER._validate_schema_node(True, schema, "value")
-
-
-def test_schema_references_preserve_constraints_siblings_and_cycle_errors() -> None:
-    root = {"$defs": {"text": {"type": "string", "minLength": 1}}}
-    reference = {"$ref": "#/$defs/text"}
-    FINALIZER._validate_schema_node("yes", reference, "value", root)
-    with pytest.raises(FINALIZER.ContractError, match="string is too short"):
-        FINALIZER._validate_schema_node("", reference, "value", root)
-    with pytest.raises(FINALIZER.ContractError, match="string does not match schema pattern"):
-        FINALIZER._validate_schema_node("no", {**reference, "pattern": "^yes$"}, "value", root)
-    with pytest.raises(RecursionError):
-        FINALIZER._validate_schema_node("yes", {"$ref": "#"}, "value")
 
 
 if __name__ == "__main__":

@@ -110,7 +110,7 @@ seed(connection, 'scan_comparison_matches', ('before_scan_id', 'after_scan_id', 
 comparison = history.compare_scans(
     connection, argparse.Namespace(before_scan_id='before', after_scan_id='after'),
     require_scan=lambda db, scan: db.execute('SELECT * FROM scans WHERE id = ?', (scan,)).fetchone(),
-    read_coverage=lambda _: {'completeness': 'complete'}, include_matching_inputs=True)
+    read_coverage=lambda _: {}, include_matching_inputs=True)
 print(json.dumps(comparison['matchingInputs']))
 `,
     join(tmpdir(), "codex-security-legacy-repositories"),
@@ -145,7 +145,7 @@ def save(value):
         connection, argparse.Namespace(before_scan_id='before', after_scan_id='after', matches_json=json.dumps(value)),
         now=lambda: '2026-01-01T00:00:00Z',
         require_scan=lambda db, scan: db.execute('SELECT * FROM scans WHERE id = ?', (scan,)).fetchone(),
-        read_coverage=lambda _: {'completeness': 'complete', 'includePaths': ['src'],
+        read_coverage=lambda _: {'includePaths': ['src'],
                                  'excludePaths': [], 'explicitExclusions': []})
 def snapshot():
     return (connection.execute('SELECT result_json FROM scan_comparisons').fetchone()[0],
@@ -180,7 +180,14 @@ print(json.dumps({'summary': accepted['summary'],
       join(tmpdir(), "codex-security-validation-fixture"),
     ),
   ).toEqual({
-    summary: { new: 1, persisting: 2, reopened: 0, resolved: 1, unknown: 0 },
+    summary: {
+      new: 1,
+      persisting: 2,
+      reopened: 0,
+      resolved: 0,
+      not_observed: 1,
+      unknown: 0,
+    },
     related: [
       ["a2", "y"],
       ["c", "z"],
@@ -412,7 +419,7 @@ payload = {
 }
 def cache():
     seed(connection, 'scan_comparisons', ('before_scan_id', 'after_scan_id', 'result_json'), ('before', 'after', json.dumps(payload)), replace=True)
-coverage = {'completeness': 'complete', 'includePaths': ['src'],
+coverage = {'includePaths': ['src'],
             'excludePaths': ['src/excluded.py'], 'explicitExclusions': []}
 def compare():
     return history.compare_scans(
@@ -460,7 +467,7 @@ print(json.dumps({'uncertain': uncertain, 'excluded': excluded, 'resolved': reso
       ],
     },
     excluded: { summary: { new: 1, resolved: 0, unknown: 1 } },
-    resolved: { summary: { new: 1, resolved: 1, unknown: 0 } },
+    resolved: { summary: { new: 1, resolved: 0, not_observed: 1, unknown: 0 } },
     linked: {
       summary: { new: 0, persisting: 0, reopened: 1, resolved: 0, unknown: 0 },
       findings: [
@@ -589,7 +596,7 @@ seed_many(connection, 'scan_comparison_matches', ('before_scan_id', 'after_scan_
 def collect_history():
     result = {}
     for index, (scan, finding) in enumerate(scans):
-        matches, first, bounds = finding_matches(connection, scan, scan, str(index))
+        matches, first, bounds = finding_matches(connection, scan, scan, f'2026-08-01T00:00:0{index}Z')
         result[scan] = {'linked': [match['occurrenceId'] for match in matches], 'first': first, 'bounds': bounds}
         for match in matches:
             assert match['reason']
@@ -604,38 +611,62 @@ print(json.dumps({'withLinks': with_links, 'withoutLinks': collect_history()}))
     withLinks: {
       a: {
         linked: ["a-repeat", "b", "c", "c-repeat"],
-        first: "0",
+        first: "2026-08-01T00:00:00Z",
         bounds: ["a", "c-repeat"],
       },
       b: {
         linked: ["a", "a-repeat", "c", "c-repeat"],
-        first: "0",
+        first: "2026-08-01T00:00:00Z",
         bounds: ["a", "c-repeat"],
       },
       c: {
         linked: ["a", "a-repeat", "b", "c-repeat"],
-        first: "0",
+        first: "2026-08-01T00:00:00Z",
         bounds: ["a", "c-repeat"],
       },
       "a-repeat": {
         linked: ["a", "b", "c", "c-repeat"],
-        first: "0",
+        first: "2026-08-01T00:00:00Z",
         bounds: ["a", "c-repeat"],
       },
       "c-repeat": {
         linked: ["a", "a-repeat", "b", "c"],
-        first: "0",
+        first: "2026-08-01T00:00:00Z",
         bounds: ["a", "c-repeat"],
       },
-      unlinked: { linked: [], first: "5", bounds: ["unlinked"] },
+      unlinked: {
+        linked: [],
+        first: "2026-08-01T00:00:05Z",
+        bounds: ["unlinked"],
+      },
     },
     withoutLinks: {
-      a: { linked: ["a-repeat"], first: "0", bounds: ["a", "a-repeat"] },
-      "a-repeat": { linked: ["a"], first: "0", bounds: ["a", "a-repeat"] },
-      b: { linked: [], first: "1", bounds: ["b"] },
-      c: { linked: ["c-repeat"], first: "2", bounds: ["c", "c-repeat"] },
-      "c-repeat": { linked: ["c"], first: "2", bounds: ["c", "c-repeat"] },
-      unlinked: { linked: [], first: "5", bounds: ["unlinked"] },
+      a: {
+        linked: ["a-repeat"],
+        first: "2026-08-01T00:00:00Z",
+        bounds: ["a", "a-repeat"],
+      },
+      "a-repeat": {
+        linked: ["a"],
+        first: "2026-08-01T00:00:00Z",
+        bounds: ["a", "a-repeat"],
+      },
+      b: { linked: [], first: "2026-08-01T00:00:01Z", bounds: ["b"] },
+      c: {
+        linked: ["c-repeat"],
+        first: "2026-08-01T00:00:02Z",
+        bounds: ["c", "c-repeat"],
+      },
+      "c-repeat": {
+        linked: ["c"],
+        first: "2026-08-01T00:00:02Z",
+        bounds: ["c", "c-repeat"],
+      },
+      unlinked: {
+        linked: [],
+        first: "2026-08-01T00:00:05Z",
+        bounds: ["unlinked"],
+      },
     },
   });
 });
