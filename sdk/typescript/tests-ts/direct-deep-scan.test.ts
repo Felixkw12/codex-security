@@ -272,14 +272,15 @@ test("preserves complete worker usage and cost after direct engine completion", 
     scanDirectory: scanDir,
     model: "gpt-6.1-sol",
   });
+  const executionThreadIds = [
+    "engine-session",
+    "discovery-session",
+    "reducer-session",
+  ];
   tracker.setAttributionReader(async () => ({
     formatVersion: 1,
     workerCodexHome: codexHome,
-    executionThreadIds: [
-      "engine-session",
-      "discovery-session",
-      "reducer-session",
-    ],
+    executionThreadIds,
     owner: {
       threadId: "engine-session",
       turnId: null,
@@ -292,6 +293,7 @@ test("preserves complete worker usage and cost after direct engine completion", 
   tracker.recordUsage(DIRECT_DEEP_SCAN_CONTROL_USAGE, "engine-session");
   tracker.start("engine-session");
   const running = await tracker.refresh();
+  assert.ok(running.usage && typeof running.usage === "object");
   await writeSession(
     codexHome,
     "waiting-session",
@@ -300,7 +302,11 @@ test("preserves complete worker usage and cost after direct engine completion", 
       parent: "engine-session",
     },
   );
-  assert.deepEqual(await tracker.refresh(), { usage: null, cost: null });
+  executionThreadIds.push("waiting-session");
+  assert.deepEqual(await tracker.refresh(), {
+    usage: { ...running.usage, coverage: "partial" },
+    cost: { ...running.cost, coverage: "partial" },
+  });
   tracker.recordUsage(
     {
       input_tokens: 0,

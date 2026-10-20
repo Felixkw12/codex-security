@@ -1270,6 +1270,7 @@ export class DeepScanCoordinator {
         this.state.scanId,
         this.state.workflowVersion === "deep-security-scan/v2",
         true,
+        worker.artifactDir,
       );
       recovered.push({
         id: worker.id,

@@ -69,10 +69,31 @@ export function deepReductionForPersistence(
   return legacy;
 }
 
+function workerCoverageIds(
+  rows: readonly JsonObject[],
+  workerId: string,
+): string[] {
+  const usedIds = new Set(
+    rows.flatMap((row) => (typeof row.id === "string" ? [row.id] : [])),
+  );
+  const emittedIds = new Set<string>();
+  return rows.map((row, index) => {
+    const baseId = typeof row.id === "string" ? row.id : String(index);
+    let id = baseId;
+    if (typeof row.id !== "string" || emittedIds.has(id)) {
+      for (let suffix = 2; usedIds.has(id); suffix++)
+        id = `${baseId}-${suffix}`;
+    }
+    usedIds.add(id);
+    emittedIds.add(id);
+    return `${workerId}/${id}`;
+  });
+}
+
 /** Reduction combines findings; it does not complete the source workers' review. */
 export function aggregateDiscoveryCoverage(
   artifacts: DeepScanArtifacts,
-  discoveries: Pick<AcceptedDiscovery, "id" | "resultPath" | "result">[],
+  discoveries: Pick<AcceptedDiscovery, "id" | "artifactDir" | "result">[],
 ): ScanDraftInput["coverage"] {
   const coverage: ScanDraftInput["coverage"] = {
     surfaces: [],
@@ -81,7 +102,7 @@ export function aggregateDiscoveryCoverage(
   };
   for (const worker of discoveries) {
     const source = structuredClone(worker.result.coverage);
-    const prefix = relative(artifacts.scanDir, dirname(worker.resultPath))
+    const prefix = relative(artifacts.scanDir, worker.artifactDir)
       .split(sep)
       .join("/");
     const scopedId = (id: string) => `${worker.id}/${id}`;
@@ -91,24 +112,12 @@ export function aggregateDiscoveryCoverage(
       "deferred",
     ] as const) {
       const rows = source[field] as JsonObject[];
-      const usedIds = new Set(
-        rows.flatMap((row) => (typeof row.id === "string" ? [row.id] : [])),
-      );
-      const emittedIds = new Set<string>();
+      const ids = workerCoverageIds(rows, worker.id);
       for (const [index, row] of rows.entries()) {
         const retained: JsonObject = { ...row, workerId: worker.id };
         // Independent reviews reuse local IDs. Preserve their links without
         // allowing one worker's disposition to stand in for another's work.
-        const baseId = typeof row.id === "string" ? row.id : String(index);
-        let id = baseId;
-        if (typeof row.id !== "string" || emittedIds.has(id)) {
-          for (let suffix = 2; usedIds.has(id); suffix++) {
-            id = `${baseId}-${suffix}`;
-          }
-        }
-        usedIds.add(id);
-        emittedIds.add(id);
-        retained.id = scopedId(id);
+        retained.id = ids[index];
         if (field === "deferred" && Array.isArray(row.surfaceIds)) {
           retained.surfaceIds = (row.surfaceIds as string[]).map(scopedId);
         }
@@ -171,6 +180,7 @@ export async function validateDiscoveryArtifacts(
   expectedScanId: string,
   validateWriteups = true,
   accepted = false,
+  artifactDir = dirname(resultPath),
 ): Promise<ScanDraftInput> {
   const result = await readDiscoveryAuditDraft(
     artifacts,
@@ -178,13 +188,35 @@ export async function validateDiscoveryArtifacts(
     expectedScanId,
     validateWriteups,
     accepted,
+    artifactDir,
   );
   if (result.complete === false)
     throw new Error(
       "Standard scan worker wrote only a checkpoint; its audit is not complete.",
     );
+  return result;
+}
+
+export async function readDiscoveryAuditDraft(
+  artifacts: DeepScanArtifacts,
+  resultPath: string,
+  expectedScanId: string,
+  validateWriteups = true,
+  accepted = false,
+  artifactDir = dirname(resultPath),
+): Promise<ScanDraftInput> {
+  await requireRegularFile(resultPath, artifacts.workersRoot);
+  const result = parseStoredScanDraft(
+    await readJsonObject(resultPath),
+    "Standard scan worker",
+    expectedScanId,
+    accepted ? parseAcceptedDiscoveryDraft : parsePersistedScanDraft,
+  );
+  // Unfinished drafts remain resumable; complete drafts must retain their evidence.
+  if (result.complete === false) return result;
+  if (validateWriteups) await validateWriteupFiles(artifacts, result);
   validateRetainedCoverage(result.coverage);
-  const root = dirname(resultPath);
+  const root = artifactDir;
   const receiptPaths = new Map<string, string>();
   for (const row of result.coverage.surfaces as JsonObject[]) {
     for (const ref of (row.receiptRefs as string[] | undefined) ?? []) {
@@ -204,25 +236,6 @@ export async function validateDiscoveryArtifacts(
       );
     }
   }
-  return result;
-}
-
-export async function readDiscoveryAuditDraft(
-  artifacts: DeepScanArtifacts,
-  resultPath: string,
-  expectedScanId: string,
-  validateWriteups = true,
-  accepted = false,
-): Promise<ScanDraftInput> {
-  await requireRegularFile(resultPath, artifacts.workersRoot);
-  const result = parseStoredScanDraft(
-    await readJsonObject(resultPath),
-    "Standard scan worker",
-    expectedScanId,
-    accepted ? parseAcceptedDiscoveryDraft : parsePersistedScanDraft,
-  );
-  if (result.complete !== false && validateWriteups)
-    await validateWriteupFiles(artifacts, result);
   return result;
 }
 
@@ -460,14 +473,18 @@ export function projectDiscoveryCoverage(
     workerId: worker.id,
     ...(worker.attempt === undefined ? {} : { attempt: worker.attempt }),
   };
-  const scopedId = (id: string) => `${worker.id}/${id}`;
   const surfaces = coverage.surfaces;
-  const surfaceIds = new Map(
-    surfaces.map((surface, index) => [
-      surface.id,
-      scopedId(surface.id ?? String(index)),
-    ]),
+  const projectedSurfaceIds = workerCoverageIds(surfaces, worker.id);
+  const exclusionIds = workerCoverageIds(
+    coverage.explicitExclusions,
+    worker.id,
   );
+  const deferredIds = workerCoverageIds(coverage.deferred, worker.id);
+  const surfaceIds = new Map<string, string>();
+  for (const [index, surface] of surfaces.entries()) {
+    if (surface.id !== undefined && !surfaceIds.has(surface.id))
+      surfaceIds.set(surface.id, projectedSurfaceIds[index]);
+  }
   const project = <Item extends Record<string, unknown>>(item: Item) => {
     const projected = structuredClone(item);
     const sourceProvenance =
@@ -496,7 +513,7 @@ export function projectDiscoveryCoverage(
     reviews: [{ ...provenance }],
     surfaces: surfaces.map((surface, index) => ({
       ...project(surface),
-      id: scopedId(surface.id ?? String(index)),
+      id: projectedSurfaceIds[index],
       receiptRefs: ((surface.receiptRefs as string[] | undefined) ?? []).map(
         (ref) =>
           ref.startsWith(archivePrefix) || ref.startsWith(`${artifactPrefix}/`)
@@ -504,10 +521,13 @@ export function projectDiscoveryCoverage(
             : `${artifactPrefix}/${ref}`,
       ),
     })),
-    explicitExclusions: coverage.explicitExclusions.map(project),
+    explicitExclusions: coverage.explicitExclusions.map((item, index) => ({
+      ...project(item),
+      id: exclusionIds[index],
+    })),
     deferred: coverage.deferred.map((item, index) => ({
       ...project(item),
-      id: scopedId(typeof item.id === "string" ? item.id : String(index)),
+      id: deferredIds[index],
       ...(item.candidateId === undefined
         ? {}
         : {

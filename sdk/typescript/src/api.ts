@@ -4972,9 +4972,8 @@ export async function runScanEvents(
         completedTurn !== undefined &&
         !managedFinalized
       ) {
-        completedTurn.usage =
-          (await options.onFinalize(completedTurn.usage)) ??
-          completedTurn.usage;
+        const finalizedUsage = await options.onFinalize(completedTurn.usage);
+        if (finalizedUsage !== undefined) completedTurn.usage = finalizedUsage;
         managedFinalized = true;
       }
       options.signal.throwIfAborted();

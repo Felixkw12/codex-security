@@ -45,6 +45,7 @@ from finalize_scan_contract import (
     write_threat_model_projection_if_possible,
 )
 from workbench.saved_coverage import (
+    _merge_reviewed_surface_receipts,
     _prepare_worker_coverage_recovery,
     _project_worker_coverage_row,
     _saved_coverage_id,
@@ -1007,7 +1008,14 @@ def merge_saved_results(
         for review in accepted_coverage.get("reviews", [])
         if isinstance(review, dict)
     }
-    workers_by_id = {worker["id"]: worker for worker in workers}
+    reviewed_workers = {
+        worker["id"]
+        for worker in workers
+        if {"status", "merge_state", "attempt"}.issubset(worker.keys())
+        and worker["status"] == "succeeded"
+        and worker["merge_state"] == "merged"
+        and (worker["id"], worker["attempt"]) in reviewed_attempts
+    }
     latest_reducer_key = (
         (reducer["completed_at"] or "", reducer["id"], int(reducer["attempt"] or 0))
         if reducer is not None and latest_reducer in drafts_by_path
@@ -1045,7 +1053,11 @@ def merge_saved_results(
         parent = drafts_by_path[latest_reducer]
 
     project_worker_coverage, surface_links = _prepare_worker_coverage_recovery(
-        sources, parent, source_order, enabled=project_worker_coverage
+        sources,
+        parent,
+        source_order,
+        enabled=project_worker_coverage,
+        preserve_workers=reviewed_workers,
     )
     # Keep the actual retained row even when recovery adds previous findings.
     linked_surface_sources = {id(surface) for _, _, surface, _, _ in surface_links}
@@ -1754,6 +1766,8 @@ def merge_saved_results(
     # Reopened work survives a superseded checkpoint, but current candidate
     # outcomes still apply. Parent closures cannot remove another worker's row.
     for owner, item in reopened_rows:
+        if owner in reviewed_workers:
+            continue
         if (identity := _deferred_candidate_id(item, owner, ambiguous_deferred)) is not None and (
             owner,
             identity,
@@ -1766,7 +1780,8 @@ def merge_saved_results(
         surfaces = draft["coverage"].get("surfaces", [])
         for surface in surfaces if isinstance(surfaces, list) else []:
             if (
-                isinstance(surface, dict)
+                owner not in reviewed_workers
+                and isinstance(surface, dict)
                 and isinstance(surface.get("id"), str)
                 and (owner, surface["id"]) in ambiguous_surface_ids
                 and surface.get("disposition") == "needs_follow_up"
@@ -1961,15 +1976,7 @@ def merge_saved_results(
                 continue
             finding_positions[key] = len(findings)
             findings.append(finding)
-        worker = workers_by_id.get(worker_id)
-        reviewed = (
-            worker is not None
-            and {"status", "merge_state", "attempt"}.issubset(worker.keys())
-            and worker["status"] == "succeeded"
-            and worker["merge_state"] == "merged"
-            and (worker_id, worker["attempt"]) in reviewed_attempts
-        )
-        if reviewed or (
+        if worker_id in reviewed_workers or (
             superseded
             and relative != accepted_reducer
             and not selected_candidates
@@ -2052,6 +2059,10 @@ def merge_saved_results(
                 retained = append_coverage_row(output, item, worker_id, field)
                 if field == "surfaces" and id(source_item) in linked_surface_sources:
                     linked_surface_outputs[id(source_item)] = retained
+
+    _merge_reviewed_surface_receipts(
+        coverage, worker_row_owners, reviewed_workers, reviewed_attempts
+    )
 
     identities: dict[str, str] = {}
     for finding in findings:

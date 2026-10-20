@@ -1479,7 +1479,7 @@ async function createWorker(scanDir: string, id: string, result: unknown) {
   await mkdir(output, { recursive: true });
   const resultPath = path.join(output, "result.json");
   await writeResult(resultPath, result);
-  return { artifacts, id, resultPath };
+  return { artifacts, id, artifactDir: output, resultPath };
 }
 
 async function testSharedMissingReceiptRepairHistory(root: string) {

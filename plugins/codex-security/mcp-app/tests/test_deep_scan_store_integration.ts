@@ -590,6 +590,11 @@ async function testWorkerRetryThreadsRemainInScanUsage() {
   try {
     const threadId = "retry-owner";
     const run = await store.begin({
+      executionSettings: await captureDeepScanExecutionSettings(
+        {},
+        { filesystemDenies: [] },
+        environment,
+      ),
       targetPath,
       threadId,
       scanRoot: path.join(fixtureRoot, "scans"),
@@ -1863,6 +1868,11 @@ async function testReceiptRepairSurvivesStoppedRecovery(
       "[deep_scan]\nworkers = 1\nmax_discovery_runs = 1\n",
     );
     const run = await store.begin({
+      executionSettings: await captureDeepScanExecutionSettings(
+        {},
+        { filesystemDenies: [] },
+        environment,
+      ),
       targetPath,
       threadId,
       scanRoot: path.join(fixtureRoot, "scans"),
@@ -2097,12 +2107,19 @@ async function testReceiptRepairSurvivesStoppedRecovery(
       id: string;
       disposition: string;
       receiptRefs: string[];
+      provenance?: unknown;
     }[];
     assert.equal(surfaces.length, crossSurface ? 2 : 1);
     assert.deepEqual(
       surfaces.map((row) => row.id).sort(),
       before.surfaces.map((row: { id: string }) => row.id).sort(),
     );
+    for (const surface of surfaces) {
+      const original = before.surfaces.find(
+        (row: { id: string }) => row.id === surface.id,
+      );
+      assert.deepEqual(surface.provenance, original.provenance);
+    }
     assert.ok(surfaces.every((row) => row.disposition === "no_issue_found"));
     assert.equal(
       recovered.deferred.some((row: { id: string }) =>
