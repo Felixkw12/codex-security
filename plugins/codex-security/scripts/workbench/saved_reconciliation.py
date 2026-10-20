@@ -210,7 +210,7 @@ def _merge_tied_parent_observations(
         if isinstance(identity, str)
     }
     closure_schema = _read_json(
-        Path(__file__).resolve().parent.parent / "schemas" / "coverage.schema.json"
+        Path(__file__).resolve().parents[2] / "schemas" / "coverage.schema.json"
     )["properties"]["resolvedDeferred"]
     closures = {}
     for observed in (current, previous):
