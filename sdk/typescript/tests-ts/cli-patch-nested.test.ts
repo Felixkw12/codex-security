@@ -462,6 +462,7 @@ describe("patch change tracking", () => {
         {
           currentDirectory:
             scope === "root" ? directory : join(directory, "package"),
+          result,
           onWorkbench: () => savedScan(result, "scan-1", directory),
           onRepositoryCommand: (command, args, cwd, options) => {
             if (
@@ -1408,6 +1409,7 @@ describe("patch change tracking", () => {
         ["patch", "--scan", "scan-1", "--create-pr", "--json"],
         {
           currentDirectory: root,
+          result,
           onWorkbench: () => savedScan(result, "scan-1", root),
           onRepositoryCommand: (command, args, cwd, options) =>
             command === "git"

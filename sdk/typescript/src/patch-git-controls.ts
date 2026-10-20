@@ -90,23 +90,33 @@ export async function withPatchGitIndex<T>(
   run: RunIndexGit,
   inspect: (run: RunIndexGit) => Promise<T>,
   files?: readonly string[],
+  sourcePathspecs?: readonly string[],
 ): Promise<T> {
   const directory = await mkdtemp(join(tmpdir(), "codex-security-patch-tree-"));
   const indexFile = join(directory, "index");
   const indexed: RunIndexGit = (args, options) =>
     run(args, { ...options, indexFile });
   try {
-    const heads = await indexed(["rev-parse", "--revs-only", "HEAD"]);
-    await indexed(["read-tree", ...(heads.trim() ? ["HEAD"] : ["--empty"])]);
+    let hasHead = true;
+    try {
+      await indexed(["rev-parse", "--verify", "--quiet", "HEAD"]);
+    } catch (error) {
+      const failure = error as { code?: unknown; status?: unknown };
+      if ((failure.code ?? failure.status) !== 1) throw error;
+      // An unborn symbolic HEAD has no commit; malformed refs still fail.
+      await indexed(["symbolic-ref", "--quiet", "HEAD"]);
+      hasHead = false;
+    }
+    await indexed(["read-tree", ...(hasHead ? ["HEAD"] : ["--empty"])]);
     const entries = Buffer.from(
       await run(
         [
-          "--literal-pathspecs",
+          ...(sourcePathspecs === undefined ? ["--literal-pathspecs"] : []),
           "ls-files",
           "--stage",
           "--full-name",
           "-z",
-          ...(files === undefined ? [] : ["--", ...files]),
+          ...(sourcePathspecs ?? (files === undefined ? [] : ["--", ...files])),
         ],
         {
           encoding: "base64",
@@ -114,12 +124,15 @@ export async function withPatchGitIndex<T>(
       ),
       "base64",
     ).toString("latin1");
-    await indexed(["update-index", "-z", "--index-info"], {
-      input: Buffer.from(
-        entries.replaceAll(/(^|\0)([0-7]+ [a-f\d]+) [123]\t/gu, "$1$2 0\t"),
-        "latin1",
-      ),
-    });
+    await indexed(
+      ["-c", "core.ignorestat=false", "update-index", "-z", "--index-info"],
+      {
+        input: Buffer.from(
+          entries.replaceAll(/(^|\0)([0-7]+ [a-f\d]+) [123]\t/gu, "$1$2 0\t"),
+          "latin1",
+        ),
+      },
+    );
     return await inspect(indexed);
   } finally {
     await rm(directory, { recursive: true, force: true });

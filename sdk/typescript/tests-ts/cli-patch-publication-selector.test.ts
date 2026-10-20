@@ -88,6 +88,7 @@ for (const mode of ["resume", "prepare"]) {
           {
             currentDirectory: directory,
             environment,
+            result,
             onWorkbench: () => savedScan(result, "scan-1", directory),
             onCodex: () => {
               models++;
