@@ -428,6 +428,15 @@
   },
   {
     "version": 52,
+    "name": "record severity classification review counts",
+    "statements": [
+      "ALTER TABLE finding_severity_assessments ADD COLUMN classification_runs INTEGER CHECK (classification_runs BETWEEN 1 AND 10);",
+      "ALTER TABLE scan_severity_assessments ADD COLUMN classification_runs INTEGER CHECK (classification_runs BETWEEN 1 AND 10);",
+      "ALTER TABLE scan_severity_classifications ADD COLUMN classification_runs INTEGER CHECK (classification_runs BETWEEN 1 AND 10);"
+    ]
+  },
+  {
+    "version": 53,
     "name": "freeze stopped scan checkpoint selections",
     "statements": [
       "ALTER TABLE scans ADD COLUMN retained_checkpoint_heads_json TEXT;"

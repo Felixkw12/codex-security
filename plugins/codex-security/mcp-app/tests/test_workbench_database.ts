@@ -169,11 +169,12 @@ test("every released schema upgrades to the same current schema and remains idem
 });
 
 for (const { missingVersions, legacyCheckpoint, mainReader } of [
-  { missingVersions: [52], legacyCheckpoint: 0, mainReader: false },
+  { missingVersions: [53], legacyCheckpoint: 0, mainReader: false },
   { missingVersions: [], legacyCheckpoint: 47, mainReader: false },
   { missingVersions: [], legacyCheckpoint: 47, mainReader: true },
   { missingVersions: [], legacyCheckpoint: 48, mainReader: false },
   { missingVersions: [], legacyCheckpoint: 50, mainReader: false },
+  { missingVersions: [], legacyCheckpoint: 52, mainReader: false },
   { missingVersions: [43], legacyCheckpoint: 47, mainReader: false },
   { missingVersions: [44, 45, 46], legacyCheckpoint: 47, mainReader: false },
 ]) {
@@ -193,7 +194,11 @@ for (const { missingVersions, legacyCheckpoint, mainReader } of [
           .filter(
             (item) =>
               !missingVersions.includes(item.version) &&
-              !(legacyCheckpoint && [50, 51].includes(item.version)) &&
+              !(legacyCheckpoint && item.version === 52) &&
+              !(
+                [47, 48, 50].includes(legacyCheckpoint) &&
+                [50, 51].includes(item.version)
+              ) &&
               !(
                 [47, 48].includes(legacyCheckpoint) &&
                 [48, 49].includes(item.version)
@@ -201,7 +206,7 @@ for (const { missingVersions, legacyCheckpoint, mainReader } of [
               !(legacyCheckpoint === 47 && item.version === 47),
           )
           .map((item) =>
-            legacyCheckpoint && item.version === 52
+            legacyCheckpoint && item.version === 53
               ? { ...item, version: legacyCheckpoint }
               : item,
           ),
@@ -227,7 +232,7 @@ for (const { missingVersions, legacyCheckpoint, mainReader } of [
           "UPDATE scans SET status = 'failed', retained_source_digests_json = ?",
         )
         .run(sources);
-      if (!missingVersions.includes(52)) {
+      if (!missingVersions.includes(53)) {
         old
           .prepare("UPDATE scans SET retained_checkpoint_heads_json = ?")
           .run(heads);
@@ -236,7 +241,7 @@ for (const { missingVersions, legacyCheckpoint, mainReader } of [
         .prepare(
           "SELECT name, applied_at FROM schema_migrations WHERE version = ?",
         )
-        .get(legacyCheckpoint || 52);
+        .get(legacyCheckpoint || 53);
     } finally {
       old.close();
     }
@@ -247,7 +252,7 @@ for (const { missingVersions, legacyCheckpoint, mainReader } of [
         upgraded
           .prepare("SELECT retained_checkpoint_heads_json FROM scans")
           .get()?.retained_checkpoint_heads_json,
-        !missingVersions.includes(52) ? heads : null,
+        !missingVersions.includes(53) ? heads : null,
       );
       upgraded
         .prepare("UPDATE scans SET retained_checkpoint_heads_json = ?")
@@ -266,7 +271,7 @@ for (const { missingVersions, legacyCheckpoint, mainReader } of [
         assert.deepEqual(
           reopened
             .prepare(
-              "SELECT name, applied_at FROM schema_migrations WHERE version = 52",
+              "SELECT name, applied_at FROM schema_migrations WHERE version = 53",
             )
             .get(),
           originalCheckpointMigration,
@@ -282,9 +287,9 @@ for (const { missingVersions, legacyCheckpoint, mainReader } of [
         reopened
           .prepare("SELECT MAX(version) AS version FROM schema_migrations")
           .get()?.version,
-        52,
+        53,
       );
-      for (const version of [43, 44, 45, 46, 47, 48, 49, 50, 51, 52]) {
+      for (const version of [43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53]) {
         assert.equal(
           reopened
             .prepare(
@@ -301,7 +306,7 @@ for (const { missingVersions, legacyCheckpoint, mainReader } of [
           .get()?.discovery_user_context_json,
         legacyCheckpoint !== 47 || mainReader ? context : null,
       );
-      assertMigrationNames(reopened, 47, 48, 49, 50, 51, 52);
+      assertMigrationNames(reopened, 47, 48, 49, 50, 51, 52, 53);
       if (legacyCheckpoint !== 47) {
         assert.deepEqual(
           reopened
