@@ -400,7 +400,11 @@ def test_stopped_recovery_keeps_unmerged_coverage_after_accepted_review(
             "sourceId": deferred["id"],
         }
     else:
-        assert deferred in coverage["deferred"]
+        assert {
+            **deferred,
+            "id": f"{pending.parent.name}/{deferred['id']}",
+            "workerId": pending.parent.name,
+        } in coverage["deferred"]
 
 
 @pytest.mark.parametrize("stopped", [False, True], ids=["completion", "recovery"])
@@ -892,6 +896,11 @@ def test_generic_closeout_preserves_projected_surface_receipts(
         },
     )
     os.utime(pending_checkpoint, ns=(100, 100))
+    if prior_receipt:
+        (checkpoint_root.parent / "checkpoint-head.json").write_text(
+            json.dumps({"checkpoint": pending_checkpoint.name})
+        )
+        os.utime(checkpoint_root.parent / "checkpoint-head.json", ns=(100, 100))
     source = {
         "completeness": "complete",
         "surfaces": [surface],
@@ -1180,6 +1189,16 @@ def test_reopened_generic_work_uses_worker_projection(
         for path in directory.rglob("*")
         if path.is_file()
     }
+    if retained is not True:
+        projected_pending.update(id=f"{worker_id}/review", workerId=worker_id)
+    if retained in (
+        "changed-surface",
+        "same-attempt-changed-surface",
+        "same-attempt-receipts",
+        "same-attempt-multiple",
+    ):
+        projected_surface.update(id=f"{worker_id}/surface", workerId=worker_id)
+        projected_pending["surfaceIds"] = [projected_surface["id"]]
     with monkeypatch.context() as interrupted:
 
         def fail_publication(*args, **kwargs):

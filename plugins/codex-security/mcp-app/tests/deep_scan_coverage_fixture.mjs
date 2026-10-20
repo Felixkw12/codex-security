@@ -564,7 +564,7 @@ export async function publishCoverageFixture(
         assert.ok(surfaces.length > 0);
         assert.ok(deferred.length > 0);
         for (const surface of surfaces)
-          assert.match(surface.id, /-attempt-\d+-surface-\d+$/);
+          assert.ok(surface.id.startsWith(`${worker.id}/`));
         for (const row of deferred)
           assert.ok(
             row.surfaceIds.every((id) =>
@@ -617,36 +617,30 @@ export async function publishCoverageFixture(
         );
         for (const projected of keptProjection)
           assert.ok(rows.some((row) => isDeepStrictEqual(row, projected)));
-        if (parentTiming === "newer") {
-          for (const worker of workers.slice(0, 2)) {
-            const source = JSON.parse(
-              await readFile(
-                path.join(worker.artifactDir, "result.json"),
-                "utf8",
-              ),
-            ).coverage[field][0];
-            const retained = rows.find((row) => row.id === source.id);
-            assert.ok(
-              retained,
-              "superseded projection must not hide a raw record",
+        for (const worker of parentTiming === "newer"
+          ? workers
+          : workers.slice(2)) {
+          const source = JSON.parse(
+            await readFile(
+              path.join(worker.artifactDir, "result.json"),
+              "utf8",
+            ),
+          ).coverage[field][0];
+          const retained = rows.find(
+            (row) => row.id === `${worker.id}/${source.id ?? "0"}`,
+          );
+          assert.ok(
+            retained,
+            "unrepresented work receives its worker identity",
+          );
+          assert.equal(retained.workerId, worker.id);
+          assert.deepEqual(retained.provenance, source.provenance);
+          if (field === "deferred")
+            assert.deepEqual(
+              retained.surfaceIds,
+              source.surfaceIds.map((id) => `${worker.id}/${id}`),
             );
-            assert.deepEqual(retained.provenance, source.provenance);
-          }
         }
-        const unrepresented = JSON.parse(
-          await readFile(
-            path.join(workers[2].artifactDir, "result.json"),
-            "utf8",
-          ),
-        ).coverage[field][0];
-        const retained = rows.find((row) => row.id === unrepresented.id);
-        assert.ok(
-          retained,
-          "unrepresented buffered work keeps its saved identity",
-        );
-        assert.deepEqual(retained.provenance, unrepresented.provenance);
-        if (field === "deferred")
-          assert.deepEqual(retained.surfaceIds, unrepresented.surfaceIds);
       }
       const frozen = await readFile(coveragePath, "utf8");
       const replay = await runWorkbench([
@@ -1085,7 +1079,7 @@ export async function publishCoverageFixture(
       1,
       "recorded coverage belongs to original execution attempt",
     );
-    assert.match(rows[0].id, new RegExp(`^${first.id}-attempt-1-surface-`));
+    assert.equal(rows[0].id, `${first.id}/${rows[0].provenance.sourceId}`);
     for (const field of ["explicitExclusions", "deferred", "openQuestions"])
       for (const row of coverage[field] ?? [])
         if (row.provenance?.workerId === first.id)
@@ -1128,7 +1122,7 @@ export async function publishCoverageFixture(
     );
     assert.match(
       prior[0].receiptRefs[0],
-      /\/attempts\/attempt-01\/artifacts\/prior\.txt$/,
+      /\/output\/artifacts\/archived-receipts\/attempt-01\/artifacts\/prior\.txt$/,
     );
     assert.equal(
       await readFile(path.join(run.scanDir, prior[0].receiptRefs[0]), "utf8"),

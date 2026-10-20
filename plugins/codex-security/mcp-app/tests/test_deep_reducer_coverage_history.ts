@@ -777,6 +777,18 @@ for (const scenario of [
       });
       await writeFile(f.resultPath, JSON.stringify(current));
       const acceptedBytes = await readFile(f.resultPath);
+      if (scenario === "missing-receipt") {
+        await assert.rejects(
+          validateDiscoveryArtifacts(
+            { workersRoot: path.dirname(f.workerRoot) },
+            f.resultPath,
+            scanId,
+          ),
+          /coverage receipt.*unavailable/,
+        );
+        assert.deepEqual(await readFile(f.resultPath), acceptedBytes);
+        return;
+      }
       await validateDiscoveryArtifacts(
         { workersRoot: path.dirname(f.workerRoot) },
         f.resultPath,

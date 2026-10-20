@@ -620,14 +620,8 @@ test("persisted optional coverage IDs retain their original host-projection shap
     assert.equal(parsed.coverage.deferred[0].id, undefined);
     assert.equal(discovery.coverage.surfaces[0].provenance.sourceId, undefined);
     assert.equal(discovery.coverage.deferred[0].provenance.sourceId, undefined);
-    assert.equal(
-      discovery.coverage.surfaces[0].id,
-      "synthetic-worker-attempt-3-surface-1",
-    );
-    assert.equal(
-      discovery.coverage.deferred[0].id,
-      "synthetic-worker-attempt-3-deferred-1",
-    );
+    assert.equal(discovery.coverage.surfaces[0].id, "synthetic-worker/0");
+    assert.equal(discovery.coverage.deferred[0].id, "synthetic-worker/0");
     assert.deepEqual(await readFile(f.resultPath), original);
   } finally {
     await rm(f.root, { recursive: true, force: true });
@@ -1136,7 +1130,11 @@ for (const receiptPath of [
             );
             assert.equal(source.surfaces[0].provenance.attempt, 1);
           } else {
-            assert.equal(source.surfaces.length, explicitId ? 1 : 2);
+            assert.equal(
+              source.surfaces.length,
+              explicitId ? 1 : 2,
+              JSON.stringify(source.surfaces),
+            );
             assert.ok(
               source.surfaces.some(
                 (row: { provenance: { attempt: number } }) =>
@@ -1152,7 +1150,8 @@ for (const receiptPath of [
                   path.join(f.context.deepReducer.scanRoot, ref),
                   "utf8",
                 ),
-                ref.includes("/attempts/")
+                ref.includes("/attempts/") ||
+                  ref.includes("/archived-receipts/")
                   ? "Original synthetic review.\n"
                   : evidence === "changed"
                     ? "New independent review.\n"
@@ -1296,6 +1295,20 @@ for (const availableReceipt of [false, true]) {
         await archiveDirectory(f.output, archive);
         const archivedBytes = await readFile(path.join(archive, "result.json"));
         await mkdir(f.output, { recursive: true });
+        if (!availableReceipt) {
+          await assert.rejects(
+            recordCodexSecurityWorkerScanDraft(
+              context,
+              workerDraft([], { complete: true }),
+            ),
+            /archived coverage receipt.*unavailable/,
+          );
+          assert.deepEqual(
+            await readFile(path.join(archive, "result.json")),
+            archivedBytes,
+          );
+          return;
+        }
         await recordCodexSecurityWorkerScanDraft(
           context,
           workerDraft([], { complete: true }),
@@ -1316,7 +1329,7 @@ for (const availableReceipt of [false, true]) {
           ),
         );
         assert.deepEqual(coverage.surfaces[0].receiptRefs, [
-          "artifacts/deep_discovery/workers/discovery-0001/attempts/attempt-01/artifacts/review.txt",
+          "artifacts/deep_discovery/workers/discovery-0001/output/artifacts/archived-receipts/attempt-01/artifacts/review.txt",
         ]);
         assert.deepEqual(
           await readFile(path.join(archive, "result.json")),

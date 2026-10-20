@@ -14,6 +14,70 @@ from test_deep_scan_successful_publication import publication_scan as publicatio
 from workbench_test_support import write_checkpoint
 
 
+@pytest.mark.parametrize("current_first", [False, True])
+def test_missing_retry_projection_reserves_current_worker_local_identity(
+    workbench_api, workbench_db, publication_scan, monkeypatch, current_first
+):
+    scan = publication_scan()
+    result = add_worker(workbench_db, scan)
+    worker_id = result.parent.name
+    with workbench_db:
+        workbench_db.execute("UPDATE deep_scan_workers SET attempt = 2 WHERE id = ?", (worker_id,))
+    historical = {
+        "id": "shared",
+        "label": "Historical review",
+        "disposition": "needs_follow_up",
+        "receiptRefs": [],
+    }
+    current = {**historical, "label": "Current review"}
+    rows = [current, historical] if current_first else [historical, current]
+    draft = {
+        "scanId": scan.scan_id,
+        "complete": True,
+        "findings": [],
+        "coverage": {
+            **scan.coverage,
+            "surfaces": rows,
+            "deferred": [
+                {"id": "review", "reason": "Review both observations.", "surfaceIds": ["shared"]}
+            ],
+        },
+    }
+    result.write_text(json.dumps(draft))
+    archive = result.parent / "attempts/attempt-1/result.json"
+    archive.parent.mkdir(parents=True)
+    archive.write_text(
+        json.dumps(
+            {
+                **draft,
+                "complete": False,
+                "coverage": {**scan.coverage, "surfaces": [historical], "deferred": []},
+            }
+        )
+    )
+    original = {path: path.read_bytes() for path in (result, archive)}
+    publish_review_projection(
+        workbench_api,
+        workbench_db,
+        scan,
+        {
+            **scan.coverage,
+            "reviews": [{"workerId": worker_id, "attempt": attempt} for attempt in (1, 2)],
+        },
+    )
+    coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, False)
+    surfaces = {row["label"]: row for row in coverage["surfaces"]}
+    assert surfaces["Current review"]["id"] == f"{worker_id}/shared"
+    assert surfaces["Current review"]["provenance"]["attempt"] == 2
+    assert surfaces["Historical review"]["id"] == f"{worker_id}/shared-attempt-1"
+    assert surfaces["Historical review"]["provenance"]["attempt"] == 1
+    pending = next(
+        row for row in coverage["deferred"] if row.get("reason") == "Review both observations."
+    )
+    assert set(pending["surfaceIds"]) == {row["id"] for row in surfaces.values()}
+    assert all(path.read_bytes() == content for path, content in original.items())
+
+
 @pytest.mark.parametrize("retained", [False, True], ids=["missing", "retained"])
 @pytest.mark.parametrize("optional_ids", [False, True], ids=["absent-ids", "present-ids"])
 @pytest.mark.parametrize("field", ["surfaces", "deferred", "explicitExclusions", "openQuestions"])
@@ -121,9 +185,14 @@ def test_recovery_preserves_descriptive_provenance(
     saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))
     assert (scan.scan_dir / "coverage.json").read_bytes() == published
     assert result.read_bytes() == original
-    if field == "explicitExclusions" and not retained and not optional_ids:
-        actual_id = actual[0].pop("id")
-        assert actual_id.startswith("saved-")
+    if not retained:
+        expected["workerId"] = worker_id
+        if field != "openQuestions":
+            expected["id"] = f"{worker_id}/{item.get('id', 0)}"
+        if field == "deferred":
+            expected["surfaceIds"] = [f"{worker_id}/source-surface"]
+            if optional_ids:
+                expected["candidateId"] = "source-candidate"
     assert actual == [expected]
 
 
@@ -434,6 +503,9 @@ def test_retry_recovery_restores_original_attempt_and_retained_deferral(
         )
     saved.recover_scan_results(context, workbench_db, Namespace(scan_id=scan.scan_id))
     coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    if missing_surface:
+        projected_surface.update(id=f"{worker_id}/{surface['id']}", workerId=worker_id)
+        projected_deferred["surfaceIds"] = [projected_surface["id"]]
     assert coverage["surfaces"] == [projected_surface]
     tasks = [row for row in coverage["deferred"] if row.get("reason") == deferred["reason"]]
     assert tasks == [projected_deferred]
@@ -819,6 +891,8 @@ def test_ambiguous_surface_receipts_keep_one_copy_per_source(
     assert len({row["id"] for row in coverage["surfaces"]}) == 2
     assert all(row["receiptRefs"] == expected_receipts for row in coverage["surfaces"])
     if reviewed:
+        if reviewed == "partial":
+            projected[1].update(id=f"{worker_id}/{surfaces[1]['id']}", workerId=worker_id)
         assert coverage["surfaces"] == projected
     assert all(path.read_bytes() == contents for path, contents in originals.items())
 
@@ -1628,7 +1702,8 @@ def test_reconstructed_retry_surface_compares_receipt_bytes(
     assert len(coverage["surfaces"]) == 1
     retained = coverage["surfaces"][0]
     assert retained["provenance"]["attempt"] == expected_attempt
-    assert retained["id"] == f"{worker_id}-attempt-{expected_attempt}-surface-1"
+    assert retained["id"] == f"{worker_id}/review"
+    assert retained["workerId"] == worker_id
     if receipt_state == "shared-archive-missing":
         assert retained["receiptRefs"] == []
         assert retained["disposition"] == "needs_follow_up"
@@ -1829,13 +1904,16 @@ def test_legacy_occurrences_survive_supported_parent_projection(
     )
     coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
     assert len(coverage["surfaces"]) == 2
+    retained_count = 2 if projection == "full" else 1 if projection == "partial" else 0
+    for index in range(retained_count, len(projected)):
+        projected[index].update(
+            id=f"{worker_id}/{surfaces[index].get('id', index)}", workerId=worker_id
+        )
     assert coverage["surfaces"][0] == projected[0]
     assert [row["provenance"]["attempt"] for row in coverage["surfaces"]] == (
         [1, 2] if archived else [1, 1]
     )
-    assert coverage["surfaces"][1]["id"] == (
-        f"{worker_id}-attempt-{2 if archived else 1}-surface-2"
-    )
+    assert coverage["surfaces"][1] == projected[1]
     for path, saved in originals.items():
         assert path.read_bytes() == saved
 
@@ -2139,7 +2217,11 @@ def test_retry_nonsurface_occurrences_survive_supported_parent_projection(
     recovered = [row for row in coverage[field] if row.get("id") != "scan-stopped"]
     assert len(recovered) == 2
     assert [row["provenance"]["attempt"] for row in recovered] == [1, 2]
-    for actual, expected in zip(recovered, projected, strict=True):
+    for index, (actual, expected) in enumerate(zip(recovered, projected, strict=True)):
+        if index >= retained:
+            expected["workerId"] = worker_id
+            if field != "openQuestions":
+                assert actual["id"] == f"{worker_id}/{items[index].get('id', index)}"
         assert {key: value for key, value in actual.items() if key != "id"} == {
             key: value for key, value in expected.items() if key != "id"
         }

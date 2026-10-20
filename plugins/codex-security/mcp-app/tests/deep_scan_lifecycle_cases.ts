@@ -1431,7 +1431,7 @@ export async function testSuccessfulDeepCoveragePreservesWorkerReviewStatus() {
   const reviewed = { label: "Reviewed query", disposition: "no_issue_found" };
   const workerReviewed = {
     ...reviewed,
-    receiptRefs: ["artifacts/missing-worker-receipt.md"],
+    receiptRefs: ["artifacts/worker-receipt.md"],
   };
   const followUp = {
     label: "Worker follow-up",
@@ -1454,6 +1454,13 @@ export async function testSuccessfulDeepCoveragePreservesWorkerReviewStatus() {
         { reason: "An independent review left this question unresolved." },
       ],
     };
+    await mkdir(path.join(request.artifactContext!.root, "artifacts"), {
+      recursive: true,
+    });
+    await writeFile(
+      path.join(request.artifactContext!.root, "artifacts/worker-receipt.md"),
+      "Reviewed query evidence.\n",
+    );
     await writeJson(resultPath, draft);
     return outcome;
   };

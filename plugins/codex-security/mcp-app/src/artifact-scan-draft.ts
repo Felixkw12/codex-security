@@ -1,4 +1,8 @@
 import type { JsonObject } from "./types.js";
+import {
+  coverageReceiptComponents,
+  validateRetainedCoverage,
+} from "./coverage-publication.js";
 import { isRecord as isObject } from "./record.js";
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
@@ -9,6 +13,7 @@ import type { ArtifactContext } from "./artifact-context.js";
 import type { RunArtifactWorkbench } from "./artifact-context.js";
 import {
   artifactDestination,
+  artifactSourcePath,
   readArtifactJsonObject,
   readArtifactBytes,
   readArtifactText,
@@ -18,6 +23,7 @@ import {
 import { artifactSchemaDocuments } from "./artifact-contracts.js";
 import { projectArtifactToolSchema } from "./artifact-schema-loader.js";
 import { saveThreatModelDocument } from "./threat-model-document.js";
+import { requireFiniteNumbers } from "./helpers/json.js";
 
 const draftDefinitions = artifactSchemaDocuments["tools/scan-draft"].$defs;
 export const scanDraftInputSchema = projectArtifactToolSchema(
@@ -123,6 +129,9 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
             trustedScope.filePaths as string[] | undefined,
           )
         : reconciled.findings;
+    // Coordinator publication also carries retained historical payloads.
+    if (finalDeepDraft && publication === undefined)
+      requireFiniteNumbers({ ...parsed, findings: scopedFindings });
     const findings = buildFindings(scopedFindings, context.mode);
     const coverage = buildCoverage(
       context,
@@ -217,6 +226,10 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
         fs.rm(draftPath, { force: true }),
       ]);
     }
+    const warnings = [
+      ...(preserved.warnings ?? []),
+      ...(documentWarnings ?? []),
+    ];
     return {
       scanId: reconciled.scanId,
       findingCount: findings.length,
@@ -224,7 +237,7 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
       coverage,
       operation: "replace",
       status: "draft_written",
-      ...(documentWarnings?.length ? { warnings: documentWarnings } : {}),
+      ...(warnings.length ? { warnings } : {}),
     };
   }
 }
@@ -245,6 +258,8 @@ export async function recordCodexSecurityWorkerScanDraft(
       "scan draft: scanId does not match the coordinator-bound worker scan.",
     );
   }
+
+  validateRetainedCoverage(parsed.coverage);
 
   const includePaths = context.includePaths ?? [context.scope || "."];
   let scoped = {
@@ -315,7 +330,8 @@ export async function recordCodexSecurityWorkerScanDraft(
       surface.receiptRefs = current.receiptRefs;
     }
   }
-  scoped = (await preserveScanDraft(context, scoped, true, archived)).input;
+  const preserved = await preserveScanDraft(context, scoped, true, archived);
+  scoped = preserved.input;
   // Older checkpoints predate the coordinator's requested-path binding.
   scoped.findings = findingsWithinScope(
     scoped.findings,
@@ -333,6 +349,10 @@ export async function recordCodexSecurityWorkerScanDraft(
     scoped.threatModel,
   );
 
+  const warnings = [
+    ...(preserved.warnings ?? []),
+    ...(documentWarning === undefined ? [] : [documentWarning]),
+  ];
   return {
     scanId: parsed.scanId,
     findingCount: scoped.findings.length,
@@ -340,7 +360,7 @@ export async function recordCodexSecurityWorkerScanDraft(
     coverage: scoped.coverage,
     operation: "replace",
     status: "draft_written",
-    ...(documentWarning === undefined ? {} : { warnings: [documentWarning] }),
+    ...(warnings.length === 0 ? {} : { warnings }),
   };
 }
 
@@ -438,6 +458,22 @@ export function matchesSavedCoverageSource(
               if (/^attempt-[0-9]+\//u.test(saved))
                 path = saved.slice(saved.indexOf("/") + 1);
             }
+            if (!receiptDigests || digest !== undefined) {
+              while (
+                /^artifacts\/archived-receipts\/attempt-[0-9]+\//u.test(path)
+              ) {
+                path = path.replace(
+                  /^artifacts\/archived-receipts\/attempt-[0-9]+\//u,
+                  "",
+                );
+              }
+            }
+            if (digest !== undefined) {
+              path = path
+                .split("/")
+                .filter((part) => part !== "." && part !== "")
+                .join("/");
+            }
             return receiptDigests ? JSON.stringify([path, digest]) : path;
           }),
         ),
@@ -518,7 +554,11 @@ export async function preserveScanDraft(
   input: ScanDraftInput;
   previousDigest: string;
   originalCurrentCoverage: ScanDraftInput["coverage"][];
+  warnings?: string[];
 }> {
+  requireFiniteNumbers(input);
+  const warnings: string[] = [];
+  const repairReceipts = saveCheckpoint || context.layout !== "worker";
   const currentCheckpointName = scanDraftCheckpointName(input);
   const requiresClosureValidation = resolvedDeferred(input.coverage).length > 0;
   if (saveCheckpoint && !requiresClosureValidation)
@@ -551,6 +591,54 @@ export async function preserveScanDraft(
   const originalCurrentCoverage = current.map(({ input }) =>
     structuredClone(input.coverage),
   );
+  const currentReceipts = new Set(
+    current.flatMap(({ input }) =>
+      input.coverage.surfaces.flatMap((row) =>
+        Array.isArray(row.receiptRefs) ? row.receiptRefs : [],
+      ),
+    ),
+  );
+  const archivedReceipts = new Map<
+    string,
+    { context: ArtifactContext; components: string[] }
+  >();
+  if (repairReceipts)
+    for (const source of archived) {
+      const sourceAttempt = source.attempt!;
+      for (const row of source.input.coverage.surfaces as JsonObject[]) {
+        if (!Array.isArray(row.receiptRefs)) continue;
+        row.receiptRefs = (row.receiptRefs as string[]).map((ref) => {
+          // Mapping saved references is data-only. Validate retained paths at I/O,
+          // after a corrected same-ID surface can replace an invalid old receipt.
+          const archivePrefix = `artifacts/deep_discovery/workers/${basename(dirname(context.root))}/attempts/`;
+          const archivedRef = ref.startsWith(archivePrefix)
+            ? ref.slice(archivePrefix.length)
+            : undefined;
+          const attempt = archivedRef?.split("/")[0] ?? sourceAttempt;
+          const receipt =
+            archivedRef === undefined
+              ? ref
+              : archivedRef.slice(archivedRef.indexOf("/") + 1);
+          const components = receipt
+            .split("/")
+            .filter((part) => part !== "" && part !== ".");
+          const retained = [
+            "artifacts",
+            "archived-receipts",
+            attempt,
+            ...components,
+          ].join("/");
+          archivedReceipts.set(retained, {
+            context: {
+              ...context,
+              root: join(dirname(context.root), "attempts", attempt),
+            },
+            components,
+          });
+          return retained;
+        });
+      }
+    }
   const savedSources = [...current, ...archived];
   const sources = savedSources.map(({ input }) => input);
   normalizeSavedScanCoverage(sources);
@@ -642,6 +730,18 @@ export async function preserveScanDraft(
       );
       sources.unshift(progress);
     }
+  }
+  const selectedReceiptsBySurface = new Map<string, Set<string>>();
+  for (const selected of [result, ...sources]) {
+    const rows = (selected.coverage.surfaces as JsonObject[]).filter(
+      (row) =>
+        typeof row.id === "string" && !selectedReceiptsBySurface.has(row.id),
+    );
+    for (const row of rows)
+      selectedReceiptsBySurface.set(
+        row.id as string,
+        new Set((row.receiptRefs as string[] | undefined) ?? []),
+      );
   }
   const currentCandidateIds = completedCandidateIds(result);
   const resolvedCandidateIds = completedCandidateIds(result, sources);
@@ -809,11 +909,196 @@ export async function preserveScanDraft(
   if (archivedSources === undefined || saveCheckpoint)
     result.coverage.surfaces = normalizeSurfaces(result.coverage.surfaces);
   else normalizeSavedScanCoverage([result]);
+  if (repairReceipts) {
+    // Archived attempts move their receipt files with them. Copy only evidence
+    // still retained by this draft into its current, independently bound output.
+    // Superseded surfaces must not reserve a discarded receipt's spelling.
+    for (const ref of new Set(
+      result.coverage.surfaces.flatMap((row) => row.receiptRefs ?? []),
+    )) {
+      if (!currentReceipts.has(ref) || !archivedReceipts.has(ref)) continue;
+      try {
+        await artifactSourcePath(
+          context,
+          coverageReceiptComponents(ref),
+          "saved coverage receipt",
+        );
+        archivedReceipts.delete(ref);
+      } catch {
+        // A saved reference may outlive its copied receipt. Keep its archive
+        // origin for the normal copy/repair path, including destination checks.
+      }
+    }
+    const retainedSelectedReceiptRefs = new Set(
+      (result.coverage.surfaces as JsonObject[]).flatMap((row) =>
+        ((row.receiptRefs as string[] | undefined) ?? []).filter((ref) =>
+          selectedReceiptsBySurface.get(row.id as string)?.has(ref),
+        ),
+      ),
+    );
+    const receiptPaths = new Map<string, string>();
+    for (const ref of retainedSelectedReceiptRefs) {
+      const origin = archivedReceipts.get(ref);
+      let components: string[];
+      try {
+        components = coverageReceiptComponents(ref);
+        await artifactSourcePath(
+          origin?.context ?? context,
+          origin
+            ? coverageReceiptComponents(origin.components.join("/"))
+            : components,
+          "selected coverage receipt",
+        );
+      } catch {
+        // Unavailable evidence cannot win a spelling preference. The normal
+        // copy/repair and discovery validation paths still report its error.
+        continue;
+      }
+      const normalized = components.join("/");
+      if (!receiptPaths.has(normalized.toLowerCase()))
+        receiptPaths.set(normalized.toLowerCase(), normalized);
+    }
+    for (const row of result.coverage.surfaces as JsonObject[]) {
+      for (const ref of (row.receiptRefs as string[] | undefined) ?? []) {
+        const normalized = ref
+          .split("/")
+          .filter((part) => part !== "" && part !== ".")
+          .join("/");
+        const key = normalized.toLowerCase();
+        const origin = archivedReceipts.get(ref);
+        if (
+          !origin &&
+          selectedReceiptsBySurface.get(row.id as string)?.has(ref)
+        ) {
+          if (!receiptPaths.has(key)) receiptPaths.set(key, normalized);
+          continue;
+        }
+        let source: string;
+        try {
+          const components = coverageReceiptComponents(
+            origin ? origin.components.join("/") : ref,
+          );
+          coverageReceiptComponents(ref);
+          const previous = receiptPaths.get(key);
+          if (previous !== undefined && previous !== normalized)
+            throw Object.assign(
+              new Error(
+                `coverage receipt: duplicate artifact path: ${previous} and ${normalized}`,
+              ),
+              { code: "invalid_coverage_receipt_path" },
+            );
+          source = await artifactSourcePath(
+            origin?.context ?? context,
+            components,
+            origin ? "archived coverage receipt" : "saved coverage receipt",
+          );
+        } catch (error) {
+          const closesSavedSurface = [...resolvedSurfaces].some((surface) =>
+            (surface.receiptRefs as string[] | undefined)?.includes(ref),
+          );
+          const unchangedDisposition = sources.some((saved) =>
+            (saved.coverage.surfaces as JsonObject[]).some(
+              (surface) =>
+                surface.id === row.id &&
+                surface.disposition === row.disposition &&
+                (surface.receiptRefs as string[] | undefined)?.includes(ref),
+            ),
+          );
+          if (
+            (!unchangedDisposition &&
+              (closedDeferredIds.size === 0 || !closesSavedSurface)) ||
+            !(error instanceof Error) ||
+            !(
+              error.message.includes("the requested artifact is unavailable") ||
+              ("code" in error &&
+                error.code === "invalid_coverage_receipt_path")
+            )
+          ) {
+            if (!origin) continue;
+            throw error;
+          }
+          // Saved, validated closeouts remain authoritative on later writes and
+          // fresh retries; the caller need not repeat their completed surfaces.
+          let repaired = false;
+          let replacementError: unknown = error;
+          const firstBrokenSource = sources.findIndex((saved) =>
+            (saved.coverage.surfaces as JsonObject[]).some(
+              (surface) =>
+                surface.id === row.id &&
+                (surface.receiptRefs as string[] | undefined)?.includes(ref),
+            ),
+          );
+          for (const candidate of [
+            input,
+            ...sources.slice(0, firstBrokenSource),
+          ]) {
+            if (
+              candidate.complete === false ||
+              (!unchangedDisposition &&
+                !resolvedDeferred(candidate.coverage).some((closure) =>
+                  closedDeferredIds.has(closure.id as string),
+                ))
+            )
+              continue;
+            const replacement = (
+              candidate.coverage.surfaces as JsonObject[]
+            ).find(
+              (surface) =>
+                surface.id === row.id &&
+                surface.disposition === row.disposition &&
+                surface.disposition !== "needs_follow_up",
+            );
+            const refs = replacement?.receiptRefs as string[] | undefined;
+            if (!refs?.length || refs.includes(ref)) continue;
+            try {
+              for (const replacementRef of refs) {
+                const saved = archivedReceipts.get(replacementRef);
+                await artifactSourcePath(
+                  saved?.context ?? context,
+                  coverageReceiptComponents(
+                    saved ? saved.components.join("/") : replacementRef,
+                  ),
+                  "replacement coverage receipt",
+                );
+              }
+              repaired = true;
+              break;
+            } catch (failure) {
+              replacementError = failure;
+            }
+          }
+          if (!repaired) {
+            // Current drafts may still be incomplete; ordinary discovery admission
+            // diagnoses unrepaired refs as before. Archived repair keeps its errors.
+            if (!origin) continue;
+            throw replacementError;
+          }
+          row.receiptRefs = (row.receiptRefs as string[]).filter(
+            (value) => value !== ref,
+          );
+          warnings.push(
+            `Replaced ${error.message.includes("unavailable") ? "missing" : "invalid"} ${origin ? "archived" : "saved"} coverage receipt ${ref}: ${error.message}`,
+          );
+          continue;
+        }
+        if (origin) {
+          const destination = await artifactDestination(
+            context,
+            coverageReceiptComponents(ref),
+            "retained coverage receipt",
+          );
+          await fs.copyFile(source, destination);
+        }
+        receiptPaths.set(key, normalized);
+      }
+    }
+  }
   if (saveCheckpoint) await saveScanDraftCheckpoint(context, result);
   return {
     input: result,
     previousDigest: previousState.digest,
     originalCurrentCoverage,
+    ...(warnings.length ? { warnings } : {}),
   };
 }
 
@@ -1440,7 +1725,11 @@ async function readPreviousScanDocuments(context: ArtifactContext) {
 async function preserveDeepThreatModel(
   context: ArtifactContext,
   input: ScanDraftInput,
-): Promise<{ input: ScanDraftInput; previousDigest?: string }> {
+): Promise<{
+  input: ScanDraftInput;
+  previousDigest?: string;
+  warnings?: string[];
+}> {
   if (input.threatModel !== undefined) return { input };
   const { contents, digest } = await readPreviousScanDocuments(context);
   const previous =
@@ -1761,8 +2050,10 @@ function containsSavedValue(current: unknown, previous: unknown): boolean {
   if (isObject(previous)) {
     return (
       isObject(current) &&
-      Object.entries(previous).every(([key, value]) =>
-        containsSavedValue(current[key], value),
+      Object.entries(previous).every(
+        ([key, value]) =>
+          Object.hasOwn(current, key) &&
+          containsSavedValue(current[key], value),
       )
     );
   }
@@ -1982,7 +2273,7 @@ export async function getCodexSecurityCompletedScan(
 function safeRelativePath(value: string, context: string): string {
   const parts = value.split("/");
   if (
-    value.trim().length === 0 ||
+    value.length === 0 ||
     Buffer.from(value, "utf8").toString("utf8") !== value ||
     value === "." ||
     value.startsWith("/") ||
