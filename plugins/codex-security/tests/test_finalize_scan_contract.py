@@ -402,13 +402,12 @@ The extraction root is not enforced.
         _, _, coverage = self.write_sealed_scan()
         coverage["completeness"] = "partial"
         self.rewrite_sealed_artifact("coverage.json", coverage)
-        names = ("scan-manifest.json", "findings.json", "coverage.json")
-        original = {name: (self.scan_dir / name).read_bytes() for name in names}
+        original = self.scan_file_bytes(*CANONICAL_FILES)
 
         _, _, retained = FINALIZER.finalize_scan(self.scan_dir)
 
         self.assertEqual(retained["completeness"], "partial")
-        self.assertEqual({name: (self.scan_dir / name).read_bytes() for name in names}, original)
+        self.assertEqual(self.scan_file_bytes(*CANONICAL_FILES), original)
 
     @pytest.mark.cross_platform
     def test_sealed_rerun_accepts_legacy_unknown_evidence_references(self) -> None:
@@ -704,12 +703,10 @@ The extraction root is not enforced.
         writeup_path.unlink()
         with self.assertRaisesRegex(FINALIZER.ContractError, "expected a file inside"):
             FINALIZER.finalize_scan(self.scan_dir)
-        sealed_files = {name: (self.scan_dir / name).read_bytes() for name in CANONICAL_FILES}
+        sealed_files = self.scan_file_bytes(*CANONICAL_FILES)
         with self.assertRaises(FINALIZER.ContractError):
             FINALIZER._prepare_scan_finalization(self.scan_dir, allow_missing_writeups=True)
-        self.assertEqual(
-            {name: (self.scan_dir / name).read_bytes() for name in CANONICAL_FILES}, sealed_files
-        )
+        self.assertEqual(self.scan_file_bytes(*CANONICAL_FILES), sealed_files)
 
     def test_finalize_requires_hardening_portfolio_to_be_regular_scan_local_file(self) -> None:
         portfolio_path = "hardening/hardening.md"
@@ -2409,8 +2406,8 @@ The extraction root is not enforced.
             self.read_json("scan-manifest.json")["scan"]["scope"]["includePaths"], ["."]
         )
 
-    def test_preserves_literal_whitespace_repository_paths(self) -> None:
-        for path in (" ", "  ", "\u00a0"):
+    def test_preserves_literal_repository_paths(self) -> None:
+        for path in (" ", "  ", "\u00a0", "src/a:b.py", "report:summary.py"):
             with self.subTest(path=path):
                 self.manifest["scan"]["scope"]["includePaths"] = [path]
                 self.coverage["includePaths"] = [path]
@@ -2435,7 +2432,7 @@ The extraction root is not enforced.
                 self.assertEqual(coverage["deferred"][0]["paths"], [path])
                 self.assertEqual(findings["findings"][0]["locations"][0]["path"], path)
                 self.assertEqual(findings["findings"][0]["codeEvidence"][0]["path"], path)
-                if path.isascii():
+                if path.isascii() and path.isspace():
                     self.assertIn(
                         f'- Included paths: `"{path}"`',
                         (self.scan_dir / "report.md").read_text(encoding="utf-8"),
