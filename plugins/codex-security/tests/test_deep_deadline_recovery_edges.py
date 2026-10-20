@@ -428,6 +428,48 @@ def test_mid_merge_failure_removes_only_created_recovery_evidence(
     assert unrelated.read_text() == "Unrelated worker evidence.\n"
 
 
+@pytest.mark.parametrize("snapshot_failure", [False, True])
+def test_failed_head_snapshot_does_not_interrupt_publication_rollback(
+    tmp_path, monkeypatch, workbench_api, snapshot_failure
+):
+    scan = deadline_fixture(tmp_path, "valid")
+    canonical_parent(scan, saved_draft(scan.scan_id, findings=[scan.finding]))
+    before = {
+        path.relative_to(scan.directory): (path.read_bytes(), path.stat().st_mtime_ns)
+        for path in scan.directory.rglob("*")
+        if path.is_file()
+    }
+    saved = workbench_api["saved_results"]
+    write = saved.write_scan_local_bytes
+    failed_snapshots = []
+
+    def fail_before_snapshot_directory(directory, relative, contents):
+        if snapshot_failure and "/checkpoint-heads/" in relative:
+            assert not (directory / relative).parent.exists()
+            failed_snapshots.append(relative)
+            raise OSError("Synthetic head snapshot write failure")
+        write(directory, relative, contents)
+
+    monkeypatch.setattr(saved, "write_scan_local_bytes", fail_before_snapshot_directory)
+    with sqlite3.connect(scan.database) as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute(
+            "CREATE TRIGGER reject_deadline BEFORE UPDATE OF completion_warnings_json ON scans "
+            "BEGIN SELECT RAISE(ABORT, 'synthetic publication failure'); END"
+        )
+        record = workbench_api["require_scan"](connection, scan.scan_id)
+        with pytest.raises(sqlite3.IntegrityError, match="synthetic publication failure"):
+            saved.preserve_deep_deadline_draft(SimpleNamespace(**workbench_api), connection, record)
+    assert bool(failed_snapshots) is snapshot_failure
+    assert all(not (scan.directory / path).exists() for path in failed_snapshots)
+    after = {
+        path.relative_to(scan.directory): (path.read_bytes(), path.stat().st_mtime_ns)
+        for path in scan.directory.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+
+
 @pytest.mark.parametrize("directory", ["checkpoints", "checkpoint-heads", "source-order"])
 def test_deadline_rollback_preserves_preexisting_dangling_recovery_entry(
     tmp_path: Path, workbench_api, directory: str

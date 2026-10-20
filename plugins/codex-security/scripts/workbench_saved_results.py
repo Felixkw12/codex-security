@@ -2514,7 +2514,10 @@ def _restore_published_outputs(
             write_scan_local_bytes(scan_dir, relative, contents)
             os.utime(scan_dir / relative, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
     for relative in sorted(created_paths or ()):
-        _remove_scan_local_file_if_exists(scan_dir, relative)
+        # A journaled write can fail before creating its parent directory.
+        path = scan_dir / relative
+        if path.exists() or path.is_symlink():
+            _remove_scan_local_file_if_exists(scan_dir, relative)
 
 
 def preserve_deep_deadline_draft(
