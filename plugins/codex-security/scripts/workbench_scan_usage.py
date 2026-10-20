@@ -101,22 +101,21 @@ def merge_scan_usage_fields(*observations: Mapping[str, Any]) -> dict[str, Any]:
             merged["usage"] = usage
         if usage.get("coverage") not in ("complete", "partial"):
             continue
-        observed_at = _timestamp(usage.get("observedAt"))
-        latest_observed_at = (
-            _timestamp(latest_coverage.get("observedAt")) if latest_coverage is not None else None
+        latest_coverage = (
+            usage if latest_coverage is None else _merge_usage_coverage(latest_coverage, usage)
         )
-        if (
-            latest_coverage is None
-            or observed_at is None
-            or latest_observed_at is None
-            or observed_at >= latest_observed_at
-        ):
-            latest_coverage = usage
     cost = merged.get("cost")
     usage = merged.get("usage")
     if usage is not None and latest_coverage is not None and latest_coverage is not usage:
         usage = {**usage}
-        for field in ("coverage", "missingThreadCount", "warnings", "observedAt", "completion"):
+        for field in (
+            "coverage",
+            "coverageScope",
+            "missingThreadCount",
+            "warnings",
+            "observedAt",
+            "completion",
+        ):
             if field in latest_coverage:
                 usage[field] = latest_coverage[field]
             else:
@@ -145,6 +144,41 @@ def merge_scan_usage_fields(*observations: Mapping[str, Any]) -> dict[str, Any]:
             else:
                 updated.pop("warnings", None)
             merged["usage"] = updated
+    return merged
+
+
+def _merge_usage_coverage(previous: dict[str, Any], observed: dict[str, Any]) -> dict[str, Any]:
+    previous_at = _timestamp(previous.get("observedAt"))
+    observed_at = _timestamp(observed.get("observedAt"))
+    if previous_at is not None and observed_at is not None and previous_at > observed_at:
+        previous, observed = observed, previous
+    previous_scope = previous.get("coverageScope")
+    observed_scope = observed.get("coverageScope")
+    covers_previous = (
+        previous_scope is not None
+        and observed_scope is not None
+        and set(previous_scope).issubset(observed_scope)
+    )
+    unresolved_previous = previous["coverage"] == "partial" and not covers_previous
+    merged = {**observed}
+    if unresolved_previous:
+        merged["coverage"] = "partial"
+        merged["missingThreadCount"] = max(
+            previous.get("missingThreadCount", 0), observed.get("missingThreadCount", 0)
+        )
+        warnings = sorted(set(previous.get("warnings", [])) | set(observed.get("warnings", [])))
+        if warnings:
+            merged["warnings"] = warnings
+        if previous.get("completion", {}).get("finalized") is False:
+            merged["completion"] = previous["completion"]
+    if previous_scope is not None and observed_scope is not None:
+        merged["coverageScope"] = sorted(set(previous_scope) | set(observed_scope))
+    elif previous_scope is not None and observed["coverage"] == "complete":
+        merged["coverageScope"] = previous_scope
+    elif unresolved_previous:
+        # An older subtotal without scope cannot prove which gaps a later
+        # collector has resolved. Retain that uncertainty across future merges.
+        merged.pop("coverageScope", None)
     return merged
 
 
@@ -193,7 +227,9 @@ def collect_scan_usage(
         return _unavailable_usage("scan_window_unavailable")
 
     warnings: set[str] = set()
-    receipts, missing_receipts = _worker_usage_receipts(scan, started_at, stopped_at, warnings)
+    receipts, missing_receipts, receipt_scope = _worker_usage_receipts(
+        scan, started_at, stopped_at, warnings
+    )
     state_database = _codex_state_database()
     sessions: list[RolloutSession] = []
     missing_thread_ids: set[str] = set()
@@ -333,6 +369,14 @@ def collect_scan_usage(
         "source": "codex_runtime" if runtime_receipts_used else "codex_rollout",
         **{key: sum(role[key] for role in by_role.values()) for key in TOKEN_FIELDS.values()},
         "threadCount": len(measured_threads),
+        "coverageScope": sorted(
+            receipt_scope
+            | {f"thread:{identity}" for identity in measured_threads}
+            | {
+                identity if identity.startswith("worker-attempt:") else f"thread:{identity}"
+                for identity in missing_thread_ids
+            }
+        ),
         "byRole": by_role,
         "window": {"startedAt": started_at.isoformat(), "endedAt": stopped_at.isoformat()},
         "observedAt": observed_at.isoformat(),
@@ -354,21 +398,22 @@ def _worker_usage_receipts(
     started_at: datetime,
     completed_at: datetime,
     warnings: set[str],
-) -> tuple[dict[str, RolloutUsage], set[str]]:
+) -> tuple[dict[str, RolloutUsage], set[str], set[str]]:
     if scan["mode"] != "deep":
-        return {}, set()
+        return {}, set(), set()
     directory = Path(scan["scan_dir"]) / "artifacts" / "deep_discovery" / "usage"
     try:
         if directory.resolve(strict=True) != directory:
             raise ValueError("Worker usage directory is not a scan-local directory.")
     except FileNotFoundError:
-        return {}, set()
+        return {}, set(), set()
     except (OSError, RuntimeError, ValueError):
         warnings.add("worker_usage_receipt_unavailable")
-        return {}, {"worker-receipts"}
+        return {}, {"worker-receipts"}, {"worker-receipts"}
     receipts: dict[str, RolloutUsage] = {}
     missing: set[str] = set()
     attempts: set[str] = set()
+    scope: set[str] = set()
     for path in sorted(directory.glob("*.json")):
         try:
             if _rollout_path(str(path)) is None:
@@ -392,7 +437,10 @@ def _worker_usage_receipts(
             if begin < started_at or begin > completed_at or attempt_id in attempts:
                 continue
             attempts.add(attempt_id)
+            scope.add(f"worker-attempt:{attempt_id}")
             thread_id = receipt.get("threadId")
+            if isinstance(thread_id, str) and thread_id:
+                scope.add(f"thread:{thread_id}")
             tokens = _usage_counts(receipt.get("usage"))
             if not isinstance(thread_id, str) or not thread_id or tokens is None:
                 missing.add(
@@ -409,11 +457,12 @@ def _worker_usage_receipts(
         except (OSError, UnicodeError, ValueError) as exc:
             warnings.add("worker_usage_receipt_unavailable")
             missing.add(f"worker-attempt:{path.stem}")
+            scope.add(f"worker-attempt:{path.stem}")
             try:
                 print(f"Could not read worker token usage: {exc}", file=sys.stderr)
             except OSError:
                 pass
-    return receipts, missing
+    return receipts, missing, scope
 
 
 def _scan_root_thread_ids(

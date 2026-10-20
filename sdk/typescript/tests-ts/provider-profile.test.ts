@@ -59,7 +59,7 @@ const startupProviders = {
   "synthetic.gateway": startupProvider,
 };
 
-test("native preflight preserves profile telemetry per invocation without persisting it", async () => {
+test("native preflight preserves consent and attribution while reading exporters from its private home", async () => {
   const home = await temporaryDirectory();
   const sharedConfig =
     '[analytics]\nenabled = false\n[otel]\nexporter = "none"\nenvironment = "synthetic-shared"\n';
@@ -108,8 +108,7 @@ test("native preflight preserves profile telemetry per invocation without persis
   expect(effective.analytics).toEqual({ enabled: false });
   expect(effective.otel).toMatchObject({
     exporter: "none",
-    environment: "synthetic-selected",
-    log_user_prompt: false,
+    environment: "synthetic-shared",
   });
   expect(effective.responses_api_metadata).toEqual({
     "synthetic.tag": "selected",
@@ -121,6 +120,79 @@ test("native preflight preserves profile telemetry per invocation without persis
   expect(next.otel.environment).toBe("synthetic-shared");
   expect(next.responses_api_metadata ?? null).toBeNull();
 });
+
+test.each(["root", "selected profile"] as const)(
+  "native helper children keep %s exporter headers out of argv without moving their home",
+  async (source) => {
+    const home = await temporaryDirectory();
+    const sharedConfig =
+      '[analytics]\nenabled = false\n[otel]\nexporter = "none"\nenvironment = "synthetic-shared"\n';
+    await writeFile(join(home, "config.toml"), sharedConfig);
+    const script = join(home, "native telemetry.mjs");
+    await writeFile(
+      script,
+      `import { readFileSync } from "node:fs";
+      import { join } from "node:path";
+      console.log(JSON.stringify({
+        args: process.argv.slice(2),
+        home: process.env.CODEX_HOME,
+        config: readFileSync(join(process.env.CODEX_HOME, "config.toml"), "utf8"),
+      }));`,
+    );
+    const telemetry = {
+      analytics: { enabled: false },
+      responses_api_metadata: { "synthetic.tag": source },
+      otel: {
+        exporter: {
+          "otlp-http": {
+            endpoint: "https://telemetry.example.test/v1/logs",
+            protocol: "json",
+            headers: { Authorization: "Bearer synthetic-helper-exporter" },
+          },
+        },
+      },
+    };
+    const settings =
+      source === "root"
+        ? telemetry
+        : { profile: "selected", profiles: { selected: telemetry } };
+    const command = await providerPreflightCommand(
+      { command: process.execPath, args: [script] },
+      settings,
+    );
+    for (const args of [
+      ["login", "status"],
+      ["plugin", "marketplace", "list"],
+      ["app-server", "--stdio"],
+    ]) {
+      const result = await runCodexCommand(command, args, {
+        ...process.env,
+        CODEX_HOME: home,
+      });
+      expect(result.success, result.stderr).toBe(true);
+      const observed = JSON.parse(result.stdout);
+      expect(observed.home).toBe(home);
+      expect(observed.config).toBe(sharedConfig);
+      expect(JSON.stringify(observed.args)).not.toContain(
+        "synthetic-helper-exporter",
+      );
+      const forwarded = Object.assign(
+        {},
+        ...observed.args
+          .slice(0, -args.length)
+          .filter((_: string, index: number) => index % 2 === 1)
+          .map((value: string) => parse(value)),
+      );
+      expect(forwarded).toEqual({
+        analytics: telemetry.analytics,
+        responses_api_metadata: telemetry.responses_api_metadata,
+      });
+    }
+    expect(await readFile(join(home, "config.toml"), "utf8")).toBe(
+      sharedConfig,
+    );
+  },
+);
 
 test.each([
   [

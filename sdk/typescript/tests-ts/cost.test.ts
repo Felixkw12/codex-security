@@ -2652,6 +2652,7 @@ describe("live scan cost tracking", () => {
       threadCount: 1,
       missingThreadCount: 1,
       usage: { input_tokens: 1_000_000 },
+      coverageScope: ["thread:scan-thread", "thread:worker-thread"],
     });
 
     await appendFile(
@@ -2668,6 +2669,7 @@ describe("live scan cost tracking", () => {
       coverage: "complete",
       threadCount: 2,
       missingThreadCount: 0,
+      coverageScope: ["thread:scan-thread", "thread:worker-thread"],
     });
     expect(usages).toHaveLength(1);
 
@@ -2861,6 +2863,12 @@ describe("live scan cost tracking", () => {
         threadCount: 2,
         missingThreadCount: 1,
         usage: { input_tokens: 250, output_tokens: 20 },
+        coverageScope: [
+          "thread:resumed-worker",
+          "thread:scan-thread",
+          "worker-attempt:first",
+          "worker-attempt:second",
+        ],
       },
     });
     // Re-reading the same durable attempts does not increment their usage.
@@ -2876,6 +2884,7 @@ describe("live scan cost tracking", () => {
       threadCount: 2,
       missingThreadCount: 0,
       usage: { input_tokens: 250, output_tokens: 20 },
+      coverageScope: partial.measurement.coverageScope,
     });
     expect(measurements.map((measurement) => measurement.coverage)).toEqual([
       "partial",
@@ -2939,6 +2948,46 @@ describe("live scan cost tracking", () => {
       if (source === "unknown")
         expect(snapshot).toMatchObject({ usage: null, cost: null });
       else expect(snapshot.cost?.inputTokens).toBe(1_500);
+      expect(snapshot.measurement.coverageScope).toEqual([
+        "thread:scan-thread",
+        "thread:validation-thread",
+      ]);
     },
   );
+
+  test("includes a separate validation root and its missing child in coverage scope", async () => {
+    const home = await codexHome();
+    await writeSession(home, "validation-thread", {
+      input_tokens: 500,
+      output_tokens: 0,
+    });
+    await writeSession(
+      home,
+      "validation-child",
+      {},
+      {
+        parent: "validation-thread",
+      },
+    );
+    const tracker = costTracker(home);
+    tracker.start("scan-thread");
+    tracker.recordUsage(
+      { input_tokens: 500, output_tokens: 0 },
+      "validation-thread",
+    );
+    const snapshot = await tracker.stop({
+      input_tokens: 1_000,
+      output_tokens: 0,
+    });
+    expect(snapshot.measurement).toMatchObject({
+      coverage: "partial",
+      missingThreadCount: 1,
+      usage: { input_tokens: 1_500 },
+      coverageScope: [
+        "thread:scan-thread",
+        "thread:validation-child",
+        "thread:validation-thread",
+      ],
+    });
+  });
 });

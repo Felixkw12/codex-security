@@ -42,6 +42,13 @@ export function combineMeasurements(
       (sum, value) => sum + value.missingThreadCount,
       0,
     ),
+    ...(values.every((value) => value.coverageScope !== undefined)
+      ? {
+          coverageScope: [
+            ...new Set(values.flatMap((value) => value.coverageScope!)),
+          ].sort(),
+        }
+      : {}),
   };
 }
 
@@ -58,6 +65,9 @@ export function measuredScanCost(
       observedAt: measurement.observedAt,
       threadCount: measurement.threadCount,
       missingThreadCount: measurement.missingThreadCount,
+      ...(measurement.coverageScope === undefined
+        ? {}
+        : { coverageScope: measurement.coverageScope }),
       inputTokens: tokens.input_tokens,
       cachedInputTokens: tokens.cached_input_tokens,
       cacheWriteInputTokens: tokens.cache_write_input_tokens,

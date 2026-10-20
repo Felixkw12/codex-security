@@ -56,6 +56,7 @@ await Promise.all([
           appendFileSync(
             process.env.SYNTHETIC_CONFIG_OBSERVATIONS,
             JSON.stringify({
+              args: process.argv.slice(2),
               home: process.env.CODEX_HOME,
               analytics: initialConfig.analytics,
               otel: initialConfig.otel,

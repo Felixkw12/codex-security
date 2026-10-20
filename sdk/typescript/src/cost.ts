@@ -84,6 +84,8 @@ export interface ScanUsageMeasurement {
   observedAt: string;
   threadCount: number;
   missingThreadCount: number;
+  /** Known thread/attempt identities for reconciling coverage, not metric labels. */
+  coverageScope?: string[];
 }
 
 export interface ScanCostSnapshot {
@@ -219,6 +221,7 @@ export class ScanCostTracker {
           false,
           previous.threadCount,
           Math.max(1, previous.missingThreadCount),
+          previous.coverageScope,
         );
         throw error;
       }
@@ -290,6 +293,7 @@ export class ScanCostTracker {
     let workerReceipts: Awaited<ReturnType<typeof readWorkerReceipts>> = {
       usages: new Map(),
       unknownAttempts: 0,
+      attemptIds: new Set(),
     };
     try {
       workerReceipts = await readWorkerReceipts(this.#options.scanDirectory);
@@ -452,7 +456,21 @@ export class ScanCostTracker {
       missingThreadCount = Math.max(1, missingThreadCount);
     const complete = missingThreadCount === 0 && usage !== null;
     const cost = estimateScanCost(this.#options.model, usage);
-    this.#setSnapshot(usage, cost, complete, threadCount, missingThreadCount);
+    this.#setSnapshot(
+      usage,
+      cost,
+      complete,
+      threadCount,
+      missingThreadCount,
+      collectionError === undefined
+        ? [
+            ...[...included].map((id) => `thread:${id}`),
+            ...[...workerReceipts.attemptIds].map(
+              (id) => `worker-attempt:${id}`,
+            ),
+          ].sort()
+        : undefined,
+    );
     if (complete) {
       this.#reportUsage(usage);
     }
@@ -467,6 +485,7 @@ export class ScanCostTracker {
     complete: boolean,
     threadCount: number,
     missingThreadCount: number,
+    coverageScope?: string[],
   ): void {
     const data = {
       usage,
@@ -475,6 +494,7 @@ export class ScanCostTracker {
         usage === null ? "unavailable" : complete ? "complete" : "partial",
       threadCount,
       missingThreadCount,
+      ...(coverageScope === undefined ? {} : { coverageScope }),
     } as const;
     const measurement = { ...data, observedAt: new Date().toISOString() };
     this.#snapshot = {
@@ -547,9 +567,11 @@ export class ScanCostTracker {
 async function readWorkerReceipts(scanDirectory: string | undefined): Promise<{
   usages: Map<string, ScanTokenUsage | null>;
   unknownAttempts: number;
+  attemptIds: Set<string>;
 }> {
   const usages = new Map<string, ScanTokenUsage | null>();
-  const result = { usages, unknownAttempts: 0 };
+  const attempts = new Set<string>();
+  const result = { usages, unknownAttempts: 0, attemptIds: attempts };
   if (scanDirectory === undefined) return result;
   const directory = join(scanDirectory, "artifacts", "deep_discovery", "usage");
   try {
@@ -561,7 +583,6 @@ async function readWorkerReceipts(scanDirectory: string | undefined): Promise<{
       throw new Error(
         `Worker usage directory must use a canonical directory: ${directory}`,
       );
-    const attempts = new Set<string>();
     for (const entry of await readdir(directory, { withFileTypes: true })) {
       if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
       const receipt: unknown = JSON.parse(

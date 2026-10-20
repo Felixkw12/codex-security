@@ -3054,19 +3054,22 @@ export class CodexSecurity {
       return result;
     } catch (error) {
       // Hosted terminal failures can carry the only receipt for consumed tokens.
+      const measuredExecution =
+        error instanceof ScanExecutionError && error.receiptMatchesRequest
+          ? error.result
+          : undefined;
       if (
-        error instanceof ScanExecutionError &&
-        error.result.usage !== undefined
+        measuredExecution?.usage !== undefined &&
+        measuredExecution.sessionId !== undefined
       ) {
-        if (error.result.sessionId !== undefined) {
-          costTracker?.start(error.result.sessionId);
-          costTracker?.recordUsage(error.result.usage, error.result.sessionId);
-        }
+        costTracker?.start(measuredExecution.sessionId);
+        costTracker?.recordUsage(
+          measuredExecution.usage,
+          measuredExecution.sessionId,
+        );
       }
       const snapshot = await costTracker
-        ?.stop(
-          error instanceof ScanExecutionError ? error.result.usage : undefined,
-        )
+        ?.stop(measuredExecution?.usage)
         .catch(() => null);
       if (artifactRestorationFailure !== null) throw artifactRestorationFailure;
       const terminalTurnStatus = terminalScanTurnStatus();
@@ -3663,13 +3666,17 @@ export class CodexSecurity {
                   });
                 }
                 if (result.requestId !== request.requestId)
-                  throw new ScanExecutionError({
-                    ...result,
-                    requestId: request.requestId,
-                    status: "acceptance_unknown",
-                    message:
-                      "Execution response does not match the active request.",
-                  });
+                  throw new ScanExecutionError(
+                    {
+                      ...result,
+                      requestId: request.requestId,
+                      status: "acceptance_unknown",
+                      message:
+                        "Execution response does not match the active request.",
+                    },
+                    undefined,
+                    { receiptMatchesRequest: false },
+                  );
                 if (result.status !== "completed")
                   throw new ScanExecutionError(result);
                 id = result.sessionId!;

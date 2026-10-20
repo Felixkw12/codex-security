@@ -6,14 +6,22 @@ remote collector.
 
 ## Controls and collection
 
-Native `analytics` and `otel` settings keep their Codex semantics. Selected
-profiles, project settings, and explicit overrides keep their native precedence.
-Stored-account authentication forwards these settings per invocation; per-scan
+Native `analytics` and `otel` settings keep their Codex semantics. Scan profiles,
+project settings, and explicit overrides keep their native precedence. Per-scan
 settings are not merged into shared credential configuration. Discovery, reducer,
 and resumed workers inherit their scan's settings. Worker runtime snapshots live
 under the credential home denied to model tools. OTel exporter configuration can
 contain authentication headers, so it is excluded from model-readable preflight
 files and saved scan recipes while remaining available to native execution.
+
+For authentication/bootstrap commands and stored-account CLI app-server startup,
+automatic inheritance covers analytics consent and request metadata. OTel
+exporters come from the selected native home or existing explicit runtime
+configuration; ambient/profile exporter settings are not copied when
+authentication selects another home. The pinned runtime cannot load a separate
+private profile for these helpers without changing authentication/state identity.
+The wrapper does not copy inherited exporter headers into arguments or
+temporarily rewrite shared settings.
 
 Request metadata includes command, surface, package/plugin versions, configured
 provider family, and scan mode when available. Wrapper operations and workers add
@@ -121,6 +129,15 @@ A newly discovered worker can change complete usage to partial. The
 dashboard updates the qualifier and clears unavailable values. Existing
 `onUsage` and `onCost` observers retain their complete-only behavior; budget
 enforcement still uses known spending subtotals.
+
+When available, `coverageScope` identifies every discovered thread and worker
+attempt, including missing measurements. Saved reconciliation clears a known gap
+only when a newer observation covers that entire scope. Narrower observations
+retain unresolved gaps and the union of known identities. For overlapping partial
+observations, reconciliation retains the largest reported missing-thread count;
+it cannot recover an exact combined count. Legacy observations without a scope
+cannot prove that their gaps were resolved.
+These identities belong in local records, not metric labels.
 
 Saved success, failure, and cancellation records retain numerical usage even
 without a model price. Repeated terminal updates reconcile late observations

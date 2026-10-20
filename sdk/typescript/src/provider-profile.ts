@@ -28,7 +28,7 @@ export interface ProviderProfile {
   cleanup(): Promise<void>;
 }
 
-/** Keep effective provider metadata and telemetry settings on native no-turn commands. */
+/** Keep provider metadata, analytics consent, and attribution on no-turn commands. */
 export async function providerPreflightCommand(
   command: CodexCommand,
   config: JsonObject,
@@ -47,7 +47,9 @@ export async function providerPreflightCommand(
   }
   if (resolved["model_provider"] !== undefined)
     overrides.push(`model_provider=${inlineToml(resolved["model_provider"])}`);
-  for (const key of ["analytics", "otel", "responses_api_metadata"]) {
+  // These commands cannot load a private profile while preserving their auth
+  // home. Exporter headers stay in native configuration, never copied into argv.
+  for (const key of ["analytics", "responses_api_metadata"]) {
     const value = resolved[key];
     if (value !== undefined) overrides.push(`${key}=${inlineToml(value)}`);
   }

@@ -1885,11 +1885,10 @@ async function skillStartupConfigOverrides(
       ambientFeatures[key],
     ]),
   ];
-  const telemetryKeys = [
-    "analytics",
-    "otel",
-    "responses_api_metadata",
-  ] as const;
+  // App-server has no private profile-file option. Keep inherited exporter
+  // credentials in their native home rather than exposing them in arguments or
+  // temporarily changing shared settings while other scans are running.
+  const telemetryKeys = ["analytics", "responses_api_metadata"] as const;
   if (
     settings.every(([, value]) => value === undefined) &&
     telemetryKeys.every((key) => ambientConfig[key] === undefined)
@@ -1979,7 +1978,7 @@ async function skillStartupConfigOverrides(
     if (value === undefined) continue;
     let inherited: JsonObject = { [key]: value };
     // Native layers are already filtered for project trust and supported keys.
-    // Preserve their precedence and literal metadata/header keys as whole tables.
+    // Preserve their precedence and literal metadata keys as whole tables.
     for (const layer of layers.slice(0, userLayer).reverse()) {
       if (
         !isJsonObject(layer) ||
@@ -8732,6 +8731,7 @@ async function executeScan(
   let deepProgress: DeepScanProgress | null = null;
   let deepConsolidating = false;
   let runningCost: Readonly<ScanCost> | null = null;
+  let costUpdateCount = 0;
   let runningUsage: Readonly<ScanTokenUsage> | null = null;
   let runningCoverage: "complete" | "partial" | "unavailable" | null = null;
   let maxCostUsd = arguments_.maxCostUsd;
@@ -9080,15 +9080,16 @@ async function executeScan(
           dashboard.setUsage(usage);
           return;
         }
-        const priorCost = runningCost;
+        const priorCostUpdateCount = costUpdateCount;
         // The tracker queues usage before cost; let the paired cost update render once.
         await Promise.resolve();
-        if (runningCost !== priorCost) return;
+        if (costUpdateCount !== priorCostUpdateCount) return;
         progress?.stopTimer();
         progress?.stage(`Tokens: ${formatTokenUsage(usage)}.`);
         progress?.startTimer(runningMessage());
       },
       onCost: (cost, limit = maxCostUsd) => {
+        costUpdateCount += 1;
         if (limit !== maxCostUsd && limit !== undefined) {
           dashboard?.note(`Total cost limit increased to ${formatUsd(limit)}.`);
         }

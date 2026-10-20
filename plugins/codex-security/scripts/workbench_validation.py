@@ -133,6 +133,7 @@ def _valid_measured_scan_usage(usage: object) -> bool:
 
     allowed_keys = {
         "coverage",
+        "coverageScope",
         "source",
         "threadCount",
         "missingThreadCount",
@@ -148,6 +149,14 @@ def _valid_measured_scan_usage(usage: object) -> bool:
     }
     if thread_count == 0 or not set(usage).issubset(allowed_keys):
         return False
+    if "coverageScope" in usage:
+        scope = usage["coverageScope"]
+        if (
+            not isinstance(scope, list)
+            or any(not isinstance(identity, str) or not identity for identity in scope)
+            or len(set(scope)) != len(scope)
+        ):
+            return False
     if (
         not all(type(usage.get(key)) is int and usage[key] >= 0 for key in SCAN_USAGE_TOKEN_KEYS)
         or usage["cachedInputTokens"] + usage["cacheWriteInputTokens"] > usage["inputTokens"]
@@ -197,8 +206,6 @@ def _valid_measured_scan_usage(usage: object) -> bool:
 def parse_scan_cost(value: str | None) -> str | None:
     if value is None:
         return None
-    if len(value.encode("utf-8")) > 8192:
-        raise SystemExit("Scan cost must be no larger than 8 KiB.")
     try:
         cost = json.loads(value, parse_constant=reject_nonstandard_json_number)
     except (TypeError, UnicodeError, ValueError) as exc:
@@ -211,6 +218,8 @@ def parse_scan_cost(value: str | None) -> str | None:
             and not _valid_legacy_scan_cost(cost["cost"])
         ):
             raise SystemExit("Scan cost includes invalid measured token usage.")
+    elif len(value.encode("utf-8")) > 8192:
+        raise SystemExit("Scan cost must be no larger than 8 KiB.")
     elif not _valid_legacy_scan_cost(cost):
         raise SystemExit(
             "Scan cost must include a model, nonnegative token counts, and an estimated USD amount."

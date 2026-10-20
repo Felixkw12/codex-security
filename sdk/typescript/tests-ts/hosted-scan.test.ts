@@ -796,15 +796,22 @@ test.each([
   },
 );
 
-test.each([undefined, "measured-host-session"])(
-  "failed hosted scans report measured usage with session %p",
-  async (sessionId) => {
+test.each(
+  [undefined, "measured-host-session"].flatMap((sessionId) =>
+    (["failed", "acceptance_unknown"] as const).map((status) => ({
+      sessionId,
+      status,
+    })),
+  ),
+)(
+  "$status hosted scans report measured usage with session $sessionId",
+  async ({ sessionId, status }) => {
     const input = await fixture();
     const terminal = await runHostedScan(input, {
       executor: {
         async run(request) {
           return receipt(request, {
-            status: "failed",
+            status,
             sessionId,
             usage: {
               input_tokens: 123,
@@ -816,12 +823,12 @@ test.each([undefined, "measured-host-session"])(
         },
       },
     });
-    expect(terminal.status).toBe("failed");
+    expect(terminal.status).toBe(status);
     const journal = await readOperationTelemetry(input.stateDirectory);
     expect(
       journal.events.find((event) => event.type === "attempt_finished"),
     ).toMatchObject({
-      outcome: "failed",
+      outcome: status === "acceptance_unknown" ? "unresolved" : "failed",
       measurement: {
         coverage: "complete",
         usage: { input_tokens: 123, output_tokens: 7, total_tokens: 130 },
@@ -1062,25 +1069,54 @@ test("SDK cancellation waits for the executor receipt without losing known sessi
   });
 });
 
-test("mismatched execution receipts are never accepted or retried", async () => {
-  const input = await fixture();
-  const executor = {
-    run: mock(async () =>
-      receipt(
-        { requestId: "other-request" },
-        {
-          sessionId: "known-session",
-          usage: { input_tokens: 9 },
-        },
+test.each([
+  { status: "completed" as const, sessionId: "known-session" },
+  { status: "failed" as const, sessionId: undefined },
+])(
+  "$status mismatched execution receipts are retained without accounting or retry",
+  async ({ status, sessionId }) => {
+    const input = await fixture();
+    const usage = { input_tokens: 9, output_tokens: 1 };
+    const executor = {
+      run: mock(async () =>
+        receipt({ requestId: "other-request" }, { status, sessionId, usage }),
       ),
-    ),
-  };
-  const result = await runHostedScan(input, { executor });
-  expect(executor.run).toHaveBeenCalledTimes(1);
-  expect(result.status).toBe("acceptance_unknown");
-  expect(result.execution?.sessionId).toBe("known-session");
-  expect(result.artifacts).toEqual([]);
-});
+    };
+    const result = await runHostedScan(input, { executor });
+    expect(executor.run).toHaveBeenCalledTimes(1);
+    expect(result.status).toBe("acceptance_unknown");
+    expect(result.execution?.sessionId).toBe(sessionId);
+    expect(result.execution?.usage).toEqual(usage);
+    expect(result.artifacts).toEqual([]);
+    const journal = await readOperationTelemetry(input.stateDirectory);
+    const terminal = journal.events.find(
+      (event) => event.type === "attempt_finished",
+    );
+    expect(terminal).toMatchObject({ outcome: "unresolved" });
+    expect(terminal?.measurement?.usage ?? null).toBeNull();
+    expect(terminal?.measurement?.cost ?? null).toBeNull();
+    const saved = await runWorkbench(
+      {
+        python: pythonExecutable()!,
+        pluginRoot: PLUGIN_ROOT,
+        environment: {
+          PATH: process.env["PATH"],
+          SYSTEMROOT: process.env["SYSTEMROOT"],
+          CODEX_SECURITY_STATE_DIR: input.stateDirectory,
+        },
+      },
+      ["get-scan", "--scan-id", result.scanId!],
+    );
+    const scan = saved["scan"] as Record<string, unknown>;
+    expect(scan).toBeDefined();
+    expect(scan["usage"]).toMatchObject({
+      coverage: "unavailable",
+      threadCount: 0,
+    });
+    expect(scan["usage"]).not.toHaveProperty("totalTokens");
+    expect(scan["cost"] ?? null).toBeNull();
+  },
+);
 
 test("same Cloud attempt does not create CLI cross-invocation replay decisions", async () => {
   const input = await fixture();

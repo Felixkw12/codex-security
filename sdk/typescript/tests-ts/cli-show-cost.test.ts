@@ -139,6 +139,14 @@ test.each(
     deps.createSecurity = () =>
       fakeSecurity(async (_repository, options = {}) => {
         options.onScanStarted?.();
+        options.onMeasurement?.({
+          usage: observedUsage,
+          cost: result.cost!,
+          coverage: "complete",
+          observedAt: new Date().toISOString(),
+          threadCount: 1,
+          missingThreadCount: 0,
+        });
         if (delivery === "direct") {
           const observed = options.onUsage?.(observedUsage);
           options.onCost?.(result.cost!);

@@ -285,7 +285,7 @@ async function withStoredApiKey(
 }
 
 test.each(["patch", "verify-fix"] as const)(
-  "%s preserves ambient telemetry profiles and explicit overrides without sharing them",
+  "%s preserves consent and private-home exporters without copying inherited headers",
   async (command) => {
     await withStoredApiKey(
       command,
@@ -302,11 +302,27 @@ test.each(["patch", "verify-fix"] as const)(
           "native-config.jsonl",
         );
         const configPath = join(ambientHome, "config.toml");
+        const privateOtel = {
+          environment: "synthetic-shared",
+          exporter: "none",
+          log_user_prompt: false,
+        };
+        await writeCodexConfig(join(sharedHome, "config.toml"), {
+          otel: privateOtel,
+        });
         const telemetry = {
           analytics: { enabled: false },
           otel: {
             environment: "synthetic-selected",
-            exporter: "none",
+            exporter: {
+              "otlp-http": {
+                endpoint: "https://telemetry.example.test/v1/logs",
+                protocol: "json",
+                headers: {
+                  Authorization: "Bearer synthetic-selected-exporter",
+                },
+              },
+            },
             log_user_prompt: false,
           },
           responses_api_metadata: {
@@ -317,7 +333,16 @@ test.each(["patch", "verify-fix"] as const)(
         };
         await writeCodexConfig(configPath, {
           analytics: { enabled: true },
-          otel: { environment: "synthetic-root", exporter: "none" },
+          otel: {
+            environment: "synthetic-root",
+            exporter: {
+              "otlp-http": {
+                endpoint: "https://telemetry.example.test/v1/logs",
+                protocol: "json",
+                headers: { Authorization: "Bearer synthetic-root-exporter" },
+              },
+            },
+          },
           responses_api_metadata: { "team.tag": "root", root_only: "root" },
           projects: { [repository]: { trust_level: "trusted" } },
           profile: "selected",
@@ -348,7 +373,7 @@ test.each(["patch", "verify-fix"] as const)(
         });
         expect(inherited).toMatchObject({
           analytics: telemetry.analytics,
-          otel: telemetry.otel,
+          otel: privateOtel,
           requestMetadata: telemetry.responses_api_metadata,
         });
         const launches = (
@@ -360,7 +385,13 @@ test.each(["patch", "verify-fix"] as const)(
         expect(launches.length).toBeGreaterThanOrEqual(2);
         for (const launch of launches) {
           expect(launch.analytics).toEqual(telemetry.analytics);
-          expect(launch.otel).toMatchObject(telemetry.otel);
+          expect(launch.otel).toMatchObject(privateOtel);
+          expect(JSON.stringify(launch.args)).not.toContain(
+            "synthetic-selected-exporter",
+          );
+          expect(JSON.stringify(launch.args)).not.toContain(
+            "synthetic-root-exporter",
+          );
           expect(launch.metadata).toMatchObject(
             telemetry.responses_api_metadata,
           );
@@ -376,7 +407,7 @@ test.each(["patch", "verify-fix"] as const)(
         const configured = await run(explicit, { inheritAnalytics: true });
         expect(configured).toMatchObject({
           analytics: explicit.analytics,
-          otel: { ...telemetry.otel, ...explicit.otel },
+          otel: { ...privateOtel, ...explicit.otel },
           requestMetadata: {
             ...telemetry.responses_api_metadata,
             ...explicit.responses_api_metadata,
@@ -385,7 +416,8 @@ test.each(["patch", "verify-fix"] as const)(
         const shared = parseToml(
           await readFile(join(sharedHome, "config.toml"), "utf8"),
         );
-        for (const key of ["analytics", "otel", "responses_api_metadata"])
+        expect(shared["otel"]).toEqual(privateOtel);
+        for (const key of ["analytics", "responses_api_metadata"])
           expect(shared).not.toHaveProperty(key);
 
         // A subsequent invocation must not retain the earlier ambient profile.
@@ -394,14 +426,14 @@ test.each(["patch", "verify-fix"] as const)(
           otel: { environment: "synthetic-next", exporter: "none" },
         });
         const next = await run({}, { inheritAnalytics: true });
-        expect(next.otel?.["environment"]).toBe("synthetic-next");
+        expect(next.otel).toMatchObject(privateOtel);
         expect(next.requestMetadata ?? {}).not.toHaveProperty("selected_only");
       },
     );
   },
 );
 
-test("stored and API-key patches preserve the same ambient telemetry controls", async () => {
+test("stored and API-key patches preserve consent while exporters follow their selected native home", async () => {
   await withStoredApiKey("patch", async ({ ambientHome, run }) => {
     await writeCodexConfig(join(ambientHome, "config.toml"), {
       analytics: { enabled: false },
@@ -414,8 +446,9 @@ test("stored and API-key patches preserve the same ambient telemetry controls", 
     });
     const stored = await run({}, { inheritAnalytics: true });
     const apiKey = await run({}, { inheritAnalytics: true, auth: "api-key" });
-    for (const key of ["analytics", "otel"] as const)
-      expect(stored[key]).toEqual(apiKey[key]);
+    expect(stored.analytics).toEqual(apiKey.analytics);
+    expect(stored.otel?.["environment"]).not.toBe("synthetic-auth-independent");
+    expect(apiKey.otel?.["environment"]).toBe("synthetic-auth-independent");
     expect(stored.requestMetadata).toMatchObject({
       "team.tag": "synthetic-ambient",
     });
