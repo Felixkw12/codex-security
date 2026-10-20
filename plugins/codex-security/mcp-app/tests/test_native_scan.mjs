@@ -27,7 +27,8 @@ const bundle = await build({
       export { acquireScanExecution } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/scan-execution.ts", import.meta.url)))};
       export { prepareAmbientRuntime, prepareExecutionSource, createExecutionCodex, prepareDiscoveryExecution, prepareMergeExecution } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/execution-preparation.ts", import.meta.url)))};
       export { createPermissionCheckedCodex } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/permission-profile.ts", import.meta.url)))};
-      export { scanRuntimeCodexConfig } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/api.ts", import.meta.url)))};`,
+      export { createReplayProfile } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/provider-profile.ts", import.meta.url)))};
+      export { scanRuntimeCodexConfig, scanPreflightCodexConfig } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/api.ts", import.meta.url)))};`,
     resolveDir: fileURLToPath(new URL("../src/", import.meta.url)),
   },
   define: {
@@ -71,6 +72,8 @@ const {
   prepareNativeScan,
   nativeScanConfiguration,
   scanRuntimeCodexConfig,
+  scanPreflightCodexConfig,
+  createReplayProfile,
   createPermissionCheckedCodex,
   prepareAmbientRuntime,
   prepareExecutionSource,
@@ -122,7 +125,7 @@ function syntheticPermissionAppServer(parentPath) {
   const capture = (value) => {
     if (process.env.NATIVE_PROFILE_CAPTURE) fs.appendFileSync(process.env.NATIVE_PROFILE_CAPTURE, JSON.stringify(value) + "\\n");
   };
-  capture({ kind: "preflight", argv, cwd: process.cwd(), marker: process.env.NATIVE_PROFILE_MARKER,
+  capture({ kind: "preflight", argv, modelProvider: config.model_provider, provider: config.model_providers?.[config.model_provider], cwd: process.cwd(), marker: process.env.NATIVE_PROFILE_MARKER,
     codex: process.env.CODEX_API_KEY, openai: process.env.OPENAI_API_KEY,
     gitEnvironment: Object.fromEntries(["PATH", "CODEX_SECURITY_GIT", "GIT_SSH_COMMAND", "GIT_CONFIG_GLOBAL"].map(name => [name, process.env[name]])) });
   require("node:readline").createInterface({ input: process.stdin }).on("line", (line) => {
@@ -1694,6 +1697,14 @@ for (const scenario of [
   "saved-present-knowledge",
   "tilde-home-and-selected-config",
   "explicit-state-directory",
+  "openrouter-env-key",
+  "fireworks-env-key",
+  "openrouter-bearer",
+  "fireworks-bearer",
+  "openrouter-http-headers",
+  "fireworks-http-headers",
+  "openrouter-env-http-headers",
+  "fireworks-env-http-headers",
 ]) {
   test(
     `native merged settings reach every worker: ${scenario}`,
@@ -1712,6 +1723,12 @@ for (const scenario of [
       const pluginRoot = join(root, "plugin");
       const executable = join(root, "codex");
       const capture = join(root, "worker.json");
+      const preflights = join(root, "preflights.jsonl");
+      const externalProvider = scenario.startsWith("openrouter-")
+        ? "openrouter"
+        : scenario.startsWith("fireworks-")
+          ? "fireworks"
+          : undefined;
       const restore = captureEnvironment([
         "HOME",
         "USERPROFILE",
@@ -1720,6 +1737,9 @@ for (const scenario of [
         "CODEX_CLI_PATH",
         "CODEX_API_KEY",
         "OPENAI_API_KEY",
+        "OPENROUTER_API_KEY",
+        "FIREWORKS_API_KEY",
+        "NATIVE_PROFILE_CAPTURE",
         "CODEX_SECURITY_CONFIG_PATH",
         "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
         "CODEX_SECURITY_STATE_DIR",
@@ -1739,7 +1759,21 @@ const fs = require("node:fs");
 ${syntheticPermissionAppServer()}
 if (process.argv.includes("app-server")) servePermissionProfiles();
 else {
-  fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify({ argv: process.argv.slice(2), codex: process.env.CODEX_API_KEY, openai: process.env.OPENAI_API_KEY, home: process.env.CODEX_HOME, state: process.env.CODEX_SECURITY_STATE_DIR, executable: process.argv[1], knowledge: process.env.CODEX_SECURITY_KNOWLEDGE_BASE }));
+  const { parse } = require(${JSON.stringify(createRequire(import.meta.url).resolve("smol-toml"))});
+  const argv = process.argv.slice(2);
+  const path = require("node:path");
+  const effective = parse(fs.readFileSync(path.join(process.env.CODEX_HOME, "config.toml"), "utf8"));
+  const merge = (target, value) => { for (const [key, child] of Object.entries(value)) target[key] = child && typeof child === "object" && !Array.isArray(child) ? merge(target[key] ?? {}, child) : child; return target; };
+  if (argv.includes("--profile")) merge(effective, parse(fs.readFileSync(path.join(process.env.CODEX_HOME, argv[argv.indexOf("--profile") + 1] + ".config.toml"), "utf8")));
+  for (let i = 0; i < argv.length; i++) if (["--config", "-c"].includes(argv[i])) merge(effective, parse(argv[++i]));
+  const provider = effective.model_providers?.[effective.model_provider];
+  fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify({ argv, codex: process.env.CODEX_API_KEY, openai: process.env.OPENAI_API_KEY, home: process.env.CODEX_HOME, state: process.env.CODEX_SECURITY_STATE_DIR, executable: process.argv[1], knowledge: process.env.CODEX_SECURITY_KNOWLEDGE_BASE,
+    modelProvider: effective.model_provider,
+    provider,
+    providerToken: provider && (provider.experimental_bearer_token ?? process.env[provider.env_key]),
+    providerHeaders: provider && {...provider.http_headers, ...Object.fromEntries(Object.entries(provider.env_http_headers ?? {}).map(([header, key]) => [header, process.env[key]]))},
+    literalCredentialInEnvironment: ["synthetic-provider-token", "synthetic-provider-header"].some(value => Object.values(process.env).includes(value)),
+  }));
   console.log(JSON.stringify({ type: "thread.started", thread_id: "synthetic-merged-worker" }));
   console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0 } }));
 }
@@ -1752,21 +1786,47 @@ else {
           OPENAI_API_KEY: "synthetic-selected-key",
         });
         delete process.env.CODEX_API_KEY;
+        delete process.env.OPENROUTER_API_KEY;
+        delete process.env.FIREWORKS_API_KEY;
+        delete process.env.NATIVE_PROFILE_CAPTURE;
+        if (externalProvider) {
+          process.env.CODEX_API_KEY = "synthetic-competing-key";
+          process.env.NATIVE_PROFILE_CAPTURE = preflights;
+        }
         delete process.env.CODEX_SECURITY_KNOWLEDGE_BASE;
         delete process.env.CODEX_SECURITY_CONFIG_PATH;
         delete process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
         delete process.env.CODEX_SECURITY_STATE_DIR;
         if (scenario === "explicit-state-directory")
           process.env.CODEX_SECURITY_STATE_DIR = join(root, "ambient-state");
+        const credential = scenario.endsWith("-env-key")
+          ? { env_key: "OPENAI_API_KEY" }
+          : scenario.endsWith("-bearer")
+            ? { experimental_bearer_token: "synthetic-provider-token" }
+            : scenario.endsWith("-env-http-headers")
+              ? { env_http_headers: { Authorization: "OPENAI_API_KEY" } }
+              : {
+                  http_headers: { Authorization: "synthetic-provider-header" },
+                };
         const configuration = {
           model: "ambient-model",
-          model_provider: "openai",
+          model_provider: externalProvider ?? "openai",
           model_providers: {
-            openai: { env_key: "OPENAI_API_KEY", requires_openai_auth: true },
+            [externalProvider ?? "openai"]: externalProvider
+              ? {
+                  name: "Synthetic provider",
+                  wire_api: "responses",
+                  base_url: "https://example.invalid/custom",
+                  ...credential,
+                }
+              : { env_key: "OPENAI_API_KEY", requires_openai_auth: true },
           },
         };
         const configText = stringifyToml(configuration);
         await writeFile(join(home, "config.toml"), configText);
+        const replay = externalProvider
+          ? await createReplayProfile(home, configuration)
+          : undefined;
         const scanDir = join(root, "scan");
         await mkdir(scanDir, { mode: 0o700 });
         const document = join(root, "knowledge.txt");
@@ -1813,6 +1873,8 @@ else {
             "CODEX_CLI_PATH",
             "OPENAI_API_KEY",
             "CODEX_API_KEY",
+            "OPENROUTER_API_KEY",
+            "FIREWORKS_API_KEY",
             "CODEX_SECURITY_KNOWLEDGE_BASE",
             "CODEX_SECURITY_CONFIG_PATH",
             "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
@@ -1885,6 +1947,16 @@ else {
             },
             recipe: {
               auth: "api-key",
+              ...(resumed && replay
+                ? {
+                    config: scanPreflightCodexConfig({
+                      ...configuration,
+                      model: "explicit-current-model",
+                      model_reasoning_effort: "ultra",
+                    }),
+                    replayProfile: { name: replay.name, home: "ambient" },
+                  }
+                : {}),
               scanInputs: scanInputIdentity(
                 input().scan.userContext,
                 savedKnowledge,
@@ -1992,7 +2064,45 @@ else {
               );
               assert.equal(observed.executable, executable);
               assert.equal(observed.openai, "synthetic-selected-key");
-              assert.equal(observed.codex, undefined);
+              assert.equal(
+                observed.codex,
+                externalProvider ? "synthetic-competing-key" : undefined,
+              );
+              if (externalProvider) {
+                assert.equal(observed.modelProvider, externalProvider);
+                assert.deepEqual(
+                  observed.provider,
+                  configuration.model_providers[externalProvider],
+                );
+                assert.equal(config.model_provider, externalProvider);
+                assert.equal(config.model_providers, undefined);
+                if (
+                  scenario.endsWith("-env-key") ||
+                  scenario.endsWith("-bearer")
+                )
+                  assert.equal(
+                    observed.providerToken,
+                    scenario.endsWith("-env-key")
+                      ? "synthetic-selected-key"
+                      : "synthetic-provider-token",
+                  );
+                else
+                  assert.equal(
+                    observed.providerHeaders.Authorization,
+                    scenario.endsWith("-env-http-headers")
+                      ? "synthetic-selected-key"
+                      : "synthetic-provider-header",
+                  );
+                assert.equal(observed.literalCredentialInEnvironment, false);
+                for (const value of [
+                  "synthetic-provider-token",
+                  "synthetic-provider-header",
+                ])
+                  assert.equal(
+                    observed.argv.some((argument) => argument.includes(value)),
+                    false,
+                  );
+              }
               if (observed.knowledge !== knowledge?.path)
                 knowledgeMismatches.push({
                   role,
@@ -2055,6 +2165,31 @@ else {
           }
         }
         assert.deepEqual(knowledgeMismatches, []);
+        if (externalProvider) {
+          const rows = (await readFile(preflights, "utf8"))
+            .trim()
+            .split("\n")
+            .map(JSON.parse)
+            .filter((row) => row.kind === "preflight");
+          assert.equal(rows.length, 4);
+          for (const row of rows) {
+            assert.equal(row.openai, "synthetic-selected-key");
+            assert.equal(row.codex, "synthetic-competing-key");
+            assert.equal(row.modelProvider, externalProvider);
+            assert.deepEqual(row.provider, {
+              name: "Synthetic provider",
+              wire_api: "responses",
+            });
+            for (const value of [
+              "synthetic-provider-token",
+              "synthetic-provider-header",
+            ])
+              assert.equal(
+                row.argv.some((argument) => argument.includes(value)),
+                false,
+              );
+          }
+        }
       } finally {
         restore();
         await rm(root, { recursive: true, force: true });

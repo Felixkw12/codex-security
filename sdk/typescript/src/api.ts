@@ -1184,7 +1184,7 @@ export class CodexSecurity {
         options.auth,
         modelProvider,
         hasCommandAuth(configuration),
-        true,
+        { preflight: true },
       ),
       ...model,
       ...(typeof modelProvider === "string" ? { modelProvider } : {}),
@@ -4135,8 +4135,9 @@ export class CodexSecurity {
         authentication = await runtimeScanAuthentication(
           source.environment,
           runtime.codexHome,
-          options.auth,
+          source.preserveProviderEnvironment ? "auto" : options.auth,
           modelProvider,
+          { preserveProviderEnvironment: source.preserveProviderEnvironment },
         );
       if (
         options.safetyIdentifier !== undefined &&

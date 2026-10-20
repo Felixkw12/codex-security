@@ -118,9 +118,10 @@ export function prepareExecutionSource(input: {
       : null;
   const authentication = scanAuthentication(
     environment,
-    input.auth,
+    preserveProviderEnvironment ? "auto" : input.auth,
     modelProvider,
     commandAuth,
+    { preserveProviderEnvironment },
   );
   const apiKey =
     !preserveProviderEnvironment && authentication.method === "api_key"
