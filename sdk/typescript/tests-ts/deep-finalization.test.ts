@@ -731,7 +731,7 @@ for (const {
             return;
           }
           const result = await running;
-          expect(result.coverage.completeness).toBe("partial");
+          expect(result.coverage).not.toHaveProperty("completeness");
           expect(JSON.stringify(result.coverage)).toContain("cost limit");
           if (unpricedUsage) {
             expect(result.cost).toBeNull();
@@ -808,9 +808,8 @@ for (const {
           "Validate the resolved destination",
         );
         expect(
-          JSON.parse(await readFile(join(scanDir, "coverage.json"), "utf8"))
-            .completeness,
-        ).toBe("partial");
+          JSON.parse(await readFile(join(scanDir, "coverage.json"), "utf8")),
+        ).not.toHaveProperty("completeness");
         expect(commands).toContain("fail-scan");
         expect(modelInputs).toHaveLength(1);
         await client.close();
@@ -872,9 +871,8 @@ for (const {
           reportAvailable: true,
         });
         expect(
-          JSON.parse(await readFile(join(scanDir, "coverage.json"), "utf8"))
-            .completeness,
-        ).toBe("partial");
+          JSON.parse(await readFile(join(scanDir, "coverage.json"), "utf8")),
+        ).not.toHaveProperty("completeness");
         expect(await readFile(join(scanDir, "report.md"), "utf8")).toContain(
           "Validate the resolved destination",
         );
@@ -971,7 +969,7 @@ for (const {
       }
       // The synthetic accepted workers have no native usage receipts.
       expect(result.cost).toBeNull();
-      expect(result.coverage.completeness).toBe("partial");
+      expect(result.coverage).not.toHaveProperty("completeness");
       expect(result.findings.findings[0]?.remediation).toBe(
         "Validate the resolved destination before writing.",
       );

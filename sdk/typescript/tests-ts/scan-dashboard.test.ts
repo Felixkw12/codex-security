@@ -1331,20 +1331,19 @@ describe("live scan dashboard", () => {
     expect(frame()).toContain("3 findings before deduplication");
     dashboard.finishComponents({
       total: 3,
-      completed: 1,
-      incomplete: 1,
+      completed: 2,
       failed: 1,
       planPath: "/synthetic/plan.json",
       sourceFindingCount: 3,
       findingCount: 2,
       deduplication: {
-        status: "incomplete",
+        status: "failed",
         confirmedGroups: 1,
         uncertainPairs: 0,
       },
     });
-    expect(frame()).toContain("3 findings → 2 groups · matching incomplete");
-    expect(frame()).toContain("partial results");
+    expect(frame()).toContain("3 findings → 2 groups · matching failed");
+    expect(frame()).toContain("Finished with errors");
     expect(timers).toBe(1);
     dashboard.stop();
     expect(timers).toBe(0);
@@ -2658,3 +2657,30 @@ test.each([16, 25, 120])(
     }
   },
 );
+
+test("shows saved review counts separately from file coverage", () => {
+  const stderr = capture(true);
+  const dashboard = createDashboard(stderr.stream);
+  dashboard.start();
+  try {
+    dashboard.setStage("validating findings");
+    dashboard.setFiles({
+      phase: "validation",
+      filesCompleted: 0,
+      filesTotal: 8,
+      reviewItems: { completed: 11, total: 13 },
+    });
+    expect(lastFrame(stderr)).toContain("validating findings");
+    expect(lastFrame(stderr)).toContain("REVIEWS  11 / 13 completed");
+    expect(lastFrame(stderr)).not.toContain("FILES");
+    dashboard.setFiles({
+      phase: "validation",
+      filesCompleted: 0,
+      filesTotal: 8,
+      reviewItems: { completed: 13, total: 13 },
+    });
+    expect(lastFrame(stderr)).toContain("REVIEWS  13 / 13 completed");
+  } finally {
+    dashboard.stop();
+  }
+});

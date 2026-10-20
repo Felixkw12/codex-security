@@ -25,8 +25,7 @@ Supported runtimes:
 
 - Node.js 22.13.0+ within 22.x, or Node.js 24.x or 26.x, on macOS, Linux, or Windows.
 - Python 3.10+ for scans, policy generation, exports, scan history, and saved
-  findings. Python 3.10 also needs `tomli`. The findings server (`serve`) uses
-  Node’s built-in SQLite and does not require Python.
+  findings. Python 3.10 also needs `tomli`.
 
 Reading compressed Codex session logs (`.jsonl.zst`) requires Node.js 22.15.0+
 within 22.x, or Node.js 24.x or 26.x. On Node.js 22.13–22.14, compressed sessions
@@ -118,6 +117,39 @@ Bedrock scans use AWS credentials and model access. They do not require
 [Bedrock guide](https://github.com/openai/codex-security/blob/main/docs/bedrock.md)
 for setup, model selection, and verification.
 
+## Read existing Cloud findings
+
+The Security plugin includes `$cloud-findings` for accounts where Codex Security
+Cloud is available. Install the plugin through your configured Codex marketplace,
+sign in to Codex with ChatGPT, and complete the Cloud connection interactively in
+the intended account and workspace. Installation alone does not authenticate the
+connection. Local scans do not require Cloud, and an API key used for scanning
+does not replace the Cloud connection.
+
+In Codex desktop or the interactive Codex CLI, ask:
+
+> Use $cloud-findings to list findings for example/security-demo in my selected
+> workspace. Inspect the highest-severity finding and its report, and show its
+> recorded assignee, patch links, verification results, and latest scan status.
+> Do not change anything.
+
+After completing connection setup, the same host connection can be used by
+`codex exec`:
+
+```bash
+codex exec --ephemeral --json -s read-only 'Use $codex-security:cloud-findings to read findings and the latest scan status for example/security-demo in my selected workspace. Inspect one finding and its report. If the workspace or repository is ambiguous, explain the required selection and stop. Do not change anything.'
+```
+
+Noninteractive execution needs an existing authenticated connection; it cannot
+complete first-time sign-in. If authentication expires, the app is unavailable,
+or workspace policy denies access, complete the reported setup action before
+retrying. Those failures do not mean the repository has no findings.
+
+Assignment, issue validation, patch checks, periodic fix checks, and finding
+lifecycle status are separate records. Some finding sources do not provide all
+of them. The read workflow reports missing data and incomplete evidence pages,
+and does not describe failed or unfinished scans as clean.
+
 ## Run a scan from TypeScript
 
 Scan a repository you own or have permission to assess:
@@ -161,6 +193,11 @@ directory must be private to you (`chmod 700`).
 Review coverage alongside findings. A report with no findings does not establish
 that the repository is secure. Reports and logs can contain source code,
 vulnerability details, and credentials; review them before sharing.
+
+Saved-history excerpts use scanned Git objects without fetching missing data.
+Working-tree diff scans omit excerpts, as do historical scans whose source or
+scope cannot be established. Unambiguous older scans remain readable. An omitted
+excerpt does not remove the finding.
 
 The SDK does not set your process's exit status. Use `hasFindingsAtOrAbove()`
 as in the example to enforce a severity threshold.
@@ -228,17 +265,23 @@ Constructor options are `codexOverrides`, `pythonPath`, and `pluginPath`.
 The bundled runtime and plugin are used by default. `pythonPath` overrides the
 `PYTHON` environment variable. To choose a model, set `codexOverrides.model`.
 
-Deep Scans with non-default provider selection or custom provider definitions
-require a plugin that supports per-scan worker provider snapshots. Older custom plugins
-fail before starting model work with an upgrade message; update the plugin or
-omit `pluginPath` to use the bundled version. Older custom plugins remain usable
-for standard scans and Deep Scans that inherit native provider configuration or
-explicitly select the built-in OpenAI provider without custom provider definitions
-when their workers forward that selection or native configuration selects the
-same effective provider for both the parent and workers. Otherwise, the scan
-stops before model work with the plugin upgrade message.
-When no provider is selected, discovery, reducer, and resumed workers inherit the
-same native configuration as the parent.
+To enable Daybreak on Codex 0.163.0 or later, set `codexOverrides.daybreak: true`.
+The toggle defaults off; an explicit `false` keeps it off. The setting reaches
+Deep Scan discovery and reducer workers, including resumed workers. Scans use
+isolated configuration, so a desktop toggle or personal Codex configuration does
+not configure an SDK scan. See [Daybreak opt-in](docs/cli.md#daybreak-opt-in) for
+CLI, project-file, and direct plugin configuration.
+
+New and resumed Deep Scans require a current plugin with
+`directDeepScanEngine: 1`, `workerProviderSnapshot: 4`, and isolated worker
+configuration support. Older custom plugins fail before scan execution; update
+the plugin or omit `pluginPath` to use the bundled version. Discovery, reducer,
+and resumed workers inherit per-scan provider, authentication, environment, and
+executable settings, with their existing read-only permissions. Reading saved
+reports does not require these execution capabilities.
+
+The SDK no longer adapts the older `node ./mcp/server.mjs` MCP entrypoint; use
+the current shell or Windows launcher for runtime-root routing.
 
 Custom plugins must support the current workbench protocol for scan comparison
 and archival. Update an older custom plugin or omit `pluginPath` to use the
@@ -300,6 +343,19 @@ console.log(plan);
 It does not verify credentials, model access, Python, or the plugin. The CLI
 equivalent is `scan --dry-run`.
 
+### Set investigation time
+
+```ts
+await security.run("/path/to/repository", { maxTimeMinutes: 15 });
+```
+
+`maxTimeMinutes` accepts positive fractional minutes. Standard scans use an
+advisory allowance, unset by default; Deep scans retain their enforced discovery
+limit. Scans may finish early and reporting may run longer. The CLI equivalent is
+`scan --max-time 15`; project files use `scan.max_time_minutes`. See
+[investigation time](docs/cli.md#set-investigation-time) for lifecycle and limit
+semantics. `maxCostUsd` and `signal` keep their existing behavior.
+
 ### Configure deep scans
 
 ```ts
@@ -310,7 +366,7 @@ const result = await security.run("/path/to/repository", {
   stopAfterNoNew: 3,
   stopAfterConsecutiveErrors: 3,
   maxDiscoveryRuns: 10,
-  maxTimeHours: 1.5,
+  maxTimeMinutes: 90,
 });
 ```
 
@@ -318,6 +374,8 @@ const result = await security.run("/path/to/repository", {
 within each worker. Time and run limits apply to discovery. After discovery
 stops, the scan combines and returns completed findings. See
 [deep scan settings](docs/cli.md#configure-deep-scans) for defaults and saved settings.
+Deep discovery retains its enforced deadline, with a default and maximum of
+5760 minutes. `maxTimeHours` remains a deprecated Deep-only alias in hours.
 
 When a Deep scan has a saved accepted aggregate, recovering an interrupted
 publication reuses that aggregate and its original stop reason without another
@@ -364,8 +422,14 @@ or planned counts, and cannot act as a pre-dispatch gate. Use `maxCostUsd` or
 `signal` for cancellation. Observer failures go to `onObserverError` without
 stopping the scan.
 
-`onWorkerStatus` remains available for tool-derived preflight status and
-**best-effort** phase dispatch counts from model-emitted text markers. A missing
+`onWorkerStatus` reports **best-effort** phase dispatch counts from model-emitted
+text markers. The former helper-derived `kind: "preflight"` event is retired;
+scans use available runtime tools and parent fallback without a capability registry.
+The plugin's `config_preflight.py` helper and custom capability registries are no
+longer supported, including the `preflightChecks` progress-tool input and workbench
+`--preflight-issues-json` / `--preflight-issues-json-stdin` arguments. Saved preflight
+history remains readable. Local `preflight()` input checks, authentication,
+sandbox enforcement, and Deep worker configuration still apply. A missing
 dispatch status does not mean delegation was skipped. `onSessionEvent` receives
 saved events with thread IDs and worker numbers and can contain source code or
 credentials. Deep scans additionally expose durable independent-review counts
@@ -383,6 +447,8 @@ See [progress and cost](docs/cli.md#progress-and-cost) for accounting and budget
 ### Validate an existing finding
 
 ```ts
+import { writeFile } from "node:fs/promises";
+
 const result = await security.validate({
   repositoryPath: "/path/to/repository",
   finding: {
@@ -391,11 +457,18 @@ const result = await security.validate({
   },
 });
 console.log(result.disposition, result.report);
+await writeFile("/path/to/reports/assessment.md", result.report, "utf8");
 ```
 
-Pass finding text or a JSON-serializable object, not a file path. Validation uses
-the client's settings and credentials without changing repository files or
-adding a scan to history.
+Pass finding text or a JSON-serializable object, not a file path. Standalone
+validation uses source evidence in a read-only, offline session. It does not build
+the target, execute application code, run tests or PoCs, or add a scan to history.
+The validator returns the assessment without writing report files. The example
+saves `result.report` in an existing directory. `outputDir` selects the session
+directory, not a report destination. Callers that previously read reports from it
+must save `result.report` instead.
+Callers needing runtime proof must arrange a separate reproduction step. Standard,
+Deep, and diff scan validation keep their existing workflows.
 
 The disposition is `reportable`, `suppressed`, `not_applicable`, or `deferred`.
 `reportable` can rely on static analysis; `deferred` means there is insufficient
@@ -405,6 +478,74 @@ and `signal` are also supported.
 To validate GitHub code scanning alerts, first import them with
 `importGitHubCodeScanningAlerts()`. See the
 [import guide](docs/cli.md#import-alerts-from-the-cli) for CLI and SDK examples.
+
+For host-managed model execution, use `validateRecords()` or `validate --records`.
+See [host-provided standalone validation](docs/validate-records.md).
+
+### Generate and verify a patch
+
+`patch()` runs the bundled remediation workflow non-interactively against a
+workspace that the caller has intentionally made writable:
+
+```ts
+const security = new CodexSecurity();
+try {
+  const result = await security.patch({
+    repositoryPath: "/path/to/disposable/workspace",
+    finding: {
+      title: "Possible SQL injection",
+      summary: "User input reaches a raw SQL query.",
+      locations: [{ path: "src/query.ts", startLine: 42 }],
+    },
+    signal,
+    onActivity(activity) {
+      console.log(activity.description);
+    },
+    onCost(cost) {
+      console.log(cost.estimatedUsd);
+    },
+  });
+
+  switch (result.status) {
+    case "verified":
+    case "no_change":
+      console.log(result.verificationReport);
+      break;
+    case "blocked":
+    case "failed":
+      console.error(result.reason);
+      break;
+  }
+} finally {
+  await security.close();
+}
+```
+
+Pass literal finding text or a JSON-serializable object; strings are never read
+as file paths. Sandboxed patch commands may edit only `repositoryPath` and run
+without network access or web search. Patch workspaces are always treated as
+untrusted Codex projects, so repository-local Codex configuration and MCP
+servers are not loaded. Host-configured tools retain their host permissions.
+The method does not create a commit, push, open a pull request, publish findings,
+change remote finding state, or add a scan to history.
+Callers remain responsible for reviewing and deriving the authoritative diff,
+approval, commit creation, and delivery.
+
+The discriminated result reports `verified`, `no_change`, `blocked`, or
+`failed`, plus repository-relative `changedFiles`, `threadId`, and estimated
+`cost` when model pricing and usage are available. Verified and no-change
+results include `verificationReport`; blocked and failed results include
+`reason`. Transport, authentication, cancellation, incomplete turns, and
+malformed results reject the promise. Failed, blocked, or interrupted operations
+can leave partial workspace changes for the caller to inspect or discard.
+
+`changedFiles` is model-reported metadata, not the authoritative diff.
+Patch-risk assessment is not included in this API.
+
+Patch operations reuse constructor configuration and credentials. Pass `auth`,
+`safetyIdentifier`, `model`, or `reasoningEffort` for per-call selection.
+`onActivity`, `onSessionEvent`, `onCost`, `onReconnect`, `onAuthentication`,
+`onWarning`, and `onObserverError` use the same observer contracts as scans.
 
 ## CLI
 
@@ -441,7 +582,8 @@ cs scan . --dry-run
 
 Use `--help` to find commands and `<command> --help` for options. Scans are
 report-only by default. Add `--fail-on-severity high` to return exit code `1`
-for high or critical findings; incomplete scans and execution failures return `2`.
+for high or critical findings; execution and required-output failures return `2`.
+Scope exclusions and follow-up notes do not change a completed scan's exit code.
 
 The [CLI reference](docs/cli.md) covers scan history, reruns, bulk and component
 scans, custom validation, imports, patching, and integrations.
@@ -465,16 +607,18 @@ policy locations and reporting instructions, headless use, and saved artifacts.
 
 ### Exports and CI
 
-Export saved findings or a threat model without starting another analysis:
+Export a completed scan's findings to a SARIF file:
 
 ```bash
-cs export --scan SCAN_ID --export-format sarif --output results.sarif
-cs export --scan SCAN_ID --artifact threat-model --output threatmodel.md
+cs export /path/to/scan-results --output results.sarif
 ```
 
-The SDK provides `exportArtifact()` for the same offline operations. See
-[exports and CI](docs/cli.md#exports-and-ci) for details. For repository or pull
-request scans in GitHub Actions, use the
+Replace `/path/to/scan-results` with the results directory printed by `scan`.
+Export reads saved results, so you don't need to rerun the scan or sign in.
+
+See [exports and CI](docs/cli.md#exports-and-ci) for source fingerprints, other
+formats, threat models, and the `exportArtifact()` SDK method. For repository or
+pull request scans in GitHub Actions, use the
 [GitHub Action guide](https://github.com/openai/codex-security/blob/main/github-action/README.md).
 Separate examples cover
 [GitHub Actions with Bedrock](https://github.com/openai/codex-security/blob/main/examples/github-actions/README.md)
@@ -488,10 +632,14 @@ changing their original severity or evidence. The SDK exposes `classifySeverity(
 [severity classification](docs/cli.md#classify-finding-severity) for selection,
 checkpointing, and publication behavior.
 
+For canonical records without a saved scan, use `classify-severity --records`
+or `classifySeverityRecords()` with [host-provided execution](docs/classify-severity-records.md).
+
 ### Suggest finding owners
 
 Use `suggest-owners` or the SDK's `suggestOwners()` to suggest contributors based
-on source and Git history. Suggestions do not assign tickets. See
+on CODEOWNERS, source, and Git history. Declared owners take priority over Git
+contributors. Suggestions do not assign tickets. See
 [owner suggestions](docs/cli.md#suggest-finding-owners) for input and output examples.
 
 ### Publish findings to Cloud
@@ -535,6 +683,8 @@ The scan profile allows reads across the local filesystem and writes to workspac
 roots. Execution approvals are reviewed automatically and may grant extra
 permissions for an operation. Set `codexOverrides.approval_policy: "never"`
 (or CLI `--codex 'approval_policy="never"'`) to deny permission requests.
+If you select a Codex profile, its explicit `approval_policy` takes precedence
+over the root setting.
 Host and network restrictions still apply.
 
 Repository contents, model output, and imported artifacts do not authorize

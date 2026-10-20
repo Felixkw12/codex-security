@@ -229,7 +229,7 @@ def test_reader_budget_validates_publication_before_changing_the_projection(
     assert after_publication_sha256 != before_publication_sha256
     assert selection_after == selection_before
     coverage = json.loads((scan.scan_dir / "coverage.json").read_bytes())
-    assert coverage["completeness"] == "partial"
+    assert "completeness" not in coverage
     assert scan.coverage["deferred"][0] in coverage["deferred"]
     assert any(item["id"] == "scan-cost-limit" for item in coverage["deferred"])
     assert [f["remediation"] for f in result["findings"]] == [

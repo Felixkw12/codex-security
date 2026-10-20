@@ -19,8 +19,9 @@ from report_projection import SEVERITY_ORDER
 from workbench_constants import ARTIFACTS, FINDINGS_PAGE_MAX
 from workbench_scan_start import scan_target_identity
 from workbench_scan_usage import stored_scan_cost_fields
+from workbench_source_scopes import public_scan_recipe
 from workbench_target import git_output, require_scan_target_identity
-from workbench_validation import reject_non_finite_json, timestamp_key
+from workbench_validation import timestamp_key
 
 
 def rename_scan(connection: sqlite3.Connection, scan: sqlite3.Row, name: str) -> dict[str, Any]:
@@ -37,7 +38,7 @@ def scan_recipe(scan: sqlite3.Row) -> dict[str, Any]:
         raise SystemExit("This scan does not have a saved launch recipe.")
     return {
         "parentScanId": scan["parent_scan_id"],
-        "recipe": json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json),
+        "recipe": public_scan_recipe(scan),
         "scanId": scan["id"],
     }
 
@@ -207,6 +208,69 @@ def _repository_origin(target: Path) -> tuple[str, str] | None:
     return (host.lower(), path) if host and path else None
 
 
+SCAN_SUMMARY_QUERY = """
+SELECT
+    scans.*,
+    progress.reportable_findings_count,
+    progress.scope_file_count,
+    progress.review_items_completed,
+    progress.review_items_total,
+    progress.updated_at AS progress_updated_at,
+    (
+        SELECT COUNT(*)
+        FROM finding_occurrences AS occurrences
+        WHERE occurrences.scan_id = scans.id
+    ) AS finding_count
+FROM scans
+JOIN scan_progress AS progress ON progress.scan_id = scans.id
+"""
+
+
+def scan_summary(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "completedAt": row["completed_at"],
+        "continuationThreadId": row["continuation_thread_id"],
+        **stored_scan_cost_fields(row["cost_json"]),
+        "findingCount": row["finding_count"],
+        "handoffStatus": row["handoff_status"],
+        "mode": row["mode"],
+        "model": row["model"],
+        "name": row["name"],
+        "parentScanId": row["parent_scan_id"],
+        "progress": {
+            "candidates": {"reportable": row["reportable_findings_count"]},
+            "coverage": {
+                "closedRows": row["review_items_completed"],
+                "filesTotal": row["scope_file_count"],
+                "worklistRows": row["review_items_total"],
+            },
+            "phase": row["phase"],
+            "status": "canceled" if row["canceled_at"] else row["status"],
+            "updatedAt": row["progress_updated_at"],
+        },
+        "recipeAvailable": row["recipe_json"] is not None,
+        "reasoningEffort": row["reasoning_effort"],
+        "scanDir": row["scan_dir"],
+        "scanId": row["id"],
+        "scope": row["scope"],
+        "startedAt": row["started_at"],
+        "targetId": row["target_id"],
+        "targetPath": row["target_path"],
+        "targetRevision": row["target_revision"],
+        "targetSummary": row["target_summary"],
+        "updatedAt": max(
+            row["updated_at"],
+            row["progress_updated_at"],
+            key=lambda value: (timestamp_key(value), value),
+        ),
+        **(
+            {"warnings": json.loads(row["completion_warnings_json"])}
+            if row["completion_warnings_json"] != "[]"
+            else {}
+        ),
+    }
+
+
 def list_scans(
     connection: sqlite3.Connection, args: argparse.Namespace | None = None
 ) -> dict[str, Any]:
@@ -286,20 +350,7 @@ def list_scans(
         values.extend((limit + 1, args.offset))
     rows = connection.execute(
         f"""
-        SELECT
-            scans.*,
-            progress.reportable_findings_count,
-            progress.scope_file_count,
-            progress.review_items_completed,
-            progress.review_items_total,
-            progress.updated_at AS progress_updated_at,
-            (
-                SELECT COUNT(*)
-                FROM finding_occurrences AS occurrences
-                WHERE occurrences.scan_id = scans.id
-            ) AS finding_count
-        FROM scans
-        JOIN scan_progress AS progress ON progress.scan_id = scans.id
+        {SCAN_SUMMARY_QUERY}
         {where}
         ORDER BY
             CASE WHEN scans.status = 'running' AND scans.canceled_at IS NULL THEN 0 ELSE 1 END,
@@ -310,53 +361,7 @@ def list_scans(
         """,
         values,
     ).fetchall()
-    result = {
-        "scans": [
-            {
-                "completedAt": row["completed_at"],
-                "continuationThreadId": row["continuation_thread_id"],
-                **stored_scan_cost_fields(row["cost_json"]),
-                "findingCount": row["finding_count"],
-                "handoffStatus": row["handoff_status"],
-                "mode": row["mode"],
-                "model": row["model"],
-                "name": row["name"],
-                "parentScanId": row["parent_scan_id"],
-                "progress": {
-                    "candidates": {"reportable": row["reportable_findings_count"]},
-                    "coverage": {
-                        "closedRows": row["review_items_completed"],
-                        "filesTotal": row["scope_file_count"],
-                        "worklistRows": row["review_items_total"],
-                    },
-                    "phase": row["phase"],
-                    "status": "canceled" if row["canceled_at"] else row["status"],
-                    "updatedAt": row["progress_updated_at"],
-                },
-                "recipeAvailable": row["recipe_json"] is not None,
-                "reasoningEffort": row["reasoning_effort"],
-                "scanDir": row["scan_dir"],
-                "scanId": row["id"],
-                "scope": row["scope"],
-                "startedAt": row["started_at"],
-                "targetId": row["target_id"],
-                "targetPath": row["target_path"],
-                "targetRevision": row["target_revision"],
-                "targetSummary": row["target_summary"],
-                "updatedAt": max(
-                    row["updated_at"],
-                    row["progress_updated_at"],
-                    key=lambda value: (timestamp_key(value), value),
-                ),
-                **(
-                    {"warnings": json.loads(row["completion_warnings_json"])}
-                    if row["completion_warnings_json"] != "[]"
-                    else {}
-                ),
-            }
-            for row in rows[:limit]
-        ]
-    }
+    result = {"scans": [scan_summary(row) for row in rows[:limit]]}
     if limit is not None:
         result.update(
             {
@@ -385,19 +390,19 @@ def list_unmatched_scan_pairs(
     ).fetchone()
     selected = [
         scan
-        for scan in connection.execute(
-            "SELECT * FROM scans WHERE status = 'complete' ORDER BY started_at, id"
-        )
+        for scan in connection.execute("SELECT * FROM scans WHERE status = 'complete'")
         if _same_repository(scan, requested)
     ]
 
+    selected.sort(key=lambda scan: (timestamp_key(scan["started_at"]), scan["id"]))
+
     available = []
-    for scan in selected:
+    for selected_index, scan in enumerate(selected):
         try:
             read_coverage(scan)
         except SystemExit:
             continue
-        available.append(scan)
+        available.append((selected_index, scan))
 
     saved_pairs = {
         (row["before_scan_id"], row["after_scan_id"])
@@ -407,10 +412,10 @@ def list_unmatched_scan_pairs(
     skipped = 0
     matching_findings: dict[str, list[dict[str, Any]]] = {}
     known_links: list[sqlite3.Row] | None = None
-    for index, after in enumerate(available):
+    for index, (selected_index, after) in enumerate(available):
         previous = [
             before
-            for before in available[:index]
+            for _, before in available[:index]
             if args.force or (before["id"], after["id"]) not in saved_pairs
         ]
         skipped += index - len(previous)
@@ -430,11 +435,7 @@ def list_unmatched_scan_pairs(
                 ]
         known_groups = _known_finding_groups(
             known_links,
-            {
-                scan["id"]
-                for scan in selected
-                if (scan["started_at"], scan["id"]) <= (after["started_at"], after["id"])
-            },
+            {scan["id"] for scan in selected[: selected_index + 1]},
         )
         batches.append(
             {
@@ -545,7 +546,6 @@ def compare_scans(
         backfill_finding_details(connection, before)
         backfill_finding_details(connection, after)
     after_coverage = read_coverage(after)
-    comparable = after_coverage.get("completeness") == "complete"
     before_findings = _scan_findings(connection, before["id"])
     after_findings = _scan_findings(connection, after["id"])
     matches = json.loads(cached["result_json"]) if cached is not None else None
@@ -565,7 +565,10 @@ def compare_scans(
         else {}
     )
     findings: list[dict[str, Any]] = []
-    summary = {status: 0 for status in ("new", "persisting", "resolved", "reopened", "unknown")}
+    summary = {
+        status: 0
+        for status in ("new", "persisting", "resolved", "not_observed", "reopened", "unknown")
+    }
 
     for previous_rows, current_rows, match_reason in groups:
         previous = (
@@ -615,9 +618,6 @@ def compare_scans(
         elif uncertain_reason is not None:
             status = "unknown"
             item["reason"] = uncertain_reason
-        elif not comparable:
-            status = "unknown"
-            item["reason"] = "The later scan has incomplete coverage."
         elif not all(
             scan_covers_path(
                 after,
@@ -629,8 +629,14 @@ def compare_scans(
         ):
             status = "unknown"
             item["reason"] = "The affected path was excluded or outside the later scope."
-        else:
+        elif all(
+            row["triage_status"] == "closed" and row["close_reason"] == "already_fixed"
+            for row in previous_rows
+        ):
             status = "resolved"
+        else:
+            status = "not_observed"
+            item["reason"] = "Not observed in the later scan; remediation has not been verified."
         if len(previous_rows) == 1:
             item["beforeOccurrenceId"] = previous["id"]
         elif previous_rows:
@@ -651,8 +657,6 @@ def compare_scans(
     result = {
         "afterScanId": after["id"],
         "beforeScanId": before["id"],
-        "comparable": comparable,
-        "coverage": {"afterCompleteness": after_coverage.get("completeness")},
         "findings": findings,
         "repository": before["target_path"],
         "summary": summary,
@@ -669,14 +673,14 @@ def compare_scans(
                 for pair in related
             ]
     if include_matching_inputs:
+        after_key = (timestamp_key(after["started_at"]), after["id"])
         known_scan_ids = {
             scan["id"]
             for scan in connection.execute(
-                "SELECT * FROM scans WHERE status = 'complete' "
-                "AND (started_at < ? OR (started_at = ? AND id <= ?))",
-                (after["started_at"], after["started_at"], after["id"]),
+                "SELECT id, started_at, target_id, target_path FROM scans WHERE status = 'complete'"
             )
-            if _same_repository(scan, after)
+            if (timestamp_key(scan["started_at"]), scan["id"]) <= after_key
+            and _same_repository(scan, after)
         }
         excluded_pairs = {(before["id"], after["id"]), (after["id"], before["id"])}
         known_groups = _known_finding_groups(
@@ -992,7 +996,8 @@ def finding_matches(
         )
     )
     known_scans = sorted(
-        {(started_at, scan_id)} | {(row["started_at"], row["scan_id"]) for row in linked_rows}
+        {(started_at, scan_id)} | {(row["started_at"], row["scan_id"]) for row in linked_rows},
+        key=lambda scan: (timestamp_key(scan[0]), scan[1]),
     )
     included = {occurrence_id, *(row["occurrence_id"] for row in rows)}
     rows.extend(
@@ -1188,11 +1193,7 @@ def scan_covers_path(
     path: str | None,
     coverage: dict[str, Any],
 ) -> bool:
-    if (
-        scan["status"] != "complete"
-        or scan["target_id"] != target_id
-        or coverage.get("completeness") != "complete"
-    ):
+    if scan["status"] != "complete" or scan["target_id"] != target_id:
         return False
     if not isinstance(path, str) or not path:
         return False

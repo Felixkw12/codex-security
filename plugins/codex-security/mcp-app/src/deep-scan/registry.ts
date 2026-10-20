@@ -25,6 +25,7 @@ export interface DeepScanCoordinatorStartOptions extends CoordinatorOptions {
 export class DeepScanCoordinatorRegistry {
   private readonly coordinators = new Map<string, DeepScanCoordinator>();
   private readonly observers = new Set<DeepScanCoordinator>();
+  private closed = false;
 
   get(scanId: string): DeepScanCoordinator | undefined {
     return this.coordinators.get(scanId);
@@ -34,6 +35,7 @@ export class DeepScanCoordinatorRegistry {
     requireSupportedDeepScan(options.run);
     const existing = this.coordinators.get(options.run.scanId);
     if (existing) return existing;
+    if (this.closed) throw new Error("Deep Scan coordinator host has closed.");
     let coordinator!: DeepScanCoordinator;
     coordinator = new DeepScanCoordinator({
       ...options,
@@ -81,6 +83,7 @@ export class DeepScanCoordinatorRegistry {
   }
 
   shutdown(reason: string): void {
+    this.closed = true;
     for (const coordinator of this.coordinators.values())
       coordinator.cancel(reason);
     for (const coordinator of this.observers) coordinator.cancel(reason);
@@ -208,11 +211,9 @@ export class DeepScanRemoteCoordinator {
   }
 }
 
-export async function startOrJoinDeepScanCoordinator(input: {
-  run: DeepScanRunState;
-  registry: Pick<DeepScanCoordinatorRegistry, "get" | "start">;
-  options: Omit<DeepScanCoordinatorStartOptions, "run" | "observeReplacement">;
-}): Promise<{
+export async function startOrJoinDeepScanCoordinator(
+  input: ConstructorParameters<typeof DeepScanRemoteCoordinator>[0],
+): Promise<{
   coordinator: DeepScanCoordinator | DeepScanRemoteCoordinator;
   joined: boolean;
 }> {

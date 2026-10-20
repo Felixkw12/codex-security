@@ -58,7 +58,7 @@ def test_late_head_changes_require_explicit_recovery(
     tmp_path: Path, selection: str, has_result: bool
 ) -> None:
     state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
-    _, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
+    worker_id, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
     pending, closed = drafts(scan_id)
     reopened = write_checkpoint(result.parent / "checkpoints", pending)
     completed = write_checkpoint(result.parent / "checkpoints", closed)
@@ -78,7 +78,7 @@ def test_late_head_changes_require_explicit_recovery(
     assert any("/checkpoint-heads/" in path for path in frozen)
     assert not any(path.endswith("checkpoint-head.json") for path in frozen)
     assert not any(
-        row["id"] == "review"
+        row["id"] in {"review", f"{worker_id}/review"}
         for row in json.loads((scan_dir / "coverage.json").read_text())["deferred"]
     )
     assert get_scan(state, scan_id)["scan"]["resultsRecoveryNeeded"] is False
@@ -92,7 +92,15 @@ def test_late_head_changes_require_explicit_recovery(
     recovered = scan_command(state, "recover-scan-results", scan_id, environment=environment)
     assert recovered["scan"]["resultsRecoveryNeeded"] is False
     coverage = json.loads((scan_dir / "coverage.json").read_text())
-    assert any(row["id"] == "review" for row in coverage["deferred"]) is (selection == "reopened")
+    assert not any(row["id"] == "review" for row in coverage["deferred"])
+    assert all(
+        row.get("workerId") == worker_id
+        for row in coverage["deferred"]
+        if row["id"] != "scan-stopped"
+    )
+    assert any(row["id"] == f"{worker_id}/review" for row in coverage["deferred"]) is (
+        selection == "reopened"
+    )
     published = manifest_path.read_bytes()
     scan_command(state, "recover-scan-results", scan_id, environment=environment)
     assert manifest_path.read_bytes() == published
@@ -175,7 +183,7 @@ def test_file_authored_resolution_can_leave_manifest_unchanged(
         tmp_path, scan_id, binding, [], warnings, stopped=False, reason=""
     )
     # Headless file-authored documents replace their older checkpoint coverage.
-    assert result[2]["completeness"] == ("partial" if retain_pending else "complete")
+
     assert result[2]["deferred"] == ([independent] if retain_pending else [])
     assert warnings == []
 
@@ -301,7 +309,6 @@ def test_malformed_parent_deferred_id_reaches_existing_recovery_diagnostics(
         )
         assert warnings
         assert all(isinstance(row["id"], str) for row in coverage["deferred"])
-        assert coverage["completeness"] == "partial"
 
 
 @pytest.mark.parametrize("layout", ["parent", "worker", "archived"])
@@ -548,9 +555,7 @@ def test_completion_checks_selected_parent_checkpoint(
     manifest_path.write_text(json.dumps(manifest))
     coverage = json.loads((scan_dir / "coverage.json").read_text())
     if complete is False:
-        coverage.update(
-            completeness="partial", deferred=[{"id": "review", "reason": "Review reopened."}]
-        )
+        coverage.update(deferred=[{"id": "review", "reason": "Review reopened."}])
     draft = {
         "scanId": scan_id,
         "findings": json.loads((scan_dir / "findings.json").read_text())["findings"],
@@ -816,7 +821,7 @@ def test_parent_head_selection_matches_frozen_publication_retry(
     worker_id, worker_result = accepted_standard_worker(state, codex_home, scan_dir, scan_id)
     worker = json.loads(worker_result.read_text())
     child_work = {"id": "child-review", "reason": "Worker review remains."}
-    worker["coverage"].update(completeness="partial", deferred=[child_work])
+    worker["coverage"].update(deferred=[child_work])
     worker_result.write_text(json.dumps(worker))
 
     contract = tmp_path / "contract"
@@ -848,7 +853,7 @@ def test_parent_head_selection_matches_frozen_publication_retry(
     initial["coverage"].update(surfaces=[], deferred=[])
     if evidence == "deferred":
         initial["findings"]["findings"] = []
-        initial["coverage"].update(completeness="partial", deferred=[parent_work])
+        initial["coverage"].update(deferred=[parent_work])
     else:
         initial["findings"]["findings"][0]["extensions"] = {"candidateId": "candidate-review"}
         initial["coverage"]["surfaces"] = [
@@ -876,7 +881,7 @@ def test_parent_head_selection_matches_frozen_publication_retry(
     terminal = copy.deepcopy(initial)
     terminal["manifest"]["scan"].pop("complete")
     terminal["findings"]["findings"] = []
-    terminal["coverage"].update(completeness="complete", deferred=[], surfaces=[])
+    terminal["coverage"].update(deferred=[], surfaces=[])
     if evidence == "reported":
         terminal["coverage"]["surfaces"] = [
             {
@@ -913,7 +918,7 @@ def test_parent_head_selection_matches_frozen_publication_retry(
     first = []
 
     def fail_publication(prepared, *, projection_warnings=None):
-        first.append(copy.deepcopy((prepared[3], prepared[4])))
+        first.append(copy.deepcopy((prepared.findings, prepared.coverage)))
         raise OSError("injected stopped publication failure")
 
     with monkeypatch.context() as patch:
@@ -928,7 +933,12 @@ def test_parent_head_selection_matches_frozen_publication_retry(
         json.loads((scan_dir / "coverage.json").read_text()),
     )
     for findings, coverage in (first[0], replay):
-        assert child_work in coverage["deferred"]
+        assert not any(row["id"] == child_work["id"] for row in coverage["deferred"])
+        assert {
+            **child_work,
+            "id": f"{worker_id}/{child_work['id']}",
+            "workerId": worker_id,
+        } in coverage["deferred"]
         if evidence == "deferred":
             assert (parent_work in coverage["deferred"]) is (head_time <= 100)
         else:

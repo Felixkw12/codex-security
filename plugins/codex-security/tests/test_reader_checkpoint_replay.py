@@ -161,7 +161,7 @@ def test_reader_replays_frozen_rejection_after_real_output_fault(
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
     assert findings[0]["identity"]["anchor"] == "independent-finding"
     coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
-    assert coverage["completeness"] == "partial"
+    assert "completeness" not in coverage
     assert any(
         surface.get("candidateId") == "candidate-disposition"
         and surface.get("disposition") == "rejected"

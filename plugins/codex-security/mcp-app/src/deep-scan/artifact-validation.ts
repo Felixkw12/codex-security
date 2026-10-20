@@ -1,5 +1,16 @@
-import { dirname } from "node:path";
+import { isRecord } from "../record.js";
 import { isDeepStrictEqual } from "node:util";
+import { dirname, relative, sep } from "node:path";
+import type { JsonObject } from "../types.js";
+import type { AcceptedDiscovery } from "./worker-runner.js";
+import { artifactSourcePath } from "../artifact-io.js";
+import {
+  coverageReceiptComponents,
+  validateRetainedCoverage,
+} from "../coverage-publication.js";
+import { artifactSchemaDocuments } from "../artifact-contracts.js";
+import { projectArtifactToolSchema } from "../artifact-schema-loader.js";
+import { requireFiniteNumbers } from "../helpers/json.js";
 import {
   parsePersistedScanDraft,
   readCurrentScanDraftCheckpoint,
@@ -7,6 +18,7 @@ import {
   preserveFindingDetails,
   saveScanDraftCheckpoint,
   scanFindingIdentity,
+  validateFindingSemantics,
   type ScanDraftInput,
 } from "../artifact-scan-draft.js";
 import {
@@ -20,6 +32,9 @@ export type DeepReductionInput = Omit<ScanDraftInput, "coverage"> & {
   /** Host projection of accepted source coverage; never supplied by the reducer. */
   sourceCoverage?: ScanDraftInput["coverage"];
 };
+export const deepReductionInputSchema = projectArtifactToolSchema(
+  artifactSchemaDocuments["tools/deep-reducer"].$defs.reductionInput,
+);
 
 export interface DeepReductionSources {
   discoveries: {
@@ -53,32 +68,85 @@ export function deepReductionForPersistence(
   return legacy;
 }
 
-/**
- * Check reducer findings with the Standard scan validator.
- * It requires coverage, so add an empty value and remove it after validation.
- */
+/** Reduction combines findings; it does not complete the source workers' review. */
+export function aggregateDiscoveryCoverage(
+  artifacts: DeepScanArtifacts,
+  discoveries: Pick<AcceptedDiscovery, "id" | "resultPath" | "result">[],
+): ScanDraftInput["coverage"] {
+  const coverage: ScanDraftInput["coverage"] = {
+    surfaces: [],
+    explicitExclusions: [],
+    deferred: [],
+  };
+  for (const worker of discoveries) {
+    const source = structuredClone(worker.result.coverage);
+    const prefix = relative(artifacts.scanDir, dirname(worker.resultPath))
+      .split(sep)
+      .join("/");
+    const scopedId = (id: string) => `${worker.id}/${id}`;
+    for (const field of [
+      "surfaces",
+      "explicitExclusions",
+      "deferred",
+    ] as const) {
+      const rows = source[field] as JsonObject[];
+      const usedIds = new Set(
+        rows.flatMap((row) => (typeof row.id === "string" ? [row.id] : [])),
+      );
+      const emittedIds = new Set<string>();
+      for (const [index, row] of rows.entries()) {
+        const retained: JsonObject = { ...row, workerId: worker.id };
+        // Independent reviews reuse local IDs. Preserve their links without
+        // allowing one worker's disposition to stand in for another's work.
+        const baseId = typeof row.id === "string" ? row.id : String(index);
+        let id = baseId;
+        if (typeof row.id !== "string" || emittedIds.has(id)) {
+          for (let suffix = 2; usedIds.has(id); suffix++) {
+            id = `${baseId}-${suffix}`;
+          }
+        }
+        usedIds.add(id);
+        emittedIds.add(id);
+        retained.id = scopedId(id);
+        if (field === "deferred" && Array.isArray(row.surfaceIds)) {
+          retained.surfaceIds = (row.surfaceIds as string[]).map(scopedId);
+        }
+        if (field === "surfaces" && Array.isArray(row.receiptRefs)) {
+          retained.receiptRefs = (row.receiptRefs as string[]).map(
+            (ref) => `${prefix}/${coverageReceiptComponents(ref).join("/")}`,
+          );
+        }
+        (coverage[field] as JsonObject[]).push(retained);
+      }
+    }
+    if (Array.isArray(source.openQuestions)) {
+      const questions = (coverage.openQuestions ??= []) as JsonObject[];
+      for (const question of source.openQuestions) {
+        questions.push({
+          ...(typeof question === "string"
+            ? { question }
+            : (question as JsonObject)),
+          workerId: worker.id,
+        });
+      }
+    }
+  }
+  return coverage;
+}
+
 export function parseDeepReduction(
-  input: Record<string, unknown>,
+  input: unknown,
   persisted = false,
 ): DeepReductionInput {
-  const { sourceCoverage, ...submitted } = input;
-  const standard = {
-    ...submitted,
-    coverage: {
-      completeness: "complete",
-      surfaces: [],
-      explicitExclusions: [],
-      deferred: [],
-    },
-  };
-  const { coverage: _coverage, ...parsed } = persisted
-    ? parsePersistedScanDraft(standard)
-    : parseScanDraft(standard as unknown as ScanDraftInput);
+  const record = isRecord(input) ? input : {};
+  const { sourceCoverage, ...submitted } = record;
+  const parsed = deepReductionInputSchema.parse(submitted);
+  validateFindingSemantics(parsed.findings);
   if (persisted && sourceCoverage !== undefined) {
     return {
       ...parsed,
       sourceCoverage: parsePersistedScanDraft({
-        ...standard,
+        ...submitted,
         coverage: sourceCoverage,
       }).coverage,
     };
@@ -101,6 +169,27 @@ export async function validateDiscoveryArtifacts(
     throw new Error(
       "Standard scan worker wrote only a checkpoint; its audit is not complete.",
     );
+  validateRetainedCoverage(result.coverage);
+  const root = dirname(resultPath);
+  const receiptPaths = new Map<string, string>();
+  for (const row of result.coverage.surfaces as JsonObject[]) {
+    for (const ref of (row.receiptRefs as string[] | undefined) ?? []) {
+      const components = coverageReceiptComponents(ref);
+      const normalized = components.join("/");
+      const key = normalized.toLowerCase();
+      const previous = receiptPaths.get(key);
+      if (previous !== undefined && previous !== normalized)
+        throw new Error(
+          `Standard scan worker coverage receipt: duplicate artifact path: ${previous} and ${normalized}`,
+        );
+      receiptPaths.set(key, normalized);
+      await artifactSourcePath(
+        { root, repoRoot: root, layout: "worker" },
+        components,
+        "Standard scan worker coverage receipt",
+      );
+    }
+  }
   return result;
 }
 
@@ -157,7 +246,7 @@ export async function validateReducerArtifacts(
     await readJsonObject(resultPath),
     reducerId,
     expectedScanId,
-    (value) => parseDeepReduction(value, true),
+    parseDeepReduction,
   );
   if (result.complete === false)
     throw new Error(
@@ -171,7 +260,7 @@ export async function validateReducerArtifacts(
       await readJsonObject(previousReducerResultPath),
       "Previous successful reducer",
       result.scanId,
-      (value) => parseDeepReduction(value, true),
+      parseDeepReduction,
     );
   }
 
@@ -216,6 +305,18 @@ export function reconcileDeepReduction(
   discoveries: DeepReductionSources["discoveries"],
   previous: DeepReductionInput | null,
 ): DeepReductionInput {
+  // Check retained fresh data before merging historical sources. The host
+  // replaces submitted sourceFindings with the original source payloads below.
+  requireFiniteNumbers({
+    ...input,
+    findings: input.findings.map((finding) => ({
+      ...finding,
+      provenance: {
+        ...(finding.provenance as JsonObject),
+        sourceFindings: undefined,
+      },
+    })),
+  });
   const result = structuredClone(input);
   result.sourceCoverage = aggregateSourceCoverage(discoveries, previous);
   if (result.complete === false)
@@ -262,7 +363,7 @@ export function reconcileDeepReduction(
     const sourceValues = [
       ...discoveries.map((discovery) => discovery.result[field]),
       previous?.[field],
-    ].filter((value): value is Record<string, unknown> => value !== undefined);
+    ].filter((value) => value !== undefined);
     if (
       sourceValues.some((value) => !isDeepStrictEqual(sourceValues[0], value))
     ) {
@@ -271,7 +372,7 @@ export function reconcileDeepReduction(
       );
     }
     if (sourceValues[0] !== undefined) {
-      result[field] = structuredClone(sourceValues[0]);
+      Object.assign(result, { [field]: structuredClone(sourceValues[0]) });
     }
   }
   return result;
@@ -287,7 +388,6 @@ export function aggregateSourceCoverage(
     ...discoveries.map((source) => source.coverage ?? unknownSourceCoverage()),
   ];
   const result: ScanDraftInput["coverage"] = {
-    completeness: "complete",
     surfaces: [],
     explicitExclusions: [],
     deferred: [],
@@ -297,39 +397,30 @@ export function aggregateSourceCoverage(
     "surfaces",
     "explicitExclusions",
     "deferred",
+    "resolvedDeferred",
     "openQuestions",
     "reviews",
   ]) {
     const entries = sources.flatMap(
       (source) => (source[field] as unknown[] | undefined) ?? [],
     );
-    if (entries.length || field !== "openQuestions")
-      result[field] = structuredClone(entries);
-  }
-  if (
-    sources.some((source) => source.completeness === "partial") ||
-    (result.deferred as unknown[]).length > 0 ||
-    (result.surfaces as Record<string, unknown>[]).some(
-      (surface) => surface.disposition === "needs_follow_up",
+    if (
+      entries.length ||
+      !["openQuestions", "resolvedDeferred"].includes(field)
     )
-  ) {
-    result.completeness = "partial";
-  } else if (sources.some((source) => source.completeness === "unknown")) {
-    result.completeness = "unknown";
+      result[field] = structuredClone(entries);
   }
   return result;
 }
 
 function unknownSourceCoverage(): ScanDraftInput["coverage"] {
   return {
-    completeness: "unknown",
     surfaces: [],
     explicitExclusions: [],
     deferred: [],
   };
 }
 
-/** Qualify worker-local IDs and receipt paths before combining accepted coverage. */
 export function projectDiscoveryCoverage(
   coverage: ScanDraftInput["coverage"],
   worker: { id: string; attempt?: number },
@@ -339,16 +430,9 @@ export function projectDiscoveryCoverage(
     workerId: worker.id,
     ...(worker.attempt === undefined ? {} : { attempt: worker.attempt }),
   };
-  const prefix = `${worker.id}-attempt-${worker.attempt ?? "unknown"}`;
-  const surfaces = coverage.surfaces as Record<string, unknown>[];
-  const surfaceIds = new Map(
-    surfaces.map((surface, index) => [
-      surface.id,
-      `${prefix}-surface-${index + 1}`,
-    ]),
-  );
-  const project = (item: Record<string, unknown>) => ({
+  const project = <T extends Record<string, unknown>>(item: T) => ({
     ...structuredClone(item),
+    workerId: worker.id,
     provenance: {
       ...provenance,
       ...(item.id === undefined ? {} : { sourceId: item.id }),
@@ -357,41 +441,59 @@ export function projectDiscoveryCoverage(
         : { candidateId: item.candidateId }),
     },
   });
+  const qualify = <T extends Record<string, unknown>>(rows: T[]) => {
+    const reserved = new Set(
+      rows.flatMap((row) => (typeof row.id === "string" ? [row.id] : [])),
+    );
+    const emitted = new Set<string>();
+    return rows.map((row, index) => {
+      const base = typeof row.id === "string" ? row.id : String(index);
+      let id = base;
+      if (typeof row.id !== "string" || emitted.has(id)) {
+        for (let suffix = 2; reserved.has(id); suffix++)
+          id = `${base}-${suffix}`;
+      }
+      reserved.add(id);
+      emitted.add(id);
+      return { ...project(row), id: `${worker.id}/${id}` };
+    });
+  };
   return {
-    completeness: coverage.completeness,
-    reviews: [{ ...provenance, completeness: coverage.completeness }],
-    surfaces: surfaces.map((surface, index) => ({
-      ...project(surface),
-      id: `${prefix}-surface-${index + 1}`,
-      receiptRefs: ((surface.receiptRefs as string[] | undefined) ?? []).map(
-        (ref) => `${artifactPrefix}/${ref}`,
+    ...(coverage.completeness === undefined
+      ? {}
+      : { completeness: coverage.completeness }),
+    reviews: [
+      {
+        ...provenance,
+        ...(coverage.completeness === undefined
+          ? {}
+          : { completeness: coverage.completeness }),
+      },
+    ],
+    surfaces: qualify(coverage.surfaces).map((surface, index) => ({
+      ...surface,
+      receiptRefs: (
+        (coverage.surfaces[index]!.receiptRefs as string[] | undefined) ?? []
+      ).map(
+        (ref) =>
+          `${artifactPrefix}/${coverageReceiptComponents(ref).join("/")}`,
       ),
     })),
-    explicitExclusions: (
-      coverage.explicitExclusions as Record<string, unknown>[]
-    ).map(project),
-    deferred: (coverage.deferred as Record<string, unknown>[]).map(
-      (item, index) => ({
-        ...project(item),
-        id: `${prefix}-deferred-${index + 1}`,
-        ...(item.candidateId === undefined
-          ? {}
-          : { candidateId: `${prefix}-candidate-${index + 1}` }),
-        ...(item.surfaceIds === undefined
-          ? {}
-          : {
-              surfaceIds: (item.surfaceIds as string[]).map(
-                (id) => surfaceIds.get(id) ?? id,
-              ),
-            }),
-      }),
-    ),
+    explicitExclusions: qualify(coverage.explicitExclusions),
+    deferred: qualify(coverage.deferred).map((item, index) => ({
+      ...item,
+      ...(coverage.deferred[index]!.surfaceIds === undefined
+        ? {}
+        : {
+            surfaceIds: (coverage.deferred[index]!.surfaceIds as string[]).map(
+              (id) => `${worker.id}/${id}`,
+            ),
+          }),
+    })),
     ...(coverage.openQuestions === undefined
       ? {}
       : {
-          openQuestions: (
-            coverage.openQuestions as (string | Record<string, unknown>)[]
-          ).map((question) =>
+          openQuestions: coverage.openQuestions.map((question) =>
             project(typeof question === "string" ? { question } : question),
           ),
         }),

@@ -124,6 +124,28 @@ stop_after_no_new = 1
 max_discovery_runs = 2
 `,
   );
+  await writeFile(
+    path.join(codexHome, `${threadId}.jsonl`),
+    [
+      { type: "session_meta", payload: { id: threadId } },
+      {
+        type: "turn_context",
+        payload: {
+          turn_id: "active-parent-turn",
+          cyber_access_program: "daybreak_red",
+        },
+      },
+      {
+        type: "turn_context",
+        payload: {
+          turn_id: "another-parent-turn",
+          cyber_access_program: "standard",
+        },
+      },
+    ]
+      .map((record) => JSON.stringify(record))
+      .join("\n") + "\n",
+  );
   await writeFakeCodex(fakeCodexPath);
   await writeFile(
     runtimeConfigPath,
@@ -236,7 +258,12 @@ model_reasoning_summary = "none"
         "start_codex_security_deep_scan",
         { targetPath, scope: ".", userContext: "stdio lifecycle fixture" },
         threadId,
-        { model: "gpt-5.5", reasoning_effort: "xhigh" },
+        {
+          model: "gpt-5.5",
+          reasoning_effort: "xhigh",
+          thread_id: threadId,
+          turn_id: "active-parent-turn",
+        },
       ),
     );
 
@@ -280,6 +307,11 @@ model_reasoning_summary = "none"
       { code: "ENOENT" },
     );
     assertFlagPair(startedWorker.argv, "--model", "gpt-5.5");
+    assertFlagPair(
+      startedWorker.argv,
+      "--cyber-access-program",
+      "daybreak_red",
+    );
     assert.equal(
       startedWorker.argv.includes('model_reasoning_effort="xhigh"'),
       true,
@@ -1028,9 +1060,9 @@ model_reasoning_summary = "none"
         );
         assert.ok(launches.length > 0);
         for (const launch of launches) {
-          assert.equal(launch.args[0], "-c");
+          assert.deepEqual(launch.args.slice(0, 2), ["-B", "-c"]);
           assert.equal(launch.args.at(-1), workbenchPath);
-          assert.equal(launch.args.length, 3);
+          assert.equal(launch.args.length, 4);
           assert.equal(launch.cwd, pluginRoot);
         }
       }
@@ -1351,7 +1383,12 @@ function toolCall(
   name: string,
   args: Record<string, unknown>,
   threadId: string,
-  turnMetadata?: { model: string; reasoning_effort: string },
+  turnMetadata?: {
+    model: string;
+    reasoning_effort: string;
+    thread_id?: string;
+    turn_id?: string;
+  },
   sandboxState: unknown = parentSandboxState,
 ) {
   return {
@@ -1511,6 +1548,8 @@ ${jsonLineInputSource(`      if (message.method === 'initialized') continue;
       let result;
       if (message.method === 'initialize') {
         result = { userAgent: 'fixture', codexHome: '/fixture', platformFamily: 'unix', platformOs: 'macos' };
+      } else if (message.method === 'thread/read') {
+        result = { thread: { id: message.params.threadId, path: path.join(process.env.CODEX_HOME, message.params.threadId + '.jsonl') } };
       } else if (message.method === 'config/read') {
         result = { config: { default_permissions: 'codex_security_deep_scan_worker', permissions: { codex_security_deep_scan_worker: suppliedProfile ?? { extends: ':read-only' } } }, origins: {}, layers: null };
       } else if (message.method === 'permissionProfile/list') {
@@ -1533,11 +1572,11 @@ console.log(JSON.stringify({ type: 'thread.started', thread_id: \`stdio-fixture-
 if (existsSync(process.env.FAKE_CODEX_RESTART_CONTROL)) {
   const phase = readFileSync(process.env.FAKE_CODEX_RESTART_CONTROL, 'utf8');
   if (phase === 'after-restart' || context.workerLabel === 'discovery-0001') {
-    const coverage = { completeness: 'complete', surfaces: [], explicitExclusions: [], deferred: [] };
+    const coverage = { surfaces: [], explicitExclusions: [], deferred: [] };
     if (context.claimedWorkerIds) {
       const output = path.join(root, 'deep_discovery', 'dedup', context.reducerLabel, 'output');
       const firstResult = JSON.parse(readFileSync(path.join(root, 'deep_discovery', 'workers', 'discovery-0001', 'output', 'result.json'), 'utf8'));
-      writeFileSync(path.join(output, 'result.json'), JSON.stringify({ scanId: firstResult.scanId, findings: [], coverage }));
+      writeFileSync(path.join(output, 'result.json'), JSON.stringify({ scanId: firstResult.scanId, findings: [] }));
     } else {
       writeFileSync(path.join(root, 'result.json'), JSON.stringify({ scanId: context.scanId, findings: [], coverage }));
     }
@@ -1549,7 +1588,7 @@ if (existsSync(process.env.FAKE_CODEX_RESTART_CONTROL)) {
 setInterval(() => {}, 1_000);
 const stop = (signal) => {
   if (existsSync(process.env.FAKE_CODEX_SIGNAL_CHECKPOINT_CONTROL)) {
-    const coverage = { completeness: 'complete', surfaces: [], explicitExclusions: [], deferred: [] };
+    const coverage = { surfaces: [], explicitExclusions: [], deferred: [] };
     const checkpointDir = path.join(root, 'checkpoints');
     mkdirSync(checkpointDir, { recursive: true });
     writeFileSync(path.join(checkpointDir, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json'), JSON.stringify({ scanId: context.scanId, findings: [], coverage }));

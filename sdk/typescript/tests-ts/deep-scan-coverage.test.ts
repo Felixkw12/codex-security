@@ -55,7 +55,7 @@ test.each([
         threadId,
         turnResult: { status: "completed" },
       });
-      expect(result.coverage.completeness).toBe(completeness);
+      expect(result.coverage["completeness"]).toBe(completeness);
       const coverage = JSON.parse(
         await readFile(join(scanDir, "coverage.json"), "utf8"),
       );

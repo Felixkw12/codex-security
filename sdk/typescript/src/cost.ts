@@ -13,6 +13,7 @@ import {
 } from "./cost-model.js";
 import {
   scanActivityFromSessionEvent,
+  sessionContentText,
   type ScanActivity,
 } from "./scan-activity.js";
 import {
@@ -45,11 +46,10 @@ export interface ScanSessionEvent {
   event: Record<string, unknown>;
 }
 
-interface SessionReasoning {
-  id: string;
-  text: string;
-  raw: boolean;
-  activity: ScanActivity | null;
+type SessionReasoning = ReturnType<typeof createSessionReasoning>;
+
+function createSessionReasoning(id: string, text = "") {
+  return { id, text, raw: false, activity: null as ScanActivity | null };
 }
 
 interface SessionUsage {
@@ -107,7 +107,8 @@ interface ScanCostTrackerOptions {
   scanDirectory?: string;
   maxCostUsd?: number;
   expectedFilesTotal?: number;
-  onCost?: (cost: Readonly<ScanCost>) => void;
+  /** Incomplete costs are measured subtotals, usable for spending limits only. */
+  onCost?: (cost: Readonly<ScanCost>, complete: boolean) => void;
   // Only reported when the full public estimate is unavailable.
   onCostLowerBound?: (cost: Readonly<ScanCost>) => void;
   onUsage?: (usage: Readonly<ScanTokenUsage>) => void;
@@ -130,13 +131,13 @@ function createSessionUsage(): SessionUsage {
   return {
     offset: 0,
     decoder: new StringDecoder("utf8"),
-    pendingLine: [],
+    pendingLine: [] as string[],
     unreadable: false,
-    threadId: null,
-    parentThreadId: null,
-    workingDirectory: null,
-    startedAt: null,
-    inheritedUsage: null,
+    threadId: null as string | null,
+    parentThreadId: null as string | null,
+    workingDirectory: null as string | null,
+    startedAt: null as number | null,
+    inheritedUsage: null as ScanTokenUsage | null,
     replaying: false,
     usage: null,
     counterUsage: null,
@@ -158,9 +159,9 @@ function createSessionUsage(): SessionUsage {
     activities: [],
     progress: [],
     filesCompleted: 0,
-    filesTotal: null,
-    prose: new Set(),
-    reasoning: null,
+    filesTotal: null as number | null,
+    prose: new Set<string>(),
+    reasoning: null as SessionReasoning | null,
     reasoningCount: 0,
     eventIndex: 0,
   };
@@ -499,6 +500,9 @@ export class ScanCostTracker {
         usages.set(threadId, counterLowerBound);
       }
       const receipt = usages.get(threadId);
+      // A discovered thread without a receipt has unknown usage, not zero.
+      // Retain it so a parent-only subtotal cannot appear to be complete.
+      if (receipt === undefined) usages.set(threadId, null);
       if (
         session.usage !== null &&
         (session.usage.total_tokens > (receipt?.total_tokens ?? -1) ||
@@ -615,18 +619,24 @@ export class ScanCostTracker {
     const measured = incomplete
       ? { ...reconciled, coverage: "partial" }
       : reconciled;
-    const cost = unmeasuredSession
-      ? null
-      : estimateScanCost(this.#options.model, measured);
-    this.#snapshot = { usage: unmeasuredSession ? null : measured, cost };
-    this.#reportUsage(measured);
-    this.#reportCost(cost, measured, {
-      ...usage,
-      modelUsage: [...liveModelUsage].map(([model, tokens]) => ({
-        model,
-        ...tokens,
-      })),
-    });
+    const cost = estimateScanCost(this.#options.model, measured);
+    this.#snapshot = {
+      usage: unmeasuredSession ? null : measured,
+      cost: unmeasuredSession ? null : cost,
+    };
+    if (!unmeasuredSession) this.#reportUsage(measured);
+    this.#reportCost(
+      cost,
+      measured,
+      {
+        ...usage,
+        modelUsage: [...liveModelUsage].map(([model, tokens]) => ({
+          model,
+          ...tokens,
+        })),
+      },
+      !unmeasuredSession,
+    );
   }
 
   #reportWorkerProgress(session: SessionUsage): void {
@@ -673,13 +683,16 @@ export class ScanCostTracker {
     cost: ScanCost | null,
     usage: unknown,
     liveUsage?: unknown,
+    complete = true,
   ): void {
-    if (cost === null) {
-      if (this.#options.onCostLowerBound === undefined) return;
-      const receiptCost = estimateScanCostLowerBound(
-        this.#options.model,
-        usage,
-      );
+    if (cost === null || !complete) {
+      if (
+        this.#options.onCostLowerBound === undefined &&
+        this.#options.onCost === undefined
+      )
+        return;
+      const receiptCost =
+        cost ?? estimateScanCostLowerBound(this.#options.model, usage);
       const liveCost = estimateScanCostLowerBound(
         this.#options.model,
         liveUsage,
@@ -690,15 +703,21 @@ export class ScanCostTracker {
           : receiptCost;
       if (lowerBound === null) return;
       const signature = JSON.stringify(lowerBound);
-      if (signature === this.#lastCostLowerBound) return;
-      this.#lastCostLowerBound = signature;
-      this.#options.onCostLowerBound(lowerBound);
+      if (signature !== this.#lastCostLowerBound) {
+        this.#lastCostLowerBound = signature;
+        this.#options.onCostLowerBound?.(lowerBound);
+      }
+      const costSignature = JSON.stringify([lowerBound, false]);
+      if (costSignature !== this.#lastCost) {
+        this.#lastCost = costSignature;
+        this.#options.onCost?.(lowerBound, false);
+      }
       return;
     }
-    const signature = JSON.stringify(cost);
+    const signature = JSON.stringify([cost, complete]);
     if (signature === this.#lastCost) return;
     this.#lastCost = signature;
-    this.#options.onCost?.(cost);
+    this.#options.onCost?.(cost, complete);
   }
 
   #reportUsage(usage: ScanTokenUsage | null): void {
@@ -982,12 +1001,10 @@ function readSessionEvent(
         ) {
           continue;
         }
-        session.reasoning = {
-          id: activity.id,
-          text: activity.description,
-          raw: false,
-          activity: null,
-        };
+        session.reasoning = createSessionReasoning(
+          activity.id,
+          activity.description,
+        );
         recordReasoningActivity(session, activity);
       }
       return;
@@ -995,12 +1012,10 @@ function readSessionEvent(
     const activity = scanActivityFromSessionEvent(event, repository);
     if (activity !== null) {
       if (activity.kind === "reasoning") {
-        const reasoning = (session.reasoning ??= {
-          id: activity.id,
-          text: activity.description,
-          raw: false,
-          activity: null,
-        });
+        const reasoning = (session.reasoning ??= createSessionReasoning(
+          activity.id,
+          activity.description,
+        ));
         recordReasoningActivity(session, {
           ...activity,
           id: reasoning.id,
@@ -1269,12 +1284,9 @@ function readSessionReasoning(
   ) {
     session.reasoning = null;
   }
-  const reasoning = (session.reasoning ??= {
-    id: `reasoning-${++session.reasoningCount}`,
-    text: "",
-    raw: false,
-    activity: null,
-  });
+  const reasoning = (session.reasoning ??= createSessionReasoning(
+    `reasoning-${++session.reasoningCount}`,
+  ));
   if (reasoning.raw && !raw) return;
   if (raw && !reasoning.raw) {
     reasoning.text = "";
@@ -1316,9 +1328,7 @@ function sessionProgressUpdates(
   payload: Readonly<Record<string, unknown>>,
 ): ScanProgress[] {
   if (payload["type"] === "message" && payload["role"] === "assistant") {
-    const content = payload["content"];
-    if (!Array.isArray(content)) return [];
-    return scanProgressUpdatesFromText(sessionContentText(content, false));
+    return scanProgressUpdatesFromText(sessionContentText(payload["content"]));
   }
   if (
     payload["type"] !== "function_call_output" &&
@@ -1331,29 +1341,11 @@ function sessionProgressUpdates(
   const output =
     typeof value === "string"
       ? value
-      : Array.isArray(value)
-        ? sessionContentText(value, true)
-        : null;
-  if (payload["status"] === "failed" || output === null) {
+      : sessionContentText(value, ["output_text", "input_text"]);
+  if (payload["status"] === "failed") {
     return [];
   }
   return scanProgressUpdatesFromText(output);
-}
-
-function sessionContentText(
-  content: readonly unknown[],
-  includeInputText: boolean,
-): string {
-  return content
-    .filter(
-      (item): item is Record<string, unknown> & { text: string } =>
-        isRecord(item) &&
-        (item["type"] === "output_text" ||
-          (includeInputText && item["type"] === "input_text")) &&
-        typeof item["text"] === "string",
-    )
-    .map((item) => item.text)
-    .join("\n");
 }
 
 function addTokenUsage(

@@ -30,12 +30,7 @@ export interface ScanCost {
   };
 }
 
-interface TokenPrices {
-  input: number;
-  cacheRead: number;
-  cacheWrite: number;
-  output: number;
-}
+type TokenPrices = ReturnType<typeof usdPerMillionTokens>;
 
 type ModelPricing = readonly [
   input: number,
@@ -125,10 +120,7 @@ const LONG_CONTEXT_PRICING_NANODOLLARS: Readonly<Record<string, ModelPricing>> =
     "gpt-daybreak-blue-latest": [8_000, 800, 10_000, 30_000],
   };
 
-function usdPerMillionTokens(
-  pricing: ModelPricing,
-  unitsPerUsd: number,
-): TokenPrices {
+function usdPerMillionTokens(pricing: ModelPricing, unitsPerUsd: number) {
   const [input, cacheRead, cacheWrite, output] = pricing;
   const unitsPerMillion = unitsPerUsd / 1_000_000;
   return {
@@ -298,13 +290,18 @@ function estimateModelCost(
   usage: unknown,
 ): ScanCost | null {
   if (model === undefined) return null;
-  const bedrockPricing = BEDROCK_MODEL_PRICING[model];
+  const bedrockPricing = Object.hasOwn(BEDROCK_MODEL_PRICING, model)
+    ? BEDROCK_MODEL_PRICING[model]
+    : undefined;
   const unitsPerUsd = bedrockPricing?.unitsPerUsd ?? 1_000_000_000;
   const pricingModel = model.startsWith("openai.")
     ? model.slice("openai.".length)
     : model;
   const pricing =
-    bedrockPricing?.short ?? MODEL_PRICING_NANODOLLARS[pricingModel];
+    bedrockPricing?.short ??
+    (Object.hasOwn(MODEL_PRICING_NANODOLLARS, pricingModel)
+      ? MODEL_PRICING_NANODOLLARS[pricingModel]
+      : undefined);
   const normalized = tokenUsage(usage);
   if (pricing === undefined || normalized === null) return null;
   const [inputRate, cachedInputRate, cacheWriteInputRate, outputRate] = pricing;

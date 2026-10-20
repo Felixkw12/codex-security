@@ -1,3 +1,4 @@
+import { requestMetadata } from "./support/request-metadata.js";
 import { once } from "node:events";
 import { createServer, type Socket } from "node:net";
 import {
@@ -43,6 +44,7 @@ import {
   type ScanProgress,
   type ScanSessionEvent,
   type ScanWorkerEvent,
+  type ScanWorkerStatus,
   ScanInterruptedError,
 } from "../src/index.js";
 import {
@@ -50,6 +52,7 @@ import {
   initialCredentialsAvailable,
 } from "../src/api.js";
 import {
+  CHEAPERINFERENCE_CODEX_PROVIDER,
   DEFAULT_CODEX_CONFIG,
   FIREWORKS_CODEX_PROVIDER,
   OPENROUTER_CODEX_PROVIDER,
@@ -321,6 +324,13 @@ const EXTERNAL_PROVIDER_CASES = [
     "accounts/fireworks/models/qwen3-235b-a22b",
     FIREWORKS_CODEX_PROVIDER,
   ],
+  [
+    "Cheaper Inference",
+    "cheaperinference",
+    "CHEAPER_INFERENCE_API_KEY",
+    "gpt-5.4",
+    CHEAPERINFERENCE_CODEX_PROVIDER,
+  ],
 ] as const;
 const BEDROCK_AUTHENTICATION_CASES = [
   [
@@ -530,8 +540,19 @@ describe("CodexSecurity finding validation", () => {
       });
       expect(workbench).not.toHaveBeenCalled();
       expect(captured.prompt).toContain(
-        JSON.stringify(join(PLUGIN_ROOT, "skills", "validation", "SKILL.md")),
+        await readFile(
+          join(PLUGIN_ROOT, "references", "standalone-validation.md"),
+          "utf8",
+        ),
       );
+      expect(captured.prompt).toContain(
+        await readFile(
+          join(PLUGIN_ROOT, "references", "static-finding-assessment.md"),
+          "utf8",
+        ),
+      );
+      expect(captured.prompt).not.toContain("$codex-security:");
+      expect(captured.prompt).not.toContain("validation_artifacts");
       expect(captured.prompt!.endsWith(JSON.stringify(finding))).toBe(true);
       expect(captured.prompt).not.toContain("Synthetic file contents");
       expect(captured.thread).toMatchObject({
@@ -545,16 +566,55 @@ describe("CodexSecurity finding validation", () => {
           model: "test-model",
           model_reasoning_effort: "high",
           features: { plugins: false },
+          default_permissions: "codex_security_validation",
+          web_search: "disabled",
+          approval_policy: "never",
           analytics: { enabled: false },
-          responses_api_metadata: {
-            codex_security_surface: "sdk",
-            codex_security_command: "validate",
-            codex_security_package_version: VERSION,
-            codex_security_plugin_version:
-              preparedRuntime("unused").plugin.version,
-          },
         },
       });
+      expect(requestMetadata(captured.codex?.configOverrides)).toMatchObject({
+        codex_security_surface: "sdk",
+        codex_security_command: "validate",
+        codex_security_package_version: VERSION,
+        codex_security_plugin_version: preparedRuntime("unused").plugin.version,
+        codex_security_provider: "openai",
+      });
+      const credentialHome = captured.codex!.env!["CODEX_HOME"]!;
+      const credentialDenies = {
+        [credentialHome]: { ".": "deny" },
+        [join(credentialHome, "deep-scan.toml")]: { ".": "deny" },
+      };
+      expect(
+        captured.codex?.configOverrides
+          ?.filter(
+            (override) => !override.startsWith("responses_api_metadata="),
+          )
+          .map((override) => parseToml(override)),
+      ).toEqual([
+        {
+          permissions: {
+            codex_security_scan: {
+              filesystem: {
+                ":root": "read",
+                ":workspace_roots": "write",
+                ...credentialDenies,
+              },
+            },
+          },
+        },
+        {
+          permissions: {
+            codex_security_validation: {
+              filesystem: {
+                ":root": "read",
+                ":workspace_roots": "read",
+                ...credentialDenies,
+              },
+              network: { enabled: false },
+            },
+          },
+        },
+      ]);
       expect(captured.codex?.env?.["OPENAI_API_KEY"]).toBeUndefined();
       expect(captured.codex?.env?.["CODEX_API_KEY"]).toBeUndefined();
       expect(captured.codex?.env?.["CODEX_SECURITY_REPOSITORY"]).toBe(
@@ -562,6 +622,86 @@ describe("CodexSecurity finding validation", () => {
       );
     },
   );
+
+  test("applies validation settings after resolving a named profile at the SDK process boundary", async () => {
+    const { root, repository, codexHome } = await runtimeDirectories();
+    const preload = join(root, "validation-process.mjs");
+    await writeFile(
+      preload,
+      [
+        `process.stdout.write(JSON.stringify({type:"item.completed",item:{id:"result",type:"agent_message",text:JSON.stringify({disposition:"deferred",report:JSON.stringify(process.argv.slice(2))})}})+"\\n");`,
+        `process.stdout.write(JSON.stringify({type:"turn.completed",usage:{input_tokens:0,output_tokens:0}})+"\\n");`,
+        "process.exit(0);",
+      ].join("\n"),
+    );
+    const environment = {
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+      OPENAI_API_KEY: "synthetic-validation-key",
+    };
+    await using client = new TestClient(
+      {
+        codexOverrides: {
+          profile: "review",
+          profiles: {
+            review: {
+              web_search: "cached",
+              approval_policy: "on-request",
+              analytics: { enabled: false },
+              otel: { exporter: "none" },
+              responses_api_metadata: {
+                "team.tag": "synthetic-validation",
+                codex_security_integration: "github_action",
+              },
+            },
+          },
+        },
+      },
+      {
+        environment,
+        prepareRuntime: runtimePreparer(codexHome, () => ({ environment })),
+        resolvePluginPython: async () => "/managed/python",
+        createCodex: (options) =>
+          new Codex({
+            ...options,
+            codexPathOverride: nodeCommand().command,
+            env: {
+              ...options.env,
+              NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
+            },
+          }),
+      },
+    );
+    const result = await client.validate({
+      repositoryPath: repository,
+      finding: "Candidate",
+    });
+    const args = JSON.parse(result.report) as string[];
+    const overrides = args.flatMap((arg, index) =>
+      arg === "--config" ? [args[index + 1]!] : [],
+    );
+    const config = Object.assign(
+      {},
+      ...overrides.map((override) => parseToml(override)),
+    );
+    expect(config).toMatchObject({
+      web_search: "disabled",
+      approval_policy: "never",
+      analytics: { enabled: false },
+      otel: { exporter: "none" },
+      default_permissions: "codex_security_validation",
+      responses_api_metadata: {
+        "team.tag": "synthetic-validation",
+        codex_security_integration: "github_action",
+        codex_security_command: "validate",
+        codex_security_provider: "openai",
+      },
+    });
+    expect(
+      overrides.filter((value) => value.startsWith("responses_api_metadata")),
+    ).toHaveLength(1);
+    expect(config).not.toHaveProperty("profile");
+    expect(config).not.toHaveProperty("profiles");
+  });
 
   test("returns an inconclusive result and keeps default evidence after close", async () => {
     const {
@@ -760,7 +900,8 @@ describe("CodexSecurity orchestration", () => {
           "workbench usage captured",
         );
         expect(measured).toMatchObject({
-          coverage: "complete",
+          coverage: "partial",
+          warnings: ["turn_in_progress"],
           inputTokens: 100,
           outputTokens: 10,
           totalTokens: 110,
@@ -881,9 +1022,9 @@ describe("CodexSecurity orchestration", () => {
   );
 
   test.each([
-    ["root configuration", { approval_policy: "never" }],
+    ["root configuration", { approval_policy: "never" }, "never"],
     [
-      "selected profile",
+      "selected never profile",
       {
         approval_policy: "on-request",
         profile: "strict",
@@ -891,10 +1032,22 @@ describe("CodexSecurity orchestration", () => {
           strict: { approval_policy: "never", model: "profile-model" },
         },
       },
+      "never",
+    ],
+    [
+      "selected on-request profile",
+      {
+        approval_policy: "never",
+        profile: "review",
+        profiles: {
+          review: { approval_policy: "on-request", model: "profile-model" },
+        },
+      },
+      "on-request",
     ],
   ] as const)(
-    "preserves strict approvals from %s in scan threads and saved recipes",
-    async (_source, codexOverrides) => {
+    "preserves approvals from %s in scan threads and saved recipes",
+    async (_source, codexOverrides, approvalPolicy) => {
       const { root, repository, codexHome } = await runtimeDirectories();
       let threadOptions: Record<string, unknown> | undefined;
       let recipe: Record<string, unknown> | undefined;
@@ -914,8 +1067,11 @@ describe("CodexSecurity orchestration", () => {
             }
             return mockWorkbench(args, input);
           },
-          createCodex: () => ({
+          createCodex: (codexOptions) => ({
             startThread: (options: Record<string, unknown>) => {
+              expect(codexOptions.config).toMatchObject({
+                approval_policy: approvalPolicy,
+              });
               threadOptions = options;
               return {
                 id: null,
@@ -929,9 +1085,9 @@ describe("CodexSecurity orchestration", () => {
       await expect(
         client.run(repository, { outputDir: join(root, "scan") }),
       ).rejects.toThrow("scan approval policy captured");
-      expect(threadOptions).toMatchObject({ approvalPolicy: "never" });
+      expect(threadOptions).toMatchObject({ approvalPolicy });
       expect(recipe).toMatchObject({
-        config: { approval_policy: "never" },
+        config: { approval_policy: approvalPolicy },
       });
       await client.close();
     },
@@ -991,6 +1147,7 @@ describe("CodexSecurity orchestration", () => {
       stopAfterConsecutiveErrors: 3,
       maxDiscoveryRuns: 40,
       maxTimeHours: 96,
+      maxTimeMinutes: 5760,
       deepScanSources: {
         workers: "default",
         subagents: "default",
@@ -1432,13 +1589,55 @@ describe("CodexSecurity orchestration", () => {
         },
       );
 
-      for (const operation of ["preflight", "run"] as const) {
-        await expect(client[operation](repository)).rejects.toThrow(
+      for (const auth of ["api-key", "chatgpt"] as const) {
+        await expect(client.preflight(repository, { auth })).rejects.toThrow(
           `Set ${apiKey} to run a scan through ${name}.`,
         );
       }
+      for (const mode of ["standard", "deep"] as const) {
+        for (const auth of [undefined, "auto", "api-key", "chatgpt"] as const) {
+          await expect(client.run(repository, { mode, auth })).rejects.toThrow(
+            `Set ${apiKey} to run a scan through ${name}.`,
+          );
+        }
+      }
       expect(prepareRuntime).not.toHaveBeenCalled();
       await client.close();
+    },
+  );
+
+  test.each(EXTERNAL_PROVIDER_CASES)(
+    "preflights %s with auto authentication without credentials or runtime startup",
+    async (_name, provider, apiKey, model, providerConfig) => {
+      const { repository } = await repositoryDirectories();
+      const prepareRuntime = mock(rejecting("runtime must not start"));
+      await using client = new TestClient(
+        {
+          codexOverrides: {
+            model,
+            model_provider: provider,
+            model_providers: { [provider]: providerConfig },
+          },
+        },
+        { environment: {}, prepareRuntime },
+      );
+
+      for (const mode of ["standard", "deep"] as const) {
+        for (const auth of [undefined, "auto"] as const) {
+          await expect(
+            client.preflight(repository, { mode, auth }),
+          ).resolves.toMatchObject({
+            mode,
+            modelProvider: provider,
+            authentication: {
+              method: "api_key",
+              source: apiKey,
+              verified: false,
+            },
+          });
+        }
+      }
+      expect(prepareRuntime).not.toHaveBeenCalled();
     },
   );
 
@@ -1817,13 +2016,18 @@ describe("CodexSecurity orchestration", () => {
         {
           profile: "cloud",
           analytics: { enabled: true },
+          otel: { environment: "synthetic-root" },
           responses_api_metadata: { custom_attribution: "root" },
           model_context_window: 64_000,
           model_auto_compact_token_limit: 48_000,
           profiles: {
             cloud: {
               analytics: { enabled: false },
-              responses_api_metadata: { custom_attribution: "selected" },
+              otel: { environment: "synthetic-selected" },
+              responses_api_metadata: {
+                custom_attribution: "selected",
+                codex_security_integration: "github_action",
+              },
               model_reasoning_summary: "concise",
               service_tier: "fast",
               model_context_window: 96_000,
@@ -1947,12 +2151,15 @@ describe("CodexSecurity orchestration", () => {
                   expect(workerConfig["analytics"]).toEqual(
                     selected["analytics"],
                   );
+                  expect(workerConfig["otel"]).toEqual(selected["otel"]);
                   expect(workerConfig["responses_api_metadata"]).toMatchObject({
                     ...(selected["responses_api_metadata"] as
                       JsonObject | undefined),
                     codex_security_surface: "sdk",
                     codex_security_command: "scan",
                     codex_security_package_version: VERSION,
+                    codex_security_provider: "amazon-bedrock",
+                    codex_security_scan_mode: "deep",
                   });
                   const windows = (resolveCodexProfile(overrides)["windows"] ??
                     DEFAULT_CODEX_CONFIG["windows"]) as { sandbox: string };
@@ -2323,7 +2530,7 @@ describe("CodexSecurity orchestration", () => {
   );
 
   test.each([false, true])(
-    "archives accepted output before starting, cancellation=%j",
+    "archives accepted output before starting, cancellation=%p",
     async (cancelRegistration) => {
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
@@ -2578,10 +2785,9 @@ describe("CodexSecurity orchestration", () => {
               scanPrompt: "Review café boundaries.\nPreserve the second line.",
             })
       ).catch((error: unknown) => error);
-      let socket: Socket | undefined;
       let closing: Promise<void> | undefined;
       try {
-        [socket] = (await Promise.race([
+        const [socket] = (await Promise.race([
           connected,
           operation.then((error) => {
             throw error;
@@ -2593,21 +2799,25 @@ describe("CodexSecurity orchestration", () => {
         expect(
           await readFile(join(root, "registration-input.json"), "utf8"),
         ).toBe(submitted!);
-        // Terminating the paused child can reset its socket on Windows.
-        // Still wait for close, and retain unexpected errors and the deadline.
+        // Terminating the paused child can reset its socket on Windows. Still
+        // wait for close, and preserve the deadline and other socket errors.
+        deadline.throwIfAborted();
         const closed = new Promise<void>((resolve, reject) => {
-          const onError = (error: NodeJS.ErrnoException) => {
-            if (error.code !== "ECONNRESET") reject(error);
-          };
-          const onAbort = () => reject(deadline.reason);
-          socket!.once("error", onError);
-          socket!.once("close", () => {
-            socket!.removeListener("error", onError);
+          const finish = (error?: unknown) => {
+            socket.off("close", onClose);
+            socket.off("error", onError);
             deadline.removeEventListener("abort", onAbort);
-            resolve();
-          });
-          if (deadline.aborted) onAbort();
-          else deadline.addEventListener("abort", onAbort, { once: true });
+            if (error === undefined) resolve();
+            else reject(error);
+          };
+          const onClose = () => finish();
+          const onError = (error: NodeJS.ErrnoException) => {
+            if (error.code !== "ECONNRESET") finish(error);
+          };
+          const onAbort = () => finish(deadline.reason);
+          socket.once("close", onClose);
+          socket.on("error", onError);
+          deadline.addEventListener("abort", onAbort, { once: true });
         });
         if (cancel === "close") closing = client.close();
         else controller.abort();
@@ -3093,7 +3303,13 @@ describe("CodexSecurity orchestration", () => {
     expect(createCodex.mock.lastCall?.[0]?.env).not.toHaveProperty(
       "Codex_Home",
     );
-    expect(prompt).toContain("$codex-security:security-scan");
+    expect(prompt).toContain(
+      shellEnvironmentReference(
+        "CODEX_SECURITY_PLUGIN_ROOT",
+        "/skills/security-scan/SKILL.md",
+      ),
+    );
+    expect(prompt).not.toContain("$codex-security:");
     expect(prompt).not.toContain("SDK-owned discovery workflow");
     expect(
       createCodex.mock.lastCall?.[0]?.config?.["mcp_servers"],
@@ -3293,7 +3509,7 @@ describe("CodexSecurity orchestration", () => {
       }),
     ).rejects.toThrow("deep scan settings captured");
     const configuration = await readFile(
-      join(codexHome, "codex-security", "config.toml"),
+      preparedRuntime(codexHome).deepScanConfigPath!,
       "utf8",
     );
     expect(configuration).toContain("workers = 2");
@@ -3319,6 +3535,280 @@ describe("CodexSecurity orchestration", () => {
     });
     await client.close();
   });
+
+  test("keeps hosted executor progress authoritative", async () => {
+    const { repository, codexHome, scanDir } = await scanDirectories();
+    const updates: ScanProgress[] = [];
+    const savedProgress = Promise.withResolvers<JsonObject>();
+    const client = new TestClient(
+      {
+        codexOverrides: {
+          model: "gpt-5.6-sol",
+          model_reasoning_effort: "high",
+        },
+      },
+      {
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (_options, args, input) => {
+          if (args[0] === "register-cli-scan") {
+            return { ...mockScanRegistration(args, input), scopeFileCount: 8 };
+          }
+          if (args[0] === "get-scan") return await savedProgress.promise;
+          return mockWorkbench(args, input);
+        },
+        hostedScan: {
+          context: {
+            repository,
+            revision: "deadbeef",
+            scope: { paths: ["."] },
+            identity: { runId: "run", attemptId: "attempt", buildId: "build" },
+          },
+          onEvent(event) {
+            if (event.type === "progress") updates.push(event.progress);
+          },
+          executor: {
+            async run(_request, { onEvent }) {
+              onEvent?.({
+                type: "progress",
+                progress: {
+                  phase: "validation",
+                  filesCompleted: 8,
+                  filesTotal: 8,
+                },
+              });
+              savedProgress.resolve({
+                scan: {
+                  progress: {
+                    phase: "discovery",
+                    coverage: { filesTotal: 8, closedRows: 0, worklistRows: 8 },
+                  },
+                },
+              });
+              await new Promise<void>((resolve) => setImmediate(resolve));
+              throw new Error("hosted execution failed");
+            },
+          },
+        },
+      },
+    );
+    const python = spyOn(runtime, "resolvePluginPython").mockResolvedValue(
+      "/managed/python",
+    );
+    try {
+      await expect(
+        client.run(repository, {
+          onProgress: (progress) => updates.push(progress),
+        }),
+      ).rejects.toThrow("hosted execution failed");
+      expect(
+        updates.map(({ phase, filesCompleted }) => [phase, filesCompleted]),
+      ).toEqual([
+        ["preflight", 0],
+        ["validation", 8],
+      ]);
+    } finally {
+      python.mockRestore();
+      await client.close();
+    }
+  });
+
+  test.each([false, true])(
+    "stops polling before follow-up (failed=%p)",
+    async (primaryFails) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const statuses: ScanWorkerStatus[] = [];
+      const warnings: string[] = [];
+      let progressSignal: AbortSignal | undefined;
+      let turns = 0;
+      const status = {
+        kind: "dispatch",
+        phase: "validation",
+        planned: 2,
+        started: 2,
+      } as const;
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (options, args, input) => {
+          if (args[0] === "register-cli-scan") {
+            return { ...mockScanRegistration(args, input), scopeFileCount: 1 };
+          }
+          if (args[0] === "get-scan") {
+            progressSignal ??= options.signal;
+            return {
+              scan: {
+                progress: {
+                  phase: "reporting",
+                  coverage: { filesTotal: 1, closedRows: 1, worklistRows: 1 },
+                },
+              },
+            };
+          }
+          return mockWorkbench(args, input);
+        },
+        createCodex: codexFactory(async () => {
+          if (++turns === 1) {
+            if (primaryFails) return { events: failedEvents() };
+            await copyCompletedScan(root);
+            return { events: completedEvents() };
+          }
+          expect(progressSignal?.aborted).toBe(true);
+          return {
+            events: completedEvents(
+              "thread-1",
+              (async function* (): AsyncGenerator<ThreadEvent> {
+                yield {
+                  type: "item.completed",
+                  item: {
+                    id: "follow-up-dispatch",
+                    type: "agent_message",
+                    text: `CODEX_SECURITY_WORKER_STATUS ${JSON.stringify(status)}`,
+                  },
+                };
+              })(),
+            ),
+          };
+        }, "thread-1"),
+      });
+      try {
+        const result = client.run(repository, {
+          postScanPrompt: "Review the synthetic fix.",
+          onProgress() {},
+          onWorkerStatus: (update) => statuses.push(update),
+          onWarning: (warning) => warnings.push(warning),
+        });
+        if (primaryFails)
+          await expect(result).rejects.toThrow("Could not draft fixes.");
+        else await result;
+        expect(turns).toBe(2);
+        expect(warnings).toEqual([]);
+        expect(statuses).toEqual(primaryFails ? [] : [status]);
+      } finally {
+        await client.close();
+      }
+    },
+  );
+
+  test.each([
+    "marker-free",
+    "late marker",
+    "late worker",
+    "unavailable",
+    "malformed",
+  ])(
+    "routes saved scan progress without replacing scan errors (%s)",
+    async (scenario) => {
+      const { repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const warnings: string[] = [];
+      const observerErrors: string[] = [];
+      const workerStatuses: unknown[] = [];
+      let failNextProgressRead = scenario === "unavailable";
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> => {
+          if (args[0] === "register-cli-scan") {
+            return { ...mockScanRegistration(args, input), scopeFileCount: 8 };
+          }
+          if (args[0] === "get-scan") {
+            if (failNextProgressRead) {
+              failNextProgressRead = false;
+              throw new Error("progress read failed");
+            }
+            return {
+              scan: {
+                progress: {
+                  phase: "validation",
+                  coverage: {
+                    filesTotal: 8,
+                    closedRows: scenario === "malformed" ? -1 : 11,
+                    worklistRows: 13,
+                  },
+                },
+              },
+            };
+          }
+          return mockWorkbench(args, input);
+        },
+        createCodex: codexFactory(async () => ({
+          events: (async function* (): AsyncGenerator<ThreadEvent> {
+            if (scenario === "late marker") {
+              yield {
+                type: "item.completed",
+                item: {
+                  id: "late-discovery-update",
+                  type: "agent_message",
+                  text: 'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8}',
+                },
+              };
+            }
+            if (scenario === "late worker") {
+              yield {
+                type: "item.completed",
+                item: {
+                  id: "late-worker-dispatch",
+                  type: "agent_message",
+                  text: 'CODEX_SECURITY_WORKER_STATUS {"kind":"dispatch","phase":"file_review","planned":2,"started":2}',
+                },
+              };
+            }
+            throw new Error("original scan failure");
+          })(),
+        })),
+      });
+      try {
+        await expect(
+          client.run(repository, {
+            onProgress: (progress) => {
+              updates.push(progress);
+              if (progress.reviewItems !== undefined)
+                throw new Error("presenter failed");
+            },
+            onWarning: (warning) => warnings.push(warning),
+            onWorkerStatus: (status) => workerStatuses.push(status),
+            onObserverError: (observer) => observerErrors.push(observer),
+          }),
+        ).rejects.toThrow("original scan failure");
+        expect(updates[0]).toEqual({
+          phase: "preflight",
+          filesCompleted: 0,
+          filesTotal: 8,
+        });
+        expect(workerStatuses).toEqual([]);
+        if (["marker-free", "late marker", "late worker"].includes(scenario)) {
+          expect(updates[1]).toEqual({
+            phase: "validation",
+            filesCompleted: 0,
+            filesTotal: 8,
+            reviewItems: { completed: 11, total: 13 },
+          });
+          if (scenario === "late marker") {
+            expect(updates.at(-1)).toEqual({
+              ...updates[1]!,
+              filesCompleted: 3,
+            });
+          }
+          expect(warnings).toEqual([]);
+          expect(observerErrors).toEqual(
+            Array(updates.length - 1).fill("onProgress"),
+          );
+        } else {
+          expect(updates).toHaveLength(1);
+          expect(observerErrors).toEqual([]);
+          expect(warnings).toEqual([
+            scenario === "unavailable"
+              ? "Could not track scan progress: progress read failed"
+              : "Could not track scan progress: Codex Security workbench returned invalid scan progress.",
+          ]);
+        }
+      } finally {
+        await client.close();
+      }
+    },
+  );
 
   test.each([true, "false", null])(
     "routes durable Deep progress without replacing scan errors (consolidating=%p)",
@@ -3421,10 +3911,7 @@ describe("CodexSecurity orchestration", () => {
         "deep scan settings captured",
       );
       expect(
-        await readFile(
-          join(codexHome, "codex-security", "config.toml"),
-          "utf8",
-        ),
+        await readFile(preparedRuntime(codexHome).deepScanConfigPath!, "utf8"),
       ).toContain("workers = 5");
       await client.close();
     },
@@ -3448,7 +3935,7 @@ describe("CodexSecurity orchestration", () => {
       const runtimeHome = join(root, "runtime-home");
       const scanDir = join(root, "scan");
       const ambientConfig = join(ambientHome, "codex-security", "config.toml");
-      const runtimeConfig = join(runtimeHome, "codex-security", "config.toml");
+      const runtimeConfig = preparedRuntime(runtimeHome).deepScanConfigPath!;
       const escapedConfig = join(root, "escaped-config.toml");
       await mkdir(repository);
       await mkdir(join(ambientHome, "codex-security"), { recursive: true });
@@ -3562,23 +4049,19 @@ describe("CodexSecurity orchestration", () => {
           code: "ENOENT",
         });
       } else {
-        const written = await readFile(configPath, "utf8");
-        if (settings === "defaults") {
-          expect(written).toBe(originalConfiguration);
-        } else {
-          expect(parseToml(written)).toEqual({
-            other: { enabled: true },
-            deep_scan: {
-              workers: 2,
-              subagents: 0,
-              stop_after_no_new: 7,
-              stop_after_consecutive_errors: 2,
-              max_discovery_runs: 12,
-              max_time_hours: 1.5,
-            },
-          });
-        }
+        expect(await readFile(configPath, "utf8")).toBe(originalConfiguration);
       }
+      expect(
+        parseToml(
+          await readFile(
+            preparedRuntime(codexHome).deepScanConfigPath!,
+            "utf8",
+          ),
+        ),
+      ).toMatchObject({
+        worker_runtime: { features: { plugins: true } },
+        deep_scan: { workers: settings === "complete overrides" ? 2 : 4 },
+      });
     },
   );
 
@@ -3675,6 +4158,7 @@ describe("CodexSecurity orchestration", () => {
       "get-scan-feedback",
       "set-scan-thread",
       "prepare-scan-completion",
+      "get-scan",
       "fail-scan",
     ]);
     await client.close();
@@ -3939,116 +4423,157 @@ describe("CodexSecurity orchestration", () => {
     },
   );
 
-  test("normalizes worker progress while streaming related session events", async () => {
-    const { root, repository, codexHome, scanDir } = await scanDirectories();
-    const updates: ScanProgress[] = [];
-    const sessionEvents: ScanSessionEvent[] = [];
-    const workers: ScanWorkerEvent[] = [];
-    const observerErrors: ScanObserverName[] = [];
-    const usage = { input_tokens: 100, output_tokens: 10 };
-    const client = TestClient.withDependencies({
-      ...scanRuntimeDependencies(codexHome, scanDir),
-      runWorkbench: async (
-        _options: unknown,
-        args: readonly string[],
-        input?: string,
-      ): Promise<JsonObject> =>
-        args[0] === "register-cli-scan"
-          ? { ...mockScanRegistration(args, input), scopeFileCount: 1_258 }
-          : mockWorkbench(args, input),
-      createCodex: codexFactory(async () => {
-        await copyCompletedScan(root);
-        await Promise.all([
-          writeUsageSession(codexHome, "thread-1", usage),
-          writeUsageSession(codexHome, "worker-thread", usage, {
-            parent: "thread-1",
-            parentField: "parent_thread_id",
-          }),
-          writeUsageSession(codexHome, "unrelated-thread", usage),
-        ]);
-        const marker = (
-          phase: ScanProgress["phase"],
-          filesCompleted: number,
-          filesTotal: number,
-        ): string =>
-          `CODEX_SECURITY_SCAN_PROGRESS ${JSON.stringify({
-            phase,
-            filesCompleted,
-            filesTotal,
-          })}`;
-        for (const [threadId, text] of [
-          ["worker-thread", marker("discovery", 3, 1_249)],
-          ["worker-thread", marker("discovery", 2, 2)],
-          ["worker-thread", marker("discovery", 7, 1_259)],
-          ["unrelated-thread", marker("discovery", 7, 1_258)],
-          ["worker-thread", marker("discovery", 1_250, 1_249)],
-          ["worker-thread", marker("discovery", 1_249, 1_249)],
-          ["worker-thread", marker("validation", 1_249, 1_249)],
-        ] as const) {
-          await appendFile(
-            join(
-              codexHome,
-              "sessions",
-              "2026",
-              "07",
-              "26",
-              `rollout-${threadId}.jsonl`,
-            ),
-            `${JSON.stringify({
-              type: "response_item",
-              payload: {
-                type: "custom_tool_call_output",
-                status: "completed",
-                output: [
-                  { type: "input_text", text: "Reviewed file batch." },
-                  { type: "input_text", text },
-                ],
+  test.each([false, true])(
+    "normalizes worker counts using the parent phase (validation dispatch: %p)",
+    async (parentDispatch) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const updates: ScanProgress[] = [];
+      const sessionEvents: ScanSessionEvent[] = [];
+      const workers: ScanWorkerEvent[] = [];
+      const observerErrors: ScanObserverName[] = [];
+      const usage = { input_tokens: 100, output_tokens: 10 };
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> => {
+          if (args[0] === "register-cli-scan")
+            return {
+              ...mockScanRegistration(args, input),
+              scopeFileCount: 1_258,
+            };
+          if (args[0] === "get-scan")
+            return {
+              scan: {
+                progress: {
+                  phase: "discovery",
+                  coverage: {
+                    filesTotal: 1_258,
+                    closedRows: 0,
+                    worklistRows: 0,
+                  },
+                },
               },
-            })}\n`,
-          );
-        }
-        return { events: completedEvents() };
-      }),
-    });
+            };
+          return mockWorkbench(args, input);
+        },
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          await Promise.all([
+            writeUsageSession(codexHome, "thread-1", usage),
+            writeUsageSession(codexHome, "worker-thread", usage, {
+              parent: "thread-1",
+              parentField: "parent_thread_id",
+            }),
+            writeUsageSession(codexHome, "unrelated-thread", usage),
+          ]);
+          const marker = (
+            phase: ScanProgress["phase"],
+            filesCompleted: number,
+            filesTotal: number,
+          ): string =>
+            `CODEX_SECURITY_SCAN_PROGRESS ${JSON.stringify({
+              phase,
+              filesCompleted,
+              filesTotal,
+            })}`;
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            if (parentDispatch) {
+              yield {
+                type: "item.completed",
+                item: {
+                  id: "parent-validation-dispatch",
+                  type: "agent_message",
+                  text: 'CODEX_SECURITY_WORKER_STATUS {"kind":"dispatch","phase":"validation","planned":2,"started":2}',
+                },
+              };
+            }
+            for (const [threadId, text] of [
+              ["worker-thread", marker("discovery", 3, 1_249)],
+              ["worker-thread", marker("discovery", 2, 2)],
+              ["worker-thread", marker("discovery", 7, 1_259)],
+              ["unrelated-thread", marker("discovery", 7, 1_258)],
+              ["worker-thread", marker("discovery", 1_250, 1_249)],
+              ["worker-thread", marker("discovery", 1_249, 1_249)],
+              ["worker-thread", marker("validation", 1_249, 1_249)],
+            ] as const) {
+              await appendFile(
+                join(
+                  codexHome,
+                  "sessions",
+                  "2026",
+                  "07",
+                  "26",
+                  `rollout-${threadId}.jsonl`,
+                ),
+                `${JSON.stringify({
+                  type: "response_item",
+                  payload: {
+                    type: "custom_tool_call_output",
+                    status: "completed",
+                    output: [
+                      { type: "input_text", text: "Reviewed file batch." },
+                      { type: "input_text", text },
+                    ],
+                  },
+                })}\n`,
+              );
+            }
+          }
+          return { events: completedEvents("thread-1", events()) };
+        }),
+      });
 
-    const result = await client.run(repository, {
-      onProgress: (progress) => updates.push(progress),
-      onWorkerEvent: (event) => workers.push(event),
-      onSessionEvent: (event) => {
-        sessionEvents.push(event);
-        if (sessionEvents.length === 1) {
-          throw new Error("session observer exploded");
-        }
-      },
-      onObserverError: (observer) => observerErrors.push(observer),
-    });
+      const result = await client.run(repository, {
+        onProgress: (progress) => updates.push(progress),
+        onWorkerEvent: (event) => workers.push(event),
+        onSessionEvent: (event) => {
+          sessionEvents.push(event);
+          if (sessionEvents.length === 1) {
+            throw new Error("session observer exploded");
+          }
+        },
+        onObserverError: (observer) => observerErrors.push(observer),
+      });
 
-    expect(result.threadId).toBe("thread-1");
-    expect(updates).toEqual([
-      { phase: "preflight", filesCompleted: 0, filesTotal: 1_258 },
-      { phase: "discovery", filesCompleted: 3, filesTotal: 1_258 },
-      { phase: "discovery", filesCompleted: 1_249, filesTotal: 1_258 },
-      { phase: "validation", filesCompleted: 1_249, filesTotal: 1_258 },
-    ]);
-    expect(sessionEvents).toHaveLength(10);
-    expect(
-      new Set(
-        sessionEvents.map(
-          ({ threadId, parentThreadId }) => `${threadId}:${parentThreadId}`,
+      expect(result.threadId).toBe("thread-1");
+      expect(updates).toEqual([
+        { phase: "preflight", filesCompleted: 0, filesTotal: 1_258 },
+        {
+          phase: "discovery",
+          filesCompleted: 0,
+          filesTotal: 1_258,
+          reviewItems: { completed: 0, total: 0 },
+        },
+        ...[3, 1_249, 1_249].map<ScanProgress>((filesCompleted) => ({
+          phase: parentDispatch ? "validation" : "discovery",
+          filesCompleted,
+          filesTotal: 1_258,
+          reviewItems: { completed: 0, total: 0 },
+        })),
+      ]);
+      expect(sessionEvents).toHaveLength(10);
+      expect(
+        new Set(
+          sessionEvents.map(
+            ({ threadId, parentThreadId }) => `${threadId}:${parentThreadId}`,
+          ),
         ),
-      ),
-    ).toEqual(new Set(["thread-1:null", "worker-thread:thread-1"]));
-    expect(workers).toEqual([{ kind: "observed", worker: 1 }]);
-    expect(
-      new Set(
-        sessionEvents
-          .filter((event) => event.threadId === "worker-thread")
-          .map((event) => event.worker),
-      ),
-    ).toEqual(new Set([1]));
-    expect(observerErrors).toEqual(["onSessionEvent"]);
-    await client.close();
-  });
+      ).toEqual(new Set(["thread-1:null", "worker-thread:thread-1"]));
+      expect(workers).toEqual([{ kind: "observed", worker: 1 }]);
+      expect(
+        new Set(
+          sessionEvents
+            .filter((event) => event.threadId === "worker-thread")
+            .map((event) => event.worker),
+        ),
+      ).toEqual(new Set([1]));
+      expect(observerErrors).toEqual(["onSessionEvent"]);
+      await client.close();
+    },
+  );
 
   test.each(["none", "sync", "async"] as const)(
     "observes workers before scan completion with %s observer errors",
@@ -4076,7 +4601,25 @@ describe("CodexSecurity orchestration", () => {
                       {},
                       { parent: "thread-1" },
                     );
-                    await observed.promise;
+                    // The fake stream has no executor transport to keep the
+                    // event loop alive while the tracker polls its new worker.
+                    const timeout = setTimeout(
+                      () =>
+                        observed.reject(
+                          new Error(
+                            "Timed out waiting for worker observation.",
+                          ),
+                        ),
+                      Number(
+                        process.env["CODEX_SECURITY_TEST_TIMEOUT_MS"] ??
+                          "30000",
+                      ),
+                    );
+                    try {
+                      await observed.promise;
+                    } finally {
+                      clearTimeout(timeout);
+                    }
                   }
                 }
               }
@@ -4100,6 +4643,7 @@ describe("CodexSecurity orchestration", () => {
         expect(workers).toEqual([{ kind: "observed", worker: 1 }]);
         expect(errors).toEqual(failure === "none" ? [] : ["onWorkerEvent"]);
       } finally {
+        observed.resolve();
         await client.close();
       }
     },
@@ -4346,6 +4890,7 @@ describe("CodexSecurity orchestration", () => {
       let modelCalled = false;
       let matchingTurns = 0;
       let observedSingleTurn: boolean | undefined;
+      let progressSignal: AbortSignal | undefined;
       let matched = false;
       let savedComparisonInput: string | undefined;
       const managedProvider = {
@@ -4446,6 +4991,12 @@ describe("CodexSecurity orchestration", () => {
         {
           codexOverrides: {
             ...providerConfig,
+            analytics: { enabled: false },
+            otel: { environment: "synthetic-matching" },
+            responses_api_metadata: {
+              "team.tag": "synthetic-matching",
+              codex_security_integration: "github_action",
+            },
             ...(failure === "budget-context"
               ? {
                   model: "gpt-6.1-sol",
@@ -4478,12 +5029,11 @@ describe("CodexSecurity orchestration", () => {
                 : {}),
             },
           })),
-          runWorkbench: async (
-            _options: unknown,
-            args: readonly string[],
-            input?: string,
-          ): Promise<JsonObject> => {
+          runWorkbench: async (options, args, input): Promise<JsonObject> => {
             commands.push(args);
+            if (args[0] === "get-scan") {
+              progressSignal ??= options.signal;
+            }
             if (args[0] === "get-scan-feedback") {
               return {
                 scanId: "scan_example_001",
@@ -4503,6 +5053,7 @@ describe("CodexSecurity orchestration", () => {
               };
             }
             if (args[0] === "list-global-findings") {
+              expect(progressSignal?.aborted).toBe(true);
               if (failure === "index") throw new Error("index unavailable");
               if (failure === "dismissed" || failure === "managed") {
                 return {
@@ -4528,6 +5079,17 @@ describe("CodexSecurity orchestration", () => {
           },
           async matchFindings(input, options, runtimeOptions) {
             expect(options?.cyberAccessProgram).toBe("daybreak_blue");
+            expect(options?.config?.codexOverrides).toMatchObject({
+              analytics: { enabled: false },
+              otel: { environment: "synthetic-matching" },
+              responses_api_metadata: {
+                "team.tag": "synthetic-matching",
+                codex_security_integration: "github_action",
+                codex_security_command: "scan",
+                codex_security_scan_mode: "standard",
+                codex_security_provider: "custom",
+              },
+            });
             if (failure !== "managed")
               expect(options?.config?.codexOverrides).toMatchObject({
                 ...providerConfig,
@@ -4645,6 +5207,7 @@ describe("CodexSecurity orchestration", () => {
         const result = await client.run(repository, {
           ...(limited ? { maxCostUsd: 1 } : {}),
           cyberAccessProgram: "daybreak_blue",
+          onProgress() {},
           onWarning: (message) => warnings.push(message),
         });
         expect(result.threadId).toBe("thread-1");
@@ -4923,11 +5486,11 @@ describe("CodexSecurity orchestration", () => {
   );
 
   test.each([
-    ["partial coverage", "partial", false, false],
-    ["unknown coverage", "unknown", false, false],
+    ["a completed scan with scope notes", "completed", false, false],
+    ["legacy coverage metadata", "legacy", false, false],
     ["a failed scan", "failed", false, false],
     ["a failed scan and follow-up", "failed", true, false],
-    ["an interrupted follow-up", "partial", false, true],
+    ["an interrupted follow-up", "completed", false, true],
   ] as const)(
     "runs post-scan instructions after %s",
     async (_scenario, outcome, followUpFails, cancelFollowUp) => {
@@ -4954,10 +5517,16 @@ describe("CodexSecurity orchestration", () => {
             await copyCompletedScan(root);
             const coveragePath = join(scanDir, "coverage.json");
             const original = await readFile(coveragePath, "utf8");
-            const coverage = original.replace(
-              '"completeness": "complete"',
-              `"completeness": "${outcome}"`,
-            );
+            const coverage = JSON.stringify({
+              ...JSON.parse(original),
+              ...(outcome === "legacy" ? { completeness: "partial" } : {}),
+              deferred: [
+                {
+                  id: "runtime-note",
+                  reason: "Optional runtime reproduction was unavailable.",
+                },
+              ],
+            });
             const manifestPath = join(scanDir, "scan-manifest.json");
             await writeFile(coveragePath, coverage);
             await writeFile(
@@ -5004,7 +5573,12 @@ describe("CodexSecurity orchestration", () => {
       } else if (scanFails) {
         await expect(result).rejects.toThrow("The scan failed.");
       } else {
-        expect((await result).coverage.completeness).toBe(outcome);
+        expect((await result).coverage.deferred).toEqual([
+          {
+            id: "runtime-note",
+            reason: "Optional runtime reproduction was unavailable.",
+          },
+        ]);
       }
       expect(prompts.at(-1)).toBe("Record the scan cost.");
       expect(prompts).toHaveLength(2);
@@ -5072,6 +5646,144 @@ describe("CodexSecurity orchestration", () => {
       }
       expect(turns).toBe(2);
       await (closing ?? client.close());
+    },
+  );
+
+  test.each(
+    [false, true].flatMap((reenter) =>
+      [false, true].map((failCleanup) => ({ reenter, failCleanup })),
+    ),
+  )(
+    "close shares cleanup during abort reentry=$reenter and failure=$failCleanup",
+    async ({ reenter, failCleanup }) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const prepared: ReturnType<typeof preparedRuntime> = {
+        ...preparedRuntime(codexHome),
+      };
+      const requestStarted = Promise.withResolvers<void>();
+      const operationRelease = Promise.withResolvers<void>();
+      const cleanupStarted = Promise.withResolvers<void>();
+      const cleanupRelease = Promise.withResolvers<void>();
+      const controller = new AbortController();
+      const deadline = AbortSignal.timeout(5_000);
+      const rejectReadiness = () => requestStarted.reject(deadline.reason);
+      deadline.addEventListener("abort", rejectReadiness, { once: true });
+      const failure = new Error("synthetic runtime cleanup failure");
+      const closes: Array<{ settled: boolean; result: Promise<unknown> }> = [];
+      const observeClose = (pending: Promise<void>) => {
+        const observed = {
+          settled: false,
+          result: pending.catch((error: unknown) => error),
+        };
+        observed.result = observed.result.finally(() => {
+          observed.settled = true;
+        });
+        closes.push(observed);
+      };
+      let cleanupCalls = 0;
+      let scanSignal: AbortSignal | undefined;
+      let budgetSignal: AbortSignal | undefined;
+      const client = new TestClient(
+        { codexOverrides: { model: "gpt-5.6-sol" } },
+        {
+          ...scanRuntimeDependencies(codexHome, scanDir),
+          prepareRuntime: async () => prepared,
+          createCodex: codexFactory(
+            async (_input: string, { signal }: { signal: AbortSignal }) => {
+              scanSignal = signal;
+              prepared.providerProfile = {
+                name: "synthetic-cleanup-observer",
+                path: join(root, "unused-profile.toml"),
+                async cleanup() {
+                  cleanupCalls++;
+                  cleanupStarted.resolve();
+                  await cleanupRelease.promise;
+                  if (failCleanup) throw failure;
+                },
+              };
+              async function* events(): AsyncGenerator<ThreadEvent> {
+                yield { type: "thread.started", thread_id: "scan-thread" };
+                await writeUsageSession(codexHome, "scan-thread", {
+                  input_tokens: 900,
+                  output_tokens: 0,
+                });
+                await (signal.aborted ? undefined : once(signal, "abort"));
+                await operationRelease.promise;
+                signal.throwIfAborted();
+              }
+              return { events: events() };
+            },
+          ),
+        },
+      );
+      const keepAlive = setTimeout(() => {}, 10_000);
+      const scan = client
+        .run(repository, {
+          mode: "standard",
+          maxCostUsd: 0.004,
+          signal: AbortSignal.any([controller.signal, deadline]),
+          onBudgetApproaching: ({ signal }) => {
+            budgetSignal = signal;
+            if (reenter) {
+              signal.addEventListener(
+                "abort",
+                () => observeClose(client.close()),
+                {
+                  once: true,
+                },
+              );
+              signal.addEventListener(
+                "abort",
+                () => observeClose(client[Symbol.asyncDispose]()),
+                { once: true },
+              );
+            }
+            requestStarted.resolve();
+            return undefined;
+          },
+        })
+        .catch((error: unknown) => error);
+      try {
+        await Promise.race([
+          requestStarted.promise,
+          scan.then((result) => {
+            throw new Error("Scan ended before its budget callback", {
+              cause: result,
+            });
+          }),
+        ]);
+        observeClose(client.close());
+        expect(scanSignal?.aborted).toBe(true);
+        expect(budgetSignal?.aborted).toBe(true);
+        observeClose(client.close());
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(cleanupCalls).toBe(0);
+        expect(closes.every(({ settled }) => !settled)).toBe(true);
+        operationRelease.resolve();
+        await cleanupStarted.promise;
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(closes).toHaveLength(reenter ? 4 : 2);
+        expect(closes.every(({ settled }) => !settled)).toBe(true);
+        cleanupRelease.resolve();
+        for (const close of closes) {
+          expect(await close.result).toBe(failCleanup ? failure : undefined);
+        }
+        const late = client.close().catch((error: unknown) => error);
+        expect(await late).toBe(failCleanup ? failure : undefined);
+        expect(cleanupCalls).toBe(1);
+        expect(await scan).toMatchObject({
+          message: "CodexSecurity is closed.",
+        });
+      } finally {
+        clearTimeout(keepAlive);
+        deadline.removeEventListener("abort", rejectReadiness);
+        controller.abort();
+        operationRelease.resolve();
+        cleanupRelease.resolve();
+        await client.close().catch(() => {});
+        await scan;
+        await Promise.all(closes.map(({ result }) => result));
+      }
     },
   );
 
@@ -5515,6 +6227,7 @@ describe("CodexSecurity orchestration", () => {
       await expect(
         client.run(repository, {
           maxCostUsd: 0.004,
+          maxTimeMinutes: 5,
           postScanPrompt: "Record the scan cost.",
           onCost: (cost) => costs.push(cost.estimatedUsd),
           signal: AbortSignal.timeout(5_000),
@@ -5542,7 +6255,8 @@ describe("CodexSecurity orchestration", () => {
       "--thread-id",
       "scan-thread",
     ]);
-    expect(commands[3]).toEqual([
+    expect(commands[3]).toEqual(["get-scan", "--scan-id", "scan_example_001"]);
+    expect(commands[4]).toEqual([
       "fail-scan",
       "--scan-id",
       "scan_example_001",
@@ -5555,7 +6269,7 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
-  test.each(["partial", "invalid", "unavailable"] as const)(
+  test.each(["completed", "failed", "unavailable"] as const)(
     "recovers exhausted deep-scan budget when completion is %s",
     async (completion) => {
       const { root, repository, codexHome, scanDir } = await scanDirectories();
@@ -5598,9 +6312,8 @@ describe("CodexSecurity orchestration", () => {
           const coveragePath = join(scanDir, "coverage.json");
           const coverage = JSON.parse(await readFile(coveragePath, "utf8"));
           coverage.mode = "deep_repository";
-          coverage.completeness =
-            completion === "invalid" ? "complete" : "partial";
-          if (completion === "partial") {
+          delete coverage.completeness;
+          if (completion === "completed") {
             coverage.deferred.push({
               id: "budget-exhausted",
               reason: "The scan reached its configured cost limit.",
@@ -5610,6 +6323,7 @@ describe("CodexSecurity orchestration", () => {
           await writeFile(coveragePath, coverageBytes);
           const manifestPath = join(scanDir, "scan-manifest.json");
           const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+          if (completion === "failed") manifest.scan.status = "failed";
           const artifact = manifest.scan.artifacts.find(
             (item: { path: string }) => item.path === "coverage.json",
           );
@@ -5617,6 +6331,17 @@ describe("CodexSecurity orchestration", () => {
           await writeFile(manifestPath, `${JSON.stringify(manifest)}\n`);
           return {
             scan: {
+              ...(completion === "completed"
+                ? {
+                    usage: {
+                      completion: {
+                        threadId: "scan-thread",
+                        turnId: "completion-turn",
+                        finalized: false,
+                      },
+                    },
+                  }
+                : {}),
               warnings: [
                 args
                   .find((value) => value.startsWith("--message="))!
@@ -5636,7 +6361,7 @@ describe("CodexSecurity orchestration", () => {
           onWarning: (warning) => warnings.push(warning),
           signal: AbortSignal.timeout(5_000),
         });
-        if (completion === "unavailable" || completion === "invalid") {
+        if (completion === "unavailable" || completion === "failed") {
           await expect(result).rejects.toBeInstanceOf(
             ScanCostLimitExceededError,
           );
@@ -5649,7 +6374,7 @@ describe("CodexSecurity orchestration", () => {
           }
         } else {
           const recovered = await result;
-          expect(recovered.coverage.completeness).toBe(completion);
+          expect(recovered.coverage).not.toHaveProperty("completeness");
           expect(recovered.findings.findings).toHaveLength(1);
           expect(recovered.threadId).toBe("scan-thread");
           expect(recovered.cost?.estimatedUsd).toBe(0.00488);
@@ -5657,6 +6382,19 @@ describe("CodexSecurity orchestration", () => {
             `Scan stopped: short-context budget baseline $0.00488 exceeded the $0.004 limit; estimated cost $0.00488–$0.01156 (standard, context unknown, cache writes unknown); partial output remains at ${scanDir}.`,
           ]);
           expect(commands.some((args) => args[0] === "fail-scan")).toBe(false);
+          expect(
+            commands.find((args) => args[0] === "finalize-scan-usage"),
+          ).toEqual([
+            "finalize-scan-usage",
+            "--scan-id",
+            "scan_example_001",
+            "--thread-id",
+            "scan-thread",
+            "--turn-id",
+            "completion-turn",
+            "--turn-status",
+            "interrupted",
+          ]);
         }
         expect(runStreamed).toHaveBeenCalledTimes(1);
         const recovery = commands.find(
@@ -6335,68 +7073,32 @@ describe("CodexSecurity orchestration", () => {
     }
   });
 
-  test("keeps legacy custom-plugin Deep Scan settings under the credential lock", async () => {
+  test("rejects custom Deep plugins without isolated worker configuration", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
-    const ambientHome = join(root, "ambient-codex-home");
-    const stateDirectory = join(root, "state");
-    const credentialHome = join(stateDirectory, "codex-home");
-    const legacyPlugin = join(root, "legacy-plugin");
-    const scanDir = join(root, "scan");
+    const pluginRoot = join(root, "custom-plugin");
     await mkdir(repository);
-    await mkdir(ambientHome);
-    await mkdir(scanDir, { mode: 0o700 });
-    await writeFile(join(ambientHome, "auth.json"), "{}\n");
-    await cp(PLUGIN_ROOT, legacyPlugin, { recursive: true });
-    const mcpPath = join(legacyPlugin, ".mcp.json");
-    const mcpConfiguration = JSON.parse(await readFile(mcpPath, "utf8")) as {
-      mcpServers: Record<string, { env_vars: string[] }>;
-    };
-    const server = mcpConfiguration.mcpServers["codex-security"]!;
+    await cp(PLUGIN_ROOT, pluginRoot, { recursive: true });
+    const mcpPath = join(pluginRoot, ".mcp.json");
+    const mcpConfiguration = JSON.parse(await readFile(mcpPath, "utf8"));
+    const server = mcpConfiguration.mcpServers["codex-security"];
     server.env_vars = server.env_vars.filter(
-      (name) => name !== "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+      (name: string) => name !== "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
     );
-    await writeFile(mcpPath, `${JSON.stringify(mcpConfiguration, null, 2)}\n`);
-
+    await writeFile(mcpPath, JSON.stringify(mcpConfiguration));
+    const createCodex = mock(throwing("Codex should not start"));
     const client = new TestClient(
-      { pluginPath: legacyPlugin },
+      { pluginPath: pluginRoot },
       {
-        environment: {
-          CODEX_HOME: ambientHome,
-          CODEX_SECURITY_STATE_DIR: stateDirectory,
-        },
-        resolvePluginPython: async () => "/managed/python",
-        prepareOutputDir: async () => scanDir,
-        repositoryRevision: async () => "deadbeef",
-        createCodex: (options: CodexOptions) => ({
-          startThread: () => ({
-            id: null,
-            async runStreamed() {
-              expect(
-                options.env?.["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"],
-              ).toBeUndefined();
-              expect(
-                existsSync(join(credentialHome, ".codex-security-scan.lock")),
-              ).toBe(true);
-              expect(
-                parseToml(
-                  await readFile(
-                    join(credentialHome, "codex-security", "config.toml"),
-                    "utf8",
-                  ),
-                )["deep_scan"],
-              ).toMatchObject({ workers: 7 });
-              throw new Error("legacy custom plugin scan reached");
-            },
-          }),
-        }),
+        environment: { CODEX_SECURITY_STATE_DIR: join(root, "state") },
+        createCodex,
       },
     );
-
     try {
-      await expect(
-        client.run(repository, { mode: "deep", workers: 7 }),
-      ).rejects.toThrow("legacy custom plugin scan reached");
+      await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
+        "Update the custom plugin or use the bundled plugin",
+      );
+      expect(createCodex).not.toHaveBeenCalled();
     } finally {
       await client.close();
     }
@@ -6430,6 +7132,260 @@ describe("CodexSecurity orchestration", () => {
     expect(createCodex).not.toHaveBeenCalled();
     await client.close();
   });
+
+  test("isolates selected native settings in current Deep worker snapshots", async () => {
+    const root = await temporaryDirectory();
+    const started = Promise.withResolvers<void>();
+    let starts = 0;
+    const paths = new Set<string>();
+    const clients = await Promise.all(
+      [0, 1].map(async (index) => {
+        const repository = join(root, `repository-${index}`);
+        const codexHome = join(root, `home-${index}`);
+        const scanDir = join(root, `scan-${index}`);
+        const sqliteHome = join(scanDir, "sqlite");
+        const configPath = join(root, `worker-config-${index}.toml`);
+        const installedRoot = join(codexHome, "plugins", "cache", "selected");
+        const customSkill = {
+          path: join(root, `unrelated-${index}`, "SKILL.md"),
+          enabled: index === 0,
+        };
+        await Promise.all(
+          [repository, codexHome, scanDir].map((directory) =>
+            mkdir(directory, { mode: 0o700 }),
+          ),
+        );
+        const nativeFile = join(root, `native-${index}.json`);
+        await writeFile(nativeFile, JSON.stringify({ models: [] }));
+        const config: JsonObject = {
+          profile: "selected",
+          synthetic_native: { root: index, selected: "root" },
+          profiles: {
+            selected: {
+              skills: { config: [customSkill] },
+              synthetic_native: { selected: `scan-${index}` },
+              experimental_compact_prompt_file: `../native-${index}.json`,
+              model_catalog_json: `../native-${index}.json`,
+              sqlite_home: index === 0 ? "sqlite" : sqliteHome,
+            },
+          },
+        };
+        const client = new TestClient(
+          { codexOverrides: config },
+          {
+            ...scanRuntimeDependencies(codexHome, scanDir),
+            prepareRuntime: runtimePreparer(codexHome, () => ({
+              configPath,
+              environment: { CODEX_SQLITE_HOME: join(root, "overridden") },
+              plugin: { ...preparedRuntime(codexHome).plugin, installedRoot },
+            })),
+            runWorkbench: async (options, args, input) => {
+              expect(options.environment?.["CODEX_SQLITE_HOME"]).toBe(
+                sqliteHome,
+              );
+              return mockWorkbench(args, input);
+            },
+            createCodex: (options) => ({
+              startThread: () => ({
+                id: null,
+                async runStreamed() {
+                  if (++starts === 2) started.resolve();
+                  await started.promise;
+                  expect(
+                    options.env?.["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"],
+                  ).toBe(preparedRuntime(codexHome).deepScanConfigPath);
+                  expect(options.env?.["CODEX_SECURITY_CONFIG_PATH"]).toBe(
+                    configPath,
+                  );
+                  expect(options.env?.["CODEX_SQLITE_HOME"]).toBe(sqliteHome);
+                  paths.add(configPath);
+                  const saved = resolveCodexProfile(
+                    parseToml(await readFile(configPath, "utf8")) as JsonObject,
+                  );
+                  const effective = resolveCodexProfile(
+                    options.config as JsonObject,
+                  );
+                  expect(saved["skills"]).toEqual(effective["skills"]);
+                  expect(effective["sqlite_home"]).toBe(
+                    index === 0 ? "sqlite" : sqliteHome,
+                  );
+                  const snapshot = parseToml(
+                    await readFile(
+                      options.env!["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!,
+                      "utf8",
+                    ),
+                  );
+                  expect(
+                    (snapshot["worker_runtime"] as JsonObject)["skills"],
+                  ).toEqual(effective["skills"]);
+                  expect(
+                    (snapshot["worker_runtime"] as JsonObject)[
+                      "synthetic_native"
+                    ],
+                  ).toEqual({ root: index, selected: `scan-${index}` });
+                  for (const key of [
+                    "experimental_compact_prompt_file",
+                    "model_catalog_json",
+                  ]) {
+                    const file = (snapshot["worker_runtime"] as JsonObject)[
+                      key
+                    ];
+                    expect(file).toBe(nativeFile);
+                    expect(await readFile(file as string, "utf8")).toBe(
+                      JSON.stringify({ models: [] }),
+                    );
+                  }
+                  expect(
+                    (snapshot["worker_runtime"] as JsonObject)["sqlite_home"],
+                  ).toBe(sqliteHome);
+                  const selections = (saved["skills"] as JsonObject)[
+                    "config"
+                  ] as JsonObject[];
+                  expect(selections).toContainEqual(customSkill);
+                  expect(selections).toContainEqual({
+                    path: join(
+                      installedRoot,
+                      "skills",
+                      "security-scan",
+                      "SKILL.md",
+                    ),
+                    enabled: false,
+                  });
+                  expect(JSON.stringify(selections)).not.toContain(
+                    `unrelated-${1 - index}`,
+                  );
+                  throw new Error("worker skill configuration captured");
+                },
+              }),
+            }),
+          },
+        );
+        return { client, repository };
+      }),
+    );
+    try {
+      const results = await Promise.allSettled(
+        clients.map(({ client, repository }) =>
+          client.run(repository, { mode: "deep" }).finally(started.resolve),
+        ),
+      );
+      for (const result of results)
+        expect(result).toMatchObject({
+          status: "rejected",
+          reason: expect.objectContaining({
+            message: "worker skill configuration captured",
+          }),
+        });
+      expect(starts).toBe(2);
+      expect(paths.size).toBe(2);
+    } finally {
+      started.resolve();
+      await Promise.all(clients.map(({ client }) => client.close()));
+    }
+  });
+
+  test.each(["standard", "deep"] as const)(
+    "loads the readable workflow and disables only denied cached skills for %s scans",
+    async (mode) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const installedRoot = join(
+        codexHome,
+        "plugins",
+        "cache",
+        "codex-security",
+        "fixture-version",
+      );
+      const unrelated = {
+        path: join(root, "other-skill", "SKILL.md"),
+        enabled: true,
+      };
+      const deepScanConfigPath = join(codexHome, "deep-scan.toml");
+      const codexOverrides: JsonObject = {
+        profile: "selected",
+        profiles: { selected: { skills: { config: [unrelated] } } },
+      };
+      const before = structuredClone(codexOverrides);
+      let reachedScan = false;
+      const client = new TestClient(
+        { codexOverrides },
+        {
+          ...scanRuntimeDependencies(codexHome, scanDir),
+          prepareRuntime: runtimePreparer(codexHome, () => ({
+            configPath: join(codexHome, "scan-config.toml"),
+            deepScanConfigPath,
+            plugin: { ...preparedRuntime(codexHome).plugin, installedRoot },
+          })),
+          createCodex: (options) => ({
+            startThread: () => ({
+              id: null,
+              async runStreamed(prompt: string) {
+                reachedScan = true;
+                const workflow =
+                  mode === "deep" ? "deep-security-scan" : "security-scan";
+                expect(prompt).toContain(
+                  shellEnvironmentReference(
+                    "CODEX_SECURITY_PLUGIN_ROOT",
+                    `/skills/${workflow}/SKILL.md`,
+                  ),
+                );
+                expect(prompt).not.toContain("$codex-security:");
+                expect(prompt).toContain(
+                  shellEnvironmentReference(
+                    "CODEX_SECURITY_PLUGIN_ROOT",
+                    "/skills/<skill-name>/SKILL.md",
+                  ),
+                );
+                expect(options.env?.["CODEX_SECURITY_PLUGIN_ROOT"]).toBe(
+                  PLUGIN_ROOT,
+                );
+                const config = resolveCodexProfile(
+                  options.config as JsonObject,
+                );
+                const entries = (config["skills"] as JsonObject)[
+                  "config"
+                ] as JsonObject[];
+                expect(entries).toContainEqual(unrelated);
+                for (const entry of await readdir(join(PLUGIN_ROOT, "skills"), {
+                  withFileTypes: true,
+                })) {
+                  if (entry.isDirectory())
+                    expect(entries).toContainEqual({
+                      path: join(
+                        installedRoot,
+                        "skills",
+                        entry.name,
+                        "SKILL.md",
+                      ),
+                      enabled: false,
+                    });
+                }
+                expect(config["mcp_servers"]).toBeUndefined();
+                if (mode === "deep") {
+                  const worker = parseToml(
+                    await readFile(
+                      options.env!["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!,
+                      "utf8",
+                    ),
+                  )["worker_runtime"] as JsonObject;
+                  expect(worker["skills"]).toEqual(config["skills"]);
+                }
+                throw new Error("readable workflow captured");
+              },
+            }),
+          }),
+        },
+      );
+      try {
+        await expect(client.run(repository, { mode })).rejects.toThrow(
+          "readable workflow captured",
+        );
+        expect(reachedScan).toBe(true);
+        expect(codexOverrides).toEqual(before);
+      } finally {
+        await client.close();
+      }
+    },
+  );
 
   test("encodes paths and runtime values as data before sending the scan prompt", async () => {
     const root = await temporaryDirectory();
@@ -6895,7 +7851,19 @@ describe("CodexSecurity orchestration", () => {
     expect(prompt()).toContain(
       `Scan target: Git diff from ${revision} to ${revision}.`,
     );
-    expect(prompt()).toContain("$codex-security:security-diff-scan");
+    expect(prompt()).toContain(
+      shellEnvironmentReference(
+        "CODEX_SECURITY_PLUGIN_ROOT",
+        "/skills/security-diff-scan/SKILL.md",
+      ),
+    );
+    expect(prompt()).not.toContain("$codex-security:");
+    expect(prompt()).toContain(
+      shellEnvironmentReference(
+        "CODEX_SECURITY_PLUGIN_ROOT",
+        "/skills/<skill-name>/SKILL.md",
+      ),
+    );
     expect(prompt()).toContain("record_codex_security_scan_draft");
     expect(prompt()).toContain("complete_codex_security_scan");
     expect(prompt()).not.toContain("do not finalize or seal them");
@@ -6908,7 +7876,13 @@ describe("CodexSecurity orchestration", () => {
     await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
       "prompt captured",
     );
-    expect(prompt()).toContain("$codex-security:deep-security-scan");
+    expect(prompt()).toContain(
+      shellEnvironmentReference(
+        "CODEX_SECURITY_PLUGIN_ROOT",
+        "/skills/deep-security-scan/SKILL.md",
+      ),
+    );
+    expect(prompt()).not.toContain("$codex-security:");
     expect(prompt()).not.toContain("record_codex_security_scan_draft");
     expect(prompt()).toContain("complete_codex_security_scan");
     expect(prompt()).not.toContain("do not finalize or seal them");
@@ -7049,6 +8023,7 @@ describe("CodexSecurity orchestration", () => {
     const inheritedTools = join(root, "operator-tools");
     await mkdir(bundledTools, { recursive: true });
     await mkdir(dirname(executable));
+    await writeFile(executable, "synthetic executable; never launched\n");
     await mkdir(inheritedTools);
     const originalPlatform = Object.getOwnPropertyDescriptor(
       process,

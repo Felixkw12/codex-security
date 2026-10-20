@@ -180,7 +180,8 @@ test("Python reader retains exact models and unmatched counter remainder", async
     "sys.path.insert(0, sys.argv[1])",
     "import workbench_scan_usage as w",
     "models={}",
-    "tokens,warnings=w._read_rollout_usage(w.RolloutSession('scan-thread',None,Path(sys.argv[2])),started_at=datetime(2026,9,1,tzinfo=timezone.utc),completed_at=None,model_usage=models)",
+    "measurement = w._read_rollout_usage(w.RolloutSession('scan-thread',None,Path(sys.argv[2])),started_at=datetime(2026,9,1,tzinfo=timezone.utc),completed_at=None,model_usage=models)",
+    "tokens, warnings = measurement.tokens, measurement.warnings",
     "print(json.dumps({'tokens':tokens,'warnings':sorted(warnings),'modelUsage':[{'model':model,**usage} for model,usage in models.items()]}))",
   ].join("\n");
   const executable = Bun.which("python3") ?? Bun.which("python");

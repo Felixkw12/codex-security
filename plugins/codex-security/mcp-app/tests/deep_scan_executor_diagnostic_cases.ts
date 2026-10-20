@@ -131,3 +131,74 @@ export function workerPermissionProfileOverride(args: readonly string[]) {
   assert.equal(overrides.length, 1);
   return overrides[0];
 }
+
+export function testWorkerErrorClassificationPreservesExplicitFailures({
+  classifyCodexWorkerError,
+  DeepScanNonRetryableError,
+  isCodexCybersecurityPolicyRefusal,
+}: Pick<
+  typeof import("../src/deep-scan/errors.js"),
+  | "classifyCodexWorkerError"
+  | "DeepScanNonRetryableError"
+  | "isCodexCybersecurityPolicyRefusal"
+>) {
+  const explicit = new DeepScanNonRetryableError(
+    "Explicitly rejected worker permission profile.",
+  );
+  assert.equal(classifyCodexWorkerError(explicit), explicit);
+
+  const refusalMessages = [
+    "Request blocked by cyberPolicy.",
+    "Request blocked by a safety policy violation.",
+    "This content was flagged for possible cybersecurity risk.",
+    "This content was flagged for potentially high-risk cyber activity.",
+    "This request has been flagged for possible cybersecurity risk.",
+    "This request has been flagged for potentially high-risk cyber activity.",
+  ];
+  for (const message of refusalMessages) {
+    const original = new Error(message);
+    const classified = classifyCodexWorkerError(original);
+    assert.equal(classified, original);
+    assert.equal(classified.name, "Error");
+    assert.equal(isCodexCybersecurityPolicyRefusal(classified), true);
+
+    const explicitRefusal = new DeepScanNonRetryableError(message);
+    assert.equal(classifyCodexWorkerError(explicitRefusal), explicitRefusal);
+
+    for (const unrecognized of [
+      `Source fixture: ${message}`,
+      `${message} Source fixture.`,
+      JSON.stringify({ message }),
+      `Codex Exec exited with code 1: ${message}`,
+      `429 Too Many Requests: ${message}`,
+      ` ${message}`,
+      `${message}\n`,
+      message.toLowerCase(),
+    ]) {
+      const unrelated = new Error(unrecognized);
+      assert.equal(classifyCodexWorkerError(unrelated), unrelated);
+      assert.equal(isCodexCybersecurityPolicyRefusal(unrelated), false);
+    }
+  }
+
+  for (const message of [
+    "config parser handles unknown keys",
+    "failed to load configuration: invalid value",
+    "agents.max_threads cannot be set when features.multi_agent_v2 is enabled",
+    "authentication required",
+    "not logged in",
+    "missing API key",
+    "Codex Exec exited with code 2: failed to load configuration: invalid value",
+    "chatgpt authentication required for remote plugin catalog; api key auth is not supported",
+    "chatgpt authentication required to sync remote plugins; api key auth is not supported",
+  ]) {
+    const original = new Error(message);
+    assert.equal(classifyCodexWorkerError(original), original);
+  }
+  for (const code of ["ECONNRESET", "EPIPE", "ETIMEDOUT", "cyber_policy"]) {
+    const original = Object.assign(new Error("Unrecognized worker failure"), {
+      code,
+    });
+    assert.equal(classifyCodexWorkerError(original), original);
+  }
+}

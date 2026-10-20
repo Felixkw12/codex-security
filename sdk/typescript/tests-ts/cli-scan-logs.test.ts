@@ -408,6 +408,7 @@ test("saved logs include the privately recorded worker home after recovery", asy
       _input,
       _signal,
       _python,
+      _protectedRoot,
       privateSettings,
     ) => {
       privateSettingsRequested = privateSettings === true;
@@ -498,6 +499,7 @@ test("saved logs remain readable for a future workflow without admitting executi
       input,
       signal,
       _python,
+      _protectedRoot,
       privateSettings,
     ) => {
       privateSettingsRequested ||= privateSettings === true;

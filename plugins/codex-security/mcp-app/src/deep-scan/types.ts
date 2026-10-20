@@ -1,4 +1,5 @@
 import type { DeepReducerContext } from "../artifact-io.js";
+import type { WorkbenchDeepScanStore } from "./store.js";
 import type { DeepScanExecutionSettingsSnapshot } from "./recovery-settings.js";
 
 export type DeepScanTerminalReason = "saturated" | "capped";
@@ -227,6 +228,7 @@ export interface CodexWorkerRequest {
   continuationPrompt?: string;
   artifactContext?: CodexWorkerArtifactContext;
   onThreadStarted?: (threadId: string) => Promise<void> | void;
+  onNonRetryableError?: (error: Error) => void;
 }
 
 export interface CodexWorkerResult {

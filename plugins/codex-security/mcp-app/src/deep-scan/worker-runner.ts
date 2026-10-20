@@ -1,6 +1,6 @@
-import type { ScanDraftInput } from "../artifact-scan-draft.js";
 import { auditEvidence, runAcceptedAudit } from "../accepted-audit.js";
 import { promises as fs } from "node:fs";
+import type { ScanDraftInput } from "../artifact-scan-draft.js";
 import { dirname, join } from "node:path";
 import { readDeepReductionSources } from "../artifact-deep-reducer.js";
 import {
@@ -15,7 +15,6 @@ import { archiveDirectory, writePrivateFile } from "./artifacts.js";
 import type { DeepScanArtifacts } from "./artifacts.js";
 import {
   abortError,
-  errorNameWithCode,
   boundedDeepScanErrorMessage,
   classifyCodexWorkerError as asError,
   DeepScanNonRetryableError,
@@ -41,6 +40,7 @@ export interface AcceptedDiscovery {
   label: string;
   artifactDir: string;
   resultPath: string;
+  result: ScanDraftInput;
   completionSequence: number;
   attempt: number;
   threadId?: string;
@@ -49,16 +49,10 @@ export interface AcceptedDiscovery {
 export type DiscoveryOutcome =
   | { type: "discovery"; status: "succeeded"; worker: AcceptedDiscovery }
   | { type: "discovery"; status: "canceled"; workerId: string }
-  | {
+  | (Extract<WorkerAttemptOutcome, { status: "failed" }> & {
       type: "discovery";
-      status: "failed";
       workerId: string;
-      error: Error;
-      attempt?: number;
-      threadId?: string;
-      replaceableFailureKind?: DeepScanReplaceableFailureKind;
-      consecutiveErrors?: number;
-    };
+    });
 
 export interface SuccessfulDedupOutcome {
   type: "dedup";
@@ -101,6 +95,7 @@ export interface DeepScanWorkerRunnerOptions {
   log: DeepScanLogger;
   retryDelaysMs: readonly number[];
   signal: AbortSignal;
+  onNonRetryableError?: (error: Error) => void;
 }
 
 interface WorkerAttemptEvidence {
@@ -168,7 +163,7 @@ export class DeepScanWorkerRunner {
       artifactDir,
       attempt: 1,
     });
-    let discoveryValidated = false;
+    let discoveryResult: ScanDraftInput | undefined;
     let outcome = await this.runWorkerWithRetries({
       workerId,
       kind: "discovery",
@@ -178,17 +173,16 @@ export class DeepScanWorkerRunner {
       artifactContext: { root: artifactDir, layout: "worker" },
       subagents: run.config.subagents,
       validate: async () => {
-        const draft = await readDiscoveryAuditDraft(
+        discoveryResult = await readDiscoveryAuditDraft(
           artifacts,
           resultPath,
           run.scanId,
         );
-        discoveryValidated = draft.complete !== false;
-        return draft;
+        return discoveryResult;
       },
     });
     if (outcome.status === "succeeded" && this.options.signal.aborted) {
-      await this.persistWorkerCancellation(
+      outcome = await this.cancelAttempt(
         {
           workerId,
           kind: "discovery",
@@ -198,24 +192,13 @@ export class DeepScanWorkerRunner {
         outcome.attempt,
         outcome.threadId,
       );
-      outcome = { status: "canceled" };
     }
-    if (!discoveryValidated) {
+    if (!discoveryResult) {
       await fs.rm(resultPath, { force: true });
     }
     if (outcome.status === "failed") {
-      return {
-        type: "discovery",
-        status: "failed",
-        workerId,
-        error: outcome.error,
-        ...(outcome.replaceableFailureKind
-          ? { replaceableFailureKind: outcome.replaceableFailureKind }
-          : {}),
-        ...(outcome.consecutiveErrors === undefined
-          ? {}
-          : { consecutiveErrors: outcome.consecutiveErrors }),
-      };
+      const { status, ...failure } = outcome;
+      return { type: "discovery", status, workerId, ...failure };
     }
     if (outcome.status === "canceled" || this.options.signal.aborted) {
       return { type: "discovery", status: "canceled", workerId };
@@ -261,6 +244,7 @@ export class DeepScanWorkerRunner {
         label: workerLabel,
         artifactDir,
         resultPath: persisted.acceptedResultPath ?? resultPath,
+        result: discoveryResult!,
         completionSequence: persisted.completionSequence,
         attempt: outcome.attempt,
         threadId: outcome.threadId,
@@ -372,7 +356,7 @@ export class DeepScanWorkerRunner {
       },
     });
     if (outcome.status === "succeeded" && this.options.signal.aborted) {
-      await this.persistWorkerCancellation(
+      outcome = await this.cancelAttempt(
         {
           workerId: reducerId,
           kind: "dedup",
@@ -382,7 +366,6 @@ export class DeepScanWorkerRunner {
         outcome.attempt,
         outcome.threadId,
       );
-      outcome = { status: "canceled" };
     }
     if (outcome.status === "failed") {
       if (outcome.error instanceof DeepScanNonRetryableError)
@@ -485,6 +468,7 @@ export class DeepScanWorkerRunner {
                 : join(run.scanDir, "artifacts"),
             subagents: input.subagents,
             signal,
+            onNonRetryableError: this.options.onNonRetryableError,
             resumeThreadId: resumableThreadId,
             continuationPrompt: resumableThreadId
               ? (continuationPrompt ??
@@ -672,12 +656,10 @@ export class DeepScanWorkerRunner {
   }
 
   private async persistWorkerCancellation(
-    input: {
-      workerId: string;
-      kind: "discovery" | "dedup";
-      promptPath: string;
-      artifactDir: string;
-    },
+    input: Pick<
+      Parameters<DeepScanWorkerRunner["runWorkerWithRetries"]>[0],
+      "workerId" | "kind" | "promptPath" | "artifactDir"
+    >,
     attempt: number,
     threadId: string | undefined,
   ): Promise<void> {

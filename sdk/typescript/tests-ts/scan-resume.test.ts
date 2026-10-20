@@ -709,17 +709,20 @@ test.each([
         },
       })),
     );
-    // Preserve the CLI's nonzero exit for a valid, sealed partial result.
-    expect(code, stderr.text()).toBe(2);
+    // A valid bounded result succeeds while retaining follow-up notes.
+    expect(code, stderr.text()).toBe(0);
     const result = JSON.parse(stdout.text());
     if (bulk) {
-      expect(result, stderr.text()).toMatchObject({ incomplete: 1, failed: 0 });
+      expect(result, stderr.text()).toMatchObject({
+        completed: 1,
+        failed: 0,
+      });
       const receipts = await readJsonLines(result.resultsPath);
       expect(receipts).toHaveLength(2);
       expect(receipts[1]).toMatchObject({
         attempt: 1,
         outputDir: f.scanDir,
-        status: "completed_with_incomplete_coverage",
+        status: "completed",
         cost: { inputTokens: 10000, outputTokens: 2000 },
       });
       // Reconcile a crash after sealing but before the bulk receipt was appended.
@@ -737,9 +740,9 @@ test.each([
             runWorkbench: f.command,
           },
         ),
-      ).toBe(2);
+      ).toBe(0);
       expect(JSON.parse(reconciledOutput.text())).toMatchObject({
-        incomplete: 1,
+        completed: 1,
         failed: 0,
       });
       const reconciled = await readJsonLines(result.resultsPath);
@@ -756,14 +759,14 @@ test.each([
           stderr.stream,
           { ...dependencies(), runWorkbench: f.command },
         ),
-      ).toBe(2);
+      ).toBe(0);
       expect(JSON.parse(nextOutput.text())).toMatchObject({
         skipped: 1,
-        incomplete: 1,
+        completed: 1,
         failed: 0,
       });
     } else {
-      expect(result.coverage.completeness).toBe("partial");
+      expect(result.coverage).not.toHaveProperty("completeness");
       expect(result.manifest.scan.id).toBe(f.scanId);
       expect(result.manifest.scan.sealedAt).toBeString();
       expect(result.cost.inputTokens).toBe(10000);
@@ -844,7 +847,7 @@ test("reader resumes a saved budget selection without model work", async () => {
   const result = JSON.parse(stdout.text());
   expect(result.manifest.scan.id).toBe(f.scanId);
   expect(result.manifest.scan.sealedAt).toBeString();
-  expect(result.coverage.completeness).toBe("partial");
+  expect(result.coverage).not.toHaveProperty("completeness");
   const conserved = Bun.spawnSync(
     [
       f.python,
@@ -932,7 +935,7 @@ test.each([
         },
       })),
     );
-    expect(code, stderr.text()).toBe(2);
+    expect(code, stderr.text()).toBe(rejected ? 2 : 0);
     expect(
       await Promise.all(
         artifactNames.map((name) => readFile(join(f.scanDir, name))),
@@ -950,7 +953,7 @@ test.each([
       });
       if (scenario === "bulk") {
         expect(JSON.parse(stdout.text())).toMatchObject({
-          incomplete: 1,
+          completed: 1,
           failed: 0,
         });
         const receipts = await readJsonLines(join(f.root, "results.jsonl"));
@@ -958,7 +961,7 @@ test.each([
         expect(receipts[1]).toMatchObject({
           attempt: 1,
           outputDir: f.scanDir,
-          status: "completed_with_incomplete_coverage",
+          status: "completed",
         });
       }
     }
@@ -1129,13 +1132,27 @@ test.each([
                   expect(prompt).toContain(
                     "Keep the original scan instructions.",
                   );
-                  const deep = await readFile(
-                    join(f.codexHome, "codex-security", "config.toml"),
-                    "utf8",
+                  const deepConfigPath =
+                    options.env?.["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"];
+                  expect(deepConfigPath).toBe(
+                    preparedRuntime(f.codexHome).deepScanConfigPath,
                   );
-                  expect(deep).toContain("subagents = 0");
-                  expect(deep).toContain("stop_after_consecutive_errors = 2");
-                  expect(deep).toContain("max_time_hours = 1.5");
+                  const deep = parseToml(
+                    await readFile(deepConfigPath!, "utf8"),
+                  );
+                  expect(deep).toMatchObject({
+                    deep_scan: {
+                      workers: 2,
+                      subagents: 0,
+                      stop_after_no_new: 6,
+                      stop_after_consecutive_errors: 2,
+                      max_discovery_runs: 5,
+                      max_time_hours: 1.5,
+                    },
+                    worker_runtime: {
+                      features: { goals: false },
+                    },
+                  });
                   const workerConfigPath =
                     options.env?.["CODEX_SECURITY_CONFIG_PATH"];
                   expect(workerConfigPath).toBe(
@@ -1169,7 +1186,7 @@ test.each([
         };
       }),
     );
-    expect(code, stderr.text()).toBe(2);
+    expect(code, stderr.text()).toBe(0);
     expect(prompts, stderr.text()).toHaveLength(2);
     expect(prompts[1]).toBe(settings.postScanPrompt);
     expect(f.environment.OPENAI_API_KEY).toBe("synthetic-resume-key");
@@ -1350,8 +1367,11 @@ test("bulk Deep resume stages campaign knowledge after its source is removed", a
     },
   );
   expect(resumed, stderr.text()).toBe(true);
-  expect(code, stderr.text()).toBe(2);
-  expect(JSON.parse(stdout.text())).toMatchObject({ incomplete: 1, failed: 0 });
+  expect(code, stderr.text()).toBe(0);
+  expect(JSON.parse(stdout.text())).toMatchObject({
+    completed: 1,
+    failed: 0,
+  });
   expect(
     (await f.command(["get-scan-recipe", "--scan-id", f.scanId]))["recipe"],
   ).toMatchObject({ knowledgeBasePaths: [document] });
@@ -1425,7 +1445,8 @@ test.each(["failed", "missing-checkout", "missing-session", "standard"])(
                 ).replaceAll("\r\n", "\n"),
               ).toBe("# synthetic source\n");
               return {
-                coverage: { completeness: "complete" },
+                manifest: { scan: { status: "completed" } },
+                coverage: {},
                 cost: null,
               } as import("../src/result.js").ScanResult;
             },

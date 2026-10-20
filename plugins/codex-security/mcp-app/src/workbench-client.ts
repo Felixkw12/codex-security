@@ -73,6 +73,7 @@ async function executeWorkbench(
     "complete-scan",
     "export-findings",
     "finish-deep-scan",
+    "finding-issues",
     "get-scan",
     "get-deep-scan",
     "get-workspace",
@@ -95,7 +96,8 @@ async function executeWorkbench(
   const execution = execFileAsync(
     pythonCommand,
     [
-      ...(options.isolatedPython ? ["-I", "-X", "utf8", "-B"] : []),
+      ...(options.isolatedPython ? ["-I", "-X", "utf8"] : []),
+      "-B",
       "-c",
       WORKBENCH_PYTHON.replace(
         "workbench_db.main()",

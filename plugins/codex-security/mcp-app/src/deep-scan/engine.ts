@@ -7,8 +7,10 @@ import {
 } from "./recovery-settings.js";
 import { createScanArtifactContext } from "../artifact-context.js";
 import { recordCodexSecurityScanDraftViaWorkbench } from "../artifact-scan-draft.js";
+import { workbenchArgs } from "../workbench-arguments.js";
 import { CodexSdkWorkerExecutor } from "./executor.js";
 import type { DeepWorkerParentSandbox } from "./parent-sandbox.js";
+import type { DeepScanParentTurn } from "./permission-profile-preflight.js";
 import {
   DeepScanCoordinatorRegistry,
   startOrJoinDeepScanCoordinator,
@@ -25,6 +27,7 @@ export function startDeepScanEngine(options: {
   pluginRoot: string;
   pythonCommand: string;
   parentSandbox: DeepWorkerParentSandbox;
+  parentTurn?: DeepScanParentTurn;
   threadId: string;
   handoffClaimToken?: string;
   model?: string;
@@ -92,6 +95,7 @@ export function startDeepScanEngine(options: {
         model: options.model,
         reasoningEffort: options.reasoningEffort,
         parentSandbox: options.parentSandbox,
+        parentTurn: options.parentTurn,
         artifactContext: {
           pluginRoot,
           scanRoot: run.scanDir,
@@ -130,22 +134,14 @@ export function startDeepScanEngine(options: {
         );
       },
       onStopped: async (stopped) => {
-        await runWorkbench([
-          "preserve-scan-results",
-          "--scan-id",
-          stopped.scanId,
-          "--thread-id",
-          threadId,
-          ...(handoffClaimToken === undefined
-            ? []
-            : ["--claim-token", handoffClaimToken]),
-          ...(stopped.coordinatorGeneration === undefined
-            ? []
-            : [
-                "--coordinator-generation",
-                String(stopped.coordinatorGeneration),
-              ]),
-        ]);
+        await runWorkbench(
+          workbenchArgs("preserve-scan-results", {
+            scanId: stopped.scanId,
+            threadId,
+            claimToken: handoffClaimToken,
+            coordinatorGeneration: stopped.coordinatorGeneration,
+          }),
+        );
       },
     },
   });
