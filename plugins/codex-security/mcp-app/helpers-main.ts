@@ -79,7 +79,6 @@ function runHelper(): void {
   };
   if (
     command === "generate-in-scope-files" ||
-    command === "make-repo-rank-input" ||
     command === "make-repo-scope-input" ||
     command === "make-diff-rank-input"
   ) {
@@ -142,7 +141,7 @@ function runHelper(): void {
     });
   } else {
     console.error(
-      `Usage: launch_codex_security_mcp[.cmd] --helper <generate-in-scope-files | make-repo-rank-input | make-repo-scope-input | make-diff-rank-input | resolve-security-md | normalize-candidates | validate-patch-risk-assessment | copy-deep-review-input | bind-repo-scopes | ${Object.keys(workbenchUsage).join(" | ")}> [options]`,
+      `Usage: launch_codex_security_mcp[.cmd] --helper <generate-in-scope-files | make-repo-scope-input | make-diff-rank-input | resolve-security-md | normalize-candidates | validate-patch-risk-assessment | copy-deep-review-input | bind-repo-scopes | ${Object.keys(workbenchUsage).join(" | ")}> [options]`,
     );
     process.exitCode = 2;
   }

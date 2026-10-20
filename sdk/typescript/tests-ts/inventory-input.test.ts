@@ -95,14 +95,27 @@ process.exitCode = result.status;
     expect(result.status, result.stderr).toBe(0);
     return readFileSync(out, "utf8");
   };
-  const rows = (command = "make-repo-rank-input", args: string[] = []) =>
-    success(command, args)
+  const scopeArgs = (scope = ".") => {
+    const file = join(root, "requested-scopes.json");
+    writeFileSync(file, JSON.stringify([scope]));
+    return ["--scopes-file", file];
+  };
+  const rows = (command = "make-repo-scope-input", args?: string[]) =>
+    success(command, args ?? scopeArgs())
       .split(/\r?\n/u)
       .filter(Boolean)
       .map(
         (line) =>
           JSON.parse(line) as { path: string; area?: string; preview?: string },
       );
+  const localRows = (args: string[] = []) =>
+    rows("make-diff-rank-input", [
+      "--base",
+      git(repo, "hash-object", "-w", "-t", "tree", "--stdin"),
+      "--mode",
+      "local-patch",
+      ...args,
+    ]);
   const commit = () => {
     git(repo, "add", ".");
     git(repo, "commit", "-qm", "Fixture revision");
@@ -116,6 +129,8 @@ process.exitCode = result.status;
     run,
     success,
     rows,
+    localRows,
+    scopeArgs,
     commit,
     toolEnvironment,
   };
@@ -157,14 +172,14 @@ test("revision previews use the same read window as local files", () => {
       "\ndef outside_window():\n    pass\n",
   );
   f.commit();
-  const local = f.rows()[0]!.preview;
+  const local = f.localRows()[0]!.preview;
   const revision = f.rows("make-diff-rank-input", ["--base", base])[0]!.preview;
   expect(revision).toBe(local);
   expect(revision).toContain("first");
   expect(revision).not.toContain("outside_window");
 });
 
-test("revision previews retain blobs with Git's input-only NUL batch protocol", () => {
+test("revision previews retain blobs with Git versions lacking NUL batch input", () => {
   const f = fixture();
   f.write("deleted.py", "deleted source\n");
   f.write("changed.py", "old source\n");
@@ -184,7 +199,7 @@ const spawn = cp.spawn;
 cp.spawn = (command, args, options) => {
   if (args.includes("cat-file")) {
     require("node:fs").appendFileSync(${JSON.stringify(calls)}, JSON.stringify(args) + "\\n");
-    args = args.map(arg => arg === "-Z" ? "--unsupported-batch-zero" : arg);
+    args = args.map(arg => arg === "-z" || arg === "-Z" ? "--unsupported-batch-zero" : arg);
   }
   return spawn(command, args, options);
 };
@@ -216,16 +231,12 @@ require("node:module").syncBuiltinESMExports();
     .map((line) => JSON.parse(line));
   expect(batches.length).toBeGreaterThan(0);
   for (const args of batches) {
-    expect(args).toContain("-z");
+    expect(args).not.toContain("-z");
     expect(args).not.toContain("-Z");
   }
 });
 
-for (const command of [
-  "generate-in-scope-files",
-  "make-repo-scope-input",
-  "make-repo-rank-input",
-]) {
+for (const command of ["generate-in-scope-files", "make-repo-scope-input"]) {
   for (const rawWindowsHome of [false, true]) {
     test.skipIf(process.platform !== "win32")(
       `${command} selects trusted ripgrep outside the repository${rawWindowsHome ? " through the UTF-16 bridge" : ""}`,
@@ -304,11 +315,7 @@ require("node:module").syncBuiltinESMExports();
   }
 }
 
-for (const command of [
-  "generate-in-scope-files",
-  "make-repo-scope-input",
-  "make-repo-rank-input",
-]) {
+for (const command of ["generate-in-scope-files", "make-repo-scope-input"]) {
   for (const location of [
     "relative",
     "symlink parent",
@@ -405,11 +412,7 @@ function runPathInventory(
   );
 }
 
-for (const command of [
-  "generate-in-scope-files",
-  "make-repo-scope-input",
-  "make-repo-rank-input",
-]) {
+for (const command of ["generate-in-scope-files", "make-repo-scope-input"]) {
   test.skipIf(process.platform === "win32")(
     `${command} continues PATH lookup after a missing ripgrep interpreter`,
     () => {
@@ -486,11 +489,7 @@ for (const command of [
   }
 }
 
-for (const command of [
-  "generate-in-scope-files",
-  "make-repo-scope-input",
-  "make-repo-rank-input",
-])
+for (const command of ["generate-in-scope-files", "make-repo-scope-input"])
   for (const status of [126, 127])
     for (const rawHome of [false, true])
       for (const shebang of [false, true]) {
@@ -559,7 +558,7 @@ exec '${executable!.replaceAll("'", "'\\''")}' "$@"
         );
         const result = runPathInventory(
           f,
-          "make-repo-rank-input",
+          "make-repo-scope-input",
           {
             ...f.toolEnvironment,
             PATH: `${tools}${delimiter}${f.toolEnvironment["PATH"] ?? ""}`,
@@ -616,7 +615,7 @@ for (const scope of [".", "src", "./src", "src/résumé.py"]) {
   });
 }
 
-for (const command of ["make-repo-rank-input", "make-repo-scope-input"]) {
+for (const command of ["make-repo-scope-input"]) {
   test(`${command} retains explicit and ignored tracked files without widening directory scope`, () => {
     const f = fixture();
     f.write("src/source.py");
@@ -636,17 +635,16 @@ for (const command of ["make-repo-rank-input", "make-repo-scope-input"]) {
     const rows = f.rows(command, ["--scopes-file", scopes]);
     expect(rows.map((row) => row.path)).toEqual([
       "direct.bin",
-      ...(command === "make-repo-scope-input" ? ["src/binary"] : []),
+      "src/binary",
       "src/entrypoint",
       "src/ignored-tracked.py",
       "src/source.py",
     ]);
-    if (command === "make-repo-rank-input") expect(rows[0]!.preview).toBe("");
   });
 }
 
 for (const encoding of ["utf8", "utf16le", "utf16be"] as const) {
-  for (const mode of ["repo", "revisions", "local-patch"]) {
+  for (const mode of ["revisions", "local-patch"]) {
     test(`${mode} previews decode ${encoding} and detect binary bytes beyond the prefix`, () => {
       const f = fixture();
       f.write("existing.py");
@@ -686,10 +684,12 @@ for (const encoding of ["utf8", "utf16le", "utf16be"] as const) {
           ]),
         );
       if (mode === "revisions") f.commit();
-      const rows =
-        mode === "repo"
-          ? f.rows()
-          : f.rows("make-diff-rank-input", ["--base", base, "--mode", mode]);
+      const rows = f.rows("make-diff-rank-input", [
+        "--base",
+        base,
+        "--mode",
+        mode,
+      ]);
       expect(rows.find((row) => row.path === "text")?.preview).toBe(
         source.slice(0, -1),
       );
@@ -714,10 +714,8 @@ for (const budget of [0, -1, 2, 30, 220, 1024]) {
           `line_${String(index).padStart(2, "0")} ${"😀".repeat(20)}`,
       ).join("\n");
     f.write("source", source);
-    const preview = f.rows("make-repo-rank-input", [
-      "--preview-bytes",
-      String(budget),
-    ])[0]!.preview!;
+    const preview = f.localRows(["--preview-bytes", String(budget)])[0]!
+      .preview!;
     expect(Buffer.byteLength(preview)).toBeLessThanOrEqual(Math.max(0, budget));
     expect(preview).not.toContain("\ufffd");
     if (budget <= 0) expect(preview).toBe("");
@@ -735,7 +733,7 @@ test("small previews retain complete bodies, literal replacement characters, and
     "source",
     "\n \t\n    text = 'two  spaces\tand\u0085a separator �'  \r\n    return text  \r\n\n",
   );
-  expect(f.rows()[0]!.preview).toBe(
+  expect(f.localRows()[0]!.preview).toBe(
     "    text = 'two  spaces\tand\u0085a separator �'  \n    return text  ",
   );
 });
@@ -747,7 +745,7 @@ test("explicit scope names are literal and JSONL escapes Unicode separators", ()
   f.write("~literal/file");
   const scopes = join(f.root, "scopes.json");
   writeFileSync(scopes, JSON.stringify([name, "~literal"]));
-  const text = f.success("make-repo-rank-input", ["--scopes-file", scopes]);
+  const text = f.success("make-repo-scope-input", ["--scopes-file", scopes]);
   expect(text).not.toMatch(/[\u0085\u2028\u2029]/u);
   expect(
     text
@@ -1069,7 +1067,7 @@ test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
   },
 );
 
-for (const command of ["make-repo-rank-input", "make-repo-scope-input"])
+for (const command of ["make-repo-scope-input"])
   test.skipIf(process.platform === "win32")(
     `${command} skips candidates that become inaccessible after enumeration`,
     () => {
@@ -1126,7 +1124,7 @@ test("failed inventory generation preserves the existing file", () => {
   expect(readFileSync(f.out, "utf8")).toBe("previous\n");
 });
 
-for (const command of ["make-repo-scope-input", "make-repo-rank-input"]) {
+for (const command of ["make-repo-scope-input"]) {
   test(`${command} ignores tracked descendants replaced by symlinks`, () => {
     const f = fixture();
     f.write("src/nested/source");
@@ -1328,7 +1326,7 @@ test("Git inventory clears inherited repository selection and keeps forced track
     ),
     [process.platform === "win32" ? "gIt_WoRk_TrEe" : "GIT_WORK_TREE"]: f.root,
   };
-  const result = f.run("make-repo-rank-input", [], env);
+  const result = f.run("make-repo-scope-input", f.scopeArgs(), env);
   expect(result.status, result.stderr).toBe(0);
   expect(
     readFileSync(f.out, "utf8")
@@ -1443,7 +1441,7 @@ for (const rawExecutable of [false, true])
         `HOME=$(printf '%b' '${octal(home)}'); export HOME`,
         `raw_bin=$(printf '%b' '${octal(bin)}'); PATH="$raw_bin"; export PATH`,
         `CODEX_SECURITY_GIT=$(printf '%b' '${octal(gitPath)}'); export CODEX_SECURITY_GIT`,
-        'exec "$1" "$2" make-repo-rank-input --repo "$3" --out "$4"',
+        'exec "$1" "$2" make-repo-scope-input --repo "$3" --out "$4" --scopes-file "$5"',
       ].join("\n");
       const result = spawnSync(
         "/bin/sh",
@@ -1455,6 +1453,7 @@ for (const rawExecutable of [false, true])
           join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
           f.repo,
           f.out,
+          f.scopeArgs()[1]!,
         ],
         {
           encoding: "utf8",
@@ -1616,7 +1615,7 @@ test.skipIf(process.platform === "win32")(
       CODEX_SECURITY_GIT: undefined,
       PATH: undefined,
     };
-    const result = f.run("make-repo-rank-input", [], env);
+    const result = f.run("make-repo-scope-input", f.scopeArgs(), env);
     expect(result.status, result.stderr).toBe(0);
     expect(
       readFileSync(f.out, "utf8")
@@ -1625,7 +1624,8 @@ test.skipIf(process.platform === "win32")(
         .map((line) => JSON.parse(line).path),
     ).toContain("retained.txt");
     expect(
-      f.run("make-repo-rank-input", [], { ...env, PATH: "" }).status,
+      f.run("make-repo-scope-input", f.scopeArgs(), { ...env, PATH: "" })
+        .status,
     ).not.toBe(0);
   },
 );
@@ -1702,18 +1702,21 @@ for (const setting of [
       const command =
         setting === "RIPGREP_CONFIG_PATH"
           ? "generate-in-scope-files"
-          : "make-repo-rank-input";
+          : "make-repo-scope-input";
       const result = spawnSync(
         "/bin/sh",
         [
           "-c",
-          `${setting}=$(printf '%b' '${octal}'); export ${setting}\nexec "$1" "$2" "$3" --repo "$4" --out "$5" --scope .`,
+          `${setting}=$(printf '%b' '${octal}'); export ${setting}\nexec "$1" "$2" "$3" --repo "$4" --out "$5" "$6" "$7"`,
           "inventory-config",
           node,
           join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
           command,
           f.repo,
           f.out,
+          ...(command === "generate-in-scope-files"
+            ? ["--scope", "."]
+            : f.scopeArgs()),
         ],
         {
           encoding: "utf8",
@@ -1776,9 +1779,6 @@ test.skipIf(process.platform !== "win32")(
     const f = fixture();
     f.write("src/source.py");
     const scope = `${parse(f.repo).root.slice(0, 2)}src`;
-    expect(
-      f.rows("make-repo-rank-input", ["--scope", scope]).map((row) => row.path),
-    ).toEqual(["src/source.py"]);
     const scopes = join(f.root, "scopes.json");
     writeFileSync(scopes, JSON.stringify([scope]));
     expect(
@@ -1792,10 +1792,10 @@ test.skipIf(process.platform !== "win32")(
 test("preview trimming handles a full sample of leading blank lines", () => {
   const f = fixture();
   f.write("source.py", "\n".repeat(64_000) + "kept\n");
-  expect(f.rows()[0]!.preview).toBe("kept");
+  expect(f.localRows()[0]!.preview).toBe("kept");
 });
 
-for (const command of ["make-repo-rank-input", "make-repo-scope-input"])
+for (const command of ["make-repo-scope-input"])
   test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
     `${command} reports unreadable tracked directories without replacing output`,
     () => {
@@ -1818,7 +1818,7 @@ for (const command of ["make-repo-rank-input", "make-repo-scope-input"])
     },
   );
 
-for (const command of ["make-repo-scope-input", "make-repo-rank-input"])
+for (const command of ["make-repo-scope-input"])
   test.skipIf(process.platform === "win32")(
     `${command} prunes Git metadata in a tracked file replaced by a directory`,
     () => {
@@ -1866,7 +1866,7 @@ test.skipIf(process.platform !== "win32")(
     const scopes = join(f.root, "scopes.json");
     writeFileSync(scopes, '["."]');
     try {
-      for (const command of ["make-repo-rank-input", "make-repo-scope-input"])
+      for (const command of ["make-repo-scope-input"])
         expect(
           f.rows(command, ["--scopes-file", scopes]).map((row) => row.path),
         ).toEqual(["visible.py"]);
@@ -1927,7 +1927,7 @@ for (const rawHome of [false, true])
       });
       const result = runPathInventory(
         f,
-        "make-repo-rank-input",
+        "make-repo-scope-input",
         {
           ...f.toolEnvironment,
           CODEX_SECURITY_GIT: selectedGit,
@@ -1948,7 +1948,7 @@ test("inventory preserves scoped names beneath dotted-I repository names", () =>
   renameSync(f.repo, repository);
   const scopes = join(f.root, "scopes.json");
   writeFileSync(scopes, JSON.stringify(["scope"]));
-  for (const command of ["make-repo-scope-input", "make-repo-rank-input"]) {
+  for (const command of ["make-repo-scope-input"]) {
     const rows = f.rows(command, [
       "--repo",
       repository,
@@ -1956,8 +1956,6 @@ test("inventory preserves scoped names beneath dotted-I repository names", () =>
       scopes,
     ]);
     expect(rows.map((row) => row.path)).toEqual(["scope/source.py"]);
-    if (command === "make-repo-rank-input")
-      expect(rows[0]).toMatchObject({ area: "scope", preview: "kept" });
   }
 });
 
@@ -2026,11 +2024,7 @@ test.skipIf(process.platform !== "win32")(
       }
       const scopes = join(f.root, "scopes.json");
       writeFileSync(scopes, '["."]');
-      for (const command of [
-        "make-repo-rank-input",
-        "make-repo-scope-input",
-        "make-diff-rank-input",
-      ]) {
+      for (const command of ["make-repo-scope-input", "make-diff-rank-input"]) {
         const rows = f.rows(
           command,
           command === "make-diff-rank-input"
@@ -2052,7 +2046,7 @@ test.skipIf(process.platform !== "win32")(
   },
 );
 
-for (const command of ["make-repo-scope-input", "make-repo-rank-input"])
+for (const command of ["make-repo-scope-input"])
   for (const raw of ["ordinary", "HOME", "PATH", "repository"])
     for (const tool of ["missing", "non-executable"])
       test.skipIf(process.platform === "win32")(
@@ -2149,7 +2143,7 @@ for (const name of [".gitignore", ".ignore", ".rgignore"])
           join(f.repo, location === "ancestor" ? name : `scope/nested/${name}`),
         );
         writeFileSync(f.out, "previous\n");
-        const result = f.run("make-repo-rank-input", ["--scope", "scope"], {
+        const result = f.run("make-repo-scope-input", f.scopeArgs("scope"), {
           ...process.env,
           CODEX_SECURITY_GIT: "",
           PATH: f.root,
@@ -2178,7 +2172,7 @@ for (const marker of [".git", ".gitignore"])
       writeFileSync(f.out, "previous\n");
       chmodSync(blocked, 0);
       try {
-        const result = f.run("make-repo-rank-input", ["--scope", scope], {
+        const result = f.run("make-repo-scope-input", f.scopeArgs(scope), {
           ...process.env,
           CODEX_SECURITY_GIT: "",
           PATH: f.root,
@@ -2206,7 +2200,7 @@ for (const name of [".gitignore", ".ignore", ".rgignore"])
       writeFileSync(f.out, "previous\n");
       chmodSync(blocked, 0);
       try {
-        const result = f.run("make-repo-rank-input", [], {
+        const result = f.run("make-repo-scope-input", f.scopeArgs(), {
           ...process.env,
           CODEX_SECURITY_GIT: "",
           PATH: f.root,
@@ -2230,7 +2224,7 @@ test("file and Git previews retain empty files and incomplete final UTF-16 units
   f.write("utf16.py", Buffer.from([0xff, 0xfe, 0]));
   f.commit();
   for (const rows of [
-    f.rows(),
+    f.localRows(),
     f.rows("make-diff-rank-input", ["--base", base]),
   ]) {
     expect(rows.find((row) => row.path === "empty.py")?.preview).toBe("");
@@ -2239,11 +2233,7 @@ test("file and Git previews retain empty files and incomplete final UTF-16 units
 });
 
 for (const signal of ["TERM", "KILL"])
-  for (const command of [
-    "generate-in-scope-files",
-    "make-repo-rank-input",
-    "make-repo-scope-input",
-  ])
+  for (const command of ["generate-in-scope-files", "make-repo-scope-input"])
     test.skipIf(process.platform === "win32")(
       `${command} preserves output when ripgrep is terminated by SIG${signal}`,
       () => {
@@ -2272,3 +2262,147 @@ for (const signal of ["TERM", "KILL"])
         expect(readFileSync(f.out, "utf8")).toBe("previous\n");
       },
     );
+
+for (const selectedPath of [".", "component"]) {
+  for (const linkedWorktree of [false, true]) {
+    test(`inventory retains ignored tracked paths in ${selectedPath}, linked=${linkedWorktree}`, () => {
+      const f = fixture();
+      f.write(".gitignore", "ignored/\n");
+      f.commit();
+      let repository = f.repo;
+      if (linkedWorktree) {
+        repository = join(f.root, "worktree");
+        git(f.repo, "worktree", "add", "-q", "--detach", repository, "HEAD");
+      }
+      const selected = join(repository, selectedPath);
+      mkdirSync(join(selected, "ignored"), { recursive: true });
+      writeFileSync(
+        join(selected, "ignored", "tracked.py"),
+        "tracked = True\n",
+      );
+      writeFileSync(
+        join(selected, "ignored", "untracked.py"),
+        "untracked = True\n",
+      );
+      git(selected, "add", "--force", "--", "ignored/tracked.py");
+      const result = f.run("generate-in-scope-files", [
+        "--repo",
+        selected,
+        "--scope",
+        ".",
+      ]);
+      expect(result.status, result.stderr).toBe(0);
+      const paths = readFileSync(f.out, "utf8").split("\n");
+      expect(paths).toContain("./ignored/tracked.py");
+      expect(paths).not.toContain("./ignored/untracked.py");
+    });
+  }
+}
+
+for (const scope of [".", ".svn", "vendor/.svn/pristine/base"]) {
+  test(`inventory excludes tracked SVN metadata for ${scope}`, () => {
+    const f = fixture();
+    f.write(".svn/wc.db");
+    f.write("vendor/.svn/pristine/base");
+    f.write("source.py");
+    f.write(".gitignore", ".svn/\n");
+    git(f.repo, "add", "--force", ".svn", "vendor/.svn");
+    const paths = f
+      .success("generate-in-scope-files", ["--scope", scope])
+      .trim()
+      .split("\n")
+      .filter(Boolean);
+    expect(paths.every((path) => !path.split("/").includes(".svn"))).toBe(true);
+    if (scope === ".") expect(paths).toContain("./source.py");
+    else expect(paths).toEqual([]);
+  });
+}
+
+test("scope input excludes explicitly requested SVN metadata", () => {
+  const f = fixture();
+  f.write("src/source.py");
+  f.write("src/.svn/config");
+  f.commit();
+  const scopes = join(f.root, "scopes.json");
+  writeFileSync(scopes, JSON.stringify(["src", "src/.svn/config"]));
+  expect(
+    f
+      .rows("make-repo-scope-input", ["--scopes-file", scopes])
+      .map((row) => row.path),
+  ).toEqual(["src/source.py"]);
+});
+
+test("diff inventory accepts a base revision matching a path", () => {
+  const f = fixture();
+  f.write("release/build.py", "build = 1\n");
+  f.commit();
+  git(f.repo, "branch", "release");
+  f.write("release/build.py", "build = 2\n");
+  expect(
+    f
+      .rows("make-diff-rank-input", [
+        "--base",
+        "release",
+        "--mode",
+        "local-patch",
+      ])
+      .map((row) => row.path),
+  ).toEqual(["release/build.py"]);
+});
+
+for (const mode of [
+  "staged",
+  "unstaged",
+  "untracked",
+  "deleted",
+  "revisions",
+]) {
+  for (const command of ["make-diff-rank-input", "generate-in-scope-files"]) {
+    test(`${command} excludes local SVN metadata and retains revision data for ${mode}`, () => {
+      const f = fixture();
+      const names = [
+        ".svn/wc.db",
+        "vendor/.svn/entries",
+        "source.py",
+        "vendor/.svn-source.py",
+      ];
+      f.write("base.py");
+      if (mode !== "untracked")
+        for (const name of names) f.write(name, "before\n");
+      const base = f.commit();
+      for (const name of names) {
+        if (mode === "deleted") rmSync(join(f.repo, name));
+        else f.write(name, "after\n");
+      }
+      if (mode === "staged") git(f.repo, "add", ".");
+      if (mode === "revisions") f.commit();
+      const diffMode = mode === "revisions" ? "revisions" : "local-patch";
+      const paths =
+        command === "make-diff-rank-input"
+          ? f
+              .rows(command, ["--base", base, "--mode", diffMode])
+              .map((row) => row.path)
+          : f
+              .success(command, [
+                "--scope",
+                ".",
+                "--diff-base",
+                base,
+                "--diff-mode",
+                diffMode,
+              ])
+              .trim()
+              .split("\n")
+              .filter(Boolean);
+      expect(paths.sort()).toEqual(
+        (mode === "revisions" ? names : names.slice(2)).sort(),
+      );
+    });
+  }
+}
+
+test("keeps the retired repository-ranking helper unavailable", () => {
+  const result = fixture().run("make-repo-rank-input", ["--help"]);
+  expect(result.status).toBe(2);
+  expect(result.stderr).not.toContain("make-repo-rank-input");
+});

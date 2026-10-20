@@ -33,6 +33,7 @@ import {
   lstat,
   regular,
   sameFile,
+  sourceMetadata,
   walk,
   windows,
 } from "./inventory-paths";
@@ -509,6 +510,7 @@ export async function directoryPaths(
     matching = new Map<string, boolean>();
   for (const name of listing) {
     const parts = name.split("/");
+    if (parts.some((part) => sourceMetadata.has(part))) continue;
     if (parts.length <= depth) continue;
     if (depth) {
       const indexedPrefix = append(repository, parts.slice(0, depth).join(sep));
@@ -556,6 +558,7 @@ async function changed(repo: string, args: string[]): Promise<Change[]> {
         "-z",
         "--diff-filter=ACMRDT",
         ...args,
+        "--",
       ]),
     ),
   );
@@ -590,7 +593,9 @@ export async function changedPaths(
   ))
     if (!path.endsWith("/")) result.set(path, { path, status: "A" });
   return [...result.values()].filter(
-    ({ path, status }) => status === "D" || regular(append(repo, path)),
+    ({ path, status }) =>
+      !path.split("/").some((part) => sourceMetadata.has(part)) &&
+      (status === "D" || regular(append(repo, path))),
   );
 }
 
@@ -600,8 +605,13 @@ export async function blobSamples(
   names: string[],
 ): Promise<([Buffer, boolean] | undefined)[]> {
   if (!names.length) return [];
-  const child = gitProcess(repo, ["cat-file", "--batch", "-z"])?.child as
-    ChildProcessWithoutNullStreams | undefined;
+  const nulInput = names.some((name) => /[\r\n]/u.test(name));
+  const separator = nulInput ? "\0" : "\n";
+  const child = gitProcess(repo, [
+    "cat-file",
+    "--batch",
+    ...(nulInput ? ["-z"] : []),
+  ])?.child as ChildProcessWithoutNullStreams | undefined;
   if (!child) return names.map(() => undefined);
   const completion = new Promise<number>((resolve, reject) => {
     child.once("error", reject);
@@ -609,7 +619,7 @@ export async function blobSamples(
   });
   child.stderr.resume();
   child.stdin.on("error", () => {});
-  child.stdin.end(encodeGitPath(names.join("\0") + "\0"));
+  child.stdin.end(encodeGitPath(names.join(separator) + separator));
   const result: ([Buffer, boolean] | undefined)[] = [];
   let pending = Buffer.alloc(0),
     remaining: number | undefined,

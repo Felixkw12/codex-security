@@ -30,6 +30,7 @@ import {
   regular,
   rejectStreams,
   stat,
+  sourceMetadata,
   walk,
   windows,
 } from "./inventory-paths";
@@ -45,10 +46,7 @@ import {
 import { PREVIEW_BYTES, previewForBytes, sampleFile } from "./source-preview";
 
 export type InventoryCommand =
-  | "generate-in-scope-files"
-  | "make-repo-rank-input"
-  | "make-repo-scope-input"
-  | "make-diff-rank-input";
+  "generate-in-scope-files" | "make-repo-scope-input" | "make-diff-rank-input";
 export interface InventoryOptions {
   repo: string;
   out: string;
@@ -125,9 +123,9 @@ async function scopeCandidates(repo: string, scope: string): Promise<string[]> {
         "--no-require-git",
         "--null",
         "--glob",
-        "!**/.git",
+        "!**/{.git,.svn}",
         "--glob",
-        "!**/.git/**",
+        "!**/{.git,.svn}/**",
         "--",
         relative(repo, scope) || ".",
       ],
@@ -282,9 +280,9 @@ export async function generateInventory(
         "--path-separator",
         "/",
         "--glob",
-        "!**/.git",
+        "!**/{.git,.svn}",
         "--glob",
-        "!**/.git/**",
+        "!**/{.git,.svn}/**",
         "--",
         requested,
       ],
@@ -299,7 +297,7 @@ export async function generateInventory(
         `ripgrep ${result.signal ? `terminated by ${result.signal}` : `exited with status ${result.status}`}${result.stderr.trim() ? `: ${result.stderr.trim()}` : ""}`,
       );
     let bytes = result.stdout;
-    if (exists(append(repo, ".git"))) {
+    if ([...ancestors(repo)].some((path) => exists(append(path, ".git")))) {
       const tracked = await git(repo, [
         "ls-files",
         "--cached",
@@ -326,6 +324,7 @@ export async function generateInventory(
       }
     }
     for (const path of decodePosixBytes(bytes).split("\0").filter(Boolean)) {
+      if (path.split("/").some((part) => sourceMetadata.has(part))) continue;
       if (/[\r\n]/u.test(path))
         throw new Error(
           "Repository contains a path that cannot fit in the file inventory",
@@ -401,40 +400,21 @@ export async function generateInventory(
         rankRows.set(path, { path, area: options.area ?? "diff", preview });
     }
   } else {
-    const explicit = options.scopesFile !== undefined,
-      scoped = command === "make-repo-scope-input";
-    const scopes = explicit
-      ? loadScopes(expandHome(options.scopesFile!, home))
-      : [scope];
+    const scopes = loadScopes(expandHome(options.scopesFile!, home));
     const resolved = scopes.map((value) =>
-      scopePath(repo, value, home, explicit, scoped),
+      scopePath(repo, value, home, true, true),
     );
-    const direct = new Set(explicit ? resolved.filter(regular) : []);
     for (const selected of resolved) {
-      const area = options.area || inside(repo, selected);
       for (const path of await scopeCandidates(repo, selected)) {
         let name: string;
         try {
           if (!regular(path)) continue;
-          const resolvedPath = canonical(path);
-          inside(repo, resolvedPath);
-          name = inside(repo, scoped ? resolvedPath : path);
+          name = inside(repo, canonical(path));
         } catch {
           continue;
         }
-        if (name.split("/").includes(".git") || rankRows.has(name)) continue;
-        if (scoped) rankRows.set(name, { path: name });
-        else {
-          const [sample, binary] = sampleFile(path);
-          if (binary && !direct.has(path)) continue;
-          rankRows.set(name, {
-            path: name,
-            area,
-            preview: binary
-              ? ""
-              : previewForBytes(sample, options.previewBytes)[0],
-          });
-        }
+        if (name.split("/").some((part) => sourceMetadata.has(part))) continue;
+        rankRows.set(name, { path: name });
       }
     }
   }
@@ -479,9 +459,7 @@ export async function inventoryCommand(
     ? ["diff-base", "diff-head", "diff-mode"]
     : diff
       ? ["head", "mode", "area", "preview-bytes"]
-      : scoped
-        ? []
-        : ["scope", "scopes-file", "area", "preview-bytes"];
+      : [];
   const usage = `usage: launch_codex_security_mcp[.cmd] --helper ${command} ${required.map((name) => `--${name} VALUE`).join(" ")}`;
   try {
     let values: Record<string, string | boolean | undefined>;
