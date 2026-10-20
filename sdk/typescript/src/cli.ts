@@ -1344,7 +1344,7 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
       configuredPath: pythonPath,
       environment,
       signal,
-      protectedRoot: protectedRoots,
+      protectedRoot: protectedRoot === undefined ? undefined : protectedRoots,
     });
     if (checkingTarget && protectedRoot !== undefined) {
       const git = await inspectTrustedExecutable("git", environment, [
