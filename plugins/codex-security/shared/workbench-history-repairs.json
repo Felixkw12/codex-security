@@ -1,5 +1,33 @@
 [
   [
+    "-- Move checkpoint previews before source-scope history checks.",
+    "WITH input AS (SELECT :history AS history)",
+    "SELECT 'sql' AS operation,",
+    "    'UPDATE schema_migrations SET version = 52 WHERE version = ' || version AS value",
+    "FROM schema_migrations",
+    "WHERE version IN (47, 48, 50)",
+    "    AND name = 'freeze stopped scan checkpoint selections';"
+  ],
+  [
+    "-- Move source-scope previews before the shared history repairs.",
+    "WITH input AS (SELECT :history AS history)",
+    "SELECT 'sql' AS operation,",
+    "    'UPDATE schema_migrations SET version = 50 WHERE version = ' || version AS value",
+    "FROM schema_migrations",
+    "WHERE version IN (34, 40, 41, 42, 43, 44, 48)",
+    "    AND name = 'persist authorized source excerpt scopes';"
+  ],
+  [
+    "WITH history AS (",
+    "    SELECT json_extract(value, '$.version') AS version,",
+    "        json_extract(value, '$.name') AS name FROM json_each(:history)",
+    ")",
+    "SELECT 'error' AS operation,",
+    "    'The Codex Security database has an unsupported source-scope migration history.' AS value",
+    "FROM schema_migrations JOIN history USING (version)",
+    "WHERE version IN (43, 50) AND schema_migrations.name != history.name;"
+  ],
+  [
     "-- mirror and early-moves: relocate numbers before checking profiles.",
     "WITH",
     "-- Keep the common :history binding even though these moves do not inspect it.",
@@ -21,9 +49,7 @@
     "    VALUES",
     "        (0, 33, 40, 'index finding identity and comparison history'),",
     "        (1, 25, 26, 'persist scan completion warnings'),",
-    "        (2, 12, 20, 'phase-specific scan progress'),",
-    "        (3, 47, 50, 'freeze stopped scan checkpoint selections'),",
-    "        (4, 48, 50, 'freeze stopped scan checkpoint selections')",
+    "        (2, 12, 20, 'phase-specific scan progress')",
     ")",
     "SELECT 0 AS position, 'error' AS operation,",
     "        'The Codex Security database has an unsupported mirror migration history.' AS value",
@@ -46,7 +72,7 @@
     "    'INSERT INTO schema_migrations (version, name, applied_at) VALUES (47, ' ||",
     "    quote(json_extract(value, '$.name')) || ', ?)' AS value",
     "FROM json_each(:history) WHERE json_extract(value, '$.version') = 47",
-    "    AND EXISTS (SELECT 1 FROM schema_migrations WHERE version = 50",
+    "    AND EXISTS (SELECT 1 FROM schema_migrations WHERE version = 52",
     "        AND name = 'freeze stopped scan checkpoint selections')",
     "    AND NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version = 47)",
     "    AND EXISTS (SELECT 1 FROM pragma_table_info('deep_scan_runs')",

@@ -169,10 +169,11 @@ test("every released schema upgrades to the same current schema and remains idem
 });
 
 for (const { missingVersions, legacyCheckpoint, mainReader } of [
-  { missingVersions: [50], legacyCheckpoint: 0, mainReader: false },
+  { missingVersions: [52], legacyCheckpoint: 0, mainReader: false },
   { missingVersions: [], legacyCheckpoint: 47, mainReader: false },
   { missingVersions: [], legacyCheckpoint: 47, mainReader: true },
   { missingVersions: [], legacyCheckpoint: 48, mainReader: false },
+  { missingVersions: [], legacyCheckpoint: 50, mainReader: false },
   { missingVersions: [43], legacyCheckpoint: 47, mainReader: false },
   { missingVersions: [44, 45, 46], legacyCheckpoint: 47, mainReader: false },
 ]) {
@@ -192,11 +193,15 @@ for (const { missingVersions, legacyCheckpoint, mainReader } of [
           .filter(
             (item) =>
               !missingVersions.includes(item.version) &&
-              !(legacyCheckpoint && [48, 49].includes(item.version)) &&
+              !(legacyCheckpoint && [50, 51].includes(item.version)) &&
+              !(
+                [47, 48].includes(legacyCheckpoint) &&
+                [48, 49].includes(item.version)
+              ) &&
               !(legacyCheckpoint === 47 && item.version === 47),
           )
           .map((item) =>
-            legacyCheckpoint && item.version === 50
+            legacyCheckpoint && item.version === 52
               ? { ...item, version: legacyCheckpoint }
               : item,
           ),
@@ -222,7 +227,7 @@ for (const { missingVersions, legacyCheckpoint, mainReader } of [
           "UPDATE scans SET status = 'failed', retained_source_digests_json = ?",
         )
         .run(sources);
-      if (!missingVersions.includes(50)) {
+      if (!missingVersions.includes(52)) {
         old
           .prepare("UPDATE scans SET retained_checkpoint_heads_json = ?")
           .run(heads);
@@ -231,7 +236,7 @@ for (const { missingVersions, legacyCheckpoint, mainReader } of [
         .prepare(
           "SELECT name, applied_at FROM schema_migrations WHERE version = ?",
         )
-        .get(legacyCheckpoint || 50);
+        .get(legacyCheckpoint || 52);
     } finally {
       old.close();
     }
@@ -242,7 +247,7 @@ for (const { missingVersions, legacyCheckpoint, mainReader } of [
         upgraded
           .prepare("SELECT retained_checkpoint_heads_json FROM scans")
           .get()?.retained_checkpoint_heads_json,
-        !missingVersions.includes(50) ? heads : null,
+        !missingVersions.includes(52) ? heads : null,
       );
       upgraded
         .prepare("UPDATE scans SET retained_checkpoint_heads_json = ?")
@@ -261,7 +266,7 @@ for (const { missingVersions, legacyCheckpoint, mainReader } of [
         assert.deepEqual(
           reopened
             .prepare(
-              "SELECT name, applied_at FROM schema_migrations WHERE version = 50",
+              "SELECT name, applied_at FROM schema_migrations WHERE version = 52",
             )
             .get(),
           originalCheckpointMigration,
@@ -277,9 +282,9 @@ for (const { missingVersions, legacyCheckpoint, mainReader } of [
         reopened
           .prepare("SELECT MAX(version) AS version FROM schema_migrations")
           .get()?.version,
-        50,
+        52,
       );
-      for (const version of [43, 44, 45, 46, 47, 48, 49, 50]) {
+      for (const version of [43, 44, 45, 46, 47, 48, 49, 50, 51, 52]) {
         assert.equal(
           reopened
             .prepare(
@@ -296,7 +301,7 @@ for (const { missingVersions, legacyCheckpoint, mainReader } of [
           .get()?.discovery_user_context_json,
         legacyCheckpoint !== 47 || mainReader ? context : null,
       );
-      assertMigrationNames(reopened, 47, 48, 49, 50);
+      assertMigrationNames(reopened, 47, 48, 49, 50, 51, 52);
       if (legacyCheckpoint !== 47) {
         assert.deepEqual(
           reopened
@@ -310,6 +315,43 @@ for (const { missingVersions, legacyCheckpoint, mainReader } of [
     }
   });
 }
+
+test("worker thread history survives retry, replay, and worker retirement", (t) => {
+  const database = memory(t, 49);
+  insertScan(database);
+  database.exec(`
+    INSERT INTO deep_scan_runs (
+      scan_id, schema_version, workflow_version, status, phase, workers,
+      subagents, stop_after_no_new, max_discovery_runs, created_at, updated_at
+    ) VALUES ('scan', 1, 'fixture', 'running', 'discovery', 1, 0, 3, 10, 'created', 'updated');
+    INSERT INTO deep_scan_workers (
+      id, scan_id, kind, status, prompt_path, artifact_dir, attempt,
+      sdk_thread_id, created_at, updated_at
+    ) VALUES ('worker', 'scan', 'discovery', 'running', '/synthetic/prompt.md',
+      '/synthetic/output', 1, 'first-thread', 'created', 'updated');
+  `);
+  applyMigrations(database);
+  database.exec(`
+    UPDATE deep_scan_workers SET sdk_thread_id = 'retry-thread', attempt = 2;
+    UPDATE deep_scan_workers SET sdk_thread_id = 'retry-thread', attempt = 2;
+    DELETE FROM deep_scan_workers;
+  `);
+  applyMigrations(database);
+  assert.deepEqual(
+    database
+      .prepare(
+        "SELECT sdk_thread_id FROM deep_scan_worker_threads ORDER BY sdk_thread_id",
+      )
+      .all()
+      .map((row) => row.sdk_thread_id),
+    ["first-thread", "retry-thread"],
+  );
+  database.exec("DELETE FROM scans");
+  assert.deepEqual(
+    database.prepare("SELECT * FROM deep_scan_worker_threads").all(),
+    [],
+  );
+});
 
 test("configured state paths use native parent traversal semantics", async () => {
   const directory = await temporary.create("workbench-symlink-");
@@ -411,6 +453,193 @@ test(
     });
   },
 );
+
+for (const previewVersion of [34, 40, 41, 42, 43, 44, 48]) {
+  test(`database-info upgrades source-scope preview ${previewVersion} without losing scan data`, async () => {
+    const directory = await temporary.create("workbench-source-preview-");
+    const databasePath = join(directory, "workbench.sqlite3");
+    const old = new DatabaseSync(databasePath);
+    applyMigrations(
+      old,
+      migrations.filter(
+        (item) => item.version <= (previewVersion === 43 ? 42 : 32),
+      ),
+    );
+    insertScan(old);
+    const sourceScope = migrations.find((item) => item.version === 50)!;
+    old.exec(sourceScope.statements.join("\n"));
+    old
+      .prepare("INSERT INTO schema_migrations VALUES (?, ?, 'original')")
+      .run(previewVersion, sourceScope.name);
+    const scopes = JSON.stringify({
+      "synthetic/repository": ["src/original.ts"],
+    });
+    old.prepare("UPDATE scans SET source_scopes_json = ?").run(scopes);
+    old.close();
+
+    assert.equal((await databaseInfo(directory)).databasePath, databasePath);
+    const upgraded = new DatabaseSync(databasePath);
+    try {
+      assertMigrationNames(
+        upgraded,
+        34,
+        40,
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47,
+        48,
+        49,
+        50,
+      );
+      assert.equal(
+        upgraded
+          .prepare(
+            "SELECT applied_at FROM schema_migrations WHERE version = 50",
+          )
+          .get()?.applied_at,
+        "original",
+      );
+      assert.equal(
+        upgraded
+          .prepare("SELECT source_scopes_json FROM scans WHERE id = 'scan'")
+          .get()?.source_scopes_json,
+        scopes,
+      );
+      assert.equal(
+        upgraded.prepare("SELECT name FROM scans WHERE id = 'scan'").get()
+          ?.name,
+        null,
+      );
+      assert.deepEqual(upgraded.prepare("PRAGMA foreign_key_check").all(), []);
+      const history = upgraded
+        .prepare("SELECT * FROM schema_migrations ORDER BY version")
+        .all();
+      await databaseInfo(directory);
+      assert.deepEqual(
+        upgraded
+          .prepare("SELECT * FROM schema_migrations ORDER BY version")
+          .all(),
+        history,
+      );
+    } finally {
+      upgraded.close();
+    }
+  });
+}
+
+test("database-info retains scan names from installed migration 42", async () => {
+  const directory = await temporary.create("workbench-released-names-");
+  const databasePath = join(directory, "workbench.sqlite3");
+  const old = new DatabaseSync(databasePath);
+  applyMigrations(
+    old,
+    migrations.filter((item) => item.version <= 42),
+  );
+  insertScan(old);
+  old.exec("UPDATE scans SET name = 'Original scan'");
+  const originalAppliedAt = old
+    .prepare("SELECT applied_at FROM schema_migrations WHERE version = 42")
+    .get()?.applied_at;
+  old.close();
+  await databaseInfo(directory);
+  const upgraded = new DatabaseSync(databasePath);
+  try {
+    assertMigrationNames(upgraded, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51);
+    assert.equal(
+      upgraded.prepare("SELECT name FROM scans").get()?.name,
+      "Original scan",
+    );
+    assert.equal(
+      upgraded.prepare("SELECT source_scopes_json FROM scans").get()
+        ?.source_scopes_json,
+      null,
+    );
+    assert.equal(
+      upgraded
+        .prepare("SELECT applied_at FROM schema_migrations WHERE version = 42")
+        .get()?.applied_at,
+      originalAppliedAt,
+    );
+  } finally {
+    upgraded.close();
+  }
+});
+
+test("database-info repairs recorded scan-name and source-scope columns", async () => {
+  const directory = await temporary.create("workbench-source-repair-");
+  const databasePath = join(directory, "workbench.sqlite3");
+  const old = new DatabaseSync(databasePath);
+  applyMigrations(old);
+  insertScan(old);
+  const history = old
+    .prepare("SELECT * FROM schema_migrations ORDER BY version")
+    .all();
+  old.exec(
+    "ALTER TABLE scans DROP COLUMN name; ALTER TABLE scans DROP COLUMN source_scopes_json",
+  );
+  old.close();
+  await databaseInfo(directory);
+  const repaired = new DatabaseSync(databasePath);
+  try {
+    assert.deepEqual(
+      {
+        ...repaired
+          .prepare(
+            "SELECT name, source_scopes_json, target_revision FROM scans",
+          )
+          .get(),
+      },
+      { name: null, source_scopes_json: null, target_revision: "revision" },
+    );
+    assert.deepEqual(
+      repaired
+        .prepare("SELECT * FROM schema_migrations ORDER BY version")
+        .all(),
+      history,
+    );
+  } finally {
+    repaired.close();
+  }
+});
+
+for (const version of [43, 50]) {
+  test(`database-info rejects unsupported source-scope history ${version} without changing it`, async () => {
+    const directory = await temporary.create("workbench-source-unknown-");
+    const databasePath = join(directory, "workbench.sqlite3");
+    const old = new DatabaseSync(databasePath);
+    applyMigrations(old);
+    old
+      .prepare(
+        "UPDATE schema_migrations SET name = 'unknown source history' WHERE version = ?",
+      )
+      .run(version);
+    const history = old
+      .prepare("SELECT * FROM schema_migrations ORDER BY version")
+      .all();
+    const originalSchema = schema(old);
+    old.close();
+    await assert.rejects(
+      databaseInfo(directory),
+      /unsupported source-scope migration history/u,
+    );
+    const unchanged = new DatabaseSync(databasePath);
+    try {
+      assert.deepEqual(schema(unchanged), originalSchema);
+      assert.deepEqual(
+        unchanged
+          .prepare("SELECT * FROM schema_migrations ORDER BY version")
+          .all(),
+        history,
+      );
+    } finally {
+      unchanged.close();
+    }
+  });
+}
 
 test("preview index history does not skip findings, embedding or checkpoint migrations", (t) => {
   const database = memory(t);

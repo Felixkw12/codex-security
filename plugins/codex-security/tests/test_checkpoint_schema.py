@@ -11,10 +11,11 @@ import pytest
     "omitted_versions, legacy_checkpoint, main_reader",
     [
         ((), False, False),
-        ((50,), False, False),
+        ((52,), False, False),
         ((), 47, False),
         ((), 47, True),
         ((), 48, False),
+        ((), 50, False),
         ((43,), 47, False),
         ((44, 45, 46), 47, False),
     ],
@@ -24,6 +25,7 @@ import pytest
         "legacy-checkpoint",
         "legacy-main-reader",
         "prior-checkpoint-number",
+        "previous-head-checkpoint-number",
         "legacy-severity-gap",
         "legacy-dedupe-gap",
     ],
@@ -46,11 +48,12 @@ def test_frozen_checkpoint_head_migration_preserves_scan_state(
             connection,
             tuple(
                 (legacy_checkpoint, name, sql)
-                if legacy_checkpoint and version == 50
+                if legacy_checkpoint and version == 52
                 else (version, name, sql)
                 for version, name, sql in migrations
                 if version not in omitted_versions
-                and not (legacy_checkpoint and version in (48, 49))
+                and not (legacy_checkpoint and version in (50, 51))
+                and not (legacy_checkpoint in (47, 48) and version in (48, 49))
                 and not (legacy_checkpoint == 47 and version == 47)
             ),
         )
@@ -81,13 +84,13 @@ def test_frozen_checkpoint_head_migration_preserves_scan_state(
                 ),
             )
         heads = json.dumps({"workers/review": "workers/review/checkpoints/" + "a" * 64 + ".json"})
-        if 50 not in omitted_versions:
+        if 52 not in omitted_versions:
             connection.execute(
                 "UPDATE scans SET retained_checkpoint_heads_json = ? WHERE id = 'failed'", (heads,)
             )
         original_checkpoint_migration = connection.execute(
             "SELECT * FROM schema_migrations WHERE version = ?",
-            (legacy_checkpoint or 50,),
+            (legacy_checkpoint or 52,),
         ).fetchone()
         connection.execute(
             "INSERT INTO deep_scan_runs (scan_id, schema_version, workflow_version, status, phase, "
@@ -110,6 +113,8 @@ def test_frozen_checkpoint_head_migration_preserves_scan_state(
             retained_heads = updated.pop("retained_checkpoint_heads_json")
             assert retained_heads == original.get("retained_checkpoint_heads_json")
             original.pop("retained_checkpoint_heads_json", None)
+            if "source_scopes_json" not in original:
+                assert updated.pop("source_scopes_json") is None
             assert updated == original
 
         connection.execute(
@@ -131,19 +136,19 @@ def test_frozen_checkpoint_head_migration_preserves_scan_state(
         assert [
             tuple(row)
             for row in connection.execute(
-                "SELECT version, name FROM schema_migrations WHERE version = 50"
+                "SELECT version, name FROM schema_migrations WHERE version = 52"
             )
-        ] == [(50, "freeze stopped scan checkpoint selections")]
+        ] == [(52, "freeze stopped scan checkpoint selections")]
         if original_checkpoint_migration is not None:
             assert (
                 connection.execute(
-                    "SELECT name, applied_at FROM schema_migrations WHERE version = 50"
+                    "SELECT name, applied_at FROM schema_migrations WHERE version = 52"
                 ).fetchone()[:]
                 == original_checkpoint_migration[1:]
             )
         assert connection.execute(
             "SELECT COUNT(*), MAX(version) FROM schema_migrations"
-        ).fetchone()[:] == (len(migrations), 50)
+        ).fetchone()[:] == (len(migrations), 52)
         for version in (43, 44, 45, 46, 47):
             assert (
                 connection.execute(

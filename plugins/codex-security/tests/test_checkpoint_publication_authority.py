@@ -695,6 +695,8 @@ def test_head_reselection_preserves_equal_or_newer_pending_evidence(
 
     coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
     key, value = next(iter(identity.items()))
+    if generic and not root_head:
+        value = f"{result.parent.name}/{value}"
     pending_rows = [row for row in coverage["deferred"] if row.get(key) == value]
     assert bool(pending_rows) is (pending_offset >= 0)
 
@@ -1814,7 +1816,9 @@ def test_restored_observation_keeps_independent_registered_result(
         for field in ("surfaces", "openQuestions", "explicitExclusions"):
             assert coverage.get(field) == prior_coverage.get(field)
     else:
-        assert coverage["openQuestions"] == stale["coverage"]["openQuestions"]
+        assert coverage["openQuestions"] == [
+            {**row, "workerId": result.parent.name} for row in stale["coverage"]["openQuestions"]
+        ]
         assert any(row["pattern"] == "old-scope/**" for row in coverage["explicitExclusions"])
     assert all((scan.scan_dir / path).read_bytes() == content for path, content in original.items())
 
@@ -2634,6 +2638,16 @@ def test_rejection_receipt_is_verified_before_suppressing_accepted_finding(
     scan = publication_scan()
     (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
     result = add_worker(workbench_db, scan, status="canceled")
+    # Worker receipts are published beneath the parent artifact directory.
+    output = scan.scan_dir / "artifacts" / "workers" / result.parent.name
+    output.parent.mkdir(parents=True, exist_ok=True)
+    result.parent.rename(output)
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_workers SET artifact_dir = ?, result_manifest_path = ? WHERE id = ?",
+            (str(output), str(output / result.name), output.name),
+        )
+    result = output / result.name
     result.write_text(json.dumps(save_disposition(scan, result.parent, "reported")))
     os.utime(result, ns=(300, 300))
     rejected = save_disposition(scan, result.parent, "rejected")
@@ -2644,7 +2658,7 @@ def test_rejection_receipt_is_verified_before_suppressing_accepted_finding(
             else "artifacts/review.txt"
         ]
         if receipt_state.startswith("present"):
-            receipt = scan.scan_dir / "artifacts" / "review.txt"
+            receipt = result.parent / "artifacts" / "review.txt"
             receipt.parent.mkdir(exist_ok=True)
             receipt.write_text("Synthetic rejected candidate review.")
         checkpoint = write_checkpoint(result.parent / "checkpoints", rejected)

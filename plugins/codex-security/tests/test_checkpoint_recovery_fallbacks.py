@@ -888,6 +888,11 @@ def test_restored_terminal_keeps_surfaces_for_surviving_deferred_work(
         ),
     )["scan"]
     _, _, coverage = saved.finalize_scan(scan.scan_dir)
+    if owner == "worker":
+        surface = {**surface, "id": f"{directory.name}/pending-surface", "workerId": directory.name}
+        task = {**task, "id": f"{directory.name}/review-task", "workerId": directory.name}
+        if "surfaceIds" in task:
+            task["surfaceIds"] = [surface["id"]]
     assert coverage["surfaces"] == ([surface] if pending == "linked" else [])
     assert (task in coverage["deferred"]) is (pending != "closed")
     assert (surface["label"] in (scan.scan_dir / "report.md").read_text()) is (pending == "linked")

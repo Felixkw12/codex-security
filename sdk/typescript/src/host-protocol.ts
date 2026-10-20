@@ -1,6 +1,6 @@
 import { createInterface } from "node:readline";
 import { type Readable, Writable } from "node:stream";
-import { z } from "incur";
+import { z } from "zod";
 
 const rpcId = z.union([z.string(), z.number().int()]);
 const envelope = z.strictObject({ jsonrpc: z.literal("2.0") });
@@ -45,6 +45,7 @@ export async function runHostProtocol(
   operation: {
     label: string;
     requestMethod: string;
+    progressMethod?: string;
     /** Scan cancellation must retain the host's eventual receipt and usage. */
     awaitCancellationReceipt?: boolean;
     errorData?: (error: unknown) => object | undefined;
@@ -235,7 +236,7 @@ export async function runHostProtocol(
             if (terminalCode === undefined)
               void send({
                 jsonrpc: "2.0",
-                method: "scan.progress",
+                method: operation.progressMethod ?? "scan.progress",
                 params: { id: runId, event },
               }).catch(outputError);
           },
