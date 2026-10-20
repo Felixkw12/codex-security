@@ -74,6 +74,82 @@ async function addArtifact(documents: Documents, path: string) {
   });
 }
 
+test.each(["receiptRefs", "deferred"] as const)(
+  "preserves omitted tracking coverage %s when the selected schema permits it",
+  async (field) => {
+    const documents = await fixture();
+    const pluginRoot = await fixtures.temporaryDirectory();
+    await cp(join(PLUGIN_ROOT, "schemas"), join(pluginRoot, "schemas"), {
+      recursive: true,
+    });
+    const schemaPath = join(pluginRoot, "schemas", "coverage.schema.json");
+    const schema = JSON.parse(await readFile(schemaPath, "utf8"));
+    const definition =
+      field === "receiptRefs" ? schema.properties.surfaces.items : schema;
+    definition.required = definition.required.filter(
+      (required: string) => required !== field,
+    );
+    await writeJson(schemaPath, schema);
+
+    for (const selectedRoot of [PLUGIN_ROOT, pluginRoot]) {
+      const { contract } = await loadSealedContract(documents.scanDir, {
+        pluginRoot: selectedRoot,
+        profile: "tracking",
+      });
+      expect(contract.coverage).toEqual(documents.coverage);
+      expect(
+        (await loadContract(documents.scanDir, { pluginRoot: selectedRoot }))
+          .coverage,
+      ).toEqual(documents.coverage);
+    }
+
+    const target =
+      field === "receiptRefs"
+        ? documents.coverage.surfaces[0]!
+        : documents.coverage;
+    Reflect.set(target, field, null);
+    await saveAndSeal(documents);
+    await expect(
+      validateTrackingSource(documents.scanDir, { pluginRoot }),
+    ).rejects.toThrow(field);
+    await expect(
+      loadContract(documents.scanDir, { pluginRoot }),
+    ).rejects.toThrow(field);
+
+    Reflect.deleteProperty(target, field);
+    await saveAndSeal(documents);
+    const original = await readFile(join(documents.scanDir, "coverage.json"));
+    await expect(validateTrackingSource(documents.scanDir)).rejects.toThrow(
+      field,
+    );
+    await expect(
+      loadContract(documents.scanDir, { pluginRoot: PLUGIN_ROOT }),
+    ).rejects.toThrow(field);
+    await expect(
+      loadContract(documents.scanDir, { pluginRoot }),
+    ).rejects.toThrow();
+    await expect(
+      validateTrackingSource(documents.scanDir, { pluginRoot }),
+    ).resolves.toEqual(documents.findings.findings);
+    const { contract } = await loadSealedContract(documents.scanDir, {
+      pluginRoot,
+      profile: "tracking",
+    });
+    expect(contract.coverage).toEqual(documents.coverage);
+    expect(
+      Object.hasOwn(
+        field === "receiptRefs"
+          ? contract.coverage.surfaces[0]!
+          : contract.coverage,
+        field,
+      ),
+    ).toBe(false);
+    expect(await readFile(join(documents.scanDir, "coverage.json"))).toEqual(
+      original,
+    );
+  },
+);
+
 test.each([
   ["./artifacts/receipt.json", false],
   [".//./artifacts/receipt.json", false],

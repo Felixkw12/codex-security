@@ -344,7 +344,11 @@ function validateCanonicalContract(
     }
   }
   const activeDeferredIds = new Set<string>();
-  for (const [index, deferred] of coverage.deferred.entries()) {
+  const deferredWork =
+    profile === "tracking" && coverage.deferred === undefined
+      ? []
+      : coverage.deferred;
+  for (const [index, deferred] of deferredWork.entries()) {
     activeDeferredIds.add(deferred.id);
     if (typeof deferred["candidateId"] === "string") {
       activeDeferredIds.add(deferred["candidateId"]);
@@ -565,6 +569,8 @@ async function validateSeal(
     }
   };
   for (const surface of coverage.surfaces) {
+    if (root.profile === "tracking" && surface.receiptRefs === undefined)
+      continue;
     for (const receipt of surface.receiptRefs) {
       requireSealedReference(receipt, "Coverage receipt");
     }
