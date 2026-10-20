@@ -18,11 +18,14 @@ files and saved scan recipes while remaining available to native execution.
 Request metadata includes command, surface, package/plugin versions, configured
 provider family, and scan mode when available. Wrapper operations and workers add
 opaque operation, attempt, and parent-attempt IDs. IDs are join keys, not metric
-labels. Hosted execution receives the same attribution in
+labels. Hosted scan execution receives the same attribution in
 `request.runtime.requestMetadata`; the executor owns forwarding it to its runtime.
 Native analytics opt-out does not remove request attribution or configure an OTel
 exporter. Hosted schema and checkout preparation precede the SDK invocation;
 rejections at that boundary remain the host's responsibility to record.
+The [hosted remediation executor](./hosted-remediation.md) owns request
+attribution, durable attempt tracking, and usage reporting for
+`runHostedRemediation`.
 
 Local operational receipts are saved under `telemetry/` in the existing Codex
 Security state directory. These are local history, not an analytics upload.
