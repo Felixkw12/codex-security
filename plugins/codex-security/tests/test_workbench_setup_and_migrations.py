@@ -93,8 +93,9 @@ EXPECTED_MIGRATIONS = [
     (49, "index finding issue receipt ownership"),
     (50, "persist authorized source excerpt scopes"),
     (51, "preserve deep scan worker thread history"),
-    (52, "preserve finding decision append chronology"),
-    (53, "bind new finding decisions to admitted scans"),
+    (52, "record severity classification review counts"),
+    (53, "preserve finding decision append chronology"),
+    (54, "bind new finding decisions to admitted scans"),
 ]
 
 
@@ -2938,9 +2939,9 @@ def test_decision_history_upgrade_preserves_published_sequences(
         if version < installed_version
     ]
     historical.extend(
-        (version - (52 - installed_version), name, sql)
+        (version - (53 - installed_version), name, sql)
         for version, name, sql in namespace["MIGRATIONS"]
-        if version == 52 or (version == 53 and with_scan_boundary)
+        if version == 53 or (version == 54 and with_scan_boundary)
     )
     with sqlite3.connect(":memory:") as connection:
         connection.row_factory = sqlite3.Row
