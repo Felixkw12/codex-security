@@ -5,14 +5,12 @@ from __future__ import annotations
 import copy
 import os
 import re
-import sys
 import unicodedata
 from collections import Counter
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 from finalize_scan_contract import (
     ContractError,
     _has_identity_text,
@@ -34,7 +32,7 @@ from workbench_saved_sources import (
 )
 
 _FINDING_IDENTITY_SCHEMA = _read_json(
-    Path(__file__).resolve().parent.parent / "schemas" / "findings.schema.json"
+    Path(__file__).resolve().parents[2] / "schemas" / "findings.schema.json"
 )["properties"]["findings"]["items"]["properties"]["identity"]
 
 
