@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { after, test } from "node:test";
 import type { ScanDraftInput } from "../src/artifact-scan-draft.js";
+import type { DeepScanRunState } from "../src/deep-scan/types.js";
 import {
   claimDedupInputs,
   createCoordinator,
@@ -13,6 +14,18 @@ import {
   temporaryDirectories,
 } from "./deep_scan_coordinator_fixture.ts";
 import { readJson, writeJson } from "./support/json.ts";
+import { importModule } from "./import-module.ts";
+
+const { createDeepScanArtifacts, validateDiscoveryArtifacts } =
+  await importModule({
+    stdin: {
+      contents: `
+        export { createDeepScanArtifacts } from "./artifacts.ts";
+        export { validateDiscoveryArtifacts } from "./artifact-validation.ts";
+      `,
+      resolveDir: path.join(import.meta.dirname, "../src/deep-scan/"),
+    },
+  });
 
 after(() => temporaryDirectories.cleanup());
 
@@ -51,6 +64,16 @@ for (const continueReduction of [false, true]) {
               candidate: pending.candidate,
               receiptRefs: ["artifacts/missing-review.txt"],
             });
+            await mkdir(path.join(request.artifactContext!.root, "artifacts"), {
+              recursive: true,
+            });
+            await writeFile(
+              path.join(
+                request.artifactContext!.root,
+                "artifacts/missing-review.txt",
+              ),
+              "Synthetic review evidence.\n",
+            );
             await writeJson(resultPath, result);
           }
           return outcome;
@@ -59,7 +82,17 @@ for (const continueReduction of [false, true]) {
       store.dedupCommitResponseGate = Promise.withResolvers<void>();
       const original = createCoordinator(fixture, store, executor);
       original.start();
-      await store.dedupCommitted.promise;
+      await Promise.race([
+        store.dedupCommitted.promise,
+        original
+          .settled()
+          .then((terminal: DeepScanRunState) =>
+            assert.fail(
+              terminal.error ??
+                "Coordinator finished before the reducer commit.",
+            ),
+          ),
+      ]);
       original.cancel("mcp server process restarted");
       store.dedupCommitResponseGate.resolve();
       await original.settled();
@@ -74,6 +107,20 @@ for (const continueReduction of [false, true]) {
           await writeJson(worker.resultManifestPath!, result);
         } else {
           assert.equal(result.coverage.completeness, undefined);
+          if (missingReceipt) {
+            // The worker was accepted before this historical receipt disappeared.
+            await rm(
+              path.join(worker.artifactDir, "artifacts/missing-review.txt"),
+            );
+            await assert.rejects(
+              validateDiscoveryArtifacts(
+                createDeepScanArtifacts(fixture.run.scanDir),
+                worker.resultManifestPath!,
+                fixture.run.scanId,
+              ),
+              /requested artifact is unavailable/,
+            );
+          }
         }
       }
       const acceptedBytes = await Promise.all(
@@ -135,4 +182,40 @@ for (const continueReduction of [false, true]) {
       );
     });
   }
+}
+
+for (const receipt of ["artifacts/missing.txt", "artifacts/../outside.txt"]) {
+  test(`accepted candidate recovery still rejects a generic receipt: ${receipt}`, async () => {
+    const fixture = await fixtureRun();
+    const artifacts = createDeepScanArtifacts(fixture.run.scanDir);
+    const resultPath = path.join(
+      artifacts.workersRoot,
+      "worker",
+      "output",
+      "result.json",
+    );
+    const result: ScanDraftInput = {
+      scanId: fixture.run.scanId,
+      findings: [],
+      coverage: {
+        surfaces: [
+          {
+            label: "Generic review evidence",
+            disposition: "no_issue_found",
+            receiptRefs: [receipt],
+          },
+        ],
+        explicitExclusions: [],
+        deferred: [],
+      },
+    };
+    await mkdir(path.dirname(resultPath), { recursive: true });
+    await writeJson(resultPath, result);
+    await assert.rejects(
+      validateDiscoveryArtifacts(artifacts, resultPath, fixture.run.scanId, {
+        recoverCandidateReceipts: true,
+      }),
+      /requested artifact is unavailable|safe scan-relative|Invalid string/,
+    );
+  });
 }

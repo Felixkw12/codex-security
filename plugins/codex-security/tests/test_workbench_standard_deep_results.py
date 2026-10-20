@@ -3568,7 +3568,9 @@ def test_public_worker_receipt_recovery_uses_actual_owner(
     scan = get_scan(state, scan_id)["scan"]
     coverage = json.loads((scan_dir / "coverage.json").read_text())
     assert scan["progress"]["candidates"]["unresolved"] == 1
-    assert generic in coverage["deferred"]
+    assert {**generic, "id": f"{worker_id}/general-review", "workerId": worker_id} in coverage[
+        "deferred"
+    ]
     candidates = [row for row in coverage["deferred"] if row.get("candidateId") == "candidate-a"]
     assert len(candidates) == 1
     assert candidates[0]["sourceWorkerId"] == worker_id

@@ -3,6 +3,7 @@ import { dirname, relative, sep } from "node:path";
 import type { JsonObject } from "../types.js";
 import type { AcceptedDiscovery } from "./worker-runner.js";
 import { artifactSourcePath } from "../artifact-io.js";
+import { recoverWorkerCandidateReceipts } from "../artifact-worker-receipts.js";
 import {
   coverageReceiptComponents,
   validateRetainedCoverage,
@@ -248,6 +249,7 @@ export async function validateDiscoveryArtifacts(
   artifacts: DeepScanArtifacts,
   resultPath: string,
   expectedScanId: string,
+  options: { recoverCandidateReceipts?: boolean } = {},
 ): Promise<ScanDraftInput> {
   await requireRegularFile(resultPath, artifacts.workersRoot);
   const result = parseStoredScanDraft(
@@ -260,8 +262,15 @@ export async function validateDiscoveryArtifacts(
     throw new Error(
       "Standard scan worker wrote only a checkpoint; its audit is not complete.",
     );
-  validateRetainedCoverage(result.coverage);
   const root = dirname(resultPath);
+  if (options.recoverCandidateReceipts) {
+    await recoverWorkerCandidateReceipts(result.coverage, {
+      root,
+      repoRoot: root,
+      layout: "worker",
+    });
+  }
+  validateRetainedCoverage(result.coverage);
   const receiptPaths = new Map<string, string>();
   for (const row of result.coverage.surfaces as JsonObject[]) {
     for (const ref of (row.receiptRefs as string[] | undefined) ?? []) {

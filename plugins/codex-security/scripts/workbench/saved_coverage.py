@@ -104,6 +104,7 @@ def _prepare_worker_coverage_recovery(
     source_order: dict[str, tuple[int, int]],
     *,
     enabled: bool,
+    surface_receipts_prepared: Callable[[str, dict[str, Any]], bool] | None = None,
 ) -> tuple[
     bool, list[tuple[dict[str, Any], str, dict[str, Any], dict[str, Any], dict[str, Any] | None]]
 ]:
@@ -167,8 +168,17 @@ def _prepare_worker_coverage_recovery(
                     if coverage_candidate_key(row, owner) is not None
                     else None
                 )
+                receipts_prepared = (
+                    field == "surfaces"
+                    and surface_receipts_prepared is not None
+                    and surface_receipts_prepared(relative, row)
+                )
                 row["workerId"] = owner
-                if field == "surfaces" and isinstance(row.get("receiptRefs"), list):
+                if (
+                    field == "surfaces"
+                    and not receipts_prepared
+                    and isinstance(row.get("receiptRefs"), list)
+                ):
                     refs = []
                     for ref in row["receiptRefs"]:
                         if isinstance(ref, str):

@@ -32,6 +32,9 @@ from candidate_identity import (
     surface_reference_key,
 )
 from candidate_identity import (
+    archive_candidate_payloads as archive_candidate_payloads,
+)
+from candidate_identity import (
     unresolved_candidates as unresolved_candidates,
 )
 from finalize_scan_contract import (
@@ -678,6 +681,12 @@ def merge_saved_results(
     initial_warnings = set(warnings)
     receipt_states: dict[str, Any] = {}
     receipt_reopened: set[tuple[str | None, str]] = set()
+    prepared_surface_receipts: set[tuple[str, str]] = set()
+
+    def surface_receipt_key(relative: str, row: dict[str, Any]) -> tuple[str, str]:
+        # Frozen candidate decisions can change a retained row's disposition.
+        return relative, _digest({key: value for key, value in row.items() if key != "disposition"})
+
     try:
         source_times = _frozen_source_times(
             scan_dir, scan_id, frozen_source_digests or {}, receipt_states
@@ -883,6 +892,7 @@ def merge_saved_results(
                     projected["coverage"], draft["unresolvedCandidates"]
                 )
             if worker_id is not None:
+                original_surfaces = projected["coverage"].get("surfaces", [])
                 projected = recover_candidate_receipts(
                     projected,
                     scan_dir,
@@ -894,6 +904,18 @@ def merge_saved_results(
                         _digest([relative, worker_id, projected]), {}
                     ),
                 )
+                recovered_surfaces = projected["coverage"].get("surfaces", [])
+                if isinstance(original_surfaces, list) and isinstance(recovered_surfaces, list):
+                    for original, recovered in zip(original_surfaces, recovered_surfaces):
+                        if (
+                            isinstance(original, dict)
+                            and original.get("disposition") in {"rejected", "not_applicable"}
+                            and isinstance(recovered, dict)
+                            and recovered.get("receiptRefs")
+                        ):
+                            # These receipts have already been validated at the
+                            # owning worker root and qualified for publication.
+                            prepared_surface_receipts.add(surface_receipt_key(relative, recovered))
             sources.append((relative, projected, worker_id))
         except (ContractError, OSError, ValueError) as exc:
             if (scan_dir / relative).exists():
@@ -1056,7 +1078,13 @@ def merge_saved_results(
         parent = drafts_by_path[latest_reducer]
 
     project_worker_coverage, surface_links = _prepare_worker_coverage_recovery(
-        sources, parent, source_order, enabled=project_worker_coverage
+        sources,
+        parent,
+        source_order,
+        enabled=project_worker_coverage,
+        surface_receipts_prepared=lambda relative, row: (
+            surface_receipt_key(relative, row) in prepared_surface_receipts
+        ),
     )
     # Keep the actual retained row even when recovery adds previous findings.
     linked_surface_sources = {id(surface) for _, _, surface, _, _ in surface_links}
@@ -1234,8 +1262,18 @@ def merge_saved_results(
         "surfaces": [],
         "explicitExclusions": [],
         "deferred": [],
-        **(copy.deepcopy(parent["coverage"]) if parent else {}),
     }
+    if parent and parent["coverage"]:
+        retained_coverage = copy.deepcopy(parent["coverage"])
+        if parent_is_canonical and not stopped:
+            coverage = retained_coverage
+        else:
+            # Stopped recovery and reducer-only candidates synthesize an envelope;
+            # live canonical coverage must retain its authored validation errors.
+            coverage.update(retained_coverage)
+    # The published envelope binds scope for both initial recovery and frozen
+    # replay; authored semantic fields must still pass normal validation.
+    coverage.update(mode=binding["coverageMode"], **binding["scope"])
     if isinstance(coverage.get("openQuestions"), list):
         coverage["openQuestions"] = [
             {"question": item.strip()} if isinstance(item, str) else item
@@ -1686,7 +1724,7 @@ def merge_saved_results(
         for row in deferred_rows[relative]
         if isinstance(row, dict)
         and isinstance(identity := row.get("id"), str)
-        and (key := (owner, identity)) not in candidate_ids
+        and (key := (_deferred_owner(row, owner), identity)) not in candidate_ids
         and key not in ambiguous_deferred
         and (updated := accepted_deferred_orders.get(key)) is not None
         and updated > source_order[relative]
@@ -1805,6 +1843,8 @@ def merge_saved_results(
             continue
         pending = coverage.setdefault("deferred", [])
         if isinstance(pending, list):
+            if owner is not None and isinstance(item.get("candidateId"), str):
+                item = {**item, "sourceWorkerId": owner}
             append_coverage_row(pending, item, owner, "deferred")
     for _, draft, owner in all_sources:
         surfaces = draft["coverage"].get("surfaces", [])
@@ -2233,8 +2273,8 @@ def merge_saved_results(
         named_surface_outputs = {
             identity for outputs in worker_surface_outputs.values() for identity in outputs
         }
-        surfaces = coverage.get("surfaces", [])
-        for surface in surfaces if isinstance(surfaces, list) else []:
+        worker_surface_rows = coverage.get("surfaces", [])
+        for surface in worker_surface_rows if isinstance(worker_surface_rows, list) else []:
             if not isinstance(surface, dict):
                 continue
             owner, identity = worker_row_owners.get(id(surface)), surface.get("id")

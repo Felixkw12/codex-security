@@ -207,18 +207,20 @@ def list_repositories(
         """
         WITH ranked_scans AS (
             SELECT scans.*,
-                COUNT(*) OVER (PARTITION BY target_id) AS scan_count,
+                progress.reportable_findings_count,
+                progress.scope_file_count,
+                progress.review_items_completed,
+                progress.review_items_total,
+                progress.updated_at AS progress_updated_at,
+                COUNT(*) OVER (PARTITION BY scans.target_id) AS scan_count,
                 ROW_NUMBER() OVER (
-                    PARTITION BY target_id ORDER BY julianday(upper(started_at)) DESC, id DESC
+                    PARTITION BY scans.target_id
+                    ORDER BY julianday(upper(scans.started_at)) DESC, scans.id DESC
                 ) AS scan_rank
             FROM scans
+            JOIN scan_progress AS progress ON progress.scan_id = scans.id
         )
         SELECT scans.*,
-            progress.reportable_findings_count,
-            progress.scope_file_count,
-            progress.review_items_completed,
-            progress.review_items_total,
-            progress.updated_at AS progress_updated_at,
             (
                 SELECT COUNT(*) FROM finding_occurrences AS occurrences
                 WHERE occurrences.scan_id = scans.id
@@ -226,7 +228,6 @@ def list_repositories(
             targets.current_path,
             targets.display_name
         FROM ranked_scans AS scans
-        JOIN scan_progress AS progress ON progress.scan_id = scans.id
         JOIN security_targets AS targets ON targets.id = scans.target_id
         WHERE scans.scan_rank = 1
         ORDER BY julianday(upper(scans.started_at)) DESC, scans.id DESC

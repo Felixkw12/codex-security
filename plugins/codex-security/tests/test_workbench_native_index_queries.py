@@ -680,6 +680,9 @@ def test_repository_latest_keeps_sqlite_millisecond_ties(workbench_api, indexed_
     assert repositories[0]["scanCount"] == 2
 
     connection.execute("UPDATE scans SET cost_json = '{' WHERE id = ?", (SCAN_IDS[0],))
+    # Only the selected latest summary is hydrated after the atomic count/rank query.
+    assert query(connection)["repositories"] == repositories
+    connection.execute("UPDATE scans SET cost_json = '{' WHERE id = ?", (SCAN_IDS[1],))
     with pytest.raises(ValueError, match="Expecting property name"):
         query(connection)
 
