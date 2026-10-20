@@ -328,14 +328,6 @@ function validateCanonicalContract(
     if (occurrenceIds.has(finding.occurrenceId))
       throw new ContractValidationError(`${context}: duplicate occurrence id.`);
     occurrenceIds.add(finding.occurrenceId);
-    const evidenceIds = new Set<string>();
-    for (const evidence of finding.codeEvidence ?? []) {
-      if (evidenceIds.has(evidence.id))
-        throw new ContractValidationError(
-          `${context}.codeEvidence: duplicate code-evidence id.`,
-        );
-      evidenceIds.add(evidence.id);
-    }
     for (const [field, value] of [
       ["title", finding.title],
       ["summary", finding.summary],

@@ -1525,6 +1525,13 @@ async function loadRegisteredCampaignScan(
     authority.seal_manifest_digest !== loaded.manifestDigest
   )
     return undefined;
+  for (const finding of loaded.contract.findings.findings) {
+    const evidenceIds = new Set<string>();
+    for (const evidence of finding.codeEvidence ?? []) {
+      if (evidenceIds.has(evidence.id)) return undefined;
+      evidenceIds.add(evidence.id);
+    }
+  }
   return { contract: loaded.contract, authority };
 }
 

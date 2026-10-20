@@ -1066,15 +1066,39 @@ describe("multiscan", () => {
   test.each(interruptedUtf8Cases)(
     "recovery preserves interrupted %s after %d UTF-8 bytes (malformed prefix=%p)",
     async (character, length, malformedPrefix) => {
-      const paths = await fixture();
+      const { paths, source } = await repositoryFixture(
+        "utf8-source",
+        "complete",
+      );
       const task = {
         id: "complete",
-        repository: join(paths.root, "unused-source"),
-        revision: "a".repeat(40),
+        repository: source.path,
+        revision: source.revision,
         mode: "standard",
       };
       const outputDir = join(paths.output, "artifacts", task.id, "attempt-1");
-      await completedScan(outputDir);
+      // Complete the producer flow so recovery has private registration and a seal.
+      expect(
+        await runMultiscan(
+          options(
+            paths,
+            client(async (_repository, settings = {}) => {
+              const result = await completedScan(settings.outputDir!);
+              result.manifest.scan.artifacts.push({
+                path: "report.md",
+                sha256: "0".repeat(64),
+                mediaType: "text/markdown",
+              });
+              await writeFile(
+                join(settings.outputDir!, "scan-manifest.json"),
+                JSON.stringify(result.manifest),
+              );
+              await reseal(settings.outputDir!);
+              return result;
+            }),
+          ),
+        ),
+      ).toMatchObject({ completed: 1, failed: 0 });
       const artifacts = [
         "scan-manifest.json",
         "findings.json",
@@ -1082,14 +1106,6 @@ describe("multiscan", () => {
         "report.md",
       ].map((name) => join(outputDir, name));
       const before = await Promise.all(artifacts.map((path) => readFile(path)));
-      await writeFile(
-        paths.input,
-        `id,repository,revision\n${task.id},${task.repository},${task.revision}\n`,
-      );
-      await writeFile(
-        join(paths.output, "manifest.json"),
-        JSON.stringify({ version: 2, tasks: [task] }, null, 2) + "\n",
-      );
       let prefix = Buffer.from(
         JSON.stringify({
           ...task,
