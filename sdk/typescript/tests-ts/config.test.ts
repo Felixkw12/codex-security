@@ -1,5 +1,6 @@
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { spawnSync } from "node:child_process";
 import { afterEach, describe, expect, test } from "bun:test";
 import { parse } from "smol-toml";
 import { scanRuntimeCodexConfig } from "../src/api.js";
@@ -736,7 +737,25 @@ describe("Codex configuration", () => {
         );
       const evidence = join(artifacts, "previous-SECURITY.md");
       await writeFile(evidence, "original");
+      const acl = () => {
+        const result = spawnSync("icacls.exe", [workspace], {encoding:"utf8"});
+        console.log("CWD", workspace, result.stdout, result.stderr);
+        for (const path of [dirname(workspace), root, codexHome]) {
+          console.log("ANCESTOR", path, spawnSync("icacls.exe", [path], {encoding:"utf8"}).stdout);
+        }
+      };
+      acl();
       const read = sandbox("read", evidence);
+      acl();
+      console.log("COLD POLICY", read.exitCode, new TextDecoder().decode(read.stderr));
+      if (read.exitCode !== 0) {
+        const scan = sandbox("read", evidence, "codex_security_scan");
+        console.log("SCAN", scan.exitCode, new TextDecoder().decode(scan.stderr));
+        acl();
+        const retry = sandbox("read", evidence);
+        console.log("POLICY AFTER SCAN", retry.exitCode, new TextDecoder().decode(retry.stderr));
+        acl();
+      }
       if (read.exitCode !== 0) {
         const details = new TextDecoder().decode(read.stderr);
         if (
