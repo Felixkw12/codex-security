@@ -3523,6 +3523,10 @@ export class CodexSecurity {
               telemetry.repository,
               this.#dependencies.environment,
             ),
+            protectedOutput:
+              telemetry.options.outputDir === undefined
+                ? undefined
+                : expandHome(telemetry.options.outputDir),
             command: telemetry.command,
             deferPersistence:
               telemetry.command === "policy" ||

@@ -1667,9 +1667,9 @@ export async function runWorkbench(
       ? (options.stateDirectory ??
         codexSecurityStateDirectory(options.environment))
       : undefined;
-    // OS argv cannot carry NUL, but workbench text fields can.
-    const framedArguments =
-      !native && arguments_.some((argument) => argument.includes("\0"));
+    // Usage scopes can exceed OS argv limits; text fields can also contain NUL.
+    // Keep Python arguments in the existing private stdin frame.
+    const framedArguments = !native;
     let program = archiveHandshake ? ARCHIVE_REGISTRATION_PROGRAM : undefined;
     if (framedArguments)
       program =

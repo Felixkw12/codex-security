@@ -69,6 +69,7 @@ export interface OperationTelemetryEvent {
 interface OperationTelemetryOptions {
   directory: string;
   protectedRepository?: string;
+  protectedOutput?: string;
   command: OperationTelemetryEvent["command"];
   surface: OperationTelemetryEvent["surface"];
   mode?: OperationTelemetryEvent["mode"];
@@ -143,6 +144,11 @@ export class OperationTelemetry {
   ): Promise<void> {
     try {
       const protectedRoots = [...additionalRoots];
+      if (this.#options.protectedOutput !== undefined) {
+        protectedRoots.push(
+          await canonicalConfigPath(this.#options.protectedOutput),
+        );
+      }
       if (this.#options.protectedRepository !== undefined) {
         const repository = await canonicalConfigPath(
           this.#options.protectedRepository,

@@ -64,6 +64,93 @@ test("journals early failures without copying target paths or diagnostic text", 
   );
 });
 
+test.each(["scan", "validate", "policy"] as const)(
+  "explicit %s output stays empty through runtime preparation",
+  async (command) => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const state = join(root, "state");
+    const outputDir = join(state, "telemetry");
+    await mkdir(repository);
+    await mkdir(outputDir, { recursive: true, mode: 0o700 });
+    const observed: OperationTelemetryEvent[] = [];
+    const failure = new Error("Synthetic runtime boundary reached");
+    let runtimeCalls = 0;
+    const client = new TestClient(
+      {},
+      {
+        environment: {
+          CODEX_SECURITY_STATE_DIR: state,
+          CODEX_HOME: join(root, "codex"),
+        },
+        createOperationTelemetry: (options) => new OperationTelemetry(options),
+        prepareRuntime: async () => {
+          runtimeCalls++;
+          throw failure;
+        },
+      },
+    );
+    const options = {
+      outputDir,
+      onTelemetry: (event: Readonly<OperationTelemetryEvent>) =>
+        observed.push(event),
+    };
+    try {
+      const operation =
+        command === "scan"
+          ? client.run(repository, { ...options, mode: "standard" })
+          : command === "validate"
+            ? client.validate({
+                ...options,
+                repositoryPath: repository,
+                finding: "Synthetic candidate finding",
+              })
+            : client.generatePolicy(repository, options);
+      await expect(operation).rejects.toBe(failure);
+    } finally {
+      await client.close();
+    }
+    expect(runtimeCalls).toBe(1);
+    expect(await readdir(outputDir)).toEqual([]);
+    expect(observed.map((event) => event.type)).toEqual([
+      "attempt_started",
+      "attempt_finished",
+    ]);
+    expect(observed[1]).toMatchObject({
+      operationId: observed[0]!.operationId,
+      attemptId: observed[0]!.attemptId,
+      outcome: "failed",
+      collection: { persisted: 0 },
+    });
+  },
+);
+
+test("rejected explicit scan output keeps its completed artifacts unchanged", async () => {
+  await using fixture = await workflowFixture();
+  const state = fixture.environment.CODEX_SECURITY_STATE_DIR;
+  await mkdir(state, { mode: 0o700 });
+  const outputDir = join(state, "telemetry");
+  await rename(fixture.scanDir, outputDir);
+  const entries = await readdir(outputDir, { recursive: true });
+  const client = new TestClient(
+    {},
+    {
+      environment: fixture.environment,
+      createOperationTelemetry: (options) => new OperationTelemetry(options),
+    },
+  );
+  try {
+    await expect(
+      client.run(fixture.repository, { mode: "standard", outputDir }),
+    ).rejects.toThrow("Scan output directory is not empty");
+  } finally {
+    await client.close();
+  }
+  expect((await readdir(outputDir, { recursive: true })).sort()).toEqual(
+    entries.sort(),
+  );
+});
+
 test("rejected workflow state paths leave sealed artifacts unchanged", async () => {
   await using fixture = await workflowFixture();
   const state = join(fixture.scanDir, "state");
@@ -178,6 +265,7 @@ test("resume keeps the operation identity and replay deduplicates terminal recei
   const directory = await temporaryDirectory();
   const first = new OperationTelemetry({
     directory,
+    protectedOutput: join(directory, "scan-artifacts"),
     command: "scan",
     surface: "sdk",
   });
@@ -187,6 +275,7 @@ test("resume keeps the operation identity and replay deduplicates terminal recei
   await first.finish("completed");
   const resumed = new OperationTelemetry({
     directory,
+    protectedOutput: join(directory, "scan-artifacts"),
     command: "scan",
     surface: "sdk",
     resumeScanId: "synthetic-scan",
@@ -203,6 +292,11 @@ test("resume keeps the operation identity and replay deduplicates terminal recei
   await interrupted.start();
   const { events } = await readOperationTelemetry(directory);
   expect(events).toHaveLength(5);
+  expect(
+    events
+      .filter((event) => event.attemptId === resumed.attemptId)
+      .map((event) => event.operationId),
+  ).toEqual([first.operationId, first.operationId]);
   const summary = summarizeOperationTelemetry(
     [...events].reverse().concat(events),
   );

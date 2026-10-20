@@ -16,7 +16,7 @@ import {
   nativeConfigOverrides,
 } from "./assertions.ts";
 import { createTemporaryDirectories } from "./support/temporary-directories.ts";
-import { mock } from "node:test";
+import { mock, test } from "node:test";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import assert from "node:assert/strict";
 import childProcess, {
@@ -102,136 +102,150 @@ const ipcFrameError =
   "code-mode delegate response exceeds the IPC frame limit: code-mode IPC frame length 76008279 exceeds 67108864 bytes";
 
 try {
-  testCodeModeFrameDiagnosticBoundaries();
-  await testLargeScopeTransport();
-  await testOpenAiCredentialsReachWorker();
-  await testWorkerCancellation();
-  testUsageLimitClassification();
-  await testWorkerTerminalEvents();
-  await testWorkerRuntimeSettings();
-  await testUnsupportedProviderSnapshotFailsBeforeLaunch();
-  await testWorkerCyberAccessSettings({
-    CodexSdkWorkerExecutor,
-    fakeCodexFixture,
-    parentSandbox: trustedParentSandbox,
-    workerRequest,
-    assertConfigOverrides,
-    assertReadOnlyWorkerPolicy,
-    assertWorkerSubagentPolicy,
-    restoreEnv,
-  });
-  await testCompletedWorkerSettlesWithoutWaitingForProcessExit();
-  if (process.platform !== "win32") {
-    await testDeepScanContextSnapshots({
+  await test("portable worker lifecycle and runtime settings", async () => {
+    testCodeModeFrameDiagnosticBoundaries();
+    await testLargeScopeTransport();
+    await testOpenAiCredentialsReachWorker();
+    await testWorkerCancellation();
+    testUsageLimitClassification();
+    await testWorkerTerminalEvents();
+    await testWorkerRuntimeSettings();
+    await testUnsupportedProviderSnapshotFailsBeforeLaunch();
+    await testWorkerCyberAccessSettings({
       CodexSdkWorkerExecutor,
       fakeCodexFixture,
       parentSandbox: trustedParentSandbox,
-    });
-    await testMissingParentSandboxFailsBeforeWorkerLaunch();
-    await testDisallowedWorkerProfileFailsBeforeWorkerLaunch();
-    await testRuntimePermissionProfileFallbackStopsAndDiscards();
-    await testWorkerLaunchesWithoutGlobalCodex();
-    await testPreflightBindsExecutableAndHomeBeforeChangingCwd();
-    await testConcurrentWorkerExecutableAliases({
-      CodexSdkWorkerExecutor,
-      fakeCodexFixture,
-      parentSandbox: trustedParentSandbox,
-      bundledCodexSdkEnvironment,
+      workerRequest,
+      assertConfigOverrides,
       assertReadOnlyWorkerPolicy,
+      assertWorkerSubagentPolicy,
+      restoreEnv,
     });
-    await testSdkInvocationAndThreadCapture();
-    await testBedrockCredentialsReachWorker();
-    await testBedrockCredentialsReachWorker("oidc");
-    await testExternalProviderCredentialsReachWorker();
-    await testArtifactServerUsesExtendedStartupTimeout();
-    await testZeroSubagentsPreservesHostRestrictions();
-    await testSdkResumesExistingThread();
-    await testRetryNotificationDoesNotInterruptTurn();
-    await testSandboxNamespaceDiagnosticIsPreserved();
-    await testOwnedArtifactToolFailureDiagnosticIsPreserved();
-    for (const reference of ["discovery:\0" + "0", "😀".repeat(1300)]) {
-      await testArtifactDiagnosticSurvivesWorkerRetries(reference);
+    await testCompletedWorkerSettlesWithoutWaitingForProcessExit();
+  });
+  await test(
+    "native worker permissions and authentication",
+    { skip: process.platform === "win32" },
+    async () => {
+      await testDeepScanContextSnapshots({
+        CodexSdkWorkerExecutor,
+        fakeCodexFixture,
+        parentSandbox: trustedParentSandbox,
+      });
+      await testMissingParentSandboxFailsBeforeWorkerLaunch();
+      await testDisallowedWorkerProfileFailsBeforeWorkerLaunch();
+      await testRuntimePermissionProfileFallbackStopsAndDiscards();
+      await testWorkerLaunchesWithoutGlobalCodex();
+      await testPreflightBindsExecutableAndHomeBeforeChangingCwd();
+      await testConcurrentWorkerExecutableAliases({
+        CodexSdkWorkerExecutor,
+        fakeCodexFixture,
+        parentSandbox: trustedParentSandbox,
+        bundledCodexSdkEnvironment,
+        assertReadOnlyWorkerPolicy,
+      });
+      await testSdkInvocationAndThreadCapture();
+      await testBedrockCredentialsReachWorker();
+      await testBedrockCredentialsReachWorker("oidc");
+      await testExternalProviderCredentialsReachWorker();
+      await testArtifactServerUsesExtendedStartupTimeout();
+      await testZeroSubagentsPreservesHostRestrictions();
+      await testSdkResumesExistingThread();
+    },
+  );
+  await test(
+    "native worker diagnostics and retries",
+    { skip: process.platform === "win32" },
+    async () => {
+      await testRetryNotificationDoesNotInterruptTurn();
+      await testSandboxNamespaceDiagnosticIsPreserved();
+      await testOwnedArtifactToolFailureDiagnosticIsPreserved();
+      for (const reference of ["discovery:\0" + "0", "😀".repeat(1300)]) {
+        await testArtifactDiagnosticSurvivesWorkerRetries(reference);
+      }
+      await testCodeModeFrameDiagnosticSurvivesSuccessfulTurn();
+      await testStreamTerminationWithoutTerminalEventFails();
+      await testAbortPropagation();
+      await testUnstructuredConfigurationFailureRemainsRetryable();
+      await testUnstructuredThreadStartFailureRemainsRetryable();
+      await testPolicyFailuresRemainWorkerErrors();
+      await testMalformedCommandEventsRemainRetryable();
+      await testRateLimitPolicyFailureRemainsRetryable();
+      await testArtifactStartupTimeoutClassification();
+    },
+  );
+  await test("worker executable selection and errors", async () => {
+    assert.equal(
+      resolveCodexPath({}, "darwin"),
+      path.join(process.cwd(), "codex"),
+    );
+    assert.equal(
+      resolveCodexPath({}, "linux"),
+      path.join(process.cwd(), "codex"),
+    );
+    assert.equal(
+      resolveCodexPath({}, "win32"),
+      path.join(process.cwd(), "codex.exe"),
+    );
+    const absoluteConfiguredPath = path.join(
+      path.parse(process.cwd()).root,
+      "fixture",
+      "codex",
+    );
+    assert.equal(
+      resolveCodexPath({ CODEX_CLI_PATH: ` ${absoluteConfiguredPath} ` }),
+      absoluteConfiguredPath,
+    );
+    const originalCwd = path.join(process.cwd(), "fixture-root");
+    const relativeConfiguredPath = path.join("fixtures", "codex");
+    assert.equal(
+      resolveCodexPath(
+        { CODEX_CLI_PATH: relativeConfiguredPath },
+        "linux",
+        process.arch,
+        originalCwd,
+      ),
+      path.join(originalCwd, "fixtures", "codex"),
+    );
+    assert.equal(
+      resolveCodexPath(
+        { CODEX_CLI_PATH: relativeConfiguredPath },
+        "win32",
+        process.arch,
+        originalCwd,
+      ),
+      path.join(originalCwd, "fixtures", "codex"),
+    );
+    assert.equal(
+      resolveCodexPath({ CODEX_CLI_PATH: " C:\\Tools\\codex.exe " }, "win32"),
+      "C:\\Tools\\codex.exe",
+    );
+    assert.equal(
+      resolveCodexPath({ codex_cli_path: " C:\\Tools\\codex.exe " }, "win32"),
+      "C:\\Tools\\codex.exe",
+    );
+    assert.equal(
+      resolveCodexPath(
+        { codex_cli_path: "/ignored/codex" },
+        "linux",
+        process.arch,
+        originalCwd,
+      ),
+      path.join(originalCwd, "codex"),
+    );
+    testOsErrorCodesRemainRetryable();
+    testTextualMissingPathErrorsRemainRetryable();
+    testWorkerErrorClassificationPreservesExplicitFailures();
+    await testWindowsAppsCodexFallsBackToRelocatedBinary();
+    await testWindowsNpmPackageResolution();
+    await testWindowsNpmPackageResolution("managed");
+    if (process.platform === "win32") {
+      await testWindowsLongExecutableLaunches();
+      await testWindowsRootRelativePathsStayBoundToOriginalDrive();
+      await testWindowsWorkerEnvironmentPreservesMixedCaseKeys();
+      await testWindowsLauncherSkipsExtensionlessNpmShim();
     }
-    await testCodeModeFrameDiagnosticSurvivesSuccessfulTurn();
-    await testStreamTerminationWithoutTerminalEventFails();
-    await testAbortPropagation();
-    await testUnstructuredConfigurationFailureRemainsRetryable();
-    await testUnstructuredThreadStartFailureRemainsRetryable();
-    await testPolicyFailuresRemainWorkerErrors();
-    await testMalformedCommandEventsRemainRetryable();
-    await testRateLimitPolicyFailureRemainsRetryable();
-    await testArtifactStartupTimeoutClassification();
-  }
-  assert.equal(
-    resolveCodexPath({}, "darwin"),
-    path.join(process.cwd(), "codex"),
-  );
-  assert.equal(
-    resolveCodexPath({}, "linux"),
-    path.join(process.cwd(), "codex"),
-  );
-  assert.equal(
-    resolveCodexPath({}, "win32"),
-    path.join(process.cwd(), "codex.exe"),
-  );
-  const absoluteConfiguredPath = path.join(
-    path.parse(process.cwd()).root,
-    "fixture",
-    "codex",
-  );
-  assert.equal(
-    resolveCodexPath({ CODEX_CLI_PATH: ` ${absoluteConfiguredPath} ` }),
-    absoluteConfiguredPath,
-  );
-  const originalCwd = path.join(process.cwd(), "fixture-root");
-  const relativeConfiguredPath = path.join("fixtures", "codex");
-  assert.equal(
-    resolveCodexPath(
-      { CODEX_CLI_PATH: relativeConfiguredPath },
-      "linux",
-      process.arch,
-      originalCwd,
-    ),
-    path.join(originalCwd, "fixtures", "codex"),
-  );
-  assert.equal(
-    resolveCodexPath(
-      { CODEX_CLI_PATH: relativeConfiguredPath },
-      "win32",
-      process.arch,
-      originalCwd,
-    ),
-    path.join(originalCwd, "fixtures", "codex"),
-  );
-  assert.equal(
-    resolveCodexPath({ CODEX_CLI_PATH: " C:\\Tools\\codex.exe " }, "win32"),
-    "C:\\Tools\\codex.exe",
-  );
-  assert.equal(
-    resolveCodexPath({ codex_cli_path: " C:\\Tools\\codex.exe " }, "win32"),
-    "C:\\Tools\\codex.exe",
-  );
-  assert.equal(
-    resolveCodexPath(
-      { codex_cli_path: "/ignored/codex" },
-      "linux",
-      process.arch,
-      originalCwd,
-    ),
-    path.join(originalCwd, "codex"),
-  );
-  testOsErrorCodesRemainRetryable();
-  testTextualMissingPathErrorsRemainRetryable();
-  testWorkerErrorClassificationPreservesExplicitFailures();
-  await testWindowsAppsCodexFallsBackToRelocatedBinary();
-  await testWindowsNpmPackageResolution();
-  await testWindowsNpmPackageResolution("managed");
-  if (process.platform === "win32") {
-    await testWindowsLongExecutableLaunches();
-    await testWindowsRootRelativePathsStayBoundToOriginalDrive();
-    await testWindowsWorkerEnvironmentPreservesMixedCaseKeys();
-    await testWindowsLauncherSkipsExtensionlessNpmShim();
-  }
+  });
 } finally {
   restoreEnv("FAKE_CODEX_MARKER", previousMarker);
   await temporaryDirectories.cleanup();
