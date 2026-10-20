@@ -21,6 +21,7 @@ from workbench_test_support import (
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import workbench_db
 import workbench_saved_results as saved
+from workbench import saved_sources
 
 
 def call_workbench(monkeypatch, state, codex_home, *args):
@@ -118,6 +119,7 @@ def test_head_capture_includes_checkpoint_published_after_enumeration(
         return paths
 
     monkeypatch.setattr(saved, "_checkpoint_paths", publish_after_listing)
+    monkeypatch.setattr(saved_sources, "_checkpoint_paths", publish_after_listing)
     call_workbench(
         monkeypatch,
         state,

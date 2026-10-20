@@ -29,7 +29,7 @@ def _project_worker_coverage_row(item: Any, worker_id: str | None, field: str) -
     if worker_id is None or not isinstance(row, dict):
         return row
     row["workerId"] = worker_id
-    if field == "openQuestions":
+    if field == "openQuestions" or (field == "explicitExclusions" and "id" in row):
         return row
     # Reconcile raw checkpoint identities first. Anonymous output rows use the
     # existing content identity, never their position in an earlier snapshot.
@@ -65,7 +65,9 @@ def _coverage_comparison_row(row: Any, field: str) -> Any:
     return row
 
 
-def _aggregate_worker_coverage_rows(rows: list[Any], worker_id: str, field: str) -> list[Any]:
+def _aggregate_worker_coverage_rows(
+    rows: list[Any], worker_id: str, field: str, *, legacy_exclusions: bool = False
+) -> list[Any]:
     """Match accepted aggregate IDs without changing raw recovery identities."""
     reserved = {
         row["id"] for row in rows if isinstance(row, dict) and isinstance(row.get("id"), str)
@@ -73,10 +75,14 @@ def _aggregate_worker_coverage_rows(rows: list[Any], worker_id: str, field: str)
     emitted: set[str] = set()
     projected = []
     for index, original in enumerate(rows):
-        row = copy.deepcopy(original)
-        if isinstance(row, dict) and field != "openQuestions":
-            generated = not isinstance(row.get("id"), str)
-            identity = str(index) if generated else row["id"]
+        row = _project_worker_coverage_row(original, worker_id, field)
+        if (
+            isinstance(row, dict)
+            and field != "openQuestions"
+            and not (field == "explicitExclusions" and "id" in original and not legacy_exclusions)
+        ):
+            generated = not isinstance(original.get("id"), str)
+            identity = str(index) if generated else original["id"]
             base = identity
             if generated or identity in emitted:
                 suffix = 2
@@ -85,11 +91,30 @@ def _aggregate_worker_coverage_rows(rows: list[Any], worker_id: str, field: str)
                     suffix += 1
             reserved.add(identity)
             emitted.add(identity)
-            row["id"] = identity
-        projected.append(
-            _coverage_comparison_row(_project_worker_coverage_row(row, worker_id, field), field)
-        )
+            row["id"] = f"{worker_id}/{identity}"
+        projected.append(_coverage_comparison_row(row, field))
     return projected
+
+
+def _retained_exclusion_record(
+    rows: list[Any],
+    index: int,
+    worker_id: str,
+    published: list[Any],
+    projections: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    # Older main aggregates qualified even opaque exclusion IDs. Reuse the
+    # published record only when its entire content matches that old projection.
+    legacy = _aggregate_worker_coverage_rows(
+        rows, worker_id, "explicitExclusions", legacy_exclusions=True
+    )[index]
+    if not any(
+        legacy in records
+        for projection in projections
+        if isinstance(records := projection.get("explicitExclusions"), list)
+    ):
+        return None
+    return next((row for row in published if row == legacy), None)
 
 
 def _prepare_worker_coverage_recovery(
@@ -120,7 +145,7 @@ def _prepare_worker_coverage_recovery(
             and isinstance(row.get("workerId"), str)
             and row["workerId"] in workers
             and (
-                field == "openQuestions"
+                field in {"openQuestions", "explicitExclusions"}
                 or (isinstance(row.get("id"), str) and row["id"].startswith(f"{row['workerId']}/"))
             )
             for draft in parents

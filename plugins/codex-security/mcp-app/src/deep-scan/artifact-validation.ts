@@ -86,6 +86,11 @@ export function aggregateDiscoveryCoverage(
       const emittedIds = new Set<string>();
       for (const [index, row] of rows.entries()) {
         const retained: JsonObject = { ...row, workerId: worker.id };
+        // Exclusion IDs are opaque extension data, not links between coverage rows.
+        if (field === "explicitExclusions" && "id" in row) {
+          (coverage.explicitExclusions as JsonObject[]).push(retained);
+          continue;
+        }
         // Independent reviews reuse local IDs. Preserve their links without
         // allowing one worker's disposition to stand in for another's work.
         const baseId = typeof row.id === "string" ? row.id : String(index);
@@ -589,7 +594,10 @@ export function projectDiscoveryCoverage(
     explicitExclusions: qualify(
       "explicitExclusions",
       coverage.explicitExclusions,
-    ),
+    ).map((row, index) => {
+      const original = coverage.explicitExclusions[index]!;
+      return "id" in original ? { ...row, id: original.id } : row;
+    }),
     deferred: qualify("deferred", coverage.deferred).map((item, index) => ({
       ...item,
       ...(coverage.deferred[index]!.surfaceIds === undefined

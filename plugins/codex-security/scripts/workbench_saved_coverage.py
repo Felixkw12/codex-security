@@ -45,6 +45,33 @@ def _deferred_candidate_id(
     return identity
 
 
+def _coverage_row_ids(coverage: dict[str, Any]) -> set[int]:
+    return {
+        id(item)
+        for field in ("surfaces", "explicitExclusions", "deferred")
+        for item in (coverage.get(field) if isinstance(coverage.get(field), list) else [])
+    }
+
+
+def _remove_resolved_coverage(
+    coverage: dict[str, Any],
+    resolved: dict[tuple[str | None, str], str],
+    candidate: Callable[[str | None, dict[str, Any]], tuple[str | None, str] | None],
+) -> None:
+    for field in ("surfaces", "deferred"):
+        items = coverage.get(field, [])
+        if isinstance(items, list):
+            coverage[field] = [
+                item
+                for item in items
+                if not (
+                    isinstance(item, dict)
+                    and (field == "deferred" or item.get("disposition") == "needs_follow_up")
+                    and candidate(None, item) in resolved
+                )
+            ]
+
+
 def _encoded(value: Any) -> bytes:
     return json.dumps(
         value, ensure_ascii=True, allow_nan=False, sort_keys=True, separators=(",", ":")

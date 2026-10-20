@@ -648,15 +648,14 @@ async function testCoveragePublicationParity(root: string) {
         receiptRefs: { external: "opaque metadata" },
       },
     ];
-    result.coverage.explicitExclusions = [
-      {
-        id: "external",
-        pattern: "vendor/**",
-        reason: "External code.",
-        receiptRefs: ["opaque/missing.md"],
-        surfaceIds: ["opaque-id"],
-      },
-    ];
+    const exclusionIds = ["external", ["external"]];
+    result.coverage.explicitExclusions = exclusionIds.map((id) => ({
+      id,
+      pattern: "vendor/**",
+      reason: "External code.",
+      receiptRefs: ["opaque/missing.md"],
+      surfaceIds: ["opaque-id"],
+    }));
     await writeResult(worker.resultPath, result);
     const accepted = await validateDiscoveryArtifacts(
       worker.artifacts,
@@ -666,6 +665,24 @@ async function testCoveragePublicationParity(root: string) {
     const coverage = aggregateDiscoveryCoverage(worker.artifacts, [
       { ...worker, result: accepted },
     ]);
+    for (const projected of [
+      coverage,
+      projectDiscoveryCoverage(
+        accepted.coverage,
+        { id: worker.id, attempt: 1 },
+        "artifacts/deep_discovery/workers/discovery-0001/output",
+      ),
+    ]) {
+      assert.deepEqual(
+        projected.explicitExclusions.map((row: JsonObject) => row.id),
+        exclusionIds,
+      );
+      assert.ok(
+        projected.explicitExclusions.every(
+          (row: JsonObject) => row.workerId === worker.id,
+        ),
+      );
+    }
     assert.deepEqual(coverage.deferred[0].receiptRefs, {
       external: "opaque metadata",
     });
@@ -1864,7 +1881,7 @@ function testCurrentAndHistoricalCoverageIdentity() {
       (row: { workerId: string }) => row.workerId === "worker-a",
     ),
   );
-  assert.equal(projected.explicitExclusions[0].id, "worker-a/vendor");
+  assert.equal(projected.explicitExclusions[0].id, "vendor");
   assert.equal(projected.deferred[0].id, "worker-a/follow-up");
   assert.deepEqual(
     projected.deferred[0].surfaceIds,

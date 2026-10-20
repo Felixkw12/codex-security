@@ -40,6 +40,7 @@ from finalize_scan_contract import (
 from workbench.saved_coverage import (
     _prepare_worker_coverage_recovery,
     _project_worker_coverage_row,
+    _retained_exclusion_record,
     _saved_coverage_id,
 )
 from workbench.saved_sources import (
@@ -69,6 +70,7 @@ from workbench_constants import (
     PHASES,
 )
 from workbench_saved_coverage import (
+    _coverage_row_ids,
     _deferred_candidate_id,
     _deferred_rows,
     _digest,
@@ -79,6 +81,7 @@ from workbench_saved_coverage import (
     _generic_surface_updates,
     _has_candidate_fields,
     _merge_tied_parent_observations,
+    _remove_resolved_coverage,
     _resolved_deferred_rows,
     _retained_findings,
     _worker_candidate_key,
@@ -844,7 +847,6 @@ def merge_saved_results(
         source: dict[str, Any],
         relative: str,
     ) -> dict[str, Any]:
-        # Match projectDiscoveryCoverage so recovered holes retain source ownership.
         source_key = (relative, field)
         if (
             field in {"surfaces", "deferred", "explicitExclusions"}
@@ -881,6 +883,8 @@ def merge_saved_results(
         for key, name in (("id", "sourceId"), ("candidateId", "candidateId")):
             if key in original:
                 result["provenance"][name] = original[key]
+        if field == "explicitExclusions" and "id" in original:
+            return result
         if field != "openQuestions":
             result["id"] = f"{worker['id']}/{original.get('id', index - 1)}"
         if field == "surfaces":
@@ -957,7 +961,7 @@ def merge_saved_results(
                 if isinstance(rows, list):
                     reserved.extend(row for row in rows if isinstance(row, dict))
             if result not in reserved and any(row.get("id") == result["id"] for row in reserved):
-                used = {row.get("id") for row in reserved}
+                used = {row["id"] for row in reserved if isinstance(row.get("id"), str)}
                 base = result["id"]
                 historical = attempt != worker["attempt"]
                 if historical:
@@ -1095,8 +1099,7 @@ def merge_saved_results(
     worker_surface_outputs: dict[tuple[str, str], dict[int, dict[str, Any]]] = {}
 
     def record_coverage_owner(retained: Any, item: Any, owner: str | None, field: str) -> None:
-        # Parent aggregates can carry worker metadata without originating in
-        # that worker's retained source. Track the actual source of output rows.
+        # Track actual source ownership, not parent metadata alone.
         if project_worker_coverage and owner is not None and isinstance(retained, dict):
             worker_row_owners[id(retained)] = owner
             if field == "surfaces" and isinstance(item.get("id"), str):
@@ -1275,15 +1278,7 @@ def merge_saved_results(
             {"question": item.strip()} if isinstance(item, str) else item
             for item in coverage["openQuestions"]
         ]
-    canonical_rows = (
-        {
-            id(item)
-            for field in ("surfaces", "explicitExclusions", "deferred")
-            for item in (coverage.get(field) if isinstance(coverage.get(field), list) else [])
-        }
-        if parent_is_canonical
-        else set()
-    )
+    canonical_rows = _coverage_row_ids(coverage) if parent_is_canonical else set()
     findings: list[dict[str, Any]] = []
     finding_positions: dict[str, int] = {}
     represented: dict[str, str | None] = {}
@@ -1652,6 +1647,12 @@ def merge_saved_results(
         output = coverage.setdefault(field, [])
         if not isinstance(output, list):
             return None
+        if field == "explicitExclusions" and worker is not None:
+            retained = _retained_exclusion_record(
+                source[field], index - 1, worker["id"], output, projected_coverages
+            )
+            if retained is not None:
+                return retained
         project = reviewed and worker["merge_state"] == "merged"
         retained_links: set[str] = set()
         observation = None
@@ -1831,6 +1832,7 @@ def merge_saved_results(
             return False
         return True
 
+    _remove_resolved_coverage(coverage, resolved, coverage_candidate)
     ambiguous_surface_ids = {
         (owner, identity)
         for owner, row, _ in reopened_rows

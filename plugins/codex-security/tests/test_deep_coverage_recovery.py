@@ -976,6 +976,51 @@ def test_projection_normalizes_surface_receipts_without_rewriting_extension_meta
     assert json.loads((Path(source["artifact_dir"]) / "result.json").read_text()) == draft
 
 
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("source_id", ["external", ["external"], None, 7])
+def test_exclusion_only_parent_preserves_current_and_legacy_projection(tmp_path, legacy, source_id):
+    draft = saved_draft("coverage-scan", complete=True)
+    draft["coverage"]["explicitExclusions"] = [
+        {"id": source_id, "pattern": "vendor/**", "reason": "External code."}
+    ]
+    source = worker(tmp_path, "first", draft)
+    original = (Path(source["artifact_dir"]) / "result.json").read_bytes()
+    parent = copy.deepcopy(draft)
+    exclusion = parent["coverage"]["explicitExclusions"][0]
+    exclusion["workerId"] = "first"
+    if legacy:
+        exclusion["id"] = f"first/{source_id if isinstance(source_id, str) else 0}"
+    write_saved_parent(tmp_path, parent, 200)
+    result = recover(tmp_path, [source])
+    replay = recover(tmp_path, [source], frozen=result[0]["scan"]["preservedSources"])
+    for documents in (result, replay):
+        assert documents[2]["explicitExclusions"] == [exclusion]
+    assert replay[2] == result[2]
+    assert (Path(source["artifact_dir"]) / "result.json").read_bytes() == original
+
+
+@pytest.mark.parametrize("parent_present", [False, True])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_exclusion_extension_ids_do_not_alias_new_projection(tmp_path, parent_present, reverse):
+    exclusions = [
+        {"id": identity, "pattern": "vendor/**", "reason": "External code."}
+        for identity in ["first/external", "external"][:: -1 if reverse else 1]
+    ]
+    draft = saved_draft("coverage-scan", complete=True)
+    draft["coverage"]["explicitExclusions"] = exclusions
+    source = worker(tmp_path, "first", draft)
+    expected = [{**row, "workerId": "first"} for row in exclusions]
+    if parent_present:
+        parent = copy.deepcopy(draft)
+        parent["coverage"]["explicitExclusions"] = expected
+        write_saved_parent(tmp_path, parent, 200)
+    result = recover(tmp_path, [source], project=True)
+    replay = recover(tmp_path, [source], project=True, frozen=result[0]["scan"]["preservedSources"])
+    assert result[2]["explicitExclusions"] == expected
+    assert replay[2] == result[2]
+    assert json.loads((Path(source["artifact_dir"]) / "result.json").read_bytes()) == draft
+
+
 @pytest.mark.parametrize("reverse_sources", [False, True])
 @pytest.mark.parametrize("reverse_surfaces", [False, True])
 def test_current_receipt_spelling_precedes_historical_receipts(
