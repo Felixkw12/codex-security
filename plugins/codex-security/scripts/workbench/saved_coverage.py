@@ -10,7 +10,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from candidate_identity import _deferred_candidate_id, is_candidate_row
+from candidate_identity import _deferred_candidate_id, coverage_candidate_key, is_candidate_row
 from finalize_scan_contract import (
     ContractError,
     _normalize_unsealed_open_questions,
@@ -155,12 +155,18 @@ def _prepare_worker_coverage_recovery(
             rows = draft["coverage"].get(field, [])
             if not isinstance(rows, list):
                 continue
+            legacy_candidates = []
             for index, row in enumerate(rows):
                 if field == "openQuestions" and isinstance(row, str):
                     row = {"question": row}
                     rows[index] = row
                 if not isinstance(row, dict):
                     continue
+                legacy = (
+                    {**copy.deepcopy(row), "sourceWorkerId": owner}
+                    if coverage_candidate_key(row, owner) is not None
+                    else None
+                )
                 row["workerId"] = owner
                 if field == "surfaces" and isinstance(row.get("receiptRefs"), list):
                     refs = []
@@ -179,8 +185,15 @@ def _prepare_worker_coverage_recovery(
                     row["receiptRefs"] = refs
                 if field == "surfaces":
                     row.setdefault("receiptRefs", [])
+                    if legacy is not None:
+                        legacy["receiptRefs"] = row["receiptRefs"]
+                if legacy is not None:
+                    legacy_candidates.append((_coverage_comparison_row(legacy, field), row))
             aggregate_rows = _aggregate_worker_coverage_rows(rows, owner, field)
             projected[field].extend(aggregate_rows)
+            # Earlier candidate-aware reducers copied the worker's local row
+            # with sourceWorkerId, before main qualified aggregate IDs.
+            projected[field].extend(aggregate for aggregate, _ in legacy_candidates)
             if field in {"surfaces", "deferred"}:
                 originals = surface_sources if field == "surfaces" else task_sources
                 originals.extend(
@@ -188,6 +201,7 @@ def _prepare_worker_coverage_recovery(
                     for aggregate, row in zip(aggregate_rows, rows)
                     if isinstance(aggregate, dict) and isinstance(row, dict)
                 )
+                originals.extend(legacy_candidates)
     # A canonical aggregate contains copies of the same worker evidence. Let
     # the existing per-worker chronology reconcile those originals exactly once.
     # Keep parent-only evidence when its bound worker source is unavailable.
