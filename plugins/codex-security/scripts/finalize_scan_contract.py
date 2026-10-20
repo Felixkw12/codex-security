@@ -588,14 +588,14 @@ def _open_scan_local_file_with_path(
     if not (os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW")):
         if not _is_windows():
             raise ContractError("scan-local input requires descriptor-relative file operations")
-        backend = _windows_scan_local_files()
         try:
             backend = _windows_scan_local_files()
             if resolve_spelling:
                 return backend.open_read_fd_with_path(scan_dir, relative_path, context)
             return backend.open_read_fd(scan_dir, relative_path, context), relative_path
         except OSError as exc:
-            if exc.errno in backend._MISSING_ERRORS:
+            # The Windows backend retains native ERROR_FILE/PATH_NOT_FOUND codes.
+            if exc.errno in {2, 3}:
                 raise MissingScanLocalFileError(str(exc)) from exc
             raise ContractError(str(exc)) from exc
     root_fd: int | None = None

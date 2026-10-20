@@ -20,6 +20,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from finalize_scan_contract import (
     ContractError,
+    MissingScanLocalFileError,
     _finding_strength,
     _populate_unsealed_artifact_envelope,
     _populate_unsealed_manifest_envelope,
@@ -270,10 +271,8 @@ def _read_saved_result(
         draft, _, metadata = _read_scan_local_json_with_metadata(
             scan_dir, relative, "Saved scan checkpoint"
         )
-    except ContractError as exc:
-        if not isinstance(exc.__cause__, FileNotFoundError) or not re.fullmatch(
-            r"checkpoints/[0-9a-f]{64}\.json", relative
-        ):
+    except MissingScanLocalFileError as exc:
+        if not re.fullmatch(r"checkpoints/[0-9a-f]{64}\.json", relative):
             raise
         name = Path(relative).name
         descriptor = open_scan_local_file_descriptor(
