@@ -70,25 +70,29 @@ export function adaptTrackingSchema(
   }
 }
 
-/** Adapt historical remote syntax for validation without changing saved data. */
-export function trackingRemoteForValidation(remote: string): string {
-  let compatible = remote.replace(/^file:\/\//iu, "https://");
-  const scoped = /^([a-z][a-z0-9+.-]*:\/\/)\[([^/?#\]]+)\](.*)$/iu.exec(
-    compatible,
-  );
-  if (scoped === null) return compatible;
-  const [address, scope, extra] = scoped[2]!.split("%");
-  if (
-    scope === undefined ||
-    scope.length === 0 ||
-    extra !== undefined ||
-    isIP(address!) !== 6 ||
-    /[\\/@?#\s<>^|\u0000-\u001f\u007f-\u009f\u2028\u2029]/u.test(scope)
-  ) {
-    return compatible;
+/** Preserve tracking's raw authority checks without URL host normalization. */
+export function isTrackingRemoteAuthority(authority: string): boolean {
+  // The historical parser rejects separators introduced by NFKC normalization.
+  const normalized = authority.replace(/[@:#?]/gu, "").normalize("NFKC");
+  if (/[/?#@:]/u.test(normalized)) return false;
+
+  const bracketed = authority.startsWith("[");
+  const parts = bracketed
+    ? /^\[([^\]]+)\](?::(.*))?$/u.exec(authority)
+    : /^([^:[\]]+)(?::(.*))?$/u.exec(authority);
+  if (parts === null) return false;
+  const hostname = parts[1]!;
+  const port = parts[2] ?? "";
+  if (bracketed) {
+    const [address, scope, extra] = hostname.split("%");
+    if (isIP(address!) !== 6 || scope === "" || extra !== undefined) {
+      return false;
+    }
   }
-  compatible = `${scoped[1]}[${address}]${scoped[3]}`;
-  return compatible;
+  return (
+    !/[\p{White_Space}\u001c-\u001f<>^|]/u.test(hostname) &&
+    (port === "" || (/^[0-9]+$/u.test(port) && Number(port) <= 65535))
+  );
 }
 
 /** Python's timestamp parser carries excess offset minutes into the hour. */

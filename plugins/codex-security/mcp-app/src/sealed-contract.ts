@@ -11,7 +11,7 @@ import { isRecord } from "./record.js";
 import {
   adaptTrackingSchema,
   isTrackingDateTime,
-  trackingRemoteForValidation,
+  isTrackingRemoteAuthority,
 } from "./tracking-contract-compat.js";
 import type {
   CoverageDocument,
@@ -235,7 +235,7 @@ function validateCanonicalContract(
   const remote = manifest.scan.target.remote;
   if (remote !== undefined) {
     const authority = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/([^/?#]+)/.exec(
-      remote,
+      profile === "tracking" ? remote.replace(/^ +/u, "") : remote,
     )?.[1];
     if (
       remote.includes("\\") ||
@@ -252,31 +252,42 @@ function validateCanonicalContract(
         "scan.target.remote: remote URL must not contain credentials, query, or fragment.",
       );
     }
-    let parsed: URL;
-    try {
-      parsed = new URL(
-        profile === "tracking" ? trackingRemoteForValidation(remote) : remote,
-      );
-    } catch (error) {
-      throw new ContractValidationError(
-        "scan.target.remote: expected a sanitized canonical absolute URL.",
-        { cause: error },
-      );
-    }
-    if (parsed.protocol.length === 0 || parsed.host.length === 0) {
-      throw new ContractValidationError(
-        "scan.target.remote: expected a sanitized canonical absolute URL.",
-      );
-    }
-    if (
-      parsed.username.length > 0 ||
-      parsed.password.length > 0 ||
-      parsed.search.length > 0 ||
-      parsed.hash.length > 0
-    ) {
-      throw new ContractValidationError(
-        "scan.target.remote: remote URL must not contain credentials, query, or fragment.",
-      );
+    if (profile === "tracking") {
+      if (!isTrackingRemoteAuthority(authority)) {
+        throw new ContractValidationError(
+          "scan.target.remote: expected a sanitized canonical absolute URL.",
+        );
+      }
+      if (/\?[^#]+|#./u.test(remote)) {
+        throw new ContractValidationError(
+          "scan.target.remote: remote URL must not contain credentials, query, or fragment.",
+        );
+      }
+    } else {
+      let parsed: URL;
+      try {
+        parsed = new URL(remote);
+      } catch (error) {
+        throw new ContractValidationError(
+          "scan.target.remote: expected a sanitized canonical absolute URL.",
+          { cause: error },
+        );
+      }
+      if (parsed.protocol.length === 0 || parsed.host.length === 0) {
+        throw new ContractValidationError(
+          "scan.target.remote: expected a sanitized canonical absolute URL.",
+        );
+      }
+      if (
+        parsed.username.length > 0 ||
+        parsed.password.length > 0 ||
+        parsed.search.length > 0 ||
+        parsed.hash.length > 0
+      ) {
+        throw new ContractValidationError(
+          "scan.target.remote: remote URL must not contain credentials, query, or fragment.",
+        );
+      }
     }
   }
 

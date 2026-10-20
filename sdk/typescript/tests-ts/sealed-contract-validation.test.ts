@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { readFile, writeFile } from "node:fs/promises";
+import { cp, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { loadContract } from "../src/contract.js";
@@ -19,7 +19,10 @@ afterEach(fixtures.cleanup);
 const { validateTrackingSource } = (
   await import(pathToFileURL(join(PLUGIN_ROOT, "mcp", "helpers.mjs")).href)
 ).default as {
-  validateTrackingSource(scanDir: string): Promise<Finding[]>;
+  validateTrackingSource(
+    scanDir: string,
+    options?: { pluginRoot: string },
+  ): Promise<Finding[]>;
 };
 
 type Documents = {
@@ -301,6 +304,129 @@ test.each(historicalTrackingCases)(
         paths.map((path) => readFile(join(documents.scanDir, path))),
       ),
     ).toEqual(before);
+  },
+);
+
+const remoteAuthorityCases: Array<[string, boolean, boolean]> = [
+  [" https://example.test/repo", true, false],
+  ["  ssh://example.test/repo", true, false],
+  ["\u00a0https://example.test/repo", false, false],
+  ["\ufeffhttps://example.test/repo", false, false],
+  ["https://example.test ", false, true],
+  ["https://example.test /repo", false, false],
+  ["https://example.test/repo ", true, true],
+  ["https://example.123/repo", true, false],
+  ["https://example.123:443/repo", true, false],
+  ["https://example.123./repo", true, false],
+  ["https://example.09/repo", true, false],
+  ["https://256.256.256.256/repo", true, false],
+  ["https://example.123x/repo", true, true],
+  ["file://example.123/repo", true, false],
+  ["https://exa%20mple.test/repo", true, false],
+  ["https://exa%40mple.test/repo", true, false],
+  ["https://exa%2fmple.test/repo", true, false],
+  ["https://exa%00mple.test/repo", true, false],
+  ["https://exa%zzmple.test/repo", true, false],
+  ["https://exa%mple.test/repo", true, false],
+  ["ssh://exa%20mple.test/repo", true, true],
+  ["ssh://exa\u00a0mple.test/repo", false, true],
+  ["ssh://exa\u2007mple.test/repo", false, true],
+  ["ssh://exa\u202fmple.test/repo", false, true],
+  ["ssh://exa\u3000mple.test/repo", false, true],
+  ["ssh://exa\ufeffmple.test/repo", true, true],
+  ["ssh://exa\u200bmple.test/repo", true, true],
+  ["ssh://exa\uff1ample.test/repo", false, true],
+  ["ssh://exa\uff20mple.test/repo", false, true],
+  ["ssh://exa\uff0fmple.test/repo", false, true],
+  ["ssh://exa\uff1fmple.test/repo", false, true],
+  ["ssh://exa\uff03mple.test/repo", false, true],
+  ["ssh://exa\u2100mple.test/repo", false, true],
+  ["ssh://ex\uff41mple.test/repo", true, true],
+  ["ssh://[fe80::1%eth\ufeff0]/repo", true, false],
+  ["ssh://[fe80::1%eth\u00a00]/repo", false, false],
+  ["ssh://[::1]:/repo", true, true],
+  ["ssh://[::1]suffix/repo", false, false],
+  ["ssh://[::1]]/repo", false, false],
+  ["ssh://[::1]:22:23/repo", false, false],
+  ["ssh://example.test:/repo", true, true],
+  ["ssh://example.test:00022/repo", true, true],
+  ["ssh://example.test:65535/repo", true, true],
+  ["ssh://example.test:65536/repo", false, false],
+  ["ssh://example.test:+22/repo", false, false],
+  ["ssh://example.test:\uff12\uff12/repo", false, false],
+];
+
+test.each(remoteAuthorityCases)(
+  "preserves tracking and SDK remote authority admission for %s",
+  async (remote, trackingAccepts, sdkAccepts) => {
+    const documents = await fixture();
+    documents.manifest.scan.target.remote = remote;
+    await saveAndSeal(documents);
+    const manifestPath = join(documents.scanDir, "scan-manifest.json");
+    const before = await readFile(manifestPath);
+    const message = "expected a sanitized canonical absolute URL";
+    if (trackingAccepts) {
+      expect(await validateTrackingSource(documents.scanDir)).toEqual(
+        documents.findings.findings,
+      );
+    } else {
+      await expect(validateTrackingSource(documents.scanDir)).rejects.toThrow(
+        message,
+      );
+    }
+    if (sdkAccepts) {
+      expect(
+        (await loadContract(documents.scanDir, { pluginRoot: PLUGIN_ROOT }))
+          .manifest,
+      ).toEqual(documents.manifest);
+    } else {
+      await expect(
+        loadContract(documents.scanDir, { pluginRoot: PLUGIN_ROOT }),
+      ).rejects.toThrow(message);
+    }
+    expect(await readFile(manifestPath)).toEqual(before);
+  },
+);
+
+test.each([
+  ["?query", false],
+  ["#fragment", false],
+  ["?query#fragment", false],
+  ["#?", false],
+  ["?", true],
+  ["#", true],
+  ["?#", true],
+] as const)(
+  "preserves remote delimiter semantics with custom schemas: %s",
+  async (suffix, accepts) => {
+    const documents = await fixture();
+    documents.manifest.scan.target.remote = `ssh://example.test/repo${suffix}`;
+    await saveAndSeal(documents);
+    const pluginRoot = await fixtures.temporaryDirectory();
+    await cp(join(PLUGIN_ROOT, "schemas"), join(pluginRoot, "schemas"), {
+      recursive: true,
+    });
+    const schemaPath = join(pluginRoot, "schemas", "scan-manifest.schema.json");
+    const schema = JSON.parse(await readFile(schemaPath, "utf8"));
+    delete schema.properties.scan.properties.target.properties.remote.pattern;
+    await writeJson(schemaPath, schema);
+    if (accepts) {
+      expect(
+        await validateTrackingSource(documents.scanDir, { pluginRoot }),
+      ).toEqual(documents.findings.findings);
+      expect(
+        (await loadContract(documents.scanDir, { pluginRoot })).manifest,
+      ).toEqual(documents.manifest);
+    } else {
+      const message =
+        "remote URL must not contain credentials, query, or fragment";
+      await expect(
+        validateTrackingSource(documents.scanDir, { pluginRoot }),
+      ).rejects.toThrow(message);
+      await expect(
+        loadContract(documents.scanDir, { pluginRoot }),
+      ).rejects.toThrow(message);
+    }
   },
 );
 
