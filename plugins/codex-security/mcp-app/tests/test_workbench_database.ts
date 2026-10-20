@@ -993,7 +993,7 @@ test("retries an upgrade when another process holds the write lock beyond the bu
 });
 
 test("composition upgrades repair stored paths and public findings before Python opens them", async () => {
-  for (const pending of [51, 55, 56]) {
+  for (const pending of [53, 57, 58]) {
     const directory = await temporary.create("workbench-composition-upgrade-");
     const databasePath = join(directory, "workbench.sqlite3");
     const oldParent = join(directory, "deep");
@@ -1147,7 +1147,7 @@ with sqlite3.connect(sys.argv[2]) as db:
 });
 
 test("unindexed severity recovery matches stable occurrences without replacing assessments", (t) => {
-  const database = memory(t, 53);
+  const database = memory(t, 55);
   for (const id of ["recover", "mismatch", "preserve"]) {
     database
       .prepare(
@@ -1164,7 +1164,9 @@ test("unindexed severity recovery matches stable occurrences without replacing a
       )
       .run(id, id === "mismatch" ? "unrelated" : occurrence);
   }
-  database.exec(`INSERT INTO scan_severity_classifications VALUES ('scan', '["recover","mismatch","preserve"]', 'created', NULL, NULL);
+  database.exec(`INSERT INTO scan_severity_classifications
+    (scan_id, finding_ids_json, assessed_at, rubric_sha256, knowledge_base_sha256)
+    VALUES ('scan', '["recover","mismatch","preserve"]', 'created', NULL, NULL);
     INSERT INTO scan_severity_assessments
       (scan_id, finding_id, input_sha256, assessed_at, source, decision, level, rationale)
       VALUES ('scan', 'preserve', 'original', 'created', 'rubric', 'assessed', 'low', 'preserved');`);
@@ -1173,7 +1175,7 @@ test("unindexed severity recovery matches stable occurrences without replacing a
   assert.throws(() => applyMigrations(database), /fixture storage failure/u);
   assert.equal(
     database
-      .prepare("SELECT 1 FROM schema_migrations WHERE version = 54")
+      .prepare("SELECT 1 FROM schema_migrations WHERE version = 56")
       .get(),
     undefined,
   );
@@ -1197,34 +1199,34 @@ test("pre-release composition history moves without shadowing editable scan name
   const database = memory(t);
   applyMigrations(
     database,
-    migrations.filter((item) => item.version <= 43 || item.version >= 51),
+    migrations.filter((item) => item.version <= 43 || item.version >= 53),
   );
   database.exec(
     "DELETE FROM schema_migrations WHERE version = 42; ALTER TABLE scans DROP COLUMN name;",
   );
   for (const [from, to] of [
     [43, 42],
-    [51, 43],
-    [52, 44],
-    [53, 45],
-    [54, 46],
-    [55, 48],
-    [56, 49],
+    [53, 43],
+    [54, 44],
+    [55, 45],
+    [56, 46],
+    [57, 48],
+    [58, 49],
   ])
     database
       .prepare("UPDATE schema_migrations SET version = ? WHERE version = ?")
       .run(to, from);
   database.exec(
-    "INSERT INTO schema_migrations VALUES (51, 'synthetic conflicting history', 'created')",
+    "INSERT INTO schema_migrations VALUES (53, 'synthetic conflicting history', 'created')",
   );
   const history = () =>
     database.prepare("SELECT * FROM schema_migrations ORDER BY version").all();
   const before = history();
   assert.throws(() => applyMigrations(database));
   assert.deepEqual(history(), before);
-  database.exec("DELETE FROM schema_migrations WHERE version = 51");
+  database.exec("DELETE FROM schema_migrations WHERE version = 53");
   applyMigrations(database);
-  assertMigrationNames(database, 42, 43, 51, 52, 53, 54, 55, 56);
+  assertMigrationNames(database, 42, 43, 51, 52, 53, 54, 55, 56, 57, 58);
   assert.ok(
     database
       .prepare("PRAGMA table_info(scans)")
@@ -1235,21 +1237,20 @@ test("pre-release composition history moves without shadowing editable scan name
 
 for (const version of [43, 50])
   test(`released severity history ${version} opens without replaying its table migration`, (t) => {
-    const database = memory(t, 50);
+    const database = memory(t, 43);
     database
       .prepare("UPDATE schema_migrations SET version = ? WHERE version = 43")
       .run(version);
     const schema = () =>
       database
-        .prepare(
-          "SELECT sql FROM sqlite_master WHERE name = 'scan_severity_assessments'",
-        )
-        .get();
+        .prepare("PRAGMA table_info(scan_severity_assessments)")
+        .all()
+        .filter((column) => column.name !== "classification_runs");
     const before = schema();
     applyMigrations(database);
     applyMigrations(database);
     assert.deepEqual(schema(), before);
-    assertMigrationNames(database, 42, 43, 51, 52, 53, 54, 55, 56);
+    assertMigrationNames(database, 42, 43, 51, 52, 53, 54, 55, 56, 57, 58);
     assert.equal(
       database.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()!
         .count,

@@ -94,12 +94,13 @@ EXPECTED_MIGRATIONS = [
     (49, "index finding issue receipt ownership"),
     (50, "persist authorized source excerpt scopes"),
     (51, "preserve deep scan worker thread history"),
-    (52, "persist composition child membership"),
-    (53, "reuse scan severity assessments"),
-    (54, "persist scan execution sessions"),
-    (55, "recover unindexed severity assessments"),
-    (56, "repair stored composition membership"),
-    (57, "repair archived composition paths"),
+    (52, "record severity classification review counts"),
+    (53, "persist composition child membership"),
+    (54, "reuse scan severity assessments"),
+    (55, "persist scan execution sessions"),
+    (56, "recover unindexed severity assessments"),
+    (57, "repair stored composition membership"),
+    (58, "repair archived composition paths"),
 ]
 
 
@@ -959,7 +960,7 @@ def test_comparison_indexes_upgrade_without_skipping_findings_migrations(
 
 
 @pytest.mark.parametrize("indexed", [False, True])
-@pytest.mark.parametrize("previous_version", [41, 54, 55])
+@pytest.mark.parametrize("previous_version", [41, 52, 55, 56])
 def test_severity_migration_preserves_assessments_for_their_original_scan(
     indexed: bool,
     previous_version: int,
@@ -1022,12 +1023,16 @@ def test_severity_migration_preserves_assessments_for_their_original_scan(
             namespace["now"],
             namespace["backfill_security_targets"],
         )
-        updated = previous_version == 55 or (previous_version == 54 and indexed)
+        if previous_version >= 52:
+            connection.execute("UPDATE finding_severity_assessments SET classification_runs = 3")
+            connection.execute("UPDATE scan_severity_assessments SET classification_runs = 5")
+            connection.execute("UPDATE scan_severity_classifications SET classification_runs = 3")
+        updated = previous_version == 56 or (previous_version == 55 and indexed)
         if updated:
             connection.execute(
                 "UPDATE scan_severity_assessments SET rationale = 'Updated assessment'"
             )
-        if previous_version >= 53:
+        if previous_version >= 54:
             assert (
                 connection.execute(
                     "SELECT 1 FROM sqlite_master WHERE name = 'scan_severity_reuse'"
@@ -1047,6 +1052,21 @@ def test_severity_migration_preserves_assessments_for_their_original_scan(
             "SELECT scan_id, occurrence_id FROM scan_severity_assessments"
         ).fetchall()
         assert [tuple(row) for row in migrated] == [("second-scan", occurrence_id)]
+        expected_runs = (
+            None if previous_version < 52 else 5 if indexed or previous_version >= 56 else 3
+        )
+        assert (
+            connection.execute(
+                "SELECT classification_runs FROM scan_severity_assessments"
+            ).fetchone()[0]
+            == expected_runs
+        )
+        assert {
+            row[0]
+            for row in connection.execute(
+                "SELECT classification_runs FROM scan_severity_classifications"
+            )
+        } == {None if previous_version < 52 else 3}
         assert connection.execute("SELECT rationale FROM scan_severity_assessments").fetchone()[
             0
         ] == ("Updated assessment" if updated else "Saved severity")
@@ -2252,7 +2272,7 @@ def test_workbench_repairs_shadowed_scan_recipe_migration(tmp_path: Path) -> Non
     with sqlite3.connect(database) as connection:
         connection.execute("DROP INDEX scans_by_composition_parent")
         connection.execute("ALTER TABLE scans DROP COLUMN parent_scan_role")
-        connection.execute("DELETE FROM schema_migrations WHERE version = 52")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 53")
         connection.execute("ALTER TABLE scans DROP COLUMN parent_scan_id")
         connection.execute("ALTER TABLE scans DROP COLUMN recipe_json")
         connection.execute(
@@ -2999,16 +3019,26 @@ def test_workbench_reconciles_profile_and_public_warning_histories(
 
 
 @pytest.mark.parametrize(
-    "history", ["main", "main-severity", "published-composition", "current-composition"]
+    "history",
+    [
+        "main",
+        "main-severity",
+        "released-main",
+        "published-composition",
+        "current-composition",
+        "previous-merge",
+    ],
 )
 def test_workbench_upgrades_colliding_released_migration_histories(history: str) -> None:
     namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
     timestamp = "2026-09-01T00:00:00Z"
-    old_versions = {43: 42, 52: 43, 53: 44, 54: 45, 55: 46, 56: 48, 57: 49}
-    if history == "main-severity":
+    old_versions = {43: 42, 53: 43, 54: 44, 55: 45, 56: 46, 57: 48, 58: 49}
+    if history in {"main-severity", "released-main"}:
         old_versions = {}
     elif history == "current-composition":
-        old_versions = {43: 50, **{version: version - 1 for version in range(52, 58)}}
+        old_versions = {43: 50, **{version: version - 2 for version in range(53, 59)}}
+    elif history == "previous-merge":
+        old_versions = {version: version - 1 for version in range(53, 59)}
     historical = [
         (old_versions.get(version, version), name, sql)
         for version, name, sql in namespace["MIGRATIONS"]
@@ -3017,9 +3047,13 @@ def test_workbench_upgrades_colliding_released_migration_histories(history: str)
             if history == "main"
             else version <= 43
             if history == "main-severity"
-            else (version <= 41 or version == 43 or version >= 52)
+            else version <= 52
+            if history == "released-main"
+            else (version <= 41 or version == 43 or version >= 53)
             if history == "published-composition"
-            else (version <= 43 or version >= 52)
+            else version != 52
+            if history == "previous-merge"
+            else (version <= 43 or version >= 53)
         )
     ]
     with sqlite3.connect(":memory:") as connection:

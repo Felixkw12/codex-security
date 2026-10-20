@@ -44,6 +44,7 @@ function save(
       evidence: { count: 18446744073709551617n },
     },
     assessment: {
+      classificationRuns: null,
       findingId,
       occurrenceId: `occurrence-${findingId}`,
       inputSha256: "evidence-digest",
@@ -64,7 +65,7 @@ function save(
 function begin(
   scanId: string,
   findingIds: string[],
-): Severity.SeverityCheckpoint {
+): Extract<Severity.SeverityCheckpoint, { action: "begin" }> {
   return {
     action: "begin",
     scanId,
@@ -186,6 +187,7 @@ for (const indexed of [false, true]) {
 test("severity checkpoints retain external findings and isolate each scan's assessments", (t) => {
   const database = open(t);
   const payload = save("finding\0suffix", "scan-a");
+  payload.assessment.classificationRuns = 10;
   for (const field of [
     "occurrenceId",
     "inputSha256",
@@ -240,6 +242,54 @@ test("severity checkpoints retain external findings and isolate each scan's asse
       .get(payload.finding.findingId)!.details_json,
     details,
   );
+});
+
+test("severity review counts remain scan-local when an existing assessment is replaced", async (t) => {
+  const directory = await temporary.create("severity-review-counts-");
+  const path = join(directory, "workbench.sqlite3");
+  const database = open(t, path);
+  const first = save("finding", "scan-a");
+  first.assessment.classificationRuns = 1;
+  const other = save("finding", "scan-b");
+  other.assessment.classificationRuns = 3;
+  other.assessment.level = "low";
+  for (const payload of [first, other]) {
+    severityCheckpoint(
+      database,
+      {
+        ...begin(payload.scanId, ["finding"]),
+        classificationRuns: payload.assessment.classificationRuns!,
+      },
+      "started",
+    );
+    severityCheckpoint(database, payload, "first");
+  }
+
+  const requested = { ...begin("scan-a", ["finding"]), classificationRuns: 3 };
+  const previous = severityCheckpoint(
+    database,
+    requested,
+    "restarted",
+  ).assessments!;
+  assert.equal(previous[0].classificationRuns, 1);
+  assert.equal(previous[0].level, "high");
+
+  first.assessment.classificationRuns = 3;
+  first.assessment.level = "medium";
+  severityCheckpoint(database, first, "replacement");
+  const result = readSeverityClassification(path, "scan-a") as {
+    classificationRuns: number;
+    assessments: { classificationRuns: number; level: string }[];
+  };
+  assert.equal(result.classificationRuns, 3);
+  assert.deepEqual(
+    result.assessments.map(({ classificationRuns, level }) => ({
+      classificationRuns,
+      level,
+    })),
+    [{ classificationRuns: 3, level: "medium" }],
+  );
+  assert.equal(assessments(database, ["finding"], "scan-b")[0].level, "low");
 });
 
 test("failed assessment writes roll back external finding insertion and preserve the cache", (t) => {

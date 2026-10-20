@@ -2400,13 +2400,13 @@ def test_membership_migration_backfills_stored_paths_once(
     marker = parent_dir / "saved-output.txt"
     marker.write_bytes(b"Saved outputs must not change during migration.")
     with sqlite3.connect(database) as connection:
-        connection.execute("DELETE FROM schema_migrations WHERE version = 55")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 57")
         if already_applied:
             connection.execute("UPDATE scans SET parent_scan_role = NULL")
         else:
             connection.execute("DROP INDEX scans_by_composition_parent")
             connection.execute("ALTER TABLE scans DROP COLUMN parent_scan_role")
-            connection.execute("DELETE FROM schema_migrations WHERE version = 51")
+            connection.execute("DELETE FROM schema_migrations WHERE version = 53")
         before = connection.execute(
             "SELECT id, parent_scan_id, scan_dir, status FROM scans ORDER BY id"
         ).fetchall()
@@ -2427,7 +2427,7 @@ def test_membership_migration_backfills_stored_paths_once(
             rerun["scanId"]: None,
         }
         assert connection.execute(
-            "SELECT COUNT(*) FROM schema_migrations WHERE version = 51"
+            "SELECT COUNT(*) FROM schema_migrations WHERE version = 53"
         ).fetchone() == (1,)
     saved_marker = tmp_path / "removed-output/saved-output.txt" if missing_outputs else marker
     assert saved_marker.read_bytes() == b"Saved outputs must not change during migration."
@@ -2711,7 +2711,7 @@ def test_artifact_thread_ids_do_not_become_execution_log_roots(
     if migrate:
         with sqlite3.connect(state / "workbench.sqlite3") as connection:
             connection.execute("DROP TABLE scan_execution_threads")
-            connection.execute("DELETE FROM schema_migrations WHERE version = 53")
+            connection.execute("DELETE FROM schema_migrations WHERE version = 55")
     saved = run_workbench(state, "get-scan", "--scan-id", scan["scanId"])["scan"]
     assert saved["threadIds"] == ["owned-thread"]
     assert saved["executionThreadIds"] == ["owned-thread"]
@@ -2977,11 +2977,11 @@ def test_membership_migration_rebuilds_public_finding_projections(
         locations = connection.execute(
             "SELECT * FROM finding_locations ORDER BY occurrence_id"
         ).fetchall()
-        connection.execute("DELETE FROM schema_migrations WHERE version = 55")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 57")
         if not already_applied:
             connection.execute("DROP INDEX scans_by_composition_parent")
             connection.execute("ALTER TABLE scans DROP COLUMN parent_scan_role")
-            connection.execute("DELETE FROM schema_migrations WHERE version = 51")
+            connection.execute("DELETE FROM schema_migrations WHERE version = 53")
         connection.commit()
         assert (
             connection.execute(
@@ -3182,9 +3182,9 @@ def test_membership_upgrade_recovers_children_archived_by_legacy_parent_only_mov
         connection.execute(
             "UPDATE scans SET scan_dir = ? WHERE id = ?", (str(archived), parent["scanId"])
         )
-        connection.execute("DELETE FROM schema_migrations WHERE version = 56")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 58")
         if not already_applied:
-            connection.execute("DELETE FROM schema_migrations WHERE version IN (51, 55)")
+            connection.execute("DELETE FROM schema_migrations WHERE version IN (53, 57)")
             connection.execute("DROP INDEX scans_by_composition_parent")
             connection.execute("ALTER TABLE scans DROP COLUMN parent_scan_role")
     original = {
@@ -3211,7 +3211,7 @@ def test_membership_upgrade_recovers_children_archived_by_legacy_parent_only_mov
         assert artifacts
         assert all(Path(path).is_relative_to(archived / child_path) for (path,) in artifacts)
         assert connection.execute(
-            "SELECT COUNT(*) FROM schema_migrations WHERE version = 56"
+            "SELECT COUNT(*) FROM schema_migrations WHERE version = 58"
         ).fetchone() == (1,)
     assert {scan["scanId"] for scan in run_workbench(state, "list-scans")["scans"]} == {
         parent["scanId"],

@@ -206,9 +206,9 @@ def apply_migrations(
                     connection.execute(statement)
                 if version == 38:
                     migrate_finding_workflow_results(connection)
-                elif version in (52, 56, 57):
+                elif version in (53, 57, 58):
                     backfill_composition_children(connection)
-                elif version == 55:
+                elif version == 56:
                     backfill_unindexed_severity_assessments(connection)
             if version not in applied:
                 connection.execute(

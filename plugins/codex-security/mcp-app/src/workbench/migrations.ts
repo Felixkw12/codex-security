@@ -364,9 +364,9 @@ export function applyMigrations(
       } else {
         database.exec(item.statements.join("\n"));
         if (item.version === 38) migrateWorkflowResults(database);
-        else if ([52, 56, 57].includes(item.version))
+        else if ([53, 57, 58].includes(item.version))
           backfillCompositionChildren(database);
-        else if (item.version === 55)
+        else if (item.version === 56)
           backfillUnindexedSeverityAssessments(database);
       }
       if (!applied.has(item.version)) {
