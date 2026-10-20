@@ -729,12 +729,24 @@ describe("reviewed release note helpers", () => {
   });
 
   test("composes reviewed and generated notes deterministically", () => {
-    expect(composeReleaseNotes("Generated notes", "Reviewed summary")).toBe(
-      "<!-- codex-security-release-summary:start -->\n" +
-        "Reviewed summary\n" +
-        "<!-- codex-security-release-summary:end -->\n\n" +
-        "Generated notes",
-    );
+    const summary = "## Highlights\n\nReviewed summary";
+    const generated = [
+      "## What's Changed",
+      "",
+      "- A change ([#1](https://github.com/example/project/pull/1))",
+      "",
+      "## New Contributors",
+      "",
+      "- @contributor",
+    ].join("\n");
+    const notes = composeReleaseNotes(generated, summary);
+    expect(extractHistoricalReleaseSummary(notes)).toBe(summary);
+    expect(notes.indexOf(summary)).toBeLessThan(notes.indexOf("<details>"));
+    expect(notes).toContain(`</summary>\n\n${generated}\n\n</details>`);
+    expect(notes.match(/<details>/gu)).toHaveLength(1);
+    expect(
+      composeReleaseNotes(generated, extractHistoricalReleaseSummary(notes)),
+    ).toBe(notes);
     expect(composeReleaseNotes("Generated notes", null)).toBe(
       "Generated notes",
     );
@@ -2644,11 +2656,11 @@ describe("GitHub release workflow safeguards", () => {
     );
   });
 
-  test("runs manually dispatched GitHub releases from trusted main", () => {
+  test("runs manually dispatched GitHub releases from the main commit selected for the run", () => {
     expect(githubReleaseWorkflow).toContain("workflow_dispatch:");
     expect(githubReleaseWorkflow).toContain("github.ref == 'refs/heads/main'");
     expect(githubReleaseWorkflow).toMatch(
-      /- name: Checkout release automation\n(?:[^\n]*\n)*?\s+ref: refs\/heads\/main/u,
+      /- name: Checkout release automation\n(?:[^\n]*\n)*?\s+ref: \$\{\{ github\.sha \}\}/u,
     );
   });
 
@@ -3656,7 +3668,7 @@ describe("GitHub release workflow safeguards", () => {
     expect(nodeCiWorkflow).toContain("needs: validate-title");
   });
 
-  test("keeps required contexts stable for every change", async () => {
+  test("runs source validation with required check names for every PR edit", async () => {
     const workflow = Bun.YAML.parse(nodeCiWorkflow) as {
       concurrency: {
         group: string;
@@ -3667,6 +3679,7 @@ describe("GitHub release workflow safeguards", () => {
         {
           name: string;
           if?: string;
+          needs?: string | string[];
           "timeout-minutes"?: number;
           strategy?: { matrix: Record<string, string[]> };
           steps: Array<{
@@ -3678,13 +3691,14 @@ describe("GitHub release workflow safeguards", () => {
       >;
     };
 
-    expect(workflow.concurrency.group).toBe(
-      "${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}",
-    );
+    const sourceGroup =
+      "${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}";
+    expect(workflow.concurrency.group).toBe(sourceGroup);
     expect(workflow.concurrency["cancel-in-progress"]).toBe(
       "${{ github.event_name == 'pull_request' }}",
     );
     expect(workflow.jobs["validate-title"]?.["timeout-minutes"]).toBe(10);
+    expect(workflow.jobs["validate-title"]?.if).toBeUndefined();
     expect(
       workflow.jobs["validate-title"]?.steps.find(
         ({ name }) =>
@@ -3705,9 +3719,16 @@ describe("GitHub release workflow safeguards", () => {
     ]) {
       expect(workflow.jobs[job]?.if).toBeUndefined();
     }
-    const requiredJobCondition = "always()";
-    expect(workflow.jobs["required-test"]?.if).toBe(requiredJobCondition);
-    expect(workflow.jobs["windows"]?.if).toBe(requiredJobCondition);
+    for (const [name, job] of Object.entries(workflow.jobs)) {
+      if (["validate-title", "required-test", "windows"].includes(name)) {
+        continue;
+      }
+      expect([job.needs].flat(), name).toContain("validate-title");
+      expect(job.if ?? "", name).not.toMatch(/\b(always|failure|cancelled)\(/u);
+    }
+    for (const job of ["required-test", "windows"]) {
+      expect(workflow.jobs[job]?.if).toBe("always()");
+    }
     const coverageGate = (job: string) =>
       workflow.jobs[job]?.steps.find(
         ({ name }) =>
@@ -3803,23 +3824,28 @@ describe("GitHub release workflow safeguards", () => {
     };
     const unixJob = workflow.jobs["required-test"];
     const windowsJob = workflow.jobs["windows"];
-    const fullNames = [
-      ...(unixJob?.strategy?.matrix["os"] ?? []).map((os) =>
-        renderName(unixJob?.name ?? "", { os }),
-      ),
-      ...(windowsJob?.strategy?.matrix["node"] ?? []).map((node) =>
-        renderName(windowsJob?.name ?? "", { node }),
-      ),
-    ];
     const requiredContexts = new Set([
       "ubuntu-latest / node-22",
       "macos-latest / node-22",
       "windows-latest / node-22",
     ]);
-
-    expect(
-      fullNames.filter((name) => requiredContexts.has(name)).sort(),
-    ).toEqual([...requiredContexts].sort());
+    const names = [
+      ...(unixJob?.strategy?.matrix["os"] ?? []).map((os) =>
+        renderName(unixJob!.name, { os }),
+      ),
+      ...(windowsJob?.strategy?.matrix["node"] ?? []).map((node) =>
+        renderName(windowsJob!.name, { node }),
+      ),
+    ];
+    expect(names).toEqual([
+      "ubuntu-latest / node-22",
+      "macos-latest / node-22",
+      "windows-latest / node-22",
+      "windows-latest / node-24",
+    ]);
+    expect(names.filter((name) => requiredContexts.has(name)).sort()).toEqual(
+      [...requiredContexts].sort(),
+    );
   });
 
   test("documents a canonical historical-summary prefix block", () => {
