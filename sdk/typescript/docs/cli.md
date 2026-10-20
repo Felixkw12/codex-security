@@ -391,6 +391,7 @@ codex-security scan .
 codex-security scan . --path src --path tests
 codex-security scan . --diff origin/main --json
 codex-security scan . --working-tree
+codex-security scan . --owner-suggestions
 codex-security scan . --output-dir /path/outside/repository/results --dry-run
 ```
 
@@ -406,6 +407,13 @@ Committed-diff scans require a clean, full checkout at the requested head
 revision, including when using `--validate`. A different checkout revision or
 local changes are rejected before scanning; check out the requested head and
 commit or stash local changes before retrying.
+
+`--owner-suggestions` writes optional `owner-suggestions.json` after a completed
+committed Git scan, using the same checkout, model, and reasoning effort. Owner
+errors leave the base scan completed. The JSON result includes
+`ownerSuggestionsPath` or `ownerSuggestionsError`; the sealed findings and
+manifest stay unchanged. This option is unsupported for working-tree and
+directory snapshots, and is skipped with a warning when `--max-cost` is set.
 
 Repeat `--knowledge-base PATH` for context: UTF-8 text files (including JSON and
 SARIF), PDF, DOCX, or directories. Directory traversal skips other binary files;
