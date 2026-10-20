@@ -43,21 +43,11 @@ jobs:
         id: windows-temp
         shell: pwsh
         run: ./sdk/typescript/scripts/prepare-windows-test-root.ps1
-      - name: Reproduce scan then policy
-        working-directory: sdk/typescript
+      - name: Reproduce the failing Windows shard and seed
         env:
           TEMP: ${{ steps.windows-temp.outputs.path }}
           TMP: ${{ steps.windows-temp.outputs.path }}
           TMPDIR: ${{ steps.windows-temp.outputs.path }}
-        run: |
-          bun test --timeout 120000 tests-ts/config.test.ts -t "allows scan helpers to write workspace files"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          bun test --timeout 120000 tests-ts/config.test.ts -t "reads policy source without exposing credentials"
-          exit $LASTEXITCODE
-      - name: Reproduce the failing main seed in one test process
-        working-directory: sdk/typescript
-        env:
-          TEMP: ${{ steps.windows-temp.outputs.path }}
-          TMP: ${{ steps.windows-temp.outputs.path }}
-          TMPDIR: ${{ steps.windows-temp.outputs.path }}
-        run: bun test --timeout 120000 tests-ts/config.test.ts --seed=13523
+          CODEX_SECURITY_TEST_TIMEOUT_MS: "120000"
+          CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "false"
+        run: node --experimental-strip-types sdk/typescript/scripts/run-ci-tests.mts 3/7 --seed=13523
