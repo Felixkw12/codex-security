@@ -214,7 +214,7 @@ sys.path.insert(0, sys.argv[1])
 import finalize_scan_contract as finalizer
 payload = json.load(sys.stdin)
 with tempfile.TemporaryDirectory() as directory:
-    root = pathlib.Path(directory)
+    root = pathlib.Path(directory).resolve()
     (root / "scan-manifest.json").write_text(json.dumps({"scan": payload["scan"]}))
     (root / "threatmodel.md").write_bytes(payload["markdown"].encode("utf-8"))
     print(finalizer.describe_threat_model(root)["path"] == str(root / "threatmodel.md"))

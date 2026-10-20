@@ -324,7 +324,7 @@ test("saved-model rendering does not require the worker's Python interpreter", a
 });
 
 test("overlapping draft projections retain the latest committed model", async (t) => {
-  const root = await temporaryDirectory("threatmodel-concurrent-");
+  const root = await temporaryDirectory("threatmodel-concurrent-", true);
   const firstStarted = Promise.withResolvers<string>();
   const releaseFirst = Promise.withResolvers<void>();
   const originalRename = fs.rename;
