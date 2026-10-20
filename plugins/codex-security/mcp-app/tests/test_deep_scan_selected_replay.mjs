@@ -33,7 +33,6 @@ for (const terminalReason of ["saturated", "capped"]) {
         complete: true,
         findings: [],
         coverage: {
-          completeness: "partial",
           surfaces: [],
           explicitExclusions: [],
           deferred: [

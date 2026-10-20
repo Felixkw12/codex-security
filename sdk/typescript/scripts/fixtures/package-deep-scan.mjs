@@ -76,7 +76,9 @@ try {
 
   const checks = await Promise.allSettled([
     runInstalledSdk(installedPlugin, executable).then(() =>
-      console.log("Validated installed SDK direct Deep Scan and worker retry."),
+      console.log(
+        "Validated installed SDK parent-driven Deep Scan and worker retry.",
+      ),
     ),
     runInstalledDirectSdk(installedPlugin, executable),
     runDetachedPlugin(detachedPlugin, executable).then(() =>
@@ -404,6 +406,7 @@ async function runInstalledSdk(pluginRoot, executable) {
       environment: f.env,
       prepareRuntime: async () => ({
         codexHome: f.home,
+        deepScanConfigPath: join(f.home, "deep-scan-config.toml"),
         environment: f.env,
         credentialsAvailable: true,
         plugin: {
@@ -415,7 +418,7 @@ async function runInstalledSdk(pluginRoot, executable) {
           version: manifest.version,
         },
       }),
-      supportsDirectDeepScan: async () => false,
+      canRunDirectDeepScan: () => false,
       // Replace only the parent model's tool choice. The installed SDK registers
       // and finalizes the scan; the packaged MCP runs the real Deep lifecycle.
       createCodex({ env, apiKey }) {

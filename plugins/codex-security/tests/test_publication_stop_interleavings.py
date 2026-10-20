@@ -204,7 +204,7 @@ def test_stop_and_publication_keep_the_winning_terminal_outcome(
         if cut != "sealed":
             published_coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
             assert coverage["deferred"][0] in published_coverage["deferred"]
-            assert published_coverage["completeness"] == "partial"
+            assert "completeness" not in published_coverage
 
 
 @pytest.mark.parametrize("cut", ["before", "after"])

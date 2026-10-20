@@ -1737,7 +1737,20 @@ function reduction<Finding extends Record<string, unknown>>(
 }
 
 async function testDiscoveryRequiresCurrentCheckpoint(root: string) {
-  const first = draft([finding("first", "src/a.js")]);
+  const first = draft([finding("first", "src/a.js")], {
+    coverage: {
+      surfaces: [
+        {
+          id: "source",
+          label: "Source",
+          disposition: "reported",
+          receiptRefs: ["artifacts/source.md"],
+        },
+      ],
+      explicitExclusions: [],
+      deferred: [],
+    },
+  });
   const current = draft([finding("current", "src/b.js")]);
   const { artifacts, ...worker } = await createWorker(
     path.join(root, "checkpoint-publication"),
@@ -1750,7 +1763,15 @@ async function testDiscoveryRequiresCurrentCheckpoint(root: string) {
     layout: "worker" as const,
     scanId,
   };
+  await mkdir(path.join(context.root, "artifacts"));
+  const receipt = path.join(context.root, "artifacts/source.md");
+  await writeFile(receipt, "Original source review.\n");
   await saveScanDraftCheckpoint(context, first);
+  const acceptedCheckpoint = path.join(
+    context.root,
+    "checkpoints",
+    (await readJson(context.root, "checkpoint-head.json")).checkpoint,
+  );
   assert.deepEqual(
     await validateDiscoveryArtifacts(artifacts, worker.resultPath, scanId),
     first,
@@ -1761,6 +1782,27 @@ async function testDiscoveryRequiresCurrentCheckpoint(root: string) {
     validateDiscoveryArtifacts(artifacts, worker.resultPath, scanId),
     /does not match its current checkpoint head/,
   );
+  assert.deepEqual(
+    await validateDiscoveryArtifacts(
+      artifacts,
+      acceptedCheckpoint,
+      scanId,
+      context.root,
+    ),
+    first,
+    "accepted immutable evidence keeps its original output owner after a new head",
+  );
+  await rm(receipt);
+  await assert.rejects(
+    validateDiscoveryArtifacts(
+      artifacts,
+      acceptedCheckpoint,
+      scanId,
+      context.root,
+    ),
+    /coverage receipt.*unavailable/,
+  );
+  await writeFile(receipt, "Original source review.\n");
   await writeResult(worker.resultPath, {
     ...current,
     handoffClaimToken: otherScanId,

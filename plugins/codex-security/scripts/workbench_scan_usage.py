@@ -609,9 +609,12 @@ def _scan_root_thread_ids(
                 SELECT DISTINCT sdk_thread_id
                 FROM deep_scan_worker_threads
                 WHERE scan_id = ?
+                UNION
+                SELECT sdk_thread_id FROM deep_scan_attempt_sessions
+                WHERE scan_id = ?
                 ORDER BY sdk_thread_id
                 """,
-                (scan["id"],),
+                (scan["id"], scan["id"]),
             )
         )
     roots: dict[str, None] = {}

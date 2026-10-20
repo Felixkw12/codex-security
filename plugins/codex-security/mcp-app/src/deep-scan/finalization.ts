@@ -85,7 +85,6 @@ export async function readSelectedDeepScanDraft(
       scanId,
       findings: [],
       coverage: {
-        completeness: "partial",
         surfaces: [],
         explicitExclusions: [],
         deferred: [

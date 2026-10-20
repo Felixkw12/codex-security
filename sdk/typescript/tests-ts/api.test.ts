@@ -6658,12 +6658,14 @@ describe("CodexSecurity orchestration", () => {
       "--scan-id",
       expect.any(String),
     ]);
-    expect(commands[2]).toMatchObject([
-      "fail-scan",
-      "--scan-id",
-      expect.stringMatching(/^[0-9a-f-]{36}$/),
-      "--message=original scan failure",
-    ]);
+    expect(commands.find(([command]) => command === "fail-scan")).toMatchObject(
+      [
+        "fail-scan",
+        "--scan-id",
+        expect.stringMatching(/^[0-9a-f-]{36}$/),
+        "--message=original scan failure",
+      ],
+    );
     const history = await runWorkbench(
       { python: python!, pluginRoot: PLUGIN_ROOT, environment },
       ["list-scans", "--repository", repository],

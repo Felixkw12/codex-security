@@ -148,7 +148,7 @@ await test("workbench scalar arguments reach the Python parser literally", async
       `import json, sys
 sys.path.insert(0, ${JSON.stringify(scripts)})
 from workbench_cli import parse_args
-def main():
+def main(*, select_finalization=False, with_execution_settings=False):
     print(json.dumps(vars(parse_args("argument transport"))))
 `,
     );

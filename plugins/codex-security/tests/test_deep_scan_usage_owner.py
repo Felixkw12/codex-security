@@ -171,6 +171,11 @@ def test_registered_cli_parent_usage_precedes_coordinator_registration(
     before = run_workbench(state, "get-scan", "--scan-id", scan_id, environment=environment)["scan"]
     assert before["executionAttribution"] is None
     with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        # Keep both usage samples in the past while straddling the scan start.
+        connection.execute(
+            "UPDATE scans SET started_at = ? WHERE id = ?",
+            ((datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat(), scan_id),
+        )
         started = datetime.fromisoformat(
             connection.execute("SELECT started_at FROM scans WHERE id = ?", (scan_id,))
             .fetchone()[0]

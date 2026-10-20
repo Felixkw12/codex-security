@@ -166,7 +166,7 @@ describe("bundled plugin build", () => {
       };
       assert.equal(helper.parseCanonicalScanDraft(input).scanId, input.scanId);
       assert.throws(() => helper.parseCanonicalScanDraft({
-        ...input, coverage: { ...input.coverage, completeness: "invalid" },
+        ...input, coverage: { ...input.coverage, surfaces: "invalid" },
       }));
       console.log("Bundled parser accepted valid input and rejected invalid coverage.");
     `,

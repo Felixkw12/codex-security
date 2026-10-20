@@ -1,6 +1,6 @@
 import { isRecord } from "../record.js";
 import { isDeepStrictEqual } from "node:util";
-import { dirname, relative, sep } from "node:path";
+import { dirname, join, relative, sep } from "node:path";
 import type { JsonObject } from "../types.js";
 import type { AcceptedDiscovery } from "./worker-runner.js";
 import { artifactSourcePath } from "../artifact-io.js";
@@ -159,18 +159,26 @@ export async function validateDiscoveryArtifacts(
   artifacts: DeepScanArtifacts,
   resultPath: string,
   expectedScanId: string,
+  artifactDir = dirname(resultPath),
 ): Promise<ScanDraftInput> {
   const result = await readDiscoveryAuditDraft(
     artifacts,
     resultPath,
     expectedScanId,
+    artifactDir,
   );
   if (result.complete === false)
     throw new Error(
       "Standard scan worker wrote only a checkpoint; its audit is not complete.",
     );
+  return result;
+}
+
+async function validateDiscoveryCoverage(
+  root: string,
+  result: ScanDraftInput,
+): Promise<void> {
   validateRetainedCoverage(result.coverage);
-  const root = dirname(resultPath);
   const receiptPaths = new Map<string, string>();
   for (const row of result.coverage.surfaces as JsonObject[]) {
     for (const ref of (row.receiptRefs as string[] | undefined) ?? []) {
@@ -190,13 +198,13 @@ export async function validateDiscoveryArtifacts(
       );
     }
   }
-  return result;
 }
 
 export async function readDiscoveryAuditDraft(
   artifacts: DeepScanArtifacts,
   resultPath: string,
   expectedScanId: string,
+  artifactDir = dirname(resultPath),
 ): Promise<ScanDraftInput> {
   await requireRegularFile(resultPath, artifacts.workersRoot);
   const saved = await readJsonObject(resultPath);
@@ -206,17 +214,22 @@ export async function readDiscoveryAuditDraft(
     expectedScanId,
     parsePersistedScanDraft,
   );
-  const checkpoint = await readCurrentScanDraftCheckpoint({
-    root: dirname(resultPath),
-    repoRoot: artifacts.scanDir,
-    layout: "worker",
-    scanId: expectedScanId,
-  });
+  const checkpoint =
+    resultPath === join(artifactDir, "result.json")
+      ? await readCurrentScanDraftCheckpoint({
+          root: artifactDir,
+          repoRoot: artifacts.scanDir,
+          layout: "worker",
+          scanId: expectedScanId,
+        })
+      : undefined;
   const { handoffClaimToken: _claim, ...semantic } = saved;
   if (checkpoint !== undefined && !isDeepStrictEqual(checkpoint, semantic))
     throw new Error(
       "The worker result does not match its current checkpoint head.",
     );
+  if (result.complete !== false)
+    await validateDiscoveryCoverage(artifactDir, result);
   return result;
 }
 
@@ -260,7 +273,7 @@ export async function validateReducerArtifacts(
       await readJsonObject(previousReducerResultPath),
       "Previous successful reducer",
       result.scanId,
-      parseDeepReduction,
+      (value) => parseDeepReduction(value, true),
     );
   }
 

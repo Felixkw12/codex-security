@@ -246,7 +246,19 @@ def require_deep_scan_ready_for_parent_completion(
             "the parent scan can be completed."
         )
     if run["terminal_reason"] == "capped":
-        require_deep_scan_workers_finished(connection, scan["id"], "capped")
+        selection = deep_scan_finalization_input(run)
+        # Older writers selected budget publications before reducing every
+        # accepted review. Replay only the omissions recorded in that selection.
+        require_deep_scan_workers_finished(
+            connection,
+            scan["id"],
+            "capped",
+            allowed_buffered_worker_ids=(
+                selection["omittedWorkerIds"]
+                if selection is not None and "publicationSha256" not in selection
+                else ()
+            ),
+        )
 
 
 def require_deep_scan_workers_finished(
@@ -255,6 +267,7 @@ def require_deep_scan_workers_finished(
     terminal_reason: str,
     *,
     has_omitted_workers: bool = False,
+    allowed_buffered_worker_ids: tuple[str, ...] | list[str] = (),
 ) -> None:
     """Check execution state for coordinator completion and resumed parent publication."""
     failed_worker = connection.execute(
@@ -313,14 +326,13 @@ def require_deep_scan_workers_finished(
         raise SystemExit("Deep Scan cannot finish while discovery output is merging.")
     if terminal_reason == "capped" and has_omitted_workers:
         raise SystemExit("Deep Scan capped completion cannot declare omitted buffered workers.")
-    if (
-        terminal_reason == "capped"
-        and connection.execute(
-            "SELECT 1 FROM deep_scan_workers WHERE scan_id = ? "
-            "AND kind = 'discovery' AND merge_state = 'buffered' LIMIT 1",
+    if terminal_reason == "capped" and any(
+        worker["id"] not in allowed_buffered_worker_ids
+        for worker in connection.execute(
+            "SELECT id FROM deep_scan_workers WHERE scan_id = ? "
+            "AND kind = 'discovery' AND merge_state = 'buffered'",
             (scan_id,),
-        ).fetchone()
-        is not None
+        )
     ):
         raise SystemExit("Deep Scan cannot finish capped while discovery output remains buffered.")
 

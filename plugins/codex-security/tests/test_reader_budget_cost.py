@@ -83,6 +83,8 @@ def test_reader_budget_cost_preserves_unknown_totals(
         assert saved["usage"]["coverage"] == "unavailable"
     else:
         assert public["cost"] == BUDGET_COST
-        assert json.loads(saved) == BUDGET_COST
+        saved = json.loads(saved)
+        assert saved["cost"] == BUDGET_COST
+        assert saved["usage"]["coverage"] == "unavailable"
     manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
     assert manifest["scan"]["sealedAt"]

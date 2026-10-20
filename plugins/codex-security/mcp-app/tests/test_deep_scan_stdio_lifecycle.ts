@@ -151,6 +151,8 @@ max_discovery_runs = 2
     runtimeConfigPath,
     `model_reasoning_summary = "detailed"
 profile = "selected"
+[codex_security]
+cyber_access_program = "daybreak_red"
 [profiles.selected]
 model_reasoning_summary = "none"
 `,

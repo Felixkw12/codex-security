@@ -1072,7 +1072,8 @@ test.each([
     const selected = {
       model: `synthetic-${auth ?? "auto"}-model`,
       model_reasoning_effort: "high",
-      features: { goals: false },
+      daybreak: true,
+      features: { goals: false, cli_daybreak: true },
     };
     const settings = {
       config: scanPreflightCodexConfig({
@@ -1151,7 +1152,8 @@ test.each([
                       max_time_hours: 1.5,
                     },
                     worker_runtime: {
-                      features: { goals: false },
+                      daybreak: true,
+                      features: { goals: false, cli_daybreak: true },
                     },
                   });
                   const workerConfigPath =

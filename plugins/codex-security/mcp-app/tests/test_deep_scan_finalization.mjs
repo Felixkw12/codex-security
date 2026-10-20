@@ -51,7 +51,6 @@ for (const terminalReason of ["capped", "saturated"]) {
         complete: true,
         findings: [],
         coverage: {
-          completeness: "partial",
           surfaces: [],
           explicitExclusions: [],
           deferred: [
@@ -126,7 +125,7 @@ test("recreates only partial coverage for a persisted zero-success deadline sele
   );
   assert.equal(result.scanId, scanId);
   assert.deepEqual(result.findings, []);
-  assert.equal(result.coverage.completeness, "partial");
+  assert.equal(Object.hasOwn(result.coverage, "completeness"), false);
   assert.equal(result.coverage.deferred.length, 1);
   await assert.rejects(
     readSelectedDeepScanDraft(createDeepScanArtifacts("unused"), scanId, {

@@ -151,7 +151,7 @@ def test_reader_completes_old_unsealed_budget_and_replays(
     assert dict(workbench_db.execute("SELECT * FROM deep_scan_runs").fetchone()) == run
     assert list(workbench_db.execute("SELECT * FROM deep_scan_attempts")) == attempts
     coverage = json.loads((scan.scan_dir / "coverage.json").read_bytes())
-    assert coverage["completeness"] == "partial"
+    assert "completeness" not in coverage
     assert len(coverage["surfaces"]) == 2
     for actual, source in zip(
         coverage["surfaces"], scan.source["coverage"]["surfaces"], strict=True
@@ -167,6 +167,25 @@ def test_reader_completes_old_unsealed_budget_and_replays(
     workbench_api["complete_scan"](
         workbench_db, Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None)
     )
+    assert snapshot(workbench_db, scan) == before
+
+
+def test_reader_rejects_buffered_work_outside_the_legacy_selection(
+    workbench_api, workbench_db, legacy_budget
+):
+    scan = legacy_budget()
+    extra = add_worker(workbench_db, scan)
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_workers SET merge_state = 'buffered' WHERE id = ?",
+            (extra.parent.name,),
+        )
+    before = snapshot(workbench_db, scan)
+    with pytest.raises(SystemExit, match="discovery output remains buffered"):
+        workbench_api["complete_scan"](
+            workbench_db,
+            Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=json.dumps(BUDGET_COST)),
+        )
     assert snapshot(workbench_db, scan) == before
 
 

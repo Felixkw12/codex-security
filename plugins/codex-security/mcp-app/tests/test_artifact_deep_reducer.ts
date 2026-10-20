@@ -198,8 +198,8 @@ try {
       previous: null,
     },
   );
-  assert.equal(inputs.discoveries[0]!.coverage!.completeness, "partial");
-  assert.equal(inputs.discoveries[1]!.coverage!.completeness, "unknown");
+  for (const discovery of inputs.discoveries)
+    assert.equal(Object.hasOwn(discovery.coverage, "completeness"), false);
   assert.deepEqual(
     await getModelInputs(context),
     {

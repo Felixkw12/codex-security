@@ -208,7 +208,7 @@ async function readPreviousReduction(
     await readJsonObject(previousReducerResultPath),
     "The previous accepted Deep reduction",
     bound.scanId,
-    parseDeepReduction,
+    (input) => parseDeepReduction(input, true),
     " has an invalid Standard scan result: ",
     " belongs to a different scan.",
   );

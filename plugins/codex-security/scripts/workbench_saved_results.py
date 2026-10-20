@@ -192,13 +192,20 @@ def validate_sealed_budget_draft(
     # The seal can reach disk before parent completion commits. Validate
     # it without changing bytes; the existing finalizer commits replay.
     try:
-        _, _, _, _, coverage, _, _ = _prepare_scan_finalization(
+        prepared = _prepare_scan_finalization(
             scan_dir,
             expected_coverage_mode=db.expected_coverage_mode(scan),
             completion_binding=db.workbench_completion_binding(scan, scan["started_at"], manifest),
         )
-        if coverage["completeness"] != "partial":
-            raise ContractError("Budget-exhausted completion requires partial coverage.")
+        coverage = prepared.coverage
+        if coverage.get("completeness") != "partial" and not any(
+            item["reason"] == "Validation was deferred because the scan reached its cost limit."
+            or item["reason"].startswith(
+                "Validation was deferred because the scan reached its cost limit: "
+            )
+            for item in coverage["deferred"]
+        ):
+            raise ContractError("Budget-exhausted completion requires saved cost-limit coverage.")
     except ContractError as exc:
         raise SystemExit(str(exc)) from exc
 
@@ -905,12 +912,6 @@ def merge_saved_results(
     if "sourceCoverage" not in drafts_by_path.get(accepted_reducer, {}):
         accepted_reducer = None
     accepted_coverage = drafts_by_path.get(accepted_reducer, {}).get("coverage", {})
-    reviewed_attempts = {
-        (review.get("workerId"), review.get("attempt"))
-        for review in accepted_coverage.get("reviews", [])
-        if isinstance(review, dict)
-    }
-    workers_by_id = {worker["id"]: worker for worker in workers}
     latest_reducer_key = (
         (reducer["completed_at"] or "", reducer["id"], int(reducer["attempt"] or 0))
         if reducer is not None and latest_reducer in drafts_by_path
@@ -946,6 +947,26 @@ def merge_saved_results(
                 parent_is_canonical = False
     if parent is None and latest_reducer is not None:
         parent = drafts_by_path[latest_reducer]
+
+    # Current writers attach host-owned review metadata to the canonical
+    # publication; older reducers persisted it in sourceCoverage instead.
+    reviewed_coverage = [accepted_coverage]
+    if parent_is_canonical and parent is not None:
+        reviewed_coverage.append(parent["coverage"])
+    reviewed_attempts = {
+        (review.get("workerId"), review.get("attempt"))
+        for reviewed in reviewed_coverage
+        for review in reviewed.get("reviews", [])
+        if isinstance(review, dict)
+    }
+    reviewed_workers = {
+        worker["id"]: worker["attempt"]
+        for worker in workers
+        if {"status", "merge_state", "attempt"}.issubset(worker.keys())
+        and worker["status"] == "succeeded"
+        and worker["merge_state"] == "merged"
+        and (worker["id"], worker["attempt"]) in reviewed_attempts
+    }
 
     project_worker_coverage, surface_links = _prepare_worker_coverage_recovery(
         sources, parent, source_order, enabled=project_worker_coverage
@@ -1442,6 +1463,7 @@ def merge_saved_results(
             and parent is not None
             and parent.get("complete") is not False
             and relative != "parent"
+            and relative != accepted_reducer
             and source_order[relative] <= (0, parent_modified)
             and (not stopped_parent_seal or relative in parent_preserved_sources)
         ) or (
@@ -1642,7 +1664,28 @@ def merge_saved_results(
                 coverage[field] = [row for row in coverage[field] if row not in removed_parent]
     if isinstance(coverage.get("surfaces"), list):
         for owner, surface, replaced_sources in surface_updates:
-            retained = append_coverage_row(coverage["surfaces"], surface, owner, "surfaces")
+            if owner in reviewed_workers:
+                # Repair the accepted projection in place, preserving its
+                # identity and host provenance while retaining earlier evidence.
+                retained = next(
+                    (
+                        row
+                        for row in coverage["surfaces"]
+                        if isinstance(row, dict)
+                        and isinstance(provenance := row.get("provenance"), dict)
+                        and provenance.get("workerId") == owner
+                        and provenance.get("attempt") == reviewed_workers[owner]
+                        and provenance.get("sourceId") == surface.get("id")
+                        and row.get("disposition") == surface.get("disposition")
+                    ),
+                    None,
+                )
+                if retained is None:
+                    continue
+                retained["receiptRefs"] = surface["receiptRefs"]
+                record_coverage_owner(retained, surface, owner, "surfaces")
+            else:
+                retained = append_coverage_row(coverage["surfaces"], surface, owner, "surfaces")
             for source_id in replaced_sources & linked_surface_sources:
                 linked_surface_outputs[source_id] = retained
         for surface in coverage["surfaces"]:
@@ -1859,15 +1902,7 @@ def merge_saved_results(
                 continue
             finding_positions[key] = len(findings)
             findings.append(finding)
-        worker = workers_by_id.get(worker_id)
-        reviewed = (
-            worker is not None
-            and {"status", "merge_state", "attempt"} <= worker.keys()
-            and worker["status"] == "succeeded"
-            and worker["merge_state"] == "merged"
-            and (worker_id, worker["attempt"]) in reviewed_attempts
-        )
-        if reviewed or (
+        if worker_id in reviewed_workers or (
             superseded
             and relative != accepted_reducer
             and not selected_candidates

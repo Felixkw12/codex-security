@@ -70,7 +70,7 @@ def test_budget_completion_and_cancel_keep_the_committed_outcome(
         assert json.loads(run["finalization_input_json"] or "null") == selection
         assert accepted.read_bytes() == accepted_bytes
         coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
-        assert coverage["completeness"] == "partial"
+        assert "completeness" not in coverage
         assert any(item["id"] == "accepted-follow-up" for item in coverage["deferred"])
         if not cancel_first:
             assert any(item["id"] == "scan-cost-limit" for item in coverage["deferred"])

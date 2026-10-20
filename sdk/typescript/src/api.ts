@@ -4837,8 +4837,8 @@ export async function runScanEvents(
         options.onFinalize !== undefined &&
         !managedFinalized
       ) {
-        execution.usage =
-          (await options.onFinalize(execution.usage)) ?? execution.usage;
+        const finalizedUsage = await options.onFinalize(execution.usage);
+        if (finalizedUsage !== undefined) execution.usage = finalizedUsage;
         managedFinalized = true;
       }
       options.signal.throwIfAborted();

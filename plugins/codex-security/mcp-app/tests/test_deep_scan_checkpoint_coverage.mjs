@@ -21,14 +21,18 @@ for (const continueAfterResume of [false, true]) {
       const coverage = JSON.parse(
         await readFile(path.join(scanDir, "coverage.json"), "utf8"),
       );
-      assert.equal(coverage.completeness, "partial");
+      assert.equal(Object.hasOwn(coverage, "completeness"), false);
       assert.deepEqual(
-        coverage.reviews.map((review) => review.completeness),
-        ["partial", "complete", "unknown"],
+        coverage.reviews.map((review) => review.attempt),
+        [2, 1, 1],
       );
       assert.equal(coverage.reviews[0].attempt, 2);
       assert.equal(
-        new Set(coverage.deferred.map((item) => item.candidateId)).size,
+        new Set(
+          coverage.deferred.map((item) =>
+            JSON.stringify([item.workerId, item.candidateId]),
+          ),
+        ).size,
         2,
       );
       const report = await readFile(path.join(scanDir, "report.md"), "utf8");

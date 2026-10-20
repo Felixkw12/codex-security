@@ -40,11 +40,11 @@ def test_normal_seal_cannot_be_committed_as_budget_completion(
     if budget_seal:
         workbench_api["complete_budget_exhausted_scan"](workbench_db, args)
         assert workbench_db.execute("SELECT status FROM scans").fetchone()[0] == "complete"
-        assert (
-            json.loads((scan.scan_dir / "coverage.json").read_text())["completeness"] == "partial"
-        )
+        coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+        assert "completeness" not in coverage
+        assert any(item["id"] == "scan-cost-limit" for item in coverage["deferred"])
     else:
-        with pytest.raises(SystemExit, match="partial"):
+        with pytest.raises(SystemExit, match="cost-limit"):
             workbench_api["complete_budget_exhausted_scan"](workbench_db, args)
         assert list(workbench_db.iterdump()) == database
     assert {

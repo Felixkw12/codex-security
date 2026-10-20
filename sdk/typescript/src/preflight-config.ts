@@ -22,6 +22,7 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
       "goals",
       "multi_agent",
       "enable_fanout",
+      "cli_daybreak",
       "api_key_cyber_access_programs",
       "api_key_model_discovery",
     ]) {
@@ -47,6 +48,9 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
   };
   const executionConfig = (source: JsonObject): JsonObject => {
     const result: JsonObject = {};
+    if (typeof source["daybreak"] === "boolean") {
+      result["daybreak"] = source["daybreak"];
+    }
     for (const key of [
       "model",
       "model_reasoning_effort",
@@ -59,6 +63,18 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
     }
     const features = capabilityFeatures(source["features"]);
     if (Object.keys(features).length > 0) result["features"] = features;
+    const skills = source["skills"];
+    if (isRecord(skills) && Array.isArray(skills["config"])) {
+      result["skills"] = {
+        config: skills["config"].flatMap((entry) =>
+          isRecord(entry) &&
+          safeString(entry["path"]) &&
+          typeof entry["enabled"] === "boolean"
+            ? [{ path: entry["path"], enabled: entry["enabled"] }]
+            : [],
+        ),
+      };
+    }
     const agents = source["agents"];
     if (isRecord(agents)) {
       const sanitized: JsonObject = {};
@@ -85,8 +101,12 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
     const value = resolved[key];
     if (safeString(value)) result[key] = value;
   }
+  if (typeof resolved["daybreak"] === "boolean") {
+    result["daybreak"] = resolved["daybreak"];
+  }
   const resolvedFeatures = capabilityFeatures(resolved["features"]);
   for (const key of [
+    "cli_daybreak",
     "api_key_cyber_access_programs",
     "api_key_model_discovery",
   ]) {
@@ -120,7 +140,7 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
       [modelProvider]: { ...EXTERNAL_CODEX_PROVIDERS[modelProvider] },
     };
   } else if (modelProvider === "amazon-bedrock") {
-    const providers = config["model_providers"];
+    const providers = resolved["model_providers"];
     const provider = isRecord(providers) ? providers[modelProvider] : undefined;
     const aws = isRecord(provider) ? provider["aws"] : undefined;
     if (isRecord(aws)) {

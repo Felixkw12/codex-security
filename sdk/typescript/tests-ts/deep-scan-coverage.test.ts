@@ -55,13 +55,14 @@ test.each([
         threadId,
         turnResult: { status: "completed" },
       });
-      expect(result.coverage["completeness"]).toBe(completeness);
+      expect(result.coverage["completeness"]).toBeUndefined();
+      expect(result.manifest.scan.status).toBe("completed");
       const coverage = JSON.parse(
         await readFile(join(scanDir, "coverage.json"), "utf8"),
       );
       expect(coverage.reviews[0].attempt).toBe(2);
       const report = await readFile(join(scanDir, "report.md"), "utf8");
-      expect(report).toContain(`| Coverage | ${completeness} |`);
+      expect(report).toContain("## Source Review Coverage");
       expect(coverage.explicitExclusions).toHaveLength(coverage.reviews.length);
       for (const review of coverage.reviews)
         expect(report).toContain(review.workerId);
@@ -70,14 +71,18 @@ test.each([
           coverage.deferred.map((item: { reason: string }) => item.reason),
         ).toEqual(["Verify entry boundaries.", "Verify symbolic links."]);
         expect(
-          new Set(coverage.deferred.map((item: { id: string }) => item.id))
-            .size,
+          new Set(
+            coverage.deferred.map(
+              (item: { id: string; provenance: { workerId: string } }) =>
+                JSON.stringify([item.provenance.workerId, item.id]),
+            ),
+          ).size,
         ).toBe(2);
         expect(
           coverage.reviews.map(
-            (review: { completeness: string }) => review.completeness,
+            (review: { completeness?: string }) => review.completeness,
           ),
-        ).toEqual(["partial", "complete", "unknown"]);
+        ).toEqual([undefined, undefined, undefined]);
         for (const item of coverage.deferred) {
           expect(item.provenance.candidateId).toBe("candidate-1");
           expect(report).toContain(item.reason);
@@ -102,10 +107,9 @@ test.each([
           stderr.stream,
           dependencies({ result, onWorkbench: () => ({ deepScan: terminal }) }),
         ),
-      ).toBe(completeness === "complete" ? 0 : 2);
+      ).toBe(0);
       expect(JSON.parse(stdout.text()).coverage).toEqual(coverage);
-      if (completeness !== "complete")
-        expect(stderr.text()).toContain("STOPPED");
+      expect(stderr.text()).toContain("STOPPED");
     } finally {
       await rm(root, { recursive: true, force: true });
     }

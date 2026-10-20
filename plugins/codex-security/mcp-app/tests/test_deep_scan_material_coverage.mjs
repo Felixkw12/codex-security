@@ -49,10 +49,10 @@ for (const [resume, continueAfterResume] of [
       const coverage = JSON.parse(
         await readFile(path.join(scanDir, "coverage.json"), "utf8"),
       );
-      assert.equal(coverage.completeness, "partial");
+      assert.equal(Object.hasOwn(coverage, "completeness"), false);
       assert.deepEqual(
-        coverage.reviews.map((review) => review.completeness),
-        ["partial", "complete", "unknown"],
+        coverage.reviews.map((review) => review.attempt),
+        [2, 1, 1],
       );
       assert.equal(
         coverage.deferred.length,
@@ -60,7 +60,11 @@ for (const [resume, continueAfterResume] of [
         "a finding does not discharge independent unresolved work",
       );
       assert.equal(
-        new Set(coverage.deferred.map((item) => item.candidateId)).size,
+        new Set(
+          coverage.deferred.map((item) =>
+            JSON.stringify([item.workerId, item.candidateId]),
+          ),
+        ).size,
         2,
       );
       for (const item of coverage.deferred)
