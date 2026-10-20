@@ -4,6 +4,42 @@ export type {
   ArtifactExportResult,
 } from "./artifact-export.js";
 export { CodexSecurity, createSecurity } from "./api.js";
+export {
+  runHostedRemediation,
+  HostedRemediationInputSchema,
+  HostedRemediationPreparationError,
+} from "./hosted-remediation.js";
+export type {
+  HostedRemediationInput,
+  HostedRemediationOptions,
+  HostedRemediationResult,
+  RemediationExecutor,
+  RemediationExecutionRequest,
+  RemediationExecutionResult,
+  RemediationExecutionEvent,
+} from "./hosted-remediation.js";
+export { runHostedRemediationProtocol } from "./hosted-remediation-protocol.js";
+export type {
+  FindingPatch,
+  FindingVerification,
+  FindingVerificationCheck,
+} from "./remediation.js";
+export {
+  runHostedScan,
+  HostedScanInputSchema,
+  HostedScanPreparationError,
+} from "./hosted-scan.js";
+export type {
+  HostedScanInput,
+  HostedScanOptions,
+  HostedScanResult,
+} from "./hosted-scan.js";
+export type {
+  ScanExecutor,
+  ScanExecutionRequest,
+  ScanExecutionResult,
+  ScanExecutionEvent,
+} from "./scan-executor.js";
 export { loadProjectConfig, resolveProjectConfig } from "./project-config.js";
 export type {
   ResolvedProjectConfig,
@@ -18,6 +54,7 @@ export { classifySeverity } from "./classify-severity.js";
 export { suggestOwners } from "./suggest-owners.js";
 export type {
   OwnerFinding,
+  CodeownerIdentity,
   OwnerIdentity,
   OwnerSuggestion,
   OwnerSuggestions,
@@ -53,7 +90,7 @@ export type {
 export { estimateScanCost } from "./cost.js";
 export type { ScanCost, ScanSessionEvent, ScanWorkerEvent } from "./cost.js";
 export type { ScanTokenUsage } from "./cost-model.js";
-export type { DeepScanProgress } from "./deep-progress.js";
+export type { DeepScanProgress } from "./scan-progress.js";
 export type { CustomValidationResult } from "./custom-validation.js";
 export type { ScanActivity, ScanActivityStatus } from "./scan-activity.js";
 export { matchScanFindings } from "./scan-comparison.js";
@@ -66,6 +103,8 @@ export type {
 export type {
   CodexSecurityMetadata,
   DeepScanOptions,
+  PatchOptions,
+  PatchResult,
   ScanAuthMode,
   ScanAuthentication,
   ScanBudget,
@@ -215,3 +254,21 @@ export {
 export type { NormalizedTarget, ScanMode, ScanTarget } from "./targets.js";
 export type { AbsolutePath } from "./config-path.js";
 export { BUNDLED_PLUGIN_VERSION, VERSION } from "./version.js";
+
+export {
+  classifySeverityRecords,
+  classifySeverityRecordsInputSchema,
+} from "./classify-severity-records.js";
+export type {
+  ClassifySeverityRecordsInput,
+  ClassifySeverityRecordsOptions,
+  ClassifySeverityRecordsResult,
+  CanonicalSeverityAssessment,
+  SeverityClassificationReviewRequest,
+} from "./classify-severity-records.js";
+export { validateRecords } from "./validation-records.js";
+export type {
+  ValidateRecordsInput,
+  ValidateRecordsOptions,
+  ValidationReviewRequest,
+} from "./validation-records.js";

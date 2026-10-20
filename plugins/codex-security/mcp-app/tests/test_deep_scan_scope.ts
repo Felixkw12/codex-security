@@ -78,7 +78,7 @@ for (const mode of ["deep", "standard"] as const) {
   }
 }
 
-test("composed discovery keeps typed IDs while canonical admission accepts persisted IDs", () => {
+test("composed discovery and canonical draft admission require typed surface IDs", () => {
   const coverage = {
     completeness: "partial",
     surfaces: [
@@ -96,13 +96,14 @@ test("composed discovery keeps typed IDs while canonical admission accepts persi
       }),
     /Invalid string/,
   );
-  assert.equal(
-    parseCanonicalScanDraft({
-      scanId: "7fc17317-9594-49e0-b06a-d72fd7e14bba",
-      manifest: { scan: { id: "7fc17317-9594-49e0-b06a-d72fd7e14bba" } },
-      findings: { findings: [] },
-      coverage,
-    }).coverage.surfaces[0].id,
-    "HTTP API",
+  assert.throws(
+    () =>
+      parseCanonicalScanDraft({
+        scanId: "7fc17317-9594-49e0-b06a-d72fd7e14bba",
+        manifest: { scan: { id: "7fc17317-9594-49e0-b06a-d72fd7e14bba" } },
+        findings: { findings: [] },
+        coverage,
+      }),
+    /Invalid string/,
   );
 });

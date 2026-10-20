@@ -36,7 +36,7 @@ Workbench-owned Standard scans submit findings and coverage through `record_code
 
 Deep children use ordinary SDK-owned Standard canonical findings and coverage. Pending work and its evidence remain in child coverage.
 
-See [completion and recovery](scan-contract.md#completion-and-recovery) for parent finalization, retained child evidence, and checkpoint compatibility.
+The shared runner writes the parent scan's canonical artifacts from the accepted aggregate, configured include and exclude paths, and child coverage, then seals the parent and generates its report. If the discovery time limit expires before any source review completes, the parent retains the deadline reason and any saved findings or pending review. See [completion and recovery](scan-contract.md#completion-and-recovery) for parent finalization, retained child evidence, and checkpoint compatibility.
 
 - A workbench-backed diff scan records all candidates once with `record_codex_security_discovery_candidates({ scanId, candidates })` and reads the canonical candidates with `list_codex_security_candidates({ scanId, cursor?, limit? })`.
   - The writer validates candidates against assigned source paths, merges rows with the same CWE ids, locations, and optional instance, preserves their text, and assigns deterministic `candidate_id` values.

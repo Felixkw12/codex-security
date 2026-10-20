@@ -510,7 +510,7 @@ test("publishes unresolved pass coverage before a later batch loses transport", 
   });
   await expect(runDeepScans(h.input)).rejects.toBe(transport);
   expect(h.published).toHaveLength(1);
-  expect(h.published[0]!.coverage.completeness).toBe("partial");
+  expect(h.published[0]!.coverage).not.toHaveProperty("completeness");
   expect(h.published[0]!.coverage.deferred).toContainEqual({
     reason: "artifacts/deep-scan/passes/pass-1",
   });
@@ -731,7 +731,7 @@ test.each(["before recovery", "during recovery"])(
       expect([...h.records.values()][0]!.progress.status).toBe("failed");
       expect(h.calls).toHaveLength(1);
       expect(stopped).toBe(1);
-      expect(h.published.at(-1)!.coverage!.completeness).toBe("partial");
+      expect(h.published.at(-1)!.coverage!).not.toHaveProperty("completeness");
     } finally {
       clock.mockRestore();
     }

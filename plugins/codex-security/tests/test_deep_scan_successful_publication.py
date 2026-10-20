@@ -122,7 +122,7 @@ def assert_published_aggregate(scan):
     coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
     for field in ("documentType", "schemaVersion", "scanId"):
         coverage.pop(field)
-    assert coverage == scan.coverage
+    assert coverage == {key: value for key, value in scan.coverage.items() if key != "completeness"}
     assert (scan.scan_dir / "report.md").is_file()
 
 
@@ -150,11 +150,7 @@ def test_publication_renders_each_source_remediation(
     sources = [first, second, third, fourth]
     finding["remediation"] = first["remediation"]
     finding["remediationTests"] = first["remediationTests"]
-    if mode == "standard":
-        # Standard completion itself consolidates these duplicate logical findings.
-        scan.findings[:] = sources
-        finding = first
-    elif mode == "deep-nested":
+    if mode == "deep-nested":
         nested = copy.deepcopy(second)
         nested["provenance"]["previousFindings"] = [third]
         nested["provenance"]["sourceFindings"] = [{"id": "review-4:0", "finding": fourth}]
@@ -178,23 +174,7 @@ def test_publication_renders_each_source_remediation(
     completed = complete(workbench_api, workbench_db, scan)
 
     assert completed["progress"]["status"] == "complete"
-    if mode == "standard":
-        published = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
-        assert len(published) == 1
-        canonical = published[0]
-        assert "sourceFindings" not in canonical["provenance"]
-        retained = [canonical, *canonical["provenance"].pop("previousFindings")]
-        for source in retained:
-            for field in ("findingId", "occurrenceId", "fingerprints"):
-                value = source.pop(field)
-                assert value
-        assert retained == sources
-        coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
-        for field in ("documentType", "schemaVersion", "scanId"):
-            coverage.pop(field)
-        assert coverage == scan.coverage
-    else:
-        assert_published_aggregate(scan)
+    assert_published_aggregate(scan)
     report = (scan.scan_dir / "report.md").read_text()
     if linked_writeup:
         assert "findings/archive/archive.md" in report
@@ -290,9 +270,8 @@ def test_stopped_scan_salvages_saved_parent_checkpoints(
 
     assert stopped["progress"]["status"] == "failed"
     manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
     assert manifest["scan"]["status"] == "failed"
-    assert coverage["completeness"] == "partial"
+
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
     expected_summaries = {later_finding["summary"]}
     if has_parent:
@@ -460,3 +439,138 @@ def test_stopped_deep_projection_filters_the_canonical_parent(
     assert stopped["progress"]["status"] == "failed"
     assert stopped["findingCount"] == 0
     assert json.loads((scan.scan_dir / "findings.json").read_text())["findings"] == []
+
+
+def test_already_sealed_legacy_capped_scan_remains_immutable(
+    workbench_api, workbench_db, publication_scan
+):
+    scan = publication_scan()
+    complete(workbench_api, workbench_db, scan)
+    names = ("scan-manifest.json", "findings.json", "coverage.json")
+    sealed = {name: (scan.scan_dir / name).read_bytes() for name in names}
+    with workbench_db:
+        workbench_db.execute(
+            "INSERT INTO deep_scan_runs (scan_id, schema_version, workflow_version, status, phase, "
+            "workers, subagents, stop_after_no_new, max_discovery_runs, created_at, updated_at) "
+            "SELECT id, 1, 'deep-security-scan/v1', 'failed', 'discovery', 4, 3, 4, 8, "
+            "started_at, updated_at FROM scans WHERE id = ?",
+            (scan.scan_id,),
+        )
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET terminal_reason = 'capped' WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
+    repeated = complete(workbench_api, workbench_db, scan)
+    assert repeated["progress"]["status"] == "complete"
+    assert {name: (scan.scan_dir / name).read_bytes() for name in names} == sealed
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("scope", [".", "subdir"])
+@pytest.mark.parametrize("missing_parent", [False, True])
+def test_deep_completion_preserves_findings_with_missing_optional_writeups(
+    workbench_api, workbench_db, publication_scan, scope, missing_parent
+):
+    scan = publication_scan(scope=scope)
+    valid_path = "findings/valid/valid.md"
+    valid_file = scan.scan_dir / valid_path
+    valid_file.parent.mkdir(parents=True)
+    valid_file.write_text("# Retained writeup\n")
+    scan.findings[0]["writeup"] = {"reportPath": valid_path}
+    missing = copy.deepcopy(scan.findings[0])
+    missing["identity"]["anchor"] = "missing-writeup"
+    missing["summary"] = "A separate finding whose optional writeup was not transferred."
+    missing_path = "findings/missing/missing.md"
+    if not missing_parent:
+        (scan.scan_dir / missing_path).parent.mkdir()
+    missing["writeup"] = {"reportPath": missing_path}
+    scan.findings.append(missing)
+    if scope != ".":
+        excluded = copy.deepcopy(missing)
+        excluded["identity"]["anchor"] = "excluded-writeup"
+        excluded["locations"] = [{"path": "unrelated/extract.py", "startLine": 1}]
+        excluded["writeup"] = {"reportPath": "findings/excluded/excluded.md"}
+        scan.findings.insert(0, excluded)
+    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": scan.findings}))
+    original_files = {valid_file: valid_file.read_bytes()}
+    # Preparing and then completing also exercises replay of the sealed parent.
+    prepared = complete(workbench_api, workbench_db, scan, prepare_only=True)
+    completed = complete(workbench_api, workbench_db, scan)
+
+    assert completed["progress"]["status"] == "complete"
+    assert completed["findingCount"] == 2
+    assert len(completed["warnings"]) == 1
+    assert completed["warnings"] == prepared["warnings"]
+    assert completed["warnings"][0].startswith("Skipped missing writeup for finding 2:")
+    assert "findings[1].writeup.reportPath" in completed["warnings"][0]
+    if scope != ".":
+        scan.findings.pop(0)
+    missing.pop("writeup")
+    assert_published_aggregate(scan)
+    assert {path: path.read_bytes() for path in original_files} == original_files
+    report = (scan.scan_dir / "report.md").read_text()
+    assert valid_path in report
+    assert missing_path not in report
+    assert missing["summary"] in report
+    manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())
+    assert manifest["scan"]["status"] == "completed"
+    assert manifest["scan"]["sealedAt"]
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("invalid", ["unsafe-path", "directory"])
+def test_deep_scope_filter_does_not_hide_invalid_writeups(
+    workbench_api, workbench_db, publication_scan, invalid
+):
+    scan = publication_scan(scope="subdir")
+    finding = scan.findings[0]
+    finding["locations"] = [{"path": "unrelated/extract.py", "startLine": 1}]
+    report_path = "findings/invalid/invalid.md"
+    if invalid == "unsafe-path":
+        report_path = "../invalid.md"
+    else:
+        (scan.scan_dir / report_path).mkdir(parents=True)
+    finding["writeup"] = {"reportPath": report_path}
+    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": scan.findings}))
+
+    with pytest.raises(SystemExit, match="reportPath|regular non-symlink file"):
+        complete(workbench_api, workbench_db, scan)
+    assert (
+        workbench_db.execute("SELECT status FROM scans WHERE id = ?", (scan.scan_id,)).fetchone()[0]
+        != "complete"
+    )
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("invalid", ["finding", "coverage"])
+def test_missing_deep_writeup_does_not_enable_general_recovery(
+    workbench_api, workbench_db, publication_scan, invalid
+):
+    scan = publication_scan()
+    scan.findings[0]["writeup"] = {"reportPath": "findings/missing/missing.md"}
+    if invalid == "finding":
+        scan.findings[0]["severity"]["level"] = "invalid"
+    else:
+        scan.coverage["surfaces"] = "invalid"
+    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": scan.findings}))
+    (scan.scan_dir / "coverage.json").write_text(json.dumps(scan.coverage))
+
+    with pytest.raises(SystemExit, match="severity|surfaces"):
+        complete(workbench_api, workbench_db, scan)
+    assert (
+        workbench_db.execute("SELECT status FROM scans WHERE id = ?", (scan.scan_id,)).fetchone()[0]
+        != "complete"
+    )
+
+
+def test_standard_publication_preserves_deferred_work(
+    workbench_api, workbench_db, publication_scan
+):
+    scan = publication_scan(mode="standard")
+    scan.coverage["deferred"] = [{"id": "remaining-review", "reason": "Another surface remains."}]
+    (scan.scan_dir / "coverage.json").write_text(json.dumps(scan.coverage))
+
+    complete(workbench_api, workbench_db, scan)
+
+    assert_published_aggregate(scan)

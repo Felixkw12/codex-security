@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from finalize_scan_contract import (
     DISPOSITIONS,
     ContractError,
+    MissingScanLocalFileError,
     _finding_strength,
     _populate_unsealed_artifact_envelope,
     _populate_unsealed_manifest_envelope,
@@ -172,7 +173,7 @@ def _read_checkpoint_bytes(scan_dir: Path, relative: str) -> tuple[dict[str, Any
     try:
         return _read_scan_local_json_bytes(scan_dir, relative, "Saved scan checkpoint")
     except ContractError as error:
-        if not isinstance(error.__cause__, FileNotFoundError):
+        if not isinstance(error, MissingScanLocalFileError):
             raise
         if not re.fullmatch(r"checkpoints/[0-9a-f]{64}\.json", relative):
             raise ContractError("saved checkpoint is missing") from None
@@ -929,9 +930,8 @@ def merge_saved_results(
         stopped and parent_manifest and parent_manifest["scan"].get("sealedAt")
     )
 
-    finding_schema = _read_json(
-        Path(__file__).resolve().parent.parent / "schemas" / "findings.schema.json"
-    )
+    schema_dir = Path(__file__).resolve().parent.parent / "schemas"
+    finding_schema = _read_json(schema_dir / "findings.schema.json")
     finding_validity: dict[str, bool] = {}
 
     def finding_in_scope(finding: dict[str, Any]) -> bool:
@@ -1023,6 +1023,49 @@ def merge_saved_results(
         coverage["resolvedDeferred"] = [
             copy.deepcopy(value[1]) for value in closed_deferred.values()
         ]
+
+        def valid_receipts(row: dict[str, Any]) -> list[str]:
+            recovered = {"surfaces": [copy.deepcopy(row)], "deferred": [], "explicitExclusions": []}
+            _recover_unsealed_coverage(recovered, schema_dir, scan_dir, [], [])
+            return [ref for item in recovered["surfaces"] for ref in item["receiptRefs"]]
+
+        # Closing a linked task retains its earlier verified proof. Current
+        # selected spellings win, and later pending work cannot supply evidence.
+        receipt_spellings = {
+            ref.lower(): ref for row in surface_rows.values() for ref in valid_receipts(row)
+        }
+        for relative, draft in all_sources:
+            if relative in pending_paths:
+                continue
+            linked = {
+                surface_id
+                for task in _deferred_rows(draft["coverage"])
+                if plain_row(task)
+                and isinstance(task.get("id"), str)
+                and isinstance(task.get("surfaceIds"), list)
+                and task["id"] in closed_deferred
+                and source_times.get(relative, 0) < closed_deferred[task["id"]][0]
+                for surface_id in task.get("surfaceIds", [])
+                if isinstance(surface_id, str)
+            }
+            rows = draft["coverage"].get("surfaces", [])
+            for row in rows if isinstance(rows, list) else []:
+                if (
+                    not isinstance(row, dict)
+                    or not isinstance(row.get("id"), str)
+                    or row["id"] not in linked
+                ):
+                    continue
+                current_surface = surface_rows.get(row["id"])
+                if current_surface is None:
+                    continue
+                refs = current_surface.setdefault("receiptRefs", [])
+                if not isinstance(refs, list):
+                    continue
+                for ref in valid_receipts(row):
+                    preferred = receipt_spellings.setdefault(ref.lower(), ref)
+                    if ref == preferred and ref not in refs:
+                        refs.append(ref)
     # Ambiguous legacy task IDs cannot identify an implicit replacement or closure.
     # Keep each distinct task even when a current draft resolves the matching candidate.
     deferred_output = coverage.setdefault("deferred", [])
@@ -1466,23 +1509,36 @@ def merge_saved_results(
         items = coverage.setdefault(field, [])
         if isinstance(items, list):
             items[:] = [item for item in items if not superseded_work(field, item)]
+        explicit_ids = (
+            {
+                item["id"]
+                for item in items
+                if isinstance(item, dict) and isinstance(item.get("id"), str)
+            }
+            if isinstance(items, list)
+            else set()
+        )
         for item in items if isinstance(items, list) else []:
             if not isinstance(item, dict):
                 continue
             if field == "surfaces":
                 item.setdefault("receiptRefs", [])
-            if id(item) in canonical_rows:
+            if "id" not in item:
+                generated = item.get("candidateId") or f"saved-{_digest(item)[:16]}"
+                # A generated ID must not take the target of an authored surface link.
+                if isinstance(generated, str) and generated in explicit_ids:
+                    generated = f"{generated}-{_digest(item)[:16]}"
+                item["id"] = generated
+            elif id(item) in canonical_rows:
                 if isinstance(item.get("id"), str):
                     used.add(item["id"])
                 continue
-            item.setdefault("id", item.get("candidateId") or f"saved-{_digest(item)[:16]}")
             if not isinstance(item["id"], str):
                 continue
             if item["id"] in used:
                 item["id"] = f"{item['id']}-{_digest(item)[:16]}"
             used.add(item["id"])
-    if stopped or any(warning not in initial_warnings for warning in warnings):
-        coverage["completeness"] = "partial"
+    coverage.pop("completeness", None)
     if stopped:
         if not isinstance(coverage.get("deferred"), list):
             coverage["deferred"] = []
@@ -1498,12 +1554,12 @@ def coverage_for_comparison(db: Any, scan: Any) -> dict[str, Any]:
     scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
     db.require_recorded_manifest_digest(scan, scan_dir)
     try:
-        _, _, manifest, _, coverage, was_sealed, _ = _prepare_scan_finalization(scan_dir)
+        prepared = _prepare_scan_finalization(scan_dir)
     except ContractError as exc:
         raise SystemExit(str(exc)) from exc
-    if not was_sealed or manifest["scan"]["id"] != scan["id"]:
+    if not prepared.was_sealed or prepared.manifest["scan"]["id"] != scan["id"]:
         raise SystemExit("Only sealed scans can be compared.")
-    return coverage
+    return prepared.coverage
 
 
 @contextmanager
@@ -1528,8 +1584,8 @@ def preserve_prepared_sources_on_error(scan_dir: Path) -> Iterator[None]:
         raise
 
 
-def _snapshot_published_outputs(scan_dir: Path) -> dict[str, bytes | None]:
-    snapshots: dict[str, bytes | None] = {}
+def _snapshot_published_outputs(scan_dir: Path) -> dict[str, tuple[bytes, os.stat_result] | None]:
+    snapshots: dict[str, tuple[bytes, os.stat_result] | None] = {}
     for relative in _PUBLISHED_OUTPUTS:
         descriptor = -1
         try:
@@ -1538,7 +1594,8 @@ def _snapshot_published_outputs(scan_dir: Path) -> dict[str, bytes | None]:
             )
             with os.fdopen(descriptor, "rb") as handle:
                 descriptor = -1
-                snapshots[relative] = handle.read()
+                metadata = os.fstat(handle.fileno())
+                snapshots[relative] = (handle.read(), metadata)
         except ContractError:
             path = scan_dir / relative
             if path.exists() or path.is_symlink():
@@ -1553,14 +1610,19 @@ def _snapshot_published_outputs(scan_dir: Path) -> dict[str, bytes | None]:
     return snapshots
 
 
-def _restore_published_outputs(scan_dir: Path, snapshots: dict[str, bytes | None]) -> None:
-    for relative, contents in snapshots.items():
-        if contents is None:
+def _restore_published_outputs(
+    scan_dir: Path, snapshots: dict[str, tuple[bytes, os.stat_result] | None]
+) -> None:
+    for relative, snapshot in snapshots.items():
+        if snapshot is None:
             path = scan_dir / relative
             if path.exists() or path.is_symlink():
                 _remove_scan_local_file_if_exists(scan_dir, relative)
         else:
+            contents, metadata = snapshot
             write_scan_local_bytes(scan_dir, relative, contents)
+            # Saved-result selection uses mtime; rollback must preserve its ordering.
+            os.utime(scan_dir / relative, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
 
 
 def require_current_deep_scan(db: Any, connection: Any, scan: Any) -> None:
@@ -1593,7 +1655,7 @@ def _stopped_child_draft(
         )
     ):
         db.require_recorded_manifest_digest(child, child_dir)
-        _, _, manifest, findings, coverage, _, _ = _prepare_scan_finalization(child_dir)
+        _, _, manifest, findings, coverage, _, _, _ = _prepare_scan_finalization(child_dir)
     else:
         binding = {**db.workbench_completion_binding(child, db.now()), "status": "interrupted"}
         warnings: list[str] = []
@@ -1616,10 +1678,10 @@ def _stopped_child_draft(
         )
         if documents is None:
             return None
-        _, _, manifest, findings, coverage, _, _ = _prepare_scan_finalization(
+        _, _, manifest, findings, coverage, _, _, _ = _prepare_scan_finalization(
             child_dir,
             completion_binding=binding,
-            completion_warnings=warnings,
+            recover_unsealed=True,
             draft_documents=documents,
             finding_scope=db.requested_finding_scope(child) if child["mode"] == "deep" else None,
         )
@@ -1829,7 +1891,7 @@ def save_composed_checkpoint(
     aggregate["scanId"] = scan["id"]
     aggregate["complete"] = False
     coverage = aggregate.setdefault("coverage", {})
-    coverage["completeness"] = "partial"
+    coverage.pop("completeness", None)
     deferred = coverage.setdefault("deferred", [])
     directories = (
         dict.fromkeys(Path(scan["scan_dir"]) / item["directory"] for item in checkpoint["passes"])
@@ -2093,10 +2155,11 @@ def preserve_scan_results_locked(
         scan_dir,
         expected_coverage_mode=db.expected_coverage_mode(scan),
         completion_binding=binding,
-        completion_warnings=warnings,
+        recover_unsealed=True,
         draft_documents=documents,
         finding_scope=db.requested_finding_scope(scan) if scan["mode"] == "deep" else None,
     )
+    warnings.extend(prepared.warnings)
     snapshots = _snapshot_published_outputs(scan_dir)
     try:
         manifest, findings, _ = _write_prepared_scan_finalization(
@@ -2697,7 +2760,7 @@ def _retained_composed_draft(db: Any, scan: Any, scan_dir: Path) -> dict[str, An
                 elif frozen_sources is None:
                     frozen_sources = {}
             db.require_recorded_manifest_digest(scan, scan_dir)
-            _, _, manifest, findings, coverage, _, _ = _prepare_scan_finalization(scan_dir)
+            _, _, manifest, findings, coverage, _, _, _ = _prepare_scan_finalization(scan_dir)
             db.verify_manifest_binding(scan, manifest)
             retained_draft = _parent_scan_draft(scan["id"], manifest["scan"], findings, coverage)
     return retained_draft

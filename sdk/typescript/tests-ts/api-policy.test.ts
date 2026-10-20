@@ -1,5 +1,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
+import { once } from "node:events";
 import {
+  chmod,
   link,
   mkdir,
   readFile,
@@ -52,9 +54,17 @@ import {
   stageResult,
 } from "./support/security-policy.js";
 import { rejecting, throwing } from "./support/errors.js";
+import { writeSession } from "./support/usage-rollout.js";
 
 const { fixture, cleanup } = createPolicyTestFixtures();
 afterEach(cleanup);
+
+function effectiveConfiguration(configuration: CodexOptions): JsonObject {
+  return (configuration.configOverrides ?? []).reduce(
+    (config, override) => deepMerge(config, parseToml(override) as JsonObject),
+    (configuration.config ?? {}) as JsonObject,
+  );
+}
 
 async function setup(
   options: {
@@ -72,6 +82,7 @@ async function setup(
 ) {
   const f = await fixture();
   const codexHome = join(f.root, "codex-home");
+  const ambientHome = join(f.root, "ambient [codex-home]{fixture}");
   await mkdir(codexHome, { mode: 0o700 });
   const runtime = preparedRuntime(codexHome);
   Object.assign(runtime.environment, options.environment);
@@ -103,6 +114,7 @@ async function setup(
     "policy",
   ];
   const environment: NodeJS.ProcessEnv = {
+    CODEX_HOME: ambientHome,
     CODEX_SECURITY_STATE_DIR: join(f.root, "state"),
     ...options.environment,
   };
@@ -132,6 +144,12 @@ async function setup(
   );
   return {
     ...f,
+    ambientHome,
+    ambientCredentialsGlob: join(
+      f.root,
+      "ambient [[]codex-home[]][{]fixture[}]",
+      "{auth.json,config.toml,*.config.toml,.*.config.toml.tmp}",
+    ),
     security,
     runtime,
     environment,
@@ -191,11 +209,7 @@ describe("CodexSecurity policy API", () => {
     expect(configuration.codexPathOverride).toBe(
       runtime.executablePathForSpawn(first),
     );
-    const effective = configuration.configOverrides!.reduce(
-      (config, override) =>
-        deepMerge(config, parseToml(override) as JsonObject),
-      configuration.config as JsonObject,
-    );
+    const effective = effectiveConfiguration(configuration);
     const filesystem = (
       (effective["permissions"] as JsonObject)[
         "codex_security_policy"
@@ -224,7 +238,7 @@ describe("CodexSecurity policy API", () => {
           "npm-vendor-legacy",
         ]),
   ])(
-    "grants only the selected runtime files to policy turns (%s)",
+    "keeps runtime reads and credential denials in policy turns (%s)",
     async (installation) => {
       const executable = await realpath(
         runtime.resolveCodexCommand({}).command,
@@ -315,28 +329,31 @@ describe("CodexSecurity policy API", () => {
 
       await f.security.generatePolicy(f.repository, { outputDir: f.outputDir });
 
-      const overrides = f.configuration()!.configOverrides!;
-      expect(overrides).toHaveLength(2);
-      expect(parseToml(overrides[0]!)).toEqual({
-        permissions: {
-          codex_security_policy: {
-            filesystem: {
-              ":minimal": "read",
-              ":workspace_roots": "read",
-              ...Object.fromEntries(
-                readPaths.map((path) => [path, { ".": "read" }]),
-              ),
-            },
-          },
-        },
+      const configuration = effectiveConfiguration(f.configuration()!);
+      expect(configuration["default_permissions"]).toBe(
+        "codex_security_policy",
+      );
+      expect(
+        (
+          (configuration["permissions"] as JsonObject)[
+            "codex_security_policy"
+          ] as JsonObject
+        )["filesystem"],
+      ).toEqual({
+        [await realpath(f.runtime.codexHome)]: { ".": "deny" },
+        ...(process.platform === "win32"
+          ? { [f.ambientCredentialsGlob]: "deny" }
+          : {}),
+        [process.platform === "win32" ? ":root" : ":minimal"]: "read",
+        ":workspace_roots": "read",
+        ...Object.fromEntries(readPaths.map((path) => [path, { ".": "read" }])),
       });
-      expect(parseToml(overrides[1]!)).toEqual({
-        responses_api_metadata: {
-          codex_security_surface: "sdk",
-          codex_security_command: "policy",
-          codex_security_package_version: VERSION,
-          codex_security_plugin_version: f.runtime.plugin.version,
-        },
+      expect(configuration["responses_api_metadata"]).toEqual({
+        codex_security_surface: "sdk",
+        codex_security_command: "policy",
+        codex_security_package_version: VERSION,
+        codex_security_plugin_version: f.runtime.plugin.version,
+        codex_security_provider: "openai",
       });
       expect(f.threads).toHaveLength(3);
       for (const thread of f.threads) {
@@ -352,6 +369,101 @@ describe("CodexSecurity policy API", () => {
         );
       expect(await readFile(sharedConfigPath, "utf8")).toBe(sharedConfig);
       await f.security.close();
+    },
+  );
+
+  test("isolates credential denials and explicit Windows settings between concurrent policy sessions", async () => {
+    const sessions = await Promise.all(
+      ["elevated", "unelevated"].map(async (sandbox) => {
+        const f = await setup({
+          config: { codexOverrides: { windows: { sandbox } } },
+        });
+        policyGit(f.repository, "init", "--quiet");
+        await mkdir(f.ambientHome, { mode: 0o700 });
+        if (sandbox === "unelevated") f.runtime.codexHome = f.ambientHome;
+        await writeFile(
+          join(f.ambientHome, "auth.json"),
+          JSON.stringify({ OPENAI_API_KEY: "synthetic-policy-key" }),
+        );
+        await writeFile(
+          join(f.ambientHome, "config.toml"),
+          "# Synthetic private provider configuration\n",
+        );
+        f.runtime.configPath = join(f.root, "config-preflight.toml");
+        await writeFile(f.runtime.configPath, "synthetic = true\n");
+        return { f, sandbox };
+      }),
+    );
+    try {
+      await Promise.all(
+        sessions.map(({ f }) =>
+          f.security.generatePolicy(f.repository, { outputDir: f.outputDir }),
+        ),
+      );
+      for (const { f, sandbox } of sessions) {
+        const configuration = effectiveConfiguration(f.configuration()!);
+        expect(configuration["windows"]).toEqual({ sandbox });
+        const filesystem = (
+          configuration["permissions"] as Record<
+            string,
+            Record<string, unknown>
+          >
+        )["codex_security_policy"]!["filesystem"] as Record<string, unknown>;
+        for (const path of [
+          await realpath(f.runtime.codexHome),
+          f.runtime.configPath!,
+          join(f.repository, ".git"),
+        ]) {
+          expect(filesystem[path]).toEqual({ ".": "deny" });
+        }
+        for (const name of ["auth.json", "config.toml"]) {
+          expect(filesystem[join(f.ambientHome, name)]).toEqual(
+            process.platform === "win32" ? { ".": "deny" } : undefined,
+          );
+        }
+        expect(filesystem[f.ambientCredentialsGlob]).toBe(
+          process.platform === "win32" ? "deny" : undefined,
+        );
+        for (const { f: other } of sessions) {
+          if (other !== f) {
+            expect(filesystem).not.toHaveProperty(other.runtime.codexHome);
+            expect(filesystem).not.toHaveProperty(other.runtime.configPath!);
+          }
+        }
+        expect(f.threads).toHaveLength(3);
+        for (const thread of f.threads) {
+          expect(thread.approvalPolicy).toBe("never");
+          expect(thread.networkAccessEnabled).toBe(false);
+        }
+      }
+    } finally {
+      await Promise.all(sessions.map(({ f }) => f.security.close()));
+    }
+  });
+
+  test.skipIf(process.platform === "win32" || process.geteuid?.() === 0)(
+    "uses an API key and separate runtime when the unused ambient home is inaccessible",
+    async () => {
+      const f = await setup({
+        environment: { OPENAI_API_KEY: "synthetic-policy-key" },
+      });
+      await mkdir(f.ambientHome, { mode: 0o700 });
+      const ambientAuth = join(f.ambientHome, "auth.json");
+      await writeFile(ambientAuth, "{}");
+      await chmod(f.ambientHome, 0);
+      try {
+        await expect(realpath(ambientAuth)).rejects.toMatchObject({
+          code: "EACCES",
+        });
+        const result = await f.security.generatePolicy(f.repository, {
+          outputDir: f.outputDir,
+        });
+        expect(result.content).toBe(POLICY);
+        expect(f.threads).toHaveLength(3);
+      } finally {
+        await chmod(f.ambientHome, 0o700);
+        await f.security.close();
+      }
     },
   );
 
@@ -978,7 +1090,10 @@ describe("CodexSecurity policy API", () => {
       expect(effective).toMatchObject({
         permissions: {
           codex_security_policy: {
-            filesystem: { ":minimal": "read", ":workspace_roots": "read" },
+            filesystem: {
+              [process.platform === "win32" ? ":root" : ":minimal"]: "read",
+              ":workspace_roots": "read",
+            },
           },
         },
       });
@@ -1793,6 +1908,55 @@ describe("CodexSecurity policy API", () => {
     ).toContain("src/service.ts:1");
     expect(await readdir(f.repository)).toEqual([]);
     await f.security.close();
+  });
+
+  test("stops a policy stage at its measured budget while worker usage is missing", async () => {
+    let interruptedStage: SecurityPolicyStage | undefined;
+    const f = await setup({
+      stream: async function* (stage, signal) {
+        yield { type: "thread.started", thread_id: `policy-${stage}` };
+        yield { type: "turn.started" };
+        if (!signal.aborted) await once(signal, "abort");
+        interruptedStage = stage;
+        throw signal.reason;
+      },
+    });
+    await writeSession(f.runtime.codexHome, "policy-architecture", {
+      input_tokens: 3_000,
+      output_tokens: 0,
+    });
+    await writeSession(
+      f.runtime.codexHome,
+      "policy-worker",
+      {},
+      { parent: "policy-architecture" },
+    );
+    const costs = mock();
+    const cancellation = new AbortController();
+    const timeout = setTimeout(
+      () => cancellation.abort(new Error("Policy budget was not enforced.")),
+      5_000,
+    );
+    try {
+      await expect(
+        f.security.generatePolicy(f.repository, {
+          outputDir: f.outputDir,
+          maxCostUsd: 0.004,
+          signal: cancellation.signal,
+          onCost: costs,
+        }),
+      ).rejects.toThrow("exceeded its $0.004 cost limit");
+      expect(interruptedStage).toBe("architecture");
+      expect(f.threads).toHaveLength(1);
+      expect(costs).not.toHaveBeenCalled();
+      await expect(
+        readFile(join(f.outputDir, "project-spec.md")),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+      expect(await readdir(f.repository)).toEqual([]);
+    } finally {
+      clearTimeout(timeout);
+      await f.security.close();
+    }
   });
 
   test("optional observer failures do not stop policy generation", async () => {

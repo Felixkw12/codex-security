@@ -323,7 +323,6 @@ async function testCompactDiffScanCompletion() {
         handoffClaimToken,
         findings: [],
         coverage: {
-          completeness: "complete",
           surfaces: [
             {
               label: "Changed handler and removed guard",
@@ -549,7 +548,6 @@ async function testSemanticScanDraftCompletion() {
     const explicitCollisionDeferredId = "explicit-deferred-query";
     const candidateCollisionDeferredId = "candidate-owned-query";
     const coverage: SemanticCoverage = {
-      completeness: "partial",
       surfaces: [
         {
           label: "SQL execution",
@@ -761,7 +759,7 @@ async function testSemanticScanDraftCompletion() {
       handoffClaimToken,
       complete: false,
       findings: [finding],
-      coverage: { ...coverage, completeness: "partial" },
+      coverage: { ...coverage },
     };
     requireSuccessfulTool(
       await call("record_codex_security_scan_draft", checkpoint),
@@ -886,7 +884,7 @@ async function testSemanticScanDraftCompletion() {
     assert.ok(results.findings.findings[0].fingerprints.primary);
     assert.equal(results.manifest.scan.target.kind, "directory_snapshot");
     assert.equal(results.coverage.inventoryStrategy, "directory");
-    assert.equal(results.coverage.completeness, "partial");
+    assert.equal(results.coverage.completeness, undefined);
     assert.deepEqual(results.coverage.includePaths, ["."]);
     assert.deepEqual(results.coverage.excludePaths, []);
     assert.equal(results.coverage.surfaces[0].disposition, "reported");
@@ -1099,7 +1097,9 @@ async function testClaimedParentArtifactOperations() {
     const progressResult = await call("update_codex_security_scan_progress", {
       scanId,
       handoffClaimToken: claimToken,
-      preflightChecks: [],
+      phaseItemsTotal: 1,
+      phaseItemsCompleted: 1,
+      phaseProgressUnit: "checks",
     });
     requireSuccessfulTool(
       progressResult,
@@ -1557,7 +1557,6 @@ process.exit(1);
         handoffClaimToken,
         findings: [],
         coverage: {
-          completeness: "complete",
           surfaces: [{ label: "Synthetic fixture", disposition: "rejected" }],
           explicitExclusions: [],
           deferred: [],
@@ -1870,6 +1869,8 @@ async function testParentToolList() {
       "record_candidate_attack_paths",
       "record_codex_security_scan_draft",
       "get_codex_security_completed_scan",
+      "get_codex_security_finding_issues",
+      "record_codex_security_finding_issues",
       "complete_codex_security_scan",
     ]) {
       assert.equal(names.has(name), true, `Missing parent MCP tool ${name}.`);
@@ -2007,6 +2008,16 @@ function assertSemanticInputProperties(schema: Record<string, unknown>) {
     Record<string, unknown>
   >;
   const findingSchema = properties.findings.items as Record<string, unknown>;
+  if (properties.coverage) {
+    assert.equal(
+      Object.hasOwn(properties.coverage.properties as object, "completeness"),
+      false,
+    );
+    assert.equal(
+      (properties.coverage.required as string[]).includes("completeness"),
+      false,
+    );
+  }
   const groups: [Record<string, unknown>, string[]][] = [
     [properties.scope, ["includePaths", "excludePaths"]],
     [findingSchema, ["findingId", "occurrenceId", "fingerprints"]],

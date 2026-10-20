@@ -1,4 +1,3 @@
-import { normalizePersistedFindingDetails } from "./finding-normalization.js";
 import {
   exactUnion,
   findingsWithinScope,
@@ -9,26 +8,23 @@ import {
   requireObject,
   scanFindingIdentity,
   semanticScanDraft,
-  validateCoverageSemantics,
   validateFindingSemantics,
   type SemanticScan,
   type SemanticFinding,
 } from "../../../../sdk/typescript/src/scan-semantics.js";
 import { isNonEmptyString } from "./record.js";
+import { requireFiniteNumbers } from "./helpers/json.js";
+import { coverageReceiptComponents } from "./coverage-publication.js";
 import { createHash, randomUUID } from "node:crypto";
 import { writePreparedScanDraft } from "../../../../sdk/typescript/src/scan-draft-publication.js";
 import { promises as fs } from "node:fs";
 import { isAbsolute, join, posix } from "node:path";
-import type * as z from "zod/v4";
-import commonSchema from "../../schemas/definitions/artifact-common.schema.json";
-import scanDraftDocument from "../../schemas/tools/scan-draft.schema.json";
-import scanManifestDocument from "../../schemas/scan-manifest.schema.json";
-import coverageDocument from "../../schemas/coverage.schema.json";
-import findingsDocument from "../../schemas/findings.schema.json";
+import * as z from "zod/v4";
 import type { ArtifactContext } from "./artifact-context.js";
 import type { RunArtifactWorkbench } from "./artifact-context.js";
 import {
   artifactDestination,
+  artifactSourcePath,
   replaceArtifactText,
   readArtifactJsonObject,
   readArtifactText,
@@ -36,11 +32,9 @@ import {
   requireArtifactRoot,
 } from "./artifact-io.js";
 import { artifactSchemaDocuments } from "./artifact-contracts.js";
-import {
-  projectArtifactToolSchema,
-  loadArtifactZodSchema,
-  type SchemaDocument,
-} from "./artifact-schema-loader.js";
+import { projectArtifactToolSchema } from "./artifact-schema-loader.js";
+
+export { preserveFindingDetails, validateFindingSemantics };
 
 type JsonObject = Record<string, unknown>;
 
@@ -87,76 +81,12 @@ export const scanDraftInputSchema = projectArtifactToolSchema(
   draftDefinitions.scanDraftInput,
 );
 
-// Keep draft completion/host-field handling, using canonical persisted field rules.
-const canonicalScanDraftInputSchema = loadArtifactZodSchema(
-  [
-    commonSchema,
-    {
-      ...scanDraftDocument,
-      $defs: {
-        ...scanManifestDocument.$defs,
-        ...findingsDocument.$defs,
-        ...scanDraftDocument.$defs,
-        scanId: scanManifestDocument.properties.scan.properties.id,
-        scanDraftInput: {
-          ...scanDraftDocument.$defs.scanDraftInput,
-          properties: {
-            ...scanDraftDocument.$defs.scanDraftInput.properties,
-            scanId: scanManifestDocument.properties.scan.properties.id,
-          },
-        },
-        scope: {
-          ...scanDraftDocument.$defs.scope,
-          properties:
-            scanManifestDocument.properties.scan.properties.scope.properties,
-        },
-        threatModel:
-          scanManifestDocument.properties.scan.properties.threatModel,
-        finding: {
-          ...scanDraftDocument.$defs.finding,
-          properties: findingsDocument.properties.findings.items.properties,
-        },
-        coverage: {
-          ...scanDraftDocument.$defs.coverage,
-          properties: {
-            ...coverageDocument.properties,
-            surfaces: {
-              ...coverageDocument.properties.surfaces,
-              items: {
-                ...coverageDocument.properties.surfaces.items,
-                required: scanDraftDocument.$defs.surface.required,
-              },
-            },
-            deferred: {
-              ...coverageDocument.properties.deferred,
-              items: {
-                ...coverageDocument.properties.deferred.items,
-                required:
-                  scanDraftDocument.$defs.coverage.properties.deferred.items
-                    .required,
-              },
-            },
-            // String questions are normalized by the finalizer after admission.
-            openQuestions: {
-              ...coverageDocument.properties.openQuestions,
-              items: {
-                anyOf: [
-                  scanDraftDocument.$defs.coverage.properties.openQuestions
-                    .items.anyOf[0],
-                  coverageDocument.properties.openQuestions.items,
-                ],
-              },
-            },
-          },
-        },
-      },
-    },
-  ] as SchemaDocument[],
-  scanDraftDocument.$id,
-  "scanDraftInput",
-) as z.ZodType<ScanDraftInput>;
-
 export const completedScanInputSchema = draftDefinitions.completedScanInput;
+
+// File-authored scan IDs are host-owned; findings use the current tool contract.
+const fileScanDraftInputSchema = scanDraftInputSchema.extend({
+  scanId: z.string().min(1),
+});
 
 /** Replace the three existing final-input documents without completing or sealing a scan. */
 export async function recordCodexSecurityScanDraft(
@@ -165,7 +95,7 @@ export async function recordCodexSecurityScanDraft(
   publishDraft: PublishScanDraft,
   signal?: AbortSignal,
 ): Promise<ScanDraftResult> {
-  const parsed = parseScanDraft(input);
+  let parsed = parseScanDraft(input);
   requireBoundScan(context, parsed, true);
   if (
     context.mode === "deep" &&
@@ -176,6 +106,22 @@ export async function recordCodexSecurityScanDraft(
       "scan draft: terminal Deep drafts cannot resolve child deferred work.",
     );
 
+  if (context.mode === "deep" && parsed.complete !== false) {
+    const scope = context.targetContract?.scope as
+      | {
+          requiredIncludePaths?: string[];
+          filePaths?: string[];
+        }
+      | undefined;
+    parsed = {
+      ...parsed,
+      findings: findingsWithinScope(
+        parsed.findings,
+        scope?.requiredIncludePaths ?? ["."],
+        scope?.filePaths,
+      ),
+    };
+  }
   for (;;) {
     signal?.throwIfAborted();
     const preserved = await preserveScanDraft(context, parsed);
@@ -196,7 +142,7 @@ export async function recordCodexSecurityScanDraft(
     const hardening = await readExistingHardeningPortfolio(context);
     const draft = prepareSemanticScanDraft(context, reconciled, hardening);
     try {
-      const warnings = await publishDraft(
+      const publicationWarnings = await publishDraft(
         draft,
         preserved.previousDigest,
         context.mode === "deep" && parsed.complete !== false
@@ -204,6 +150,7 @@ export async function recordCodexSecurityScanDraft(
           : parsed,
         preserved.checkpointIds,
       );
+      const warnings = [...preserved.warnings, ...(publicationWarnings ?? [])];
       return {
         scanId: reconciled.scanId,
         findingCount: draft.findings.findings.length,
@@ -284,7 +231,9 @@ async function preserveScanDraft(
   input: ScanDraftInput;
   previousDigest: string;
   checkpointIds: string[];
+  warnings: string[];
 }> {
+  requireFiniteNumbers(input);
   const state = await readPreviousScanDraft(context);
   const pending = await readPendingCheckpoints(
     context,
@@ -318,11 +267,112 @@ async function preserveScanDraft(
     result = preserveDraft(result, draft);
   }
   result.threatModel ??= state.input?.threatModel;
+  const warnings = await repairSavedCoverageReceipts(
+    context,
+    result,
+    input,
+    previous,
+  );
   return {
     input: result,
     previousDigest: state.digest,
     checkpointIds: pending.map((entry) => entry.name),
+    warnings,
   };
+}
+
+/** Corrected same-ID surfaces may replace unavailable receipt files from saved snapshots. */
+async function repairSavedCoverageReceipts(
+  context: ArtifactContext,
+  result: ScanDraftInput,
+  input: ScanDraftInput,
+  previous: ScanDraftInput[],
+): Promise<string[]> {
+  const warnings: string[] = [];
+  const sources = [input, ...previous];
+  const selected = new Map<string, Set<string>>();
+  const paths = new Map<string, string>();
+  for (const draft of sources) {
+    for (const row of draft.coverage.surfaces) {
+      if (!row.id || selected.has(row.id)) continue;
+      selected.set(row.id, new Set(row.receiptRefs ?? []));
+      for (const ref of row.receiptRefs ?? []) {
+        try {
+          const components = coverageReceiptComponents(ref);
+          await artifactSourcePath(
+            context,
+            components,
+            "selected coverage receipt",
+          );
+          const normalized = components.join("/");
+          if (!paths.has(normalized.toLowerCase()))
+            paths.set(normalized.toLowerCase(), normalized);
+        } catch {
+          // Normal publication admission reports unavailable selected evidence.
+        }
+      }
+    }
+  }
+  for (const row of result.coverage.surfaces) {
+    for (const ref of row.receiptRefs ?? []) {
+      if (row.id && selected.get(row.id)?.has(ref)) continue;
+      try {
+        const components = coverageReceiptComponents(ref);
+        const normalized = components.join("/");
+        const preferred = paths.get(normalized.toLowerCase());
+        if (preferred !== undefined && preferred !== normalized)
+          throw Object.assign(
+            new Error(
+              `coverage receipt: duplicate artifact path: ${preferred} and ${normalized}`,
+            ),
+            { code: "invalid_coverage_receipt_path" },
+          );
+        await artifactSourcePath(context, components, "saved coverage receipt");
+        paths.set(normalized.toLowerCase(), normalized);
+      } catch (error) {
+        if (
+          !(error instanceof Error) ||
+          !(
+            error.message.includes("the requested artifact is unavailable") ||
+            ("code" in error && error.code === "invalid_coverage_receipt_path")
+          )
+        )
+          continue;
+        const broken = sources.findIndex((draft) =>
+          draft.coverage.surfaces.some(
+            (saved) => saved.id === row.id && saved.receiptRefs?.includes(ref),
+          ),
+        );
+        for (const draft of sources.slice(0, broken)) {
+          if (draft.complete === false) continue;
+          const replacement = draft.coverage.surfaces.find(
+            (candidate) =>
+              candidate.id === row.id &&
+              candidate.disposition === row.disposition &&
+              candidate.disposition !== "needs_follow_up",
+          );
+          const refs = replacement?.receiptRefs;
+          if (!refs?.length || refs.includes(ref)) continue;
+          try {
+            for (const replacementRef of refs)
+              await artifactSourcePath(
+                context,
+                coverageReceiptComponents(replacementRef),
+                "replacement coverage receipt",
+              );
+          } catch {
+            continue;
+          }
+          row.receiptRefs = row.receiptRefs!.filter((value) => value !== ref);
+          warnings.push(
+            `Replaced ${error.message.includes("unavailable") ? "missing" : "invalid"} saved coverage receipt ${ref}: ${error.message}`,
+          );
+          break;
+        }
+      }
+    }
+  }
+  return warnings;
 }
 
 function validateDeferredClosures(
@@ -529,13 +579,6 @@ function preserveDraft(
       result.coverage.openQuestions ?? [],
       previous.coverage.openQuestions ?? [],
     );
-  if (
-    result.coverage.deferred.length ||
-    result.coverage.surfaces.some(
-      (surface) => surface.disposition === "needs_follow_up",
-    )
-  )
-    result.coverage.completeness = "partial";
   return result;
 }
 
@@ -963,7 +1006,7 @@ export async function getCodexSecurityCompletedScan(
 function safeRelativePath(value: string, context: string): string {
   const parts = value.split("/");
   if (
-    value.trim().length === 0 ||
+    value.length === 0 ||
     Buffer.from(value, "utf8").toString("utf8") !== value ||
     value === "." ||
     value.startsWith("/") ||
@@ -1019,7 +1062,7 @@ export function parseCanonicalScanDraft(input: {
 function parseCanonicalCheckpoint(
   input: Record<string, unknown>,
 ): ScanDraftInput {
-  const parsed = parsePersistedCheckpoint(input, canonicalScanDraftInputSchema);
+  const parsed = parsePersistedCheckpoint(input);
   for (const [index, finding] of parsed.findings.entries()) {
     for (const field of ["locations", "codeEvidence"] as const) {
       for (const [locationIndex, location] of (
@@ -1035,25 +1078,8 @@ function parseCanonicalCheckpoint(
   return parsed;
 }
 
-function parseSavedScanDraft(input: unknown): ScanDraftInput {
-  return parseSemanticScanDraft(input, scanDraftInputSchema);
-}
-
-function parseSemanticScanDraft(
-  input: unknown,
-  schema: z.ZodType<ScanDraftInput>,
-): ScanDraftInput {
-  const parsed = schema.parse(input);
-  validateFindingSemantics(
-    parsed.findings,
-    schema !== canonicalScanDraftInputSchema,
-  );
-  validateCoverageSemantics(parsed.coverage);
-  return parsed;
-}
-
 export function parseScanDraft(input: unknown): ScanDraftInput {
-  const parsed = parseSavedScanDraft(input);
+  const parsed = parsePersistedScanDraft(input);
   if (parsed.complete === false && parsed.coverage.resolvedDeferred?.length)
     throw new Error(
       "scan draft: coverage.resolvedDeferred is allowed only on a terminal draft.",
@@ -1061,28 +1087,27 @@ export function parseScanDraft(input: unknown): ScanDraftInput {
   return parsed;
 }
 
-/** Validate saved drafts before reconciling interrupted writes and older findings. */
-export function parsePersistedScanDraft(
-  input: Record<string, unknown> | ScanDraftInput,
-): ScanDraftInput {
-  return parsePersistedDraft(structuredClone(input), scanDraftInputSchema);
+export function parseCurrentFindings(
+  input: unknown,
+): ScanDraftInput["findings"] {
+  const findings = draftDefinitions.finding.array().parse(input);
+  validateFindingSemantics(findings);
+  return findings;
 }
 
-function parsePersistedDraft(
-  compatible: Record<string, unknown> | ScanDraftInput,
-  schema: z.ZodType<ScanDraftInput>,
+/** Validate current draft fields without assigning workbench-owned identities. */
+export function parsePersistedScanDraft(
+  input: unknown,
+  schema: z.ZodType<ScanDraftInput> = scanDraftInputSchema,
 ): ScanDraftInput {
-  if (Array.isArray(compatible.findings)) {
-    for (const finding of compatible.findings) {
-      if (isObject(finding)) normalizePersistedFindingDetails(finding, "draft");
-    }
-  }
-  return parseSemanticScanDraft(compatible, schema);
+  const parsed = schema.parse(input);
+  validateFindingSemantics(parsed.findings);
+  delete parsed.coverage.completeness;
+  return parsed;
 }
 
 function parsePersistedCheckpoint(
   input: Record<string, unknown>,
-  schema: z.ZodType<ScanDraftInput> = scanDraftInputSchema,
 ): ScanDraftInput {
   const compatible = structuredClone(input);
   if (isObject(compatible.scope)) {
@@ -1111,7 +1136,7 @@ function parsePersistedCheckpoint(
       delete finding.fingerprints;
     }
   }
-  return parsePersistedDraft(compatible, schema);
+  return parsePersistedScanDraft(compatible, fileScanDraftInputSchema);
 }
 
 function requireBoundScan(

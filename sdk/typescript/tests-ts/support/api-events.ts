@@ -4,6 +4,8 @@ import { cp, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { CodexOptions, ThreadEvent } from "@openai/codex-sdk";
 import { CodexSecurity } from "../../src/api.js";
+import { parse as parseToml } from "smol-toml";
+import { deepMerge, type JsonObject } from "../../src/config.js";
 import { runScanTurn } from "../../src/scan-events.js";
 import type { ScanOptions } from "../../src/index.js";
 import { PLUGIN_ROOT, copyCompletedScan } from "../plugin-root.js";
@@ -161,3 +163,10 @@ export function codexFactory<Run>(
 }
 
 export const failedPostScanEvents = failedEvents;
+
+export function effectiveCodexConfiguration(options: CodexOptions): JsonObject {
+  return (options.configOverrides ?? []).reduce(
+    (config, override) => deepMerge(config, parseToml(override) as JsonObject),
+    (options.config ?? {}) as JsonObject,
+  );
+}

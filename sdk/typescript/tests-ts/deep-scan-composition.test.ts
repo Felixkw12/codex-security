@@ -943,7 +943,7 @@ test("invalid matching leaves accepted findings and source evidence unchanged", 
   for (const field of ["findings", "sourceFindings", "revisions"] as const)
     expect(saved!.aggregate![field]).toEqual(accepted!.aggregate![field]);
   expect(Object.keys(saved!.aggregate!.sourceFindings)).toHaveLength(1);
-  expect(saved!.aggregate!.coverage!.completeness).toBe("partial");
+  expect(saved!.aggregate!.coverage!).not.toHaveProperty("completeness");
   expect(saved!.mergeFailures).toBe(1);
   expect(h.calls).toHaveLength(2);
   expect(h.publications).toHaveLength(1);
@@ -1065,7 +1065,7 @@ test.each(["capped", "expired"] as const)(
     const state = await runDeepScans(h.input);
     expect(state.terminalReason).toBe("capped");
     expect(h.publications.at(-1)!.findings).toHaveLength(1);
-    expect(h.publications.at(-1)!.coverage!.completeness).toBe("partial");
+    expect(h.publications.at(-1)!.coverage!).not.toHaveProperty("completeness");
     expect([...h.costs.values()]).toEqual([cost, cost, cost]);
     expect(h.calls).toHaveLength(1);
     expect(h.metrics().merges).toBe(0);
@@ -1244,6 +1244,9 @@ const runtimeRefusals = [
   "Request flagged for potentially high-risk cyber activity.",
   "Request rejected: cyber_policy.",
   "cyber_policy",
+  "Quota exceeded. Check your plan and billing details.",
+  "You’ve hit your usage limit. Try again later.",
+  "You’ve hit your usage limit for synthetic-model. Try again later.",
 ];
 
 test.each(runtimeRefusals)(
@@ -1773,7 +1776,9 @@ test.each(["before recovery", "during recovery"])(
       expect(
         h.operations.filter((operation) => operation === "fail-scan"),
       ).toHaveLength(1);
-      expect(h.publications.at(-1)!.coverage!.completeness).toBe("partial");
+      expect(h.publications.at(-1)!.coverage!).not.toHaveProperty(
+        "completeness",
+      );
     } finally {
       clock.mockRestore();
     }

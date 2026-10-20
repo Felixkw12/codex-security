@@ -585,13 +585,13 @@ describe("compact diff scan", () => {
           findings: [
             {
               ...finding,
-              root_cause: {
+              rootCause: {
+                summary: "An archive entry controls the output path.",
                 evidenceRefs: ["missing-root-cause-evidence"],
               },
             },
           ],
           coverage: {
-            completeness: "complete",
             surfaces: [{ label: "Changed files", disposition: "rejected" }],
             explicitExclusions: [],
             deferred: [],
@@ -601,121 +601,100 @@ describe("compact diff scan", () => {
       });
       expect(invalidRootCauseReference["isError"]).toBe(true);
       expect(JSON.stringify(invalidRootCauseReference)).toContain(
-        "root_cause.evidenceRefs",
+        "rootCause.evidenceRefs",
       );
-      const duplicateIdentities = await client.request("tools/call", {
-        name: "record_codex_security_scan_draft",
-        arguments: {
-          scanId,
-          handoffClaimToken,
-          findings: [
-            {
-              ...finding,
-              identity: {
-                anchor: "candidate-duplicate-instance",
-                instance: "dss-147-a",
-              },
-            },
-            {
-              ...finding,
-              identity: {
-                anchor: "candidate-duplicate-instance",
-                instance: "dss-147-a",
-              },
-              extensions: {
-                candidateId: "candidate-duplicate-instance",
-                reportId: "DSS-147-A",
-              },
-            },
-          ],
-          coverage: {
-            completeness: "complete",
-            surfaces: [{ label: "Changed files", disposition: "rejected" }],
-            explicitExclusions: [],
-            deferred: [],
-          },
-        },
-        _meta: { "openai/threadId": owner },
-      });
-      expect(duplicateIdentities["isError"]).toBe(true);
-      expect(JSON.stringify(duplicateIdentities)).toContain(
-        "repeats an identity",
-      );
-      const draftFindings = [
-        {
-          ...finding,
-          extensions: {
-            candidateId: "candidate-singleton",
-            reportId: "DSS-144-A",
-          },
-        },
-        {
-          ...finding,
-          code_evidence: [
-            {
-              code: "value = 2",
-              id: "legacy-source",
-            },
-          ],
-          attackPath: {
-            dataflow: { evidence_refs: ["legacy-source"] },
-          },
-        },
-        {
-          ...finding,
-          ruleId: "path-traversal.archive-upload",
-          identity: {
-            anchor: "candidate-cross-rule",
-            instance: "shared-report",
-          },
-        },
-        {
-          ...finding,
-          identity: {
-            anchor: "candidate-cross-rule",
-            instance: "shared-report",
-          },
-          extensions: {
-            candidateId: "candidate-cross-rule",
-            reportId: "shared-report",
-          },
-        },
-        {
-          ...finding,
-          extensions: {
-            candidateId: "candidate-cross-rule",
-            reportId: "second-report",
-          },
-        },
-        {
-          ...finding,
-          identity: {
-            anchor: "candidate-authored-instance",
-            instance: "dss-147-a",
-          },
-        },
-        {
-          ...finding,
-          extensions: {
-            candidateId: "candidate-authored-instance",
-            reportId: "DSS-147-B",
-          },
-        },
-        {
-          ...finding,
-          extensions: {
-            candidateId: "candidate-authored-instance",
-            ledgerRowId: "ledger-row-c",
-          },
-        },
-      ];
       await call("record_codex_security_scan_draft", {
         scanId,
         handoffClaimToken,
-        findings: draftFindings,
+        findings: [
+          {
+            ...finding,
+            identity: {
+              anchor: "candidate-duplicate-instance",
+              instance: "dss-147-a",
+            },
+          },
+          {
+            ...finding,
+            extensions: {
+              candidateId: "candidate-duplicate-instance",
+              reportId: "DSS-147-A",
+            },
+          },
+        ],
+        coverage: {
+          surfaces: [{ label: "Changed files", disposition: "rejected" }],
+          explicitExclusions: [],
+          deferred: [],
+        },
+      });
+      expect(
+        (
+          JSON.parse(readFileSync(join(scanDir, "findings.json"), "utf8")) as {
+            findings: JsonObject[];
+          }
+        ).findings.map((draftFinding) => draftFinding["identity"]),
+      ).toEqual([
+        { anchor: "candidate-duplicate-instance", instance: "dss-147-a" },
+        { anchor: "candidate-duplicate-instance", instance: "dss-147-a" },
+      ]);
+      await call("record_codex_security_scan_draft", {
+        scanId,
+        handoffClaimToken,
+        findings: [
+          {
+            ...finding,
+            extensions: {
+              candidateId: "candidate-singleton",
+              reportId: "DSS-144-A",
+            },
+          },
+          {
+            ...finding,
+            ruleId: "path-traversal.archive-upload",
+            identity: {
+              anchor: "candidate-cross-rule",
+              instance: "shared-report",
+            },
+          },
+          {
+            ...finding,
+            extensions: {
+              candidateId: "candidate-cross-rule",
+              reportId: "shared-report",
+            },
+          },
+          {
+            ...finding,
+            extensions: {
+              candidateId: "candidate-cross-rule",
+              reportId: "second-report",
+            },
+          },
+          {
+            ...finding,
+            identity: {
+              anchor: "candidate-authored-instance",
+              instance: "dss-147-a",
+            },
+          },
+          {
+            ...finding,
+            extensions: {
+              candidateId: "candidate-authored-instance",
+              reportId: "DSS-147-B",
+            },
+          },
+          {
+            ...finding,
+            extensions: {
+              candidateId: "candidate-authored-instance",
+              ledgerRowId: "ledger-row-c",
+            },
+          },
+        ],
         threatModel,
         coverage: {
-          completeness: "complete",
           surfaces: [
             {
               label: "Changed files",
@@ -769,30 +748,23 @@ describe("compact diff scan", () => {
       expect((completed["coverage"] as JsonObject)["inventoryStrategy"]).toBe(
         "diff",
       );
-      const completedFindings = (completed["findings"] as JsonObject)[
-        "findings"
-      ] as JsonObject[];
-      const completedIdentities = completedFindings.map(
-        (completedFinding) => completedFinding["identity"],
-      );
-      expect(completedIdentities).toEqual(canonicalDraftIdentities);
-      expect(completedFindings).toMatchObject(draftFindings);
-      expect(
-        new Set(completedFindings.map((row) => row["findingId"])).size,
-      ).toBe(draftFindings.length);
-      for (const [index, submitted] of draftFindings.entries()) {
-        if ("identity" in submitted)
-          expect(completedIdentities[index]).toEqual(submitted.identity);
-      }
-      const legacyFinding = (
+      const completedIdentities = (
         (completed["findings"] as JsonObject)["findings"] as JsonObject[]
-      )[1];
-      expect(legacyFinding?.["code_evidence"]).toEqual([
-        { code: "value = 2", id: "legacy-source" },
+      ).map((completedFinding) => completedFinding["identity"]);
+      expect(completedIdentities).toEqual(canonicalDraftIdentities);
+      expect(completedIdentities).toEqual([
+        { anchor: "candidate-singleton", instance: "dss-144-a" },
+        { anchor: "candidate-cross-rule", instance: "shared-report" },
+        { anchor: "candidate-cross-rule", instance: "shared-report" },
+        { anchor: "candidate-cross-rule", instance: "second-report" },
+        { anchor: "candidate-authored-instance", instance: "dss-147-a" },
+        {
+          anchor: "candidate-authored-instance",
+          instance: "dss-147-b",
+        },
+        { anchor: "candidate-authored-instance", instance: "ledger-row-c" },
+        { anchor: "candidate-duplicate-instance", instance: "dss-147-a" },
       ]);
-      expect(legacyFinding?.["attackPath"]).toEqual({
-        dataflow: { evidence_refs: ["legacy-source"] },
-      });
       expect(
         ((completed["manifest"] as JsonObject)["scan"] as JsonObject)[
           "threatModel"

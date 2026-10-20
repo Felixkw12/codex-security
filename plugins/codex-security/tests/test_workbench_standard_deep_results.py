@@ -60,7 +60,6 @@ def test_merge_saved_results_deduplicates_open_questions(
     (scan_dir / "coverage.json").write_text(
         json.dumps(
             {
-                "completeness": "partial",
                 "surfaces": [],
                 "explicitExclusions": [],
                 "deferred": [],
@@ -76,7 +75,6 @@ def test_merge_saved_results_deduplicates_open_questions(
                 "complete": False,
                 "findings": [],
                 "coverage": {
-                    "completeness": "partial",
                     "surfaces": [],
                     "explicitExclusions": [],
                     "deferred": [],

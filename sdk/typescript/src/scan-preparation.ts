@@ -121,7 +121,7 @@ export function scanPrompt(
         ]),
     ...(hasConfigPath
       ? [
-          `For normal config-preflight helper calls, append --config ${shellEnvironmentReference("CODEX_SECURITY_CONFIG_PATH")} so preflight reads the sanitized active runtime config. Preserve the documented runtime and --effective-config arguments for session-only values.`,
+          `The SDK has prepared the active runtime configuration. Its sanitized snapshot is available at ${shellEnvironmentReference("CODEX_SECURITY_CONFIG_PATH")}; preserve the selected runtime settings when delegating review work.`,
         ]
       : []),
     ...(hasKnowledgeBase
@@ -135,7 +135,7 @@ export function scanPrompt(
     ...(skillName === "security-scan" || enforceCostLimit || customValidation
       ? [
           "During the audit, checkpoint the unsealed canonical scan-manifest.json, findings.json, and coverage.json before combining or revalidating returned baseline or investigator results and after each validation decision. Reuse these same files; do not wait for the final report or depend on a draft MCP tool.",
-          "For unfinished checkpoints, set scan.complete to false and coverage.completeness to partial. Keep validated findings in findings; preserve pending candidates in coverage.deferred with a stable candidateId, their original payload under candidate, evidence, counterevidence, and a meaningful reason. Do not present pending work as validated.",
+          "For unfinished checkpoints, set scan.complete to false. Keep validated findings in findings; preserve pending candidates in coverage.deferred with a stable candidateId, their original payload under candidate, evidence, counterevidence, and a meaningful reason. Do not present pending work as validated.",
           "Write the final canonical scan-manifest.json, findings.json, and coverage.json with the provisional scan.complete marker removed, retaining truthful coverage and any deferred work. Do not finalize or seal them; the SDK workbench owns authoritative metadata, finalization, report generation, and sealing.",
         ]
       : [

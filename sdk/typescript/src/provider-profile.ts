@@ -20,6 +20,7 @@ import {
 import { isRecord } from "./record.js";
 import { bundledCodexSdkEnvironment } from "./codex-sdk-environment.js";
 import {
+  acquireCodexSecurityCredentialHomeLock,
   bundledPluginRoot,
   codexSecurityCredentialHome,
   executablePathForSpawn,
@@ -72,7 +73,9 @@ export function scanReplaySettings(config: JsonObject): JsonObject {
       "analytics",
       "shell_environment_policy",
       "model_instructions_file",
+      "experimental_compact_prompt_file",
       "model_catalog_json",
+      "sqlite_home",
     ]
       .filter((key) => config[key] !== undefined)
       .map((key) => [key, config[key]!]),
@@ -180,4 +183,27 @@ async function nativeProfileClient() {
       join(await bundledPluginRoot(), "scripts", "codex_profile.mjs"),
     ).href
   );
+}
+
+export async function withCodexPreflightLock<T>(
+  env: Record<string, string> | undefined,
+  signal: AbortSignal | undefined,
+  operation: () => Promise<T>,
+): Promise<T> {
+  // App-server treats concurrent cold-home SQLite initialization as fatal.
+  // Keep the lock in a private child so a readable native home stays readable.
+  const lockDirectory = join(
+    configuredCodexHome(env ?? process.env),
+    ".codex-security-preflight",
+  );
+  await mkdir(lockDirectory, { recursive: true, mode: 0o700 });
+  const release = await acquireCodexSecurityCredentialHomeLock(
+    lockDirectory,
+    signal,
+  );
+  try {
+    return await operation();
+  } finally {
+    await release();
+  }
 }

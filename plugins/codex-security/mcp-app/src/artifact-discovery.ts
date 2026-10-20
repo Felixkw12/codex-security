@@ -23,10 +23,7 @@ import {
   replaceArtifactText,
 } from "./artifact-io.js";
 import { artifactSchemaDocuments } from "./artifact-contracts.js";
-import {
-  candidateSchemaV1,
-  candidateLedgerRowSchema,
-} from "./artifact-candidate.js";
+import { candidateLedgerRowSchema } from "./artifact-candidate.js";
 
 const discoveryComponents = ["artifacts", "02_discovery"] as const;
 const discoveryLabel = "discovery candidates";

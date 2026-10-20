@@ -33,4 +33,11 @@ describe("scan approval policy", () => {
       }),
     ).toBe("never");
   });
+  test("ignores unselected profiles and preserves the default policy", () => {
+    expect(
+      scanApprovalPolicy({
+        profiles: { unattended: { approval_policy: "never" } },
+      }),
+    ).toBe("on-request");
+  });
 });

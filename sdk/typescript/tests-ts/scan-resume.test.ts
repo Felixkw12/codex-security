@@ -6,7 +6,10 @@ import { gitText } from "./support/shell.js";
 import { readSealedScanTurn } from "../src/scan-publication.js";
 import { ScanTransportClosedError } from "../src/scan-execution.js";
 import { createProviderProfile } from "../src/provider-profile.js";
-import { nativeScanConfiguration } from "../src/execution-preparation.js";
+import {
+  nativeScanConfiguration,
+  type CodexClientLike,
+} from "../src/execution-preparation.js";
 import { randomUUID } from "node:crypto";
 import { stripVTControlCharacters } from "node:util";
 import {
@@ -52,6 +55,7 @@ import { semanticCoverage, semanticFinding } from "./helpers/semantic-scan.js";
 import { TestClient } from "./support/api-client.js";
 import {
   completedEvents,
+  effectiveCodexConfiguration,
   preparedRuntime as fixtureRuntime,
 } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
@@ -335,7 +339,6 @@ async function interruptedScan(
       scanId,
       findings: ordinaryPass.findings ?? [],
       coverage: ordinaryPass.coverage ?? {
-        completeness: "partial",
         surfaces: [],
         explicitExclusions: [],
         deferred: [{ id: "time-cap", reason: "Synthetic time cap" }],
@@ -444,7 +447,6 @@ test.each([
       complete: previouslyComplete,
       findings: [],
       coverage: {
-        completeness: previouslyComplete ? "complete" : "partial",
         surfaces: [],
         explicitExclusions: [],
         deferred: previouslyComplete
@@ -470,7 +472,6 @@ test.each([
             : [],
         coverage: {
           ...provisional.coverage,
-          completeness: "complete",
           deferred: [],
         },
       });
@@ -574,7 +575,7 @@ test.each([
       return;
     }
     const published = await publication;
-    expect(published.result.coverage.completeness).toBe("complete");
+    expect(published.result.coverage).not.toHaveProperty("completeness");
     expect(published.result.coverage.deferred).toEqual([]);
     expect(
       published.result.findings.findings.map((finding) => finding.title),
@@ -852,6 +853,7 @@ test.each([
     const selected = {
       model: `synthetic-${auth ?? "auto"}-model`,
       model_reasoning_effort: "high",
+      daybreak: auth === "api-key",
       features: { goals: false },
     };
     const settings = {
@@ -902,7 +904,7 @@ test.each([
         runWorkbench: f.command,
         createSecurity: resumeClient(f, (options) => {
           expect(options.config).toMatchObject(selected);
-          expect(options.config).toMatchObject({
+          expect(effectiveCodexConfiguration(options)).toMatchObject({
             permissions: { codex_security_scan: settings.inheritedPermissions },
           });
           expect(options.env?.["CODEX_SAFETY_IDENTIFIER"]).toBe(
@@ -943,7 +945,7 @@ test.each([
         }),
       },
     );
-    expect(code, stderr.text()).toBe(2);
+    expect(code, stderr.text()).toBe(0);
     expect(prompts, stderr.text()).toHaveLength(1);
     expect(prompts[0]).toContain(JSON.stringify(f.repository));
     expect(prompts[0]).toContain(JSON.stringify(f.scanDir));
@@ -1060,7 +1062,7 @@ test("bulk Deep resume stages campaign knowledge after its source is removed", a
     {
       ...dependencies({ environment: f.environment, currentDirectory: f.root }),
       createSecurity: resumeClient(f, (codex) => ({
-        startThread(options) {
+        startThread(this: CodexClientLike, options) {
           return this.resumeThread!(f.threadId, options);
         },
         resumeThread(threadId) {
@@ -1094,8 +1096,11 @@ test("bulk Deep resume stages campaign knowledge after its source is removed", a
   expect(await staged).toEqual({
     "0-architecture.md.txt": "Original architecture.",
   });
-  expect(code, stderr.text()).toBe(2);
-  expect(JSON.parse(stdout.text())).toMatchObject({ incomplete: 1, failed: 0 });
+  expect(code, stderr.text()).toBe(0);
+  expect(JSON.parse(stdout.text())).toMatchObject({
+    completed: 1,
+    failed: 0,
+  });
   expect(
     (await f.command(["get-scan-recipe", "--scan-id", f.scanId]))["recipe"],
   ).toMatchObject({ knowledgeBasePaths: [document] });
@@ -1134,7 +1139,7 @@ test.each(["unchanged", "edited", "deleted"] as const)(
         }),
         runWorkbench: f.command,
         createSecurity: resumeClient(f, (codex) => ({
-          startThread(options) {
+          startThread(this: CodexClientLike, options) {
             return this.resumeThread!(f.threadId, options);
           },
           resumeThread() {
@@ -1156,7 +1161,7 @@ test.each(["unchanged", "edited", "deleted"] as const)(
     );
     expect(resumed, stderr.text()).toBe(true);
     expect(await stagedText).toBe("Original architecture.\n");
-    expect(code).toBe(2);
+    expect(code).toBe(0);
     expect(
       await readFile(join(f.scanDir, ".scan-knowledge.json"), "utf8"),
     ).toContain("Original architecture.");
@@ -1250,10 +1255,9 @@ async function sealSavedScan(
     scanId: f.scanId,
     findings: [],
     coverage: {
-      completeness: "partial",
       surfaces: [],
       explicitExclusions: [],
-      deferred: [],
+      deferred: [{ id: "time-cap", reason: "Synthetic time cap" }],
     },
   });
   const checkpoint = JSON.parse(
@@ -1595,7 +1599,6 @@ test.each([
       scanId: f.scanId,
       findings: [],
       coverage: {
-        completeness: "complete",
         surfaces: [],
         explicitExclusions: [],
         deferred: [],
@@ -1767,7 +1770,8 @@ test.each(["failed", "missing-checkout", "missing-session", "standard"])(
                 ).replaceAll("\r\n", "\n"),
               ).toBe("# synthetic source\n");
               return {
-                coverage: { completeness: "complete" },
+                manifest: { scan: { status: "completed" } },
+                coverage: {},
                 cost: null,
               } as import("../src/result.js").ScanResult;
             },
@@ -1835,7 +1839,9 @@ test("bulk recovery completes a sealed historical attempt without another scan",
         locations: [{ path: "source.py", startLine: 1 }],
       }),
     ],
-    coverage: semanticCoverage({ completeness: "partial" }),
+    coverage: semanticCoverage({
+      deferred: [{ id: "time-cap", reason: "Synthetic time cap" }],
+    }),
   });
   await f.command(
     [
@@ -1924,10 +1930,13 @@ with sqlite3.connect(sys.argv[1]) as connection:
     },
   );
   expect(requests, stderr.text()).toEqual([f.scanId]);
-  expect(code, stderr.text()).toBe(2);
+  expect(code, stderr.text()).toBe(0);
   const result = JSON.parse(stdout.text());
   const savedResults = await readFile(result.resultsPath, "utf8");
-  expect(result, savedResults).toMatchObject({ incomplete: 1, failed: 0 });
+  expect(result, savedResults).toMatchObject({
+    completed: 1,
+    failed: 0,
+  });
   const receipts = savedResults
     .trim()
     .split("\n")
@@ -1936,7 +1945,7 @@ with sqlite3.connect(sys.argv[1]) as connection:
   expect(receipts[1]).toMatchObject({
     attempt: 1,
     outputDir: f.scanDir,
-    status: "completed_with_incomplete_coverage",
+    status: "completed",
   });
   expect(
     (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
@@ -2015,6 +2024,20 @@ test("resuming Deep Scan includes archived spending before starting another turn
       })!,
     },
   );
+  const checkpoint = JSON.parse(
+    await readFile(join(f.scanDir, DEEP_SCAN_CHECKPOINT), "utf8"),
+  );
+  checkpoint.startedAt = new Date().toISOString();
+  await f.command(
+    [
+      "save-scan-artifact",
+      "--scan-id",
+      f.scanId,
+      "--artifact-path",
+      DEEP_SCAN_CHECKPOINT,
+    ],
+    JSON.stringify(checkpoint),
+  );
   await appendFile(
     f.sessionPath,
     JSON.stringify({
@@ -2062,7 +2085,7 @@ test("resuming Deep Scan includes archived spending before starting another turn
       })),
     },
   );
-  expect(code).not.toBe(0);
+  expect(code, stderr.text()).toBe(0);
   expect(turns).toBe(0);
   expect(stderr.text()).toContain("exceeded the $0.000001 limit");
 });
@@ -2515,7 +2538,7 @@ test.each([
         },
       },
     );
-    expect(code, stderr.text()).toBe(2);
+    expect(code, stderr.text()).toBe(publicationOnly ? 0 : 2);
     expect(runtimeStarts).toBe(0);
     expect(authenticationChecks).toBe(0);
     expect(requests).toEqual(publicationOnly ? [f.scanId] : []);
@@ -2528,7 +2551,7 @@ test.each([
       expect(stdout.text() + stderr.text()).toContain("ENOENT");
     if (publicationOnly && bulk) {
       const result = JSON.parse(stdout.text());
-      expect(result).toMatchObject({ incomplete: 1, failed: 0 });
+      expect(result).toMatchObject({ completed: 1, failed: 0 });
       const receipts = (await readFile(result.resultsPath, "utf8"))
         .trim()
         .split("\n")

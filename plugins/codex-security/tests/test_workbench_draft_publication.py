@@ -37,7 +37,7 @@ def test_terminal_deep_draft_compares_previous_bytes_without_parsing_review_docu
         }
     }
     documents["findings"]["findings"] = []
-    documents["coverage"].update(completeness="complete", surfaces=[], deferred=[])
+    documents["coverage"].update(surfaces=[], deferred=[])
     drafts = scan_dir / "drafts"
     drafts.mkdir(exist_ok=True)
     staged = drafts / f"{uuid.uuid4()}.json"
@@ -148,7 +148,7 @@ def test_deep_setup_draft_does_not_complete_unfinished_composition(
         }
     }
     documents["findings"]["findings"] = []
-    documents["coverage"].update(completeness="complete", surfaces=[], deferred=[])
+    documents["coverage"].update(surfaces=[], deferred=[])
     drafts = scan_dir / "drafts"
     drafts.mkdir(exist_ok=True)
     staged = drafts / f"{uuid.uuid4()}.json"

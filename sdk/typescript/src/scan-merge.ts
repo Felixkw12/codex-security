@@ -378,14 +378,6 @@ export function combineScanCoverage(
     ...(metadata.length > 1 || (!priorCoverage && "sourceScans" in fields)
       ? { sourceScans: structuredClone(exactUnion(metadata)) }
       : {}),
-    completeness:
-      completed.length === 0 ||
-      unresolved.length > 0 ||
-      completed.some((source) => source["completeness"] === "partial")
-        ? "partial"
-        : completed.some((source) => source["completeness"] === "unknown")
-          ? "unknown"
-          : "complete",
     surfaces: [],
     explicitExclusions: [],
     deferred: [],

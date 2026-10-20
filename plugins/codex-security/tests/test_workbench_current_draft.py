@@ -653,7 +653,7 @@ def test_stopped_scan_retains_canonical_results_written_after_committed_draft(
     assert (directory / "artifacts/scan-draft.json").read_bytes() == committed
 
     coverage = json.loads((directory / "coverage.json").read_text())
-    assert coverage["completeness"] == "partial"
+    assert "completeness" not in coverage
     assert later_coverage["surfaces"][-1] in coverage["surfaces"]
     assert later_coverage["openQuestions"][0] in coverage["openQuestions"]
     deferred_ids = {item["id"] for item in coverage["deferred"]}

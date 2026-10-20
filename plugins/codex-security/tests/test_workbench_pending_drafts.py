@@ -309,7 +309,7 @@ def test_pending_review_on_an_already_resolved_surface_survives_completion(
     run_workbench(fixture.state, "prepare-scan-completion", "--scan-id", fixture.scan_id)
     coverage = json.loads((fixture.directory / "coverage.json").read_text())
     assert coverage["deferred"] == pending["coverage"]["deferred"]
-    assert coverage["completeness"] == "partial"
+    assert "completeness" not in coverage
 
 
 @pytest.mark.parametrize("pending_scan", ["deep_child"], indirect=True)

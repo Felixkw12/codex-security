@@ -96,7 +96,7 @@ for index, (scan, repository) in enumerate([
     ('unrelated-before', 'unrelated'), ('unrelated-after', 'unrelated'),
     ('before', 'selected'), ('after', 'selected')
 ]):
-    seed(connection, 'scans', ('id', 'target_id', 'target_path', 'status', 'started_at'), (scan, None, str(Path(sys.argv[2]) / repository), 'complete', str(index)))
+    seed(connection, 'scans', ('id', 'target_id', 'target_path', 'status', 'started_at'), (scan, None, str(Path(sys.argv[2]) / repository), 'complete', f'2026-01-01T00:00:0{index}Z'))
 seed_many(connection, 'finding_occurrences', ('id', 'finding_id', 'scan_id'), [
     ('unrelated-first', 'unrelated-identity-a', 'unrelated-before'),
     ('unrelated-second', 'unrelated-identity-b', 'unrelated-after')
@@ -105,7 +105,7 @@ seed(connection, 'scan_comparison_matches', ('before_scan_id', 'after_scan_id', 
 comparison = history.compare_scans(
     connection, argparse.Namespace(before_scan_id='before', after_scan_id='after'),
     require_scan=lambda db, scan: db.execute('SELECT * FROM scans WHERE id = ?', (scan,)).fetchone(),
-    read_coverage=lambda _: {'completeness': 'complete'}, include_matching_inputs=True)
+    read_coverage=lambda _: {}, include_matching_inputs=True)
 print(json.dumps(comparison['matchingInputs']))
 `,
     join(tmpdir(), "codex-security-legacy-repositories"),
@@ -140,7 +140,7 @@ def save(value):
         connection, argparse.Namespace(before_scan_id='before', after_scan_id='after', matches_json=json.dumps(value)),
         now=lambda: '2026-01-01T00:00:00Z',
         require_scan=lambda db, scan: db.execute('SELECT * FROM scans WHERE id = ?', (scan,)).fetchone(),
-        read_coverage=lambda _: {'completeness': 'complete', 'includePaths': ['src'],
+        read_coverage=lambda _: {'includePaths': ['src'],
                                  'excludePaths': [], 'explicitExclusions': []})
 def snapshot():
     return (connection.execute('SELECT result_json FROM scan_comparisons').fetchone()[0],
@@ -175,7 +175,14 @@ print(json.dumps({'summary': accepted['summary'],
       join(tmpdir(), "codex-security-validation-fixture"),
     ),
   ).toEqual({
-    summary: { new: 1, persisting: 2, reopened: 0, resolved: 1, unknown: 0 },
+    summary: {
+      new: 1,
+      persisting: 2,
+      reopened: 0,
+      resolved: 0,
+      not_observed: 1,
+      unknown: 0,
+    },
     related: [
       ["a2", "y"],
       ["c", "z"],
@@ -284,7 +291,7 @@ import workbench_scan_history as history
 connection = migrated_connection()
 for index in range(3):
     scan = f'scan-{index}'
-    seed(connection, 'scans', ('id', 'target_path', 'target_id', 'status', 'started_at'), (scan, sys.argv[2], None, 'complete', str(index)))
+    seed(connection, 'scans', ('id', 'target_path', 'target_id', 'status', 'started_at'), (scan, sys.argv[2], None, 'complete', f'2026-01-01T00:00:0{index}Z'))
     seed(connection, 'finding_occurrences', ('id', 'finding_id', 'scan_id', 'details_json', 'remediation', 'severity', 'summary', 'title'), (scan, scan, scan, '{}', 'fix', 'high', 'summary', 'title'))
 queries = []
 connection.set_trace_callback(queries.append)
@@ -303,7 +310,7 @@ scoped = history._saved_finding_links(connection, {'scan-0', 'scan-1'})
 link_queries = [query for query in queries if 'FROM scan_comparison_matches' in query]
 for index in (3, 4):
     scan = f'scan-{index}'
-    seed(connection, 'scans', ('id', 'target_path', 'target_id', 'status', 'started_at'), (scan, sys.argv[2], None, 'complete', str(index)))
+    seed(connection, 'scans', ('id', 'target_path', 'target_id', 'status', 'started_at'), (scan, sys.argv[2], None, 'complete', f'2026-01-01T00:00:0{index}Z'))
     seed(connection, 'finding_occurrences', ('id', 'finding_id', 'scan_id', 'details_json', 'remediation', 'severity', 'summary', 'title'), (scan, f'scan-{index - 3}', scan, '{}', 'fix', 'high', 'summary', 'title'))
 def coverage(scan):
     if scan['id'] in {'scan-0', 'scan-1', 'scan-2'}:
@@ -405,7 +412,7 @@ payload = {
 }
 def cache():
     seed(connection, 'scan_comparisons', ('before_scan_id', 'after_scan_id', 'result_json'), ('before', 'after', json.dumps(payload)), replace=True)
-coverage = {'completeness': 'complete', 'includePaths': ['src'],
+coverage = {'includePaths': ['src'],
             'excludePaths': ['src/excluded.py'], 'explicitExclusions': []}
 def compare():
     return history.compare_scans(
@@ -453,7 +460,7 @@ print(json.dumps({'uncertain': uncertain, 'excluded': excluded, 'resolved': reso
       ],
     },
     excluded: { summary: { new: 1, resolved: 0, unknown: 1 } },
-    resolved: { summary: { new: 1, resolved: 1, unknown: 0 } },
+    resolved: { summary: { new: 1, resolved: 0, not_observed: 1, unknown: 0 } },
     linked: {
       summary: { new: 0, persisting: 0, reopened: 1, resolved: 0, unknown: 0 },
       findings: [

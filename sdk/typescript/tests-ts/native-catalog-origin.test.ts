@@ -13,6 +13,7 @@ import {
   prepareDiscoveryExecution,
   prepareMergeExecution,
   prepareExecutionSource,
+  resolveExecutionPaths,
   type PreparedExecution,
 } from "../src/execution-preparation.js";
 import { executablePathForSpawn } from "../src/runtime.js";
@@ -39,14 +40,21 @@ test.each(["home", "selected", "selected-profile", "recipe"] as const)(
       mkdir(merge),
     ]);
     const original =
-      'model_catalog_json = "models.json"\nmodel_instructions_file = "instructions.md"\n';
+      'model_catalog_json = "models.json"\nmodel_instructions_file = "instructions.md"\nexperimental_compact_prompt_file = "compact.md"\nsqlite_home = "sqlite"\n';
     await writeFile(join(home, "config.toml"), original);
     await writeFile(join(home, "models.json"), JSON.stringify(catalog));
     await writeFile(
       join(home, "instructions.md"),
       "Synthetic home instructions.\n",
     );
-    for (const cwd of [discovery, merge]) {
+    await writeFile(join(home, "compact.md"), "Synthetic home compact prompt.");
+    await mkdir(join(home, "sqlite"));
+    for (const cwd of [root]) {
+      await writeFile(
+        join(cwd, "caller-compact.md"),
+        "Synthetic caller compact prompt.",
+      );
+      await mkdir(join(cwd, "caller-sqlite"));
       await writeFile(join(cwd, "caller-models.json"), JSON.stringify(catalog));
       await writeFile(
         join(cwd, "caller-instructions.md"),
@@ -75,10 +83,15 @@ test.each(["home", "selected", "selected-profile", "recipe"] as const)(
       join(selectedDirectory, "selected-instructions.md"),
       "Synthetic selected instructions.\n",
     );
+    await writeFile(
+      join(selectedDirectory, "selected-compact.md"),
+      "Synthetic selected compact prompt.",
+    );
+    await mkdir(join(selectedDirectory, "selected-sqlite"));
     const selectedPath = join(selectedDirectory, "settings.toml");
     await writeFile(
       selectedPath,
-      `${origin === "selected-profile" ? 'profile = "selected"\n[profiles.selected]\n' : ""}model_catalog_json = "selected-models.json"\nmodel_instructions_file = "selected-instructions.md"\n`,
+      `${origin === "selected-profile" ? 'profile = "selected"\n[profiles.selected]\n' : ""}model_catalog_json = "selected-models.json"\nmodel_instructions_file = "selected-instructions.md"\nexperimental_compact_prompt_file = "selected-compact.md"\nsqlite_home = "selected-sqlite"\n`,
     );
     const environment = {
       PATH: process.env["PATH"],
@@ -119,6 +132,8 @@ test.each(["home", "selected", "selected-profile", "recipe"] as const)(
       },
       model_instructions_file: "caller-instructions.md",
       model_catalog_json: "caller-models.json",
+      experimental_compact_prompt_file: "caller-compact.md",
+      sqlite_home: "caller-sqlite",
     };
     const savedProfile = explicit
       ? await createProviderProfile(home, replaySettings)
@@ -145,14 +160,29 @@ const args = process.argv.slice(2), config = parse(fs.readFileSync(path.join(pro
 const merge=(target,value)=>{for(const [key,child] of Object.entries(value))target[key]=child&&typeof child==="object"&&!Array.isArray(child)?merge(target[key]??{},child):child;return target;};
 if(args.includes("--profile"))merge(config,parse(fs.readFileSync(path.join(process.env.CODEX_HOME,args[args.indexOf("--profile")+1]+".config.toml"),"utf8")));
 for(let i=0;i<args.length;i++)if(["-c","--config"].includes(args[i]))merge(config,parse(args[++i]));
-fs.appendFileSync(${JSON.stringify(capture)},JSON.stringify({args,catalog:config.model_catalog_json,instructions:config.model_instructions_file,analytics:config.analytics,shellPolicy:config.shell_environment_policy})+"\\n");
+fs.appendFileSync(${JSON.stringify(capture)},JSON.stringify({args,catalog:config.model_catalog_json,instructions:config.model_instructions_file,compact:config.experimental_compact_prompt_file,sqliteHome:config.sqlite_home,analytics:config.analytics,shellPolicy:config.shell_environment_policy})+"\\n");
 if(args.includes("app-server"))require("node:readline").createInterface({input:process.stdin}).on("line",line=>{const request=JSON.parse(line);if(request.id===undefined)return;const result=request.method==="initialize"?{}:request.method==="config/read"?{config}:{data:[{id:config.default_permissions,allowed:true}],nextCursor:null};console.log(JSON.stringify({id:request.id,result}));});
 else {process.stdin.resume();process.stdin.on("end",()=>{console.log(JSON.stringify({type:"thread.started",thread_id:"00000000-0000-4000-8000-000000000001"}));console.log(JSON.stringify({type:"turn.completed",usage:{input_tokens:0,cached_input_tokens:0,output_tokens:0}}));});}
 `,
     );
+    await writeFile(
+      join(root, "compact.md"),
+      "Synthetic parent compact prompt.",
+    );
+    await writeFile(
+      join(root, "selected-compact.md"),
+      "Synthetic selected parent compact prompt.",
+    );
+    await mkdir(join(root, "sqlite"));
+    await mkdir(join(root, "selected-sqlite"));
+    const workerConfiguration = resolveExecutionPaths(
+      configuration,
+      root,
+      environment,
+    );
     const source = prepareExecutionSource({
       command: { command: executable },
-      configuration,
+      configuration: workerConfiguration,
       environment,
       preserveProviderEnvironment: true,
     });
@@ -161,9 +191,9 @@ else {process.stdin.resume();process.stdin.on("end",()=>{console.log(JSON.string
       source,
       runtime: { ...preparedRuntime(home), preserveCodexHomeConfig: true },
       runtimeHome: home,
-      effectiveConfig: configuration,
+      effectiveConfig: workerConfiguration,
       preflightConfig: {},
-      sessionConfig: scanRuntimeCodexConfig(configuration, home),
+      sessionConfig: scanRuntimeCodexConfig(workerConfiguration, home),
       authentication: source.authentication,
       approvalPolicy: "never",
       python: process.execPath,
@@ -198,7 +228,11 @@ else {process.stdin.resume();process.stdin.on("end",()=>{console.log(JSON.string
           role === "discovery"
             ? prepareDiscoveryExecution(session)
             : prepareMergeExecution(session, 2);
-        const { codex } = createExecutionCodex({ surface: "sdk" }, worker, {});
+        const { codex } = await createExecutionCodex(
+          { surface: "sdk", command: "scan", mode: "deep" },
+          worker,
+          {},
+        );
         for (const resumed of [false, true]) {
           const options = {
             workingDirectory: role === "discovery" ? discovery : merge,
@@ -235,14 +269,28 @@ else {process.stdin.resume();process.stdin.on("end",()=>{console.log(JSON.string
         }
         expect(row.catalog).toBe(
           explicit
-            ? "caller-models.json"
+            ? join(root, "caller-models.json")
             : origin.startsWith("selected")
               ? join(selectedDirectory, "selected-models.json")
               : join(home, "models.json"),
         );
+        expect(row.compact).toBe(
+          explicit
+            ? join(root, "caller-compact.md")
+            : origin.startsWith("selected")
+              ? join(selectedDirectory, "selected-compact.md")
+              : join(home, "compact.md"),
+        );
+        expect(row.sqliteHome).toBe(
+          explicit
+            ? join(root, "caller-sqlite")
+            : origin.startsWith("selected")
+              ? join(selectedDirectory, "selected-sqlite")
+              : join(home, "sqlite"),
+        );
         expect(row.instructions).toBe(
           explicit
-            ? "caller-instructions.md"
+            ? join(root, "caller-instructions.md")
             : origin.startsWith("selected")
               ? join(selectedDirectory, "selected-instructions.md")
               : join(home, "instructions.md"),

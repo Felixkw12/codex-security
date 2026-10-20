@@ -558,7 +558,7 @@ export async function runDeepScans(
         : executionSignal.aborted &&
             !(executionSignal.reason instanceof ScanCostTrackingError) &&
             !(executionSignal.reason instanceof ScanPermissionError) &&
-            !isCodexCybersecurityPolicyRefusal(executionSignal.reason)
+            !isCodexNonRetryableFailure(executionSignal.reason)
           ? "canceled"
           : "failed";
   let polling = false;
@@ -680,8 +680,7 @@ export async function runDeepScans(
           error instanceof ScanTransportClosedError ||
           error instanceof ScanPermissionError ||
           (state.mergeFailures ?? 0) >= settings.stopAfterConsecutiveErrors ||
-          (error !== validationError &&
-            isCodexCybersecurityPolicyRefusal(error))
+          (error !== validationError && isCodexNonRetryableFailure(error))
         )
           throw error;
         if (!(await retryMerge())) throw error;
@@ -765,7 +764,7 @@ export async function runDeepScans(
           error instanceof ScanCostLimitExceededError ||
           error instanceof ScanTransportClosedError ||
           error instanceof ScanPermissionError ||
-          isCodexCybersecurityPolicyRefusal(error)
+          isCodexNonRetryableFailure(error)
         )
           externalStop.abort(error);
         if (discoverySignal.aborted) throw error;
@@ -984,7 +983,7 @@ export async function runDeepScans(
       error instanceof ScanCostTrackingError ||
       error instanceof ScanCostLimitExceededError ||
       error instanceof ScanPermissionError ||
-      isCodexCybersecurityPolicyRefusal(error)
+      isCodexNonRetryableFailure(error)
     )
       externalStop.abort(error);
     if (
@@ -1045,5 +1044,23 @@ export function isCodexCybersecurityPolicyRefusal(error: unknown): boolean {
     "Request blocked by a cybersecurity_policy_violation.",
     "Request refused under cybersecurity policy.",
     "Cybersecurity policy has refused the request.",
+  ].includes(message);
+}
+
+/** Terminal native account limits cannot be fixed by retrying discovery. */
+export function isCodexNonRetryableFailure(error: unknown): boolean {
+  if (isCodexCybersecurityPolicyRefusal(error)) return true;
+  const message = error instanceof Error ? error.message : String(error);
+  if (
+    message.startsWith("You’ve hit your usage limit.") ||
+    message.startsWith("You’ve hit your usage limit for ")
+  )
+    return true;
+  return [
+    "Quota exceeded. Check your plan and billing details.",
+    "Your workspace is out of credits. Add credits to continue.",
+    "Your workspace is out of credits. Ask your workspace owner to refill in order to continue.",
+    "You hit your spend cap set in your workspace. Increase your spend cap to continue.",
+    "You hit your spend cap set by the owner of your workspace. Ask an owner to increase your spend cap to continue.",
   ].includes(message);
 }

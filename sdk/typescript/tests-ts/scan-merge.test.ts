@@ -364,7 +364,7 @@ describe("local scan merging", () => {
       [first.draft.coverage, second.draft.coverage],
       ["One interrupted scan retains unfinished work."],
     );
-    expect(combined.completeness).toBe("partial");
+    expect(combined).not.toHaveProperty("completeness");
     expect(combined.surfaces).toEqual([
       ...first.draft.coverage.surfaces,
       ...second.draft.coverage.surfaces,
@@ -380,14 +380,14 @@ describe("local scan merging", () => {
     expect(
       combineScanCoverage([
         child("unknown", [], { completeness: "unknown" }).draft.coverage,
-      ]).completeness,
-    ).toBe("unknown");
+      ]),
+    ).not.toHaveProperty("completeness");
     expect(
-      combineScanCoverage([child("empty", []).draft.coverage]).completeness,
-    ).toBe("complete");
-    expect(combineScanCoverage([], ["No scan completed."]).completeness).toBe(
-      "partial",
-    );
+      combineScanCoverage([child("empty", []).draft.coverage]),
+    ).not.toHaveProperty("completeness");
+    const unfinished = combineScanCoverage([], ["No scan completed."]);
+    expect(unfinished).not.toHaveProperty("completeness");
+    expect(unfinished.deferred).toEqual([{ reason: "No scan completed." }]);
   });
 
   test("combines large coverage and unresolved lists on Node without argument limits", async () => {
@@ -409,7 +409,7 @@ const coverage = {
 };
 const unresolved = Array.from({ length: count }, (_, index) => "Unresolved " + index);
 const combined = combineScanCoverage([coverage], unresolved);
-assert.equal(combined.completeness, "partial");
+assert.equal("completeness" in combined, false);
 assert.deepEqual(combined.surfaces, coverage.surfaces);
 assert.deepEqual(combined.deferred.slice(0, count), coverage.deferred);
 assert.deepEqual(combined.deferred.slice(count), unresolved.map(reason => ({ reason })));
@@ -468,7 +468,7 @@ assert.equal(coverage.surfaces[0].label, "Surface 0");
       ],
     });
     const coverage = combineScanCoverage([fresh.draft.coverage], [], prior);
-    expect(coverage["completeness"]).toBe("partial");
+    expect(coverage).not.toHaveProperty("completeness");
     expect(coverage["surfaces"]).toEqual([
       prior.surfaces[0]!,
       {
@@ -489,16 +489,16 @@ assert.equal(coverage.surfaces[0].label, "Surface 0");
         surfaces: [],
         explicitExclusions: [],
         deferred: [],
-      })["completeness"],
-    ).toBe("complete");
+      }),
+    ).not.toHaveProperty("completeness");
     expect(
       combineScanCoverage([fresh.draft.coverage], [], {
         completeness: "unknown",
         surfaces: [],
         explicitExclusions: [],
         deferred: [],
-      })["completeness"],
-    ).toBe("unknown");
+      }),
+    ).not.toHaveProperty("completeness");
   });
 
   test("uses ordinary target and coverage publication at the export boundary", () => {
@@ -940,7 +940,12 @@ test("publishes coverage metadata and retains conflicting source values on resum
   );
   expect(prepared.coverage["toolMetadata"]).toEqual(first["toolMetadata"]);
   expect(prepared.coverage["sourceScans"]).toEqual(combined["sourceScans"]);
-  expect(prepared.coverage.completeness).toBe("partial");
+  expect(prepared.coverage).not.toHaveProperty("completeness");
+  expect(prepared.coverage.deferred).toContainEqual(
+    expect.objectContaining({
+      reason: "Pending pass.",
+    }),
+  );
   const third = semanticCoverage({ toolMetadata: { scanner: "third" } });
   const next = combineScanCoverage([third], [], resumed);
   expect(next["sourceScans"]).toEqual([

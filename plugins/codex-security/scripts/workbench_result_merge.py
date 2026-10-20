@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from finalize_scan_contract import (
     ContractError,
+    MissingScanLocalFileError,
     _prepare_scan_finalization,
     _read_json,
     _read_scan_local_json,
@@ -60,7 +61,7 @@ def _legacy_read_saved_result(
             scan_dir, relative, "Saved scan checkpoint"
         )
     except ContractError as error:
-        if not isinstance(error.__cause__, FileNotFoundError) or not re.fullmatch(
+        if not isinstance(error, MissingScanLocalFileError) or not re.fullmatch(
             r"checkpoints/[0-9a-f]{64}\.json", relative
         ):
             raise
@@ -333,7 +334,7 @@ def coverage_for_comparison(db: Any, scan: Any) -> dict[str, Any]:
     scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
     db.require_recorded_manifest_digest(scan, scan_dir)
     try:
-        _, _, manifest, _, coverage, was_sealed, _ = _prepare_scan_finalization(scan_dir)
+        _, _, manifest, _, coverage, was_sealed, _, _ = _prepare_scan_finalization(scan_dir)
     except ContractError as exc:
         raise SystemExit(str(exc)) from exc
     if not was_sealed or manifest["scan"]["id"] != scan["id"]:
@@ -386,6 +387,11 @@ def _reconcile_child_coverage(
     coverage: dict[str, Any], child: dict[str, Any], child_id: str
 ) -> None:
     """Refresh only this unmerged child's namespaced, validated coverage state."""
+    receipt_spellings = {
+        ref.lower(): ref
+        for surface in child.get("surfaces", [])
+        for ref in surface.get("receiptRefs", [])
+    }
     for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions"):
         current = {row["id"]: row for row in child.get(field, []) if isinstance(row.get("id"), str)}
         retained = []
@@ -398,6 +404,8 @@ def _reconcile_child_coverage(
             if replacement is None:
                 continue
             for history_field in ("previousFindings", "receiptRefs"):
+                if history_field == "receiptRefs" and field != "surfaces":
+                    continue
                 history = previous.get(history_field)
                 if isinstance(history, list) and history:
                     values = replacement.get(history_field)
@@ -405,6 +413,13 @@ def _reconcile_child_coverage(
                         values = replacement[history_field] = []
                     if isinstance(values, list):
                         for value in history:
+                            if (
+                                history_field == "receiptRefs"
+                                and isinstance(value, str)
+                                and receipt_spellings.get(value.lower(), value) != value
+                            ):
+                                # The validated child already chose the current spelling.
+                                continue
                             if value not in values:
                                 values.append(copy.deepcopy(value))
             retained.append(replacement)

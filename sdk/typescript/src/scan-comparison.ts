@@ -22,11 +22,11 @@ import {
 } from "./auth.js";
 import {
   deepMerge,
+  inlineToml,
   codexConfigOverrides,
   providerProcessConfiguration,
   mcpProcessConfiguration,
   hasCommandAuth,
-  inlineToml,
   mergedCodexConfig,
   normalizeLegacyWindowsSandboxOverride,
   resolveCodexProfile,
@@ -44,7 +44,7 @@ import {
 import { providerPreflightCommand } from "./provider-profile.js";
 import { createExecutionProfileCodex } from "./execution-profile.js";
 import { CodexSecurityError, ConfigurationError } from "./errors.js";
-import { codexSecurityRequestMetadata } from "./request-metadata.js";
+import { codexSecurityRequestContext } from "./request-metadata.js";
 import {
   compactFinding,
   findingCatalogue,
@@ -632,15 +632,21 @@ async function startReadOnlyCodexThread(
     options.inheritedPermissions,
   );
   const sdkConfig = prepared.config;
-  const requestMetadata = {
-    ...(homeExecutionConfig["responses_api_metadata"] as
-      JsonObject | undefined),
-    ...(sdkConfig["responses_api_metadata"] as JsonObject | undefined),
-    ...codexSecurityRequestMetadata(
-      runtimeOptions.surface,
-      runtimeOptions.command,
-    ),
-  };
+  const requestContext = codexSecurityRequestContext(
+    {
+      ...sdkConfig,
+      responses_api_metadata: {
+        ...(homeExecutionConfig["responses_api_metadata"] as
+          JsonObject | undefined),
+        ...(sdkConfig["responses_api_metadata"] as JsonObject | undefined),
+      },
+    },
+    {
+      surface: runtimeOptions.surface,
+      command: runtimeOptions.command,
+      providerResolved: sdkConfig["model_provider"] !== undefined,
+    },
+  );
   delete sdkConfig["responses_api_metadata"];
   if (preparedFactory === undefined) {
     const suppliedConfig = resolveCodexProfile(
@@ -658,7 +664,7 @@ async function startReadOnlyCodexThread(
     sdkConfig["model_providers"] = providerConfig["model_providers"]!;
   const configOverrides = [
     ...prepared.overrides,
-    `responses_api_metadata=${inlineToml(requestMetadata)}`,
+    requestContext.configOverride,
   ];
   const environment =
     preparedFactory === undefined
@@ -747,6 +753,9 @@ async function startReadOnlyCodexThread(
               api_key_model_discovery:
                 effectiveFeatures["api_key_model_discovery"],
             }),
+        ...(effectiveFeatures?.["cli_daybreak"] === undefined
+          ? {}
+          : { cli_daybreak: effectiveFeatures["cli_daybreak"] }),
         apps: false,
         code_mode: false,
         code_mode_only: false,
@@ -809,19 +818,24 @@ export async function disabledMcpServers(
   configOverrides: readonly string[] = [],
 ): Promise<JsonObject> {
   const workingDirectory = resolve(options.workingDirectory ?? process.cwd());
-  const { success, stdout, stderr } = await runCodexCommand(
+  const processConfig = mcpProcessConfiguration(
+    resolveCodexProfile(config ?? {}),
+  ).config;
+  const preflightCommand = await providerPreflightCommand(
     command,
+    processConfig,
+  );
+  // The probe needs provider metadata; execution reads full definitions privately.
+  delete processConfig["model_providers"];
+
+  const { success, stdout, stderr } = await runCodexCommand(
+    preflightCommand,
     [
       "-C",
       workingDirectory,
-      ...[
-        ...codexConfigOverrides(
-          providerProcessConfiguration(
-            mcpProcessConfiguration(config ?? {}).config,
-          ).config,
-        ),
-        ...configOverrides,
-      ].flatMap((value) => ["--config", value]),
+      ...[...codexConfigOverrides(processConfig), ...configOverrides].flatMap(
+        (value) => ["--config", value],
+      ),
       "-c",
       "features.plugins=false",
       "mcp",

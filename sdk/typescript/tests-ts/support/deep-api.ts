@@ -7,6 +7,7 @@ import type { CodexOptions, ThreadOptions } from "@openai/codex-sdk";
 import { parse as parseToml } from "smol-toml";
 import { CodexSecurity, type ScanOptions } from "../../src/api.js";
 import type { JsonObject } from "../../src/config.js";
+import { definedEnvironment } from "../../src/execution-auth.js";
 import {
   prepareScanArtifactRestorer,
   runWorkbench,
@@ -46,13 +47,14 @@ export function createDeepApiFixtures() {
     const version = JSON.parse(
       await readFile(join(pluginRoot, ".codex-plugin/plugin.json"), "utf8"),
     ).version;
-    const environment = {
-      ...process.env,
+    const environment: Record<string, string> = {
+      ...definedEnvironment(process.env),
       CODEX_HOME: home,
       CODEX_SECURITY_STATE_DIR: join(root, "state"),
       OPENAI_API_KEY: "synthetic-test-key",
       SYNTHETIC_SETTING: "captured",
     };
+    let runtimeEnvironment: Record<string, string> | undefined;
     const records = new Map<
       string,
       {
@@ -154,7 +156,7 @@ export function createDeepApiFixtures() {
               preserveCodexHomeConfig: true,
               persistentCredentialHome: true,
               credentialsAvailable: true,
-              environment,
+              environment: runtimeEnvironment ?? environment,
               plugin: {
                 pluginRoot: sourcePluginRoot,
                 installedRoot: pluginRoot,
@@ -292,7 +294,7 @@ export function createDeepApiFixtures() {
               }
               if (mode === "deep") {
                 await writeFile(knowledgePath, "Changed after registration");
-                environment.SYNTHETIC_SETTING = "later value";
+                environment["SYNTHETIC_SETTING"] = "later value";
               }
             }
             if (
@@ -606,6 +608,10 @@ export function createDeepApiFixtures() {
     return {
       root,
       home,
+      environment,
+      setRuntimeEnvironment(value: Record<string, string>) {
+        runtimeEnvironment = value;
+      },
       repository,
       outputDir,
       knowledgePath,

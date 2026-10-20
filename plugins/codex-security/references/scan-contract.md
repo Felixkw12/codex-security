@@ -124,7 +124,9 @@ Use CWE taxonomy separately. Do not include file names, line numbers, scan IDs, 
 
 `coverage.json` records scan scope and completion information. Standard and diff summaries also describe reviewed surfaces and outstanding work.
 
-During [Deep Scan](../skills/deep-security-scan/SKILL.md#run-independent-standard-scans), the host combines child scans’ reviewed surfaces, explicit exclusions, deferred work and open questions, preserving references to the child artifacts. Parent coverage stays partial when a child is partial, no completed input is available, or a pass remains unresolved. Otherwise, unknown child coverage stays unknown. Reaching a discovery limit alone does not make complete child coverage partial. Stopped outcomes follow the [stopped-result recovery rules](#stopped-result-recovery).
+During [Deep Scan](../skills/deep-security-scan/SKILL.md#run-independent-standard-scans), the host combines child scans' reviewed surfaces, explicit exclusions, deferred work and open questions, retaining the configured paths and references to the child artifacts. The host derives parent coverage as partial when a child is partial, no completed input is available, or a pass remains unresolved. Otherwise, unknown child coverage stays unknown. Reaching a discovery limit alone does not make complete child coverage partial.
+
+Merging findings does not clear pending review work. If the discovery deadline arrives before a review finishes, the host preserves valid checkpoint findings and pending work with the deadline reason. See [stopped-result recovery](#stopped-result-recovery).
 
 Each pass retains its ordinary result and coverage. The host preserves every original finding in the merged finding's provenance, along with accepted scope and threat-model context. The merger does not decide coverage.
 
@@ -136,7 +138,6 @@ For Standard and diff scans, record:
 - detailed receipt references
 - explicit exclusions
 - deferred work
-- completeness
 
 `mode` records the requested scan workflow:
 
@@ -164,7 +165,7 @@ For a whole-repository Deep scan, keep `inventoryStrategy` as `repository`; repe
 | `directory`        | Deterministic non-Git directory inventory                 |
 | `custom`           | Producer-defined inventory described by detailed receipts |
 
-For Standard and diff scans, use `complete` when the requested scope was fully reviewed, `partial` when in-scope work was deferred, and `unknown` when the producer cannot establish enough coverage to make that distinction.
+Coverage lists reviewed surfaces, exclusions, and follow-up work. The manifest records execution status. Existing sealed bundles retain legacy metadata unchanged.
 
 Map detailed ledger closure into completed surface summaries in this order:
 
@@ -207,6 +208,8 @@ Record report-specific semantics without duplicating data already represented el
 These fields are optional for compatibility with existing v1 canonical artifacts. When omitted, finalization emits explicit, deterministic fallback text derived only from the remaining canonical JSON. It never reads an existing report to recover missing semantics.
 
 ## Schemas
+
+New completed findings must match `schemas/tools/scan-draft.schema.json`. Finalization rejects legacy field aliases, malformed optional details, and invalid semantic slugs instead of repairing them. Historical sealed reports are validated through an in-memory compatibility adapter; their saved bytes remain unchanged. Stopped-scan recovery still salvages saved evidence.
 
 - `schemas/scan-manifest.schema.json`
 - `schemas/findings.schema.json`

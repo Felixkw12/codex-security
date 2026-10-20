@@ -182,7 +182,7 @@ def test_stopped_parent_preserves_work_with_malformed_child_manifest(
     findings = json.loads((parent_dir / "findings.json").read_text())["findings"]
     assert {finding["title"] for finding in findings} == expected
     coverage = json.loads((parent_dir / "coverage.json").read_text())
-    assert coverage["completeness"] == "partial"
+    assert "completeness" not in coverage
     for path, contents in original.items():
         assert path.read_bytes() == contents
 

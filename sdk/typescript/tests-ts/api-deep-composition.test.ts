@@ -1,3 +1,4 @@
+import { effectiveCodexConfiguration } from "./support/api-events.js";
 import { main } from "../src/cli.js";
 import { capture, dependencies as cliDependencies } from "./cli-fixtures.js";
 import { randomUUID } from "node:crypto";
@@ -73,7 +74,7 @@ test.each(["active", "completed"] as const)(
       await readFile(join(h.outputDir, "coverage.json"), "utf8"),
     );
     expect(findings.findings).toHaveLength(1);
-    expect(coverage.completeness).toBe("partial");
+    expect(coverage).not.toHaveProperty("completeness");
     expect(coverage.deferred).toContainEqual(
       expect.objectContaining({
         reason: "Independent source validation is pending.",
@@ -122,7 +123,7 @@ test("ordinary children and reducer share one immutable preparation and knowledg
         "config"
       ],
     ).toMatchObject(workerConfig);
-    expect(launch.options.config).toMatchObject({
+    expect(effectiveCodexConfiguration(launch.options)).toMatchObject({
       ...workerConfig,
       model: "gpt-6-astra",
       model_reasoning_effort: "high",
@@ -221,7 +222,7 @@ test("shared matching reads evidence through the prepared parent session", async
   expect(h.preparations()).toBe(1);
   expect(h.threadScans.size).toBe(3);
   for (const turn of parentTurns) {
-    expect(turn.options.config).toMatchObject({
+    expect(effectiveCodexConfiguration(turn.options)).toMatchObject({
       model: "gpt-6-astra",
       model_reasoning_effort: "high",
       permissions: {
@@ -269,15 +270,30 @@ test.each([
         set: { SYNTHETIC_SETTING: "synthetic-private-shell-value" },
       },
       model_instructions_file: join(h.root, "instructions.md"),
+      experimental_compact_prompt_file: join(h.root, "compact.md"),
+      model_catalog_json: join(h.root, "catalog.json"),
+      sqlite_home: join(h.root, "sqlite"),
     };
     await writeFile(
       replaySettings.model_instructions_file,
       "Synthetic replay instructions.",
     );
+    await writeFile(
+      replaySettings.experimental_compact_prompt_file,
+      "Synthetic compact prompt.",
+    );
+    await writeFile(
+      replaySettings.model_catalog_json,
+      JSON.stringify({ models: [] }),
+    );
+    await mkdir(replaySettings.sqlite_home);
     h.stopBeforeSealing();
     await using first = h.makeClient({
       ...replaySettings,
       model_instructions_file: "../instructions.md",
+      experimental_compact_prompt_file: "../compact.md",
+      model_catalog_json: "../catalog.json",
+      sqlite_home: "../sqlite",
       profile: "selected",
       service_tier: global,
       model_context_window: 128_000,
@@ -368,7 +384,7 @@ test.each([
       expect(
         (launch.options.config!["model_providers"] as JsonObject)["synthetic"],
       ).not.toHaveProperty("auth");
-      expect(launch.options.config).toMatchObject({
+      expect(effectiveCodexConfiguration(launch.options)).toMatchObject({
         model_provider: "synthetic",
         model_providers: { synthetic: transportProvider },
         service_tier: expected,
@@ -684,7 +700,7 @@ test("zero-work Deep Scan preserves a zero receipt across interrupted sealing", 
   });
   expect(result.cost).toEqual(zeroCost);
   expect(result.findings.findings).toEqual([]);
-  expect(result.coverage.completeness).toBe("partial");
+  expect(result.coverage).not.toHaveProperty("completeness");
   expect(result.coverage.deferred).toEqual([
     expect.objectContaining({
       reason:
@@ -839,7 +855,7 @@ test.each([
     expect(h.launches).toHaveLength(3);
     if (budget) {
       expect(result.cost!.estimatedUsd).toBeGreaterThan(options.maxCostUsd!);
-      expect(result.coverage.completeness).toBe("partial");
+      expect(result.coverage).not.toHaveProperty("completeness");
       expect(h.commands).toContain("complete-budget-exhausted-scan");
     }
     const completed = await runWorkbench(
@@ -1242,7 +1258,7 @@ test.each([false, true])(
     const followUp = h.launches.at(-1)!;
     const output = followUp.threadOptions.workingDirectory!;
     expect(dirname(output)).toBe(join(h.outputDir, "artifacts/follow-up"));
-    expect(followUp.options.config).toMatchObject({
+    expect(effectiveCodexConfiguration(followUp.options)).toMatchObject({
       permissions: {
         codex_security_scan: {
           filesystem: {
@@ -1289,7 +1305,7 @@ test("budget exhaustion seals accepted findings without a reducer session", asyn
   expect(h.commands).toContain("complete-budget-exhausted-scan");
   expect(result.threadId).toBeNull();
   expect(result.findings.findings).toHaveLength(2);
-  expect(result.coverage.completeness).toBe("partial");
+  expect(result.coverage).not.toHaveProperty("completeness");
   expect(result.cost).not.toBeNull();
   const checkpoint = JSON.parse(
     await readFile(
@@ -1404,7 +1420,7 @@ test.each(["direct", "resumed"])(
       ),
     ).toBe(true);
     expect(result.threadId).toBeNull();
-    expect(result.coverage.completeness).toBe("partial");
+    expect(result.coverage).not.toHaveProperty("completeness");
     expect(result.findings.findings).toContainEqual(
       expect.objectContaining({ title: "First completed discovery" }),
     );
@@ -1504,7 +1520,7 @@ test("resumed reducer budget recovery includes completed child receipts before e
   });
   expect(h.launches).toHaveLength(3);
   expect(result.findings.findings).toHaveLength(2);
-  expect(result.coverage.completeness).toBe("partial");
+  expect(result.coverage).not.toHaveProperty("completeness");
   const expectedCost = {
     ...estimateScanCost("gpt-6-astra", {
       input_tokens: usage.input_tokens * 6,
@@ -1589,7 +1605,7 @@ test("budget exhaustion resumes from its final receipt after sealing before data
   });
   expect(restored.cost).toEqual(expectedCost);
   expect(restored.findings.findings).toHaveLength(2);
-  expect(restored.coverage.completeness).toBe("partial");
+  expect(restored.coverage).not.toHaveProperty("completeness");
   expect(await readFile(manifestPath, "utf8")).toBe(sealedManifest);
   expect(h.launches).toHaveLength(2);
   const completed = await runWorkbench(
@@ -2174,3 +2190,38 @@ test("accepted patches restore ambient providers from a produced native-preserva
   ).toEqual(before);
   expect(h.launches).toHaveLength(3);
 });
+
+test.each([undefined, "Write follow-up notes"])(
+  "composed Deep Scan preserves completed usage and report through follow-up %p",
+  async (postScanPrompt) => {
+    const h = await fixture();
+    let starts = 0;
+    await using client = h.makeClient();
+    const result = await client.run(h.repository, {
+      ...h.options,
+      postScanPrompt,
+      onScanStarted: () => {
+        starts += 1;
+      },
+    });
+    const report = await readFile(result.reportPath, "utf8");
+    const expectedUsage = {
+      ...usage,
+      input_tokens: usage.input_tokens * 3,
+      output_tokens: usage.output_tokens * 3,
+    };
+    expect(starts).toBe(1);
+    expect(result.reportPath).toBe(join(h.outputDir, "report.md"));
+    expect(result.turnResult.finalResponse).toBe(report);
+    expect(result.toJSON()["turn"]).toMatchObject({ finalResponse: report });
+    expect(result.turnResult.usage).toMatchObject(expectedUsage);
+    expect(result.cost).toEqual(estimateScanCost("gpt-6-astra", expectedUsage));
+    const checkpoint = await loadDeepScanCheckpoint(h.outputDir);
+    expect(checkpoint?.finalCost).toEqual(result.cost);
+    expect(h.launches).toHaveLength(postScanPrompt === undefined ? 3 : 4);
+    if (postScanPrompt !== undefined) {
+      expect(h.completedPrompts.at(-1)).toContain(postScanPrompt);
+      expect(h.launches.at(-1)!.runOptions?.signal).toBeInstanceOf(AbortSignal);
+    }
+  },
+);

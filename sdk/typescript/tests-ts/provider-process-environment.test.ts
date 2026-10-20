@@ -17,6 +17,7 @@ import type { JsonObject } from "../src/config.js";
 import { definedEnvironment } from "../src/execution-auth.js";
 import {
   createExecutionCodex,
+  executionCommand,
   prepareDiscoveryExecution,
   prepareMergeExecution,
   prepareExecutionSource,
@@ -193,7 +194,7 @@ else { process.stdin.resume(); process.stdin.on("end",()=>{console.log(JSON.stri
       await Promise.all(
         sessions.map(async (session) => {
           await disabledMcpServers(
-            session.source.command,
+            executionCommand(session.source),
             session.sessionConfig,
             definedEnvironment(session.source.environment),
             { workingDirectory: root },
@@ -205,9 +206,13 @@ else { process.stdin.resume(); process.stdin.on("end",()=>{console.log(JSON.stri
                 : role === "merge"
                   ? prepareMergeExecution(session, 2)
                   : session;
-            const { codex } = createExecutionCodex({ surface: "sdk" }, worker, {
-              SYNTHETIC_ROLE: role,
-            });
+            const { codex } = await createExecutionCodex(
+              { surface: "sdk", command: "scan", mode: "deep" },
+              worker,
+              {
+                SYNTHETIC_ROLE: role,
+              },
+            );
             for (const resumed of [false, true]) {
               const options = {
                 workingDirectory: root,
@@ -412,7 +417,11 @@ else { process.stdin.resume();process.stdin.on("end",()=>{console.log(JSON.strin
           role === "discovery"
             ? prepareDiscoveryExecution(session)
             : prepareMergeExecution(session, 2);
-        const { codex } = createExecutionCodex({ surface: "sdk" }, worker, {});
+        const { codex } = await createExecutionCodex(
+          { surface: "sdk", command: "scan", mode: "deep" },
+          worker,
+          {},
+        );
         for (const resumed of [false, true]) {
           const options = { workingDirectory: root, skipGitRepoCheck: true };
           const thread = resumed

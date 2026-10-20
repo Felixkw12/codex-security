@@ -300,7 +300,6 @@
       }
     ],
     "coverage": {
-      "completeness": "partial",
       "surfaces": [
         {
           "id": "@CHILD@/surface",
@@ -327,7 +326,7 @@
           "reason": "A synthetic deployment condition needs follow-up.",
           "surfaceIds": ["@CHILD@/surface"],
           "receiptRefs": [
-            "artifacts/deep-scan/passes/pass-1/artifacts/receipt.json"
+            "artifacts/receipt.json"
           ]
         }
       ],
@@ -335,7 +334,7 @@
         {
           "id": "@CHILD@/open",
           "question": "Which deployment restricts access?",
-          "surfaceIds": ["@CHILD@/surface"]
+          "surfaceIds": ["surface"]
         }
       ]
     },

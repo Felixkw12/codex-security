@@ -47,6 +47,7 @@ export function semanticScanDraft(
     "excludePaths",
     "receiptRefs",
     "inventoryStrategy",
+    "completeness",
   ])
     delete semanticCoverage[field];
   return {
@@ -180,8 +181,10 @@ export function containsSavedValue(
   if (isObject(previous)) {
     return (
       isObject(current) &&
-      Object.entries(previous).every(([key, value]) =>
-        containsSavedValue(current[key], value),
+      Object.entries(previous).every(
+        ([key, value]) =>
+          Object.hasOwn(current, key) &&
+          containsSavedValue(current[key], value),
       )
     );
   }
@@ -219,26 +222,23 @@ export function scanFindingIdentity(source: JsonObject): string {
   ]);
 }
 
-export function validateFindingSemantics(
-  findings: SemanticFinding[],
-  enforceLegacyEvidenceBounds = true,
-): void {
+export function validateFindingSemantics(findings: JsonObject[]): void {
   for (const [findingIndex, finding] of findings.entries()) {
-    const severity = finding.severity;
+    const severity = finding["severity"] as JsonObject;
     if (
       severity["score"] !== undefined &&
       typeof severity["scoringSystem"] !== "string"
     ) {
       throw new Error(
-        `scan draft: findings[${findingIndex}].severity.scoringSystem is required with severity.score.`,
+        `scan draft: findings[${findingIndex}].severity["scoringSystem"] is required with severity["score"].`,
       );
     }
 
-    const locations = finding.locations;
+    const locations = finding["locations"] as JsonObject[];
     for (const [locationIndex, location] of locations.entries()) {
       if (
         typeof location["endLine"] === "number" &&
-        location["endLine"] < location.startLine
+        location["endLine"] < (location["startLine"] as number)
       ) {
         throw new Error(
           `scan draft: findings[${findingIndex}].locations[${locationIndex}].endLine ` +
@@ -248,47 +248,35 @@ export function validateFindingSemantics(
     }
 
     const evidenceIds = new Set<string>();
-    for (const [evidenceName, evidenceCatalog] of [
-      ["codeEvidence", finding["codeEvidence"]],
-      ["code_evidence", finding["code_evidence"]],
-    ] as const) {
-      for (const [evidenceIndex, evidence] of (
-        evidenceCatalog ?? []
-      ).entries()) {
-        const id = evidence.id;
-        if (evidenceIds.has(id)) {
-          throw new Error(
-            `scan draft: findings[${findingIndex}].${evidenceName}[${evidenceIndex}].id ` +
-              `duplicates ${id}.`,
-          );
-        }
-        evidenceIds.add(id);
-        if (
-          (evidenceName === "codeEvidence" || enforceLegacyEvidenceBounds) &&
-          typeof evidence["endLine"] === "number" &&
-          evidence["endLine"] < (evidence["startLine"] as number)
-        ) {
-          throw new Error(
-            `scan draft: findings[${findingIndex}].${evidenceName}[${evidenceIndex}].endLine ` +
-              "must not precede startLine.",
-          );
-        }
+    for (const [evidenceIndex, evidence] of (
+      (finding["codeEvidence"] as JsonObject[] | undefined) ?? []
+    ).entries()) {
+      const id = evidence["id"] as string;
+      if (evidenceIds.has(id)) {
+        throw new Error(
+          `scan draft: findings[${findingIndex}].codeEvidence[${evidenceIndex}].id ` +
+            `duplicates ${id}.`,
+        );
+      }
+      evidenceIds.add(id);
+      if (
+        typeof evidence["endLine"] === "number" &&
+        evidence["endLine"] < (evidence["startLine"] as number)
+      ) {
+        throw new Error(
+          `scan draft: findings[${findingIndex}].codeEvidence[${evidenceIndex}].endLine ` +
+            "must not precede startLine.",
+        );
       }
     }
 
     const referencedSections: Array<[string, unknown]> = [
       ["rootCause", finding["rootCause"]],
-      ["root_cause", finding["root_cause"]],
       ["validation", finding["validation"]],
       ["attackPath", finding["attackPath"]],
     ];
     if (isObject(finding["attackPath"])) {
-      for (const sectionName of [
-        "dataFlow",
-        "dataflow",
-        "data_flow",
-        "reachability",
-      ]) {
+      for (const sectionName of ["dataflow", "reachability"]) {
         referencedSections.push([
           `attackPath.${sectionName}`,
           finding["attackPath"][sectionName],
@@ -297,41 +285,18 @@ export function validateFindingSemantics(
     }
     for (const [sectionName, section] of referencedSections) {
       if (!isObject(section)) continue;
-      for (const referencesName of ["evidenceRefs", "evidence_refs"]) {
-        const references = section[referencesName];
-        if (references === undefined) continue;
-        if (
-          !Array.isArray(references) ||
-          references.some(
-            (reference) =>
-              typeof reference !== "string" || !evidenceIds.has(reference),
-          )
-        ) {
-          throw new Error(
-            `scan draft: findings[${findingIndex}].${sectionName}.${referencesName} ` +
-              "must refer to that finding's existing code-evidence IDs.",
-          );
-        }
+      const references = section["evidenceRefs"];
+      if (references === undefined) continue;
+      if (
+        !Array.isArray(references) ||
+        references.some((reference) => !evidenceIds.has(reference))
+      ) {
+        throw new Error(
+          `scan draft: findings[${findingIndex}].${sectionName}.evidenceRefs ` +
+            "must refer to that finding's existing code-evidence IDs.",
+        );
       }
     }
-  }
-}
-
-export function validateCoverageSemantics(coverage: SemanticCoverage): void {
-  if (coverage["completeness"] !== "complete") return;
-  if (coverage.deferred.length > 0) {
-    throw new Error(
-      "scan draft: complete coverage cannot contain deferred work.",
-    );
-  }
-  if (
-    coverage.surfaces.some(
-      (surface) => surface["disposition"] === "needs_follow_up",
-    )
-  ) {
-    throw new Error(
-      "scan draft: complete coverage cannot contain needs_follow_up surfaces.",
-    );
   }
 }
 
@@ -357,7 +322,6 @@ type PreparedFinding = SemanticFinding & {
 type PreparedCoverage = Pick<
   CoverageDocument,
   | "mode"
-  | "completeness"
   | "inventoryStrategy"
   | "includePaths"
   | "excludePaths"
@@ -774,6 +738,7 @@ function buildCoverage(
     surfaces: normalizedSurfaces,
     deferred: normalizedDeferred,
   };
+  delete (result as JsonObject)["completeness"];
   if (openQuestions === undefined) delete result.openQuestions;
   else
     result.openQuestions = openQuestions.map((question) =>

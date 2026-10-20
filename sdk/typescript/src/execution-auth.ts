@@ -16,6 +16,7 @@ import {
 import type { ProcessEnvironment } from "./runtime.js";
 
 export type ScanAuthentication =
+  | { method: "host"; verified: false }
   | { method: "command"; verified: false }
   | {
       method: "api_key";
@@ -45,6 +46,7 @@ export function scanAuthentication(
   auth: ScanAuthMode = DEFAULT_SCAN_AUTH,
   modelProvider?: unknown,
   commandAuth = false,
+  preflight = false,
 ): ScanAuthentication {
   if (!SCAN_AUTH_MODES.includes(auth)) {
     throw new TypeError(
@@ -72,6 +74,14 @@ export function scanAuthentication(
     return { method: "stored_credentials", verified: false };
   }
   const key = environmentApiKeyEntry(environment, modelProvider);
+  if (key === null && isExternalModelProvider(modelProvider)) {
+    const provider = EXTERNAL_CODEX_PROVIDERS[modelProvider];
+    if (preflight && auth === "auto")
+      return { method: "api_key", source: provider.env_key, verified: false };
+    throw new AuthenticationRequiredError(
+      `Set ${provider.env_key} to run a scan through ${provider.name}.`,
+    );
+  }
   if (
     auth === "api-key" &&
     key === null &&
@@ -133,7 +143,11 @@ export function selectedScanEnvironment(
   return Object.fromEntries(
     Object.entries(withoutOpenAiApiKeys(environment)).filter(([name]) => {
       const key = name.toUpperCase();
-      if (key === "OPENROUTER_API_KEY" || key === "FIREWORKS_API_KEY") {
+      if (
+        key === "OPENROUTER_API_KEY" ||
+        key === "FIREWORKS_API_KEY" ||
+        key === "CHEAPER_INFERENCE_API_KEY"
+      ) {
         return (
           !bedrockProvider &&
           (selectedProviderKey === null || key === selectedProviderKey)
@@ -159,7 +173,8 @@ function environmentApiKeyEntry(
     | "OPENAI_API_KEY"
     | "CODEX_API_KEY"
     | "OPENROUTER_API_KEY"
-    | "FIREWORKS_API_KEY";
+    | "FIREWORKS_API_KEY"
+    | "CHEAPER_INFERENCE_API_KEY";
   value: string;
 } | null {
   const keys = isExternalModelProvider(modelProvider)

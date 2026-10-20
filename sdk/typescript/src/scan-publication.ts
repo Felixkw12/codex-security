@@ -199,6 +199,7 @@ export async function publishScan(
 ): Promise<{
   result: ScanResult;
   warnings: { message: string; targetChanged: boolean }[];
+  completedScan?: unknown;
 }> {
   const { scanId, scanDir, expectation, signal, workbench } = context;
   let preparation: JsonObject = {};
@@ -325,7 +326,11 @@ export async function publishScan(
     scanId,
     ...(cost === null ? [] : ["--cost-json", JSON.stringify(cost)]),
   ]);
-  return { result, warnings: publicationWarnings(completion, preparation) };
+  return {
+    result,
+    warnings: publicationWarnings(completion, preparation),
+    completedScan: completion["scan"],
+  };
 }
 
 /** Load a result that the workbench has already completed, without completing it again. */
@@ -479,6 +484,11 @@ export async function collectResult(
     workbenchValidated,
     signal,
   });
+  if (manifest.scan.status !== "completed") {
+    throw new IncompleteScanError(
+      `Codex Security scan ${manifest.scan.status}; available results remain at ${scanDir}.`,
+    );
+  }
   let sarifPath: string | null = null;
   try {
     sarifPath = await requireScanFile(

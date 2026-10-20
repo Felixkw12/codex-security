@@ -19,6 +19,7 @@ import {
 } from "./scan-execution.js";
 import { ScanCostTrackingError } from "./deep-scan.js";
 import type { CompletedScanTurn } from "./scan-publication.js";
+import { ScanExecutionError } from "./scan-executor.js";
 import { scanActivitiesFromEvent, type ScanActivity } from "./scan-activity.js";
 import {
   scanProgressUpdatesFromEvent,
@@ -41,6 +42,7 @@ interface ScanEventRunOptions extends Pick<ScanOptions, "onReconnect"> {
   model?: string;
   expectedFilesTotal?: number;
   onFinalize?: (usage: unknown) => Promise<unknown>;
+  onTurnStatus?: (status: "completed" | "failed") => void;
   onThreadStarted?: (threadId: string) => Promise<void> | void;
   onScanStarted?: () => void;
   onTrustedAccessStatus?: (status: ScanTrustedAccessStatus) => void;
@@ -93,6 +95,9 @@ export async function runScanTurn(
       thread: options.thread,
       events: options.events,
       onEvent: async (event) => {
+        if (event.type === "turn.completed")
+          options.onTurnStatus?.("completed");
+        if (event.type === "turn.failed") options.onTurnStatus?.("failed");
         if (
           !tacStatusReported &&
           options.modelProvider !== "amazon-bedrock" &&
@@ -160,7 +165,10 @@ export async function runScanTurn(
       },
     };
   } catch (error) {
-    if (isCancellationDerivedFailure(error, options.signal))
+    if (
+      !(error instanceof ScanExecutionError) &&
+      isCancellationDerivedFailure(error, options.signal)
+    )
       throwIfAborted(options.signal, options.scanDir);
     throw error;
   }

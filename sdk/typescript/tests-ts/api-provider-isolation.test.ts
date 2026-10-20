@@ -1,3 +1,5 @@
+import { codexFactory } from "./support/api-events.js";
+import { preparedRuntime } from "./support/api-events.js";
 import { nativeRequest } from "./support/native-request.js";
 import { afterEach, expect, test } from "bun:test";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
@@ -966,3 +968,36 @@ test.each([
   },
   30_000,
 );
+
+test("standard scans do not require Deep Scan plugin capabilities", async () => {
+  const root = await temporaryDirectory();
+  const repository = join(root, "repository");
+  const plugin = join(root, "custom-plugin");
+  const home = join(root, "codex-home");
+  await mkdir(repository);
+  await mkdir(home, { mode: 0o700 });
+  await cp(PLUGIN_ROOT, plugin, { recursive: true });
+  const manifestPath = join(plugin, ".codex-plugin", "plugin.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  delete manifest.codexSecurity;
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  const runtime = preparedRuntime(home);
+  const client = TestClient.withDependencies({
+    prepareRuntime: async () => ({
+      ...runtime,
+      deepScanConfigPath: undefined,
+      plugin: { ...runtime.plugin, pluginRoot: plugin, installedRoot: plugin },
+    }),
+    resolvePluginPython: async () => "/managed/python",
+    createCodex: codexFactory(async () => {
+      throw new Error("standard scan started");
+    }),
+  });
+  try {
+    await expect(
+      client.run(repository, { outputDir: join(root, "scan") }),
+    ).rejects.toThrow("standard scan started");
+  } finally {
+    await client.close();
+  }
+});

@@ -37,9 +37,17 @@ export const FIREWORKS_CODEX_PROVIDER = {
   wire_api: "responses",
 } as const satisfies JsonObject;
 
+export const CHEAPERINFERENCE_CODEX_PROVIDER = {
+  name: "Cheaper Inference",
+  base_url: "https://api.cheaperinference.com/v1",
+  env_key: "CHEAPER_INFERENCE_API_KEY",
+  wire_api: "responses",
+} as const satisfies JsonObject;
+
 export const EXTERNAL_CODEX_PROVIDERS = {
   openrouter: OPENROUTER_CODEX_PROVIDER,
   fireworks: FIREWORKS_CODEX_PROVIDER,
+  cheaperinference: CHEAPERINFERENCE_CODEX_PROVIDER,
 } as const;
 
 export type ExternalModelProvider = keyof typeof EXTERNAL_CODEX_PROVIDERS;
@@ -160,6 +168,11 @@ export function structuredCodexConfig(config: JsonObject = {}): JsonObject {
   return structured;
 }
 
+/** @internal Quote a TOML string without changing its contents. */
+export function quoteTomlString(value: string): string {
+  return JSON.stringify(value).replaceAll("\u007f", "\\u007f");
+}
+
 /** @internal Serialize one Codex CLI override value without flattening its keys. */
 export function inlineToml(value: JsonValue): string {
   if (value === null)
@@ -170,7 +183,7 @@ export function inlineToml(value: JsonValue): string {
   if (isObject(value)) {
     return `{${Object.entries(value)
       .filter(([, item]) => item !== null)
-      .map(([key, item]) => `${JSON.stringify(key)}=${inlineToml(item)}`)
+      .map(([key, item]) => `${quoteTomlString(key)}=${inlineToml(item)}`)
       .join(",")}}`;
   }
   return stringify({ value }).slice("value = ".length).trim();

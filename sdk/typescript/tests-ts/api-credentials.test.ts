@@ -1,5 +1,6 @@
-import { nodeCommand } from "./support/shell.js";
+import { effectiveCodexConfiguration } from "./support/api-events.js";
 import { execFileSync } from "node:child_process";
+import { nodeCommand } from "./support/shell.js";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
@@ -125,7 +126,7 @@ describe("CodexSecurity orchestration", () => {
     "profile-providers-ambient",
     "profile-inherited-cwd",
     "profile-overridden-cwd",
-    "profile-strict",
+    "profile-policy-override",
     "null optional args",
     "null optional cwd",
   ])(
@@ -136,7 +137,7 @@ describe("CodexSecurity orchestration", () => {
       const profileProviders = profile && selection !== "profile";
       const inheritedCwd = selection === "profile-inherited-cwd";
       const overriddenCwd = selection === "profile-overridden-cwd";
-      const strict = selection === "profile-strict";
+      const policyOverride = selection === "profile-policy-override";
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
       const home = join(root, "model-home");
@@ -181,7 +182,7 @@ describe("CodexSecurity orchestration", () => {
             }
           : definition;
       const overrides = {
-        ...(strict ? { approval_policy: "never" } : {}),
+        ...(policyOverride ? { approval_policy: "never" } : {}),
         ...(profile
           ? {
               profile: "review",
@@ -189,7 +190,7 @@ describe("CodexSecurity orchestration", () => {
                 review: {
                   model_provider: "synthetic.provider",
                   service_tier: "fast",
-                  ...(strict ? { approval_policy: "on-request" } : {}),
+                  ...(policyOverride ? { approval_policy: "on-request" } : {}),
                   ...(profileProviders
                     ? {
                         model_providers: {
@@ -236,6 +237,13 @@ describe("CodexSecurity orchestration", () => {
               startThread: () => ({
                 id: null,
                 async runStreamed() {
+                  if (profile) {
+                    expect(captured!.config?.["service_tier"]).toBe("fast");
+                    if (policyOverride)
+                      expect(captured!.config?.["approval_policy"]).toBe(
+                        "on-request",
+                      );
+                  }
                   if (!profile) {
                     const preflightConfig = parseToml(
                       await readFile(
@@ -407,7 +415,7 @@ describe("CodexSecurity orchestration", () => {
               });
               expect(options.env?.["CODEX_SECURITY_SURFACE"]).toBe("sdk");
               expect(options.config).toHaveProperty("projects");
-              expect(options.config).toHaveProperty(
+              expect(effectiveCodexConfiguration(options)).toHaveProperty(
                 "permissions.codex_security_scan",
               );
               expect(options.config).toMatchObject({
@@ -426,9 +434,7 @@ describe("CodexSecurity orchestration", () => {
                   set: { PRIVATE_TOKEN: "RUNTIME_SHELL_SECRET" },
                 },
               });
-              expect(
-                parseToml(options.configOverrides!.join("\n")),
-              ).toMatchObject({
+              expect(effectiveCodexConfiguration(options)).toMatchObject({
                 responses_api_metadata: {
                   request_trace: "preserve-configured-metadata",
                   codex_security_surface: "sdk",
@@ -448,47 +454,12 @@ describe("CodexSecurity orchestration", () => {
                 },
               });
               expect(input).toContain(
-                `--config ${shellEnvironmentReference("CODEX_SECURITY_CONFIG_PATH")}`,
+                "The SDK has prepared the active runtime configuration.",
               );
-              expect(input).toContain("--effective-config");
-              const shellEnvironment = options.env as Record<string, string>;
-              const helper = execFileSync(
-                interpreter!,
-                [
-                  join(PLUGIN_ROOT, "scripts", "config_preflight.py"),
-                  "--skill",
-                  "security-scan",
-                  "--config",
-                  shellEnvironment["CODEX_SECURITY_CONFIG_PATH"]!,
-                  "--cwd",
-                  repository,
-                  "--multi-agent-runtime-owner",
-                  "native",
-                  "--multi-agent-runtime-version",
-                  "v2",
-                  "--multi-agent-session-cap",
-                  "12",
-                  "--multi-agent-runtime-provenance",
-                  "tool-surface",
-                  "--runtime-check",
-                  "delegation_available=true",
-                  "--runtime-check",
-                  "goal_tools_available=true",
-                  "--effective-config",
-                  "features.goals=true",
-                ],
-                {
-                  env: {
-                    PATH: process.env["PATH"],
-                    CODEX_HOME: join(root, "denied"),
-                  },
-                  encoding: "utf8",
-                },
+              expect(input).toContain(
+                shellEnvironmentReference("CODEX_SECURITY_CONFIG_PATH"),
               );
-              const preflight = JSON.parse(helper) as Record<string, unknown>;
-              expect(preflight["status"]).toBe("ready");
-              expect(preflight["config_resolution"]).toBe("manual-layers");
-              expect(preflight["config_paths"]).toEqual([configPath]);
+              expect(input).not.toContain("config-preflight helper calls");
               await copyCompletedScan(root);
               const manifestPath = join(scanDir, "scan-manifest.json");
               const manifest = JSON.parse(

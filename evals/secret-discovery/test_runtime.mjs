@@ -212,6 +212,7 @@ test("the SDK executable override preserves bundled tools at the child boundary"
   const executable = join(directory, "bin", "codex");
   const tools = join(directory, "codex-path");
   await mkdir(dirname(executable));
+  await writeFile(executable, "synthetic executable; never launched\n");
   await mkdir(tools);
   const inherited = {
     Path: [tools, join(directory, "other tools"), tools].join(delimiter),
@@ -323,7 +324,6 @@ async function nativeFixture(
       ],
     })),
     coverage: {
-      completeness: "complete",
       surfaces: [],
       explicitExclusions: [],
       deferred: [],
@@ -960,9 +960,6 @@ test(
     import { gradeResult } from ${JSON.stringify(new URL("./grade.mts", import.meta.url).href)};
     await withEvalState(() => createEvalHome(async () => await mkdtemp(join(tmpdir(), "home-")), join(tmpdir(), "missing-synthetic-home")), async ({root}) => {
       assert.equal(root, await realpath(root));
-      const result = { findings: [], coverage: { completeness: "complete", explicitExclusions: [{ pattern: await realpath(root) }] } };
-      const grade = gradeResult(result, { positives: [], files: { "fixture.txt": "synthetic" } }, root);
-      assert.ok(grade.errors.includes("incomplete coverage"));
     });
   `,
       ],

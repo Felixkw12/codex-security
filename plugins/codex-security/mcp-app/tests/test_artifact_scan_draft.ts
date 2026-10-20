@@ -144,10 +144,6 @@ test("draft saves read one committed snapshot and preserve accepted findings by 
     remediation: "Preserve this original repair.",
   });
   await f.save(draft({ complete: false, findings: [original] }));
-  const persisted = JSON.parse(await readFile(f.snapshotPath, "utf8"));
-  persisted.findings.findings[0].code_evidence = null;
-  persisted.findings.findings[0].root_cause = null;
-  await writeFile(f.snapshotPath, JSON.stringify(persisted));
   // Archived checkpoints are evidence, not inputs to every subsequent write.
   await mkdir(join(f.root, "checkpoints"));
   await writeFile(join(f.root, "checkpoints", "invalid.json"), "not JSON");
@@ -239,7 +235,7 @@ test("new same-label surfaces retain pending coverage until its explicit ID is r
       disposition,
     })),
   );
-  assert.equal(f.documents.coverage.completeness, "partial");
+  assert.equal(Object.hasOwn(f.documents.coverage, "completeness"), false);
 
   await f.save(
     draft({
@@ -261,7 +257,7 @@ test("new same-label surfaces retain pending coverage until its explicit ID is r
   );
   assert.equal(f.documents.coverage.surfaces[0].id, pendingId);
   assert.equal(f.documents.coverage.surfaces[0].disposition, "no_issue_found");
-  assert.equal(f.documents.coverage.completeness, "complete");
+  assert.equal(Object.hasOwn(f.documents.coverage, "completeness"), false);
 });
 
 test("missing deferred IDs preserve distinct candidates and stable IDs revise saved rows", async (t) => {
@@ -294,7 +290,7 @@ test("missing deferred IDs preserve distinct candidates and stable IDs revise sa
     const expectedCount = candidateId === undefined ? 2 : 1;
     assert.equal(saved.length, expectedCount);
     assert.deepEqual(saved[0].candidate, second.candidate);
-    assert.equal(f.documents.coverage.completeness, "partial");
+    assert.equal(Object.hasOwn(f.documents.coverage, "completeness"), false);
     if (candidateId === undefined) {
       assert.notEqual(saved[0].id, firstId);
       assert.equal(saved[1].id, firstId);
@@ -315,7 +311,7 @@ test("missing deferred IDs preserve distinct candidates and stable IDs revise sa
       saved.map(({ id, candidate }) => ({ id, candidate })),
     );
     assert.equal(revised[0].reason, "Awaiting fixture");
-    assert.equal(f.documents.coverage.completeness, "partial");
+    assert.equal(Object.hasOwn(f.documents.coverage, "completeness"), false);
   }
 });
 
@@ -339,7 +335,7 @@ test("candidate-only deferred updates preserve the unique saved ID and evidence"
   for (const reason of ["Awaiting fixture", "Ready for validation"]) {
     await save([{ candidateId: original.candidateId, reason }]);
     assert.deepEqual(f.documents.coverage.deferred, [{ ...original, reason }]);
-    assert.equal(f.documents.coverage.completeness, "partial");
+    assert.equal(Object.hasOwn(f.documents.coverage, "completeness"), false);
   }
 });
 
@@ -519,7 +515,7 @@ test("pending candidate evidence is preserved until its explicit finding or reje
     });
     await f.save(final);
     assert.equal(f.documents.coverage.deferred.length, 0);
-    assert.equal(f.documents.coverage.completeness, "complete");
+    assert.equal(Object.hasOwn(f.documents.coverage, "completeness"), false);
     if (disposition === "reported")
       assert.deepEqual(
         f.documents.findings.findings[0].provenance.originalCandidates,
@@ -653,7 +649,7 @@ for (const field of ["candidateId", "reportId", "ledgerRowId"]) {
         }),
       );
       assert.equal(f.documents.coverage.deferred.length, 0);
-      assert.equal(f.documents.coverage.completeness, "complete");
+      assert.equal(Object.hasOwn(f.documents.coverage, "completeness"), false);
       const reported = f.documents.findings.findings[0];
       assert.deepEqual(reported.provenance.originalCandidates, [candidate]);
       await f.save(
@@ -740,7 +736,7 @@ test("surface resolution preserves candidate work and evidence without a candida
   assert.deepEqual(f.documents.coverage.deferred[1].candidate, candidate);
   assert.deepEqual(f.documents.coverage.deferred[2].finding, deferredFinding);
   assert.equal(f.documents.coverage.surfaces.length, 1);
-  assert.equal(f.documents.coverage.completeness, "partial");
+  assert.equal(Object.hasOwn(f.documents.coverage, "completeness"), false);
 });
 
 test("a late partial writer preserves final presentation and retains new evidence", async (t) => {
@@ -1020,17 +1016,15 @@ test("scan claims, status, and semantic validation precede publication", async (
     ),
     /scanId/,
   );
-  assert.throws(
-    () =>
-      parseScanDraft(
-        draft({
-          coverage: semanticCoverage({
-            deferred: [{ reason: "Outstanding work" }],
-          }),
-        }),
-      ),
-    /complete coverage/,
+  const pending = parseScanDraft(
+    draft({
+      coverage: semanticCoverage({
+        deferred: [{ reason: "Outstanding work" }],
+      }),
+    }),
   );
+  assert.equal(pending.coverage.deferred.length, 1);
+  assert.equal(Object.hasOwn(pending.coverage, "completeness"), false);
   assert.throws(
     () =>
       parseScanDraft(
@@ -1264,7 +1258,7 @@ for (const disposition of ["no_issue_found", "reported"] as const) {
     );
     await f.save(draft({ coverage: semanticCoverage({ surfaces }) }));
     assert.deepEqual(f.documents.coverage.deferred, deferred);
-    assert.equal(f.documents.coverage.completeness, "partial");
+    assert.equal(Object.hasOwn(f.documents.coverage, "completeness"), false);
   });
 }
 
@@ -1467,7 +1461,7 @@ for (const mode of ["standard", "diff"]) {
         }),
       );
       assert.deepEqual(f.documents.coverage.deferred, []);
-      assert.equal(f.documents.coverage.completeness, "complete");
+      assert.equal(Object.hasOwn(f.documents.coverage, "completeness"), false);
       assert.equal(f.documents.coverage.surfaces[0].disposition, outcome);
       if (outcome === "reported") {
         assert.equal(f.documents.findings.findings.length, 1);
@@ -1642,3 +1636,79 @@ for (const changed of [false, true]) {
     );
   });
 }
+
+for (const failure of ["missing", "invalid", "case alias"] as const) {
+  test(`corrected terminal surface replaces a ${failure} retained receipt`, async (t) => {
+    const f = await fixture(t);
+    const previous =
+      failure === "invalid"
+        ? "artifacts/CON"
+        : failure === "case alias"
+          ? "artifacts/Receipt.md"
+          : "artifacts/old.md";
+    const replacement =
+      failure === "case alias" ? "artifacts/receipt.md" : "artifacts/new.md";
+    const surface = {
+      id: "surface_api",
+      label: "API",
+      disposition: "no_issue_found" as const,
+    };
+    await writeFile(join(f.root, previous), "Original coverage evidence.");
+    await f.save(
+      draft({
+        coverage: semanticCoverage({
+          surfaces: [{ ...surface, receiptRefs: [previous] }],
+        }),
+      }),
+    );
+    if (failure === "missing") await rm(join(f.root, previous));
+    await writeFile(join(f.root, replacement), "Corrected coverage evidence.");
+    const response = await f.save(
+      draft({
+        coverage: semanticCoverage({
+          surfaces: [{ ...surface, receiptRefs: [replacement] }],
+        }),
+      }),
+    );
+    assert.deepEqual(f.documents.coverage.surfaces[0]!.receiptRefs, [
+      replacement,
+    ]);
+    assert.equal(response.warnings?.length, 1);
+    assert.match(
+      response.warnings![0]!,
+      /Replaced (missing|invalid) saved coverage receipt/,
+    );
+  });
+}
+
+test("an unavailable replacement does not discard retained coverage evidence", async (t) => {
+  const f = await fixture(t);
+  const surface = {
+    id: "surface_api",
+    label: "API",
+    disposition: "no_issue_found" as const,
+  };
+  const previous = "artifacts/old.md";
+  const replacement = "artifacts/new.md";
+  await writeFile(join(f.root, previous), "Original coverage evidence.");
+  await f.save(
+    draft({
+      coverage: semanticCoverage({
+        surfaces: [{ ...surface, receiptRefs: [previous] }],
+      }),
+    }),
+  );
+  await rm(join(f.root, previous));
+  const response = await f.save(
+    draft({
+      coverage: semanticCoverage({
+        surfaces: [{ ...surface, receiptRefs: [replacement] }],
+      }),
+    }),
+  );
+  assert.deepEqual(
+    new Set(f.documents.coverage.surfaces[0]!.receiptRefs),
+    new Set([previous, replacement]),
+  );
+  assert.equal(response.warnings, undefined);
+});

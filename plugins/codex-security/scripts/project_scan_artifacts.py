@@ -134,9 +134,9 @@ def project_scan_artifacts(
                 candidate = row["candidateId"]
                 row["sourceCandidateId"] = candidate
                 row["candidateId"] = _project_candidate_id(source_scan_id, candidate)
-            if isinstance(row.get("surfaceIds"), list):
+            if field == "deferred" and isinstance(row.get("surfaceIds"), list):
                 row["surfaceIds"] = [f"{source_scan_id}/{value}" for value in row["surfaceIds"]]
-            if isinstance(row.get("receiptRefs"), list):
+            if field == "surfaces" and isinstance(row.get("receiptRefs"), list):
                 row["receiptRefs"] = [f"{prefix}/{value}" for value in row["receiptRefs"]]
     scope = copy.deepcopy(scan["scope"])
     scope.pop("includePaths", None)
@@ -158,7 +158,7 @@ def project_scan_artifacts(
 
 
 def project_completed_scan(request: ProjectionRequest) -> ProjectedScan:
-    source_directory, _, manifest, findings, coverage, sealed, _ = _prepare_scan_finalization(
+    source_directory, _, manifest, findings, coverage, sealed, _, _ = _prepare_scan_finalization(
         Path(request["sourceDirectory"])
     )
     scan = manifest["scan"]
