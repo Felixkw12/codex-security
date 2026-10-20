@@ -63,6 +63,22 @@ function rawToolValue(value: string): boolean {
   return (windows ? /[\ud800-\udfff]/u : /[\udc80-\udcff]/u).test(value);
 }
 
+function selectedBundledRipgrep(candidate: string): boolean {
+  const codex = environmentValue("CODEX_CLI_PATH");
+  if (!codex) return false;
+  try {
+    return sameFile(
+      candidate,
+      append(
+        append(dirname(dirname(canonical(codex))), "codex-path"),
+        "rg.exe",
+      ),
+    );
+  } catch {
+    return false;
+  }
+}
+
 function trustedTool(
   name: "git" | "rg",
   target: string,
@@ -138,7 +154,7 @@ function trustedTool(
         }
       },
     );
-    if (inRepository) {
+    if (inRepository && !(name === "rg" && selectedBundledRipgrep(resolved))) {
       if (configured !== undefined)
         throw new Error(
           "CODEX_SECURITY_GIT must stay outside the protected repository.",

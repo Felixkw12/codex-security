@@ -239,6 +239,60 @@ require("node:module").syncBuiltinESMExports();
 for (const command of ["generate-in-scope-files", "make-repo-scope-input"]) {
   for (const rawWindowsHome of [false, true]) {
     test.skipIf(process.platform !== "win32")(
+      `${command} uses the selected project-local Codex ripgrep${rawWindowsHome ? " through the UTF-16 bridge" : ""}`,
+      () => {
+        const f = fixture();
+        rmSync(join(f.repo, ".git"), { recursive: true });
+        f.write(".ignore", "scope/ignored.py\n");
+        f.write("scope/visible.py");
+        f.write("scope/ignored.py");
+        const env = { ...f.toolEnvironment };
+        const pathKey =
+          Object.keys(env).find((key) => key.toUpperCase() === "PATH") ??
+          "PATH";
+        const ripgrep = Bun.which("rg", { PATH: env[pathKey] });
+        expect(ripgrep).not.toBeNull();
+        const runtime = join(
+          f.repo,
+          "node_modules",
+          "@openai",
+          `codex-win32-${process.arch}`,
+          "vendor",
+          "synthetic-target",
+        );
+        const codex = join(runtime, "bin", "codex.exe");
+        const tools = join(runtime, "codex-path");
+        mkdirSync(dirname(codex), { recursive: true });
+        mkdirSync(tools);
+        copyFileSync(node, codex);
+        copyFileSync(ripgrep!, join(tools, "rg.exe"));
+        copyFileSync(node, join(f.repo, "rg.exe"));
+        env[pathKey] = [f.repo, tools].join(delimiter);
+        env["CODEX_CLI_PATH"] = codex;
+        env["CODEX_SECURITY_GIT"] = "";
+        if (rawWindowsHome) env["HOME"] = `${f.root}${sep}home-\ud800`;
+        const result = f.run(
+          command,
+          command === "generate-in-scope-files"
+            ? ["--scope", "scope"]
+            : f.scopeArgs("scope"),
+          env,
+        );
+        expect(result.status, result.stderr).toBe(0);
+        const contents = readFileSync(f.out, "utf8");
+        expect(
+          command === "generate-in-scope-files"
+            ? contents.trim()
+            : JSON.parse(contents).path,
+        ).toBe("scope/visible.py");
+      },
+    );
+  }
+}
+
+for (const command of ["generate-in-scope-files", "make-repo-scope-input"]) {
+  for (const rawWindowsHome of [false, true]) {
+    test.skipIf(process.platform !== "win32")(
       `${command} selects trusted ripgrep outside the repository${rawWindowsHome ? " through the UTF-16 bridge" : ""}`,
       () => {
         const f = fixture();
