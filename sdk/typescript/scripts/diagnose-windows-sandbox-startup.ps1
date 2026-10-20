@@ -118,13 +118,14 @@ function Invoke-Probe($Fixture, [string] $Phase, [string] $WorkingDirectory) {
     $start.WorkingDirectory = $env:SystemRoot
     $start.RedirectStandardOutput = $true
     $start.RedirectStandardError = $true
-    $command = '$ErrorActionPreference = ''Stop''; [Console]::Write([IO.File]::ReadAllText($env:POLICY_PROBE_PATH))'
+    $command = '$ErrorActionPreference = ''Stop''; Get-Content -LiteralPath $env:POLICY_PROBE_PATH -Raw'
     $arguments = @($CodexJs, 'sandbox', '--permission-profile', 'codex_security_policy', '--cd', $WorkingDirectory,
         $powerShell, '-NoLogo', '-NoProfile', '-NonInteractive', '-Command', $command)
     foreach ($argument in $arguments) { $start.ArgumentList.Add($argument) }
     foreach ($key in @('OPENAI_API_KEY', 'CODEX_API_KEY')) { $null = $start.Environment.Remove($key) }
     $start.Environment['CODEX_HOME'] = $Fixture.Home
     foreach ($key in @('TEMP', 'TMP', 'TMPDIR')) { $start.Environment[$key] = $Fixture.Temp }
+    $start.Environment['PSModulePath'] = Join-Path (Split-Path $powerShell) 'Modules'
     $start.Environment['POLICY_PROBE_PATH'] = Join-Path $Fixture.Workspace 'probe.txt'
     $process = [Diagnostics.Process]::Start($start)
     $stdout = $process.StandardOutput.ReadToEndAsync()
