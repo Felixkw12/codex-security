@@ -9061,16 +9061,15 @@ async function executeScan(
         });
         if (dashboard !== null) {
           dashboard.setMeasurement(measurement);
-        } else if (
-          measurement.coverage !== "complete" &&
-          previous !== measurement.coverage
-        ) {
+        } else if (measurement.coverage !== "complete") {
           progress?.stopTimer();
-          progress?.stage(
-            measurement.coverage === "partial"
-              ? "Usage is partial; showing the observed subtotal."
-              : "Usage is unavailable.",
-          );
+          if (previous !== measurement.coverage) {
+            progress?.stage(
+              measurement.coverage === "partial"
+                ? "Usage is partial; showing the observed subtotal."
+                : "Usage is unavailable.",
+            );
+          }
           progress?.startTimer(runningMessage());
         }
       },

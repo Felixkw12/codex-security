@@ -167,6 +167,8 @@ test.each([false, true])(
       output_tokens: 5,
     });
     const observed: Readonly<ScanUsageMeasurement>[] = [];
+    const observerErrors = mock();
+    const observerFailure = new Error("Synthetic measurement observer failure");
     const saved: readonly string[][] = [];
     const controller = new AbortController();
     const complete = Promise.withResolvers<void>();
@@ -209,13 +211,26 @@ test.each([false, true])(
           onMeasurement: (measurement) => {
             observed.push(measurement);
             if (measurement.coverage === "complete") complete.resolve();
+            throw observerFailure;
           },
+          onObserverError: observerErrors,
         }),
       ).rejects.toThrow();
       expect(observed.map((value) => value.coverage)).toEqual([
         "complete",
         "partial",
       ]);
+      expect(observerErrors).toHaveBeenCalledTimes(2);
+      expect(observerErrors).toHaveBeenNthCalledWith(
+        1,
+        "onMeasurement",
+        observerFailure,
+      );
+      expect(observerErrors).toHaveBeenNthCalledWith(
+        2,
+        "onMeasurement",
+        observerFailure,
+      );
       expect(observed.at(-1)).toMatchObject({
         cost: null,
         usage: { input_tokens: 100, output_tokens: 5 },

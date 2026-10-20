@@ -678,6 +678,11 @@ const SAFETY_IDENTIFIER_ENV = "CODEX_SAFETY_IDENTIFIER";
 const PERSONAL_TRUSTED_ACCESS_URL = "https://chatgpt.com/cyber";
 const ORGANIZATIONAL_TRUSTED_ACCESS_URL =
   "https://openai.com/form/enterprise-trusted-access-for-cyber/";
+
+class PolicyCostLimitExceededError extends CodexSecurityError {
+  public override name = CodexSecurityError.name;
+}
+
 export class CodexSecurity {
   public readonly config: Readonly<CodexSecurityConfig>;
   public readonly metadata: CodexSecurityMetadata = {
@@ -1529,7 +1534,7 @@ export class CodexSecurity {
           total.estimatedUsd > options.maxCostUsd
         ) {
           budgetController.abort(
-            new CodexSecurityError(
+            new PolicyCostLimitExceededError(
               `Security-policy generation exceeded its $${options.maxCostUsd} cost limit; partial output remains at ${outputDir}.`,
             ),
           );
@@ -3600,7 +3605,8 @@ export class CodexSecurity {
         {
           failureCategory: canceled
             ? "canceled"
-            : error instanceof ScanCostLimitExceededError
+            : error instanceof ScanCostLimitExceededError ||
+                error instanceof PolicyCostLimitExceededError
               ? "budget"
               : error instanceof AuthenticationRequiredError
                 ? "authentication"
