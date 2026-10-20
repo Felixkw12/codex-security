@@ -61,7 +61,7 @@ function New-Fixture([string] $Name) {
     # Production Windows policy from scanRuntimeCodexConfig: root/workspace read,
     # credential-home denial, elevated backend, and network disabled. The explicit
     # workspace read keeps the same target readable during the C:\Windows warmup.
-    $home = $f.Home.Replace('\', '/')
+    $fixtureHome = $f.Home.Replace('\', '/')
     $workspace = $f.Workspace.Replace('\', '/')
     $config = @"
 approval_policy = "on-request"
@@ -74,7 +74,7 @@ sandbox = "elevated"
 ":root" = "read"
 ":workspace_roots" = "read"
 "$workspace" = { "." = "read" }
-"$home" = { "." = "deny" }
+"$fixtureHome" = { "." = "deny" }
 [permissions.codex_security_policy.network]
 enabled = false
 "@
@@ -118,7 +118,7 @@ function Invoke-Probe($Fixture, [string] $Phase, [string] $WorkingDirectory) {
     $start.WorkingDirectory = $env:SystemRoot
     $start.RedirectStandardOutput = $true
     $start.RedirectStandardError = $true
-    $command = '$ErrorActionPreference = ''Stop''; [Console]::Write((Get-Content -LiteralPath $env:POLICY_PROBE_PATH -Raw))'
+    $command = '$ErrorActionPreference = ''Stop''; [Console]::Write([IO.File]::ReadAllText($env:POLICY_PROBE_PATH))'
     $arguments = @($CodexJs, 'sandbox', '--permission-profile', 'codex_security_policy', '--cd', $WorkingDirectory,
         $powerShell, '-NoLogo', '-NoProfile', '-NonInteractive', '-Command', $command)
     foreach ($argument in $arguments) { $start.ArgumentList.Add($argument) }
