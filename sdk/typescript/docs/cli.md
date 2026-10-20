@@ -391,6 +391,7 @@ codex-security scan .
 codex-security scan . --path src --path tests
 codex-security scan . --diff origin/main --json
 codex-security scan . --working-tree
+codex-security scan . --owner-suggestions
 codex-security scan . --output-dir /path/outside/repository/results --dry-run
 ```
 
@@ -401,6 +402,13 @@ working copies. Their source inventories exclude `.git` and `.svn` metadata.
 changes. Both require Git. Deep scans support whole repositories and path scopes.
 Working-tree snapshots include untracked nested Git repositories. Initialized submodules must
 be clean and at the commit recorded by the parent.
+
+`--owner-suggestions` writes optional `owner-suggestions.json` after a completed
+committed Git scan, using the same checkout, model, and reasoning effort. Owner
+errors leave the base scan completed. The JSON result includes
+`ownerSuggestionsPath` or `ownerSuggestionsError`; the sealed findings and
+manifest stay unchanged. This option is unsupported for working-tree and
+directory snapshots, and is skipped with a warning when `--max-cost` is set.
 
 Repeat `--knowledge-base PATH` for context: UTF-8 text files (including JSON and
 SARIF), PDF, DOCX, or directories. Directory traversal skips other binary files;
@@ -693,29 +701,6 @@ From TypeScript, use `runComponentScans({ repository, outputDir, components })`.
 Use `auto: true`, `planOnly: true`, and `scanOptions.auth` for the corresponding
 planning and authentication choices. Custom `createSecurity` clients receive
 absolute targets; saved plans and component receipts retain relative paths.
-
-### Set investigation time
-
-```bash
-codex-security scan . --max-time 15
-codex-security scan . --diff origin/main --max-time 15
-codex-security scan . --mode deep --max-time 90
-```
-
-`--max-time` accepts positive fractional **minutes**. Standard scans have no
-time allowance by default. When selected, it is advisory: spend the available
-time on useful investigation and validation, finish early if no worthwhile work
-remains, and stop starting investigations at the deadline. Reporting can run
-longer. This is not a hard timeout or a minimum runtime. The allowance covers
-repository, path, diff, and working-tree scans; standalone custom validation and
-post-scan instructions are outside it. Existing `--max-cost` and cancellation
-behavior are unchanged.
-
-The SDK setting is `maxTimeMinutes`; project files use `scan.max_time_minutes`.
-Each launched scan or rerun gets its own allowance after setup, and reconnects
-do not reset it. Standard scans still do not support resume. For batch and
-component scans, the project setting applies separately to each scan attempt,
-not to planning, result matching, or the total campaign.
 
 ### Set investigation time
 
