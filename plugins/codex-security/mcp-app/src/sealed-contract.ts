@@ -18,7 +18,9 @@ import type {
   FindingsDocument,
   ScanManifest,
 } from "./models.js";
-import { openScanReadRoot } from "./native.js";
+import { openScanReadRoot, windowsBinding } from "./native.js";
+import { widePath, windowsFileSystem } from "../../native/windows-files.mjs";
+import { resolvedPathText } from "./helpers/helper-files.js";
 import { decodePosixBytes, encodePosixPath } from "./helpers/posix-path.js";
 import {
   SealedContractError as ContractValidationError,
@@ -581,29 +583,32 @@ async function requireScanRoot(
   const absolute = resolve(scanDirectory);
   let root: ScanRoot | undefined;
   try {
-    const metadata = await lstat(filesystemPath(absolute));
-    if (!metadata.isDirectory()) throw new Error("not a directory");
+    const identity = await scanDirectoryIdentity(absolute);
     const path =
       process.platform === "win32"
-        ? await realpath(absolute)
+        ? resolvedPathText(absolute)
         : decodePosixBytes(
             await realpath(encodePosixPath(absolute), { encoding: "buffer" }),
           );
     throwIfAborted(signal);
     root = { path, reader: openScanReadRoot(path), requirePrivateRoot };
-    const current = await lstat(filesystemPath(absolute));
-    const canonical = await lstat(filesystemPath(path));
-    if (
-      !current.isDirectory() ||
-      !canonical.isDirectory() ||
-      current.dev !== metadata.dev ||
-      current.ino !== metadata.ino ||
-      canonical.dev !== metadata.dev ||
-      canonical.ino !== metadata.ino
-    ) {
+    const current = await scanDirectoryIdentity(absolute);
+    const canonical = await scanDirectoryIdentity(path);
+    if (!sameArray(current, identity) || !sameArray(canonical, identity)) {
       throw new Error("scan directory changed while opening");
     }
-    if (requirePrivateRoot) await requirePrivateScanRoot(path);
+    if (requirePrivateRoot) {
+      try {
+        await requirePrivateScanRoot(path);
+      } catch (error) {
+        throw new ContractValidationError(
+          error instanceof Error
+            ? error.message
+            : "Scan directory must remain private to the current user.",
+          { cause: error },
+        );
+      }
+    }
     root.reader.verify();
     throwIfAborted(signal);
     return root;
@@ -616,6 +621,17 @@ async function requireScanRoot(
       { cause: error },
     );
   }
+}
+
+async function scanDirectoryIdentity(path: string) {
+  if (process.platform === "win32") {
+    return windowsFileSystem(windowsBinding()).directoryIdentity(
+      widePath(path),
+    );
+  }
+  const metadata = await lstat(encodePosixPath(path));
+  if (!metadata.isDirectory()) throw new Error("not a directory");
+  return { dev: metadata.dev, ino: metadata.ino };
 }
 
 async function verifyScanRoot(
@@ -639,7 +655,7 @@ async function verifyScanRoot(
 async function requirePrivateScanRoot(path: string): Promise<void> {
   if (process.platform === "win32") return;
   const effectiveUid = process.geteuid?.();
-  const metadata = await lstat(filesystemPath(path));
+  const metadata = await lstat(encodePosixPath(path));
   if ((metadata.mode & 0o077) !== 0)
     throw new ContractValidationError(
       `Scan output directory must not be accessible to other users (chmod 700): ${path}`,
@@ -650,7 +666,7 @@ async function requirePrivateScanRoot(path: string): Promise<void> {
     );
   let current = dirname(path);
   while (true) {
-    const parent = await lstat(filesystemPath(current));
+    const parent = await lstat(encodePosixPath(current));
     if (!parent.isDirectory())
       throw new ContractValidationError(
         `Scan output parent must be a non-symlink directory: ${current}`,
@@ -673,10 +689,6 @@ async function requirePrivateScanRoot(path: string): Promise<void> {
   }
 }
 
-function filesystemPath(path: string): string | Buffer {
-  return process.platform === "win32" ? path : encodePosixPath(path);
-}
-
 function openHeldFile(
   root: ScanRoot,
   relativePath: string,
@@ -687,7 +699,8 @@ function openHeldFile(
   const normalized = portableRelativePath(relativePath, context);
   try {
     const file = root.reader.openFile(normalized);
-    if (file === null) throw new Error("missing file");
+    if (file === null)
+      throw Object.assign(new Error("missing file"), { code: "ENOENT" });
     return file;
   } catch (error) {
     throw new ContractValidationError(

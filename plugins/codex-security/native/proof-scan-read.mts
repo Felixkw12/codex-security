@@ -144,19 +144,22 @@ export function scanReadProof(): Record<string, boolean> {
       assert.equal(fifoRead.error, undefined);
       assert.equal(fifoRead.status, 0, fifoRead.stderr);
 
-      const rawRootPath = Buffer.concat([
-        Buffer.from(`${fixture}/raw-`),
-        Buffer.from([255]),
-      ]);
-      mkdirSync(rawRootPath, { mode: 0o700 });
-      writeFileSync(
-        Buffer.concat([rawRootPath, Buffer.from("/receipt.json")]),
-        payload,
-      );
-      const rawRoot = native.openScanReadRoot(rawRootPath);
-      roots.push(rawRoot);
-      assert.deepEqual(chunks(openFile(rawRoot, "receipt.json")), payload);
-      rawRoot.close();
+      // APFS cannot create this invalid-UTF-8 filename.
+      if (process.platform === "linux") {
+        const rawRootPath = Buffer.concat([
+          Buffer.from(`${fixture}/raw-`),
+          Buffer.from([255]),
+        ]);
+        mkdirSync(rawRootPath, { mode: 0o700 });
+        writeFileSync(
+          Buffer.concat([rawRootPath, Buffer.from("/receipt.json")]),
+          payload,
+        );
+        const rawRoot = native.openScanReadRoot(rawRootPath);
+        roots.push(rawRoot);
+        assert.deepEqual(chunks(openFile(rawRoot, "receipt.json")), payload);
+        rawRoot.close();
+      }
 
       const fileLink = join(artifacts, "linked.json");
       symlinkSync("receipt.json", fileLink);

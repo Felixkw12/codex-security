@@ -13,6 +13,12 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { basename, join } from "node:path";
+import { createRequire } from "node:module";
+import {
+  widePath,
+  windowsFileSystem,
+} from "../../../plugins/codex-security/native/windows-files.mjs";
+import type { WindowsBinding } from "../../../plugins/codex-security/native/windows-binding.mjs";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, test } from "bun:test";
 import { loadContract } from "../src/contract.js";
@@ -311,6 +317,46 @@ describe("native tracking source validation", () => {
     expect(result.stdout).toBe(`${f.findings.findings[0]!.findingId}\n`);
     expect(result.stderr).toBe("");
   });
+
+  test.skipIf(process.platform !== "win32")(
+    "preserves a Windows UTF-16 scan root beside its replacement-character sibling",
+    async () => {
+      const original = await fixture(1);
+      const decoy = await fixture(2);
+      const rawPath = join(original.root, "scan-\ud800");
+      const replacementPath = join(original.root, "scan-\ufffd");
+      const native = createRequire(import.meta.url)(
+        join(
+          PLUGIN_ROOT,
+          "mcp",
+          "native",
+          `win32-${process.arch}`,
+          "windows.node",
+        ),
+      ) as WindowsBinding;
+      const files = windowsFileSystem(native);
+      files.rename(widePath(original.scanDir), widePath(rawPath));
+      try {
+        files.rename(widePath(decoy.scanDir), widePath(replacementPath));
+        try {
+          const loaded = await loadContract(rawPath, {
+            pluginRoot: PLUGIN_ROOT,
+          });
+          expect(loaded.findings.findings).toEqual(original.findings.findings);
+          expect(await validateTrackingSource(rawPath)).toEqual(
+            original.findings.findings,
+          );
+          expect(await validateTrackingSource(replacementPath)).toEqual(
+            decoy.findings.findings,
+          );
+        } finally {
+          files.rename(widePath(replacementPath), widePath(decoy.scanDir));
+        }
+      } finally {
+        files.rename(widePath(rawPath), widePath(original.scanDir));
+      }
+    },
+  );
 
   test.skipIf(process.platform === "win32")(
     "launcher preserves POSIX scan directory path bytes",

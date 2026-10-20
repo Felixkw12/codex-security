@@ -324,6 +324,10 @@ function handleProof(root: string) {
     const replacement = join(longDirectory, "directory-\ufffd");
     mkdirSync(replacement);
     writeFileSync(join(replacement, "file-\ufffd"), "replacement sentinel");
+    assert.notDeepEqual(
+      files.directoryIdentity(pathBytes(rawDirectory)),
+      files.directoryIdentity(pathBytes(replacement)),
+    );
     const raw = keep(open(rawPath, undefined, undefined, flags.CREATE_NEW));
     rawPaths.push(rawPath);
     assert.equal(
