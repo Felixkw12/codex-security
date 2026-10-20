@@ -3858,6 +3858,7 @@ describe("CodexSecurity orchestration", () => {
           if (scenario === "late marker") {
             expect(updates.at(-1)).toEqual({
               ...updates[1]!,
+              phase: "discovery",
               filesCompleted: 3,
             });
           }
@@ -4841,7 +4842,9 @@ describe("CodexSecurity orchestration", () => {
         await client.run(repository, {
           onProgress: (update) => {
             updates.push(update);
-            if (update.phase === "validation") workerReady.resolve();
+            // Worker counts arrive before this fixture releases the parent phase.
+            if (update.filesCompleted === 8 && update.filesTotal === 8)
+              workerReady.resolve();
           },
           onSessionEvent: (event) => sessionEvents.push(event),
         });
@@ -5891,7 +5894,7 @@ describe("CodexSecurity orchestration", () => {
         expect(updates.at(-1)).toEqual(
           scenario === "below worker"
             ? {
-                phase: count === 7 ? "discovery" : "validation",
+                phase: count === 7 ? "preflight" : "validation",
                 filesCompleted: count === 7 ? 7 : 3,
                 filesTotal: 7,
               }
@@ -6149,7 +6152,7 @@ describe("CodexSecurity orchestration", () => {
           },
         });
         expect(updates.at(-1)).toEqual({
-          phase: eligibleWorker ? "discovery" : "validation",
+          phase: eligibleWorker ? "preflight" : "validation",
           filesCompleted: eligibleWorker ? 7 : 4,
           filesTotal: 7,
         });
@@ -7207,7 +7210,7 @@ describe("CodexSecurity orchestration", () => {
         });
         const workerCount = counts.reduce((sum, count) => sum + count, 0);
         expect(updates.at(-1)).toEqual({
-          phase: workerCount > 7 ? "discovery" : "validation",
+          phase: "validation",
           filesCompleted: Math.max(7, workerCount),
           filesTotal: 9,
         });
@@ -7465,7 +7468,7 @@ describe("CodexSecurity orchestration", () => {
           onWorkerEvent: () => workerRead.resolve(),
         });
         expect(updates.at(-1)).toEqual({
-          phase: workerCount <= 7 ? "validation" : "discovery",
+          phase: split && workerCount > 7 ? "preflight" : "validation",
           filesCompleted: Math.max(7, workerCount),
           filesTotal: 9,
         });
@@ -7747,8 +7750,8 @@ describe("CodexSecurity orchestration", () => {
                 text: progressMarker(parentPhase, 3, parentTotal),
               },
             };
-            // This is a new tool receipt, not a copied message projection. It
-            // replaces the earlier worker phase if the parent is ineligible.
+            // A fresh worker receipt is still consumed without replacing the
+            // last admitted parent phase.
             if (repeat)
               await appendFile(
                 worker,
@@ -7781,12 +7784,7 @@ describe("CodexSecurity orchestration", () => {
           },
         });
         expect(updates.at(-1)).toEqual({
-          phase:
-            parentTotal === 7
-              ? parentPhase
-              : nextWorker === "accepted" && !repeat
-                ? nextPhase
-                : workerPhase,
+          phase: parentPhase,
           filesCompleted: 3,
           filesTotal: 7,
         });
@@ -8176,10 +8174,10 @@ describe("CodexSecurity orchestration", () => {
         });
         expect(updates.at(-1)).toEqual({
           phase:
-            scenario === "lower-parent"
-              ? workerPhase
-              : scenario === "newer-parent"
-                ? newerPhase
+            scenario === "newer-parent"
+              ? newerPhase
+              : scenario === "lower-parent" && early
+                ? "discovery"
                 : parentPhase,
           filesCompleted: scenario === "restore-scope" ? 4 : 3,
           filesTotal: scenario === "restore-scope" ? 8 : 6,
@@ -8322,7 +8320,7 @@ describe("CodexSecurity orchestration", () => {
           },
         });
         expect(updates.at(-1)).toEqual({
-          phase: lastPhase,
+          phase: parentPhase,
           filesCompleted: 9,
           filesTotal: 10,
         });
@@ -8841,27 +8839,31 @@ describe("CodexSecurity orchestration", () => {
         });
         expect(updates.at(-1)).toEqual({
           phase:
-            laterParent ||
-            parentCount > 8 ||
-            (newerSource === "worker" && parentCount === 8)
-              ? parentPhase
-              : workerPhase,
+            newerSource === "worker"
+              ? !liveFirst && parentCount < 8 && !laterParent
+                ? "preflight"
+                : parentPhase
+              : laterParent || parentCount > 8
+                ? parentPhase
+                : workerPhase,
           filesCompleted: Math.max(parentCount, 8),
           filesTotal: 9,
         });
         if (!liveFirst && !laterParent && parentCount <= 8) {
-          const worker = updates.findIndex(
-            (update) => update.phase === workerPhase,
+          // Worker receipts retain the parent phase, so their public progress
+          // boundary is the accepted coverage count.
+          const coverage = updates.findIndex((update) =>
+            newerSource === "worker"
+              ? update.filesCompleted >= 8
+              : update.phase === workerPhase,
           );
-          expect(worker).toBeGreaterThanOrEqual(0);
+          expect(coverage).toBeGreaterThanOrEqual(0);
           expect(
             updates
-              .slice(worker)
+              .slice(coverage)
               .every(
                 (update) =>
-                  (newerSource === "worker" && parentCount === 8
-                    ? true
-                    : update.phase === workerPhase) &&
+                  (newerSource === "worker" || update.phase === workerPhase) &&
                   update.filesCompleted >= 8,
               ),
           ).toBe(true);
@@ -9769,7 +9771,7 @@ describe("CodexSecurity orchestration", () => {
     }[] = [
       {
         name: "an earlier exact match before pending repeated inventory",
-        expected: progress("attack_path", 5, 9),
+        expected: progress("discovery", 5, 9),
         steps: [
           ["live", "first", inventory(9)],
           ["save", "first", inventory(9)],
@@ -9853,7 +9855,7 @@ describe("CodexSecurity orchestration", () => {
       },
       {
         name: "deferred live inventory ahead of an older saved row",
-        expected: progress("attack_path", 2, 5),
+        expected: progress("preflight", 2, 5),
         steps: [
           ["worker", progress("attack_path", 2, 5)],
           ["poll"],
@@ -9883,7 +9885,7 @@ describe("CodexSecurity orchestration", () => {
       },
       {
         name: "a repeated saved inventory beyond the resolved live boundary",
-        expected: progress("attack_path", 2, 9),
+        expected: progress("preflight", 2, 9),
         steps: [
           ["worker", progress("attack_path", 2, 5)],
           ["poll"],
@@ -10080,7 +10082,7 @@ describe("CodexSecurity orchestration", () => {
         progressMarker("discovery", 0, total);
       const expected: ScanProgress =
         scenario === "unwritten growth" || scenario === "close growth"
-          ? { phase: "attack_path", filesCompleted: 5, filesTotal: 9 }
+          ? { phase: "discovery", filesCompleted: 5, filesTotal: 9 }
           : scenario === "unwritten phase"
             ? { phase: "validation", filesCompleted: 3, filesTotal: 8 }
             : scenario.startsWith("live scope")
@@ -10207,7 +10209,7 @@ describe("CodexSecurity orchestration", () => {
               await receipt(workerPath, progressMarker("attack_path", 5, 9));
               await tracker!.refresh();
               expect(updates.at(-1)).toEqual({
-                phase: "attack_path",
+                phase: "discovery",
                 filesCompleted: 5,
                 filesTotal: 9,
               });
@@ -10398,7 +10400,7 @@ describe("CodexSecurity orchestration", () => {
       },
       {
         name: "worker phase after scope growth",
-        expected: progress("attack_path", 1, 9),
+        expected: progress("discovery", 1, 9),
         steps: [
           ["worker", progress("attack_path", 1, 7)],
           ["save", "smaller", progress("discovery", 0, 5)],
@@ -10462,7 +10464,7 @@ describe("CodexSecurity orchestration", () => {
       },
       {
         name: "a zero phase as scope evidence below worker coverage",
-        expected: progress("attack_path", 3, 5),
+        expected: progress("threat_model", 3, 5),
         steps: [
           ["live", "phase changed", progress("threat_model", 0, 5)],
           ["live", "anchor", "done"],
@@ -10477,7 +10479,7 @@ describe("CodexSecurity orchestration", () => {
       },
       {
         name: "known inventory source bounds",
-        expected: progress("attack_path", 5, 9),
+        expected: progress("discovery", 5, 9),
         steps: [
           ["save", "initial", progress("discovery", 0, 8)],
           ["poll"],
@@ -10799,7 +10801,7 @@ describe("CodexSecurity orchestration", () => {
       {
         name: "an omitted final projection below worker coverage",
         expected: progress("validation", 1, 5),
-        unresolvedExpected: progress("attack_path", 6, 8),
+        unresolvedExpected: progress("preflight", 6, 8),
         steps: [
           ["worker", progress("attack_path", 6, 8)],
           ["poll"],
@@ -11032,7 +11034,7 @@ describe("CodexSecurity orchestration", () => {
         mode === "in scope"
           ? review
           : mode === "worker prior"
-            ? progress("attack_path", 1, 5)
+            ? progress("validation", 1, 5)
             : inventory(5);
       const next = progress("reporting", state.filesCompleted + 1, 5);
       const latest = mode === "multi marker" ? [inventory(5), review] : review;
@@ -11478,7 +11480,7 @@ describe("CodexSecurity orchestration", () => {
             ["check", expected],
             ["worker", progress("attack_path", 2, total)],
             ["poll"],
-            ["check", progress("attack_path", 2, total)],
+            ["check", progress(expected.phase, 2, total)],
             ["save", "followup", progress("reporting", 3, total)],
             ["poll"],
             ["check", progress("reporting", 3, total)],
@@ -11796,7 +11798,7 @@ describe("CodexSecurity orchestration", () => {
         const unresolved = mode === "ambiguous" || mode === "new turn";
         const reviewed = progress("reporting", 1, unresolved ? 9 : 8);
         const settled = unresolved
-          ? progress("attack_path", 6, 9)
+          ? progress(reviewed.phase, 6, 9)
           : progress("reporting", 3, 8);
         const currentText =
           mode === "untruncated"
@@ -11854,7 +11856,7 @@ describe("CodexSecurity orchestration", () => {
               : ([
                   ["additional-worker", progress("attack_path", 2, 8)],
                   ["poll"],
-                  ["check", progress("attack_path", 2, 8)],
+                  ["check", progress(reviewed.phase, 2, 8)],
                   ["save", "followup", progress("reporting", 3, 8)],
                   ["poll"],
                   ["check", settled],
@@ -12550,7 +12552,7 @@ describe("CodexSecurity orchestration", () => {
     for (const changed of [false, true]) {
       for (const eligible of [false, true]) {
         const review = progress("validation", 3, 10);
-        const state = eligible ? review : progress("attack_path", 2, 5);
+        const state = eligible ? review : progress("discovery", 2, 5);
         add(
           `accepted coverage after recovered scope (changed=${changed}, eligible=${eligible})`,
           state,
@@ -12602,7 +12604,7 @@ describe("CodexSecurity orchestration", () => {
         const live = mode === "exact" ? "live" : "live-changed";
         add(
           `inventory witness survives ${variant} (mode=${mode})`,
-          progress("attack_path", 2, total),
+          progress(zero ? "reporting" : "discovery", 2, total),
           [
             ...(zero
               ? ([
@@ -12907,7 +12909,7 @@ describe("CodexSecurity orchestration", () => {
       const expected =
         next.filesCompleted === next.filesTotal
           ? next
-          : progress("attack_path", state.filesTotal, state.filesTotal);
+          : progress(next.phase, state.filesTotal, state.filesTotal);
       scenarios.push({
         name,
         expected,
@@ -13261,7 +13263,7 @@ describe("CodexSecurity orchestration", () => {
       const expected =
         next.filesCompleted === next.filesTotal
           ? next
-          : progress("attack_path", state.filesTotal, state.filesTotal);
+          : progress(next.phase, state.filesTotal, state.filesTotal);
       scenarios.push({
         name,
         expected,
@@ -13329,7 +13331,7 @@ describe("CodexSecurity orchestration", () => {
         `bounded inventory after review (mode=${mode})`,
         mode === "prior inventory"
           ? progress("validation", 3, 5)
-          : progress("attack_path", 7, 8),
+          : progress("validation", 7, 8),
         [
           ["save", "initial", inventory(mode === "prior inventory" ? 5 : 8)],
           [
@@ -13608,7 +13610,7 @@ describe("CodexSecurity orchestration", () => {
       const expected =
         next.filesCompleted === next.filesTotal
           ? next
-          : progress("attack_path", state.filesTotal, state.filesTotal);
+          : progress(next.phase, state.filesTotal, state.filesTotal);
       scenarios.push({
         name,
         expected,
@@ -13984,7 +13986,7 @@ describe("CodexSecurity orchestration", () => {
       const expected =
         next.filesCompleted === next.filesTotal
           ? next
-          : progress("attack_path", state.filesTotal, state.filesTotal);
+          : progress(next.phase, state.filesTotal, state.filesTotal);
       scenarios.push({
         name,
         expected,
@@ -14015,7 +14017,7 @@ describe("CodexSecurity orchestration", () => {
       const live = command === "changed" ? "live-changed" : "live";
       add(
         `bounded inventory after saved review (${command})`,
-        progress("attack_path", 7, 8),
+        progress(command === "exact" ? "preflight" : "validation", 7, 8),
         [
           ["worker", progress("attack_path", 7, 8)],
           ["poll"],
@@ -14398,7 +14400,7 @@ describe("CodexSecurity orchestration", () => {
       const expected =
         next.filesCompleted === next.filesTotal
           ? next
-          : progress("attack_path", state.filesTotal, state.filesTotal);
+          : progress(next.phase, state.filesTotal, state.filesTotal);
       scenarios.push({
         name,
         expected,
@@ -14766,12 +14768,12 @@ describe("CodexSecurity orchestration", () => {
           progress("attack_path", state.filesTotal, state.filesTotal),
         ],
         ["poll"],
-        ["check", progress("attack_path", state.filesTotal, state.filesTotal)],
+        ["check", progress(next.phase, state.filesTotal, state.filesTotal)],
       ];
       scenarios.push(
         {
           name: `restore scope after rejecting a provisional inventory (saved baseline=${control})`,
-          expected: progress("attack_path", 8, 8),
+          expected: progress("reporting", 8, 8),
           steps: [
             ...(control
               ? ([["save", "initial", inventory(8)], ["poll"]] as Step[])
@@ -14792,7 +14794,7 @@ describe("CodexSecurity orchestration", () => {
         },
         {
           name: `copy retains admitted source scope (native copy=${control})`,
-          expected: progress("attack_path", 6, 6),
+          expected: progress("reporting", 6, 6),
           steps: [
             ["receipt", inventory(5)],
             ["live-message", "inventory", inventory(6)],
@@ -14810,7 +14812,7 @@ describe("CodexSecurity orchestration", () => {
         },
         {
           name: `later live inventory cannot rescope native history (persisted early=${control})`,
-          expected: progress("attack_path", 8, 8),
+          expected: progress("reporting", 8, 8),
           steps: [
             ["save", "oversized", progress("validation", 9, 10)],
             ["live", "oversized", progress("validation", 9, 10)],
@@ -14842,14 +14844,14 @@ describe("CodexSecurity orchestration", () => {
             ["save", "current", inventory(8)],
             ["save", "phase", progress("discovery", 3, 8)],
             ...finish(
-              progress("attack_path", 5, 8),
+              progress("threat_model", 5, 8),
               progress("reporting", 6, 8),
             ),
           ],
         },
         {
           name: `bounded omitted review closes inventory admission (exact review=${control})`,
-          expected: progress("attack_path", 5, 5),
+          expected: progress("reporting", 5, 5),
           steps: [
             ["save", "initial", inventory(5)],
             ["live", "initial", inventory(5)],
@@ -14871,7 +14873,7 @@ describe("CodexSecurity orchestration", () => {
         },
         {
           name: `inventory after a known review is excluded through bounds (exact inventory=${control})`,
-          expected: progress("attack_path", 8, 8),
+          expected: progress("reporting", 8, 8),
           steps: [
             ["save", "initial", inventory(8)],
             ["live", "initial", inventory(8)],
@@ -14894,7 +14896,7 @@ describe("CodexSecurity orchestration", () => {
         },
         {
           name: `earlier eligible review precedes provisional scope (review polled early=${control})`,
-          expected: progress("attack_path", 8, 8),
+          expected: progress("reporting", 8, 8),
           steps: [
             ["save", "initial", inventory(8)],
             ["poll"],
@@ -15194,13 +15196,13 @@ describe("CodexSecurity orchestration", () => {
           "check",
           next.filesCompleted === next.filesTotal
             ? next
-            : progress("attack_path", next.filesCompleted + 1, next.filesTotal),
+            : progress(next.phase, next.filesCompleted + 1, next.filesTotal),
         ],
       ];
       scenarios.push(
         {
           name: `newer inventory after an older truncated bound (exact=${exact})`,
-          expected: progress("attack_path", 5, 9),
+          expected: progress("reporting", 5, 9),
           steps: [
             ["live-changed", "older", commandOutput(text(inventory(5)))],
             [live, "newer", inventory(9)],
@@ -15215,7 +15217,7 @@ describe("CodexSecurity orchestration", () => {
         },
         {
           name: `review cutoff before a queued later inventory (split callback=${exact})`,
-          expected: progress("attack_path", 3, 5),
+          expected: progress("reporting", 3, 5),
           steps: [
             ["save", "initial", inventory(8)],
             ["live-changed", "initial", inventory(8)],
@@ -15236,7 +15238,7 @@ describe("CodexSecurity orchestration", () => {
         },
         {
           name: `count-rejected inventory before a matched review (exact=${exact})`,
-          expected: progress("attack_path", 3, 5),
+          expected: progress("reporting", 3, 5),
           steps: [
             ["save", "initial", persistedCommandOutput],
             ["save", "current", inventory(5)],
@@ -15253,7 +15255,7 @@ describe("CodexSecurity orchestration", () => {
         },
         {
           name: `count-rejected inventory inside a complete projection (exact=${exact})`,
-          expected: progress("attack_path", 4, 5),
+          expected: progress("reporting", 4, 5),
           steps: [
             ["live-changed", "initial", commandOutput(text(inventory(9)))],
             ["save", "initial", persistedCommandOutput],
@@ -15271,7 +15273,7 @@ describe("CodexSecurity orchestration", () => {
         },
         {
           name: `deferred expansion supersedes a truncated bound (exact=${exact})`,
-          expected: progress("attack_path", 8, 8),
+          expected: progress("reporting", 8, 8),
           steps: [
             ["worker", progress("attack_path", 2, 5)],
             ["live-changed", "initial", commandOutput(text(inventory(5)))],
@@ -15309,7 +15311,7 @@ describe("CodexSecurity orchestration", () => {
         },
         {
           name: `late inventory proof after saved reporting (exact=${exact})`,
-          expected: progress("attack_path", 5, 5),
+          expected: progress("reporting", 5, 5),
           steps: [
             ["save", "older", persistedCommandOutput],
             ["save", "newer", inventory(5)],
@@ -15632,7 +15634,7 @@ describe("CodexSecurity orchestration", () => {
       })),
       ...[false, true].map((exact): Scenario => ({
         name: `newer inventory during older-scope corroboration (exact=${exact})`,
-        expected: progress("attack_path", 5, 9),
+        expected: progress("validation", 5, 9),
         steps: [
           [exact ? "live" : "live-changed", "older", inventory(3)],
           ["save", "older", inventory(3)],
@@ -15687,7 +15689,7 @@ describe("CodexSecurity orchestration", () => {
         const next = [inventory(10), progress("reporting", 5, 10)];
         return {
           name: `exact inventory before a newer live scope (without oversized=${withoutOversized})`,
-          expected: progress("attack_path", 7, 10),
+          expected: progress("validation", 7, 10),
           steps: [
             ["live", "first", first],
             ["save", "first", first],
@@ -15729,7 +15731,7 @@ describe("CodexSecurity orchestration", () => {
         );
         return {
           name: `response-only authority after an anchor (native inventory=${nativeInventory})`,
-          expected: progress("attack_path", 7, 10),
+          expected: progress("validation", 7, 10),
           steps,
         };
       }),
@@ -16474,7 +16476,7 @@ describe("CodexSecurity orchestration", () => {
       },
       {
         name: "eligible worker coverage ahead of a zero marker",
-        expected: progress("attack_path", 5, 5),
+        expected: progress("preflight", 5, 5),
         steps: [
           ["worker", progress("attack_path", 5, 5)],
           ["poll"],
@@ -16951,7 +16953,7 @@ describe("CodexSecurity orchestration", () => {
           onProgress: (update) => {
             updates.push(update);
             if (
-              update.phase === "attack_path" &&
+              update.phase === "discovery" &&
               update.filesCompleted === 5 &&
               update.filesTotal === 9
             )
@@ -17134,7 +17136,7 @@ describe("CodexSecurity orchestration", () => {
         });
         expect(updates.at(-1)).toEqual(
           scenario === "older-snapshot"
-            ? { phase: "attack_path", filesCompleted: 6, filesTotal: 9 }
+            ? { phase: "validation", filesCompleted: 6, filesTotal: 9 }
             : { phase: "validation", filesCompleted: 5, filesTotal: 8 },
         );
         if (scenario === "older-snapshot") {
@@ -17297,7 +17299,7 @@ describe("CodexSecurity orchestration", () => {
           },
         });
         expect(updates.at(-1)).toEqual({
-          phase: "attack_path",
+          phase: "discovery",
           filesCompleted: 6,
           filesTotal: 9,
         });
@@ -17628,10 +17630,11 @@ describe("CodexSecurity orchestration", () => {
             if (id === "observed-last") lastRead.resolve();
           },
         });
+        // The final receipt was consumed, but unchanged parent-phase coverage
+        // is deduplicated even when the worker's own phase changes.
         expect(updates.filter((p) => p.filesCompleted > 0)).toEqual([
-          { phase: firstPhase, filesCompleted: 2, filesTotal: 8 },
-          { phase: secondPhase, filesCompleted: 3, filesTotal: 8 },
-          { phase: firstPhase, filesCompleted: 3, filesTotal: 8 },
+          { phase: "preflight", filesCompleted: 2, filesTotal: 8 },
+          { phase: "preflight", filesCompleted: 3, filesTotal: 8 },
         ]);
       } finally {
         clearInterval(keepAlive);
