@@ -158,7 +158,15 @@ def test_cost_before_selection_retains_only_merged_findings(
             assert "cost" not in stored and "estimatedUsd" not in stored
             assert stored["usage"]["coverage"] == "unavailable"
         else:
-            assert stored == BUDGET_COST
+            assert stored == {
+                "cost": BUDGET_COST,
+                "usage": {
+                    "coverage": "unavailable",
+                    "source": "codex_rollout",
+                    "threadCount": 0,
+                    "warnings": ["codex_state_unavailable"],
+                },
+            }
         assert run["terminal_reason"] == "capped"
         assert run["error_message"] == args.message
         assert args.message in json.loads(row["completion_warnings_json"])

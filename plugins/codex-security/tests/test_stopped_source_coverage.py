@@ -167,4 +167,8 @@ def test_stopped_recovery_keeps_unmerged_coverage_after_accepted_review(
     coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
     assert "completeness" not in coverage
     assert coverage["reviews"] == reviews
-    assert deferred in coverage["deferred"]
+    assert {
+        **deferred,
+        "id": f"{pending.parent.name}/{deferred['id']}",
+        "workerId": pending.parent.name,
+    } in coverage["deferred"]
