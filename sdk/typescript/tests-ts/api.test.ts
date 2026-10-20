@@ -7221,9 +7221,7 @@ describe("CodexSecurity orchestration", () => {
                     options.config as JsonObject,
                   );
                   expect(saved["skills"]).toEqual(effective["skills"]);
-                  expect(effective["sqlite_home"]).toBe(
-                    index === 0 ? "sqlite" : sqliteHome,
-                  );
+                  expect(effective["sqlite_home"]).toBe(sqliteHome);
                   const snapshot = parseToml(
                     await readFile(
                       options.env!["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!,

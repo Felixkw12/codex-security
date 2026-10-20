@@ -105,6 +105,25 @@ async function bundledWorkerExecutor(
     extract(/var USAGE_LIMIT_MESSAGES = [\s\S]*?\n\]\);/u),
     extract(/function codexWorkerTurnError\([\s\S]*?\n\}/u),
   ].join("\n");
+  const workerSource = [
+    workerErrors,
+    record,
+    abort,
+    diagnostic,
+    transport,
+    source,
+  ].join("\n");
+  const recordPredicates = [
+    ...new Set(
+      [...workerSource.matchAll(/\b(isRecord\d*)\(/gu)].map(
+        (match) => match[1],
+      ),
+    ),
+  ]
+    .map((name) =>
+      extract(new RegExp(`function ${name}\\([\\s\\S]*?\\n\\}`, "u")),
+    )
+    .join("\n");
   const fileSystemImport = /\b(import_node_fs\d*)\.promises\.readFile\(/u.exec(
     source,
   )?.[1];
@@ -143,8 +162,7 @@ async function bundledWorkerExecutor(
     "workerSubagentConfig",
     "appendItemDiagnostic",
     "classifyCodexWorkerError",
-    "isRecord",
-    `${workerErrors}\n${record}\n${abort}\n${diagnostic}\n${transport}\n${source}\nreturn CodexSdkWorkerExecutor;`,
+    `${recordPredicates}\n${workerSource}\nreturn CodexSdkWorkerExecutor;`,
   )(
     { promises: { readFile: async () => "fixture worker prompt" } },
     {
@@ -194,8 +212,6 @@ async function bundledWorkerExecutor(
     () => ({}),
     () => {},
     (error: unknown) => error,
-    (value: unknown) =>
-      typeof value === "object" && value !== null && !Array.isArray(value),
   ) as WorkerExecutorConstructor;
   return {
     requests,
