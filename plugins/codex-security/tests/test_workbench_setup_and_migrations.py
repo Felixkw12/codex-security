@@ -90,8 +90,9 @@ EXPECTED_MIGRATIONS = [
     (49, "index finding issue receipt ownership"),
     (50, "persist authorized source excerpt scopes"),
     (51, "preserve deep scan worker thread history"),
-    (52, "persist composition child membership"),
-    (53, "reuse scan severity assessments"),
+    (52, "record severity classification review counts"),
+    (53, "persist composition child membership"),
+    (54, "reuse scan severity assessments"),
 ]
 
 

@@ -68,7 +68,10 @@ test.each([Infinity, -Infinity, NaN])(
     const input = {
       scanId: "synthetic-scan",
       findings: [],
-      threatModel: { summary: "Synthetic boundary review.", audit: { measurement } },
+      threatModel: {
+        summary: "Synthetic boundary review.",
+        audit: { measurement },
+      },
       coverage: { surfaces: [], explicitExclusions: [], deferred: [] },
     };
     const original = structuredClone(input);

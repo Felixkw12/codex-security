@@ -33,6 +33,7 @@ import {
 import { publishDraft } from "./support/scan-publication.js";
 import { createApiTestFixtures } from "./support/api-events.js";
 import { tokenUsageEvent } from "./support/usage-rollout.js";
+import { requestMetadata } from "./support/request-metadata.js";
 import { prepareSemanticScanDraft } from "../src/scan-semantics.js";
 import { DEEP_SCAN_CHECKPOINT } from "../src/deep-scan.js";
 import { ScanTransportClosedError } from "../src/scan-execution.js";
@@ -362,13 +363,21 @@ test.each([
     const inheritedSettings = {
       openai_base_url: "https://endpoint.example.test/v1",
       web_search: "cached",
+      analytics: { enabled: false },
+      otel: { environment: "synthetic-composed-scan" },
+      responses_api_metadata: {
+        "team.tag": "synthetic-composed-scan",
+        codex_security_integration: "github_action",
+      },
       model_instructions_file: "instructions.md",
       experimental_compact_prompt_file: "compact.md",
       model_catalog_json: "models.json",
       sqlite_home: "sqlite",
     };
+    const { responses_api_metadata: inheritedMetadata, ...inheritedConfig } =
+      inheritedSettings;
     const expectedSettings = () => ({
-      ...inheritedSettings,
+      ...inheritedConfig,
       model_instructions_file: join(scanDir, "instructions.md"),
       experimental_compact_prompt_file: join(scanDir, "compact.md"),
       model_catalog_json: join(scanDir, "models.json"),
@@ -787,12 +796,16 @@ process.exit(0);
                     expect(env).not.toHaveProperty("CODEX_API_KEY");
                     const {
                       model_providers: providerDefinitions,
+                      responses_api_metadata,
                       ...publicSettings
                     } = nativeSettings;
                     expect(options.config).toMatchObject({
                       ...publicSettings,
                       ...expectedSettings(),
                     });
+                    expect(
+                      requestMetadata(options.configOverrides),
+                    ).toMatchObject(responses_api_metadata);
                     if (providerDefinitions !== undefined) {
                       expect(options.config).not.toHaveProperty(
                         "model_providers",
@@ -1664,6 +1677,9 @@ process.exit(0);
       }
       for (const turn of turns) {
         expect(turn.config).toMatchObject(expectedSettings());
+        expect(requestMetadata(turn.overrides)).toMatchObject(
+          inheritedMetadata,
+        );
         expect(turn.environment["CODEX_SQLITE_HOME"]).toBe(
           join(scanDir, "sqlite"),
         );

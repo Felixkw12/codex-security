@@ -44,6 +44,7 @@ function save(
       evidence: { count: 18446744073709551617n },
     },
     assessment: {
+      classificationRuns: null,
       findingId,
       occurrenceId: `occurrence-${findingId}`,
       inputSha256: "evidence-digest",
@@ -78,6 +79,7 @@ function begin(
 test("severity checkpoints retain external findings and isolate each scan's assessments", (t) => {
   const database = open(t);
   const payload = save("finding\0suffix", "scan-a");
+  payload.assessment.classificationRuns = 10;
   for (const field of [
     "occurrenceId",
     "inputSha256",
@@ -337,6 +339,54 @@ test("matching evidence reuses per-scan assessments without changing an acknowle
     "2026-01-05T00:00:00Z",
   );
   assert.deepEqual(assessments(database, ["finding"]), []);
+});
+
+test("reuse selects the requested review count before ranking and updates a stale local count", (t) => {
+  const database = open(t);
+  const first = save("finding", "scan-a");
+  first.assessment.classificationRuns = 1;
+  const matching = save("finding", "scan-b");
+  matching.assessment.classificationRuns = 3;
+  const legacy = save("finding", "scan-c");
+  for (const [payload, timestamp] of [
+    [first, "2026-01-01T00:00:00Z"],
+    [matching, "2026-01-02T00:00:00Z"],
+    [legacy, "2026-01-03T00:00:00Z"],
+  ] as const) {
+    severityCheckpoint(database, begin(payload.scanId, ["finding"]), "started");
+    severityCheckpoint(database, payload, timestamp);
+  }
+
+  const cached = (classificationRuns?: number) =>
+    severityCheckpoint(
+      database,
+      {
+        action: "begin",
+        scanId: "scan-a",
+        findingIds: ["finding"],
+        inputs: { finding: "evidence-digest" },
+        assessedAt: "started",
+        rubricSha256: null,
+        knowledgeBaseSha256: null,
+        classificationRuns,
+      },
+      "unused",
+    ).assessments!;
+  assert.deepEqual(cached(3), [
+    { ...matching.assessment, assessedAt: "2026-01-02T00:00:00Z" },
+  ]);
+  assert.deepEqual(cached(), [
+    { ...legacy.assessment, assessedAt: "2026-01-03T00:00:00Z" },
+  ]);
+  assert.deepEqual(cached(5), []);
+
+  const reused = { ...matching, scanId: "scan-a", reused: true };
+  severityCheckpoint(database, reused, "2026-01-04T00:00:00Z");
+  const updated = assessments(database, ["finding"], "scan-a");
+  assert.equal(updated[0].classificationRuns, 3);
+  assert.equal(updated[0].assessedAt, "2026-01-04T00:00:00Z");
+  severityCheckpoint(database, reused, "2026-01-05T00:00:00Z");
+  assert.deepEqual(assessments(database, ["finding"], "scan-a"), updated);
 });
 
 test("real severity producer reuses unchanged evidence across occurrences", async (t) => {

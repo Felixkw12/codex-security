@@ -19,6 +19,7 @@ import {
   scanAuthentication,
   runtimeScanAuthentication,
   selectedScanEnvironment,
+  withoutOpenAiApiKeys,
   environmentApiKey,
   environmentValue,
   definedEnvironment,
@@ -672,6 +673,7 @@ export class CodexSecurity {
   readonly #abortController = new AbortController();
   #activeOperation: Promise<unknown> | null = null;
   #runtime: PreparedRuntime | null = null;
+  #runtimeEnvironmentInput: ProcessEnvironment = {};
   #runtimeCredentialSource: "api_key" | "stored_credentials" | null = null;
   #closed = false;
   #closePromise: Promise<void> | null = null;
@@ -3122,6 +3124,9 @@ export class CodexSecurity {
             "all",
           );
           if (previousFindings !== undefined) {
+            const matchingPermissions = (
+              session.sessionConfig["permissions"] as JsonObject
+            )[SCAN_PERMISSION_PROFILE] as JsonObject;
             await matchCompletedScan({
               scanId,
               repository: repo,
@@ -3149,7 +3154,9 @@ export class CodexSecurity {
               config: {
                 ...this.config,
                 codexOverrides: {
-                  ...deepMerge({ ...session.runtimeConfig }, effectiveConfig),
+                  ...resolveCodexProfile(
+                    deepMerge({ ...session.runtimeConfig }, effectiveConfig),
+                  ),
                   responses_api_metadata: {
                     ...codexSecurityRequestContext(effectiveConfig, {
                       surface: this.#surface,
@@ -3169,7 +3176,10 @@ export class CodexSecurity {
                 );
                 try {
                   matcherConfig["mcp_servers"] = await disabledMcpServers(
-                    executionCommand(session.source),
+                    await providerPreflightCommand(
+                      executionCommand(session.source),
+                      matcherConfig,
+                    ),
                     matcherConfig,
                     definedEnvironment(environment),
                     { signal, workingDirectory: repo },
@@ -3204,7 +3214,10 @@ export class CodexSecurity {
               model,
               cyberAccessProgram: options.cyberAccessProgram,
               signal,
-              inheritedPermissions: session.inheritedPermissions,
+              inheritedPermissions: {
+                filesystem: matchingPermissions["filesystem"] as JsonObject,
+                network: { enabled: false },
+              },
               preserveProviderEnvironment:
                 session.source.preserveProviderEnvironment,
             });
@@ -3927,8 +3940,39 @@ export class CodexSecurity {
         this.#dependencies.ambientExecution === undefined
       ) {
         await this.#refreshPersistentRuntime(runtime, source, signal);
+        this.#runtimeEnvironmentInput = { ...source.environment };
       }
-      const environment = { ...runtime.environment };
+      const runtimeEnvironment = { ...source.environment };
+      // Preserve preparation changes without reviving removed input credentials.
+      for (const [key, value] of Object.entries(
+        withoutCodexHome(runtime.environment),
+      )) {
+        if (value !== this.#runtimeEnvironmentInput[key])
+          runtimeEnvironment[key] = value;
+      }
+      for (const key of Object.keys(runtimeEnvironment)) {
+        if (key.toUpperCase() === "CODEX_MCP_NODE_PATH")
+          delete runtimeEnvironment[key];
+      }
+      const runtimeNode = environmentValue(
+        runtime.environment,
+        "CODEX_MCP_NODE_PATH",
+      );
+      if (runtimeNode !== undefined)
+        runtimeEnvironment["CODEX_MCP_NODE_PATH"] = runtimeNode;
+      const preparedEnvironment = source.preserveProviderEnvironment
+        ? runtimeEnvironment
+        : selectedScanEnvironment(
+            commandAuth
+              ? withoutOpenAiApiKeys(runtimeEnvironment)
+              : runtimeEnvironment,
+            options.auth,
+            modelProvider,
+          );
+      const environment = {
+        ...withoutCodexHome(preparedEnvironment),
+        CODEX_HOME: runtime.codexHome,
+      };
       const effectiveConfig = await scanSkillConfig(
         scanCyberAccessConfig(
           structuredClone(runtime.effectiveConfig ?? source.configuration),
@@ -4075,7 +4119,7 @@ export class CodexSecurity {
       }
       return {
         policy: "ordinary",
-        source,
+        source: { ...source, environment: preparedEnvironment },
         runtime,
         runtimeConfig,
         safetyIdentifier: options.safetyIdentifier,
@@ -4113,6 +4157,7 @@ export class CodexSecurity {
         temporaryRoot,
         validateLocation,
       );
+      this.#runtimeEnvironmentInput = { ...source.environment };
       this.#requireOpen();
       this.#runtimeCredentialSource = this.#runtime.credentialsAvailable
         ? "stored_credentials"
@@ -4168,6 +4213,11 @@ export class CodexSecurity {
         signal,
       }));
     runtime.effectiveConfig = mergedConfig;
+    runtime.environment = {
+      ...withoutCodexHome(source.environment),
+      CODEX_HOME: runtime.codexHome,
+      CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(source.environment),
+    };
   }
 
   async #validatePolicyInputs(

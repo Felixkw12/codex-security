@@ -5,6 +5,7 @@ import type { ScanWorkerStatus } from "../src/index.js";
 import { failedEvents } from "./support/api-events.js";
 import { parentMetadata } from "./support/usage-rollout.js";
 import { requestMetadata } from "./support/request-metadata.js";
+import { createProfileCodex } from "../src/provider-profile.js";
 import { once } from "node:events";
 import { spyOn } from "bun:test";
 import { type ScanWorkerEvent } from "../src/index.js";
@@ -35,6 +36,7 @@ import {
 import * as fsPromises from "node:fs/promises";
 
 import { execFileSync } from "node:child_process";
+import * as childProcess from "node:child_process";
 
 import { hash } from "node:crypto";
 
@@ -110,6 +112,7 @@ import {
 } from "./support/api-client.js";
 
 import {
+  completedCodex,
   completedEvents,
   createApiTestFixtures,
   preparedRuntime,
@@ -131,6 +134,17 @@ type ScanObserverName = Parameters<
 const REPOSITORY_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 
 const EXAMPLE = join(PLUGIN_ROOT, "examples", "completed-scan");
+
+function recordingWorkbench(commands: Array<readonly string[]>) {
+  return async (
+    _options: unknown,
+    args: readonly string[],
+    input?: string,
+  ): Promise<JsonObject> => {
+    commands.push(args);
+    return mockWorkbench(args, input);
+  };
+}
 
 const { cleanup, copyCompletedScan, temporaryDirectory } =
   createApiTestFixtures();
@@ -647,7 +661,6 @@ describe("CodexSecurity finding validation", () => {
       const credentialHome = captured.codex!.env!["CODEX_HOME"]!;
       const credentialDenies = {
         [credentialHome]: { ".": "deny" },
-        [join(credentialHome, "deep-scan.toml")]: { ".": "deny" },
       };
       expect(
         captured.codex?.configOverrides
@@ -656,17 +669,6 @@ describe("CodexSecurity finding validation", () => {
           )
           .map((override) => parseToml(override)),
       ).toEqual([
-        {
-          permissions: {
-            codex_security_scan: {
-              filesystem: {
-                ":root": "read",
-                ":workspace_roots": "write",
-                ...credentialDenies,
-              },
-            },
-          },
-        },
         {
           permissions: {
             codex_security_validation: {
@@ -1262,6 +1264,7 @@ describe("CodexSecurity orchestration", () => {
       stopAfterConsecutiveErrors: 3,
       maxDiscoveryRuns: 40,
       maxTimeHours: 96,
+      maxTimeMinutes: 5760,
       deepScanSources: {
         workers: "default",
         subagents: "default",
@@ -1806,9 +1809,18 @@ describe("CodexSecurity orchestration", () => {
         },
       );
 
-      await expect(client.run(repository)).rejects.toThrow(
-        `Set ${apiKey} to run a scan through ${name}.`,
-      );
+      for (const auth of ["api-key", "chatgpt"] as const) {
+        await expect(client.preflight(repository, { auth })).rejects.toThrow(
+          `Set ${apiKey} to run a scan through ${name}.`,
+        );
+      }
+      for (const mode of ["standard", "deep"] as const) {
+        for (const auth of [undefined, "auto", "api-key", "chatgpt"] as const) {
+          await expect(client.run(repository, { mode, auth })).rejects.toThrow(
+            `Set ${apiKey} to run a scan through ${name}.`,
+          );
+        }
+      }
       expect(runtimeStarted).toBe(false);
       await client.close();
     },
@@ -3663,6 +3675,7 @@ describe("CodexSecurity orchestration", () => {
       "get-scan-feedback",
       "set-scan-thread",
       "prepare-scan-completion",
+      "get-scan",
       "fail-scan",
     ]);
     await client.close();
@@ -4253,17 +4266,13 @@ describe("CodexSecurity orchestration", () => {
       "dismissed",
       undefined,
     ],
+    ["managed provider selection retains matching", "managed", undefined],
   ] as const)(
     "keeps a completed scan when %s",
     async (_scenario, failure, warning) => {
       const limited = failure === "budget" || failure === "budget-context";
-      const root = await temporaryDirectory();
-      const repository = join(root, "repository");
-      const codexHome = join(root, "codex-home");
-      const scanDir = join(root, "scan");
-      await mkdir(repository);
-      await mkdir(codexHome);
-      await mkdir(scanDir, { mode: 0o700 });
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      if (failure === "managed") await chmod(codexHome, 0o700);
       const current = {
         findingId: "csf_852f90d6e1177502ff113d4a",
         occurrenceId: "occ_e79cb19591e696572a1c22be",
@@ -4284,24 +4293,170 @@ describe("CodexSecurity orchestration", () => {
       let modelCalled = false;
       let matchingTurns = 0;
       let observedSingleTurn: boolean | undefined;
-      let observedCyberProgram: string | undefined;
-      let matchingCyberProgram: string | undefined;
+      let progressSignal: AbortSignal | undefined;
       let matched = false;
       let savedComparisonInput: string | undefined;
+      const expectReadOnlyMatching = (options: CodexOptions) => {
+        expect(options.config?.["default_permissions"]).toBe(
+          "codex_security_comparison",
+        );
+        expect(
+          parseToml((options.configOverrides ?? []).join("\n")),
+        ).toMatchObject({
+          permissions: {
+            codex_security_comparison: {
+              extends: ":read-only",
+              filesystem: { [codexHome]: { ".": "deny" } },
+              network: { enabled: false },
+            },
+          },
+        });
+      };
+      const managedProvider = {
+        name: "Synthetic managed provider",
+        wire_api: "responses",
+        requires_openai_auth: false,
+        http_headers: { "X-Synthetic-Key": "synthetic-managed-secret" },
+      };
+      const providerConfig = {
+        features: { shell_tool: false, unified_exec: false, view_image: false },
+        windows: { sandbox: "unelevated" },
+        model_provider: "synthetic.provider",
+        model_providers: {
+          "synthetic.provider": {
+            name: "Synthetic provider",
+            base_url: "https://provider.example.test/v1",
+            wire_api: "responses",
+            env_http_headers: {
+              "X-Synthetic-Context": "SYNTHETIC_MATCH_HEADER",
+            },
+            auth: { command: "synthetic-auth" },
+          },
+          ...(failure === "managed"
+            ? { "synthetic.managed": managedProvider }
+            : {}),
+        },
+      };
+      const executable = join(codexHome, "synthetic-native.mjs");
+      const startupCallsPath = join(codexHome, "matching-calls.jsonl");
+      let spawnSpy: ReturnType<typeof spyOn> | undefined;
+      if (failure === "managed") {
+        await writeFile(
+          executable,
+          `import { appendFileSync, existsSync, readFileSync } from "node:fs";
+          import { join } from "node:path";
+          import { createInterface } from "node:readline";
+          import { parse } from ${JSON.stringify(pathToFileURL(Bun.resolveSync("smol-toml", import.meta.dir)).href)};
+          const args = process.argv.slice(2);
+          const configPath = join(process.env.CODEX_HOME, "config.toml");
+          const config = existsSync(configPath) ? parse(readFileSync(configPath, "utf8")) : {};
+          for (let index = 0; index < args.length; index++) {
+            if (args[index] === "-c" || args[index] === "--config")
+              Object.assign(config, parse(args[++index]));
+          }
+          const kind = args.includes("mcp") ? "mcp" : args.includes("app-server") ? "preflight" : "exec";
+          const call = { kind, args };
+          if (kind !== "exec") {
+            call.metadata = config.model_providers;
+            appendFileSync(${JSON.stringify(startupCallsPath)}, JSON.stringify(call) + "\\n");
+            if (!config.model_providers?.["synthetic.managed"]) {
+              console.error(${JSON.stringify("Model provider `synthetic.managed` not found")});
+              process.exit(1);
+            }
+          } else {
+            const name = args[args.indexOf("--profile") + 1];
+            const profile = parse(readFileSync(join(process.env.CODEX_HOME, name + ".config.toml"), "utf8"));
+            call.providers = Object.keys(profile.model_providers);
+            call.privateSecretLoaded = profile.model_providers["synthetic.managed"].http_headers["X-Synthetic-Key"] === "synthetic-managed-secret";
+            call.permissions = config.permissions[config.default_permissions];
+            appendFileSync(${JSON.stringify(startupCallsPath)}, JSON.stringify(call) + "\\n");
+          }
+          if (kind === "mcp") { console.log("[]"); process.exit(0); }
+          if (kind === "exec") {
+            console.log(JSON.stringify({ type: "thread.started", thread_id: "matching-thread" }));
+            console.log(JSON.stringify({ type: "turn.started" }));
+            console.log(JSON.stringify({ type: "item.completed", item: { id: "matching-result", type: "agent_message", text: ${JSON.stringify(JSON.stringify({ matches: [{ beforeOccurrenceIds: [previous.occurrenceId], afterOccurrenceIds: [current.occurrenceId], confidence: "high", reason: "Same synthetic root cause." }], uncertain: [] }))} } }));
+            console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0 } }));
+            process.exit(0);
+          }
+          const lines = createInterface({ input: process.stdin });
+          for await (const line of lines) {
+            const request = JSON.parse(line);
+            if (request.id === undefined) continue;
+            const result = request.method === "config/read"
+              ? { config: { ...config, model_provider: "synthetic.managed" } }
+              : request.method === "permissionProfile/list"
+                ? { data: [{ id: config.default_permissions, allowed: true }], nextCursor: null }
+                : {};
+            console.log(JSON.stringify({ id: request.id, result }));
+          }`,
+        );
+        const originalSpawn = childProcess.spawn;
+        spawnSpy = spyOn(childProcess, "spawn").mockImplementation(((
+          ...input: Parameters<typeof originalSpawn>
+        ) => {
+          const [command, args, options] = input;
+          return (command === process.execPath ||
+            command === runtime.executablePathForSpawn(process.execPath)) &&
+            args?.some((arg) => ["mcp", "app-server", "exec"].includes(arg))
+            ? originalSpawn(
+                process.execPath,
+                [executable, ...args],
+                options ?? {},
+              )
+            : originalSpawn(...input);
+        }) as typeof originalSpawn);
+      }
       const client = new TestClient(
-        {},
         {
-          environment: {},
-          prepareRuntime: async () => preparedRuntime(codexHome),
-          resolvePluginPython: async () => "/managed/python",
-          prepareOutputDir: async () => scanDir,
-          repositoryRevision: async () => "deadbeef",
-          runWorkbench: async (
-            _options: unknown,
-            args: readonly string[],
-            input?: string,
-          ): Promise<JsonObject> => {
+          codexOverrides: {
+            ...providerConfig,
+            analytics: { enabled: false },
+            otel: { environment: "synthetic-matching" },
+            responses_api_metadata: {
+              "team.tag": "synthetic-matching",
+              codex_security_integration: "github_action",
+            },
+            ...(failure === "budget-context"
+              ? {
+                  model: "gpt-6.1-sol",
+                  model_reasoning_effort: "xhigh",
+                  profile: "cloud.production",
+                  profiles: {
+                    "cloud.production": {
+                      model: "gpt-5.6-sol",
+                      model_reasoning_effort: "medium",
+                      features: { shell_tool: true, view_image: true },
+                    },
+                  },
+                }
+              : {}),
+          },
+        },
+        {
+          ...scanRuntimeDependencies(codexHome, scanDir),
+          ...(failure === "managed"
+            ? { environment: { CODEX_CLI_PATH: process.execPath } }
+            : {}),
+          prepareRuntime: runtimePreparer(codexHome, () => ({
+            environment: {
+              SYNTHETIC_MATCH_HEADER: "synthetic-comparison-header",
+              ...(failure === "managed"
+                ? {
+                    PATH: process.env["PATH"] ?? "",
+                    ...(process.env["SystemRoot"] === undefined
+                      ? {}
+                      : { SystemRoot: process.env["SystemRoot"] }),
+                    CODEX_CLI_PATH: process.execPath,
+                  }
+                : {}),
+            },
+          })),
+          runWorkbench: async (options, args, input): Promise<JsonObject> => {
             commands.push(args);
+            if (args[0] === "get-scan") {
+              progressSignal ??= options.signal;
+            }
             if (args[0] === "get-scan-feedback") {
               return {
                 scanId: "scan_example_001",
@@ -4321,8 +4476,9 @@ describe("CodexSecurity orchestration", () => {
               };
             }
             if (args[0] === "list-global-findings") {
+              expect(progressSignal?.aborted).toBe(true);
               if (failure === "index") throw new Error("index unavailable");
-              if (failure === "dismissed") {
+              if (failure === "dismissed" || failure === "managed") {
                 return {
                   findings: args.includes("--status")
                     ? matched
@@ -4345,21 +4501,72 @@ describe("CodexSecurity orchestration", () => {
             return mockWorkbench(args, input);
           },
           async matchFindings(input, options, runtimeOptions) {
+            expect(options?.cyberAccessProgram).toBe("daybreak_blue");
+            expect(options?.config?.codexOverrides).toMatchObject({
+              analytics: { enabled: false },
+              otel: { environment: "synthetic-matching" },
+              responses_api_metadata: {
+                "team.tag": "synthetic-matching",
+                codex_security_integration: "github_action",
+                codex_security_command: "scan",
+                codex_security_scan_mode: "standard",
+                codex_security_provider: "custom",
+              },
+            });
+            if (failure !== "managed")
+              expect(options?.config?.codexOverrides).toMatchObject({
+                ...providerConfig,
+                features: {
+                  ...providerConfig.features,
+                  ...(failure === "budget-context"
+                    ? { shell_tool: true, view_image: true }
+                    : {}),
+                },
+              });
+            expect(
+              options?.config?.codexOverrides?.["environment"],
+            ).toBeUndefined();
+            expect(options?.environment?.["SYNTHETIC_MATCH_HEADER"]).toBe(
+              "synthetic-comparison-header",
+            );
+            const nativeProfile = await import(
+              pathToFileURL(join(PLUGIN_ROOT, "scripts", "codex_profile.mjs"))
+                .href
+            );
+            const matcherArguments = nativeProfile.profileConfigOverrides(
+              options?.config?.codexOverrides ?? {},
+            ) as string[];
+            expect(
+              matcherArguments.some((value) =>
+                value.includes("synthetic-comparison-header"),
+              ),
+            ).toBe(false);
             modelCalled = true;
             observedSingleTurn = runtimeOptions.singleTurn;
-            observedCyberProgram = options?.cyberAccessProgram;
             if (failure === "matcher") throw new Error("matcher unavailable");
+            if (failure === "managed")
+              return await matchScanFindingsInternal(
+                input,
+                options,
+                runtimeOptions,
+              );
             if (failure === "budget-context") {
               return await matchScanFindingsInternal(
                 input,
                 {
                   ...options,
-                  createCodex: () => ({
-                    startThread() {
+                  createCodex: (codexOptions) => ({
+                    startThread(threadOptions) {
+                      expectReadOnlyMatching(codexOptions);
+                      expect(threadOptions).toMatchObject({
+                        model: "gpt-5.6-sol",
+                        modelReasoningEffort: "medium",
+                      });
                       return {
-                        async run(_prompt, turnOptions) {
-                          matchingCyberProgram =
-                            turnOptions?.cyberAccessProgram;
+                        async run(_input, turnOptions) {
+                          expect(turnOptions.cyberAccessProgram).toBe(
+                            "daybreak_blue",
+                          );
                           matchingTurns += 1;
                           return {
                             finalResponse: JSON.stringify({
@@ -4381,78 +4588,138 @@ describe("CodexSecurity orchestration", () => {
                 runtimeOptions,
               );
             }
-            return {
-              matches: [
-                {
-                  beforeOccurrenceIds: [previous.occurrenceId],
-                  afterOccurrenceIds: [current.occurrenceId],
-                  confidence: "high",
-                  reason: "Same dismissed root cause.",
-                },
-              ],
-              uncertain: [],
-            };
-          },
-          createCodex: () => ({
-            startThread: () => ({
-              id: null,
-              async runStreamed() {
-                await copyCompletedScan(root);
-                return { events: completedEvents() };
+            return await matchScanFindingsInternal(
+              input,
+              {
+                ...options,
+                createCodex: (codexOptions) => ({
+                  startThread(threadOptions) {
+                    expectReadOnlyMatching(codexOptions);
+                    expect(threadOptions).toMatchObject({
+                      approvalPolicy: "never",
+                      networkAccessEnabled: false,
+                    });
+                    expect(threadOptions.sandboxMode).toBeUndefined();
+                    return {
+                      async run() {
+                        matchingTurns += 1;
+                        return {
+                          finalResponse: JSON.stringify({
+                            matches: [
+                              {
+                                beforeOccurrenceIds: [previous.occurrenceId],
+                                afterOccurrenceIds: [current.occurrenceId],
+                                confidence: "high",
+                                reason: "Same dismissed root cause.",
+                              },
+                            ],
+                            uncertain: [],
+                          }),
+                        };
+                      },
+                    };
+                  },
+                }),
               },
-            }),
-          }),
+              runtimeOptions,
+            );
+          },
+          createCodex: async (options) =>
+            failure === "managed" &&
+            (options.config?.["features"] as JsonObject | undefined)?.[
+              "plugins"
+            ] === false
+              ? await createProfileCodex(options, options.nativeProfile!)
+              : completedCodex(root)(options),
         },
       );
 
-      const result = await client.run(repository, {
-        cyberAccessProgram: "daybreak_blue",
-        ...(limited ? { maxCostUsd: 1 } : {}),
-        onWarning: (message) => warnings.push(message),
-      });
-      expect(result.threadId).toBe("thread-1");
-      expect(
-        result.repositoryFindings?.map(({ findingId }) => findingId),
-      ).toEqual(
-        failure === "budget"
-          ? ["another-open-finding"]
-          : failure === "dismissed"
-            ? []
-            : undefined,
-      );
-      expect(warnings).toEqual(
-        warning === undefined ? [] : [expect.stringContaining(warning)],
-      );
-      expect(modelCalled).toBe(failure !== "index");
-      expect(observedCyberProgram).toBe(
-        failure === "index" ? undefined : "daybreak_blue",
-      );
-      expect(observedSingleTurn).toBe(
-        failure === "index" ? undefined : limited,
-      );
-      if (failure === "budget-context") {
-        expect(matchingTurns).toBe(1);
-        expect(matchingCyberProgram).toBe("daybreak_blue");
-        expect(matched).toBe(false);
-      }
-      expect(commands.some(([command]) => command === "complete-scan")).toBe(
-        true,
-      );
-      expect(
-        commands.some(([command]) => command === "list-global-findings"),
-      ).toBe(true);
-      if (failure === "dismissed") {
-        expect(JSON.parse(savedComparisonInput!)).toMatchObject({
-          matches: [
-            {
-              beforeOccurrenceIds: [previous.occurrenceId],
-              afterOccurrenceIds: [current.occurrenceId],
-            },
-          ],
-          uncertain: [],
+      try {
+        const result = await client.run(repository, {
+          ...(limited ? { maxCostUsd: 1 } : {}),
+          cyberAccessProgram: "daybreak_blue",
+          onProgress() {},
+          onWarning: (message) => warnings.push(message),
         });
+        expect(result.threadId).toBe("thread-1");
+        expect(warnings).toEqual(
+          warning === undefined ? [] : [expect.stringContaining(warning)],
+        );
+        expect(
+          result.repositoryFindings?.map(({ findingId }) => findingId),
+        ).toEqual(
+          failure === "budget"
+            ? ["another-open-finding"]
+            : failure === "dismissed" || failure === "managed"
+              ? []
+              : undefined,
+        );
+        expect(modelCalled).toBe(failure !== "index");
+        expect(observedSingleTurn).toBe(
+          failure === "index" ? undefined : limited,
+        );
+        expect(matchingTurns).toBe(
+          failure === "index" || failure === "matcher" || failure === "managed"
+            ? 0
+            : 1,
+        );
+        if (failure === "budget-context") {
+          expect(matched).toBe(false);
+        }
+        expect(commands.some(([command]) => command === "complete-scan")).toBe(
+          true,
+        );
+        expect(
+          commands.some(([command]) => command === "list-global-findings"),
+        ).toBe(true);
+        if (failure === "dismissed" || failure === "managed") {
+          expect(JSON.parse(savedComparisonInput!)).toMatchObject({
+            matches: [
+              {
+                beforeOccurrenceIds: [previous.occurrenceId],
+                afterOccurrenceIds: [current.occurrenceId],
+              },
+            ],
+            uncertain: [],
+          });
+        }
+        if (failure === "managed") {
+          const calls = (await readFile(startupCallsPath, "utf8"))
+            .trim()
+            .split("\n")
+            .map((line) => JSON.parse(line));
+          expect(calls.map(({ kind }) => kind)).toEqual(["mcp", "exec"]);
+          const metadata = {
+            "synthetic.provider": {
+              name: "Synthetic provider",
+              wire_api: "responses",
+            },
+            "synthetic.managed": {
+              name: "Synthetic managed provider",
+              wire_api: "responses",
+              requires_openai_auth: false,
+            },
+          };
+          expect(calls[0].metadata).toMatchObject(metadata);
+          expect(calls[1]).toMatchObject({
+            providers: ["synthetic.provider", "synthetic.managed"],
+            privateSecretLoaded: true,
+            permissions: {
+              filesystem: { [codexHome]: { ".": "deny" } },
+              network: { enabled: false },
+            },
+          });
+          expect(JSON.stringify(calls.map(({ args }) => args))).not.toContain(
+            "synthetic-managed-secret",
+          );
+          expect(JSON.stringify(calls.map(({ args }) => args))).not.toContain(
+            "provider.example.test",
+          );
+        }
+      } finally {
+        await client.close();
+        spawnSpy?.mockRestore();
       }
-      await client.close();
     },
   );
 
@@ -5159,91 +5426,48 @@ describe("CodexSecurity orchestration", () => {
   );
 
   test("stops and records a scan as soon as its live cost exceeds the limit", async () => {
-    const root = await temporaryDirectory();
-    const repository = join(root, "repository");
-    const codexHome = join(root, "codex-home");
-    const scanDir = join(root, "scan");
-    await mkdir(repository);
-    await mkdir(codexHome);
-    await mkdir(scanDir, { mode: 0o700 });
+    const { repository, codexHome, scanDir } = await scanDirectories();
     const commands: Array<readonly string[]> = [];
     const costs: number[] = [];
-    let turns = 0;
+    const runStreamed = mock(
+      async (_input: string, options: { signal: AbortSignal }) => {
+        async function* events(): AsyncGenerator<ThreadEvent> {
+          yield { type: "thread.started", thread_id: "scan-thread" };
+          await Promise.all([
+            writeUsageSession(codexHome, "scan-thread", {
+              input_tokens: 500,
+              cached_input_tokens: 100,
+              output_tokens: 10,
+            }),
+            writeUsageSession(
+              codexHome,
+              "worker-thread",
+              {
+                input_tokens: 750,
+                cached_input_tokens: 100,
+                output_tokens: 20,
+              },
+              { parent: "scan-thread", parentField: "parent_thread_id" },
+            ),
+          ]);
+          await (options.signal.aborted
+            ? undefined
+            : once(options.signal, "abort"));
+          throw new DOMException("aborted", "AbortError");
+        }
+        return { events: events() };
+      },
+    );
     const cost = estimateScanCost("gpt-5.6-sol", {
       input_tokens: 1_250,
       cached_input_tokens: 200,
       output_tokens: 30,
     })!;
-    const client = new TestClient(
-      { codexOverrides: { model: "gpt-5.6-sol" } },
-      {
-        environment: {},
-        prepareRuntime: async () => preparedRuntime(codexHome),
-        resolvePluginPython: async () => "/managed/python",
-        prepareOutputDir: async () => scanDir,
-        repositoryRevision: async () => "deadbeef",
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> => {
-          commands.push(args);
-          if (args[0] === "register-cli-scan") {
-            return mockScanRegistration(args, input);
-          }
-          if (args[0] === "get-scan-feedback") {
-            return {
-              scanId: "scan_example_001",
-              targetId: "target_sha256_example",
-              falsePositives: [],
-            };
-          }
-          return {};
-        },
-        createCodex: () => ({
-          startThread: () => ({
-            id: null,
-            async runStreamed(
-              _input: string,
-              options: { signal: AbortSignal },
-            ) {
-              turns += 1;
-              async function* events(): AsyncGenerator<ThreadEvent> {
-                yield { type: "thread.started", thread_id: "scan-thread" };
-                await Promise.all([
-                  writeUsageSession(codexHome, "scan-thread", {
-                    input_tokens: 500,
-                    cached_input_tokens: 100,
-                    output_tokens: 10,
-                  }),
-                  writeUsageSession(
-                    codexHome,
-                    "worker-thread",
-                    {
-                      input_tokens: 750,
-                      cached_input_tokens: 100,
-                      output_tokens: 20,
-                    },
-                    "scan-thread",
-                  ),
-                ]);
-                await new Promise<void>((resolve) => {
-                  if (options.signal.aborted) {
-                    resolve();
-                  } else {
-                    options.signal.addEventListener("abort", () => resolve(), {
-                      once: true,
-                    });
-                  }
-                });
-                throw new DOMException("aborted", "AbortError");
-              }
-              return { events: events() };
-            },
-          }),
-        }),
-      },
-    );
+    const client = TestClient.withDependencies({
+      ...scanRuntimeDependencies(codexHome, scanDir),
+      runWorkbench: recordingWorkbench(commands),
+      createCodex: codexFactory(runStreamed),
+    });
 
     // The fake Codex stream has no process handle to keep its unref'ed poll alive.
     const keepEventLoopAlive = setTimeout(() => {}, 10_000);
@@ -5251,6 +5475,7 @@ describe("CodexSecurity orchestration", () => {
       await expect(
         client.run(repository, {
           maxCostUsd: 0.004,
+          maxTimeMinutes: 5,
           postScanPrompt: "Record the scan cost.",
           onCost: (cost) => costs.push(cost.estimatedUsd),
           signal: AbortSignal.timeout(5_000),
@@ -5264,7 +5489,7 @@ describe("CodexSecurity orchestration", () => {
     } finally {
       clearTimeout(keepEventLoopAlive);
     }
-    expect(turns).toBe(1);
+    expect(runStreamed).toHaveBeenCalledTimes(1);
     expect(costs.at(-1)).toBe(0.00488);
     expect(commands[1]).toEqual([
       "get-scan-feedback",
@@ -5278,7 +5503,8 @@ describe("CodexSecurity orchestration", () => {
       "--thread-id",
       "scan-thread",
     ]);
-    expect(commands[3]).toEqual([
+    expect(commands[3]).toEqual(["get-scan", "--scan-id", "scan_example_001"]);
+    expect(commands[4]).toEqual([
       "fail-scan",
       "--scan-id",
       "scan_example_001",
@@ -7562,25 +7788,51 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
     await client.close();
   });
 
-  test("uses a rotated environment API key on the next scan", async () => {
+  test("uses the current environment after rotating and removing an API key", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const codexHome = join(root, "codex-home");
     const scanDir = join(root, "scan");
+    const ambientHome = join(root, "ambient-home");
+    const statusPath = join(root, "status.json");
+    const statusScript = join(root, "status.mjs");
+    const fakeCommand = nodeCodex(statusScript);
     await mkdir(repository);
-    await mkdir(codexHome);
+    await mkdir(ambientHome);
+    await writeFile(
+      statusScript,
+      `
+import * as fs from "node:fs";
+fs.writeFileSync(${JSON.stringify(statusPath)}, JSON.stringify({
+  key: process.env.OPENAI_API_KEY, marker: process.env.SYNTHETIC_STATUS_MARKER, home: process.env.CODEX_HOME,
+}));
+console.error("Logged in using ChatGPT");
+process.exit(0);
+`,
+    );
+    await mkdir(codexHome, { mode: 0o700 });
     await mkdir(scanDir, { mode: 0o700 });
     const environment: Record<string, string | undefined> = {
+      ...fakeCommand.environment,
       OPENAI_API_KEY: "first-key",
+      CODEX_HOME: ambientHome,
+      SYNTHETIC_STATUS_MARKER: "first",
     };
     const selectedKeys: Array<string | undefined> = [];
     const client = new TestClient(
       {},
       {
         environment,
+        resolveCodexCommand: () => fakeCommand.command,
         prepareRuntime: async () => ({
           ...preparedRuntime(codexHome),
           credentialsAvailable: false,
+          environment: {
+            ...fakeCommand.environment,
+            CODEX_HOME: codexHome,
+            OPENAI_API_KEY: environment["OPENAI_API_KEY"]!,
+            SYNTHETIC_STATUS_MARKER: "first",
+          },
         }),
         resolvePluginPython: async () => "/managed/python",
         prepareOutputDir: async () => scanDir,
@@ -7596,7 +7848,14 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
     environment["OPENAI_API_KEY"] = "second-key";
     await expect(client.run(repository)).rejects.toThrow("scan reached");
 
-    expect(selectedKeys).toEqual(["first-key", "second-key"]);
+    delete environment["OPENAI_API_KEY"];
+    environment["SYNTHETIC_STATUS_MARKER"] = "current";
+    await expect(client.run(repository)).rejects.toThrow("scan reached");
+    expect(JSON.parse(await readFile(statusPath, "utf8"))).toEqual({
+      marker: "current",
+      home: codexHome,
+    });
+    expect(selectedKeys).toEqual(["first-key", "second-key", undefined]);
     await client.close();
   });
 

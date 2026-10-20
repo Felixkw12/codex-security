@@ -9,7 +9,7 @@ import pytest
 
 @pytest.mark.parametrize(
     ("shared_version", "relocations"),
-    [(41, ((42, 43), (43, 52), (44, 53))), (47, ((48, 52), (49, 53)))],
+    [(41, ((42, 43), (43, 53), (44, 54))), (47, ((48, 53), (49, 54)))],
 )
 def test_composition_preview_history_preserves_rows_and_migration_timestamps(
     shared_version, relocations
@@ -62,14 +62,16 @@ def test_composition_preview_history_preserves_rows_and_migration_timestamps(
         schema["apply_migrations"](connection, current, lambda: upgrade_time, lambda _: None)
         upgraded = dict(connection.execute("SELECT * FROM scans WHERE id = 'scan'").fetchone())
         assert {name: upgraded[name] for name in scan} == scan
-        assert (
-            dict(connection.execute("SELECT * FROM scan_severity_assessments").fetchone())
-            == assessment
+        upgraded_assessment = dict(
+            connection.execute("SELECT * FROM scan_severity_assessments").fetchone()
         )
+        assert {name: upgraded_assessment[name] for name in assessment} == assessment
+        assert upgraded_assessment["classification_runs"] is None
         history = {
             row["version"]: (row["name"], row["applied_at"])
             for row in connection.execute("SELECT * FROM schema_migrations")
         }
+        assert history[52] == ("record severity classification review counts", upgrade_time)
         for old, new in relocations:
             assert history[new] == (previous[old - 1][1], original_time)
         assert history[42] == (

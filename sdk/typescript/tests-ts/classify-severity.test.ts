@@ -1,3 +1,4 @@
+import { defaultSeverityRubric } from "../src/default-severity-rubric.js";
 import { workflowDigest } from "../src/finding-workflow.js";
 import { modelResponseText } from "./support/model-response-text.js";
 import { writeFile } from "node:fs/promises";
@@ -54,7 +55,13 @@ function fakeCodex(response: unknown) {
       return {
         async run(prompt, turn) {
           calls.push({ prompt, thread, turn });
-          return { finalResponse: modelResponseText(response) };
+          return {
+            finalResponse: modelResponseText(
+              typeof response === "function"
+                ? response(calls.length)
+                : response,
+            ),
+          };
         },
       };
     },
@@ -62,19 +69,23 @@ function fakeCodex(response: unknown) {
   return { codex, calls };
 }
 
-test("without a rubric reuses severity without authentication or a model call", async () => {
-  const { codex, calls } = fakeCodex("must not run");
+test("without a rubric runs three independent reviews with the built-in policy", async () => {
+  const { codex, calls } = fakeCodex(assessed);
   const original = structuredClone(finding);
   const result = await classifySeverity([finding], { codex, environment: {} });
-  expect(calls).toHaveLength(0);
-  expect(result.rubricSha256).toBeNull();
+  expect(calls).toHaveLength(3);
+  expect(new Set(calls.map((call) => call.thread)).size).toBe(3);
+  expect(JSON.parse(calls[0]!.prompt.split("\n\n").at(-1)!).rubric).toEqual([
+    defaultSeverityRubric,
+  ]);
+  expect(result.rubricSha256).toBe(workflowDigest([defaultSeverityRubric]));
   expect(result.assessments[0]).toMatchObject({
     findingId: finding.findingId,
     occurrenceId: finding.occurrenceId,
     decision: "assessed",
-    level: "high",
-    source: "existing-severity",
-    rationale: "Original assessment",
+    level: "medium",
+    source: "rubric",
+    rationale: assessed.rationale,
   });
   expect(finding).toEqual(original);
   expect(
@@ -105,7 +116,13 @@ test("supplies complete evidence and separate policy/context to a restricted str
   });
   expect(result.rubricSha256).toMatch(/^[a-f0-9]{64}$/u);
   expect(result.knowledgeBaseSha256).toMatch(/^[a-f0-9]{64}$/u);
-  expect(calls).toHaveLength(1);
+  expect(calls).toHaveLength(3);
+  expect(new Set(calls.map((call) => call.thread)).size).toBe(3);
+  expect(new Set(calls.map((call) => call.prompt)).size).toBe(1);
+  expect(JSON.parse(calls[0]!.prompt.split("\n\n").at(-1)!).rubric).toEqual([
+    "Assign MEDIUM to bounded unauthorized metadata reads.",
+  ]);
+  expect(calls[0]!.prompt).not.toContain(defaultSeverityRubric);
   expect(calls[0]!.prompt).toContain(String(finding["evidence"]));
   expect(calls[0]!.prompt).toContain("The counters contain no customer data.");
   expect(calls[0]!.thread).toMatchObject({
@@ -152,19 +169,15 @@ test("represents policy exclusions independently from Low", async () => {
   expect(validateSeverityClassification(result, [finding])).toEqual(result);
 });
 
-test("classifies imported reports without severity when a rubric is supplied", async () => {
+test("classifies imported reports without severity using the default rubric", async () => {
   const {
     severity: _severity,
     occurrenceId: _occurrenceId,
     ...imported
   } = finding;
-  await expect(classifySeverity([imported])).rejects.toThrow("supply a rubric");
-  const rubricPath = await document(
-    "Classify bounded metadata reads as medium.",
-  );
   const { codex } = fakeCodex(assessed);
   expect(
-    (await classifySeverity([imported], { rubricPath, codex })).assessments[0]!
+    (await classifySeverity([imported], { codex })).assessments[0]!
       .occurrenceId,
   ).toBeNull();
 });
@@ -216,24 +229,26 @@ test("binds assessments to evidence and tracks policy and context changes", asyn
 });
 
 test("cancellation and invalid inputs cannot produce a successful classification", async () => {
+  const { codex } = fakeCodex(assessed);
   const controller = new AbortController();
   const reason = new Error("Canceled classification");
   controller.abort(reason);
   await expect(
-    classifySeverity([finding], { signal: controller.signal }),
+    classifySeverity([finding], { codex, signal: controller.signal }),
   ).rejects.toBe(reason);
-  await expect(classifySeverity([finding, finding])).rejects.toThrow(
+  await expect(classifySeverity([finding, finding], { codex })).rejects.toThrow(
     "unique finding IDs",
   );
   const rubricPath = await document(" ");
-  await expect(classifySeverity([finding], { rubricPath })).rejects.toThrow(
-    "must not be empty",
-  );
-  expect((await classifySeverity([])).assessments).toEqual([]);
+  await expect(
+    classifySeverity([finding], { rubricPath, codex }),
+  ).rejects.toThrow("must not be empty");
+  expect((await classifySeverity([], { codex })).assessments).toEqual([]);
 });
 
 test("legacy severity assessments require unchanged evidence and original occurrence", async () => {
-  const current = await classifySeverity([finding]);
+  const { codex } = fakeCodex(assessed);
+  const current = await classifySeverity([finding], { codex });
   const legacy = {
     ...current,
     assessments: current.assessments.map((assessment) => ({
@@ -251,3 +266,103 @@ test("legacy severity assessments require unchanged evidence and original occurr
     );
   }
 });
+test("votes independently for each imported report and retains the winning answer", async () => {
+  const rubricPath = await document("Classify using the supplied evidence.");
+  const second = { ...finding, findingId: "second-finding" };
+  const responses = [
+    { ...assessed, level: "low", rationale: "First low answer" },
+    { ...assessed, level: "high" },
+    { ...assessed, level: "low", rationale: "Second low answer" },
+    ...["medium", "critical", "high"].map((level) => ({
+      ...assessed,
+      findingId: second.findingId,
+      level,
+    })),
+  ];
+  const { codex, calls } = fakeCodex((call: number) => responses[call - 1]);
+  const result = await classifySeverity([finding, second], {
+    rubricPath,
+    codex,
+  });
+  expect(calls).toHaveLength(6);
+  expect(result.assessments).toMatchObject([
+    { level: "low", rationale: "First low answer" },
+    { level: "critical", findingId: second.findingId },
+  ]);
+  expect(
+    calls.map(
+      ({ prompt }) =>
+        JSON.parse(prompt.split("\n\n").at(-1)!).finding.findingId,
+    ),
+  ).toEqual([
+    finding.findingId,
+    finding.findingId,
+    finding.findingId,
+    second.findingId,
+    second.findingId,
+    second.findingId,
+  ]);
+});
+
+test.each([2, 3, 10])(
+  "does not return a partial vote when review %s fails or is invalid",
+  async (failedRun) => {
+    for (const invalid of [false, true]) {
+      const { codex, calls } = fakeCodex((call: number) => {
+        if (call !== failedRun) return assessed;
+        if (invalid) return { ...assessed, findingId: "wrong-finding" };
+        throw new Error("Review failed");
+      });
+      await expect(
+        classifySeverity([finding], {
+          codex,
+          classificationRuns: Math.max(3, failedRun),
+        }),
+      ).rejects.toThrow(invalid ? "invalid assessment" : "Review failed");
+      expect(calls).toHaveLength(failedRun);
+    }
+  },
+);
+
+test.each([1, 2, 3])(
+  "cancellation after review %s stops classification",
+  async (canceledRun) => {
+    const controller = new AbortController();
+    const { codex, calls } = fakeCodex((call: number) => {
+      if (call === canceledRun) controller.abort(new Error("Stopped"));
+      return assessed;
+    });
+    await expect(
+      classifySeverity([finding], {
+        codex,
+        signal: controller.signal,
+      }),
+    ).rejects.toThrow("Stopped");
+    expect(calls).toHaveLength(canceledRun);
+  },
+);
+
+test.each([1, 2, 4, 10])(
+  "runs %i independent local reviews",
+  async (classificationRuns) => {
+    const { codex, calls } = fakeCodex(assessed);
+    const result = await classifySeverity([finding], {
+      codex,
+      classificationRuns,
+    });
+    expect(calls).toHaveLength(classificationRuns);
+    expect(result.classificationRuns).toBe(classificationRuns);
+    expect(result.assessments[0]!.level).toBe("medium");
+  },
+);
+
+test.each([0, -1, 11, 1.5, NaN, Infinity])(
+  "rejects invalid local run count %s before model work",
+  async (classificationRuns) => {
+    const { codex, calls } = fakeCodex(assessed);
+    await expect(
+      classifySeverity([finding], { codex, classificationRuns }),
+    ).rejects.toThrow();
+    expect(calls).toHaveLength(0);
+  },
+);
