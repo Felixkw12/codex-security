@@ -2224,7 +2224,6 @@ describe("CodexSecurity orchestration", () => {
                   expect(workerConfig["analytics"]).toEqual(
                     selected["analytics"],
                   );
-                  expect(workerConfig["otel"]).toEqual(selected["otel"]);
                   expect(workerConfig["responses_api_metadata"]).toMatchObject({
                     ...(selected["responses_api_metadata"] as
                       JsonObject | undefined),

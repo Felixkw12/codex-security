@@ -2100,6 +2100,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               workerConfigurations[index].knowledgePath,
             );
             const invocation = await readJson(workerLaunch.markerPath);
+            assertFlagPair(invocation.argv, "--cd", workerDirectories[index]);
             if (
               process.platform === "win32" &&
               configuration === "" &&
@@ -2107,7 +2108,6 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             ) {
               const acl = windowsAcl(workerLaunch.markerPath);
               assert.ok(!acl.includes(";;;WD)"));
-              assertFlagPair(invocation.argv, "--cd", fixture.root);
             }
             for (const name of [
               "LD_LIBRARY_PATH",
