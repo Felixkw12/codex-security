@@ -874,22 +874,23 @@ The extraction root is not enforced.
 
     def test_deep_csv_candidate_selection_preserves_precedence_and_unicode_whitespace(self) -> None:
         self.coverage["mode"] = "deep_repository"
-        for provenance, candidate, report, ledger, expected in (
-            ("provenance", "candidate", "report", "ledger", "provenance"),
-            ("\ufeff", "candidate", "report", "ledger", "candidate"),
-            ("\ufeff", "\ufeff", "report", "ledger", "report"),
-            ("\ufeff", "\ufeff", "\ufeff", "ledger", "ledger"),
-            ("\ufeff", "\ufeff", "\ufeff", "\ufeff", ""),
-            ("\u0085", "candidate", "report", "ledger", "\u0085"),
+        for provenance, candidate, report, ledger, identity, exported in (
+            ("provenance", "candidate", "report", "ledger", "provenance", "provenance"),
+            ("\ufeff", "candidate", "report", "ledger", "candidate", "candidate"),
+            ("\ufeff", "\ufeff", "report", "ledger", "report", "report"),
+            ("\ufeff", "\ufeff", "\ufeff", "ledger", "ledger", "ledger"),
+            ("\ufeff", "\ufeff", "\ufeff", "\ufeff", None, "\ufeff"),
+            ("\u0085", "candidate", "report", "ledger", "\u0085", "\u0085"),
         ):
-            with self.subTest(expected=expected):
+            with self.subTest(identity=identity, exported=exported):
                 self.finding["provenance"]["candidateId"] = provenance
                 self.finding["extensions"] = {
                     "candidateId": candidate,
                     "reportId": report,
                     "ledgerRowId": ledger,
                 }
-                self.assertEqual(next(self.export_csv())["candidate_id"], expected)
+                self.assertEqual(FINALIZER.finding_candidate_id(self.finding), identity)
+                self.assertEqual(next(self.export_csv())["candidate_id"], exported)
 
     def test_scoped_csv_export_does_not_classify_ordinary_ledger_ids_as_deep(self) -> None:
         self.coverage["mode"] = "scoped_path"

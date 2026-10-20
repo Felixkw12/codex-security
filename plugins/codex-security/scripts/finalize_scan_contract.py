@@ -2834,6 +2834,23 @@ def finding_candidate_id(finding: dict[str, Any]) -> str | None:
     )
 
 
+def _csv_candidate_id(finding: dict[str, Any]) -> str | None:
+    candidate_id = finding_candidate_id(finding)
+    if candidate_id is not None:
+        return candidate_id
+    # Preserve literal CSV metadata, such as FEFF, that is not a canonical identity.
+    for metadata, fields in (
+        (finding.get("provenance"), ("candidateId",)),
+        (finding.get("extensions"), ("candidateId", "reportId", "ledgerRowId")),
+    ):
+        if isinstance(metadata, dict):
+            for field in fields:
+                value = metadata.get(field)
+                if isinstance(value, str) and value.strip():
+                    return value
+    return None
+
+
 def finding_csv_columns(deep_scan: bool) -> tuple[str, ...]:
     return (
         "occurrence_id",
@@ -2864,7 +2881,7 @@ def build_csv_projection(findings: dict[str, Any], coverage: dict[str, Any]) -> 
             (
                 csv_cell(finding["occurrenceId"]),
                 csv_cell(finding["findingId"]),
-                *((csv_cell(finding_candidate_id(finding)),) if deep_scan else ()),
+                *((csv_cell(_csv_candidate_id(finding)),) if deep_scan else ()),
                 csv_cell(finding["title"]),
                 csv_cell(finding["summary"]),
                 csv_cell(finding["severity"]["level"]),
