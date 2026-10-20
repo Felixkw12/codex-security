@@ -66,7 +66,9 @@ print(json.dumps(result))
     ["-I", "-B", "-", join(PLUGIN_ROOT, "scripts")],
     process.env,
     probe,
-    AbortSignal.timeout(10_000),
+    AbortSignal.timeout(
+      Number(process.env["CODEX_SECURITY_TEST_TIMEOUT_MS"] ?? "30000"),
+    ),
   );
   expect(execution.exitCode, execution.stderr).toBe(0);
 
@@ -129,7 +131,19 @@ connection = sqlite3.connect(":memory:")
 connection.row_factory = sqlite3.Row
 connection.executescript("""
 CREATE TABLE security_targets(id TEXT, current_path TEXT, display_name TEXT, repository_identity TEXT, origin TEXT);
-CREATE TABLE scans(id TEXT, target_id TEXT, target_path TEXT, repository_generation TEXT, scope TEXT, updated_at TEXT, status TEXT, started_at TEXT);
+CREATE TABLE scans(
+    id TEXT, target_id TEXT, target_path TEXT, repository_generation TEXT, scope TEXT,
+    updated_at TEXT, status TEXT, started_at TEXT, completed_at TEXT,
+    continuation_thread_id TEXT, cost_json TEXT, handoff_status TEXT,
+    mode TEXT, model TEXT, name TEXT, parent_scan_id TEXT, phase TEXT,
+    canceled_at TEXT, recipe_json TEXT, reasoning_effort TEXT, scan_dir TEXT,
+    target_revision TEXT, target_summary TEXT, completion_warnings_json TEXT DEFAULT '[]'
+);
+CREATE TABLE scan_progress(
+    scan_id TEXT, reportable_findings_count INTEGER DEFAULT 0,
+    scope_file_count INTEGER DEFAULT 0, review_items_completed INTEGER DEFAULT 0,
+    review_items_total INTEGER DEFAULT 0, updated_at TEXT
+);
 CREATE TABLE finding_occurrences(id TEXT, finding_id TEXT, severity TEXT, created_at TEXT, scan_id TEXT, title TEXT, summary TEXT);
 CREATE TABLE finding_triage(occurrence_id TEXT, status TEXT, updated_at TEXT, close_reason TEXT);
 CREATE TABLE finding_locations(occurrence_id TEXT, relative_path TEXT, role TEXT, sort_order INTEGER);
@@ -159,7 +173,8 @@ indexes.Path.is_dir = lambda path: True
 def add_scan(scan_id, target, day):
     timestamp = f"2026-02-{day:02d}T00:00:00Z"
     saved = connection.execute("SELECT current_path, repository_identity FROM security_targets WHERE id = ?", (target,)).fetchone()
-    connection.execute("INSERT INTO scans VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (scan_id, target, saved["current_path"], saved["repository_identity"], "repository", timestamp, "complete", timestamp))
+    connection.execute("INSERT INTO scans (id, target_id, target_path, repository_generation, scope, updated_at, status, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (scan_id, target, saved["current_path"], saved["repository_identity"], "repository", timestamp, "complete", timestamp))
+    connection.execute("INSERT INTO scan_progress (scan_id, updated_at) VALUES (?, ?)", (scan_id, timestamp))
 
 def add_finding(occurrence, finding, scan, severity="high"):
     started = connection.execute("SELECT started_at FROM scans WHERE id = ?", (scan,)).fetchone()[0]
@@ -215,12 +230,6 @@ def findings(target, status="open", limit=20, offset=0):
     arguments = argparse.Namespace(limit=limit, offset=offset, query=None, severity=None, status=status, target_id=target)
     return indexes.list_global_findings(connection, arguments)
 
-indexes.scan_history.list_scans = lambda database: {
-    "scans": [
-        {"scanId": scan["id"], "targetId": scan["target_id"]}
-        for scan in database.execute("SELECT id, target_id FROM scans")
-    ]
-}
 repository_arguments = argparse.Namespace(
     query=None, target_id=None, status="open_findings", limit=None, offset=0
 )

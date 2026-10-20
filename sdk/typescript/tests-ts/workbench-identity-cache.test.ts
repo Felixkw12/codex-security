@@ -493,6 +493,7 @@ with ExitStack() as stack:
             target=target, scope=".", diff_target=None,
             target_identity=("synthetic", None, 7, metadata[str(target)].st_ino),
             repository_generation=registration.repository_generation,
+            source_scopes={"version": 1, "revision": "synthetic", "scopes": []},
             target_root=root / "artifacts", target_summary=None, scope_file_count=0,
             timestamp=timestamp, scan_dir=root / "artifacts" / "current",
         )
@@ -1237,7 +1238,7 @@ with ExitStack() as stack:
         stack.enter_context(patch.object(workbench, "require_scannable_target"))
         stack.enter_context(patch.object(workbench, "require_canonical_scan_directory", return_value=scan_dir))
         stack.enter_context(patch.object(workbench, "directory_snapshot_regular_file_count", return_value=0))
-        stack.enter_context(patch.object(workbench, "scan_target_identity", return_value={}))
+        stack.enter_context(patch.object(workbench, "scan_target_identity", return_value=("synthetic", "snapshot", 7, metadata[paths["requested"]].st_ino)))
         stack.enter_context(patch.object(workbench, "require_uuid", side_effect=lambda value, label: value))
         stack.enter_context(patch.object(workbench, "archive_scan"))
         class LineageAccepted(Exception):
@@ -2005,7 +2006,7 @@ test.each(["migration", "migration-recorded31"])(
     expect(result["currentScopesDistinct"]).toBe(true);
     expect(result["targetCount"]).toBe(12);
     expect(result["migrations"]).toEqual(
-      Array.from({ length: 51 }, (_, index) => index + 1),
+      Array.from({ length: 53 }, (_, index) => index + 1),
     );
   },
 );

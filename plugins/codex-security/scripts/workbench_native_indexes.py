@@ -373,25 +373,26 @@ def list_repositories(
     connection: sqlite3.Connection,
     args: argparse.Namespace | None = None,
 ) -> dict[str, Any]:
-    scans = scan_history.list_scans(connection)["scans"]
     identities = RepositoryIdentityCache(connection)
-    scans_by_id = {scan["scanId"]: scan for scan in scans}
-    scan_count_by_target = dict(Counter(scan["targetId"] for scan in scans))
-
+    scan_count_by_target = Counter()
     latest_rows: dict[str, sqlite3.Row] = {}
+    latest_scan_by_target: dict[str, dict[str, Any]] = {}
     for row in connection.execute(
-        "SELECT * FROM scans ORDER BY julianday(upper(started_at)) DESC, id DESC"
-    ):
-        previous = latest_rows.get(row["target_id"])
+        f"""{scan_history.SCAN_SUMMARY_QUERY}
+        ORDER BY julianday(upper(scans.started_at)) DESC, scans.id DESC
+        """
+    ).fetchall():
+        scan = scan_history.scan_summary(row)
+        target_id = row["target_id"]
+        scan_count_by_target[target_id] += 1
+        previous = latest_rows.get(target_id)
         if previous is None or (
             previous["status"] == row["status"] == "complete"
             and scan_history._scan_completion_order(row)
             > scan_history._scan_completion_order(previous)
         ):
-            latest_rows[row["target_id"]] = row
-    latest_scan_by_target = {
-        target_id: scans_by_id[row["id"]] for target_id, row in latest_rows.items()
-    }
+            latest_rows[target_id] = row
+            latest_scan_by_target[target_id] = scan
 
     targets = {row["id"]: row for row in connection.execute("SELECT * FROM security_targets")}
     query = args.query.strip().casefold() if args is not None and args.query else ""
