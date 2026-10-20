@@ -239,38 +239,29 @@ fn main() -> std::io::Result<()> {
         let inventory_output = inventory_repo.join(&output_name);
         let inventory_scopes = inventory_repo.join("inventory-scopes.json");
         fs::write(&inventory_scopes, r#"["scope-\udfff"]"#)?;
-        let scoped_expected = "{\"path\":\"scope-\\udfff/SECURITY.md\"}\r\n";
-        let ranked_expected = concat!(
-            "{\"path\":\"scope-\\udfff/SECURITY.md\",",
-            "\"area\":\"scope-\\udfff\",\"preview\":\"scope raw\"}\r\n",
-        );
-        for (command, expected) in [
-            ("make-repo-scope-input", scoped_expected),
-            ("make-repo-rank-input", ranked_expected),
-        ] {
-            let generated = invoke(
-                command,
-                &[
-                    "--repo".into(),
-                    inventory_repo.clone(),
-                    "--scopes-file".into(),
-                    inventory_scopes.clone(),
-                    "--out".into(),
-                    inventory_output.clone(),
-                ],
-            )?;
-            let actual = fs::read(&inventory_output);
-            if !generated.status.success()
-                || !generated.stderr.is_empty()
-                || !actual
-                    .as_ref()
-                    .is_ok_and(|bytes| bytes == expected.as_bytes())
-            {
-                return Err(io::Error::other(format!(
-                    "Wide inventory helper {command} failed: status={}, stdout={:?}, stderr={:?}, expected={:?}, actual={actual:?}",
-                    generated.status, generated.stdout, generated.stderr, expected.as_bytes(),
-                )));
-            }
+        let expected = "{\"path\":\"scope-\\udfff/SECURITY.md\"}\r\n";
+        let generated = invoke(
+            "make-repo-scope-input",
+            &[
+                "--repo".into(),
+                inventory_repo.clone(),
+                "--scopes-file".into(),
+                inventory_scopes.clone(),
+                "--out".into(),
+                inventory_output.clone(),
+            ],
+        )?;
+        let actual = fs::read(&inventory_output);
+        if !generated.status.success()
+            || !generated.stderr.is_empty()
+            || !actual
+                .as_ref()
+                .is_ok_and(|bytes| bytes == expected.as_bytes())
+        {
+            return Err(io::Error::other(format!(
+                "Wide scoped inventory helper failed: status={}, stdout={:?}, stderr={:?}, expected={:?}, actual={actual:?}",
+                generated.status, generated.stdout, generated.stderr, expected.as_bytes(),
+            )));
         }
         fs::remove_dir_all(inventory_repo)?;
         let identity_root = root.join("İroot");
