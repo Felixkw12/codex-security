@@ -1,0 +1,34 @@
+name: Windows sandbox startup diagnostic
+
+on:
+  push:
+    branches: [mdangelo/codex/investigate-windows-sandbox-267]
+
+permissions:
+  contents: read
+
+jobs:
+  reproduce:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22.13.0"
+      - name: Install the pinned Codex CLI
+        shell: pwsh
+        run: npm install --prefix "$env:RUNNER_TEMP/codex-sandbox-probe" --ignore-scripts --no-audit --no-fund @openai/codex@0.163.0
+      - name: Reproduce private working directory startup
+        shell: pwsh
+        run: ./sdk/typescript/scripts/diagnose-windows-sandbox-startup.ps1 -CodexJs "$env:RUNNER_TEMP/codex-sandbox-probe/node_modules/@openai/codex/bin/codex.js"
+      - name: Save synthetic diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-sandbox-startup-evidence
+          path: ${{ runner.temp }}/codex-sandbox-startup-evidence
+          if-no-files-found: warn
+          retention-days: 3
