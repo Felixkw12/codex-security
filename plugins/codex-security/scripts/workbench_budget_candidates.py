@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -13,18 +14,23 @@ from candidate_identity import (
     _deferred_owner,
     archive_candidate_payloads,
     candidate_key,
+    candidate_owner,
     coverage_candidate_key,
     coverage_owner,
     diff_candidate_disposition,
+    finding_candidate_id,
     finding_candidate_key,
     is_candidate_row,
     surface_reference_key,
+    unresolved_candidates,
 )
 from finalize_scan_contract import (
     ContractError,
     _read_json,
     _recover_candidate_receipts,
+    _require_safe_json_value,
     _validate_schema_node,
+    open_scan_local_file_descriptor,
 )
 from finalize_scan_contract import (
     resolved_deferred_rows as resolved_deferred_rows,
@@ -804,3 +810,387 @@ def _generated_diff_candidate_decision(item: dict[str, Any]) -> bool:
         and item.get("notes")
         in (decision["notes"], _diff_candidate_decision(candidate, legacy_reason=True)["notes"])
     )
+
+
+def _retained_findings(finding: dict[str, Any]) -> Iterator[dict[str, Any]]:
+    """Yield canonical and historical findings without trusting candidate IDs."""
+    pending = [finding]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        marker = id(current)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        yield current
+        provenance = current.get("provenance")
+        if not isinstance(provenance, dict):
+            continue
+        previous = provenance.get("previousFindings")
+        if isinstance(previous, list):
+            pending.extend(item for item in reversed(previous) if isinstance(item, dict))
+        sources = provenance.get("sourceFindings")
+        if isinstance(sources, list):
+            pending.extend(
+                source["finding"]
+                for source in reversed(sources)
+                if isinstance(source, dict) and isinstance(source.get("finding"), dict)
+            )
+
+
+def _append_finding_history(value: dict[str, Any], finding: dict[str, Any]) -> None:
+    if not isinstance(value.get("previousFindings"), list):
+        value["previousFindings"] = []
+    if finding not in value["previousFindings"]:
+        value["previousFindings"].append(finding)
+
+
+def _stopped_diff_candidate_decisions(
+    scan_dir: Path,
+    scan_id: str,
+    drafts: list[dict[str, Any]],
+    warnings: list[str],
+    *,
+    current_coverage: dict[str, Any],
+    current_findings: list[dict[str, Any]],
+    checkpoint_findings: list[dict[str, Any]],
+    receipt_reopened: set[tuple[str | None, str]],
+) -> dict[str, Any] | None:
+    """Freeze current candidate state before historical evidence is recovered."""
+    pending = {}
+    current_pending_ids = {
+        item["candidateId"]
+        for item in unresolved_candidates(current_coverage, current_findings)
+        if candidate_owner(coverage_owner(item)) is None
+    }
+    reopened = {
+        key
+        for finding in current_findings
+        if finding["provenance"].get("candidateReopened") is True
+        and (key := finding_candidate_key(finding)) is not None
+        and key[0] is None
+    }
+    demoted_findings = {}
+    # Inspect all pending and terminal payloads for retained demoted findings.
+    for field in ("deferred", "surfaces", "explicitExclusions"):
+        items = current_coverage.get(field, [])
+        for item in items if isinstance(items, list) else []:
+            if (
+                not isinstance(item, dict)
+                or (key := coverage_candidate_key(item)) is None
+                or key[0] is not None
+            ):
+                continue
+            for payload in (
+                item.get("finding"),
+                item.get("candidate"),
+                *(
+                    item.get("previousFindings")
+                    if isinstance(item.get("previousFindings"), list)
+                    else []
+                ),
+            ):
+                if isinstance(payload, dict):
+                    for retained in _retained_findings(payload):
+                        if finding_candidate_key(retained) == key:
+                            demoted_findings.setdefault(key, []).append(retained)
+    for draft in drafts:
+        items = draft["coverage"].get("deferred", [])
+        for item in items if isinstance(items, list) else []:
+            if isinstance(item, dict) and (key := coverage_candidate_key(item)) and key[0] is None:
+                rows = pending.setdefault(key[1], [])
+                if item not in rows:
+                    rows.append(copy.deepcopy(item))
+    findings = [
+        finding
+        for finding in current_findings
+        if (key := finding_candidate_key(finding)) is not None
+        and key[0] is None
+        and finding["provenance"].get("candidateReopened") is not True
+    ]
+    authored = []
+    generated = {}
+    for field in ("surfaces", "explicitExclusions"):
+        items = current_coverage.get(field, [])
+        for item in items if isinstance(items, list) else []:
+            if (
+                isinstance(item, dict)
+                and item.get("disposition") in ("rejected", "not_applicable")
+                and (key := coverage_candidate_key(item)) is not None
+                and key[0] is None
+            ):
+                if field == "surfaces" and _generated_diff_candidate_decision(item):
+                    generated[key[1]] = copy.deepcopy(item)
+                else:
+                    authored.append((field, copy.deepcopy(item)))
+    authored_ids = {item["candidateId"] for _, item in authored}
+    finding_ids = {finding_candidate_id(finding) for finding in findings}
+
+    def was_demoted(finding: dict[str, Any]) -> bool:
+        return finding_candidate_key(finding) in reopened or any(
+            isinstance(retained.get("provenance"), dict)
+            and retained["provenance"].get("diffCandidateDecision")
+            == finding["provenance"]["diffCandidateDecision"]
+            and finding_content(retained) == finding_content(finding)
+            for retained in demoted_findings.get(finding_candidate_key(finding), [])
+        )
+
+    # Phase snapshots order overrides; retained evidence records later demotion.
+    findings.extend(
+        finding
+        for finding in checkpoint_findings
+        if (key := finding_candidate_key(finding)) is not None
+        and key[0] is None
+        and finding["provenance"].get("candidateReopened") is not True
+        and key[1] not in finding_ids | authored_ids
+        and isinstance(finding.get("provenance", {}).get("diffCandidateDecision"), dict)
+        and not was_demoted(finding)
+        and (
+            key[1] not in generated
+            or finding["provenance"]["diffCandidateDecision"]
+            == _diff_candidate_phase_snapshot(generated[key[1]]["candidate"])
+        )
+    )
+    finding_ids = {finding_candidate_id(finding) for finding in findings}
+    marked_ids = {
+        finding_candidate_id(finding)
+        for finding in findings
+        if isinstance(finding.get("provenance", {}).get("diffCandidateDecision"), dict)
+    }
+    authoritative = finding_ids | authored_ids
+    tracked = pending.keys() | generated.keys() | authoritative
+    if not tracked:
+        return None
+    coverage = {
+        "surfaces": [],
+        "explicitExclusions": [],
+        "deferred": [],
+        # Retain the marker used by older frozen scans.
+        "stoppedDiffCandidateDecisions": True,
+    }
+    decisions = {
+        candidate_id: item
+        for candidate_id, item in generated.items()
+        if candidate_id not in authoritative
+    }
+    pending = {
+        key: rows for key, rows in pending.items() if key not in authoritative | generated.keys()
+    }
+    relative = "artifacts/02_discovery/candidate_ledger.jsonl"
+    try:
+        if (tracked - authoritative or marked_ids) and (scan_dir / relative).exists():
+            descriptor = open_scan_local_file_descriptor(
+                scan_dir, relative, "Diff candidate ledger"
+            )
+            with os.fdopen(descriptor, encoding="utf-8") as handle:
+                candidates = [json.loads(line) for line in handle if line.strip()]
+            _require_safe_json_value(candidates, "Diff candidate ledger")
+            for candidate in candidates:
+                if (
+                    not isinstance(candidate, dict)
+                    or not isinstance(candidate.get("candidate_id"), str)
+                    or (candidate_id := candidate["candidate_id"]) not in tracked
+                    or (candidate_id in authoritative and candidate_id not in marked_ids)
+                ):
+                    continue
+                decision = _diff_candidate_decision(candidate)
+                if (
+                    not isinstance(candidate.get("summary"), str)
+                    or not candidate["summary"].strip()
+                ):
+                    raise ValueError("Diff candidate summary is missing.")
+                phase_snapshot = _diff_candidate_phase_snapshot(candidate)
+                # The live phase can place a checkpoint after older marked or generated state.
+                for finding in checkpoint_findings:
+                    if (
+                        finding_candidate_key(finding) == (None, candidate_id)
+                        and finding["provenance"].get("candidateReopened") is not True
+                        and finding.get("provenance", {}).get("diffCandidateDecision")
+                        == phase_snapshot
+                        and finding not in findings
+                        and candidate_id not in authored_ids
+                        and not was_demoted(finding)
+                    ):
+                        findings.append(finding)
+                        finding_ids.add(candidate_id)
+                        authoritative.add(candidate_id)
+                        decisions.pop(candidate_id, None)
+                        pending.pop(candidate_id, None)
+                if candidate_id in authoritative:
+                    overrides = [
+                        finding
+                        for finding in findings
+                        if finding_candidate_id(finding) == candidate_id
+                    ]
+                    current_overrides = [
+                        finding
+                        for finding in overrides
+                        if not isinstance(
+                            marker := finding["provenance"].get("diffCandidateDecision"), dict
+                        )
+                        or marker == phase_snapshot
+                    ]
+                    if candidate_id in authored_ids or current_overrides:
+                        findings = [
+                            finding
+                            for finding in findings
+                            if finding not in overrides or finding in current_overrides
+                        ]
+                        continue
+                    # Only marked overrides yield to newer phases; legacy findings keep precedence.
+                    findings = [finding for finding in findings if finding not in overrides]
+                    finding_ids.discard(candidate_id)
+                    authoritative.discard(candidate_id)
+                prior = (
+                    pending[candidate_id][0]
+                    if candidate_id in pending
+                    else generated.get(candidate_id, {})
+                )
+                previous = prior.get("candidate")
+                previous = previous if isinstance(previous, dict) else {}
+                candidate = {
+                    **{k: v for k, v in previous.items() if k not in {"attack_path", "validation"}},
+                    **candidate,
+                }
+                unchanged_pending = (
+                    candidate_id in current_pending_ids
+                    and _diff_candidate_phase_snapshot(previous) == phase_snapshot
+                )
+                if (
+                    decision is not None
+                    and (None, candidate_id) not in receipt_reopened
+                    and not unchanged_pending
+                ):
+                    decisions[candidate_id] = {
+                        **generated.get(candidate_id, {}),
+                        **decision,
+                        "candidate": candidate,
+                    }
+                    archive_candidate_payloads(
+                        decisions[candidate_id], pending.get(candidate_id, [])
+                    )
+                    pending.pop(candidate_id, None)
+                    continue
+                item = pending.setdefault(candidate_id, [{"candidateId": candidate_id}])[0]
+                current_pending_ids.add(candidate_id)
+                item["candidate"] = candidate
+                if "reason" not in item or item["reason"] == _diff_candidate_reason(previous):
+                    item["reason"] = _diff_candidate_reason(candidate)
+                old_decision = decisions.pop(candidate_id, None)
+                if old_decision is not None:
+                    coverage["surfaces"].append(
+                        {
+                            **old_decision,
+                            "candidate": item["candidate"],
+                            "label": candidate["summary"],
+                            "disposition": "needs_follow_up",
+                            "notes": item["reason"],
+                        }
+                    )
+    except (ContractError, OSError, ValueError) as exc:
+        warnings.append(f"Could not reconcile the saved Diff candidates: {exc}")
+    for field, item in authored:
+        if item["candidateId"] not in finding_ids:
+            coverage[field].append(item)
+    coverage["surfaces"].extend(decisions.values())
+    coverage["deferred"].extend(
+        item
+        for candidate_id, rows in pending.items()
+        if candidate_id in current_pending_ids
+        for item in rows
+    )
+    archive_resolved_diff_payloads(coverage, findings, current_coverage)
+    return {
+        "scanId": scan_id,
+        "complete": False,
+        "findings": copy.deepcopy(findings),
+        "coverage": coverage,
+    }
+
+
+def _reconcile_stopped_diff_sources(
+    parent: dict[str, Any] | None,
+    sources: list[tuple[str, dict[str, Any], str | None]],
+    decisions: list[dict[str, Any]],
+) -> tuple[dict[str, Any] | None, list[tuple[str, dict[str, Any], str | None]]]:
+    """Apply frozen candidate state to copies, retaining all original source digests."""
+    states = {}
+    for draft in decisions:
+        for finding in draft["findings"]:
+            states[finding_candidate_key(finding)] = ("reported", finding)
+        for field in ("surfaces", "explicitExclusions"):
+            for item in draft["coverage"][field]:
+                if item.get("disposition") in {"rejected", "not_applicable"}:
+                    states[coverage_candidate_key(item)] = (item["disposition"], item)
+        for item in unresolved_candidates(draft["coverage"], draft["findings"]):
+            states[coverage_candidate_key(item)] = ("deferred", item)
+
+    def project(draft: dict[str, Any], owner: str | None) -> dict[str, Any]:
+        if draft["coverage"].get("stoppedDiffCandidateDecisions") is True:
+            return draft
+        result = copy.deepcopy(draft)
+        retained = []
+        for finding in result["findings"]:
+            state = (
+                states.get(finding_candidate_key(finding, owner))
+                if isinstance(finding, dict)
+                else None
+            )
+            if state is None:
+                retained.append(finding)
+            elif state[0] == "reported":
+                provenance = finding.get("provenance")
+                marker = (
+                    provenance.get("diffCandidateDecision")
+                    if isinstance(provenance, dict)
+                    else None
+                )
+                current_marker = state[1].get("provenance", {}).get("diffCandidateDecision")
+                if (
+                    isinstance(marker, dict)
+                    and isinstance(current_marker, dict)
+                    and marker != current_marker
+                ):
+                    _append_finding_history(state[1]["provenance"], finding)
+                else:
+                    retained.append(finding)
+            elif state[0] == "deferred":
+                retained_finding = state[1].get("finding")
+                if not isinstance(retained_finding, dict):
+                    retained_finding = state[1]["finding"] = finding
+                if finding not in _retained_findings(retained_finding):
+                    provenance = retained_finding.get("provenance")
+                    _append_finding_history(
+                        provenance if isinstance(provenance, dict) else state[1], finding
+                    )
+            else:
+                _append_finding_history(state[1], finding)
+        result["findings"] = retained
+        pending = [
+            item
+            for decision in decisions
+            for item in decision["coverage"]["deferred"]
+            if states.get(coverage_candidate_key(item), (None, None))[0] == "deferred"
+        ]
+        pending.extend(
+            item
+            for item in _deferred_rows(result["coverage"])
+            if isinstance(item, dict) and coverage_candidate_key(item, owner) not in states
+        )
+        for field in ("surfaces", "explicitExclusions", "deferred"):
+            items = result["coverage"].get(field)
+            if isinstance(items, list):
+                result["coverage"][field] = project_resolved_candidate_rows(
+                    items, field, owner, states, pending=pending
+                )
+        return result
+
+    return (
+        project(parent, None) if parent else None,
+        [(relative, project(draft, owner), owner) for relative, draft, owner in sources],
+    )
+
+
+def _deferred_rows(coverage: dict[str, Any]) -> list[Any]:
+    rows = coverage.get("deferred", [])
+    return rows if isinstance(rows, list) else []

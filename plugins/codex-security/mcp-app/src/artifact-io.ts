@@ -262,15 +262,26 @@ async function replaceArtifactContents(
   content: string | Uint8Array,
 ): Promise<void> {
   const temporary = join(dirname(path), "." + randomUUID() + ".tmp");
+  const handle = await fs.open(temporary, "wx", 0o600);
   try {
-    await fs.writeFile(temporary, content, {
-      encoding: "utf8",
-      mode: 0o600,
-      flag: "wx",
-    });
+    await handle.writeFile(content, "utf8").then(
+      () => handle.close(),
+      async (writeError: NodeJS.ErrnoException) => {
+        try {
+          await handle.close();
+        } catch (closeError) {
+          throw Object.assign(
+            new AggregateError([writeError, closeError], writeError.message),
+            { code: writeError.code },
+          );
+        }
+        throw writeError;
+      },
+    );
     await fs.rename(temporary, path);
-  } finally {
+  } catch (error) {
     await fs.rm(temporary, { force: true });
+    throw error;
   }
 }
 

@@ -20,8 +20,9 @@ from report_projection import SEVERITY_ORDER
 from workbench_constants import ARTIFACTS, FINDINGS_PAGE_MAX
 from workbench_scan_start import scan_target_identity
 from workbench_scan_usage import stored_scan_cost_fields
+from workbench_source_scopes import public_scan_recipe
 from workbench_target import git_output, require_scan_target_identity
-from workbench_validation import reject_non_finite_json, timestamp_key
+from workbench_validation import timestamp_key
 
 
 def saved_unresolved_candidate_count(scan: sqlite3.Row) -> int:
@@ -60,7 +61,7 @@ def scan_recipe(scan: sqlite3.Row) -> dict[str, Any]:
         raise SystemExit("This scan does not have a saved launch recipe.")
     return {
         "parentScanId": scan["parent_scan_id"],
-        "recipe": json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json),
+        "recipe": public_scan_recipe(scan),
         "scanId": scan["id"],
     }
 
@@ -224,6 +225,24 @@ def _repository_origin(target: Path) -> tuple[str, str] | None:
     return (host.lower(), path) if host and path else None
 
 
+SCAN_SUMMARY_QUERY = """
+SELECT
+    scans.*,
+    progress.reportable_findings_count,
+    progress.scope_file_count,
+    progress.review_items_completed,
+    progress.review_items_total,
+    progress.updated_at AS progress_updated_at,
+    (
+        SELECT COUNT(*)
+        FROM finding_occurrences AS occurrences
+        WHERE occurrences.scan_id = scans.id
+    ) AS finding_count
+FROM scans
+JOIN scan_progress AS progress ON progress.scan_id = scans.id
+"""
+
+
 def scan_summary(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "completedAt": row["completed_at"],
@@ -348,20 +367,7 @@ def list_scans(
         values.extend((limit + 1, args.offset))
     rows = connection.execute(
         f"""
-        SELECT
-            scans.*,
-            progress.reportable_findings_count,
-            progress.scope_file_count,
-            progress.review_items_completed,
-            progress.review_items_total,
-            progress.updated_at AS progress_updated_at,
-            (
-                SELECT COUNT(*)
-                FROM finding_occurrences AS occurrences
-                WHERE occurrences.scan_id = scans.id
-            ) AS finding_count
-        FROM scans
-        JOIN scan_progress AS progress ON progress.scan_id = scans.id
+        {SCAN_SUMMARY_QUERY}
         {where}
         ORDER BY
             CASE WHEN scans.status = 'running' AND scans.canceled_at IS NULL THEN 0 ELSE 1 END,
@@ -401,19 +407,19 @@ def list_unmatched_scan_pairs(
     ).fetchone()
     selected = [
         scan
-        for scan in connection.execute(
-            "SELECT * FROM scans WHERE status = 'complete' ORDER BY started_at, id"
-        )
+        for scan in connection.execute("SELECT * FROM scans WHERE status = 'complete'")
         if _same_repository(scan, requested)
     ]
 
+    selected.sort(key=lambda scan: (timestamp_key(scan["started_at"]), scan["id"]))
+
     available = []
-    for scan in selected:
+    for selected_index, scan in enumerate(selected):
         try:
             read_coverage(scan)
         except SystemExit:
             continue
-        available.append(scan)
+        available.append((selected_index, scan))
 
     saved_pairs = {
         (row["before_scan_id"], row["after_scan_id"])
@@ -423,10 +429,10 @@ def list_unmatched_scan_pairs(
     skipped = 0
     matching_findings: dict[str, list[dict[str, Any]]] = {}
     known_links: list[sqlite3.Row] | None = None
-    for index, after in enumerate(available):
+    for index, (selected_index, after) in enumerate(available):
         previous = [
             before
-            for before in available[:index]
+            for _, before in available[:index]
             if args.force or (before["id"], after["id"]) not in saved_pairs
         ]
         skipped += index - len(previous)
@@ -446,11 +452,7 @@ def list_unmatched_scan_pairs(
                 ]
         known_groups = _known_finding_groups(
             known_links,
-            {
-                scan["id"]
-                for scan in selected
-                if (scan["started_at"], scan["id"]) <= (after["started_at"], after["id"])
-            },
+            {scan["id"] for scan in selected[: selected_index + 1]},
         )
         batches.append(
             {
@@ -688,14 +690,14 @@ def compare_scans(
                 for pair in related
             ]
     if include_matching_inputs:
+        after_key = (timestamp_key(after["started_at"]), after["id"])
         known_scan_ids = {
             scan["id"]
             for scan in connection.execute(
-                "SELECT * FROM scans WHERE status = 'complete' "
-                "AND (started_at < ? OR (started_at = ? AND id <= ?))",
-                (after["started_at"], after["started_at"], after["id"]),
+                "SELECT id, started_at, target_id, target_path FROM scans WHERE status = 'complete'"
             )
-            if _same_repository(scan, after)
+            if (timestamp_key(scan["started_at"]), scan["id"]) <= after_key
+            and _same_repository(scan, after)
         }
         excluded_pairs = {(before["id"], after["id"]), (after["id"], before["id"])}
         known_groups = _known_finding_groups(
@@ -1011,7 +1013,8 @@ def finding_matches(
         )
     )
     known_scans = sorted(
-        {(started_at, scan_id)} | {(row["started_at"], row["scan_id"]) for row in linked_rows}
+        {(started_at, scan_id)} | {(row["started_at"], row["scan_id"]) for row in linked_rows},
+        key=lambda scan: (timestamp_key(scan[0]), scan[1]),
     )
     included = {occurrence_id, *(row["occurrence_id"] for row in rows)}
     rows.extend(

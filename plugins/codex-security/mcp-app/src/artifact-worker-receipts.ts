@@ -15,6 +15,7 @@ export async function recoverWorkerCandidateReceipts(
   coverage: JsonObject,
   source: ArtifactContext,
   retainIn?: ArtifactContext,
+  copiedReceiptRefs?: Set<string>,
 ): Promise<Set<string>> {
   const reopened = new Set<string>();
   const deferred = coverage.deferred as JsonObject[];
@@ -26,6 +27,7 @@ export async function recoverWorkerCandidateReceipts(
       !isTerminalCandidateDecision(surface) &&
       !(
         (coverage.explicitExclusions as JsonObject[]).includes(surface) &&
+        typeof surface.candidateId === "string" &&
         surface.receiptRefs !== undefined
       ) &&
       !(
@@ -136,6 +138,7 @@ export async function recoverWorkerCandidateReceipts(
         await replaceArtifactBytes(destination, contents);
       }
       retainedRefs.push(components.join("/"));
+      copiedReceiptRefs?.add(components.join("/"));
     }
     surface.receiptRefs = retainedRefs;
   }

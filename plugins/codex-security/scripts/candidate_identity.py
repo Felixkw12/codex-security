@@ -247,3 +247,45 @@ def resolved_candidate_surface_keys(
         for surface_id in surface_ids
         if isinstance(surface_id, str)
     }
+
+
+def retain_recovered_candidate_gaps(
+    coverage: dict[str, Any], recovered_candidates: list[tuple[dict[str, Any], str]]
+) -> None:
+    deferred_ids = {item["id"] for item in coverage["deferred"]}
+    closures = coverage.get("resolvedDeferred")
+    if isinstance(closures, list):
+        deferred_ids.update(
+            item["id"]
+            for item in closures
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+        )
+    for surface, reason in recovered_candidates:
+        if any(
+            item.get("candidateId") == surface["candidateId"]
+            and coverage_owner(item) == coverage_owner(surface)
+            for item in coverage["deferred"]
+        ):
+            continue
+        identity = surface["id"]
+        suffix = 2
+        while identity in deferred_ids:
+            identity = f"{surface['id']}-{suffix}"
+            suffix += 1
+        deferred_ids.add(identity)
+        coverage["deferred"].append(
+            {
+                "id": identity,
+                "candidateId": surface["candidateId"],
+                "reason": reason,
+                "surfaceIds": [surface["id"]],
+                **{
+                    field: copy.deepcopy(surface[field])
+                    for field in ("sourceWorkerId", "workerId", "candidate", "finding")
+                    if field in surface
+                    and (
+                        field in ("sourceWorkerId", "workerId") or isinstance(surface[field], dict)
+                    )
+                },
+            }
+        )

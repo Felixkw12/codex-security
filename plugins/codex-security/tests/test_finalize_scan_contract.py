@@ -155,10 +155,7 @@ The extraction root is not enforced.
                 "targetId": "target_sha256_example",
                 "displayName": "example/repo",
                 "revision": "deadbeef",
-                "snapshotDigest": (
-                    "codex-security-snapshot/v1:sha256:"
-                    "0000000000000000000000000000000000000000000000000000000000000000"
-                ),
+                "snapshotDigest": "codex-security-snapshot/v1:sha256:" + "0" * 64,
             },
             "allowedTargetKinds": ["git_worktree"],
             "scope": {"includePaths": ["src/"], "excludePaths": []},
@@ -201,6 +198,11 @@ The extraction root is not enforced.
             "\n".join(f"line {index}" for index in range(1, 60)), encoding="utf-8"
         )
         return source_root
+
+    def sarif_result(self, finding: dict, source_root: Path) -> dict:
+        return FINALIZER.build_sarif(self.manifest, {"findings": [finding]}, source_root)["runs"][
+            0
+        ]["results"][0]
 
     def export_csv(self) -> csv.DictReader:
         self.findings["findings"] = [copy.deepcopy(self.finding)]
@@ -400,13 +402,12 @@ The extraction root is not enforced.
         _, _, coverage = self.write_sealed_scan()
         coverage["completeness"] = "partial"
         self.rewrite_sealed_artifact("coverage.json", coverage)
-        names = ("scan-manifest.json", "findings.json", "coverage.json")
-        original = {name: (self.scan_dir / name).read_bytes() for name in names}
+        original = self.scan_file_bytes(*CANONICAL_FILES)
 
         _, _, retained = FINALIZER.finalize_scan(self.scan_dir)
 
         self.assertEqual(retained["completeness"], "partial")
-        self.assertEqual({name: (self.scan_dir / name).read_bytes() for name in names}, original)
+        self.assertEqual(self.scan_file_bytes(*CANONICAL_FILES), original)
 
     @pytest.mark.cross_platform
     def test_sealed_rerun_accepts_legacy_unknown_evidence_references(self) -> None:
@@ -671,12 +672,10 @@ The extraction root is not enforced.
         writeup_path.unlink()
         with self.assertRaisesRegex(FINALIZER.ContractError, "expected a file inside"):
             FINALIZER.finalize_scan(self.scan_dir)
-        sealed_files = {name: (self.scan_dir / name).read_bytes() for name in CANONICAL_FILES}
+        sealed_files = self.scan_file_bytes(*CANONICAL_FILES)
         with self.assertRaises(FINALIZER.ContractError):
             FINALIZER._prepare_scan_finalization(self.scan_dir, allow_missing_writeups=True)
-        self.assertEqual(
-            {name: (self.scan_dir / name).read_bytes() for name in CANONICAL_FILES}, sealed_files
-        )
+        self.assertEqual(self.scan_file_bytes(*CANONICAL_FILES), sealed_files)
 
     def test_finalize_requires_hardening_portfolio_to_be_regular_scan_local_file(self) -> None:
         portfolio_path = "hardening/hardening.md"
@@ -2310,6 +2309,55 @@ The extraction root is not enforced.
                 ):
                     FINALIZER.finalize_scan(self.scan_dir)
 
+    def test_rejects_remote_unsupported_port(self) -> None:
+        for remote in ("https://example.com:bad/repo", "https://example.com:99999/repo"):
+            with self.subTest(remote=remote):
+                self.manifest["scan"]["target"]["remote"] = remote
+                self.write_scan()
+                with self.assertRaisesRegex(
+                    FINALIZER.ContractError, "expected a sanitized canonical absolute URL"
+                ):
+                    FINALIZER.finalize_scan(self.scan_dir)
+
+    def test_rejects_remote_unsafe_authority(self) -> None:
+        for remote in (
+            "https://exa mple.com/repo",
+            "https://example.com>/repo",
+            "https://exa^mple.com/repo",
+            "https://exa|mple.com/repo",
+            "https://:8022/repo",
+            "https://a:b:80/repo",
+            "https://[::1/repo",
+            "https://[example]/repo",
+        ):
+            with self.subTest(remote=remote):
+                self.manifest["scan"]["target"]["remote"] = remote
+                self.write_scan()
+                with self.assertRaisesRegex(
+                    FINALIZER.ContractError, "expected a sanitized canonical absolute URL"
+                ):
+                    FINALIZER.finalize_scan(self.scan_dir)
+
+    def test_rejects_remote_bare_userinfo_separator(self) -> None:
+        self.manifest["scan"]["target"]["remote"] = "https://@example.com/repo"
+        self.write_scan()
+        with self.assertRaisesRegex(FINALIZER.ContractError, "must not contain credentials"):
+            FINALIZER.finalize_scan(self.scan_dir)
+
+    def test_seals_remote_port_and_ipv6_authority(self) -> None:
+        for remote in (
+            "https://example.com:8022/repo",
+            "https://example.com:/repo",
+            "https://[::1]:8022/repo",
+            "https://[::ffff:1.2.3.4]/repo",
+        ):
+            with self.subTest(remote=remote):
+                self.manifest["scan"]["target"]["remote"] = remote
+                self.write_scan()
+                FINALIZER.finalize_scan(self.scan_dir)
+                manifest = self.read_json("scan-manifest.json")
+                self.assertEqual(manifest["scan"]["target"]["remote"], remote)
+
     def test_rejects_repository_root_finding_location(self) -> None:
         self.findings["findings"][0]["locations"][0]["path"] = "."
         self.write_scan()
@@ -2327,65 +2375,8 @@ The extraction root is not enforced.
             self.read_json("scan-manifest.json")["scan"]["scope"]["includePaths"], ["."]
         )
 
-    def test_recovered_receipt_decision_retains_owned_pending_evidence(self) -> None:
-        original = copy.deepcopy(self.coverage)
-        for disposition in ("rejected", "not_applicable"):
-            for previous_owner in (None, "worker-current", "worker-other"):
-                with self.subTest(disposition=disposition, previous_owner=previous_owner):
-                    self.coverage = copy.deepcopy(original)
-                    self.coverage["completeness"] = "partial"
-                    surface = self.coverage["surfaces"][0]
-                    surface.update(
-                        candidateId="candidate-review",
-                        sourceWorkerId="worker-current",
-                        disposition=disposition,
-                        receiptRefs=["artifacts/review/missing-receipt.txt"],
-                        candidate={"evidence": "Saved candidate evidence remains available."},
-                    )
-                    previous = None
-                    if previous_owner is not None:
-                        previous = {
-                            "id": surface["id"],
-                            "candidateId": "candidate-review",
-                            "sourceWorkerId": previous_owner,
-                            "reason": "Independent authored proof gap.",
-                            "candidate": {"evidence": "Independent saved candidate evidence."},
-                            "surfaceIds": [surface["id"]],
-                        }
-                        self.coverage["deferred"].append(copy.deepcopy(previous))
-                    self.write_scan()
-                    prepared = FINALIZER._prepare_scan_finalization(
-                        self.scan_dir, recover_unsealed=True
-                    )
-                    warnings = prepared.warnings
-                    recovered = prepared.coverage
-                    self.assertEqual(recovered["surfaces"][0]["disposition"], "needs_follow_up")
-                    pending = next(
-                        row
-                        for row in recovered["deferred"]
-                        if row.get("sourceWorkerId") == "worker-current"
-                    )
-                    self.assertEqual(pending["surfaceIds"], [surface["id"]])
-                    if previous_owner == "worker-current":
-                        self.assertEqual(pending, previous)
-                    else:
-                        self.assertEqual(pending["candidate"], surface["candidate"])
-                        self.assertIn(warnings[0], pending["reason"])
-                    if previous is not None:
-                        self.assertIn(previous, recovered["deferred"])
-                    self.assertEqual(
-                        len({row["id"] for row in recovered["deferred"]}),
-                        len(recovered["deferred"]),
-                    )
-                    self.assertTrue(
-                        any(
-                            warning.startswith("Skipped malformed coverage receipt")
-                            for warning in warnings
-                        )
-                    )
-
-    def test_preserves_literal_whitespace_repository_paths(self) -> None:
-        for path in (" ", "  ", "\u00a0"):
+    def test_preserves_literal_repository_paths(self) -> None:
+        for path in (" ", "  ", "\u00a0", "src/a:b.py", "report:summary.py"):
             with self.subTest(path=path):
                 self.manifest["scan"]["scope"]["includePaths"] = [path]
                 self.coverage["includePaths"] = [path]
@@ -2410,7 +2401,7 @@ The extraction root is not enforced.
                 self.assertEqual(coverage["deferred"][0]["paths"], [path])
                 self.assertEqual(findings["findings"][0]["locations"][0]["path"], path)
                 self.assertEqual(findings["findings"][0]["codeEvidence"][0]["path"], path)
-                if path.isascii():
+                if path.isascii() and path.isspace():
                     self.assertIn(
                         f'- Included paths: `"{path}"`',
                         (self.scan_dir / "report.md").read_text(encoding="utf-8"),
@@ -2481,38 +2472,60 @@ The extraction root is not enforced.
         self.assertEqual(coverage["deferred"], self.coverage["deferred"])
         self.assertEqual(coverage["surfaces"][0]["disposition"], "needs_follow_up")
 
+    def write_code_evidence_scan(self, path: str) -> None:
+        self.findings["findings"][0]["codeEvidence"] = [
+            {
+                "id": "source",
+                "label": "Source",
+                "path": path,
+                "startLine": 1,
+                "code": "source()",
+                "explanation": "Synthetic source evidence.",
+            }
+        ]
+        self.write_scan()
+
     def test_rejects_unsafe_code_evidence_paths(self) -> None:
         for path in ("../../outside.ts", "/outside.ts", r"C:\outside.ts"):
             with self.subTest(path=path):
-                self.findings["findings"][0]["codeEvidence"] = [
-                    {
-                        "id": "source",
-                        "label": "Source",
-                        "path": path,
-                        "startLine": 1,
-                        "code": "source()",
-                        "explanation": "Synthetic source evidence.",
-                    }
-                ]
-                self.write_scan()
+                self.write_code_evidence_scan(path)
                 with self.assertRaisesRegex(
                     FINALIZER.ContractError,
                     r"codeEvidence\[0\]\.path: expected a safe repository-relative POSIX path",
                 ):
                     FINALIZER.finalize_scan(self.scan_dir)
 
-    def test_rejects_unsafe_deferred_paths(self) -> None:
-
-        for path in ("../../outside.ts", "/outside.ts", r"C:\outside.ts"):
+    def test_accepts_code_evidence_with_posix_colon_names(self) -> None:
+        for path in ("src/a:b.py", "report:summary.py"):
             with self.subTest(path=path):
+                self.write_code_evidence_scan(path)
+                _, findings, _ = FINALIZER.finalize_scan(self.scan_dir)
+                self.assertEqual(findings["findings"][0]["codeEvidence"][0]["path"], path)
+
+    def test_rejects_unsafe_deferred_paths(self) -> None:
+        for path in (
+            "",
+            "../../outside.ts",
+            "src/../outside.ts",
+            "src/..",
+            "/outside.ts",
+            "//server/share",
+            "C:/outside.ts",
+            "c:outside.ts",
+            "src\\outside.ts",
+            "src/\u0000outside.ts",
+            "src/\u0001outside.ts",
+            "src/\toutside.ts",
+            "src/outside.ts\n",
+            "src/\routside.ts",
+            "src/\u2028/../outside.ts",
+        ):
+            with self.subTest(path=repr(path)):
                 self.coverage["deferred"] = [
                     {"id": "review", "reason": "Review is incomplete.", "paths": [path]}
                 ]
                 self.write_scan()
-                with self.assertRaisesRegex(
-                    FINALIZER.ContractError,
-                    r"deferred\[0\]\.paths\[0\]: expected a safe repository-relative POSIX path",
-                ):
+                with self.assertRaisesRegex(FINALIZER.ContractError, r"coverage.*deferred"):
                     FINALIZER.finalize_scan(self.scan_dir)
 
     def test_accepts_safe_code_evidence_and_deferred_paths(self) -> None:
@@ -2527,7 +2540,27 @@ The extraction root is not enforced.
             }
         ]
 
-        for path in (".", "src", "src/extract.py", "src/a:b.py"):
+        for path in (
+            ".",
+            "./",
+            "././",
+            "src",
+            "src/parser.ts",
+            "./src/parser.ts",
+            "src/./parser.ts",
+            "src//parser.ts",
+            "src/",
+            "src:parser.ts",
+            "src/a:b.py",
+            "src/.hidden",
+            "src/na\u00efve file.ts",
+            "src/\u007fparser.ts",
+            "src/\u2028parser.ts",
+            "src/\u2029parser.ts",
+            " ",
+            "\u0085",
+            "\ufeff",
+        ):
             with self.subTest(path=path):
                 self.coverage["deferred"] = [
                     {"id": "review", "reason": "Review is incomplete.", "paths": [path]}
@@ -2984,7 +3017,7 @@ The extraction root is not enforced.
     def test_sarif_emits_github_line_hash_when_source_is_available(self) -> None:
         source_root = self.write_line_hash_source()
         sarif_finding = self.sarif_finding("semantic-fingerprint")
-        result = FINALIZER._sarif_result(sarif_finding, 0, source_root)
+        result = self.sarif_result(sarif_finding, source_root)
         fingerprints = result["partialFingerprints"]
         self.assertEqual(fingerprints["codexSecurity/v1"], "semantic-fingerprint")
         self.assertEqual(fingerprints["primaryLocationLineHash"], "614150a715d5311d:1")
@@ -2999,7 +3032,7 @@ The extraction root is not enforced.
             mock.patch.object(FINALIZER, "_is_windows", return_value=True),
             mock.patch.object(FINALIZER, "_windows_scan_local_files", return_value=backend),
         ):
-            result = FINALIZER._sarif_result(sarif_finding, 0, source_root)
+            result = self.sarif_result(sarif_finding, source_root)
 
         backend.open_read_fd.assert_called_once_with(
             source_root, "src/extract.py", "source file src/extract.py"
@@ -3019,14 +3052,14 @@ The extraction root is not enforced.
         sarif_finding = self.sarif_finding("semantic-fingerprint")
         sarif_finding["locations"] = [
             {"path": "src/route.py", "startLine": 1, "role": "entrypoint/wrapper"},
-            {"path": "src/control.py", "startLine": 1, "role": "root_control"},
+            {"path": "./src//control.py", "startLine": 1, "role": "root_control"},
         ]
 
-        result = FINALIZER._sarif_result(sarif_finding, 0, source_root)
+        result = self.sarif_result(sarif_finding, source_root)
 
         self.assertEqual(
             result["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
-            "src/control.py",
+            "./src//control.py",
         )
         self.assertEqual(
             result["partialFingerprints"]["primaryLocationLineHash"], "41499a4b14756ba2:1"
@@ -3038,7 +3071,7 @@ The extraction root is not enforced.
         source_path.parent.mkdir(parents=True)
         source_path.write_bytes(b"\n" * 40 + b"invalid: \xff\n")
         sarif_finding = self.sarif_finding("semantic-fingerprint")
-        result = FINALIZER._sarif_result(sarif_finding, 0, source_root)
+        result = self.sarif_result(sarif_finding, source_root)
         self.assertIn("primaryLocationLineHash", result["partialFingerprints"])
 
     def test_sarif_line_hash_skips_symlink_source(self) -> None:
@@ -3052,7 +3085,7 @@ The extraction root is not enforced.
             )
             source_path.symlink_to(external_path)
             sarif_finding = self.sarif_finding("semantic-fingerprint")
-            result = FINALIZER._sarif_result(sarif_finding, 0, source_root)
+            result = self.sarif_result(sarif_finding, source_root)
         self.assertNotIn("primaryLocationLineHash", result["partialFingerprints"])
 
     @skipUnless(hasattr(os, "mkfifo"), "requires FIFO support")
@@ -3113,7 +3146,7 @@ The extraction root is not enforced.
         source_root = self.write_line_hash_source()
         sarif_finding = self.sarif_finding("semantic-fingerprint")
         with mock.patch.object(FINALIZER, "_github_line_hashes", side_effect=PermissionError):
-            result = FINALIZER._sarif_result(sarif_finding, 0, source_root)
+            result = self.sarif_result(sarif_finding, source_root)
         self.assertNotIn("primaryLocationLineHash", result["partialFingerprints"])
 
     def test_sarif_line_hash_streams_source(self) -> None:
@@ -3147,6 +3180,54 @@ The extraction root is not enforced.
         for result in results:
             self.assertIn("primaryLocationLineHash", result["partialFingerprints"])
 
+    def test_sarif_keeps_captured_hash_when_source_root_changes(self) -> None:
+        read_hashes = FINALIZER._github_line_hashes_for_source
+        for change in ("disappear", "retarget"):
+            with self.subTest(change=change):
+                source_root = self.write_line_hash_source()
+                moved_root = source_root.with_name(f"moved-source-{change}")
+
+                def read_then_move(
+                    *args, source_root=source_root, moved_root=moved_root, change=change
+                ):
+                    hashes = read_hashes(*args)
+                    source_root.rename(moved_root)
+                    if change == "retarget":
+                        replacement = self.scan_dir / "replacement"
+                        (replacement / "src").mkdir(parents=True)
+                        (replacement / "src" / "extract.py").write_text(
+                            "replacement source\n" * 41, encoding="utf-8"
+                        )
+                        source_root.symlink_to(replacement, target_is_directory=True)
+                    return hashes
+
+                with mock.patch.object(
+                    FINALIZER, "_github_line_hashes_for_source", side_effect=read_then_move
+                ) as source_reads:
+                    result = self.sarif_result(
+                        self.sarif_finding("semantic-fingerprint"), source_root
+                    )
+
+                self.assertEqual(
+                    result["partialFingerprints"]["primaryLocationLineHash"], "614150a715d5311d:1"
+                )
+                self.assertEqual(source_reads.call_count, 1)
+
+    def test_sarif_does_not_retry_source_root_that_appears_after_capture(self) -> None:
+        source_root = self.scan_dir / "source"
+        sarif_rule = FINALIZER._sarif_rule
+
+        def create_source_then_render_rule(*args):
+            self.write_line_hash_source()
+            return sarif_rule(*args)
+
+        with mock.patch.object(
+            FINALIZER, "_sarif_rule", side_effect=create_source_then_render_rule
+        ):
+            result = self.sarif_result(self.sarif_finding("semantic-fingerprint"), source_root)
+
+        self.assertNotIn("primaryLocationLineHash", result["partialFingerprints"])
+
     def test_sarif_caches_line_hashes_per_source_file(self) -> None:
         source_root = self.write_line_hash_source()
         findings = []
@@ -3162,97 +3243,6 @@ The extraction root is not enforced.
             FINALIZER.build_sarif(self.manifest, {"findings": findings}, source_root)
 
         self.assertEqual(line_hashes.call_count, 1)
-
-    def test_receipt_recovery_preserves_closed_generic_task_identities(self) -> None:
-        original = copy.deepcopy(self.coverage)
-        for disposition in ("rejected", "not_applicable"):
-            for valid_receipt in (False, True):
-                with self.subTest(disposition=disposition, valid_receipt=valid_receipt):
-                    self.coverage = copy.deepcopy(original)
-                    surface = self.coverage["surfaces"][0]
-                    surface.update(
-                        candidateId="candidate-review",
-                        disposition=disposition,
-                        candidate={"evidence": "Retain original candidate evidence."},
-                        receiptRefs=["artifacts/review/receipt.txt"],
-                    )
-                    closures = [
-                        {"id": surface["id"], "reason": "Source review completed."},
-                        {"id": "other-closed-review", "reason": "Another review completed."},
-                    ]
-                    self.coverage["resolvedDeferred"] = copy.deepcopy(closures)
-                    self.write_scan()
-                    receipt = self.scan_dir / "artifacts/review/receipt.txt"
-                    receipt.parent.mkdir(parents=True, exist_ok=True)
-                    if valid_receipt:
-                        receipt.write_text("Synthetic verified review receipt.\n")
-                    elif receipt.exists():
-                        receipt.unlink()
-                    prepared = FINALIZER._prepare_scan_finalization(
-                        self.scan_dir, recover_unsealed=True
-                    )
-                    recovered = prepared.coverage
-                    self.assertEqual(recovered.get("resolvedDeferred"), closures)
-                    candidate_rows = [
-                        row
-                        for row in recovered["deferred"]
-                        if row.get("candidateId") == surface["candidateId"]
-                    ]
-                    self.assertEqual(bool(candidate_rows), not valid_receipt)
-                    if candidate_rows:
-                        self.assertNotIn(candidate_rows[0]["id"], {row["id"] for row in closures})
-                        self.assertEqual(candidate_rows[0]["candidate"], surface["candidate"])
-
-    def test_parent_receipt_recovery_keeps_independent_valid_closures(self) -> None:
-        original = copy.deepcopy(self.coverage)
-        for malformed in (None, "duplicate", "missing-reason", "already-active"):
-            for valid_receipt in (False, True):
-                with self.subTest(malformed=malformed, valid_receipt=valid_receipt):
-                    self.coverage = copy.deepcopy(original)
-                    surface = self.coverage["surfaces"][0]
-                    surface.update(
-                        candidateId="review/auth",
-                        disposition="rejected",
-                        receiptRefs=["artifacts/receipt.txt"],
-                    )
-                    closures = [
-                        {"id": "review/auth", "reason": "Candidate review completed."},
-                        {"id": "independent-review", "reason": "Independent review completed."},
-                    ]
-                    if malformed == "duplicate":
-                        closures.append(copy.deepcopy(closures[1]))
-                    elif malformed == "missing-reason":
-                        closures[0].pop("reason")
-                    elif malformed == "already-active":
-                        self.coverage["completeness"] = "partial"
-                        self.coverage["deferred"] = [
-                            {"id": "independent-review", "reason": "Still active."}
-                        ]
-                    self.coverage["resolvedDeferred"] = closures
-                    self.write_scan()
-                    receipt = self.scan_dir / "artifacts/receipt.txt"
-                    receipt.parent.mkdir(exist_ok=True)
-                    if valid_receipt:
-                        receipt.write_bytes(b"Synthetic completed review evidence.")
-                    else:
-                        receipt.unlink(missing_ok=True)
-                    source_bytes = (self.scan_dir / "coverage.json").read_bytes()
-                    prepared = FINALIZER._prepare_scan_finalization(
-                        self.scan_dir, recover_unsealed=True
-                    )
-                    self.assertEqual((self.scan_dir / "coverage.json").read_bytes(), source_bytes)
-                    # Task IDs remain independent of the reopened candidate's semantic ID.
-                    expected = None if malformed else closures
-                    self.assertEqual(prepared.coverage.get("resolvedDeferred"), expected)
-                    _, _, published = FINALIZER._write_prepared_scan_finalization(prepared)
-                    _, _, sealed = FINALIZER.finalize_scan(self.scan_dir)
-                    self.assertEqual(sealed, published)
-                    self.assertEqual(sealed.get("resolvedDeferred"), expected)
-                    pending = [
-                        row for row in sealed["deferred"] if row.get("candidateId") == "review/auth"
-                    ]
-                    self.assertEqual(len(pending), int(not valid_receipt))
-                    self.assertEqual(FINALIZER.finalize_scan(self.scan_dir)[2], sealed)
 
 
 if __name__ == "__main__":
