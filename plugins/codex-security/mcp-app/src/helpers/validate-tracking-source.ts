@@ -1,6 +1,6 @@
 import { parseArgs } from "node:util";
 import { loadSealedContract } from "../sealed-contract.js";
-import { resolvedPathText } from "./helper-files.js";
+import { filesystemErrorMessage, resolvedPathText } from "./helper-files.js";
 import { expandHome } from "./resolve-security-md.js";
 
 export interface TrackingSourceOptions {
@@ -76,7 +76,7 @@ export async function validateTrackingSourceCommand(
     return 0;
   } catch (error) {
     console.error(
-      `tracking source preflight failed: ${error instanceof Error ? error.message : String(error)}`,
+      `tracking source preflight failed: ${filesystemErrorMessage(error)}`,
     );
     return 2;
   }

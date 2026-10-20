@@ -112,6 +112,20 @@ function run(
 }
 
 describe("native tracking source validation", () => {
+  test("escapes filesystem controls in a missing scan path", async () => {
+    const f = await fixture();
+    const result = run({
+      ...f,
+      scanDir: join(f.root, "missing-\u001b[2J"),
+    });
+
+    expect(result.status).toBe(2);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toStartWith("tracking source preflight failed:");
+    expect(result.stderr).toContain("missing-\\u001b[2J");
+    expect(result.stderr).not.toContain("\u001b");
+  });
+
   test("requires the tracking report while the SDK accepts canonical artifacts alone", async () => {
     const f = await fixture();
     await unlink(join(f.scanDir, "report.md"));
