@@ -535,7 +535,8 @@ export class WorkbenchDeepScanStore {
   ): Promise<JsonObject> {
     const operation = this.writeTail.then(async () => {
       try {
-        return retryTransientFailure || RETRYABLE_PERSISTENCE_COMMANDS.has(args[0])
+        return retryTransientFailure ||
+          RETRYABLE_PERSISTENCE_COMMANDS.has(args[0])
           ? await this.runIdempotentPersistence(args, input, selectFinalization)
           : await this.runWorkbench(
               args,
