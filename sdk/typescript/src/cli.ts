@@ -11432,6 +11432,7 @@ export async function readSkillCommandOutput(
             appServer.onPermissions?.(profile, config);
             // Cache restrictions for the model do not change snapshot access.
             startThread({
+              default_permissions: permissionProfile!,
               permissions: {
                 [permissionProfile!]: {
                   ...profile,

@@ -56,7 +56,7 @@ lines.on("line", (line) => {
     assert.equal(profiles.length, 1);
     permissionProfile = profiles[0];
     assert.match(permissionProfile, /^codex_security_patch_[a-f0-9-]+$/);
-    assert.deepEqual(request.params.config, { permissions: { [permissionProfile]: {
+    assert.deepEqual(request.params.config, { default_permissions: permissionProfile, permissions: { [permissionProfile]: {
       extends: ":workspace", network: { enabled: false }, workspace_roots: {},
       filesystem: Object.fromEntries(paths.map((value) => [value, { ".": "read" }]))
     } } });
@@ -69,6 +69,8 @@ lines.on("line", (line) => {
     assert.equal(Object.hasOwn(request.params, "permissionProfile"), false);
     preflight = true;
     send({ id: request.id, result: { exitCode: 0, stdout: "", stderr: "" } });
+  } else if (request.method === "experimentalFeature/list") {
+    send({ id: request.id, result: { data: [{ name: "cli_daybreak", enabled: false }], nextCursor: null } });
   } else if (request.method === "turn/start") {
     assert.equal(preflight, true);
     assert.equal(request.params.permissions, permissionProfile);

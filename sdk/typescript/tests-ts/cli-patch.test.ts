@@ -1501,6 +1501,7 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
   ] as const)(
     "completes required patch output (status %i, failure %p)",
     async (codexStatus, failOutput, expectedStatus) => {
+      const { directory } = await createPublicationRepository(repositories);
       const report = "Synthetic patch report: café → fixed.\n";
       const started = Promise.withResolvers<(error?: Error) => void>();
       const stdout = new Writable({
@@ -1515,37 +1516,39 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
         : undefined;
       const stderr = capture();
       let patched = false;
-      let laterCommands = 0;
+      let laterSnapshots = 0;
       const operation = main(
         ["patch", "Synthetic finding"],
         stdout,
         stderr.stream,
         dependencies({
-          currentDirectory: CURRENT_REPOSITORY,
-          onCodex: (_args, output) => {
+          currentDirectory: directory,
+          onCodex: async (_args, output) => {
+            await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
             output?.stdout.write(report);
             patched = true;
             return codexStatus;
           },
-          onRepositoryCommand: (_command, args) => {
-            if (patched) laterCommands++;
-            return args.includes("--name-only") ? "synthetic.ts\0" : "tree";
+          onRepositoryCommand: (command, args, repository, options) => {
+            if (patched && options?.patchSnapshot !== undefined)
+              laterSnapshots++;
+            return runGitRepositoryCommand(command, args, repository, options);
           },
         }),
       );
       const complete = await started.promise;
-      const commandsBeforeCompletion = laterCommands;
+      const snapshotsBeforeCompletion = laterSnapshots;
       complete(failOutput ? failure : undefined);
-      expect(await operation).toBe(expectedStatus);
-      expect(commandsBeforeCompletion).toBe(0);
+      expect(await operation, stderr.text()).toBe(expectedStatus);
+      expect(snapshotsBeforeCompletion).toBe(0);
       expect(patched).toBe(true);
       if (failOutput) {
         expect(await emitted).toBe(failure);
-        expect(laterCommands).toBe(0);
+        expect(laterSnapshots).toBe(0);
         expect(stderr.text()).toContain(failure.message);
         expect(stderr.text()).not.toContain("Patch applied.");
       } else {
-        expect(laterCommands).toBeGreaterThan(0);
+        expect(laterSnapshots).toBeGreaterThan(0);
         expect(stderr.text()).toContain("Patch applied. Files changed: 1.");
         expect(stdout.writableEnded).toBe(false);
       }
