@@ -14,8 +14,9 @@ import { safeScopePath as sharedSafeScopePath } from "./contract-values.js";
 export {
   deriveFindingIdentity,
   hasRequiredFindingText,
-  sha256Text,
 } from "./contract-values.js";
+/** @internal */
+export { sha256Text } from "./contract-values.js";
 
 const PRODUCER_NAME = "codex-security-plugin";
 export interface ScanExpectation {
