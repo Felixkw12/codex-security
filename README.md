@@ -194,9 +194,6 @@ model without starting another analysis:
 cs export --scan SCAN_ID --artifact threat-model --output threatmodel.md
 ```
 
-MCP checkpoints write `threatmodel.md` using Node.js, independently of the selected
-Python interpreter. Scan finalization and saved-model exports still require Python.
-
 Omit `--scan` to use the current repository's latest completed scan. The
 [export guide](sdk/typescript/docs/cli.md#exports-and-ci) also covers findings,
 SARIF output for CI, and the offline TypeScript API.
