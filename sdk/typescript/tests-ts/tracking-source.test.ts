@@ -19,7 +19,7 @@ import {
   windowsFileSystem,
 } from "../../../plugins/codex-security/native/windows-files.mjs";
 import type { WindowsBinding } from "../../../plugins/codex-security/native/windows-binding.mjs";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, test } from "bun:test";
 import { loadContract } from "../src/contract.js";
 import type { Finding, FindingsDocument, ScanManifest } from "../src/models.js";
@@ -461,8 +461,20 @@ describe("native tracking source validation", () => {
     async () => {
       const original = await fixture(1);
       const decoy = await fixture(2);
-      const rawPath = join(original.root, "scan-\ud800");
-      const replacementPath = join(original.root, "scan-\ufffd");
+      // Bun's path helpers replace lone surrogates; exercise the Node reader.
+      const rawPath = `${original.root}\\scan-\ud800`;
+      const replacementPath = `${original.root}\\scan-\ufffd`;
+      expect(rawPath).not.toBe(replacementPath);
+      const source = new URL("../src/contract.ts", import.meta.url);
+      const built = await Bun.build({
+        entrypoints: [fileURLToPath(source)],
+        target: "node",
+        format: "esm",
+        define: { "import.meta.url": JSON.stringify(source.href) },
+      });
+      expect(built.success).toBe(true);
+      const module = join(original.root, "contract-reader.mjs");
+      await writeFile(module, await built.outputs[0]!.text());
       const native = createRequire(import.meta.url)(
         join(
           PLUGIN_ROOT,
@@ -477,16 +489,38 @@ describe("native tracking source validation", () => {
       try {
         files.rename(widePath(decoy.scanDir), widePath(replacementPath));
         try {
-          const loaded = await loadContract(rawPath, {
-            pluginRoot: PLUGIN_ROOT,
-          });
-          expect(loaded.findings.findings).toEqual(original.findings.findings);
-          expect(await validateTrackingSource(rawPath)).toEqual(
-            original.findings.findings,
+          const result = spawnSync(
+            node,
+            [
+              "--input-type=module",
+              "--eval",
+              `
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+const input = JSON.parse(readFileSync(0, "utf8"));
+const { loadContract } = await import(input.module);
+const { validateTrackingSource } = (await import(input.helper)).default;
+const loaded = await loadContract(input.rawPath, { pluginRoot: input.pluginRoot });
+assert.deepEqual(loaded.findings.findings, input.original);
+assert.deepEqual(await validateTrackingSource(input.rawPath), input.original);
+assert.deepEqual(await validateTrackingSource(input.replacementPath), input.decoy);
+`,
+            ],
+            {
+              input: JSON.stringify({
+                module: pathToFileURL(module).href,
+                helper: pathToFileURL(helper).href,
+                rawPath,
+                replacementPath,
+                pluginRoot: PLUGIN_ROOT,
+                original: original.findings.findings,
+                decoy: decoy.findings.findings,
+              }),
+              encoding: "utf8",
+              windowsHide: true,
+            },
           );
-          expect(await validateTrackingSource(replacementPath)).toEqual(
-            decoy.findings.findings,
-          );
+          expect(result.status, result.stderr).toBe(0);
         } finally {
           files.rename(widePath(replacementPath), widePath(decoy.scanDir));
         }
