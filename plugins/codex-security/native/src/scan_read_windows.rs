@@ -16,9 +16,9 @@ use windows_sys::Win32::{
     Foundation::{ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, INVALID_HANDLE_VALUE},
     Globalization::{CompareStringOrdinal, CSTR_EQUAL},
     Storage::FileSystem::{
-        CreateFileW, FileAttributeTagInfo, GetFileInformationByHandleEx, GetFileType,
+        CreateFileW, FileBasicInfo, GetFileInformationByHandleEx, GetFileType,
         GetFinalPathNameByHandleW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
-        FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_BASIC_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
         FILE_GENERIC_READ, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_DISK,
         OPEN_EXISTING,
     },
@@ -238,13 +238,13 @@ fn open_file(path: &Path, directory: bool) -> io::Result<Option<File>> {
 }
 
 fn attributes(file: &File) -> io::Result<u32> {
-    let mut info = FILE_ATTRIBUTE_TAG_INFO::default();
+    let mut info = FILE_BASIC_INFO::default();
     if unsafe {
         GetFileInformationByHandleEx(
             file.as_raw_handle(),
-            FileAttributeTagInfo,
-            (&mut info as *mut FILE_ATTRIBUTE_TAG_INFO).cast(),
-            size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+            FileBasicInfo,
+            (&mut info as *mut FILE_BASIC_INFO).cast(),
+            size_of::<FILE_BASIC_INFO>() as u32,
         )
     } == 0
     {

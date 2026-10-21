@@ -109,10 +109,9 @@ function handleProof(root: string) {
       payload.length,
     );
     assert.equal(checked(file.fileType()).value, 1);
-    assert.equal(
-      checked(file.attributes()).attributes & flags.FILE_ATTRIBUTE_DIRECTORY,
-      0,
-    );
+    const fileAttributes = checked(file.attributes());
+    assert.equal(fileAttributes.attributes & flags.FILE_ATTRIBUTE_DIRECTORY, 0);
+    assert.equal(fileAttributes.reparseTag, 0);
     const reader = keep(open(path, flags.GENERIC_READ));
     const buffer = Buffer.alloc(payload.length + 6, 0x7e);
     assert.equal(
@@ -192,6 +191,7 @@ function handleProof(root: string) {
     assert.equal(file.read(buffer, 0, 1).error, 6);
     assert.equal(file.write(buffer, 0, 1).error, 6);
     assert.equal(file.identity().error, 6);
+    assert.equal(file.attributes().error, 6);
 
     const ancestor = join(root, "ancestor");
     const scan = join(ancestor, "scan");

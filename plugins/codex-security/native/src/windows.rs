@@ -729,6 +729,22 @@ impl WindowsHandle {
 
     #[napi]
     pub fn attributes(&self) -> AttributesResult {
+        let mut basic = FILE_BASIC_INFO::default();
+        let error = status(unsafe {
+            GetFileInformationByHandleEx(
+                self.raw(),
+                FileBasicInfo,
+                (&mut basic as *mut FILE_BASIC_INFO).cast(),
+                size_of::<FILE_BASIC_INFO>() as u32,
+            )
+        });
+        if error != 0 || basic.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT == 0 {
+            return AttributesResult {
+                error,
+                attributes: basic.FileAttributes,
+                reparse_tag: 0,
+            };
+        }
         let mut info = FILE_ATTRIBUTE_TAG_INFO::default();
         let error = status(unsafe {
             GetFileInformationByHandleEx(
