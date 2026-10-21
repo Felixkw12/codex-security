@@ -191,6 +191,7 @@ function handleProof(root: string) {
     success(file.close());
     assert.equal(file.read(buffer, 0, 1).error, 6);
     assert.equal(file.write(buffer, 0, 1).error, 6);
+    assert.equal(file.identity().error, 6);
 
     const ancestor = join(root, "ancestor");
     const scan = join(ancestor, "scan");
