@@ -3,16 +3,13 @@ import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { test } from "node:test";
 import { importSource } from "./import-module.ts";
+import type { ThreatModelRenderInput as Input } from "../src/threat-model-render.js";
 
 const pluginRoot = join(import.meta.dirname, "../..");
 const { renderThreatModel } = await importSource(
   join(pluginRoot, "mcp-app/src/threat-model-render.ts"),
 );
 const python = process.env.PYTHON?.trim() || "python3";
-type Input = {
-  threatModel: unknown;
-  provenance?: Record<string, unknown>;
-};
 function pythonRender(input: Input): string {
   return execFileSync(
     python,
@@ -76,13 +73,13 @@ equivalent(
     scope: { includePaths: [], excludePaths: [""], summary: " " },
   },
   {
-    source: false,
-    scanId: true,
-    target: [],
-    revision: {},
-    snapshotDigest: 0,
+    source: "",
+    scanId: "example-scan",
+    target: "",
+    revision: "",
+    snapshotDigest: "",
     status: " ",
-    provisional: [],
+    provisional: false,
   },
 );
 equivalent(

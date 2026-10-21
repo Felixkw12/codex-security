@@ -48,6 +48,9 @@ async function writeCurrentThreatModelDocument(
       "threat model document",
     );
     const target = asRecord(document?.target);
+    const snapshotDigest =
+      target?.snapshotDigest ??
+      asRecord(context.targetContract?.target)?.requiredSnapshotDigest;
     const markdown = renderThreatModel({
       threatModel,
       provenance: {
@@ -56,8 +59,7 @@ async function writeCurrentThreatModelDocument(
         target: context.repoRoot,
         revision: context.targetRevision,
         snapshotDigest:
-          target?.snapshotDigest ??
-          asRecord(context.targetContract?.target)?.requiredSnapshotDigest,
+          typeof snapshotDigest === "string" ? snapshotDigest : undefined,
         status: context.status ?? "running",
         provisional: context.status !== "complete",
         ...(context.scope === undefined
