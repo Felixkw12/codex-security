@@ -61,7 +61,8 @@ jobs:
             while IFS= read -r -d '' path; do
               case "$path" in
                 .github/workflows/* | .github/actions/* | .github/actionlint.yaml | .github/zizmor.yml | \
-                  docker/verify-container-compose.sh)
+                  .github/scripts/release-progress.mjs | .github/scripts/test_release_progress.mjs | \
+                  sdk/typescript/scripts/release-pr.mjs | docker/verify-container-compose.sh)
                   workflow_quality=true
                   ;;
               esac
@@ -406,9 +407,9 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
           cache: pip
-          cache-dependency-path: plugins/codex-security/pyproject.toml
+          cache-dependency-path: plugins/codex-security/requirements-test.txt
       - name: Install Python test dependencies
-        run: python -m pip install --disable-pip-version-check --no-input -e 'plugins/codex-security[test]'
+        run: python -m pip install --disable-pip-version-check --no-input -r plugins/codex-security/requirements-test.txt
       - name: Install ripgrep
         if: runner.os == 'Linux'
         run: |
@@ -466,6 +467,9 @@ jobs:
       - name: Test secret discovery eval contracts
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
         run: node --experimental-strip-types --test evals/secret-discovery/test_*.mts
+      - name: Test workflow routing eval contracts
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+        run: node --experimental-strip-types --test evals/workflow-routing/test_*.mts
 
   required-test:
     name: ${{ matrix.os }} / node-22
@@ -503,7 +507,7 @@ jobs:
     name: windows-latest / node-22 / tests-${{ matrix.shard }}
     needs: [validate-title, package]
     runs-on: windows-latest
-    timeout-minutes: 25
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:

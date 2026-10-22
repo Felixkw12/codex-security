@@ -6,11 +6,11 @@ Load this reference only when the host identifies itself as the Codex desktop ap
 
 Resolve the target, requested scope, and exact user context. Continue a supplied `scanId` through `get_codex_security_scan_context`, passing its `handoffClaimToken` when present. Otherwise call `start_codex_security_prompt_only_scan` once with `mode: "standard"`, `targetPath`, `scope`, and optional `userContext`.
 
-Preserve the authoritative `scan.scanId`, `scan.scanDir`, and handoff token. If startup fails or returns malformed context, report the error without creating a replacement scan, opening setup, or switching to a terminal workflow. Read `../../../references/desktop-config-preflight.md` after authoritative context exists.
+Preserve the authoritative `scan.scanId`, `scan.scanDir`, scope, exact `userContext`, and handoff token. If startup fails or returns malformed context, report the error without creating a replacement scan, opening setup, or switching to a terminal workflow.
 
 ## Progress
 
-Use `update_codex_security_scan_progress({ scanId, handoffClaimToken, phase })` at real phase transitions: `threat_model` after ready preflight, `discovery` before investigation, `validation` before validation, `attack_path` before reachability assessment, and `reporting` before final draft assembly. Preserve the current phase when work overlaps and use returned `scan.userContext` for the new phase and its workers.
+Use `update_codex_security_scan_progress({ scanId, handoffClaimToken, phase })` at real phase transitions: `threat_model` before mapping security boundaries, `discovery` before investigation, `validation` before validation, `attack_path` before reachability assessment, and `reporting` before final draft assembly. Preserve the current phase when work overlaps; never move backward or repeat completed work. Use returned `scan.userContext` for the new phase and its workers.
 
 Report meaningful completed-review batches. Increase the investigator total before dispatching a new assignment; the independent baseline auditor is not part of that total. Capture completed source-backed investigations as coverage surfaces before increasing `review_receipts`. Use actual findings and artifact completion for later counts, without extra receipt files.
 

@@ -29,7 +29,7 @@ class ReportProjectionError(ValueError):
 def _text(value: Any, fallback: str) -> str:
     candidate = value if isinstance(value, str) and value.strip() else fallback
     normalized = " ".join(candidate.split())
-    if re.match(r"^(?:#{1,6}\s|[-*+]\s|>\s|```|\d+\.\s|\|)", normalized):
+    if re.match(r"^(?:#{1,6}\s|[-*+]\s|>\s|```|~~~|\d+[.)]\s|\|)", normalized):
         normalized = f"Text: {normalized}"
     return "".join(
         part if index % 2 else re.sub(r"([\\`*_\[\]<>])", r"\\\1", part)
@@ -47,7 +47,8 @@ def _strings(value: Any) -> list[str]:
 
 def _path_label(value: str) -> str:
     if "," in value or value != " ".join(value.split()) or any(ord(c) < 32 for c in value):
-        return json.dumps(value)
+        quoted = json.dumps(value, ensure_ascii=False)
+        return "".join(c if c.isprintable() else json.dumps(c)[1:-1] for c in quoted)
     return value
 
 

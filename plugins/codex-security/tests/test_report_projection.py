@@ -62,6 +62,19 @@ def test_projection_normalizes_structured_fields() -> None:
     assert "Text: ## Injected remediation - unsafe instruction" in markdown
 
 
+def test_projection_normalizes_tilde_fences_and_parenthesized_lists() -> None:
+    manifest, findings, coverage = canonical_documents()
+    finding = findings["findings"][0]
+    finding["summary"] = "~~~\ncode fence\n~~~"
+    finding["remediation"] = "1) Validate the record length."
+
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+
+    assert "\n~~~" not in markdown
+    assert "Text: ~~~ code fence ~~~" in markdown
+    assert "Text: 1) Validate the record length." in markdown
+
+
 @pytest.mark.parametrize("linked_writeup", [False, True], ids=["inline", "linked"])
 def test_projection_retains_distinct_source_fixes(linked_writeup: bool) -> None:
     manifest, findings, coverage = canonical_documents()
@@ -729,6 +742,15 @@ def test_projection_distinguishes_repeated_spaces_from_ordinary_path_spacing() -
     markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
 
     assert '- Included paths: `"a  b"`, a b, `" "`, `"  "`' in markdown
+
+
+def test_projection_keeps_printable_non_ascii_in_quoted_paths() -> None:
+    manifest, findings, coverage = canonical_documents()
+    coverage["includePaths"] = ["docs/Résumé, final.md", "docs/a\u202eb, c.md"]
+
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+
+    assert '- Included paths: `"docs/Résumé, final.md"`, `"docs/a\\u202eb, c.md"`' in markdown
 
 
 def test_projection_includes_exact_target_identity() -> None:

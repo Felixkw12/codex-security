@@ -5,6 +5,26 @@ export type {
 } from "./artifact-export.js";
 export { CodexSecurity, createSecurity } from "./api.js";
 export {
+  runHostedRemediation,
+  HostedRemediationInputSchema,
+  HostedRemediationPreparationError,
+} from "./hosted-remediation.js";
+export type {
+  HostedRemediationInput,
+  HostedRemediationOptions,
+  HostedRemediationResult,
+  RemediationExecutor,
+  RemediationExecutionRequest,
+  RemediationExecutionResult,
+  RemediationExecutionEvent,
+} from "./hosted-remediation.js";
+export { runHostedRemediationProtocol } from "./hosted-remediation-protocol.js";
+export type {
+  FindingPatch,
+  FindingVerification,
+  FindingVerificationCheck,
+} from "./remediation.js";
+export {
   runHostedScan,
   HostedScanInputSchema,
   HostedScanPreparationError,
@@ -70,7 +90,7 @@ export type {
 export { estimateScanCost } from "./cost.js";
 export type { ScanCost, ScanSessionEvent, ScanWorkerEvent } from "./cost.js";
 export type { ScanTokenUsage } from "./cost-model.js";
-export type { DeepScanProgress } from "./deep-progress.js";
+export type { DeepScanProgress } from "./scan-progress.js";
 export type { CustomValidationResult } from "./custom-validation.js";
 export type { ScanActivity, ScanActivityStatus } from "./scan-activity.js";
 export { matchScanFindings } from "./scan-comparison.js";
@@ -182,6 +202,28 @@ export type {
   DeduplicationDiagnosticObserver,
 } from "./deduplication/diagnostics.js";
 export type { FindingEmbedder } from "./server/embeddings.js";
+export {
+  ExternalPublicationError,
+  prepareExternalPublication,
+  prepareNormalizedExternalPublication,
+} from "./external-findings-publish.js";
+export type {
+  ExternalPublicationOptions,
+  NormalizedExternalPublicationOptions,
+  ExternalPublicationDependencies,
+  ExternalPublicationPreview,
+  ExternalPublicationProgress,
+  ExternalPublicationResult,
+  PreparedExternalPublication,
+} from "./external-findings-publish.js";
+export type { ExternalFinding, ExternalFindings } from "./external-findings.js";
+export type {
+  ExternalFindingEvidence,
+  FindingImportRequest,
+  FindingImportReceipt,
+  ImportRepository,
+  SourceReport,
+} from "./external-import-models.js";
 export { importGitHubCodeScanningAlerts } from "./github.js";
 export type {
   GitHubCodeScanningImportOptions,
@@ -234,3 +276,21 @@ export {
 export type { NormalizedTarget, ScanMode, ScanTarget } from "./targets.js";
 export type { AbsolutePath } from "./config-path.js";
 export { BUNDLED_PLUGIN_VERSION, VERSION } from "./version.js";
+
+export {
+  classifySeverityRecords,
+  classifySeverityRecordsInputSchema,
+} from "./classify-severity-records.js";
+export type {
+  ClassifySeverityRecordsInput,
+  ClassifySeverityRecordsOptions,
+  ClassifySeverityRecordsResult,
+  CanonicalSeverityAssessment,
+  SeverityClassificationReviewRequest,
+} from "./classify-severity-records.js";
+export { validateRecords } from "./validation-records.js";
+export type {
+  ValidateRecordsInput,
+  ValidateRecordsOptions,
+  ValidationReviewRequest,
+} from "./validation-records.js";

@@ -194,6 +194,11 @@ Review coverage alongside findings. A report with no findings does not establish
 that the repository is secure. Reports and logs can contain source code,
 vulnerability details, and credentials; review them before sharing.
 
+Saved-history excerpts use scanned Git objects without fetching missing data.
+Working-tree diff scans omit excerpts, as do historical scans whose source or
+scope cannot be established. Unambiguous older scans remain readable. An omitted
+excerpt does not remove the finding.
+
 The SDK does not set your process's exit status. Use `hasFindingsAtOrAbove()`
 as in the example to enforce a severity threshold.
 
@@ -220,6 +225,7 @@ const result = await security.run("/path/to/repository", {
 | `scanPrompt` / `scanPromptFile`             | Additional scan instructions. Inline text takes precedence.                    |
 | `validationPrompt` / `validationPromptFile` | Custom validation instructions for standard scans.                             |
 | `postScanPrompt` / `postScanPromptFile`     | Follow-up instructions after the scan.                                         |
+| `ownerSuggestions`                          | Write optional owner suggestions after a committed scan (default: `false`).    |
 | `outputDir`                                 | Results directory; omit to use the state directory.                            |
 | `archiveExisting`                           | Move previous results aside before reusing `outputDir`.                        |
 | `maxCostUsd`                                | Stop at an estimated model cost; see [cost limits](#progress-and-cost).        |
@@ -227,6 +233,16 @@ const result = await security.run("/path/to/repository", {
 
 The exported `ScanOptions` type describes all options and callbacks. For full
 CLI behavior, see [scan options and output](docs/cli.md#scan-options-and-output).
+
+Set `ownerSuggestions: true` or run `codex-security scan --owner-suggestions`
+to write `owner-suggestions.json` beside a completed committed Git scan. Project
+files can set `scan.owner_suggestions: true`. The report uses the scan's finding
+IDs and frozen revision; it does not change the sealed findings or assign users.
+Owner failures leave the base scan completed and appear as
+`result.ownerSuggestionsError`; successful reports set `result.ownerSuggestionsPath`.
+Owner inference uses the scan's model and reasoning effort. Owner enrichment is
+skipped with a warning when `maxCostUsd` is set, because its inference cannot yet
+share the scan cost limit. Working-tree and directory snapshots are unsupported.
 
 ### Scan a diff
 
@@ -259,6 +275,13 @@ const security = new CodexSecurity({
 Constructor options are `codexOverrides`, `pythonPath`, and `pluginPath`.
 The bundled runtime and plugin are used by default. `pythonPath` overrides the
 `PYTHON` environment variable. To choose a model, set `codexOverrides.model`.
+
+To enable Daybreak on Codex 0.163.0 or later, set `codexOverrides.daybreak: true`.
+The toggle defaults off; an explicit `false` keeps it off. The setting reaches
+Deep Scan discovery and reducer workers, including resumed workers. Scans use
+isolated configuration, so a desktop toggle or personal Codex configuration does
+not configure an SDK scan. See [Daybreak opt-in](docs/cli.md#daybreak-opt-in) for
+CLI, project-file, and direct plugin configuration.
 
 New and resumed Deep Scans require a current plugin with
 `directDeepScanEngine: 1`, `workerProviderSnapshot: 4`, and isolated worker
@@ -331,6 +354,19 @@ console.log(plan);
 It does not verify credentials, model access, Python, or the plugin. The CLI
 equivalent is `scan --dry-run`.
 
+### Set investigation time
+
+```ts
+await security.run("/path/to/repository", { maxTimeMinutes: 15 });
+```
+
+`maxTimeMinutes` accepts positive fractional minutes. Standard scans use an
+advisory allowance, unset by default; Deep scans retain their enforced discovery
+limit. Scans may finish early and reporting may run longer. The CLI equivalent is
+`scan --max-time 15`; project files use `scan.max_time_minutes`. See
+[investigation time](docs/cli.md#set-investigation-time) for lifecycle and limit
+semantics. `maxCostUsd` and `signal` keep their existing behavior.
+
 ### Configure deep scans
 
 ```ts
@@ -341,7 +377,7 @@ const result = await security.run("/path/to/repository", {
   stopAfterNoNew: 3,
   stopAfterConsecutiveErrors: 3,
   maxDiscoveryRuns: 10,
-  maxTimeHours: 1.5,
+  maxTimeMinutes: 90,
 });
 ```
 
@@ -349,6 +385,8 @@ const result = await security.run("/path/to/repository", {
 within each worker. Time and run limits apply to discovery. After discovery
 stops, the scan combines and returns completed findings. See
 [deep scan settings](docs/cli.md#configure-deep-scans) for defaults and saved settings.
+Deep discovery retains its enforced deadline, with a default and maximum of
+5760 minutes. `maxTimeHours` remains a deprecated Deep-only alias in hours.
 
 ### Progress and cost
 
@@ -381,8 +419,14 @@ or planned counts, and cannot act as a pre-dispatch gate. Use `maxCostUsd` or
 `signal` for cancellation. Observer failures go to `onObserverError` without
 stopping the scan.
 
-`onWorkerStatus` remains available for tool-derived preflight status and
-**best-effort** phase dispatch counts from model-emitted text markers. A missing
+`onWorkerStatus` reports **best-effort** phase dispatch counts from model-emitted
+text markers. The former helper-derived `kind: "preflight"` event is retired;
+scans use available runtime tools and parent fallback without a capability registry.
+The plugin's `config_preflight.py` helper and custom capability registries are no
+longer supported, including the `preflightChecks` progress-tool input and workbench
+`--preflight-issues-json` / `--preflight-issues-json-stdin` arguments. Saved preflight
+history remains readable. Local `preflight()` input checks, authentication,
+sandbox enforcement, and Deep worker configuration still apply. A missing
 dispatch status does not mean delegation was skipped. `onSessionEvent` receives
 saved events with thread IDs and worker numbers and can contain source code or
 credentials. Deep scans additionally expose durable independent-review counts
@@ -431,6 +475,9 @@ and `signal` are also supported.
 To validate GitHub code scanning alerts, first import them with
 `importGitHubCodeScanningAlerts()`. See the
 [import guide](docs/cli.md#import-alerts-from-the-cli) for CLI and SDK examples.
+
+For host-managed model execution, use `validateRecords()` or `validate --records`.
+See [host-provided standalone validation](docs/validate-records.md).
 
 ### Generate and verify a patch
 
@@ -557,16 +604,18 @@ policy locations and reporting instructions, headless use, and saved artifacts.
 
 ### Exports and CI
 
-Export saved findings or a threat model without starting another analysis:
+Export a completed scan's findings to a SARIF file:
 
 ```bash
-cs export --scan SCAN_ID --export-format sarif --output results.sarif
-cs export --scan SCAN_ID --artifact threat-model --output threatmodel.md
+cs export /path/to/scan-results --output results.sarif
 ```
 
-The SDK provides `exportArtifact()` for the same offline operations. See
-[exports and CI](docs/cli.md#exports-and-ci) for details. For repository or pull
-request scans in GitHub Actions, use the
+Replace `/path/to/scan-results` with the results directory printed by `scan`.
+Export reads saved results, so you don't need to rerun the scan or sign in.
+
+See [exports and CI](docs/cli.md#exports-and-ci) for source fingerprints, other
+formats, threat models, and the `exportArtifact()` SDK method. For repository or
+pull request scans in GitHub Actions, use the
 [GitHub Action guide](https://github.com/openai/codex-security/blob/main/github-action/README.md).
 Separate examples cover
 [GitHub Actions with Bedrock](https://github.com/openai/codex-security/blob/main/examples/github-actions/README.md)
@@ -574,11 +623,17 @@ and [Azure Pipelines](https://github.com/openai/codex-security/blob/main/example
 
 ### Classify finding severity
 
-Use `classify-severity` with your own rubric to assess saved findings without
-changing their original severity or evidence. The SDK exposes `classifySeverity()`,
+Use `classify-severity` to assess saved findings with the built-in severity rubric
+or an explicit custom rubric, without changing their original severity or evidence.
+Each finding receives three independent reviews by default; the most common severity wins,
+with the highest severity breaking ties among the top vote counts.
+Use `--runs N` to request 1–10 reviews (default: 3). The SDK exposes `classifySeverity()`,
 `classifyScanSeverity()`, and `classifyScanDirectorySeverity()`. See
 [severity classification](docs/cli.md#classify-finding-severity) for selection,
 checkpointing, and publication behavior.
+
+For canonical records without a saved scan, use `classify-severity --records`
+or `classifySeverityRecords()` with [host-provided execution](docs/classify-severity-records.md).
 
 ### Suggest finding owners
 
@@ -594,6 +649,15 @@ It requires ChatGPT credentials; inference API keys and AWS credentials do not
 grant Cloud access. See [Cloud publication](docs/cli.md#publish-findings-to-cloud)
 for setup and review steps, or [Linear publication](docs/cli.md#publish-completed-scans-to-linear)
 for issue creation.
+
+The SDK also exposes `prepareExternalPublication(file, options)` for supported
+vendor exports and `prepareNormalizedExternalPublication(findings, options)` for
+normalized external evidence from any provider in the Cloud import contract.
+The normalized API accepts `NormalizedExternalPublicationOptions`; file readers
+use `ExternalPublicationOptions` for their supported formats. Both resolve the Cloud repository and return a
+`preview` plus a separate `publish()` operation. Inspect the preview before
+calling `publish()`. Imported evidence remains not assessed by Codex, and saved
+requests and receipts support retries after interruption.
 
 ## Findings storage and deduplication
 
@@ -628,6 +692,8 @@ The scan profile allows reads across the local filesystem and writes to workspac
 roots. Execution approvals are reviewed automatically and may grant extra
 permissions for an operation. Set `codexOverrides.approval_policy: "never"`
 (or CLI `--codex 'approval_policy="never"'`) to deny permission requests.
+If you select a Codex profile, its explicit `approval_policy` takes precedence
+over the root setting.
 Host and network restrictions still apply.
 
 Repository contents, model output, and imported artifacts do not authorize

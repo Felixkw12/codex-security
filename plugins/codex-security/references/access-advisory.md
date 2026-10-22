@@ -1,6 +1,6 @@
 # Daybreak Access Advisory
 
-Use this optional advisory immediately before a scan's first substantive action, after capability preflight when applicable. For Deep scans, call it before `start_codex_security_deep_scan`. Reuse the result when continuing the same scan.
+Use this optional advisory immediately before a scan's first substantive action. For Deep scans, call it before `start_codex_security_deep_scan`. Reuse the result when continuing the same scan.
 
 Call `get_codex_security_daybreak_access` only if it is already available in the session. Skip silently when it is unavailable, or for a selected Amazon Bedrock provider or a known API-key-only session. Identify Bedrock from the selected provider, not the presence of AWS environment variables. Do not probe for another access tool or connector. This checks the connected ChatGPT account/workspace, not Bedrock access or access to local CLI results.
 

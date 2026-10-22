@@ -60,7 +60,9 @@ On explicit cancellation, stop additional model work. Use retained results and e
 
 Link the generated `report.md` as the primary readable result. Mention material limitations and specific follow-up work; offer export, patching, or tracking only when relevant to the request. Do not initiate additional external actions or scans without authorization.
 
-After completion, report `usage.totalTokens`, `usage.inputTokens`, and `usage.cachedInputTokens` only when `usage.coverage` is `complete` and `usage.completion.finalized` is not `false`. Otherwise leave final-turn usage to the host or say it is unavailable; do not estimate, report zero, or present preliminary counts as final. Usage metadata does not justify changing sealed artifacts.
+After completion, report the latest `usage.totalTokens`, `usage.inputTokens` (including cached input), and `usage.cachedInputTokens`. If `usage.completion.finalized` is `false`, leave the total to the host, which includes this final turn; do not quote preliminary counts as final or as a lower bound. Otherwise label partial coverage as "at least X tokens; some usage unavailable" and explain its warnings. If usage is unavailable, say so instead of reporting zero. Retain any separate cost estimate.
+
+Include `byRole` when present and use `window` and `tokensUpdatedAt` to describe the measured period. For account allowance, quote the latest `accountRateLimits` observation and its `observedAt`; identify weekly limits by window duration. These account-wide readings may include other work, saved readings are historical, and absent readings or null windows mean allowance was not observed. Do not convert between tokens, estimated API cost, and subscription allowance or modify sealed artifacts to add this metadata.
 
 For Codex app rendering, emit one `::code-comment` per surviving finding and none otherwise. Keep its title, explanation, and location consistent with the canonical finding. Map `critical`, `high`, `medium`, and `low` to priorities 0, 1, 2, and 3 respectively:
 
