@@ -52,6 +52,28 @@ def _encode_retained_sources(
     return json.dumps(state, sort_keys=True)
 
 
+def _checkpoint_paths(scan_dir: Path, directory: str) -> list[str]:
+    return [
+        f"{directory}/{name}"
+        for name in _children(scan_dir, directory)
+        if re.fullmatch(r"[0-9a-f]{64}\.json", name)
+    ]
+
+
+def _worker_outputs(scan_dir: Path, worker: Any) -> list[tuple[str, int]]:
+    output = Path(worker["artifact_dir"]).relative_to(scan_dir)
+    attempts = (output.parent if output.name == "output" else output) / "attempts"
+    archived = [
+        ((attempts / name).as_posix(), int(name.split("-")[1]))
+        for name in _children(scan_dir, attempts.as_posix())
+        if re.fullmatch(r"attempt-\d+", name)
+    ]
+    attempt = int(worker["attempt"] or 0) if "attempt" in worker.keys() else 0
+    if worker["kind"] == "discovery" and not attempt:
+        attempt = max((attempt for _, attempt in archived), default=0) + 1
+    return [(output.as_posix(), attempt), *archived]
+
+
 def _children(scan_dir: Path, relative: str) -> list[str]:
     cursor = scan_dir
     for part in Path(relative).parts:
