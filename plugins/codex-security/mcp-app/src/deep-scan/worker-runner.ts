@@ -44,6 +44,7 @@ export interface AcceptedDiscovery {
   label: string;
   artifactDir: string;
   resultPath: string;
+  resultSha256?: string;
   result: ScanDraftInput;
   completionSequence: number;
   attempt: number;
@@ -264,6 +265,7 @@ export class DeepScanWorkerRunner {
       previousSourceCoverage,
     } = request;
     let { consumed, previousReducerResultPath } = request;
+    let previousReducerResultSha256: string | undefined;
     const { artifacts, run } = this.options;
     const reducerRoot = join(artifacts.dedupRoot, reducerLabel);
     const artifactDir = join(reducerRoot, "output");
@@ -286,6 +288,7 @@ export class DeepScanWorkerRunner {
     );
     if (claim) {
       previousReducerResultPath = claim.previousResultPath;
+      previousReducerResultSha256 = claim.previousResultSha256;
       const inputs =
         claimed?.persistedDedupInputs?.filter(
           (item) => item.dedupWorkerId === reducerId,
@@ -301,6 +304,7 @@ export class DeepScanWorkerRunner {
           return {
             ...discovery,
             resultPath: item.resultManifestPath,
+            resultSha256: item.resultManifestSha256,
             attempt: item.attempt ?? discovery.attempt,
           };
         });
@@ -326,10 +330,12 @@ export class DeepScanWorkerRunner {
         claimedWorkers: consumed.map((worker) => ({
           id: worker.id,
           resultPath: worker.resultPath,
+          resultSha256: worker.resultSha256,
           artifactDir: worker.artifactDir,
           attempt: worker.attempt,
         })),
         previousReducerResultPath,
+        previousReducerResultSha256,
       },
     };
     // Snapshot inputs before execution: direct file output has the same

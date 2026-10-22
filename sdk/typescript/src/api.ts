@@ -3103,7 +3103,7 @@ export class CodexSecurity {
         let artifactRestorer: ScanArtifactRestorer | null = null;
         try {
           artifactRestorer = await prepareArtifactRestorer(
-            { ...workbenchOptions, signal: undefined },
+            workbenchOptions,
             scanDir,
           );
           const savedDocument = (name: string) =>
@@ -3444,14 +3444,37 @@ export class CodexSecurity {
         const workbenchOptions = { ...activeScan.options, signal: undefined };
         // The workbench owns the running-state check and repeated cancellation.
         // Selection may have committed before the SDK received its response.
-        await workbench(workbenchOptions, [
+        const cancelArgs = [
           "cancel-scan",
           "--scan-id",
           activeScan.id,
           ...(observedScanThreadId === undefined
             ? []
             : ["--thread-id", observedScanThreadId]),
-        ]).catch(() => undefined);
+        ];
+        try {
+          await workbench(workbenchOptions, cancelArgs);
+        } catch (cancellationError) {
+          try {
+            await workbench(workbenchOptions, cancelArgs);
+          } catch {
+            // A lost response may follow a committed cancellation. Reconcile it
+            // before reporting interruption while the saved scan is still running.
+            const saved = await workbench(
+              workbenchOptions,
+              workbenchArgs("get-scan", { scanId: activeScan.id }),
+            ).catch(() => undefined);
+            const scan = saved?.["scan"];
+            const progress = isRecord(scan) ? scan["progress"] : undefined;
+            const status = isRecord(progress) ? progress["status"] : undefined;
+            if (
+              status !== "canceled" &&
+              status !== "complete" &&
+              status !== "failed"
+            )
+              throw cancellationError;
+          }
+        }
       }
       // Publication failures remain resumable. A cost stop or explicit client close
       // still uses the existing failure path to retain partial results and stop work.

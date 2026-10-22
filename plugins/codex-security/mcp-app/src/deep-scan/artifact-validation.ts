@@ -181,6 +181,7 @@ export async function validateDiscoveryArtifacts(
   validateWriteups = true,
   accepted = false,
   artifactDir = dirname(resultPath),
+  resultSha256?: string,
 ): Promise<ScanDraftInput> {
   const result = await readDiscoveryAuditDraft(
     artifacts,
@@ -189,6 +190,7 @@ export async function validateDiscoveryArtifacts(
     validateWriteups,
     accepted,
     artifactDir,
+    resultSha256,
   );
   if (result.complete === false)
     throw new Error(
@@ -204,10 +206,14 @@ export async function readDiscoveryAuditDraft(
   validateWriteups = true,
   accepted = false,
   artifactDir = dirname(resultPath),
+  resultSha256?: string,
 ): Promise<ScanDraftInput> {
   await requireRegularFile(resultPath, artifacts.workersRoot);
   const result = parseStoredScanDraft(
-    await readJsonObject(resultPath),
+    await readJsonObject(resultPath, {
+      scanRoot: artifacts.scanDir,
+      sha256: resultSha256,
+    }),
     "Standard scan worker",
     expectedScanId,
     accepted ? parseAcceptedDiscoveryDraft : parsePersistedScanDraft,
@@ -267,8 +273,10 @@ export async function validateReducerArtifacts(
     artifacts: DeepScanArtifacts;
     artifactDir: string;
     resultPath: string;
+    resultSha256?: string;
     reducerId: string;
     previousReducerResultPath?: string;
+    previousReducerResultSha256?: string;
     sources?: DeepReductionSources;
     persistSourceCoverage?: boolean;
     accepted?: boolean;
@@ -285,7 +293,10 @@ export async function validateReducerArtifacts(
 
   await requireRegularFile(resultPath, artifactDir);
   let result = parseStoredScanDraft(
-    await readJsonObject(resultPath),
+    await readJsonObject(resultPath, {
+      scanRoot: artifacts.scanDir,
+      sha256: input.resultSha256,
+    }),
     reducerId,
     expectedScanId,
     (value) => parseDeepReduction(value, input.accepted),
@@ -299,7 +310,10 @@ export async function validateReducerArtifacts(
   if (!input.sources && previousReducerResultPath) {
     await requireRegularFile(previousReducerResultPath, artifacts.dedupRoot);
     previous = parseStoredScanDraft(
-      await readJsonObject(previousReducerResultPath),
+      await readJsonObject(previousReducerResultPath, {
+        scanRoot: artifacts.scanDir,
+        sha256: input.previousReducerResultSha256,
+      }),
       "Previous successful reducer",
       result.scanId,
       (value) => parseDeepReduction(value, true),

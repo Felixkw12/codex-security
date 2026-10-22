@@ -51,6 +51,8 @@ const { createCodexSecurityServer } = await importModule({
         build.onLoad({ filter: /[/\\]deep-scan[/\\]executor\.ts$/ }, () => ({
           contents: `export class CodexSdkWorkerExecutor { constructor() { return ${fixtureAccess}.executor; } }
             export const resolveCodexPath = () => process.execPath;
+            export const workerRuntimeConfiguration = () => ({});
+            export const workerRuntimeConfigDigest = () => "0".repeat(64);
             export const workerRuntimeSettingsFromConfig = () => ({});`,
           loader: "ts",
         }));

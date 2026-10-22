@@ -55,7 +55,10 @@ export async function readDeepReductionSources(
           bound.artifacts.workersRoot,
         );
         const result = parseStoredScanDraft(
-          await readJsonObject(worker.resultPath),
+          await readJsonObject(worker.resultPath, {
+            scanRoot: bound.artifacts.scanDir,
+            sha256: worker.resultSha256,
+          }),
           "Accepted Standard worker " + worker.id,
           bound.scanId,
           parseAcceptedDiscoveryDraft,
@@ -205,7 +208,10 @@ async function readPreviousReduction(
     bound.artifacts.dedupRoot,
   );
   return parseStoredScanDraft(
-    await readJsonObject(previousReducerResultPath),
+    await readJsonObject(previousReducerResultPath, {
+      scanRoot: bound.artifacts.scanDir,
+      sha256: bound.state.previousReducerResultSha256,
+    }),
     "The previous accepted Deep reduction",
     bound.scanId,
     (value) => parseDeepReduction(value, true),

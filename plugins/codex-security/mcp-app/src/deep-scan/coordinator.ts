@@ -1271,6 +1271,9 @@ export class DeepScanCoordinator {
         this.state.workflowVersion === "deep-security-scan/v2",
         true,
         worker.artifactDir,
+        resultPath === claimedInput?.resultManifestPath
+          ? claimedInput.resultManifestSha256
+          : undefined,
       );
       recovered.push({
         id: worker.id,
@@ -1316,12 +1319,13 @@ export class DeepScanCoordinator {
       });
     for (const worker of completedReducers) {
       // A later merge claim can retain a legacy aggregate's accepted reference.
+      const nextClaim = this.state.persistedMergeClaims?.find(
+        (claim) =>
+          claim.previousWorkerId === worker.id && claim.previousResultPath,
+      );
       const resultPath =
         worker.acceptedResultPath ??
-        this.state.persistedMergeClaims?.find(
-          (claim) =>
-            claim.previousWorkerId === worker.id && claim.previousResultPath,
-        )?.previousResultPath ??
+        nextClaim?.previousResultPath ??
         worker.resultManifestPath;
       if (!resultPath) {
         throw new Error(
@@ -1337,6 +1341,7 @@ export class DeepScanCoordinator {
             discovery && {
               ...discovery,
               resultPath: input.resultManifestPath ?? discovery.resultPath,
+              resultSha256: input.resultManifestSha256,
               attempt: input.attempt ?? discovery.attempt,
             }
           );
@@ -1355,11 +1360,16 @@ export class DeepScanCoordinator {
           artifacts: this.artifacts,
           artifactDir: worker.artifactDir,
           resultPath,
+          resultSha256:
+            resultPath === nextClaim?.previousResultPath
+              ? nextClaim.previousResultSha256
+              : undefined,
           reducerId: worker.id,
           accepted: true,
           previousReducerResultPath: claim
             ? claim.previousResultPath
             : latestResultPath,
+          previousReducerResultSha256: claim?.previousResultSha256,
         },
         this.state.scanId,
       );
@@ -1374,6 +1384,7 @@ export class DeepScanCoordinator {
             claimedWorkers: accepted.map((source) => ({
               id: source.id,
               resultPath: source.resultPath,
+              resultSha256: source.resultSha256,
               artifactDir: source.artifactDir,
               attempt: source.attempt,
             })),

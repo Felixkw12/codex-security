@@ -143,7 +143,11 @@ const cases: {
   unpricedUsage?: boolean;
   statusReadFault?: boolean;
   resumeStatusFault?: "transport" | "missing-selection" | "stopped";
-  cancellationFault?: "status-read" | "deep-state-read" | "cancel-response";
+  cancellationFault?:
+    | "status-read"
+    | "deep-state-read"
+    | "cancel-response"
+    | "cancel-before-commit";
   historicalFindings?: boolean;
   changedHistoricalFollowUp?: boolean;
   completeBeforePreparation?: boolean;
@@ -206,6 +210,15 @@ const cases: {
     outcome: "canceled-during-publication",
     cancellationFault: "status-read",
   },
+  ...(
+    [
+      "canceled-during-publication",
+      "canceled-during-resumed-publication",
+    ] as const
+  ).map((outcome) => ({
+    outcome,
+    cancellationFault: "cancel-before-commit" as const,
+  })),
   {
     outcome: "canceled-during-publication",
     cancellationFault: "cancel-response",
@@ -487,6 +500,13 @@ for (const {
               throw new Error(
                 "Synthetic budget completion failure before commit",
               );
+            if (
+              args[0] === "cancel-scan" &&
+              cancellationFault === "cancel-before-commit" &&
+              commands.filter((command) => command === "cancel-scan").length ===
+                1
+            )
+              throw new Error("Synthetic cancellation failure before commit");
             const result = await runWorkbench(options, args, input);
             if (
               args[0] === "get-deep-scan" &&
@@ -1128,7 +1148,12 @@ for (const {
         ).toEqual(originalFinalizationInput);
         expect(
           commands.filter((command) => command === "cancel-scan"),
-        ).toHaveLength(1);
+        ).toHaveLength(
+          cancellationFault === "cancel-response" ||
+            cancellationFault === "cancel-before-commit"
+            ? 2
+            : 1,
+        );
         expect(commands).not.toContain("fail-scan");
         expect(modelInputs.length).toBe(1);
         if (cancellationFault === "cancel-response") {
