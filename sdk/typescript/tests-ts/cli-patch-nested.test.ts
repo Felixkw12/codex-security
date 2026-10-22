@@ -9,7 +9,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { join, relative, resolve } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 import { dependencies } from "./cli-fixtures.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import {
@@ -419,8 +419,11 @@ describe("patch change tracking", () => {
     );
     if (moving) {
       expect(outcome.exitCode, outcome.stderr).toBe(2);
-      expect(outcome.stderr).toContain(
-        `Git configuration changed during the patch: ${configurationPath}`,
+      expect(outcome.stderr.replaceAll(sep, "/")).toContain(
+        `Git configuration changed during the patch: ${configurationPath}`.replaceAll(
+          sep,
+          "/",
+        ),
       );
       expect(assessments).toBe(0);
       expect(bookkeeping).toEqual([]);
