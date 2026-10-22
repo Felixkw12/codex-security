@@ -2218,6 +2218,88 @@ with sqlite3.connect(sys.argv[1]) as connection:
 );
 
 test.each([
+  ["deleted-checkout", "Repository is not a directory"],
+  ["replaced-checkout", "selected checkout path was replaced"],
+  ["wrong-owner", "another Codex thread"],
+  ["wrong-claim", "another continuation"],
+  ["changed-artifact", "Cannot resume sealed scan"],
+] as const)(
+  "unbound sealed native registration retains its bindings (%s)",
+  async (scenario, message) => {
+    const f = await interruptedScan("deep");
+    await finishDiscovery(f);
+    await f.command(["prepare-scan-completion", "--scan-id", f.scanId]);
+    const claim = randomUUID();
+    execFileSync(f.python, [
+      "-c",
+      `import sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as connection:
+    connection.execute(
+        "UPDATE scans SET recipe_json = NULL, deep_scan_owner_thread_id = ?, handoff_claim_token = ? WHERE id = ?",
+        (sys.argv[3], sys.argv[4], sys.argv[2]),
+    )
+`,
+      join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+      f.scanId,
+      f.threadId,
+      claim,
+    ]);
+    if (scenario === "deleted-checkout")
+      await rm(f.repository, { recursive: true });
+    if (scenario === "replaced-checkout") {
+      await rename(f.repository, join(f.root, "original-repository"));
+      await mkdir(f.repository);
+      await writeFile(join(f.repository, "source.py"), "# replacement\n");
+    }
+    if (scenario === "changed-artifact")
+      await appendFile(join(f.scanDir, "findings.json"), "\n");
+    const names = [
+      "scan-manifest.json",
+      "findings.json",
+      "coverage.json",
+      "report.md",
+    ];
+    const artifacts = await Promise.all(
+      names.map((name) => readFile(join(f.scanDir, name))),
+    );
+    const before = await f.command(["get-scan", "--scan-id", f.scanId]);
+    expect(before["recipe"]).toBeUndefined();
+    const client = resumeClient(f, () => ({
+      startThread() {
+        throw new Error("Rejected registration must not execute.");
+      },
+      resumeThread() {
+        throw new Error("Rejected registration must not execute.");
+      },
+    }))({ codexOverrides: f.recipe.config });
+    try {
+      await expect(
+        client.run(f.repository, {
+          mode: "deep",
+          outputDir: f.scanDir,
+          registeredScan: {
+            scanId: f.scanId,
+            scanDir: f.scanDir,
+            threadId: scenario === "wrong-owner" ? "other-owner" : f.threadId,
+            handoffClaimToken:
+              scenario === "wrong-claim" ? randomUUID() : claim,
+          },
+          ...f.recipe.deepScan,
+        }),
+      ).rejects.toThrow(message);
+      expect(await f.command(["get-scan", "--scan-id", f.scanId])).toEqual(
+        before,
+      );
+      expect(
+        await Promise.all(names.map((name) => readFile(join(f.scanDir, name)))),
+      ).toEqual(artifacts);
+    } finally {
+      await client.close();
+    }
+  },
+);
+
+test.each([
   [null, false, false],
   ["native-unbound", false, false],
   [undefined, false, false],

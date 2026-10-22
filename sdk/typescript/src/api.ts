@@ -1851,39 +1851,42 @@ export class CodexSecurity {
           ]);
           const recipe = saved["recipe"];
           const scan = saved["scan"];
-          const target = isRecord(recipe) ? recipe["target"] : undefined;
-          if (
-            !isRecord(recipe) ||
-            !isRecord(scan) ||
-            !isRecord(target) ||
-            typeof recipe["repository"] !== "string" ||
-            (recipe["mode"] !== "standard" && recipe["mode"] !== "deep") ||
-            !Array.isArray(target["paths"]) ||
-            !target["paths"].every((path) => typeof path === "string") ||
-            scan["scanId"] !== resumeScanId ||
-            typeof scan["targetPath"] !== "string" ||
-            !isAbsolute(recipe["repository"]) ||
-            scan["targetPath"] !==
-              (await canonicalConfigPath(recipe["repository"]))
-          )
-            throw new CodexSecurityError(
-              "The workbench returned mismatched scan resume context.",
-            );
-          if (scan["scanDir"] !== output)
-            throw new CodexSecurityError(
-              "Saved scan registration must match its target, directory and mode.",
-            );
-          sealedTarget = {
-            repository: scan["targetPath"],
-            target: target as unknown as NormalizedTarget,
-            mode: recipe["mode"],
-            repositoryRevision:
-              typeof recipe["repositoryRevision"] === "string"
-                ? recipe["repositoryRevision"]
-                : null,
-            pluginRoot,
-            protectedRoots,
-          };
+          // An unbound native scan still needs normal target and recipe registration.
+          if (recipe !== undefined || options.registeredScan === undefined) {
+            const target = isRecord(recipe) ? recipe["target"] : undefined;
+            if (
+              !isRecord(recipe) ||
+              !isRecord(scan) ||
+              !isRecord(target) ||
+              typeof recipe["repository"] !== "string" ||
+              (recipe["mode"] !== "standard" && recipe["mode"] !== "deep") ||
+              !Array.isArray(target["paths"]) ||
+              !target["paths"].every((path) => typeof path === "string") ||
+              scan["scanId"] !== resumeScanId ||
+              typeof scan["targetPath"] !== "string" ||
+              !isAbsolute(recipe["repository"]) ||
+              scan["targetPath"] !==
+                (await canonicalConfigPath(recipe["repository"]))
+            )
+              throw new CodexSecurityError(
+                "The workbench returned mismatched scan resume context.",
+              );
+            if (scan["scanDir"] !== output)
+              throw new CodexSecurityError(
+                "Saved scan registration must match its target, directory and mode.",
+              );
+            sealedTarget = {
+              repository: scan["targetPath"],
+              target: target as unknown as NormalizedTarget,
+              mode: recipe["mode"],
+              repositoryRevision:
+                typeof recipe["repositoryRevision"] === "string"
+                  ? recipe["repositoryRevision"]
+                  : null,
+              pluginRoot,
+              protectedRoots,
+            };
+          }
         }
       }
       const inputs =
@@ -1960,7 +1963,7 @@ export class CodexSecurity {
           this.#runtime?.plugin.pluginRoot ??
           this.#dependencies.ambientExecution?.pluginRoot;
         if (pluginRoot === undefined) {
-          reportWorkspace = await mkdtemp(
+          reportWorkspace ??= await mkdtemp(
             join(temporaryRoot!, "codex-security-report-"),
           );
           pluginRoot = await resolvePluginPath(
