@@ -145,6 +145,11 @@ const compressionRuntimes = [
   "without-decoder-budgeted",
   "without-decoder-optional",
   "without-decoder-unrelated",
+  "corrupt-unrelated-budgeted",
+  "corrupt-noncanonical-budgeted",
+  "corrupt-unknown-budgeted",
+  "corrupt-attributed-budgeted",
+  "corrupt-attributed-optional",
 ] as const;
 const cases: {
   outcome: (typeof outcomes)[number];
@@ -234,6 +239,7 @@ for (const {
   const budgeted = outcome.startsWith("budget-");
   const canceledFollowUp = outcome.endsWith("followup-canceled");
   const loseCompletionResponse = outcome.startsWith("lost-completion-response");
+  const corruptArchive = compressionRuntime?.startsWith("corrupt-") === true;
   const name =
     outcome === "followup-canceled"
       ? "SDK preserves a selected aggregate when its follow-up is canceled"
@@ -280,6 +286,7 @@ for (const {
     const modelInputs: string[] = [];
     const commands: string[] = [];
     const reportedCosts: number[] = [];
+    const reportedWarnings: string[] = [];
     const usagePath = join(
       codexHome,
       "sessions",
@@ -728,47 +735,92 @@ for (const {
           const archive = join(workerHome, "archived_sessions");
           await mkdir(archive, { recursive: true });
           const timestamp = new Date().toISOString();
+          const unrelatedRootId = "a5cbe3b8-2171-4708-907d-b4f03c207b94";
+          const knownUnrelated =
+            compressionRuntime === "corrupt-unrelated-budgeted" ||
+            compressionRuntime === "corrupt-noncanonical-budgeted";
           const archivedThreadId =
-            compressionRuntime === "without-decoder-unrelated"
+            compressionRuntime === "without-decoder-unrelated" ||
+            knownUnrelated ||
+            compressionRuntime === "corrupt-unknown-budgeted"
               ? "01fb9839-ef7a-4cff-965b-4477cc64ee90"
               : workerThreadId;
-          await writeFile(
-            join(archive, `rollout-${archivedThreadId}.jsonl.zst`),
-            zstdCompressSync(
-              [
-                {
-                  type: "session_meta",
-                  payload: {
-                    id: archivedThreadId,
-                    timestamp,
-                    cwd: join(
-                      scanDir,
-                      "artifacts",
-                      "deep_discovery",
-                      "review-1",
-                      "output",
-                    ),
-                  },
-                },
-                {
-                  type: "token_usage_record",
+          const archiveName = corruptArchive
+            ? `rollout-2026-10-22T01-02-03-${archivedThreadId}`
+            : `rollout-${archivedThreadId}`;
+          const archivedUsage =
+            [
+              {
+                type: "session_meta",
+                payload: {
+                  id: archivedThreadId,
                   timestamp,
-                  payload: {
-                    thread_id: archivedThreadId,
-                    turn_id: "synthetic-worker-turn",
-                    response_id: "synthetic-worker-response",
-                    model: "gpt-5.6-sol",
-                    usage: {
-                      input_tokens: 1_250,
-                      cached_input_tokens: 200,
-                      output_tokens: 30,
-                    },
+                  cwd: knownUnrelated
+                    ? join(root, "unrelated-repository")
+                    : join(
+                        scanDir,
+                        "artifacts",
+                        "deep_discovery",
+                        "review-1",
+                        "output",
+                      ),
+                  ...(knownUnrelated
+                    ? {
+                        source: {
+                          subagent: {
+                            thread_spawn: { parent_thread_id: unrelatedRootId },
+                          },
+                        },
+                      }
+                    : {}),
+                },
+              },
+              {
+                type: "token_usage_record",
+                timestamp,
+                payload: {
+                  thread_id: archivedThreadId,
+                  turn_id: "synthetic-worker-turn",
+                  response_id: "synthetic-worker-response",
+                  model: "gpt-5.6-sol",
+                  usage: {
+                    input_tokens: 1_250,
+                    cached_input_tokens: 200,
+                    output_tokens: 30,
                   },
                 },
-              ]
-                .map((event) => JSON.stringify(event))
-                .join("\n") + "\n",
+              },
+            ]
+              .map((event) => JSON.stringify(event))
+              .join("\n") + "\n";
+          if (knownUnrelated) {
+            await writeFile(
+              join(archive, `${archiveName}.jsonl`),
+              archivedUsage,
+            );
+            await writeFile(
+              join(archive, `rollout-${unrelatedRootId}.jsonl`),
+              JSON.stringify({
+                type: "session_meta",
+                payload: {
+                  id: unrelatedRootId,
+                  timestamp,
+                  cwd: join(root, "unrelated-repository"),
+                  source: "cli",
+                },
+              }) + "\n",
+            );
+          }
+          const compressedUsage = zstdCompressSync(archivedUsage);
+          if (corruptArchive) compressedUsage[0] = compressedUsage[0]! ^ 0xff;
+          await writeFile(
+            join(
+              archive,
+              compressionRuntime === "corrupt-noncanonical-budgeted"
+                ? `arbitrary-${archivedThreadId}.jsonl.zst`
+                : `${archiveName}.jsonl.zst`,
             ),
+            compressedUsage,
           );
           const saved = await runWorkbench(
             {
@@ -781,7 +833,6 @@ for (const {
           expect(saved["scan"]).toMatchObject({
             executionAttribution: {
               codexHome: workerHome,
-              executionThreadIds: expect.arrayContaining([workerThreadId]),
               owner: {
                 threadId,
                 turnId: "synthetic-scan-turn",
@@ -793,6 +844,20 @@ for (const {
             (saved["scan"] as { executionAttribution: object })
               .executionAttribution,
           ).not.toHaveProperty("legacy");
+          const attribution = (
+            saved["scan"] as {
+              executionAttribution: { executionThreadIds: string[] };
+            }
+          ).executionAttribution;
+          expect(attribution.executionThreadIds).toContain(workerThreadId);
+          if (knownUnrelated) {
+            expect(attribution.executionThreadIds).not.toContain(
+              archivedThreadId,
+            );
+            expect(attribution.executionThreadIds).not.toContain(
+              unrelatedRootId,
+            );
+          }
         } else if (initialResumeUsage) await recordBudgetUsage();
         if (outcome === "restart-without-session") await rm(usagePath);
         if (outcome === "restart-archived-session") {
@@ -811,23 +876,38 @@ for (const {
           resumeScanId: scanId,
           outputDir: scanDir,
           postScanPrompt: followUp,
-          ...(compressionRuntime === "without-decoder-optional"
+          ...(compressionRuntime === "without-decoder-optional" ||
+          compressionRuntime === "corrupt-attributed-optional"
             ? {}
             : { maxCostUsd: 0.004 }),
           onCost: (cost) => reportedCosts.push(cost.estimatedUsd),
+          onWarning: (message) => reportedWarnings.push(message),
         });
-        if (compressionRuntime === "without-decoder-budgeted") {
+        if (
+          compressionRuntime === "without-decoder-budgeted" ||
+          compressionRuntime === "corrupt-attributed-budgeted" ||
+          compressionRuntime === "corrupt-unknown-budgeted" ||
+          compressionRuntime === "corrupt-noncanonical-budgeted"
+        ) {
           const error = await resumed.catch((error: unknown) => error);
           expect(error).toBeInstanceOf(ScanInterruptedError);
           expect((error as ScanInterruptedError).cause).toBe(
             originalResumeSignal?.reason,
           );
-          expect(String(originalResumeSignal?.reason)).toContain(
-            "cannot decode compressed usage",
-          );
-          expect(String(originalResumeSignal?.reason)).toContain(
-            workerThreadId,
-          );
+          if (corruptArchive) {
+            expect(originalResumeSignal?.reason).toBeInstanceOf(Error);
+            expect(originalResumeSignal?.reason).toMatchObject({
+              code: "ZSTD_error_prefix_unknown",
+              message: "Unknown frame descriptor",
+            });
+          } else {
+            expect(String(originalResumeSignal?.reason)).toContain(
+              "cannot decode compressed usage",
+            );
+            expect(String(originalResumeSignal?.reason)).toContain(
+              workerThreadId,
+            );
+          }
           expect(modelInputs).toHaveLength(1);
           expect(commands.slice(commandsBeforeResume)).not.toContain(
             "write-scan-draft",
@@ -878,6 +958,14 @@ for (const {
           expect(commands.slice(commandsBeforeResume)).toContain(
             "complete-scan",
           );
+          if (compressionRuntime === "corrupt-attributed-optional")
+            expect(reportedWarnings).toContain(
+              "Could not track scan activity: Unknown frame descriptor",
+            );
+          if (compressionRuntime === "corrupt-unrelated-budgeted")
+            expect(reportedWarnings).not.toContain(
+              "Could not track scan activity: Unknown frame descriptor",
+            );
         }
         expect(await readFile(selectedPath)).toEqual(selectedBytes!);
         return;
@@ -1222,18 +1310,20 @@ for (const {
     name,
     async () => {
       if (compressionRuntime) {
+        const decoderEnabled =
+          !compressionRuntime.startsWith("without-decoder-");
         const preload = join(
           await temporaryDirectory(),
           "zstd-capabilities.mjs",
         );
         await writeFile(
           preload,
-          `import zlib from "node:zlib";\n${compressionRuntime === "decoder-enabled" ? "" : "delete zlib.createZstdDecompress;\n"}`,
+          `import zlib from "node:zlib";\n${decoderEnabled ? "" : "delete zlib.createZstdDecompress;\n"}`,
         );
         if (runTestInSubprocess(fileURLToPath(import.meta.url), name, preload))
           return;
         expect(typeof zlib.createZstdDecompress === "function").toBe(
-          compressionRuntime === "decoder-enabled",
+          decoderEnabled,
         );
       }
       await runCase();

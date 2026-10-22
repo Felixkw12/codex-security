@@ -27,9 +27,14 @@ beforeAll(async () => {
   moduleSource = stdout;
 });
 
-test.each(["native", "without zstd"])(
-  "accounts for archived worker costs with Node's %s capabilities",
-  async (capabilities) => {
+test.each([
+  ["native", "ordinary"],
+  ["native", "reverted"],
+  ["without zstd", "ordinary"],
+  ["without zstd", "reverted"],
+] as const)(
+  "accounts for archived worker costs with Node's %s capabilities: %s rollout",
+  async (capabilities, layout) => {
     const root = await temporaryDirectory();
     const home = join(root, "home");
     const workerHome = join(root, "recorded-home");
@@ -40,6 +45,7 @@ test.each(["native", "without zstd"])(
       mkdir(archive, { recursive: true }),
     ]);
     const at = "2026-09-01T00:00:02Z";
+    const workerThreadId = "0198ff20-1b40-7000-8000-000000000001";
     const response = (
       threadId: string,
       responseId: string,
@@ -69,14 +75,15 @@ test.each(["native", "without zstd"])(
       join(sessions, "rollout-parent.jsonl"),
       rollout("parent", 100),
     );
-    const worker = join(archive, "rollout-worker.jsonl.zst");
-    await writeFile(worker, zstdCompressSync(rollout("worker", 1_000)));
+    const filename = `rollout-2026-09-01T00-00-02-${workerThreadId}${layout === "reverted" ? "_0198ff20-1b40-7000-8000-000000000002" : ""}.jsonl.zst`;
+    const worker = join(archive, filename);
+    await writeFile(worker, zstdCompressSync(rollout(workerThreadId, 1_000)));
     const extended = join(root, "extended.zst");
     await writeFile(
       extended,
       zstdCompressSync(
-        rollout("worker", 1_000) +
-          JSON.stringify(response("worker", "later-response", 500)) +
+        rollout(workerThreadId, 1_000) +
+          JSON.stringify(response(workerThreadId, "later-response", 500)) +
           "\n",
       ),
     );
@@ -97,8 +104,8 @@ test.each(["native", "without zstd"])(
       }
       const { ScanCostTracker } = await import(${JSON.stringify(pathToFileURL(module).href)});
       const tracker = new ScanCostTracker({ codexHome: ${JSON.stringify(home)}, model: "gpt-5.6-sol", maxCostUsd: 0.003 });
-      tracker.recordUsage({ input_tokens: 1, output_tokens: 0 }, "worker");
-      tracker.setAttributionReader(async () => ({ formatVersion: 1, codexHome: ${JSON.stringify(workerHome)}, executionThreadIds: ["parent", "worker"], owner: { threadId: "parent", turnId: "turn", startedAt: ${JSON.stringify(at)} }, startedAt: ${JSON.stringify(at)}, completedAt: null }));
+      tracker.recordUsage({ input_tokens: 1, output_tokens: 0 }, ${JSON.stringify(workerThreadId)});
+      tracker.setAttributionReader(async () => ({ formatVersion: 1, codexHome: ${JSON.stringify(workerHome)}, executionThreadIds: ["parent", ${JSON.stringify(workerThreadId)}], owner: { threadId: "parent", turnId: "turn", startedAt: ${JSON.stringify(at)} }, startedAt: ${JSON.stringify(at)}, completedAt: null }));
       tracker.start("parent");
       const snapshots = [];
       let error = null;
@@ -127,7 +134,7 @@ test.each(["native", "without zstd"])(
     } else {
       expect(result.snapshots).toEqual([]);
       expect(result.error).toContain("Cannot enforce the scan cost limit");
-      expect(result.error).toContain("rollout-worker.jsonl.zst");
+      expect(result.error).toContain(filename);
     }
   },
 );

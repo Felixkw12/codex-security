@@ -316,7 +316,11 @@ export class ScanCostTracker {
       this.#options.onActivity === undefined
         ? undefined
         : this.#options.repository;
-    const unreadable: Array<{ session: SessionUsage; error: unknown }> = [];
+    const unreadable: Array<{
+      path: string;
+      session: SessionUsage;
+      error: unknown;
+    }> = [];
     const compressedWithoutDecoder: string[] = [];
     const homes = new Set([this.#options.codexHome]);
     if (this.#workerCodexHome) homes.add(this.#workerCodexHome);
@@ -355,8 +359,11 @@ export class ScanCostTracker {
               this.#attribution,
             );
           } catch (error) {
-            if (session.threadId === null) throw error;
-            unreadable.push({ session, error });
+            if (session.threadId === null) {
+              if (!path.endsWith(".zst")) throw error;
+              this.#sessions.delete(path);
+            }
+            unreadable.push({ path, session, error });
           }
         }
       }
@@ -405,18 +412,24 @@ export class ScanCostTracker {
       }
       changed = included.size !== previousSize;
     }
-    for (const { session, error } of unreadable) {
-      if (included.has(session.threadId!)) throw error;
+    for (const { path, session, error } of unreadable) {
+      const threadId = session.threadId ?? compressedSessionThreadId(path);
+      // A filename alone cannot exclude an undiscovered descendant. Only a
+      // decoded counterpart supplies the identity used by existing membership.
+      if (
+        threadId === null ||
+        (session.threadId === null &&
+          ![...this.#sessions.values()].some(
+            (candidate) => candidate.threadId === threadId,
+          )) ||
+        included.has(threadId)
+      )
+        throw error;
     }
     if (this.#options.maxCostUsd !== undefined) {
       for (const path of compressedWithoutDecoder) {
-        const name = basename(path);
         for (const threadId of included) {
-          if (
-            name !== `${threadId}.jsonl.zst` &&
-            !name.endsWith(`-${threadId}.jsonl.zst`)
-          )
-            continue;
+          if (!compressedSessionMatchesThread(path, threadId)) continue;
           throw new CodexSecurityError(
             `Cannot enforce the scan cost limit because this runtime cannot decode compressed usage for thread ${threadId}: ${path}. Use a runtime with Zstandard support to resume this budgeted scan.`,
           );
@@ -763,6 +776,27 @@ export class ScanCostTracker {
     this.#lastUsage = signature;
     this.#options.onUsage?.(usage);
   }
+}
+
+function compressedSessionThreadId(path: string): string | null {
+  return (
+    /^rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-([\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12})(?:_[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12})?\.jsonl\.zst$/u.exec(
+      basename(path),
+    )?.[1] ?? null
+  );
+}
+
+function compressedSessionMatchesThread(
+  path: string,
+  threadId: string,
+): boolean {
+  const name = basename(path);
+  const suffix = `-${threadId}.jsonl.zst`;
+  return (
+    name === `${threadId}.jsonl.zst` ||
+    name.endsWith(suffix) ||
+    compressedSessionThreadId(path) === threadId
+  );
 }
 
 export async function* sessionFiles(
