@@ -121,7 +121,6 @@ import {
 } from "@openai/codex-sdk";
 import { z } from "zod";
 import { readThreatModelPath } from "./artifact-export.js";
-import type { HostedScanOptions } from "./hosted-scan.js";
 import { scanSkillConfig } from "./scan-skill-paths.js";
 import { isRecord } from "./record.js";
 import {
@@ -636,7 +635,6 @@ interface ClientDependencies {
   /** Explicit hosted execution; never falls back to createCodex. */
   hostedScan?: {
     executor: ScanExecutor;
-    ownerCodex: NonNullable<HostedScanOptions["ownerCodex"]>;
     context: Pick<
       ScanExecutionRequest,
       "repository" | "revision" | "scope" | "identity"
@@ -2731,6 +2729,7 @@ export class CodexSecurity {
               options.maxCostUsd !== undefined,
               discoveryPrompt,
               session.source.modelProvider,
+              options.ownerSuggestions,
             );
       checkOpen();
       const feedback =
@@ -3133,6 +3132,7 @@ export class CodexSecurity {
                   knowledgeBasePaths: knowledgeBase?.sources,
                   knowledgeBaseSnapshot: knowledgeBase?.snapshot,
                   scanPrompt: effectiveScanPrompt,
+                  ownerSuggestions: options.ownerSuggestions,
                   safetyIdentifier: options.safetyIdentifier,
                   requireCost:
                     options.requireCost === true ||
@@ -3436,10 +3436,6 @@ export class CodexSecurity {
       };
       if (options.ownerSuggestions && !options.deepScanPass) {
         try {
-          if (options.maxCostUsd !== undefined)
-            throw new Error(
-              "Owner suggestions are unavailable when maxCostUsd is set.",
-            );
           const { writeScanOwnerSuggestions } =
             await import("./scan-owner-suggestions.js");
           const writer = await prepareArtifactRestorer(
@@ -3455,7 +3451,6 @@ export class CodexSecurity {
               auth: options.auth,
               reasoningEffort: scanModelConfiguration(session.sessionConfig)
                 .reasoningEffort,
-              codex: this.#dependencies.hostedScan?.ownerCodex,
             },
             this.#surface,
           );

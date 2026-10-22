@@ -285,7 +285,7 @@ test("shared matching reads evidence through the prepared parent session", async
   expect(result.cost).not.toBeNull();
 });
 
-test("owner inference enriches only the completed Deep parent using its prepared session", async () => {
+test("owner reports use discovery hints without another turn and publish only on the Deep parent", async () => {
   const h = await fixture();
   git(h.repository, "init", "-q");
   git(h.repository, "add", ".");
@@ -306,32 +306,14 @@ test("owner inference enriches only the completed Deep parent using its prepared
       threadOptions.threadSource ===
       CODEX_SECURITY_THREAD_SOURCES.suggestOwners,
   );
-  expect(ownerTurns).toHaveLength(1);
-  const owner = ownerTurns[0]!;
-  expect(owner.options.env!["CODEX_SECURITY_SCAN_ID"]).toBe(
-    result.manifest.scan.id,
-  );
+  expect(ownerTurns).toHaveLength(0);
   expect(h.records.get(result.manifest.scan.id)?.mode).toBe("deep");
-  expect(owner.options.env!["SYNTHETIC_SETTING"]).toBe("captured");
-  expect(owner.threadOptions).toMatchObject({
-    approvalPolicy: "never",
-    networkAccessEnabled: false,
-    webSearchMode: "disabled",
-  });
-  const configuration = effectiveCodexConfiguration(owner.options);
-  expect(configuration).toMatchObject({
-    model: "gpt-6-astra",
-    model_reasoning_effort: "high",
-    features: { shell_tool: false, unified_exec: false, plugins: false },
-  });
-  expect(
-    (configuration["permissions"] as JsonObject)[
-      configuration["default_permissions"] as string
-    ],
-  ).toMatchObject({
-    filesystem: { [join(h.root, "private")]: "deny" },
-    network: { enabled: false },
-  });
+  const discoveryPrompts = h.completedPrompts.filter((prompt) =>
+    prompt.startsWith("Use [$codex-security]"),
+  );
+  expect(discoveryPrompts).toHaveLength(2);
+  for (const prompt of discoveryPrompts)
+    expect(prompt).toContain("extensions.ownerSuggestion");
   expect(
     JSON.parse(await readFile(result.ownerSuggestionsPath!, "utf8")),
   ).toMatchObject({
@@ -339,7 +321,7 @@ test("owner inference enriches only the completed Deep parent using its prepared
       {
         findingId: result.findings.findings[0]!.findingId,
         status: "abstained",
-        reason: "Synthetic owner inference abstains.",
+        reason: "The scan did not record a supported owner suggestion.",
       },
     ],
   });
