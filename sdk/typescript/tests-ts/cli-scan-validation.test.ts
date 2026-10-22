@@ -1,3 +1,4 @@
+import { writeFileSync } from "node:fs";
 import {
   copyFile,
   mkdir,
@@ -12,6 +13,7 @@ import { strToU8, zipSync } from "fflate";
 import { describe, expect, mock, spyOn, test } from "bun:test";
 import { main } from "../src/cli.js";
 import { CodexSecurity } from "../src/api.js";
+import { ScanResult } from "../src/index.js";
 import * as runtime from "../src/runtime.js";
 import {
   environmentWithGit,
@@ -98,6 +100,133 @@ describe("CLI scan validation preflight", () => {
     },
   );
 });
+
+test.each([false, true])(
+  "checks the recorded target after writing the validation report (changed: %p)",
+  async (changed) => {
+    const root = await temporaryDirectory("validation-final-target-");
+    try {
+      const repository = join(root, "repository");
+      const scanDir = join(root, "scan");
+      const knowledge = join(root, "policy.md");
+      await mkdir(repository);
+      await mkdir(scanDir, { mode: 0o700 });
+      const source = join(repository, "source.ts");
+      await writeFile(source, "export const value = 1;\n");
+      await writeFile(knowledge, "Synthetic validation policy.\n");
+      const environment = {
+        ...process.env,
+        CODEX_SECURITY_STATE_DIR: join(root, "state"),
+      };
+      const python = await resolvePluginPython({
+        environment,
+        protectedRoot: repository,
+      });
+      const workbench = { python, pluginRoot: PLUGIN_ROOT, environment };
+      const registered = await runWorkbench(workbench, [
+        "register-cli-scan",
+        "--repository",
+        repository,
+        "--scan-dir",
+        scanDir,
+        "--recipe-json",
+        JSON.stringify({
+          repository,
+          mode: "standard",
+          target: { kind: "repository", paths: [] },
+          config: {},
+        }),
+      ]);
+      const base = fakeResult(["high"]);
+      base.manifest.scan.id = String(registered["scanId"]);
+      const result = new ScanResult({
+        manifest: base.manifest,
+        findings: base.findings,
+        coverage: base.coverage,
+        scanDir,
+        threadId: base.threadId,
+        turnResult: base.turnResult,
+      });
+      const reportPath = join(scanDir, "validation.md");
+      const assessment = "Completed assessment before report serialization.";
+      const cli = createCliTest(main);
+      const deps = dependencies({
+        currentDirectory: repository,
+        environment,
+        result,
+        onValidate: async () => ({
+          disposition: "deferred",
+          get report() {
+            if (changed) writeFileSync(source, "export const value = 2;\n");
+            return assessment;
+          },
+          outputDir: join(root, "evidence"),
+          threadId: null,
+        }),
+      });
+      const checkTarget = mock<typeof deps.runWorkbench>(
+        async (
+          args,
+          input,
+          signal,
+          configuredPython,
+          protectedRoot,
+          protectedRoots,
+          pluginRoot,
+        ) => {
+          expect(args).toEqual([
+            "get-scan",
+            "--scan-id",
+            result.manifest.scan.id,
+            "--check-target",
+          ]);
+          expect(configuredPython).toBe(python);
+          expect(protectedRoot).toBe(repository);
+          expect(protectedRoots).toEqual([await realpath(knowledge)]);
+          expect(pluginRoot).toBe(PLUGIN_ROOT);
+          expect(signal).toBeInstanceOf(AbortSignal);
+          expect(await readFile(reportPath, "utf8")).toContain(assessment);
+          return runWorkbench({ ...workbench, signal }, args, input);
+        },
+      );
+      const exitCode = await cli.runCli(
+        [
+          "scan",
+          ".",
+          "--validate",
+          "--python",
+          python,
+          "--plugin-path",
+          PLUGIN_ROOT,
+          "--knowledge-base",
+          knowledge,
+          "--json",
+        ],
+        { ...deps, runWorkbench: checkTarget },
+      );
+      expect(exitCode, cli.stderr.text()).toBe(changed ? 2 : 0);
+      expect(checkTarget).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(cli.stdout.text())).toMatchObject({
+        manifest: { scan: { status: "completed" } },
+        validation: {
+          status: changed ? "failed" : "complete",
+          findings: 1,
+          reportPath,
+          ...(changed
+            ? {
+                message: expect.stringContaining(
+                  "Scan target contents changed",
+                ),
+              }
+            : {}),
+        },
+      });
+      expect(await readFile(reportPath, "utf8")).toContain(assessment);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
 
 for (const changed of ["unchanged", "content", "head"] as const)
   test(`cached empty scan validation checks current target: ${changed}`, async () => {

@@ -9851,6 +9851,27 @@ async function executeScan(
       scanDir = result.scanDir;
       repository = resolve(dependencies.currentDirectory(), repository);
       if (arguments_.validate) {
+        const scanId = result.manifest.scan.id;
+        const checkTarget = async () => {
+          const context = await dependencies.runWorkbench(
+            ["get-scan", "--scan-id", scanId, "--check-target"],
+            undefined,
+            preparationAbortController.signal,
+            config.pythonPath,
+            repository,
+            options.knowledgeBaseSnapshot?.protectedRoots,
+            config.pluginPath,
+          );
+          const scan = context["scan"];
+          if (
+            !isJsonObject(scan) ||
+            scan["targetPath"] !== (await realpath(repository))
+          ) {
+            throw new CodexSecurityError(
+              "The recorded scan target does not match the validation repository.",
+            );
+          }
+        };
         const findings = result.findings.findings;
         if (targetWarnings.length > 0) {
           validation = {
@@ -9859,29 +9880,7 @@ async function executeScan(
           };
         } else if (findings.length === 0) {
           try {
-            const context = await dependencies.runWorkbench(
-              [
-                "get-scan",
-                "--scan-id",
-                result.manifest.scan.id,
-                "--check-target",
-              ],
-              undefined,
-              preparationAbortController.signal,
-              config.pythonPath,
-              repository,
-              options.knowledgeBaseSnapshot?.protectedRoots,
-              config.pluginPath,
-            );
-            const scan = context["scan"];
-            if (
-              !isJsonObject(scan) ||
-              scan["targetPath"] !== (await realpath(repository))
-            ) {
-              throw new CodexSecurityError(
-                "The recorded scan target does not match the validation repository.",
-              );
-            }
+            await checkTarget();
             validation = { status: "complete", findings: 0 };
           } catch (error) {
             const message = errorMessage(error);
@@ -9935,6 +9934,7 @@ async function executeScan(
             } finally {
               await report.close();
             }
+            await checkTarget();
             validation = {
               status: "complete",
               findings: findings.length,
@@ -9987,8 +9987,11 @@ async function executeScan(
     arguments_.includeFailureResults &&
     (failed || requestedSignal !== null)
   ) {
-    if (result !== null) failureData = result.toJSON();
-    else if (registeredScan !== undefined) {
+    if (result !== null) {
+      failureData = result.toJSON();
+      if (validation !== undefined)
+        failureData = { ...failureData, validation };
+    } else if (registeredScan !== undefined) {
       try {
         const contract = await loadContract(registeredScan.scanDir, {
           pluginRoot: await bundledPluginRoot(),

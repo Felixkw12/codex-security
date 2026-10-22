@@ -96,6 +96,43 @@ def test_check_scan_target_rejects_changed_revision(
         workbench_api["remediation_checkout_snapshot"](stored_scan)
 
 
+def test_check_committed_diff_target_rejects_sparse_checkout_after_scan(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    initialize_git_repository(repository)
+    source = repository / "src" / "source.py"
+    source.parent.mkdir()
+    source.write_text("pass\n")
+    subprocess.run(["git", "add", "src/source.py"], cwd=repository, check=True)
+    subprocess.run(["git", "commit", "-qm", "Add source"], cwd=repository, check=True)
+    state_dir = tmp_path / "state"
+    (tmp_path / "results").mkdir(mode=0o700)
+    scan = create_cli_scan(
+        state_dir,
+        tmp_path / "results",
+        repository,
+        complete=False,
+        target={"kind": "refs", "paths": [], "base": "HEAD^", "head": "HEAD"},
+    )
+    command = ("get-scan", "--scan-id", scan["scanId"])
+    assert run_workbench(state_dir, *command, "--check-target")["scan"]["scanId"] == scan["scanId"]
+
+    subprocess.run(
+        ["git", "sparse-checkout", "set", "--no-cone", "/README.md"],
+        cwd=repository,
+        check=True,
+    )
+    assert not source.exists()
+    subprocess.run(["git", "diff", "--quiet", "HEAD"], cwd=repository, check=True)
+    assert run_workbench(state_dir, *command)["scan"]["scanId"] == scan["scanId"]
+    changed = run_workbench(state_dir, *command, "--check-target", check=False)
+    assert changed["returncode"] != 0
+    assert "full repository checkout" in changed["stderr"]
+
+    subprocess.run(["git", "sparse-checkout", "disable"], cwd=repository, check=True)
+    assert source.read_text() == "pass\n"
+    assert run_workbench(state_dir, *command, "--check-target")["scan"]["scanId"] == scan["scanId"]
+
+
 def test_check_scan_target_rejects_replaced_checkout(tmp_path: Path) -> None:
     repository = tmp_path / "repository"
     repository.mkdir()

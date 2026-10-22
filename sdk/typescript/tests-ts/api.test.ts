@@ -1176,7 +1176,14 @@ describe("CodexSecurity finding validation", () => {
     },
   );
 
-  test.each(["unchanged", "deleted", "modified", "git metadata", "unbound"])(
+  test.each([
+    "unchanged",
+    "deleted",
+    "modified",
+    "git metadata",
+    "unbound",
+    ...(process.platform === "win32" ? [] : ["insecure permissions"]),
+  ])(
     "checks saved validation evidence before cache reuse: %s",
     async (change) => {
       const python = await resolvePluginPython();
@@ -1236,6 +1243,8 @@ describe("CodexSecurity finding validation", () => {
           join(first.outputDir, ".git", "HEAD"),
           "Changed metadata.\n",
         );
+      if (change === "insecure permissions")
+        await chmod(first.outputDir, 0o777);
       const second = await client.validate(request);
       expect(modelCalls).toBe(change === "unchanged" ? 1 : 2);
       expect(await readFile(join(second.outputDir, "proof.txt"), "utf8")).toBe(
@@ -1243,6 +1252,13 @@ describe("CodexSecurity finding validation", () => {
       );
       expect(await client.validate(request)).toEqual(second);
       expect(modelCalls).toBe(change === "unchanged" ? 1 : 2);
+      if (change === "insecure permissions") {
+        expect(second.outputDir).not.toBe(first.outputDir);
+        expect(await readFile(join(first.outputDir, "proof.txt"), "utf8")).toBe(
+          "Synthetic evidence 1.\n",
+        );
+        await chmod(first.outputDir, 0o700);
+      }
     },
   );
 

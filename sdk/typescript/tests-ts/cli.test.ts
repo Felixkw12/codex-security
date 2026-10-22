@@ -641,6 +641,57 @@ describe("CLI", () => {
     },
   );
 
+  test.each(["json", "jsonl"])(
+    "retains completed validation after cleanup fails (%s full output)",
+    async (format) => {
+      const root = await mkdtemp(join(tmpdir(), "scan-validation-cleanup-"));
+      const repository = join(root, "repository");
+      const scanDir = join(root, "scan");
+      await mkdir(repository);
+      await mkdir(scanDir);
+      const stdout = capture();
+      const stderr = capture();
+      const message = `Synthetic runtime cleanup failure: ${SYNTHETIC_CREDENTIALS}`;
+      try {
+        expect(
+          await main(
+            ["scan", ".", "--validate", "--format", format, "--full-output"],
+            stdout.stream,
+            stderr.stream,
+            dependencies({
+              currentDirectory: repository,
+              result: scanResultAt(scanDir, ["high"]),
+              onWorkbench: async () => ({
+                scan: { targetPath: await realpath(repository) },
+              }),
+              onClose: () => {
+                throw new Error(message);
+              },
+            }),
+          ),
+        ).toBe(2);
+        expect(JSON.parse(stdout.text())).toMatchObject({
+          ok: false,
+          error: { code: "SCAN_FAILED", message },
+          data: {
+            manifest: { scan: { status: "completed" } },
+            validation: {
+              status: "complete",
+              findings: 1,
+              reportPath: join(scanDir, "validation.md"),
+            },
+          },
+        });
+        expect(stderr.text()).toContain(message);
+        expect(
+          await readFile(join(scanDir, "validation.md"), "utf8"),
+        ).toContain("Additional evidence is needed.");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   test("keeps earlier reports when retrying validation for a completed workflow scan", async () => {
     const root = await mkdtemp(join(tmpdir(), "scan-validation-retry-"));
     const repository = join(root, "repository");

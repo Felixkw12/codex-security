@@ -1,3 +1,4 @@
+import { realpath } from "node:fs/promises";
 import type { main } from "../src/cli.js";
 import type {
   CodexSecurity,
@@ -239,8 +240,10 @@ export function dependencies(
 ): MainDependencies {
   const signals = options.signals ?? new FakeSignals();
   const result = options.result ?? fakeResult();
+  let scannedRepository: string | undefined;
   const security = {
     run: async (repository: string, runOptions: ScanOptions) => {
+      scannedRepository = repository;
       options.onTurn?.(repository, runOptions);
       const signal = runOptions.signal;
       signal?.addEventListener("abort", () => options.onInterrupt?.(), {
@@ -309,7 +312,12 @@ export function dependencies(
       ? {}
       : { importGitHubAlerts: options.importGitHubAlerts }),
     runWorkbench: async (args, input, signal) =>
-      (await options.onWorkbench?.(args, input, signal)) ?? { scans: [] },
+      (await options.onWorkbench?.(args, input, signal)) ??
+      (args[0] === "get-scan" &&
+      args.includes("--check-target") &&
+      scannedRepository !== undefined
+        ? { scan: { targetPath: await realpath(scannedRepository) } }
+        : { scans: [] }),
     readSavedFindings:
       options.readSavedFindings ?? (async () => result.findings.findings),
     matchFindings: async (input, comparisonOptions) =>

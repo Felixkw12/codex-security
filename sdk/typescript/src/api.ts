@@ -1113,10 +1113,27 @@ export class CodexSecurity {
               (inputs.outputDir === null ||
                 inputs.outputDir === cached.data.assessment.outputDir)
             ) {
-              const evidence = await workflow.sourceSnapshot(
-                cached.data.assessment.outputDir,
-                { optional: true, evidence: true },
-              );
+              let cachedOutput: string | null =
+                cached.data.assessment.outputDir;
+              if (inputs.outputDir === null) {
+                try {
+                  cachedOutput = await prepareScanOutputDir(
+                    { outputDir: cachedOutput },
+                    inputs.protectedRoots,
+                    true,
+                  );
+                } catch (error) {
+                  if (!(error instanceof OutputDirectoryError)) throw error;
+                  cachedOutput = null;
+                }
+              }
+              const evidence =
+                cachedOutput === null
+                  ? null
+                  : await workflow.sourceSnapshot(cachedOutput, {
+                      optional: true,
+                      evidence: true,
+                    });
               if (
                 evidence !== null &&
                 workflowDigest(evidence) === cached.data.evidenceDigest

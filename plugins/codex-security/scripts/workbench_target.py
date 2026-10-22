@@ -470,6 +470,14 @@ def require_scan_target_unchanged(scan: sqlite3.Row) -> None:
     if scan["diff_target_kind"] == "working_tree":
         expected_digest = scan["diff_content_digest"]
     elif scan["diff_target_kind"] in {"commit", "range"}:
+        tracked = git_bytes(Path(scan["target_path"]), "ls-files", "-t", "-z")
+        if tracked is None:
+            raise SystemExit("Could not inspect tracked files in the scan target.")
+        if any(entry.startswith(b"S ") for entry in tracked.split(b"\0")):
+            raise SystemExit(
+                "Committed-diff scans require a full repository checkout. "
+                "Sparse checkouts are not supported; materialize skipped tracked files and retry."
+            )
         expected_digest = clean_worktree_content_digest()
     else:
         expected_digest = scan["target_snapshot_digest"]
