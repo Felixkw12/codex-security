@@ -1,7 +1,12 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
-import { discoverScaInputs, normalizeOsvOutput } from "../src/sca-osv.js";
+import {
+  discoverScaInputs,
+  normalizeOsvOutput,
+  runOsvScan,
+} from "../src/sca-osv.js";
+import { dependencyScanResult, saveDependencyScan } from "../src/sca.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import {
   compareScaResults,
@@ -238,6 +243,89 @@ describe("SCA report", () => {
     );
   });
 
+  test.skipIf(process.platform === "win32").each(
+    [
+      "selected\n# Synthetic clean result\n<!--/requirements.txt",
+      "selected\n\n```\n# Synthetic clean result\n<!--/requirements.txt",
+      "selected\r\n# Synthetic clean result\r\n<!--/requirements.txt",
+    ].flatMap((sourcePath) => [
+      { sourcePath, pinned: true },
+      { sourcePath, pinned: false },
+    ]),
+  )(
+    "retains literal multiline dependency paths in saved reports: %j",
+    async ({ sourcePath, pinned }) => {
+      const root = await temporaryDirectory("sca-report-multiline-");
+      const repository = join(root, "repository");
+      const output = join(root, "output");
+      await mkdir(dirname(join(repository, sourcePath)), { recursive: true });
+      await writeFile(
+        join(repository, sourcePath),
+        `synthetic-package${pinned ? "==" : ">="}1.2.3\n`,
+      );
+      const scan = await runOsvScan(
+        { repositoryPath: repository, outputDir: output },
+        {
+          executable: process.execPath,
+          runProcess: async (_executable, argv) =>
+            argv[0] === "--version"
+              ? {
+                  stdout: "osv-scanner version: 2.6.0",
+                  stderr: "",
+                  exitCode: 0,
+                }
+              : {
+                  stdout: JSON.stringify({
+                    results: [
+                      {
+                        source: { path: argv.at(-1), type: "lockfile" },
+                        packages: [
+                          {
+                            package: {
+                              name: "synthetic-package",
+                              version: "1.2.3",
+                              ecosystem: "PyPI",
+                            },
+                            vulnerabilities: [{ id: "SYNTHETIC-ADVISORY" }],
+                          },
+                        ],
+                      },
+                    ],
+                  }),
+                  stderr: "",
+                  exitCode: 1,
+                },
+        },
+      );
+      const result = dependencyScanResult(
+        scan,
+        { path: repository, revision: null, dirty: null },
+        output,
+      );
+      await saveDependencyScan(result);
+      const saved = JSON.parse(
+        await readFile(join(output, "sca-result.json"), "utf8"),
+      ) as ScaResult;
+      expect(saved.coverage.inputs[0]?.path).toBe(sourcePath);
+      expect(saved.coverage.inputs).toEqual(scan.coverage.inputs);
+      expect(saved.coverage.limitations).toEqual(scan.coverage.limitations);
+      expect(saved.diagnostics).toEqual(scan.diagnostics);
+      expect(saved.matches).toHaveLength(pinned ? 1 : 0);
+      const report = await readFile(join(output, "report.md"), "utf8");
+      const html = Bun.markdown.html(report);
+      expect(html).not.toContain("<h1>Synthetic clean result</h1>");
+      expect(html).not.toContain("<!--");
+      expect(html).toContain("<h2>Observed components</h2>");
+      expect(html).toContain("<h2>Retained evidence</h2>");
+      if (pinned) expect(html).toContain("SYNTHETIC-ADVISORY");
+      expect(report).toContain(JSON.stringify(sourcePath));
+      for (const limitation of scan.coverage.limitations.filter((value) =>
+        value.includes(sourcePath),
+      ))
+        expect(report).toContain(JSON.stringify(limitation));
+    },
+  );
+
   test.each(["partial", "failed"] as const)(
     "distinguishes a zero-match %s run from model assessment",
     (status) => {
@@ -297,6 +385,24 @@ describe("SCA report", () => {
     const result = fixture();
     result.components[0]!.name = "synthetic`package";
     expect(renderScaReport(result)).toContain("`` synthetic`package ``");
+  });
+
+  test("keeps multiline coverage diagnostics literal across platforms", () => {
+    const result = fixture();
+    const message = "Synthetic path\r\n```\r\n# Forged heading\r\n<!--";
+    result.coverage.inputs[0]!.reason = message;
+    result.coverage.limitations = [message];
+    result.diagnostics = [message];
+    const original = JSON.stringify(result);
+    const report = renderScaReport(result);
+    const html = Bun.markdown.html(report);
+    expect(html).not.toContain("<h1>Forged heading</h1>");
+    expect(html).not.toContain("<!--");
+    expect(html).toContain("<h2>Observed components</h2>");
+    expect(html).toContain("<h2>Retained evidence</h2>");
+    expect(html).toContain("SYNTHETIC-1");
+    expect(report).toContain(JSON.stringify(message));
+    expect(JSON.stringify(result)).toBe(original);
   });
 });
 
