@@ -6487,9 +6487,14 @@ describe("CodexSecurity orchestration", () => {
     },
   );
 
-  test.each([false, true])(
-    "requires usage only for a requested cost limit (%p)",
-    async (limited) => {
+  test.each([
+    [false, false],
+    [false, true],
+    [true, false],
+    [true, true],
+  ])(
+    "requires usage only for a requested cost limit (limited=%p, owners=%p)",
+    async (limited, ownerSuggestions) => {
       const { root, repository, codexHome, scanDir } = await scanDirectories();
       const warnings = mock((_warning: string) => {});
       const commands: Array<readonly string[]> = [];
@@ -6523,7 +6528,7 @@ describe("CodexSecurity orchestration", () => {
       try {
         const scan = client.run(repository, {
           ...(limited ? { maxCostUsd: 1 } : {}),
-          ownerSuggestions: true,
+          ownerSuggestions,
           onWarning: warnings,
         });
         if (limited) {
@@ -6552,7 +6557,13 @@ describe("CodexSecurity orchestration", () => {
           );
         }
         expect(threads).toBe(1);
-        expect(warnings).not.toHaveBeenCalled();
+        expect(warnings.mock.calls.map(([warning]) => warning)).toEqual(
+          !limited && ownerSuggestions
+            ? [
+                "Could not generate owner suggestions: Owner suggestions require a completed scan of committed Git content.",
+              ]
+            : [],
+        );
       } finally {
         await client.close();
       }
