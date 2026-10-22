@@ -53,8 +53,9 @@ in the evaluator.
 Each arm runs in an opaque temporary directory outside the artifact tree; pair
 and variant labels appear only in evaluator reports and archives. After the
 client closes, its scan output is archived and its state is removed before the
-next arm. Gold labels and prior-arm results are not next to the model's working
-directory or included in prompts. This is layout separation, not a filesystem
+next arm. If state removal fails, the failed attempt is recorded and the
+comparison stops before another arm starts. Gold labels and prior-arm results
+are not next to the model's working directory or included in prompts. This is layout separation, not a filesystem
 security boundary: production API-key authentication and root-read permissions
 remain unchanged. This eval does not test resumption or external publication.
 
@@ -63,7 +64,9 @@ remain unchanged. This eval does not test resumption or external publication.
 Artifacts are saved under ignored `reports/`, updated after every attempt:
 
 - `experiment.json`: settings, evaluator/shared-helper, source, full-plugin,
-  and built-SDK file hashes, plus SDK/Codex package versions. Generated reports
+  and built-SDK file hashes, plus SDK/Codex package versions and the selected
+  Codex executable paths and SHA-256 hashes, including a `CODEX_CLI_PATH` override.
+  npm launchers also record their native executable. Generated reports
   are excluded from evaluator hashes.
 - `fixture.json`: synthetic source and held-out gold labels for review.
 - `pair-<number>-<variant>/prompt.txt`: the actual first dispatched scan prompt.

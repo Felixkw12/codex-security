@@ -11,7 +11,11 @@ import {
   VERSION,
 } from "../../sdk/typescript/dist/version.js";
 import { withEvalState } from "../secret-discovery/runtime.mts";
-import { createStandardRunner, preflightStandardEval } from "./production.mts";
+import {
+  createStandardRunner,
+  preflightStandardEval,
+  snapshotCodexExecutable,
+} from "./production.mts";
 import { prepareStandardEval } from "./fixtures.mts";
 import {
   runComparison,
@@ -30,6 +34,7 @@ const config = validateExperiment(
   ),
 );
 preflightStandardEval(process.env, config.budgetMinutes);
+const codexExecutable = await snapshotCodexExecutable(process.env);
 const pluginRoot = await bundledPluginRoot();
 const reports = fileURLToPath(new URL("./reports/", import.meta.url));
 await mkdir(reports, { recursive: true });
@@ -58,6 +63,7 @@ await withEvalState(
         "@openai/codex-sdk": CODEX_SDK_VERSION,
         "@openai/codex": CODEX_EXECUTABLE_VERSION,
       },
+      codexExecutable,
     });
     await saveJson(join(reportDirectory, "fixture.json"), prepared.fixture);
     const records = await runComparison({

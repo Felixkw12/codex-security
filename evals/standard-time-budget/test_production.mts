@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
-import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { existsSync, promises as fs } from "node:fs";
+import { cp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { join, relative } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -11,12 +12,110 @@ import * as sdk from "../../sdk/typescript/dist/api.js";
 import { createIsolatedHome } from "../../sdk/typescript/dist/runtime.js";
 import { withEvalState } from "../secret-discovery/runtime.mts";
 import { hashText, runComparison } from "./experiment.mts";
-import { createStandardRunner, preflightStandardEval } from "./production.mts";
+import {
+  createStandardRunner,
+  preflightStandardEval,
+  snapshotCodexExecutable,
+} from "./production.mts";
 import { prepareStandardEval } from "./fixtures.mts";
 import { summarizeRuns } from "./summary.mts";
 
 const { CodexSecurity } =
   sdk as unknown as typeof import("../../sdk/typescript/src/api.js");
+
+test("executable provenance follows the configured binary and its actual bytes", async (context) => {
+  const root = await temporaryDirectory("time-budget-executable-");
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const first = join(root, "first.exe");
+  const second = join(root, "second.exe");
+  await writeFile(first, "synthetic executable one");
+  await writeFile(second, "synthetic executable two");
+  const snapshot = await snapshotCodexExecutable({ CODEX_CLI_PATH: first });
+  assert.deepEqual(snapshot, {
+    command: first,
+    files: [
+      {
+        path: await realpath(first),
+        sha256: hashText("synthetic executable one"),
+      },
+    ],
+  });
+  assert.deepEqual(await snapshotCodexExecutable({ CODEX_CLI_PATH: second }), {
+    command: second,
+    files: [
+      {
+        path: await realpath(second),
+        sha256: hashText("synthetic executable two"),
+      },
+    ],
+  });
+  await writeFile(first, "replaced executable");
+  const replaced = await snapshotCodexExecutable({ CODEX_CLI_PATH: first });
+  assert.equal(replaced.command, snapshot.command);
+  assert.equal(replaced.files[0]!.sha256, hashText("replaced executable"));
+  assert.notEqual(replaced.files[0]!.sha256, snapshot.files[0]!.sha256);
+});
+
+test("state cleanup failure saves the attempt and stops before the paired arm", async (context) => {
+  const root = await temporaryDirectory("time-budget-cleanup-");
+  const originalRm = fs.rm;
+  context.after(async () => {
+    context.mock.restoreAll();
+    syncBuiltinESMExports();
+    await originalRm(root, { recursive: true, force: true });
+  });
+  const prepared = await prepareStandardEval(root, "/synthetic/plugin");
+  const outputRoot = join(root, "results");
+  const states: string[] = [];
+  const saved: Awaited<ReturnType<typeof runComparison>> = [];
+  context.mock.method(fs, "rm", async (...args: Parameters<typeof fs.rm>) => {
+    if (states.includes(String(args[0]))) {
+      throw new Error("Synthetic state removal failure");
+    }
+    return originalRm(...args);
+  });
+  syncBuiltinESMExports();
+  await assert.rejects(
+    runComparison({
+      prepared,
+      config: { model: "eval-model", pairs: 2, budgetMinutes: 5 },
+      run: createStandardRunner({
+        stateRoot: join(root, "states"),
+        outputRoot,
+        createClient: (_config, dependencies) => {
+          states.push(dependencies.environment["CODEX_SECURITY_STATE_DIR"]!);
+          return {
+            run: async (_target, options) => {
+              await writeFile(join(options!.outputDir!, "partial.json"), "{}");
+              throw new Error("Synthetic scan failure");
+            },
+            close: async () => {
+              throw new Error("Synthetic client close failure");
+            },
+          };
+        },
+      }),
+      onResult: async (record) => {
+        saved.push(record);
+      },
+    }),
+    /Synthetic state removal failure/,
+  );
+  assert.equal(states.length, 1);
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0]!.status, "failed");
+  assert.match(saved[0]!.error!, /Synthetic scan failure/);
+  assert.match(saved[0]!.error!, /Synthetic client close failure/);
+  assert.match(saved[0]!.error!, /Synthetic state removal failure/);
+  assert.equal(existsSync(states[0]!), true);
+  assert.equal(
+    await readFile(
+      join(outputRoot, "pair-1-baseline", "scan", "partial.json"),
+      "utf8",
+    ),
+    "{}",
+  );
+});
 
 test("the developer eval preflights API-key authentication and the production budget before staging", async () => {
   assert.throws(

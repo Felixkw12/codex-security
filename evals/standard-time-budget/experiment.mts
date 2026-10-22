@@ -11,6 +11,8 @@ export interface ExperimentConfig {
   budgetMinutes: number;
 }
 export type Variant = "baseline" | "time-aware";
+/** Retained arm state must not be exposed to a later arm. */
+export class StateCleanupError extends AggregateError {}
 export type RunReport = GradeReport & {
   scanId?: string;
   scanDir?: string;
@@ -123,6 +125,7 @@ export async function runComparison({
       const observation: StandardRunOptions["observation"] = {};
       let outcome: RunOutcome;
       let semanticResult: Result | undefined;
+      let cleanupFailure: StateCleanupError | undefined;
       try {
         const result = await run(prepared, {
           model: config.model,
@@ -137,6 +140,7 @@ export async function runComparison({
         outcome = { status: "completed", report: result.report };
         semanticResult = result.semanticResult;
       } catch (error) {
+        if (error instanceof StateCleanupError) cleanupFailure = error;
         outcome = {
           status: "failed",
           error: error instanceof Error ? error.message : String(error),
@@ -159,6 +163,7 @@ export async function runComparison({
       };
       records.push(record);
       await onResult(record, semanticResult, records, observation.prompt);
+      if (cleanupFailure !== undefined) throw cleanupFailure;
       signal?.throwIfAborted();
     }
   }

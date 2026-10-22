@@ -1,18 +1,41 @@
 import { randomUUID } from "node:crypto";
-import { cp, mkdir, rm } from "node:fs/promises";
+import { cp, mkdir, readFile, rm } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { Codex } from "../../sdk/typescript/node_modules/@openai/codex-sdk/dist/index.js";
 import * as sdk from "../../sdk/typescript/dist/api.js";
 import { deepScanOptions } from "../../sdk/typescript/dist/deep-config.js";
 import { createProfileCodex } from "../../sdk/typescript/dist/provider-profile.js";
+import {
+  codexExecutableReadPaths,
+  resolveCodexCommand,
+} from "../../sdk/typescript/dist/runtime.js";
 import type { CodexSecurity as Client } from "../../sdk/typescript/src/api.js";
 import type { PreparedStandardEval } from "./fixtures.mts";
 import { gradeResult, type Result } from "./grade.mts";
-import type { RunReport, Variant } from "./experiment.mts";
+import {
+  hashText,
+  StateCleanupError,
+  type RunReport,
+  type Variant,
+} from "./experiment.mts";
 
 const { CodexSecurity, scanAuthentication } =
   sdk as unknown as typeof import("../../sdk/typescript/src/api.js");
 type Dependencies = NonNullable<ConstructorParameters<typeof CodexSecurity>[1]>;
+
+export async function snapshotCodexExecutable(environment: NodeJS.ProcessEnv) {
+  const command = resolveCodexCommand(environment).command;
+  const paths = await codexExecutableReadPaths(command);
+  return {
+    command,
+    files: await Promise.all(
+      paths.map(async (path) => ({
+        path,
+        sha256: hashText(await readFile(path)),
+      })),
+    ),
+  };
+}
 
 export function preflightStandardEval(
   environment: NodeJS.ProcessEnv,
@@ -135,21 +158,26 @@ export function createStandardRunner({
       failure = error;
       throw error;
     } finally {
+      const failures: unknown[] = failure === undefined ? [] : [failure];
       try {
         await client.close();
       } catch (error) {
-        if (failure === undefined) throw error;
-        throw new AggregateError(
-          [failure, error],
-          `${String(failure)}\n${String(error)}`,
-        );
-      } finally {
-        try {
-          await cp(scanDirectory, archiveDirectory, { recursive: true });
-        } finally {
-          await rm(stateDirectory, { recursive: true, force: true });
-        }
+        failures.push(error);
       }
+      try {
+        await cp(scanDirectory, archiveDirectory, { recursive: true });
+      } catch (error) {
+        failures.push(error);
+      }
+      try {
+        await rm(stateDirectory, { recursive: true, force: true });
+      } catch (error) {
+        failures.push(error);
+        throw new StateCleanupError(failures, failures.map(String).join("\n"));
+      }
+      if (failures.length > 1)
+        throw new AggregateError(failures, failures.map(String).join("\n"));
+      if (failures.length === 1 && failure === undefined) throw failures[0];
     }
   };
 }
