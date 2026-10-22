@@ -9,6 +9,10 @@ const refusalMessages = {
   "policy-colon-refusal-text": "Request refused: safety policy.",
   "policy-colon-explanation-text":
     "Safety policy: request refused due to disallowed content.",
+  "policy-harmful-content-text":
+    "Safety policy: this request is refused due to harmful content.",
+  "policy-bare-harmful-content-text":
+    "Safety policy: request refused due to harmful content.",
   "policy-prefix-text": "Safety policy: request refused.",
   "policy-review-text": "Review refused: safety policy.",
   "policy-intro-text":

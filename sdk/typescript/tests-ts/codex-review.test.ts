@@ -131,6 +131,10 @@ const failureReasons: Record<string, string> = {
   "policy-colon-refusal-text": "Request refused: safety policy.",
   "policy-colon-explanation-text":
     "Safety policy: request refused due to disallowed content.",
+  "policy-harmful-content-text":
+    "Safety policy: this request is refused due to harmful content.",
+  "policy-bare-harmful-content-text":
+    "Safety policy: request refused due to harmful content.",
   "policy-prefix-text": "Safety policy: request refused.",
   "policy-review-text": "Review refused: safety policy.",
   "policy-intro-text":
@@ -986,6 +990,8 @@ test.each([
   "Safety policy: request was refused.",
   "Safety policy: request refused.",
   "Safety policy: request refused due to disallowed content.",
+  "Safety policy: request refused due to potentially harmful content.",
+  "Safety policy: request refused due to harmful assistance.",
   "Safety policy: request blocked under the applicable restrictions.",
   "Safety policy: request refused because it would facilitate unauthorized access.",
   "Review refusal due to the content policy.",
@@ -1001,6 +1007,9 @@ test.each([
   "Cybersecurity policy: this request is refused.",
   "Safety policy: this request is refused because it would facilitate harm.",
   "Safety policy: this request is refused due to unsafe content.",
+  "Safety policy: this request is refused due to harmful content.",
+  "Safety policy: this request is refused due to potentially harmful content. I can offer a defensive alternative.",
+  "Content policy: your review has been blocked due to harmful assistance.",
   "Safety policy: this request is refused due to unsafe content. I can offer a defensive alternative.",
   "Content policy: your review has been blocked due to unsafe assistance.",
   "Content policy: your request has been blocked because it contains disallowed content.",
@@ -1043,6 +1052,10 @@ test.each([
   "Review refused: safety policy. Service unavailable.",
   "Safety policy: request refused: service unavailable",
   "Safety policy: request refused. Service unavailable.",
+  "Safety policy: request refused due to upstream service unavailability.",
+  "Safety policy: request refused due to upstream service unavailability for content processing.",
+  "Safety policy: request refused due to upstream service unavailability while fetching content.",
+  "Safety policy: this request is refused due to upstream service unavailability while fetching content.",
   "Safety policy: this request is refused because the upstream service is unavailable.",
   "Safety policy: this request is refused. Service unavailable.",
   "Safety policy: request refused because the upstream service is unavailable.",
