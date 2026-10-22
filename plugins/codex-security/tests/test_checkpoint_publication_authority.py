@@ -982,12 +982,18 @@ def test_explicit_recovery_preserves_database_only_source_times(
 
 
 @pytest.mark.parametrize("retry", ["preserve", "recover"])
+@pytest.mark.parametrize("root_head", [False, True])
+@pytest.mark.parametrize("failure", ["publication", "source-order", "checkpoint-heads"])
 def test_failed_explicit_recovery_replays_its_frozen_selection(
-    workbench_api, workbench_db, publication_scan, monkeypatch, retry
+    workbench_api, workbench_db, publication_scan, monkeypatch, retry, failure, root_head
 ):
     scan = publication_scan()
     (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
-    result = add_worker(workbench_db, scan, status="canceled")
+    result = (
+        scan.scan_dir / "result.json"
+        if root_head
+        else add_worker(workbench_db, scan, status="canceled")
+    )
     result.write_text(json.dumps(save_disposition(scan, result.parent, "reported")))
     save_disposition(scan, result.parent, "rejected")
     workbench_api["saved_results"].fail_scan(
@@ -1008,9 +1014,23 @@ def test_failed_explicit_recovery_replays_its_frozen_selection(
     def fail_publication(*args, **kwargs):
         raise OSError("Synthetic publication interruption")
 
+    write = saved.write_scan_local_bytes
+
+    def fail_snapshot(root, relative, contents):
+        if Path(relative).parent.name == failure:
+            raise OSError("Synthetic publication interruption")
+        return write(root, relative, contents)
+
+    selected_head = (result.parent / "checkpoint-head.json").read_bytes()
+    selected_time = (result.parent / "checkpoint-head.json").stat().st_mtime_ns
     with monkeypatch.context() as patch:
-        patch.setattr(saved, "_write_prepared_scan_finalization", fail_publication)
-        with pytest.raises(OSError, match="Synthetic publication interruption"):
+        if failure == "publication":
+            patch.setattr(saved, "_write_prepared_scan_finalization", fail_publication)
+        else:
+            patch.setattr(saved, "write_scan_local_bytes", fail_snapshot)
+        with pytest.raises(
+            (OSError, saved.ContractError), match="Synthetic publication interruption"
+        ):
             workbench_api["saved_results"].recover_scan_results(
                 workbench_api["_WORKBENCH_DB_CONTEXT"],
                 workbench_db,
@@ -1030,6 +1050,27 @@ def test_failed_explicit_recovery_replays_its_frozen_selection(
         workbench_api["scan_context"](workbench_db, scan.scan_id)["scan"]["resultsRecoveryNeeded"]
         is True
     )
+    if failure == "checkpoint-heads":
+        # Without an immutable head snapshot, replay must reject a changed raw
+        # head until the selected bytes are restored, just like initial stopping.
+        replay = saved.recover_scan_results if retry == "recover" else saved.preserve_scan_results
+        with pytest.raises(
+            saved.ContractError,
+            match="changed after the scan stopped|Frozen stopped-scan checkpoint set is incomplete",
+        ):
+            replay(
+                workbench_api["_WORKBENCH_DB_CONTEXT"],
+                workbench_db,
+                Namespace(
+                    scan_id=scan.scan_id,
+                    claim_token=None,
+                    thread_id=None,
+                    coordinator_generation=None,
+                ),
+            )
+        head = result.parent / "checkpoint-head.json"
+        head.write_bytes(selected_head)
+        os.utime(head, ns=(selected_time, selected_time))
     if retry == "recover":
         recovered = workbench_api["saved_results"].recover_scan_results(
             workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, Namespace(scan_id=scan.scan_id)
@@ -1052,8 +1093,9 @@ def test_failed_explicit_recovery_replays_its_frozen_selection(
     assert "recoveryBaseDigest" not in retained
 
 
+@pytest.mark.parametrize("failure", ["publication", "source-order", "checkpoint-heads"])
 def test_failed_recovery_keeps_model_when_worker_registers_an_unselected_checkpoint(
-    workbench_api, workbench_db, publication_scan, monkeypatch
+    workbench_api, workbench_db, publication_scan, monkeypatch, failure
 ):
     scan = publication_scan()
     result = add_worker(workbench_db, scan, status="canceled")
@@ -1089,9 +1131,21 @@ def test_failed_recovery_keeps_model_when_worker_registers_an_unselected_checkpo
     def fail_publication(*args, **kwargs):
         raise OSError("Synthetic publication interruption")
 
+    write = saved.write_scan_local_bytes
+
+    def fail_snapshot(root, relative, contents):
+        if Path(relative).parent.name == failure:
+            raise OSError("Synthetic publication interruption")
+        return write(root, relative, contents)
+
     with monkeypatch.context() as patch:
-        patch.setattr(saved, "_write_prepared_scan_finalization", fail_publication)
-        with pytest.raises(OSError, match="Synthetic publication interruption"):
+        if failure == "publication":
+            patch.setattr(saved, "_write_prepared_scan_finalization", fail_publication)
+        else:
+            patch.setattr(saved, "write_scan_local_bytes", fail_snapshot)
+        with pytest.raises(
+            (OSError, saved.ContractError), match="Synthetic publication interruption"
+        ):
             saved.recover_scan_results(workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, args)
     retained = workbench_db.execute(
         "SELECT retained_source_digests_json FROM scans WHERE id = ?", (scan.scan_id,)
@@ -1109,12 +1163,12 @@ def test_failed_recovery_keeps_model_when_worker_registers_an_unselected_checkpo
     saved.recover_scan_results(workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, args)
     manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())
     assert manifest["scan"]["threatModel"]["summary"] == "Latest accepted model."
-    assert (
+    published_sources = json.loads(
         workbench_db.execute(
             "SELECT retained_source_digests_json FROM scans WHERE id = ?", (scan.scan_id,)
         ).fetchone()[0]
-        == retained
     )
+    assert published_sources["threatModelSource"] == json.loads(retained)["threatModelSource"]
 
 
 @pytest.mark.parametrize("bad_head", ["malformed", "missing-checkpoint", "missing-head"])

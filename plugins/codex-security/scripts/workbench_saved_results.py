@@ -104,6 +104,7 @@ class _CheckpointSnapshotError(ContractError):
         self.records: dict[str, tuple[dict[str, Any], str, int]] = {}
         self.heads: dict[str, str | None] = {}
         self.model_source: list[str] = []
+        self.include_parent = False
 
 
 def threat_model_fields(db: Any, scan: sqlite3.Row) -> dict[str, Any]:
@@ -473,6 +474,8 @@ def _recovery_source_digests(
         if not _is_source_order_snapshot(relative):
             source_times.setdefault(relative, observed)
 
+    snapshot_error = None
+    captured_records = {}
     for relative in paths.keys() - recovery_sources.keys():
         try:
             captured = _capture_saved_source(
@@ -482,8 +485,10 @@ def _recovery_source_digests(
                 kind=paths[relative],
                 checkpoint_heads=checkpoint_heads,
             )
-        except _CheckpointSnapshotError:
-            raise
+        except _CheckpointSnapshotError as exc:
+            snapshot_error = snapshot_error or exc
+            captured = exc.captured
+            captured_records.update(exc.records)
         except (ContractError, OSError, ValueError):
             _restore_checkpoint_head(
                 checkpoint_heads, previous_heads, frozen_sources or {}, relative
@@ -494,7 +499,23 @@ def _recovery_source_digests(
                 raise ContractError("checkpoint changed after the scan stopped")
             recovery_sources[path] = digest
             source_times.setdefault(path, observed)
-    _freeze_source_times(scan_dir, scan["id"], recovery_sources, source_times)
+    try:
+        if snapshot_error is not None:
+            raise snapshot_error
+        _freeze_source_times(scan_dir, scan["id"], recovery_sources, source_times)
+    except (ContractError, OSError) as exc:
+        failure = _CheckpointSnapshotError(
+            str(exc),
+            {
+                path: (digest, source_times[path])
+                for path, digest in recovery_sources.items()
+                if not _is_source_order_snapshot(path)
+            },
+        )
+        failure.records = captured_records
+        failure.heads = checkpoint_heads
+        failure.include_parent = include_parent
+        raise failure from exc
     return recovery_sources, include_parent, checkpoint_heads
 
 
@@ -573,13 +594,14 @@ def merge_saved_results(
     canonical_model_source: str | None = None,
     canonical_sources: dict[str, str] | None = None,
     project_worker_coverage: bool = False,
+    recovery_snapshot_error: _CheckpointSnapshotError | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None:
     """Read only bound parent/worker files; return an unsealed loss-preserving union."""
     initial_warnings = set(warnings)
     if frozen_source_digests is None:
         checkpoint_heads = {}
-    snapshot_error = None
-    captured_records: dict[str, tuple[dict[str, Any], str, int]] = {}
+    snapshot_error = recovery_snapshot_error
+    captured_records = dict(snapshot_error.records) if snapshot_error is not None else {}
 
     def capture_head(relative: str) -> dict[str, tuple[str, int]]:
         nonlocal snapshot_error
@@ -594,7 +616,11 @@ def merge_saved_results(
             return exc.captured
 
     try:
-        source_times = _frozen_source_times(scan_dir, scan_id, frozen_source_digests or {})
+        source_times = (
+            {path: observation[1] for path, observation in snapshot_error.captured.items()}
+            if snapshot_error is not None
+            else _frozen_source_times(scan_dir, scan_id, frozen_source_digests or {})
+        )
     except (ContractError, OSError, ValueError) as exc:
         raise ContractError("Frozen stopped-scan checkpoint set is incomplete.") from exc
     parent: dict[str, Any] | None = None
@@ -2328,6 +2354,7 @@ def merge_saved_results(
     if (
         frozen_source_digests is None
         or heads_snapshotted
+        or snapshot_error is not None
         or any(_is_source_order_snapshot(path) for path in source_digests)
         or allow_frozen_legacy_parent
     ):
@@ -2477,6 +2504,7 @@ def preserve_scan_results_locked(
     recovery_source_digests: dict[str, str] | None = None,
     recovery_checkpoint_heads: dict[str, str | None] | None = None,
     include_parent_with_recovery: bool = False,
+    recovery_snapshot_error: _CheckpointSnapshotError | None = None,
 ) -> bool:
     """Publish or verify retained terminal results through the workbench host."""
     scan = db.require_scan(connection, scan_id)
@@ -2667,6 +2695,7 @@ def preserve_scan_results_locked(
             canonical_model=canonical_model,
             canonical_model_source=canonical_model_source,
             canonical_sources=canonical_sources,
+            recovery_snapshot_error=recovery_snapshot_error,
             allow_frozen_legacy_parent=(
                 include_parent_with_recovery
                 or (
@@ -2679,23 +2708,30 @@ def preserve_scan_results_locked(
             ),
         )
     except _CheckpointSnapshotError as exc:
-        if frozen_source_digests is None:
+        if frozen_source_digests is None or recovery_snapshot_error is not None:
             # The stop has already committed. Keep the source set and times in
             # the database even when auxiliary snapshot files cannot be written.
             # Changed raw heads remain rejected on retry.
             captured = exc.captured
             retained_sources = {path: value[0] for path, value in captured.items()}
             source_times = {path: value[1] for path, value in captured.items()}
+            retained_heads = exc.heads
+            if recovery_snapshot_error is not None:
+                retained_heads = {
+                    "heads": retained_heads,
+                    "recoveryBaseDigest": scan["seal_manifest_digest"],
+                }
             with connection:
                 connection.execute(
                     "UPDATE scans SET retained_source_digests_json = ?, "
                     "retained_checkpoint_heads_json = ?, completion_warnings_json = ? "
-                    "WHERE id = ? AND retained_source_digests_json IS NULL",
+                    "WHERE id = ? AND retained_source_digests_json IS ?",
                     (
                         _encode_retained_sources(retained_sources, exc.model_source, source_times),
-                        json.dumps(exc.heads),
+                        json.dumps(retained_heads, sort_keys=True),
                         json.dumps(list(dict.fromkeys(warnings))),
                         scan_id,
+                        raw_frozen_sources,
                     ),
                 )
         raise
@@ -2784,9 +2820,16 @@ def recover_scan_results(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             raise SystemExit("Only a stopped scan can recover terminal results.")
         if scan["canceled_at"] is not None:
             raise SystemExit("Canceled scans cannot recover terminal results.")
-        recovery_source_digests, include_parent, checkpoint_heads = _recovery_source_digests(
-            db, connection, scan
-        )
+        recovery_snapshot_error = None
+        try:
+            recovery_source_digests, include_parent, checkpoint_heads = _recovery_source_digests(
+                db, connection, scan
+            )
+        except _CheckpointSnapshotError as exc:
+            recovery_snapshot_error = exc
+            recovery_source_digests = {path: value[0] for path, value in exc.captured.items()}
+            include_parent = exc.include_parent
+            checkpoint_heads = exc.heads
         if not preserve_scan_results_locked(
             db,
             connection,
@@ -2794,6 +2837,7 @@ def recover_scan_results(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             recovery_source_digests=recovery_source_digests,
             recovery_checkpoint_heads=checkpoint_heads,
             include_parent_with_recovery=include_parent,
+            recovery_snapshot_error=recovery_snapshot_error,
         ):
             raise SystemExit("No saved stopped-scan results were available to recover.")
         db.deep_scan.clear_deep_scan_publication_failure(connection, scan_id)
