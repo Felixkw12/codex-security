@@ -8869,15 +8869,41 @@ async function publishPatchBranch(
           head = `${headRepository.split("/")[0]}:${branch}`;
       }
 
-      const configuredRecursion = (
-        await run("git", ["config", "--list", "--name-only"])
+      const recursionSettings = (
+        await patchGitRecords(
+          repository,
+          [
+            "config",
+            "--null",
+            "--type=bool-or-str",
+            "--get-regexp",
+            "^(push\\.recursesubmodules|submodule\\.recurse)$",
+          ],
+          dependencies,
+        ).catch((error: unknown) => {
+          if (isJsonObject(error) && (error["code"] ?? error["status"]) === 1)
+            return [];
+          throw error;
+        })
+      ).filter(Boolean);
+      const enabledRecursion = new Set([
+        "push.recursesubmodules\ncheck",
+        "push.recursesubmodules\non-demand",
+        "push.recursesubmodules\nonly",
+        "submodule.recurse\ntrue",
+      ]);
+      // Git parses Boolean values and applies these settings in configuration order.
+      // Leave unrecognized values, including overridden invalid settings, to Git.
+      if (
+        !recursionSettings.length ||
+        (enabledRecursion.has(recursionSettings.at(-1)!) &&
+          recursionSettings.every(
+            (setting) =>
+              enabledRecursion.has(setting) ||
+              setting === "push.recursesubmodules\nfalse" ||
+              setting === "submodule.recurse\nfalse",
+          ))
       )
-        .split("\n")
-        .some(
-          (key) =>
-            key === "push.recursesubmodules" || key === "submodule.recurse",
-        );
-      if (!configuredRecursion)
         await checkDeinitializedPatchSubmodules(
           repository,
           branch,
@@ -8885,7 +8911,7 @@ async function publishPatchBranch(
         );
       await run("git", [
         "push",
-        ...(configuredRecursion ? [] : ["--recurse-submodules=check"]),
+        ...(recursionSettings.length ? [] : ["--recurse-submodules=check"]),
         "--set-upstream",
         `--force-with-lease=refs/heads/${branch}:`,
         "origin",
