@@ -848,6 +848,24 @@ The extraction root is not enforced.
         reader = self.export_csv()
         self.assertNotIn("candidate_id", reader.fieldnames or [])
 
+    def test_scoped_standard_csv_export_keeps_candidate_provenance_in_standard_format(
+        self,
+    ) -> None:
+        self.coverage["mode"] = "scoped_path"
+        self.finding["provenance"]["candidateId"] = "candidate-001"
+        reader = self.export_csv()
+        self.assertNotIn("candidate_id", reader.fieldnames or [])
+        self.assertEqual(next(reader)["title"], self.finding["title"])
+
+    def test_scoped_deep_csv_export_recognizes_canonical_worker_ownership(self) -> None:
+        self.coverage["mode"] = "scoped_path"
+        self.finding["provenance"].update(
+            {"candidateId": "candidate-001", "sourceWorkerId": "worker-001"}
+        )
+        reader = self.export_csv()
+        self.assertIn("candidate_id", reader.fieldnames or [])
+        self.assertEqual(next(reader)["candidate_id"], "candidate-001")
+
     def test_csv_export_escapes_newline_and_full_width_formula_prefixes(self) -> None:
         self.finding["title"] = "\n=1+1"
         self.finding["summary"] = "＝1+1"
