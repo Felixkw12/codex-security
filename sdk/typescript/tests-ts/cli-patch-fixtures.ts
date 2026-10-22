@@ -165,6 +165,7 @@ export async function runWorkflow(
     const run = current.runRepositoryCommand;
     const localRemotes = new Map<string, string>();
     let hostedRemote = "https://github.example.test/example/repository.git";
+    let creatingRequest = false;
     current.runRepositoryCommand = async (
       command,
       args,
@@ -172,9 +173,12 @@ export async function runWorkflow(
       commandOptions,
     ) => {
       if (command === "gh" && args[0] === "repo" && args[1] === "view") {
-        if (args.at(-1) === ".url") return hostedRemote.replace(/\.git$/u, "");
+        if (args.at(-1) === ".url") {
+          creatingRequest = true;
+          return hostedRemote.replace(/\.git$/u, "");
+        }
         if (
-          localRemotes.size &&
+          (localRemotes.size || creatingRequest) &&
           args.at(-1) === "tojson" &&
           args.includes("id,url")
         )
@@ -184,25 +188,23 @@ export async function runWorkflow(
           });
       }
       if (
-        localRemotes.size &&
+        (localRemotes.size || creatingRequest) &&
         command === "gh" &&
         args[0] === "repo" &&
         args[1] === "set-default"
       )
         return new URL(hostedRemote).pathname.slice(1).replace(/\.git$/u, "");
-      const translated = args.map((arg) => {
-        for (const [hosted, local] of localRemotes) {
-          if (arg === `url.${hosted}.insteadOf`)
-            return `url.${local}.insteadOf`;
-          if (
-            arg ===
-            `--config-env=url.${hosted}.insteadOf=CODEX_SECURITY_PREFLIGHT_ALIAS`
-          )
-            return `--config-env=url.${local}.insteadOf=CODEX_SECURITY_PREFLIGHT_ALIAS`;
-        }
-        return arg;
+      const environment = { ...commandOptions?.environment };
+      for (const key of Object.keys(environment)) {
+        if (!key.startsWith("GIT_CONFIG_KEY_")) continue;
+        for (const [hosted, local] of localRemotes)
+          if (environment[key] === `url.${hosted}.insteadOf`)
+            environment[key] = `url.${local}.insteadOf`;
+      }
+      const output = await run(command, args, cwd, {
+        ...commandOptions,
+        environment,
       });
-      const output = await run(command, translated, cwd, commandOptions);
       if (command !== "git" || args[args.indexOf("remote") + 1] !== "get-url")
         return output;
       if (!output.trim()) return hostedRemote;
