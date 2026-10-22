@@ -470,9 +470,14 @@ export async function capturePatchGitControls(
   // GIT_CONFIG selects a file only for git-config, not snapshot bookkeeping.
   const configurationEnvironment = { GIT_CONFIG: undefined };
   // Config records contain unrelated keys too. Split bytes before decoding paths.
-  const runConfigFields = async (checkout: string, args: string[]) =>
+  const runConfigFields = async (
+    checkout: string,
+    args: string[],
+    input?: Uint8Array,
+  ) =>
     (
       await runBytes(root, checkout, args, {
+        input,
         environment: configurationEnvironment,
       })
     )
@@ -845,6 +850,114 @@ export async function capturePatchGitControls(
       if (/^(include|includeif\..*)\.path$/u.test(origins[index + 1]!))
         includes = true;
     }
+    const captureHooks = async (configured?: string): Promise<void> => {
+      let entry: string;
+      try {
+        entry = await runControl(root, checkout, [
+          ...(configured === undefined
+            ? []
+            : ["-c", `core.hooksPath=${configured}`]),
+          "rev-parse",
+          "--git-path",
+          "hooks/post-index-change",
+        ]);
+      } catch (error) {
+        if (
+          configured !== undefined &&
+          error instanceof Error &&
+          error.message.includes("failed to expand user dir")
+        )
+          return;
+        throw error;
+      }
+      // A complete entry preserves Git's empty hooksPath semantics.
+      const hooks = relativeFile(checkout, dirname(entry.replace(/\n$/u, "")));
+      hookDirectories.add(hooks);
+      // Bind absent entries too, while leaving ordinary directory contents editable.
+      for (const hook of GIT_HOOKS)
+        await rememberHook(relativeFile(hooks, hook));
+    };
+    const inspectedIncludes = new Set<string>();
+    const captureInclude = async (
+      relativeTo: string,
+      value: string,
+      optional: boolean,
+    ): Promise<void> => {
+      let path = configPath(value);
+      if (path.length === 0) return;
+      try {
+        // Expand each value with Git without expanding inactive values as a group.
+        path = (
+          await runControl(
+            root,
+            checkout,
+            [
+              "-c",
+              `codexsecurity.patchcontrolpath=${path}`,
+              "config",
+              "--null",
+              "--type=path",
+              "--get",
+              "codexsecurity.patchcontrolpath",
+            ],
+            { environment: configurationEnvironment },
+          )
+        ).replace(/\0$/u, "");
+      } catch (error) {
+        // Active includes already passed Git's normal --includes read above.
+        if (
+          optional &&
+          error instanceof Error &&
+          error.message.includes("failed to expand user dir")
+        )
+          return;
+        throw error;
+      }
+      const includePath = relativeFile(relativeTo, path);
+      try {
+        await rememberConfiguration(includePath, !optional, optional);
+      } catch (error) {
+        // Active includes already passed Git's normal --includes read above.
+        if (
+          optional &&
+          ["EACCES", "ELOOP"].includes(
+            (error as NodeJS.ErrnoException).code ?? "",
+          )
+        ) {
+          inaccessibleIncludes.add(includePath);
+          return;
+        }
+        throw error;
+      }
+      if (!optional) return;
+      const control = controlPaths.get(includePath)!;
+      if (!Buffer.isBuffer(control.contents)) return;
+      const origin = dirname(includePath);
+      const identity = `${control.canonical}\0${await canonicalPath(origin)}`;
+      if (inspectedIncludes.has(identity)) return;
+      inspectedIncludes.add(identity);
+      let entries: string[];
+      try {
+        // Parse captured bytes without activating dormant includes or their errors.
+        entries = await runConfigFields(
+          checkout,
+          ["config", "--file", "-", "--no-includes", "--null", "--list"],
+          control.contents,
+        );
+      } catch (error) {
+        if (error instanceof Error && error.message.includes("bad config line"))
+          return;
+        throw error;
+      }
+      for (const entry of entries) {
+        const separator = entry.indexOf("\n");
+        const key = entry.slice(0, separator);
+        const value = entry.slice(separator + 1);
+        if (key === "core.hookspath") await captureHooks(configPath(value));
+        else if (/^(include|includeif\..*)\.path$/u.test(key))
+          await captureInclude(origin, value, true);
+      }
+    };
     if (includes) {
       const paths = await runConfigFields(checkout, [
         "config",
@@ -859,62 +972,16 @@ export async function capturePatchGitControls(
         const value = paths[index + 1]!;
         const separator = value.indexOf("\n");
         const key = value.slice(0, separator);
-        let path = configPath(value.slice(separator + 1));
-        if (path.length === 0) continue;
-        try {
-          // Expand each value with Git without expanding inactive values as a group.
-          path = (
-            await runControl(
-              root,
-              checkout,
-              [
-                "-c",
-                `codexsecurity.patchcontrolpath=${path}`,
-                "config",
-                "--null",
-                "--type=path",
-                "--get",
-                "codexsecurity.patchcontrolpath",
-              ],
-              { environment: configurationEnvironment },
-            )
-          ).replace(/\0$/u, "");
-        } catch (error) {
-          // Active includes already passed Git's normal --includes read above.
-          if (
-            key.startsWith("includeif.") &&
-            error instanceof Error &&
-            error.message.includes("failed to expand user dir")
-          )
-            continue;
-          throw error;
-        }
         const relativeTo = origin.startsWith("file:")
           ? dirname(
               relativeFile(configurationDirectory, configPath(origin.slice(5))),
             )
           : configurationDirectory;
-        const includePath = relativeFile(relativeTo, path);
-        try {
-          await rememberConfiguration(
-            includePath,
-            !key.startsWith("includeif."),
-            key.startsWith("includeif."),
-          );
-        } catch (error) {
-          // Git's successful --includes read above already required access to
-          // active includes. An inaccessible conditional path was not selected.
-          if (
-            key.startsWith("includeif.") &&
-            ["EACCES", "ELOOP"].includes(
-              (error as NodeJS.ErrnoException).code ?? "",
-            )
-          ) {
-            inaccessibleIncludes.add(includePath);
-            continue;
-          }
-          throw error;
-        }
+        await captureInclude(
+          relativeTo,
+          value.slice(separator + 1),
+          key.startsWith("includeif."),
+        );
       }
     }
     for (const path of globalConfigurationPaths)
@@ -964,24 +1031,7 @@ export async function capturePatchGitControls(
       ).replace(/\n$/u, "");
       await rememberSelectedConfiguration(path);
     }
-    // A complete entry preserves Git's empty hooksPath semantics; querying
-    // only the hooks directory would turn that setting into the checkout.
-    const hooks = relativeFile(
-      checkout,
-      dirname(
-        (
-          await runControl(root, checkout, [
-            "rev-parse",
-            "--git-path",
-            "hooks/post-index-change",
-          ])
-        ).replace(/\n$/u, ""),
-      ),
-    );
-    hookDirectories.add(hooks);
-    // A non-directory hooks parent is ordinary data. Bind its absent entries
-    // so validation detects hooks added after it becomes a directory.
-    for (const hook of GIT_HOOKS) await rememberHook(relativeFile(hooks, hook));
+    await captureHooks();
   };
   const selectedDirectories: string[] = [];
   for (const argument of ["--absolute-git-dir", "--git-common-dir"]) {
@@ -1445,7 +1495,7 @@ export async function capturePatchGitControls(
         // Unavailable optional storage gets no extra snapshot permission.
         // Git/LFS reports the failure if a snapshot actually uses it.
         if (
-          !["EACCES", "EPERM", "EROFS"].includes(
+          !["EACCES", "EPERM", "EROFS", "ENOTDIR"].includes(
             (error as NodeJS.ErrnoException).code ?? "",
           )
         )
