@@ -244,6 +244,8 @@ for await (const line of createInterface({ input: process.stdin })) {
       scenario === "policy-refusal-text" ||
       scenario === "policy-first-refusal-text" ||
       scenario === "policy-colon-refusal-text" ||
+      scenario === "policy-review-text" ||
+      scenario === "policy-suffix-explanation-text" ||
       scenario === "policy-colon-explanation-text" ||
       ([
         "text-only-correction",
@@ -260,19 +262,23 @@ for await (const line of createInterface({ input: process.stdin })) {
           item: {
             type: "agentMessage",
             text:
-              scenario === "policy-colon-refusal-text"
-                ? "Request refused: safety policy."
-                : scenario === "policy-colon-explanation-text"
-                  ? "Safety policy: request refused due to disallowed content."
-                  : scenario === "refusal-text"
-                    ? "I'm sorry, but I can't assist with that request."
-                    : scenario === "policy-first-refusal-text"
-                      ? "Cybersecurity policy: this request is refused."
-                      : scenario === "policy-causal-refusal-text"
-                        ? "This request was refused because it violates the safety policy."
-                        : scenario === "policy-refusal-text"
-                          ? "This request was refused because of the safety policy."
-                          : '{"decision":"SAME"}',
+              scenario === "policy-review-text"
+                ? "Review refused: safety policy."
+                : scenario === "policy-suffix-explanation-text"
+                  ? "Request refused: safety policy. I can offer a defensive alternative."
+                  : scenario === "policy-colon-refusal-text"
+                    ? "Request refused: safety policy."
+                    : scenario === "policy-colon-explanation-text"
+                      ? "Safety policy: request refused due to disallowed content."
+                      : scenario === "refusal-text"
+                        ? "I'm sorry, but I can't assist with that request."
+                        : scenario === "policy-first-refusal-text"
+                          ? "Cybersecurity policy: this request is refused."
+                          : scenario === "policy-causal-refusal-text"
+                            ? "This request was refused because it violates the safety policy."
+                            : scenario === "policy-refusal-text"
+                              ? "This request was refused because of the safety policy."
+                              : '{"decision":"SAME"}',
           },
         },
       });

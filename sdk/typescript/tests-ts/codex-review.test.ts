@@ -134,6 +134,9 @@ const failureReasons: Record<string, string> = {
     "This request was refused because of the safety policy.",
   "policy-first-refusal-text": "Cybersecurity policy: this request is refused.",
   "policy-colon-refusal-text": "Request refused: safety policy.",
+  "policy-review-text": "Review refused: safety policy.",
+  "policy-suffix-explanation-text":
+    "Request refused: safety policy. I can offer a defensive alternative.",
   "policy-colon-explanation-text":
     "Safety policy: request refused due to disallowed content.",
   "policy-reported-error":
@@ -915,6 +918,9 @@ test.each([
   "Content policy: your request has been blocked.",
   "Safety policy: the request was refused.",
   "Request refused: safety policy.",
+  "Review refused: safety policy.",
+  "Request refused: safety policy. I can offer a defensive alternative.",
+  "Request refused: safety policy! Please ask for defensive guidance instead.",
   "Safety policy: request refused.",
   "Safety policy: request was refused.",
   "Safety policy: request refused due to disallowed content.",
@@ -944,6 +950,9 @@ test.each([
   "Connection refused",
   "Connection refused: safety policy service unavailable",
   "Request refused: safety policy service unavailable",
+  "Review refused: safety policy service unavailable",
+  "Request refused: safety policy. Service unavailable.",
+  "Review refused: safety policy. Service unavailable.",
   "Safety policy: request refused by upstream with 503",
   "Safety policy: request refused. Service unavailable.",
   "Connection refused while fetching content-policy.ts",
