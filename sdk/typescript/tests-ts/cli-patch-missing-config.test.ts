@@ -3,7 +3,11 @@ import { execFileSync } from "node:child_process";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join, sep } from "node:path";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
-import { runGitRepositoryCommand, runWorkflow } from "./cli-patch-fixtures.js";
+import {
+  repositoryGit,
+  runGitRepositoryCommand,
+  runWorkflow,
+} from "./cli-patch-fixtures.js";
 
 const fixtures = createTemporaryDirectories(true);
 afterEach(fixtures.cleanup);
@@ -155,7 +159,25 @@ for (const selected of [
             },
           },
         );
-        const rejected = create === true && !selected.startsWith("disabled");
+        let directoryError: string | undefined;
+        if (create === "directory" || selected.startsWith("lfs ")) {
+          expect((await stat(control)).isDirectory()).toBe(true);
+          try {
+            // Probe native config loading without changing the index or worktree.
+            git("rev-parse", "--verify", "--quiet", "HEAD");
+          } catch (error) {
+            const failure = error as {
+              status: number;
+              stderr: Buffer | string;
+            };
+            expect(failure.status).toBe(128);
+            directoryError = failure.stderr.toString();
+            expect(directoryError).toContain(control);
+            expect(directoryError).toContain("Is a directory");
+          }
+        }
+        const activated = create === true && !selected.startsWith("disabled");
+        const rejected = activated || directoryError !== undefined;
         expect(
           {
             exit: outcome.exitCode,
@@ -170,16 +192,27 @@ for (const selected of [
           creations: rejected ? 0 : 1,
           hook: null,
         });
-        if (rejected) {
+        if (activated) {
           expect(outcome.stderr).toMatch(
             /Git configuration (?:or hooks changed location|changed) during the patch/,
           );
           expect(postModelGit).toEqual([]);
-          expect(git("rev-parse", "HEAD")).toBe(head);
-          expect(await readFile(join(root, ".git", "index"))).toEqual(index);
-          expect(git("ls-remote", "origin")).toBe("");
         }
-        expect(await readFile(join(root, "app.ts"), "utf8")).toBe("after\n");
+        if (directoryError !== undefined)
+          for (const line of directoryError.trim().split(/\r?\n/u))
+            expect(outcome.stderr).toContain(line);
+        if (rejected) {
+          // Inspect preserved state without selecting the rejected directory.
+          expect(repositoryGit(root)("rev-parse", "HEAD")).toBe(head);
+          expect(await readFile(join(root, ".git", "index"))).toEqual(index);
+          expect(repositoryGit(remote)("for-each-ref")).toBe("");
+        }
+        const preparationRejected =
+          directoryError !== undefined && selected.startsWith("lfs ");
+        expect(modelFinished).toBe(!preparationRejected);
+        expect(await readFile(join(root, "app.ts"), "utf8")).toBe(
+          preparationRejected ? "before\n" : "after\n",
+        );
       },
     );
   }
