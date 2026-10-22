@@ -730,6 +730,17 @@ export async function discoverScaInputs(
               }
               const pkg = manifest?.["package"];
               if (record(pkg)) {
+                const declaredVersion = pkg["version"];
+                const workspace = manifest?.["workspace"];
+                const workspacePackage = record(workspace)
+                  ? workspace["package"]
+                  : undefined;
+                const version =
+                  record(declaredVersion) &&
+                  declaredVersion["workspace"] === true &&
+                  record(workspacePackage)
+                    ? workspacePackage["version"]
+                    : declaredVersion;
                 const packages = parseToml(content.toString("utf8"))["package"];
                 for (
                   let index = inspected.references.length - 1;
@@ -741,7 +752,7 @@ export async function discoverScaInputs(
                     reference.resolution === "workspace-or-path" &&
                     reference.name === pkg["name"] &&
                     reference.version !== null &&
-                    reference.version === pkg["version"]
+                    reference.version === version
                   ) {
                     const sources = Array.isArray(packages)
                       ? packages.flatMap((candidate) =>

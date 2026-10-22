@@ -121,17 +121,24 @@ async function scanFixture(
   );
 }
 
-test.each([
-  null,
-  "registry+https://github.com/rust-lang/crates.io-index",
-  "registry+https://registry.example.test/index",
-])(
-  "excludes only unambiguous first-party Cargo matches and retains raw output (source-bearing twin: %s)",
-  async (source) => {
+test.each(
+  [
+    null,
+    "registry+https://github.com/rust-lang/crates.io-index",
+    "registry+https://registry.example.test/index",
+  ].flatMap((source) =>
+    [false, true].map((inherited) => [source, inherited] as const),
+  ),
+)(
+  "excludes only unambiguous first-party Cargo matches and retains raw output (source-bearing twin: %p, inherited version: %p)",
+  async (source, inherited) => {
     const { repository, output } = await setup();
     await writeFile(
       join(repository, "Cargo.toml"),
-      '[package]\nname="synthetic-lib"\nversion="1.2.0"\n',
+      '[package]\nname="synthetic-lib"\n' +
+        (inherited
+          ? 'version.workspace=true\n[workspace.package]\nversion="1.2.0"\n'
+          : 'version="1.2.0"\n[workspace.package]\nversion="9.9.9"\n'),
     );
     await writeFile(
       join(repository, "Cargo.lock"),
@@ -174,6 +181,61 @@ test.each([
     if (alternate)
       expect(result.coverage.limitations.join("\n")).toContain(source!);
     expect(result.diagnostics).toEqual([]);
+    expect(await readFile(result.scanner.rawOutputPath, "utf8")).toBe(
+      serialized,
+    );
+  },
+);
+
+test.each(["missing", "external", "mismatched"] as const)(
+  "keeps inherited Cargo version unresolved without a matching same-manifest value: %s",
+  async (kind) => {
+    const { root, repository, output } = await setup();
+    if (kind === "external") {
+      await mkdir(join(root, "workspace"));
+      await writeFile(
+        join(root, "workspace", "Cargo.toml"),
+        '[workspace.package]\nversion="1.2.0"\n',
+      );
+    }
+    await writeFile(
+      join(repository, "Cargo.toml"),
+      '[package]\nname="synthetic-lib"\nversion.workspace=true\n' +
+        (kind === "external"
+          ? 'workspace="../workspace"\n'
+          : kind === "mismatched"
+            ? '[workspace.package]\nversion="1.2.1"\n'
+            : ""),
+    );
+    await writeFile(
+      join(repository, "Cargo.lock"),
+      'version=4\n[[package]]\nname="synthetic-lib"\nversion="1.2.0"\n',
+    );
+    const vulnerability = advisory("SYNTHETIC-CARGO-1");
+    vulnerability.affected[0]!.package.ecosystem = "crates.io";
+    const raw = rawOutput("Cargo.lock", [vulnerability]);
+    raw.results[0]!.packages[0]!.package.ecosystem = "crates.io";
+    const serialized = JSON.stringify(raw);
+    const result = await runOsvScan(
+      { repositoryPath: repository, outputDir: output },
+      {
+        executable: process.execPath,
+        runProcess: async (_exe, argv) => ({
+          stdout: argv[0] === "--version" ? "2.6.0" : serialized,
+          stderr: "",
+          exitCode: argv[0] === "--version" ? 0 : 1,
+        }),
+      },
+    );
+    expect(result.coverage.firstPartyPackages).toEqual([]);
+    expect(result.coverage.unresolvedPackages).toBe(1);
+    expect(result.status).toBe("partial");
+    expect(result.coverage.status).toBe("partial");
+    expect(result.components).toHaveLength(1);
+    expect(result.matches[0]!.advisoryIds).toEqual(["SYNTHETIC-CARGO-1"]);
+    expect(result.coverage.limitations.join("\n")).toContain(
+      "workspace-or-path",
+    );
     expect(await readFile(result.scanner.rawOutputPath, "utf8")).toBe(
       serialized,
     );
