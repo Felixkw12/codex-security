@@ -1058,6 +1058,8 @@ describe("CodexSecurity orchestration", () => {
         `${code}: synthetic provider detail`,
         `error: '${code}'`,
         `${code}.`,
+        `error=${code}`,
+        `error sending request for url (https://example.test/v1) ${code}`,
       ])
         expect(classifyConnectionFailure(new Error(detail))).toBe(
           classification,
@@ -1066,6 +1068,10 @@ describe("CodexSecurity orchestration", () => {
         `https://${code}.example/v1`,
         `https://example.test/${code}/v1`,
         `https://example.test/${code}`,
+        `https://example.test/v1?error=${code}`,
+        `https://example.test/v1?${code}=synthetic`,
+        `https://example.test/v1#${code}`,
+        `https://example.test/v1#error=${code}`,
       ])
         expect(
           classifyConnectionFailure(

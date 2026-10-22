@@ -5398,7 +5398,10 @@ export function classifyConnectionFailure(
   | "network_error"
   | "timeout"
   | "unknown" {
-  const message = error instanceof Error ? error.message : String(error);
+  // URL components do not identify provider error codes; callers retain the original diagnostic.
+  const message = (
+    error instanceof Error ? error.message : String(error)
+  ).replace(/\bhttps?:\/\/[^\s"'<>]+/giu, "");
   if (
     /\b(?:sqlite3?|database|workbench)\b/iu.test(message) ||
     isTomlParserError(message)

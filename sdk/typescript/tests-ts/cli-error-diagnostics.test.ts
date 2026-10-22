@@ -379,3 +379,32 @@ test.each([
     }
   },
 );
+
+test.each([
+  "https://example.test/v1?error=invalid.api.key",
+  "https://example.test/v1#model.not.found",
+])("preserves URL diagnostic %s without credential advice", async (url) => {
+  const diagnostic = `error sending request for url (${url})`;
+  for (const json of [false, true]) {
+    const { stdout, stderr, runCli } = createCliTest(main);
+    expect(
+      await runCli(
+        ["scan", ".", ...(json ? ["--json"] : [])],
+        dependencies({
+          onRun: () => {
+            throw new Error(diagnostic);
+          },
+        }),
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain(diagnostic);
+    expect(stderr.text()).not.toContain("Authentication failed");
+    expect(stderr.text()).not.toContain("cannot access the configured model");
+    if (json)
+      expect(JSON.parse(stdout.text())).toEqual({
+        status: "failed",
+        code: "SCAN_FAILED",
+        message: diagnostic,
+      });
+  }
+});

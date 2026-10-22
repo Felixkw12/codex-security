@@ -1760,6 +1760,10 @@ process.stdout.write(JSON.stringify({
       `https://${code}.example/v1`,
       `https://example.test/${code}/v1`,
       `https://example.test/${code}`,
+      `https://example.test/v1?error=${code}`,
+      `https://example.test/v1?${code}=synthetic`,
+      `https://example.test/v1#${code}`,
+      `https://example.test/v1#error=${code}`,
     ]) {
       const detail = `error sending request for url (${url})`;
       const message = skillCommandFailure("validate", 7, detail);
