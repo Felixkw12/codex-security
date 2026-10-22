@@ -72,9 +72,22 @@ def reconcile_completed_scan_cost(
 ) -> None:
     """Persist authoritative SDK cost without discarding measured worker usage."""
 
-    fields = merge_scan_usage_fields(
-        stored_scan_cost_fields(scan["cost_json"]), stored_scan_cost_fields(cost_json)
+    stored = stored_scan_cost_fields(scan["cost_json"])
+    completion = stored.get("usage", {}).get("completion")
+    native = collect_scan_usage_safely(
+        connection,
+        scan,
+        thread_id=completion["threadId"] if completion else None,
+        completed_turn_id=completion["turnId"] if completion and completion["finalized"] else None,
     )
+    fields = merge_scan_usage_fields(stored, stored_scan_cost_fields(cost_json), {"usage": native})
+    if completion:
+        usage = {**fields["usage"], "completion": completion}
+        if not completion["finalized"]:
+            if usage["coverage"] == "complete":
+                usage["coverage"] = "partial"
+            usage["warnings"] = sorted({*usage.get("warnings", []), "turn_in_progress"})
+        fields["usage"] = usage
     cost_json = json.dumps(
         fields if "usage" in fields else fields["cost"],
         separators=(",", ":"),
@@ -93,12 +106,17 @@ def merge_scan_usage_fields(*observations: Mapping[str, Any]) -> dict[str, Any]:
 
     merged: dict[str, Any] = {}
     latest_coverage: dict[str, Any] | None = None
+    rate_limits: dict[str, dict[str, Any]] = {}
     for observation in observations:
         if isinstance(observation.get("cost"), dict):
             merged["cost"] = observation["cost"]
         usage = observation.get("usage")
         if not isinstance(usage, dict):
             continue
+        for snapshot in usage.get("accountRateLimits", []):
+            key = snapshot["limitId"]
+            if key not in rate_limits or snapshot["observedAt"] >= rate_limits[key]["observedAt"]:
+                rate_limits[key] = snapshot
         previous = merged.get("usage")
         if previous is None or _usage_quality(usage) >= _usage_quality(previous):
             merged["usage"] = usage
@@ -155,6 +173,11 @@ def merge_scan_usage_fields(*observations: Mapping[str, Any]) -> dict[str, Any]:
             else:
                 updated.pop("warnings", None)
             merged["usage"] = updated
+    if rate_limits:
+        merged["usage"] = {
+            **merged["usage"],
+            "accountRateLimits": [rate_limits[key] for key in sorted(rate_limits)],
+        }
     return merged
 
 

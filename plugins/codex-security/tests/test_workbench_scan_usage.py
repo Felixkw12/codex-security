@@ -1443,6 +1443,85 @@ def test_completion_preserves_explicit_legacy_cost(
 
 
 @pytest.mark.parametrize(
+    "native_state",
+    ["complete", "missing-worker", "missing-turn", "unavailable", "unavailable-turn"],
+)
+def test_completion_reconciles_supplied_usage_with_native_evidence(
+    tmp_path: Path, native_state: str
+) -> None:
+    fixture = _start_scan(tmp_path)
+    counted = fixture.started_at + timedelta(microseconds=1)
+    events = [_token_event(counted, 15, 6), _allowance_event(counted, 6)]
+    if native_state == "missing-turn":
+        events.extend(
+            _event(counted, "event_msg", {"type": kind, "turn_id": "unmeasured-turn"})
+            for kind in ("task_started", "task_complete")
+        )
+    if native_state not in {"unavailable", "unavailable-turn"}:
+        _state_graph(
+            fixture.environment,
+            {"scan-parent": _rollout(tmp_path, "scan-parent", events)},
+            [("scan-parent", "missing-worker")] if native_state == "missing-worker" else [],
+        )
+    runtime = {
+        "source": "codex_runtime",
+        "coverage": "complete",
+        "observedAt": counted.isoformat(),
+        "threadCount": 1,
+        "missingThreadCount": 0,
+        "coverageScope": ["thread:scan-parent"],
+        **_counts(15, 0, 6),
+    }
+    cost = {
+        "model": "gpt-5.6-sol",
+        "inputTokens": 15,
+        "cachedInputTokens": 0,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 6,
+        "estimatedUsd": 0.002,
+    }
+    arguments = ["--cost-json", json.dumps({"usage": runtime, "cost": cost})]
+    if native_state == "unavailable-turn":
+        arguments.extend(["--thread-id", "scan-parent", "--turn-id", "completion-turn"])
+    completed = _complete_scan(fixture, *arguments)["scan"]
+    assert completed["cost"] == cost
+    usage = completed["usage"]
+    if native_state == "unavailable":
+        assert usage == runtime
+        return
+    if native_state == "unavailable-turn":
+        assert usage == {
+            **runtime,
+            "coverage": "partial",
+            "warnings": ["turn_in_progress"],
+            "completion": {
+                "threadId": "scan-parent",
+                "turnId": "completion-turn",
+                "finalized": False,
+            },
+        }
+        return
+    assert usage["totalTokens"] == 21
+    assert usage["source"] == "codex_rollout"
+    assert usage["byRole"] == {
+        "parent": {**_counts(15, 0, 6), "threadCount": 1},
+        "workers": {**_counts(0, 0, 0), "threadCount": 0},
+    }
+    assert datetime.fromisoformat(usage["window"]["startedAt"]) == fixture.started_at
+    assert datetime.fromisoformat(usage["tokensUpdatedAt"]) == counted
+    assert usage["accountRateLimits"][0]["primary"]["usedPercent"] == 6
+    assert usage["coverage"] == ("complete" if native_state == "complete" else "partial")
+    if native_state == "missing-worker":
+        assert usage["missingThreadCount"] == 1
+        assert usage["coverageScope"] == ["thread:missing-worker", "thread:scan-parent"]
+        assert usage["warnings"] == ["rollout_unavailable"]
+    elif native_state == "missing-turn":
+        assert usage["warnings"] == ["token_record_missing"]
+    else:
+        assert not usage.get("warnings")
+
+
+@pytest.mark.parametrize(
     "worker_state",
     ["absent", "measured", "missing_graph_child", "missing_registered_worker", "unmeasured"],
 )
@@ -1616,9 +1695,144 @@ def test_usage_is_returned_by_completion_without_an_extra_command(tmp_path: Path
     assert "invalid choice" in str(extra_command["stderr"])
 
 
+@pytest.mark.parametrize("sdk_ahead", [False, True])
+def test_cli_completion_refresh_preserves_native_detail_and_sdk_subtotal(
+    tmp_path: Path, sdk_ahead: bool
+) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text("print('fixture')\n", encoding="utf-8")
+    scan_dir = tmp_path / "scan"
+    scan_dir.mkdir(mode=0o700)
+    environment = {
+        "CODEX_HOME": str(tmp_path / "codex-home"),
+        "CODEX_SQLITE_HOME": str(tmp_path / "codex-sqlite"),
+        "CODEX_STATE_DB": "",
+    }
+    registration = run_workbench(
+        state_dir,
+        "register-cli-scan",
+        "--repository",
+        str(target),
+        "--scan-dir",
+        str(scan_dir),
+        "--recipe-json",
+        json.dumps(
+            {
+                "repository": str(target),
+                "target": {"kind": "repository", "paths": []},
+                "mode": "standard",
+                "config": {},
+            }
+        ),
+        environment=environment,
+    )
+    scan_id = registration["scanId"]
+    thread_id = str(uuid.uuid4())
+    turn_id = "completion-turn"
+    scan_command(
+        state_dir, "set-scan-thread", scan_id, "--thread-id", thread_id, environment=environment
+    )
+    counted = datetime.now().astimezone()
+    parent = _rollout(
+        tmp_path,
+        thread_id,
+        [
+            _event(counted, "event_msg", {"type": "task_started", "turn_id": turn_id}),
+            _token_event(counted, 15, 6),
+            _allowance_event(counted, 6),
+            _event(counted, "event_msg", {"type": "task_complete", "turn_id": turn_id}),
+        ],
+    )
+    _state_graph(environment, {thread_id: parent}, [])
+    write_completed_contract(scan_dir, scan_id, target, relative_path="app.py")
+    arguments = ["--thread-id", thread_id, "--turn-id", turn_id]
+    initial = scan_command(
+        state_dir, "complete-scan", scan_id, *arguments, environment=environment
+    )["scan"]["usage"]
+    runtime = {
+        "source": "codex_runtime",
+        "coverage": "complete",
+        "observedAt": datetime.now().astimezone().isoformat(),
+        "threadCount": 1,
+        "missingThreadCount": 0,
+        "coverageScope": [f"thread:{thread_id}"],
+        **_counts(40 if sdk_ahead else 15, 0, 6),
+    }
+    refreshed = scan_command(
+        state_dir,
+        "complete-scan",
+        scan_id,
+        "--cost-json",
+        json.dumps({"usage": runtime}),
+        environment=environment,
+    )["scan"]["usage"]
+    assert refreshed["totalTokens"] == runtime["totalTokens"]
+    assert refreshed["completion"] == initial["completion"]
+    assert refreshed["coverage"] == "partial"
+    assert refreshed["warnings"] == ["turn_in_progress"]
+    assert refreshed["accountRateLimits"] == initial["accountRateLimits"]
+    if not sdk_ahead:
+        for key in ("byRole", "window", "tokensUpdatedAt", "accountRateLimits"):
+            assert refreshed[key] == initial[key]
+    finalized = scan_command(
+        state_dir, "finalize-scan-usage", scan_id, *arguments, environment=environment
+    )["scan"]["usage"]
+    assert finalized["totalTokens"] == runtime["totalTokens"]
+    assert finalized["completion"] == {**initial["completion"], "finalized": True}
+    assert finalized["coverage"] == "complete"
+    assert not finalized.get("warnings")
+    assert finalized["accountRateLimits"] == initial["accountRateLimits"]
+
+
+def test_finalized_completion_identity_survives_unknown_usage_scope(tmp_path: Path) -> None:
+    fixture = _start_scan(tmp_path)
+    counted = fixture.started_at + timedelta(microseconds=1)
+    turn_id = "completion-turn"
+    parent = _rollout(
+        tmp_path,
+        "scan-parent",
+        [
+            _event(counted, "event_msg", {"type": "task_started", "turn_id": turn_id}),
+            _token_event(counted, 15, 6),
+            _event(counted, "event_msg", {"type": "task_complete", "turn_id": turn_id}),
+        ],
+    )
+    _state_graph(fixture.environment, {"scan-parent": parent}, [])
+    supplied = {
+        "source": "codex_runtime",
+        "coverage": "partial",
+        "threadCount": 1,
+        "missingThreadCount": 1,
+        "warnings": ["worker_usage_unavailable"],
+        "observedAt": counted.isoformat(),
+        **_counts(40, 0, 6),
+    }
+    arguments = ["--thread-id", "scan-parent", "--turn-id", turn_id]
+    _complete_scan(fixture, *arguments, "--cost-json", json.dumps({"usage": supplied}))
+    finalized = scan_command(
+        fixture.state_dir,
+        "finalize-scan-usage",
+        fixture.scan_id,
+        *arguments,
+        environment=fixture.environment,
+    )["scan"]["usage"]
+    assert finalized["totalTokens"] == 46
+    assert finalized["coverage"] == "partial"
+    assert finalized["missingThreadCount"] == 1
+    assert "worker_usage_unavailable" in finalized["warnings"]
+    assert finalized["completion"] == {
+        "threadId": "scan-parent",
+        "turnId": turn_id,
+        "finalized": True,
+    }
+
+
 @pytest.mark.parametrize("native", [False, True])
+@pytest.mark.parametrize("supplied_usage", [False, True])
 def test_host_finalizes_exact_completion_turn_without_changing_artifacts(
-    tmp_path: Path, native: bool
+    tmp_path: Path, native: bool, supplied_usage: bool
 ) -> None:
     fixture = _start_scan(tmp_path)
     counted = fixture.started_at + timedelta(microseconds=1)
@@ -1644,7 +1858,26 @@ def test_host_finalizes_exact_completion_turn_without_changing_artifacts(
         {"scan-parent": parent, "scan-worker": worker},
         [("scan-parent", "scan-worker")],
     )
-    initial = _complete_scan(fixture, "--thread-id", "scan-parent", "--turn-id", turn_id)["scan"]
+    arguments = ["--thread-id", "scan-parent", "--turn-id", turn_id]
+    if supplied_usage:
+        arguments.extend(
+            [
+                "--cost-json",
+                json.dumps(
+                    {
+                        "usage": {
+                            "source": "codex_runtime",
+                            "coverage": "complete",
+                            "observedAt": counted.isoformat(),
+                            "threadCount": 2,
+                            "coverageScope": ["thread:scan-parent", "thread:scan-worker"],
+                            **_counts(30, 0, 5),
+                        }
+                    }
+                ),
+            ]
+        )
+    initial = _complete_scan(fixture, *arguments)["scan"]
     completion = {"threadId": "scan-parent", "turnId": turn_id, "finalized": False}
     assert (
         initial["usage"].items()
