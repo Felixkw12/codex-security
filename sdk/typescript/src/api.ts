@@ -1662,6 +1662,7 @@ export class CodexSecurity {
     let scanProgressTracker: ScanProgressTracker | null = null;
     let releaseCredentialHome: (() => Promise<void>) | null = null;
     let releaseExecution: (() => void) | undefined;
+    let cleanupReplayProfile: (() => Promise<void>) | undefined;
     let scanFailure = false;
     let artifactRestorationFailure: OutputDirectoryError | null = null;
     let customValidationComplete = false;
@@ -2275,6 +2276,7 @@ export class CodexSecurity {
         scanKnowledge,
         deepScan: deepScanConfiguration?.settings,
       });
+      cleanupReplayProfile = replayProfile?.cleanup;
       const workerConfig =
         mode === "deep"
           ? resolveExecutionPaths(
@@ -2299,6 +2301,21 @@ export class CodexSecurity {
         signal,
         failureMessage: "Could not save the Codex Security scan",
       };
+      if (replayProfile !== undefined) {
+        const cleanup = replayProfile.cleanup;
+        cleanupReplayProfile = async () => {
+          // Registration can commit before its response reaches this process.
+          if (
+            !(await scanOwnsReplayProfile(
+              (args) =>
+                workbench({ ...workbenchOptions, signal: undefined }, args),
+              scanDir,
+              recipe["replayProfile"] as JsonObject,
+            ))
+          )
+            await cleanup();
+        };
+      }
       const registered = await registerScan({
         scan: options,
         parentScanRole: this.#parentScanRole,
@@ -2308,6 +2325,7 @@ export class CodexSecurity {
         archivedScanDir,
         workbench: (args, input) => workbench(workbenchOptions, args, input),
       });
+      cleanupReplayProfile = undefined;
       const {
         registration,
         scanId,
@@ -3692,6 +3710,12 @@ export class CodexSecurity {
     } finally {
       budgetAbortController.abort();
       scanProgressTracker?.stop();
+      // Keep registration ownership stable until profile reconciliation finishes.
+      try {
+        await cleanupReplayProfile?.();
+      } catch (error) {
+        warnCleanupFailed(options, error);
+      }
       try {
         releaseExecution?.();
       } catch (error) {
@@ -5138,6 +5162,30 @@ async function removeTargetPathsFile(path: string | null): Promise<void> {
     await chmod(path, 0o600);
     await rm(path, { force: true });
   }
+}
+
+async function scanOwnsReplayProfile(
+  workbench: (args: readonly string[]) => Promise<JsonObject>,
+  scanDir: string,
+  profile: JsonObject,
+): Promise<boolean> {
+  const saved = await workbench(["list-scans", "--scan-root", scanDir]);
+  for (const scan of saved["scans"] as JsonObject[]) {
+    if (scan["recipeAvailable"] === false) continue;
+    const savedRecipe = await workbench([
+      "get-scan-recipe",
+      "--scan-id",
+      scan["scanId"] as string,
+    ]);
+    const recipe = savedRecipe["recipe"] as JsonObject;
+    const owner = recipe["replayProfile"] as JsonObject | undefined;
+    if (
+      owner?.["name"] === profile["name"] &&
+      owner?.["home"] === profile["home"]
+    )
+      return true;
+  }
+  return false;
 }
 
 /** Save the configuration and instructions needed to resume the same execution. */
