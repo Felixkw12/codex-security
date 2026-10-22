@@ -1358,6 +1358,31 @@ export async function runRepositoryCommand(
 ): Promise<string> {
   options?.signal?.throwIfAborted();
   const sandbox = options?.sandbox;
+  if (process.platform === "win32" && sandbox !== undefined) {
+    // The native Windows sandbox CLI does not enforce narrower read-only
+    // carveouts within an explicit write grant. Keep hooks and configuration
+    // protected before starting a snapshot filter in an overlapping cache.
+    const filesystem = Object.entries(sandbox.profile["filesystem"] ?? {});
+    for (const [writable, access] of filesystem) {
+      if (
+        !isAbsolute(writable) ||
+        !isJsonObject(access) ||
+        access["."] !== "write"
+      )
+        continue;
+      const protectedControl = filesystem.find(
+        ([path, access]) =>
+          isAbsolute(path) &&
+          isJsonObject(access) &&
+          access["."] === "read" &&
+          !isOutsidePath(relative(writable, path)),
+      );
+      if (protectedControl !== undefined)
+        throw new CodexSecurityError(
+          `Cannot prepare a patch snapshot: the Windows sandbox cannot protect Git control ${protectedControl[0]} inside writable snapshot directory ${writable}.`,
+        );
+    }
+  }
   const executable = await resolveTrustedExecutable(
     command,
     sandbox?.environment ?? process.env,

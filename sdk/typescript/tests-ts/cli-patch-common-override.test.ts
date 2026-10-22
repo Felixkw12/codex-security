@@ -112,8 +112,7 @@ for (const mode of [
         }),
       onCodex: async (_args, output) => {
         expect(output!.appServer!.snapshotStoragePaths).toEqual([
-          join(administration, "lfs", "objects"),
-          join(administration, "lfs", "tmp"),
+          join(administration, "lfs"),
         ]);
         expect(output!.appServer!.permissions!.readOnlyPaths).not.toContain(
           marker,
@@ -226,9 +225,7 @@ for (const mode of [
       onCodex: async (_args, output) => {
         launches++;
         expect(output!.appServer!.snapshotStoragePaths).toEqual(
-          mode === "overridden alias"
-            ? []
-            : [join(common, "lfs", "objects"), join(common, "lfs", "tmp")],
+          mode === "overridden alias" ? [] : [join(common, "lfs")],
         );
         expect(output!.appServer!.permissions!.readOnlyPaths).toContain(common);
         if (retargeted) {
