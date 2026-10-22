@@ -616,7 +616,7 @@ export async function capturePatchGitControls(
       readOnly: boolean;
       allowDirectoryChanges: boolean;
       allowDirectoryCreation: boolean;
-      contents: Buffer | undefined;
+      contents: Buffer | null | undefined;
     }
   >();
   const snapshotStoragePaths = new Set<string>();
@@ -691,9 +691,13 @@ export async function capturePatchGitControls(
     optional = false,
   ): Promise<void> => {
     try {
-      // Empty regular inputs have no --show-origin records. Devices such as
-      // /dev/null and unavailable optional inputs keep native Git behavior.
-      if ((await stat(path).catch(missing))?.isFile())
+      // Absent and empty regular inputs have no --show-origin records. Devices
+      // such as /dev/null and unavailable optional inputs keep native behavior.
+      const metadata = await stat(path).catch(missing);
+      if (metadata === undefined) {
+        await rememberControl(path, false);
+        controlPaths.get(path)!.contents = null;
+      } else if (metadata.isFile())
         await rememberConfiguration(path, true, optional);
     } catch (error) {
       if (
@@ -1128,9 +1132,11 @@ export async function capturePatchGitControls(
           );
         }
         if (
-          expected.contents !== undefined &&
-          (!metadata?.isFile() ||
-            !(await readFile(canonical)).equals(expected.contents))
+          expected.contents === null
+            ? metadata !== undefined && !metadata.isDirectory()
+            : expected.contents !== undefined &&
+              (!metadata?.isFile() ||
+                !(await readFile(canonical)).equals(expected.contents))
         )
           throw new Error(
             `Git configuration changed during the patch: ${path}`,
