@@ -308,7 +308,13 @@ runpy.run_path(script, run_name='__main__')
           if (resolution === "pending") {
             assert.deepEqual(
               coverage.deferred.find((row: any) => row.id === pending.id),
-              { ...pending, candidate },
+              {
+                ...pending,
+                candidate,
+                ...(modern
+                  ? {}
+                  : { surfaceIds: [`candidate-${candidate.candidate_id}`] }),
+              },
             );
             assert.ok(
               (
@@ -550,7 +556,11 @@ for (const disposition of ["rejected", "not_applicable"]) {
           (row: any) => row.candidateId === candidate.candidate_id,
         );
         assert.equal(retained.length, kind === "valid" ? 0 : 1);
-        if (retained.length) assert.deepEqual(retained[0], pending);
+        if (retained.length)
+          assert.deepEqual(retained[0], {
+            ...pending,
+            surfaceIds: [`candidate-${candidate.candidate_id}`],
+          });
         const terminal = result.surfaces.filter(
           (row: any) =>
             row.candidateId === candidate.candidate_id &&

@@ -692,6 +692,7 @@ describe("deep scan workbench ownership", () => {
             candidate: candidates[0],
             reason: "Existing candidate validation dependency was unavailable.",
             paths: ["src/source.py"],
+            surfaceIds: ["candidate-candidate-001"],
           },
           {
             id: "candidate-deferred",
@@ -699,6 +700,7 @@ describe("deep scan workbench ownership", () => {
             candidate: candidates[4],
             reason: "Existing runtime policy could not be inspected.",
             paths: ["src/source.py"],
+            surfaceIds: ["candidate-candidate-deferred"],
           },
           {
             id: "scan-cost-limit",
