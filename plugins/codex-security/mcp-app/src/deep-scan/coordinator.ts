@@ -1099,6 +1099,7 @@ export class DeepScanCoordinator {
         this.artifacts,
         worker.resultManifestPath,
         this.state.scanId,
+        this.state,
       );
       recovered.push({
         id: worker.id,

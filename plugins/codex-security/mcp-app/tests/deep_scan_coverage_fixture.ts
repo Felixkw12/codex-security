@@ -67,6 +67,7 @@ interface PublishedCoverage {
     reason: string;
     surfaceIds: string[];
   })[];
+  resolvedDeferred?: { id: string; reason: string }[];
   explicitExclusions: ProjectedRecord[];
   openQuestions: (ProjectedRecord & {
     question: string;
@@ -931,13 +932,15 @@ runpy.run_path(sys.argv[0], run_name="__main__")
       return { threadId: thread, finalResponse: "Audit finished." };
     },
   };
+  run = (await store.claimCoordinator({ scanId: run.scanId, threadId })).run;
   const coordinator = new DeepScanCoordinator({
     run,
     store,
     executor,
     pluginRoot,
+    threadId,
     retryDelaysMs: extraReceiptRetry ? [1, 1] : [1],
-    onComplete: async (draft, signal) => {
+    onComplete: async (draft, signal, publication) => {
       if (stopBeforeDraft)
         throw new Error("Synthetic stop before parent draft.");
       await recordCodexSecurityScanDraftViaWorkbench(
@@ -945,6 +948,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
         draft,
         runWorkbench,
         signal,
+        publication,
       );
     },
   });

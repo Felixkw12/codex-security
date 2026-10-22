@@ -16,7 +16,6 @@ import type {
 import { mock } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { once } from "node:events";
 import {
   mkdir,
   readFile,

@@ -84,7 +84,11 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
   const parsed = parseScanDraft(input);
   requireBoundScan(context, parsed, true);
   const finalDeepDraft = context.mode === "deep" && parsed.complete !== false;
-  if (finalDeepDraft && resolvedDeferred(parsed.coverage).length > 0) {
+  if (
+    finalDeepDraft &&
+    publication === undefined &&
+    resolvedDeferred(parsed.coverage).length > 0
+  ) {
     throw new Error(
       "scan draft: terminal Deep drafts cannot resolve child deferred work.",
     );

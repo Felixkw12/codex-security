@@ -641,8 +641,10 @@ def test_previous_attempt_resolution_does_not_clear_current_gap(
         )
     )
     # This parent disposition follows the worker result; tied observations stay pending.
-    observed = result.stat().st_mtime_ns + 1
-    os.utime(parent_path, ns=(observed, observed))
+    observed = result.stat().st_mtime_ns // 1_000_000_000 * 1_000_000_000
+    os.utime(result, ns=(observed, observed))
+    parent_observed = observed + 2_000_000_000
+    os.utime(parent_path, ns=(parent_observed, parent_observed))
     with monkeypatch.context() as interrupted:
         if retry_publication:
 

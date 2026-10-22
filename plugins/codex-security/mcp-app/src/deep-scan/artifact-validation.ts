@@ -3,7 +3,7 @@ import { dirname, posix, relative, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { JsonObject } from "../types.js";
 import type { AcceptedDiscovery } from "./worker-runner.js";
-import { artifactSourcePath } from "../artifact-io.js";
+import { artifactSourcePath, type ArtifactContext } from "../artifact-io.js";
 import {
   coverageReceiptComponents,
   validateRetainedCoverage,
@@ -142,10 +142,22 @@ export async function validateDiscoveryArtifacts(
   artifacts: DeepScanArtifacts,
   resultPath: string,
   expectedScanId: string,
+  boundScope: Pick<
+    ArtifactContext,
+    "scope" | "includePaths" | "filePaths"
+  > = {},
 ): Promise<ScanDraftInput> {
   await requireRegularFile(resultPath, artifacts.workersRoot);
   const root = dirname(resultPath);
-  const context = { root, repoRoot: root, layout: "worker" as const };
+  const context = {
+    root,
+    repoRoot: root,
+    layout: "worker" as const,
+    scanId: expectedScanId,
+    scope: boundScope.scope,
+    includePaths: boundScope.includePaths,
+    filePaths: boundScope.filePaths,
+  };
   const stored = await readJsonObject(resultPath);
   await retainRecordedReceiptOwnership(context, stored);
   const result = parseStoredScanDraft(
@@ -355,13 +367,17 @@ export function aggregateSourceCoverage(
     "surfaces",
     "explicitExclusions",
     "deferred",
+    "resolvedDeferred",
     "openQuestions",
     "reviews",
   ]) {
     const entries = sources.flatMap(
       (source) => (source[field] as unknown[] | undefined) ?? [],
     );
-    if (entries.length || field !== "openQuestions")
+    if (
+      entries.length ||
+      (field !== "openQuestions" && field !== "resolvedDeferred")
+    )
       result[field] = structuredClone(entries);
   }
   return result;
@@ -456,6 +472,14 @@ export function projectDiscoveryCoverage(
             ),
           }),
     })),
+    ...(coverage.resolvedDeferred === undefined
+      ? {}
+      : {
+          resolvedDeferred: coverage.resolvedDeferred.map(({ id, reason }) => ({
+            id: `${prefix}-resolved-${id}`,
+            reason,
+          })),
+        }),
     ...(coverage.openQuestions === undefined
       ? {}
       : {

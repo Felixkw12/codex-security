@@ -15,12 +15,15 @@ import {
 import path from "node:path";
 import { importSource } from "./import-module.ts";
 import type { ScanDraftInput } from "../src/artifact-scan-draft.ts";
+import type { DeepReductionInput } from "../src/deep-scan/artifact-validation.ts";
 import type { JsonObject } from "../src/types.ts";
 
 const {
   validateDiscoveryArtifacts,
   validateReducerArtifacts,
   aggregateDiscoveryCoverage,
+  aggregateSourceCoverage,
+  projectDiscoveryCoverage,
 } = await importSource(
   path.join(import.meta.dirname, "../src/deep-scan/artifact-validation.ts"),
 );
@@ -43,6 +46,7 @@ try {
   await testCoveragePublicationParity(root);
   await testWorkerPublicationBeforeCheckpoint(root);
   await testLegacyDeferredPublication(root);
+  testResolvedDeferredPublication();
   await testMissingReceiptRepair(root);
   for (const reverse of [false, true])
     await testMissingReceiptRepair(root, { shared: true, reverse });
@@ -73,6 +77,45 @@ try {
 }
 
 console.log("deep scan artifact validation tests passed");
+
+function testResolvedDeferredPublication() {
+  const source = {
+    surfaces: [],
+    explicitExclusions: [],
+    deferred: [{ id: "pending", reason: "A separate task remains." }],
+    resolvedDeferred: [{ id: "1", reason: "The original review finished." }],
+  };
+  let previous: DeepReductionInput | null = null;
+  for (const worker of [
+    { id: "first", attempt: 1 },
+    { id: "second", attempt: 1 },
+    { id: "first", attempt: 2 },
+  ]) {
+    const coverage = projectDiscoveryCoverage(source, worker, "worker/output");
+    const result = { scanId, findings: [] };
+    previous = {
+      ...result,
+      sourceCoverage: aggregateSourceCoverage(
+        [{ workerId: worker.id, coverage, result }],
+        previous,
+      ),
+    };
+  }
+  const parsed: ScanDraftInput = parseScanDraft({
+    ...draft([]),
+    coverage: previous!.sourceCoverage,
+  });
+  const closures = parsed.coverage.resolvedDeferred ?? [];
+  assert.equal(new Set(closures.map((row) => row.id)).size, 3);
+  assert.deepEqual(
+    closures.map((row) => row.reason),
+    Array(3).fill("The original review finished."),
+  );
+  assert.equal(parsed.coverage.deferred.length, 3);
+  assert.deepEqual(source.resolvedDeferred, [
+    { id: "1", reason: "The original review finished." },
+  ]);
+}
 
 async function testDiscoveryReceipts(root: string) {
   const result = draft([], {

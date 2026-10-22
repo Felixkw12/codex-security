@@ -10,6 +10,33 @@ import {
 
 for (const resume of [false, true]) {
   for (const outcome of ["completion", "recovery", "no parent"]) {
+    test(`resolved generic tasks survive ${resume ? "resumed" : "live"} ${outcome}`, async () => {
+      const root = await mkdtemp(path.join(tmpdir(), "resolved-coverage-"));
+      try {
+        const { scanDir } = await publishCoverageFixture(root, "complete", {
+          resume,
+          firstCheckpointReceipt: "worker",
+          sameAttemptCloseout: true,
+          stopAfterDraft: outcome === "recovery",
+          stopBeforeDraft: outcome === "no parent",
+        });
+        const coverage = await readFixtureCoverage(scanDir);
+        assert.deepEqual(
+          coverage.resolvedDeferred,
+          coverage.reviews.map(({ workerId, attempt }) => ({
+            id: `${workerId}-attempt-${attempt}-resolved-first-gap`,
+            reason: "The same boundary is verified.",
+          })),
+        );
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  }
+}
+
+for (const resume of [false, true]) {
+  for (const outcome of ["completion", "recovery", "no parent"]) {
     test(`coverage provenance survives ${resume ? "reconstructed" : "live"} reduction and ${outcome}`, async () => {
       const root = await mkdtemp(path.join(tmpdir(), "coverage-provenance-"));
       try {

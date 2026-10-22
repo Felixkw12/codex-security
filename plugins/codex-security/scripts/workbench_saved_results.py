@@ -46,6 +46,8 @@ from workbench.saved_coverage import (
     _deferred_rows,
     _merge_tied_parent_observations,
     _parent_observation_content,
+    _project_worker_closure,
+    _projected_worker_closure_sources,
     _resolved_deferred_rows,
     prepare_saved_coverage_projection,
 )
@@ -1638,6 +1640,11 @@ def merge_saved_results(
     coverage_schema = _read_json(
         Path(__file__).resolve().parent.parent / "schemas" / "coverage.schema.json"
     )["properties"]
+
+    projected_closure_sources = _projected_worker_closure_sources(
+        sources, source_order, worker_attempts, coverage_schema["resolvedDeferred"]
+    )
+
     for relative, draft, owner in all_sources:
         for item in deferred_rows[relative]:
             if not isinstance(item, dict):
@@ -1672,12 +1679,19 @@ def merge_saved_results(
                         accepted_deferred_orders.get(key, order), order
                     )
         for closure in _resolved_deferred_rows(draft, coverage_schema["resolvedDeferred"]):
-            key = (owner, closure["id"])
-            order = candidate_order(relative, owner)
+            closure_owner, closure_relative = owner, relative
+            if owner is None and (
+                source := projected_closure_sources.get((closure["id"], closure["reason"]))
+            ):
+                # A copied parent closeout keeps its worker's identity and observation
+                # time, so a later parent write cannot hide reopened worker work.
+                closure_owner, closure, closure_relative = source
+            key = (closure_owner, closure["id"])
+            order = candidate_order(closure_relative, closure_owner)
             previous = closed_deferred.get(key)
             if previous is None or order > previous[0]:
                 # The parent comes first, preserving its reason on equal timestamps.
-                closed_deferred[key] = (order, closure, relative)
+                closed_deferred[key] = (order, closure, closure_relative)
     reopened_rows: list[tuple[str | None, dict[str, Any]]] = []
     reopened_generic: set[tuple[str | None, str]] = set()
     for key, (order, _, _) in list(closed_deferred.items()):
@@ -1707,12 +1721,15 @@ def merge_saved_results(
                 and (owner, row) not in reopened_rows
             ):
                 reopened_rows.append((owner, row))
-    parent_closures = [
-        closure for (owner, _), (_, closure, _) in closed_deferred.items() if owner is None
+    retained_closures = [
+        closure
+        if owner is None
+        else _project_worker_closure(relative, owner, closure, worker_attempts, source_order)
+        for (owner, _), (_, closure, relative) in closed_deferred.items()
     ]
     coverage.pop("resolvedDeferred", None)
-    if parent_closures:
-        coverage["resolvedDeferred"] = copy.deepcopy(parent_closures)
+    if retained_closures:
+        coverage["resolvedDeferred"] = copy.deepcopy(retained_closures)
         if parent:
             coverage["deferred"] = [
                 row

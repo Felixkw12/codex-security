@@ -649,6 +649,43 @@ def _resolved_deferred_rows(draft: dict[str, Any], schema: dict[str, Any]) -> li
     return rows
 
 
+def _project_worker_closure(
+    relative: str,
+    owner: str,
+    closure: dict[str, Any],
+    worker_attempts: dict[str, tuple[str, int]],
+    source_order: dict[str, tuple[int, int]],
+) -> dict[str, Any]:
+    directory = Path(relative).parent
+    if directory.name == "checkpoints":
+        directory = directory.parent
+    _, attempt = worker_attempts.get(directory.as_posix(), (owner, source_order[relative][0]))
+    return {
+        "id": f"{owner}-attempt-{attempt}-resolved-{closure['id']}",
+        "reason": closure["reason"],
+    }
+
+
+def _projected_worker_closure_sources(
+    sources: list[tuple[str, dict[str, Any], str | None]],
+    source_order: dict[str, tuple[int, int]],
+    worker_attempts: dict[str, tuple[str, int]],
+    schema: dict[str, Any],
+) -> dict[tuple[str, str], tuple[str, dict[str, Any], str]]:
+    projected: dict[tuple[str, str], tuple[str, dict[str, Any], str]] = {}
+    for relative, draft, owner in sources:
+        if owner is None:
+            continue
+        for closure in _resolved_deferred_rows(draft, schema):
+            row = _project_worker_closure(relative, owner, closure, worker_attempts, source_order)
+            # Both fields identify the full strict closeout row, including its reason.
+            key = (row["id"], row["reason"])
+            previous = projected.get(key)
+            if previous is None or source_order[relative] > source_order[previous[2]]:
+                projected[key] = (owner, closure, relative)
+    return projected
+
+
 def _parent_observation_content(parent: dict[str, Any]) -> dict[str, Any]:
     # Frozen recovery ancestry does not change the observed scan result.
     return {
