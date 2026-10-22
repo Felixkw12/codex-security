@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
+import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 
 const bundle = await build({
   bundle: true,
-  entryPoints: [new URL("../src/scan-handoff.ts", import.meta.url).pathname],
+  entryPoints: [
+    fileURLToPath(new URL("../src/scan-handoff.ts", import.meta.url)),
+  ],
   format: "esm",
   platform: "node",
   write: false,
