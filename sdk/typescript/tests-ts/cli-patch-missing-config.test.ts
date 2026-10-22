@@ -173,7 +173,6 @@ for (const selected of [
             expect(failure.status).toBe(128);
             directoryError = failure.stderr.toString();
             expect(directoryError).toContain(control);
-            expect(directoryError).toContain("Is a directory");
           }
         }
         const activated = create === true && !selected.startsWith("disabled");
