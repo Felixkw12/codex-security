@@ -6133,7 +6133,7 @@ describe("CodexSecurity orchestration", () => {
         ]);
       }
       expect(prompts.at(-1)).toEndWith("Record the scan cost.");
-      expect(prompts.at(-1)).toContain(scanDir);
+      expect(prompts.at(-1)).toContain(JSON.stringify(scanDir));
       expect(prompts).toHaveLength(2);
       expect(workers).toEqual([{ kind: "observed", worker: 1 }]);
       expect(observerErrors).toEqual(["onWorkerEvent"]);
