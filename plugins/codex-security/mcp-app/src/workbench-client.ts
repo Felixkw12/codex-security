@@ -9,11 +9,29 @@ import {
   workbenchCommandTimeout,
 } from "./python_command.js";
 import { WORKBENCH_PYTHON } from "./server/workbench-process.js";
+import {
+  canonicalizeModelSafePath,
+  codexSecurityStateDirectory,
+} from "../../../../sdk/typescript/src/runtime.js";
+import { snapshotNativeEnvironment } from "./native-executable.js";
 
 const execFileAsync = promisify(execFile);
 const CONFIGURED_SCAN_ROOT = process.env.CODEX_SECURITY_SCAN_ROOT?.trim();
 export const PLUGIN_ROOT =
   process.env.CODEX_SECURITY_PLUGIN_ROOT || resolve(__dirname, "..");
+
+let selectedStateDirectory: Promise<string> | undefined;
+
+/** Share the SDK's state selection across the MCP host and all Python children. */
+export function workbenchStateDirectory(): Promise<string> {
+  return (selectedStateDirectory ??= (async () => {
+    if (process.env.CODEX_SECURITY_STATE_DIR?.trim())
+      return codexSecurityStateDirectory();
+    return codexSecurityStateDirectory(
+      await snapshotNativeEnvironment(canonicalizeModelSafePath),
+    );
+  })());
+}
 
 export async function scanRoot(): Promise<string> {
   const result = await runWorkbench([
@@ -71,7 +89,10 @@ async function executeWorkbench(
     {
       cwd: PLUGIN_ROOT,
       windowsHide: true,
-      env: process.env,
+      env: {
+        ...process.env,
+        CODEX_SECURITY_STATE_DIR: await workbenchStateDirectory(),
+      },
       encoding: "utf8" as const,
       maxBuffer: Infinity,
       timeout,

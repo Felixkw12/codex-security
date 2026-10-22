@@ -2589,6 +2589,7 @@ test(
           home: join(root, `home-${id}`),
           toolBin: join(root, `tools-${id}`),
           scanDir: join(root, `scan-${id}`),
+          stateDirectory: join(root, `selected-state-${id}`),
           capture: join(root, `worker-${id}.json`),
           preflights: join(root, `preflights-${id}.jsonl`),
           decoyLaunch: join(root, `decoy-${id}.jsonl`),
@@ -2734,6 +2735,7 @@ test(
           PATH: fixture.path,
           CODEX_HOME: fixture.home,
           CODEX_SECURITY_CONFIG_PATH: fixture.selectedConfigPath,
+          CODEX_SECURITY_STATE_DIR: join(root, "ambient-state"),
           OPENAI_API_KEY: `synthetic-key-${fixture.id}`,
           NATIVE_PROFILE_CAPTURE: fixture.preflights,
           NATIVE_PROFILE_MARKER: fixture.id,
@@ -2753,6 +2755,7 @@ test(
         return prepareNativeScan({
           ...input(`synthetic-${fixture.id}`),
           pluginRoot,
+          stateDirectory: fixture.stateDirectory,
           model: `synthetic-model-${fixture.id}`,
           semanticInputs:
             fixture.semanticInputs ?? fixtures[index + 2].semanticInputs,
@@ -2886,10 +2889,7 @@ test(
                     `model="synthetic-model-${fixture.id}"`,
                   ),
                 );
-                assert.equal(
-                  observed.state,
-                  join(fixture.home, "state", "plugins", "codex-security"),
-                );
+                assert.equal(observed.state, fixture.stateDirectory);
                 await assert.rejects(readFile(fixture.decoyLaunch), {
                   code: "ENOENT",
                 });
@@ -2941,6 +2941,10 @@ test(
       assert.equal(
         process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH,
         fixtures[3].deepConfigPath,
+      );
+      assert.equal(
+        process.env.CODEX_SECURITY_STATE_DIR,
+        join(root, "ambient-state"),
       );
     } finally {
       restore();

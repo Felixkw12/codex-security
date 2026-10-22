@@ -1,7 +1,7 @@
 import { captureEnvironment } from "../../../../sdk/typescript/tests-support/process-environment.mjs";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import {
   mkdtemp,
   mkdir,
@@ -32,7 +32,8 @@ const bundle = await build({
       name: "native-stop-boundaries",
       setup(build) {
         const modules = {
-          "../../../sdk/typescript/src/runtime.js": `
+          "../../../../sdk/typescript/src/runtime.js": `
+          export { canonicalizeModelSafePath } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/runtime.ts", import.meta.url)))};
           import { codexSecurityStateDirectory as stateDirectory } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/runtime.ts", import.meta.url)))};
           export function codexSecurityStateDirectory(environment) { return fixture.stateDirectory ?? stateDirectory(environment); }`,
           "@modelcontextprotocol/sdk/server/mcp.js": `
@@ -60,7 +61,8 @@ const bundle = await build({
           import { PassThrough } from "node:stream";
           export function spawn() { throw new Error("unexpected runtime child invocation"); }
           export function execFile() {}
-          execFile[Symbol.for("nodejs.util.promisify.custom")] = () => {
+          execFile[Symbol.for("nodejs.util.promisify.custom")] = (_command, _args, options) => {
+            fixture.workbenchEnvironment?.(options.env);
             const stdin = new PassThrough();
             let input = "";
             const result = new Promise((resolve, reject) => {
@@ -334,9 +336,17 @@ for (const operation of ["cancel", "fail", "canceled", "failed"]) {
       const configuredHome = `${join(root, "link")}/..`;
       const canonicalHome = await realpath(configuredHome);
       process.env.CODEX_HOME = configuredHome;
-      for (const override of [undefined, join(root, "selected-state")]) {
+      for (const override of [
+        undefined,
+        join(root, "selected-state"),
+        `  ${join(root, "padded-state")}  `,
+        "relative-state",
+      ]) {
         if (override === undefined) delete process.env.CODEX_SECURITY_STATE_DIR;
         else process.env.CODEX_SECURITY_STATE_DIR = override;
+        const expectedState = override
+          ? resolve(override.trim())
+          : join(canonicalHome, "state", "plugins", "codex-security");
         const rejoin = operation === "canceled" || operation === "failed";
         const scan = {
           scanId: "synthetic-parent",
@@ -348,13 +358,12 @@ for (const operation of ["cancel", "fail", "canceled", "failed"]) {
         let preserved = false;
         let released = false;
         const server = serverFor({
+          workbenchEnvironment(environment) {
+            assert.equal(environment.CODEX_SECURITY_STATE_DIR, expectedState);
+          },
           async cancel() {},
           async waitForScanExecution(state, directory) {
-            assert.equal(
-              state,
-              override ??
-                join(canonicalHome, "state", "plugins", "codex-security"),
-            );
+            assert.equal(state, expectedState);
             assert.equal(directory, scan.scanDir);
             return () => {
               released = true;
@@ -399,6 +408,54 @@ for (const operation of ["cancel", "fail", "canceled", "failed"]) {
     } finally {
       restore();
       await rm(root, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const resumed of [false, true]) {
+  test(`native ${resumed ? "resume" : "start"} forwards its workbench state to execution`, async () => {
+    const restore = captureEnvironment(["CODEX_SECURITY_STATE_DIR"]);
+    process.env.CODEX_SECURITY_STATE_DIR = "  relative-native-state  ";
+    const expectedState = resolve("relative-native-state");
+    const scan = {
+      scanId: "synthetic-parent",
+      scanDir: "/synthetic/scan",
+      mode: "deep",
+      handoffClaimToken: "synthetic-claim",
+      progress: { status: "running" },
+    };
+    let launches = 0;
+    const server = serverFor({
+      workbenchEnvironment(environment) {
+        assert.equal(environment.CODEX_SECURITY_STATE_DIR, expectedState);
+      },
+      async workbench([command]) {
+        if (command === "list-scans") return {};
+        if (command === "resolve-scan-root")
+          return { scanRoot: "/synthetic/scans" };
+        return { scan, ...(resumed ? { recipe: { mode: "deep" } } : {}) };
+      },
+      async run(input) {
+        launches++;
+        assert.equal(input.stateDirectory, expectedState);
+        assert.equal(input.recipe !== undefined, resumed);
+        // Host selection remains stable if unrelated ambient configuration changes.
+        process.env.CODEX_SECURITY_STATE_DIR = "different-ambient-state";
+        scan.progress.status = "complete";
+      },
+    });
+    try {
+      const result = await server.tools.get("start_codex_security_deep_scan")(
+        resumed
+          ? { scanId: scan.scanId, handoffClaimToken: scan.handoffClaimToken }
+          : { targetPath: "/synthetic/repository" },
+        nativeMeta,
+      );
+      assert.notEqual(result.isError, true, JSON.stringify(result));
+      assert.equal(launches, 1);
+    } finally {
+      restore();
+      await server.close();
     }
   });
 }

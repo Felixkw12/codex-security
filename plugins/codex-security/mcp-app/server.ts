@@ -11,7 +11,12 @@ import { join, resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod/v4";
 import { resolvePythonCommand } from "./src/python_command.js";
-import { PLUGIN_ROOT, runWorkbench, scanRoot } from "./src/workbench-client.js";
+import {
+  PLUGIN_ROOT,
+  runWorkbench,
+  scanRoot,
+  workbenchStateDirectory,
+} from "./src/workbench-client.js";
 import { version as MCP_APP_VERSION } from "./package.json";
 import {
   handoffClaimTokenSchema,
@@ -27,12 +32,10 @@ import {
   type NativeScanSemanticInputs,
 } from "./src/native-scan.js";
 import { scanInputIdentity } from "../../../sdk/typescript/src/scan-inputs.js";
-import { snapshotNativeEnvironment } from "./src/native-executable.js";
 import {
   ScanPermissionError,
   waitForScanExecution,
 } from "../../../sdk/typescript/src/scan-execution.js";
-import { codexSecurityStateDirectory } from "../../../sdk/typescript/src/runtime.js";
 import { registerFindingIssueTools } from "./src/server/finding-issue-tools.js";
 import type { DeepScanParentTurn } from "./src/deep-scan/permission-profile-preflight.js";
 import {
@@ -1024,6 +1027,7 @@ export function createCodexSecurityServer(): McpServer {
           {
             scan,
             semanticInputs,
+            stateDirectory: await workbenchStateDirectory(),
             ...(isJsonObject(begun.recipe)
               ? { recipe: begun.recipe as NativeScanInput["recipe"] }
               : {}),
@@ -2156,7 +2160,7 @@ async function finalizeNativeStoppedScan(
   const release =
     scan.mode === "deep"
       ? await waitForScanExecution(
-          codexSecurityStateDirectory(await snapshotNativeEnvironment()),
+          await workbenchStateDirectory(),
           scan.scanDir,
           PLUGIN_ROOT,
         )

@@ -922,7 +922,13 @@ command shims such as `codex.cmd` fall back to the bundled executable.
 Python lookup: `--python` on commands that expose interpreter selection or SDK
 `pythonPath`, then
 `PYTHON`, the managed runtime, and `python3` or `python` on `PATH` (`py` also
-works on Windows). `CODEX_SECURITY_STATE_DIR` overrides `CODEX_HOME` for storage.
+works on Windows).
+
+`CODEX_SECURITY_STATE_DIR` overrides `CODEX_HOME` for storage. The native MCP host uses the same state-directory selection as the CLI and SDK:
+relative values resolve from the host's working directory, surrounding whitespace
+is ignored, and an empty value uses the default. Existing MCP history created
+relative to the plugin directory can still be selected with its absolute state
+path. The host, scan workers, and execution locks share the selected location.
 
 ### Troubleshooting
 
