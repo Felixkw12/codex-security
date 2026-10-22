@@ -6707,31 +6707,26 @@ export async function main(
             imports.length === 0
               ? undefined
               : withoutLinearCredentials(dependencies.environment);
-          let patchRiskState: GitPatchState | undefined;
+          let patchState: GitPatchState | undefined;
           let patchGitBase: string | undefined;
-          let patchBase:
-            GitPatchState | Map<string, string> | string | undefined;
+          let patchBase: GitPatchState | Map<string, string> | undefined;
           let publication: PatchPublication | undefined;
           let preparationCompleted = false;
           const identifier = directPatchIdentifier(positionals, imports);
           const preparePatch = async (signal?: AbortSignal) => {
             preparationCompleted = false;
-            patchRiskState = options.assessPatchRisk
-              ? await snapshotGitPatchState(
-                  gitRepository,
-                  dependencies,
-                  true,
-                  signal,
-                )
-              : undefined;
-            patchGitBase =
-              patchRiskState?.tree ??
-              (options.createPr
-                ? await snapshotPatchTree(gitRepository, dependencies)
-                : undefined);
+            patchState =
+              options.assessPatchRisk || options.createPr
+                ? await snapshotGitPatchState(
+                    gitRepository,
+                    dependencies,
+                    options.assessPatchRisk,
+                    signal,
+                  )
+                : undefined;
+            patchGitBase = patchState?.tree;
             patchBase =
-              patchRiskState ??
-              patchGitBase ??
+              patchState ??
               (await snapshotPatchState(repository, dependencies, signal));
             if (options.createPr) {
               await requireCleanPatchPullRequestBase(
@@ -6806,7 +6801,7 @@ export async function main(
                     ...gitEnvironment,
                   },
                   base: patchGitBase!,
-                  state: patchRiskState,
+                  state: patchState,
                   configuration: options,
                   auth: options.auth,
                 },
