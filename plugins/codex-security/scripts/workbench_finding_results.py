@@ -26,7 +26,7 @@ from workbench_constants import (
     FINDING_TITLE_BYTES,
 )
 from workbench_source_excerpt import finding_source_excerpt
-from workbench_source_scopes import requested_scan_paths, safe_source_path
+from workbench_source_scopes import ordinary_path, requested_scan_paths, safe_source_path
 from workbench_target import require_scan_target_identity
 from workbench_validation import bounded_output_text
 
@@ -213,19 +213,18 @@ def finding_artifact_paths(scan_dir: Path, details: dict[str, Any]) -> list[str]
         artifacts.append(report_path)
 
     poc_relative = report_relative.parent / "poc"
-    poc_root = scan_dir.joinpath(*poc_relative.parts)
-    try:
-        if not stat.S_ISDIR(poc_root.stat(follow_symlinks=False).st_mode):
+    poc_root = scan_dir
+    for part in poc_relative.parts:
+        poc_root = poc_root / part
+        if not ordinary_directory(poc_root):
             return artifacts
-    except OSError:
-        return artifacts
 
     for current_directory, directory_names, file_names in os.walk(
         poc_root, topdown=True, followlinks=False
     ):
         current_path = Path(current_directory)
         directory_names[:] = [
-            name for name in sorted(directory_names) if not (current_path / name).is_symlink()
+            name for name in sorted(directory_names) if ordinary_directory(current_path / name)
         ]
         for file_name in sorted(file_names):
             candidate = current_path / file_name
@@ -237,6 +236,14 @@ def finding_artifact_paths(scan_dir: Path, details: dict[str, Any]) -> list[str]
                 continue
             artifacts.append(relative_path)
     return artifacts
+
+
+def ordinary_directory(path: Path) -> bool:
+    try:
+        metadata = path.lstat()
+    except OSError:
+        return False
+    return stat.S_ISDIR(metadata.st_mode) and ordinary_path(metadata)
 
 
 def scan_local_regular_file(scan_dir: Path, relative_path: str) -> bool:
