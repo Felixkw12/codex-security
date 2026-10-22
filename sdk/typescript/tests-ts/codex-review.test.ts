@@ -119,7 +119,28 @@ test.each(["defaults", "configured", "luna-model", "legacy-profile"] as const)(
   },
 );
 
+const transportStatusScenarios = [408, 429, 500, 502, 503, 504, 401].flatMap(
+  (status) =>
+    ["request", "turn"].map((phase) => ({
+      scenario: `transport-${phase}-${status}`,
+      message: `Safety policy: request refused by upstream with ${status}`,
+      phase,
+      retryable: status !== 401,
+    })),
+);
 const failureReasons: Record<string, string> = {
+  ...Object.fromEntries(
+    transportStatusScenarios.map(({ scenario, message }) => [
+      scenario,
+      message,
+    ]),
+  ),
+  "transport-null-turn": "Request flagged for possible cybersecurity risk.",
+  "transport-wording-request":
+    "Request flagged for possible cybersecurity risk.",
+  "transport-timeout-turn":
+    "Safety policy: request refused because the service timed out",
+  "service-timeout-text": "Codex did not submit a validated review",
   "policy-turn-code": "Request blocked.",
   "policy-request-code": "Request blocked.",
   "policy-turn": "Request flagged for possible cybersecurity risk.",
@@ -220,6 +241,13 @@ const failureReasons: Record<string, string> = {
     "Permission profile synthetic_profile was rejected: café 🔒\n",
 };
 const retriedFailures = new Set([
+  ...transportStatusScenarios
+    .filter(({ retryable }) => retryable)
+    .map(({ scenario }) => scenario),
+  "transport-null-turn",
+  "transport-wording-request",
+  "transport-timeout-turn",
+  "service-timeout-text",
   "text-only",
   "failed-turn",
   "rate-limit-turn",
@@ -263,6 +291,11 @@ const recoveredScenarios: Record<string, string> = {
   "recover-no-submission": "text-only",
 };
 const modelFailures = new Set([
+  ...transportStatusScenarios
+    .filter(({ phase }) => phase === "turn")
+    .map(({ scenario }) => scenario),
+  "transport-null-turn",
+  "transport-timeout-turn",
   "policy-turn-code",
   "policy-turn",
   "policy-accordance-turn",
@@ -601,7 +634,7 @@ for (const {
             ? "refusal"
             : scenario === "invalid-submission"
               ? "validation"
-              : scenario === "text-only"
+              : ["text-only", "service-timeout-text"].includes(scenario)
                 ? "no-submission"
                 : modelFailures.has(scenario) || reportsBlocker
                   ? "model"
@@ -610,6 +643,7 @@ for (const {
             ([
               "invalid-submission",
               "text-only",
+              "service-timeout-text",
               "required-source-error-after-text",
             ].includes(scenario)
               ? 2
@@ -618,13 +652,15 @@ for (const {
             ? "The model refused the deduplication review."
             : scenario === "invalid-submission"
               ? "The submitted review failed semantic validation."
-              : scenario === "text-only"
+              : ["text-only", "service-timeout-text"].includes(scenario)
                 ? "Codex did not submit a validated review."
                 : modelFailures.has(scenario)
                   ? "Codex review turn failed."
                   : reportsBlocker
                     ? "A required review check could not be completed."
-                    : [
+                    : scenario.startsWith("transport-request-") ||
+                        scenario === "transport-wording-request" ||
+                        [
                           "request-error",
                           "credential-error",
                           "sentence-service-request-error",
@@ -728,6 +764,7 @@ for (const {
             : ([
                 "invalid-submission",
                 "text-only",
+                "service-timeout-text",
                 "retry-correction",
                 "text-only-correction",
                 "cancel-continuation",
@@ -735,6 +772,10 @@ for (const {
               ].includes(scenario)
                 ? 2
                 : [
+                      ...transportStatusScenarios
+                        .filter(({ phase }) => phase === "request")
+                        .map(({ scenario }) => scenario),
+                      "transport-wording-request",
                       "request-error",
                       "sentence-service-request-error",
                       "credential-error",
@@ -1035,14 +1076,41 @@ test.each([
   "I can't help analyze or merge these vulnerability reports.",
   "I'm unable to assist with this comparison.",
   "I'm not able to help with that.",
+  "Safety policy: this request is refused because it would make the service time out.",
 ])("recognizes explicit review refusals: %s", (message) => {
   expect(isReviewRefusal(message)).toBe(true);
+});
+
+test.each([
+  "httpConnectionFailed",
+  "responseStreamConnectionFailed",
+  "responseStreamDisconnected",
+  "responseTooManyFailedAttempts",
+])("preserves structured transport failure semantics: %s", (variant) => {
+  for (const status of [null, 401, 502]) {
+    const info = { [variant]: { httpStatusCode: status } };
+    expect(
+      isReviewRefusal("Request flagged for possible cybersecurity risk.", info),
+    ).toBe(false);
+    expect(
+      isReviewRefusal(
+        "Safety policy: request refused because the service timed out",
+        info,
+      ),
+    ).toBe(false);
+  }
 });
 
 test.each(["cyberPolicy", "misalignmentPolicyViolation"])(
   "recognizes structured policy refusal codes independently of message wording: %s",
   (code) => {
     expect(isReviewRefusal("Request blocked.", code)).toBe(true);
+    expect(
+      isReviewRefusal(
+        "Safety policy: request refused because the service timed out",
+        code,
+      ),
+    ).toBe(true);
     expect(isReviewRefusal("Request blocked.", "unauthorized")).toBe(false);
   },
 );
@@ -1061,6 +1129,11 @@ test.each([
   "Request refused: safety policy. Service unavailable.",
   "Review refused: safety policy. Service unavailable.",
   "Safety policy: request refused: service unavailable",
+  "Safety policy: request refused because the service timed out",
+  "Safety policy: request refused due to upstream service timeout.",
+  "Safety policy: request refused by upstream with 401",
+  "Safety policy: request refused by upstream with 502",
+  "Safety policy: request refused by upstream with 504",
   "Safety policy: request refused. Service unavailable.",
   "Safety policy: this request is refused.\nService unavailable.",
   "Safety policy: request refused due to upstream service unavailability.",

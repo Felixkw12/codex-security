@@ -41,7 +41,35 @@ const refusalMessages = {
   "policy-first-refusal-text":
     "Cybersecurity policy: this request is refused because it would facilitate unauthorized access.",
 };
+const transportStatus = /^transport-(?:request|turn)-(\d+)$/.exec(
+  scenario,
+)?.[1];
+const transportFailure = transportStatus
+  ? {
+      message: `Safety policy: request refused by upstream with ${transportStatus}`,
+      codexErrorInfo: {
+        httpConnectionFailed: { httpStatusCode: Number(transportStatus) },
+      },
+    }
+  : scenario === "transport-wording-request"
+    ? {
+        message: "Request flagged for possible cybersecurity risk.",
+        codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
+      }
+    : undefined;
 const turnFailures = {
+  ...(scenario.startsWith("transport-turn-")
+    ? { [scenario]: transportFailure }
+    : {}),
+  "transport-null-turn": {
+    message: "Request flagged for possible cybersecurity risk.",
+    codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: null } },
+  },
+  "transport-timeout-turn": {
+    message: "Safety policy: request refused because the service timed out",
+    codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 504 } },
+  },
+
   "determiner-service-error": {
     message:
       "Safety policy: this request is refused because the upstream service is unavailable.",
@@ -57,7 +85,7 @@ const turnFailures = {
   },
   "policy-turn": {
     message: "Request flagged for possible cybersecurity risk.",
-    codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
+    codexErrorInfo: "other",
   },
   "policy-accordance-turn": {
     message: "This request was refused in accordance with the safety policy.",
@@ -167,6 +195,17 @@ for await (const line of createInterface({ input: process.stdin })) {
     assert.equal(message.params.apiKey, "synthetic-review-key");
     send({ id: message.id, result: { type: "apiKey" } });
   } else if (message.method === "thread/start") {
+    if (transportFailure && !scenario.startsWith("transport-turn-")) {
+      send({
+        id: message.id,
+        error: {
+          code: -32000,
+          message: transportFailure.message,
+          data: { codexErrorInfo: transportFailure.codexErrorInfo },
+        },
+      });
+      continue;
+    }
     if (
       [
         "request-error",
@@ -329,6 +368,7 @@ for await (const line of createInterface({ input: process.stdin })) {
       submit("invalid", { decision: "UNKNOWN" });
     } else if (
       scenario === "text-only" ||
+      scenario === "service-timeout-text" ||
       Object.hasOwn(refusalMessages, scenario) ||
       ([
         "text-only-correction",
@@ -344,7 +384,10 @@ for await (const line of createInterface({ input: process.stdin })) {
           turnId,
           item: {
             type: "agentMessage",
-            text: refusalMessages[scenario] ?? '{"decision":"SAME"}',
+            text:
+              scenario === "service-timeout-text"
+                ? "Safety policy: request refused because the service timed out"
+                : (refusalMessages[scenario] ?? '{"decision":"SAME"}'),
           },
         },
       });

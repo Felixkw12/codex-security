@@ -8,6 +8,18 @@ export function isReviewRefusal(
     codexErrorInfo === "misalignmentPolicyViolation"
   )
     return true;
+  // Structured transport failures take precedence over fallback refusal wording.
+  if (
+    codexErrorInfo !== null &&
+    typeof codexErrorInfo === "object" &&
+    [
+      "httpConnectionFailed",
+      "responseStreamConnectionFailed",
+      "responseStreamDisconnected",
+      "responseTooManyFailedAttempts",
+    ].some((variant) => Object.hasOwn(codexErrorInfo, variant))
+  )
+    return false;
   const text = message.trim();
   const policyRefusal =
     /\b(?:cybersecurity|cyber|content|safety)[ _-]*policy\s*:\s*(?:(?:this|the|your)\s+)?(?:request|review)\s+(?:(?:is|was|has been)\s+)?(?:refused|blocked)\b([\s\S]*)$/iu.exec(
@@ -16,7 +28,7 @@ export function isReviewRefusal(
   if (policyRefusal) {
     // The explicit refusal predicate decides; its explanation has no controlled vocabulary.
     // A leading service-outage cause still describes an operational failure.
-    return !/^\s*(?:(?:(?:because|as|due to)\s+|[.!:]\s*)(?:the\s+)?(?:upstream\s+)?service\s+(?:is\s+)?(?:unavailable|unavailability)\b|by\s+upstream\s+with\s+503\b)/iu.test(
+    return !/^\s*(?:(?:(?:because|as|due to)\s+|[.!:]\s*)(?:the\s+)?(?:upstream\s+)?service\s+(?:is\s+)?(?:unavailable|unavailability|timed? out|timeout)\b|by\s+upstream\s+with\s+[45]\d{2}\b)/iu.test(
       policyRefusal[1] ?? "",
     );
   }
