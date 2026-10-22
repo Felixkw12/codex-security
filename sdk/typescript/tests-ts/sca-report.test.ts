@@ -538,6 +538,10 @@ describe("SCA report", () => {
     async ({ field, message }) => {
       const result = fixture();
       result.outputDir = await temporaryDirectory("sca-assessment-report-");
+      result.status = "partial";
+      result.coverage.status = "partial";
+      result.coverage.limitations = ["Synthetic matching limitation."];
+      result.diagnostics = ["Synthetic scanner diagnostic."];
       addMatch(result, "later-match", "2.0.0", "SYNTHETIC-LATER-ADVISORY");
       const finding = {
         ...triage("needs_review"),
@@ -582,6 +586,10 @@ describe("SCA report", () => {
         "utf8",
       );
       const html = Bun.markdown.html(report);
+      expect(html).toContain("<h2>Coverage</h2>");
+      expect(html).toContain("Synthetic matching limitation.");
+      expect(html).toContain("<h2>Diagnostics</h2>");
+      expect(html).toContain("Synthetic scanner diagnostic.");
       expect(html).not.toContain("<h1>Synthetic assessment heading</h1>");
       expect(html).not.toContain("<!--");
       expect(html).not.toContain("<span hidden>");
