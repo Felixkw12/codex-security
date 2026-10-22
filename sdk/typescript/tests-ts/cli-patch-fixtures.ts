@@ -165,6 +165,7 @@ export async function runWorkflow(
     const run = current.runRepositoryCommand;
     const localRemotes = new Map<string, string>();
     let hostedRemote = "https://github.example.test/example/repository.git";
+    let creatingRequest = false;
     current.runRepositoryCommand = async (
       command,
       args,
@@ -172,9 +173,12 @@ export async function runWorkflow(
       commandOptions,
     ) => {
       if (command === "gh" && args[0] === "repo" && args[1] === "view") {
-        if (args.at(-1) === ".url") return hostedRemote.replace(/\.git$/u, "");
+        if (args.at(-1) === ".url") {
+          creatingRequest = true;
+          return hostedRemote.replace(/\.git$/u, "");
+        }
         if (
-          localRemotes.size &&
+          (localRemotes.size || creatingRequest) &&
           args.at(-1) === "tojson" &&
           args.includes("id,url")
         )
@@ -184,7 +188,7 @@ export async function runWorkflow(
           });
       }
       if (
-        localRemotes.size &&
+        (localRemotes.size || creatingRequest) &&
         command === "gh" &&
         args[0] === "repo" &&
         args[1] === "set-default"
