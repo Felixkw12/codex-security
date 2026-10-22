@@ -1639,10 +1639,10 @@ def test_explicit_comparison_uses_chronological_matching_cutoff(
 
     history = load_script("workbench_scan_history")
 
-    def unexpected_git_lookup(*_args: Any) -> str:
+    def unexpected_git_lookup(*_args: Any, **_kwargs: Any) -> str:
         raise AssertionError("Future scans must not trigger repository discovery")
 
-    monkeypatch.setattr(history, "git_output", unexpected_git_lookup)
+    monkeypatch.setitem(history.git_output.__globals__, "git_command", unexpected_git_lookup)
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         assert list(connection.iterdump()) == original
         connection.row_factory = sqlite3.Row
