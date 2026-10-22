@@ -1486,11 +1486,30 @@ process.stdout.write(JSON.stringify({
     expect(stderr.text()).toBe("");
   });
 
-  test.each(["validate", "patch", "verify-fix"] as const)(
-    "retains model permission advice from the %s child",
-    async (command) => {
-      const detail =
-        "insufficient permissions to use this model sk-proj-SYNTHETIC_KEEP";
+  test.each([
+    ...(["validate", "patch", "verify-fix"] as const).map(
+      (command) =>
+        [
+          command,
+          "insufficient permissions to use this model sk-proj-SYNTHETIC_KEEP",
+          "The selected model is unavailable for the current credentials.",
+        ] as const,
+    ),
+    ...(["validate", "patch", "verify-fix"] as const).flatMap((command) =>
+      (
+        [
+          ["response_code=401", "Authentication failed."],
+          [
+            "response-code=403",
+            "The selected model is unavailable for the current credentials.",
+          ],
+          ["responseCode=429", "The request was rate limited. Wait and retry."],
+        ] as const
+      ).map(([detail, advice]) => [command, detail, advice] as const),
+    ),
+  ] as const)(
+    "retains failure advice and diagnostics from the %s child: %s",
+    async (command, detail, advice) => {
       const stdout = capture();
       const stderr = capture();
       const source = `process.stdout.write(JSON.stringify({type:"turn.failed",error:{message:${JSON.stringify(detail)}}})+"\\n");process.exitCode=7`;
@@ -1502,9 +1521,7 @@ process.stdout.write(JSON.stringify({
         ),
       ).toBe(7);
       expect(stdout.text()).toBe("");
-      expect(stderr.text()).toContain(
-        "The selected model is unavailable for the current credentials.",
-      );
+      expect(stderr.text()).toContain(advice);
       expect(stderr.text()).toContain(detail);
     },
   );
@@ -1665,6 +1682,10 @@ process.stdout.write(JSON.stringify({
         `HTTP response code ${status}`,
         `response code: ${status}`,
         `response code: "${status}"`,
+        `response_code=${status}`,
+        `response-code=${status}`,
+        `responseCode=${status}`,
+        `HTTP response_code=${status}`,
         `status code ${status}`,
         `status_code=${status}`,
         `{"status":${status}}`,
@@ -1677,6 +1698,9 @@ process.stdout.write(JSON.stringify({
         `parse failed on line "${status}"`,
         `failed after ${status} bytes`,
         `error code: ${status}`,
+        `response_code_cache=${status}`,
+        `response-code-count ${status}`,
+        `responseCodeCount=${status}`,
         `${status} bytes read`,
         status,
       ].map((detail) => [detail, null] as const),
@@ -1716,6 +1740,24 @@ process.stdout.write(JSON.stringify({
     }
     expect(message).toContain(detail);
   });
+
+  test.each(["response_code=401", "response-code=403", "responseCode=429"])(
+    "keeps response-code URL components separate from advice: %s",
+    (code) => {
+      for (const url of [
+        `https://example.test/v1?${code}`,
+        `https://example.test/v1#${code}`,
+      ]) {
+        const detail = `error sending request for url (${url})`;
+        const message = skillCommandFailure("validate", 7, detail);
+        expect(message).toContain(detail);
+        expect(message).toContain("could not connect");
+        expect(message).not.toContain("Authentication failed");
+        expect(message).not.toContain("selected model is unavailable");
+        expect(message).not.toContain("rate limited");
+      }
+    },
+  );
 
   test("retains raw diagnostic lines until the terminal boundary", () => {
     const detail = "raw detail \u001b[31m\rnext\nline café C1 \u009b2J";
