@@ -639,8 +639,7 @@ def compare_scans(
         and aliases.get(current, current) not in before_identities
     ]
     if equivalent:
-        combined = _finding_aliases(chain(aliases.items(), equivalent))
-        conflicts = set()
+        related_pairs: set[frozenset[str]] = set()
         linked_occurrences = _rows_for_ids(
             connection,
             "SELECT id, finding_id, scan_id FROM finding_occurrences "
@@ -653,12 +652,27 @@ def compare_scans(
                 connection, scan_id, finding_ids, aliases=aliases
             ).items():
                 finding_id = finding_ids[occurrence_id]
-                identity = combined.get(finding_id, finding_id)
-                if any(
-                    identity == combined.get(pair["findingId"], pair["findingId"])
+                related_pairs.update(
+                    frozenset(
+                        (
+                            aliases.get(finding_id, finding_id),
+                            aliases.get(pair["findingId"], pair["findingId"]),
+                        )
+                    )
                     for pair in relations
-                ):
-                    conflicts.add(identity)
+                )
+        equivalent = [
+            (previous, current)
+            for previous, current in equivalent
+            if frozenset((aliases.get(previous, previous), aliases.get(current, current)))
+            not in related_pairs
+        ]
+        combined = _finding_aliases(chain(aliases.items(), equivalent))
+        conflicts = {
+            combined.get(previous, previous)
+            for previous, current in related_pairs
+            if combined.get(previous, previous) == combined.get(current, current)
+        }
         equivalent = [
             (previous, current)
             for previous, current in equivalent

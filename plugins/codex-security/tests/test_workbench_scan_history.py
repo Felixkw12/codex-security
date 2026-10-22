@@ -1074,8 +1074,12 @@ def test_equivalent_locations_preserve_confirmed_groups(
 
 @pytest.mark.parametrize(
     ("alias_shape", "history"),
-    [("none", None), ("endpoints", None), ("chain", None)]
-    + [(shape, direction) for shape in ("none", "chain") for direction in ("forward", "reverse")],
+    [("none", None), ("endpoints", None), ("chain", None), ("branch", None)]
+    + [
+        (shape, direction)
+        for shape in ("none", "chain", "branch")
+        for direction in ("forward", "reverse")
+    ],
 )
 def test_equivalent_locations_preserve_related_findings(
     tmp_path: Path, alias_shape: str, history: str | None
@@ -1096,6 +1100,10 @@ def test_equivalent_locations_preserve_related_findings(
             ("after", [anchor for anchor, _ in after_specs]),
         ]
         related_anchors = ("member-alias", "symlink-alias")
+    elif alias_shape == "branch":
+        before_specs.append(("member-alias", "src/member.py"))
+        after_specs.append(("independent-member", "src/member.py"))
+        alias_groups = [("before", [anchor for anchor, _ in before_specs])]
     elif alias_shape == "chain":
         # Three location links could bridge the related endpoints through two alias groups.
         before_specs.extend(
@@ -1197,19 +1205,36 @@ def test_equivalent_locations_preserve_related_findings(
             before, after = after, before
         compared = compare_scan_pair(state_dir, before, after)
     assert compared["summary"] == {
-        "new": 2 if alias_shape == "chain" else 1,
-        "persisting": 1,
+        "new": (0 if history == "reverse" else 1)
+        if alias_shape == "branch"
+        else (2 if alias_shape == "chain" else 1),
+        "persisting": 2 if alias_shape == "branch" else 1,
         "resolved": 0,
-        "not_observed": 2 if alias_shape == "chain" else 1,
+        "not_observed": (1 if history == "reverse" else 0)
+        if alias_shape == "branch"
+        else (2 if alias_shape == "chain" else 1),
         "reopened": 0,
         "unknown": 0,
     }
-    persisting = next(item for item in compared["findings"] if item["status"] == "persisting")
     independent = [by_anchor["independent-before"], by_anchor["independent-after"]]
     if history == "reverse":
         independent.reverse()
-    assert persisting["beforeOccurrenceId"] == independent[0]
+    persisting = next(
+        item for item in compared["findings"] if item.get("beforeOccurrenceId") == independent[0]
+    )
+    assert persisting["status"] == "persisting"
     assert persisting["afterOccurrenceId"] == independent[1]
+    if alias_shape == "branch":
+        group_side, member_side = (
+            ("after", "before") if history == "reverse" else ("before", "after")
+        )
+        shared = next(item for item in compared["findings"] if f"{group_side}OccurrenceIds" in item)
+        assert shared["status"] == "persisting"
+        assert set(shared[f"{group_side}OccurrenceIds"]) == {
+            by_anchor["member-control"],
+            by_anchor["member-alias"],
+        }
+        assert shared[f"{member_side}OccurrenceId"] == by_anchor["independent-member"]
     if history is None:
         assert len(compared["related"]) == 1
         assert all(compared["related"][0][key] == value for key, value in related.items())
