@@ -209,11 +209,16 @@ for (const nested of [false, true]) {
         script,
         `const fs = require("node:fs");
 fs.writeSync(2, "Synthetic native hook probe started.\\n");
+fs.writeSync(2, "Native probe runtime: " + JSON.stringify({ node: process.versions.node, bun: process.versions.bun }) + "\\n");
+process.on("exit", code => fs.writeSync(2, "Native probe exit: " + code + "\\n"));
 let denied = false;
 try { fs.writeFileSync(${JSON.stringify(hook)}, ${JSON.stringify(changed)}); }
 catch (error) { if (!["EACCES", "EPERM", "EROFS"].includes(error.code)) throw error; denied = true; }
+fs.writeSync(2, "Native protected write denied: " + denied + "\\n");
 fs.writeFileSync(${JSON.stringify(join(directory, "src/finding-1.ts"))}, "fixed\\n");
-process.stdout.write(JSON.stringify({ denied }));
+fs.writeSync(2, "Native ordinary write completed.\\n");
+process.stdout.write(JSON.stringify({ denied }), error => fs.writeSync(2, "Native stdout callback: " + String(error) + "\\n"));
+fs.writeSync(2, "Native probe reached end of script.\\n");
 `,
       );
       let denied: boolean | undefined;
