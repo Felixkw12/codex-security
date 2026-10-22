@@ -524,9 +524,10 @@ process.exit(0);
           ...environment,
           OPENAI_API_KEY: undefined,
           CODEX_API_KEY: undefined,
-          CODEX_SAFETY_IDENTIFIER: customProvider
-            ? environment.CODEX_SAFETY_IDENTIFIER
-            : undefined,
+          CODEX_SAFETY_IDENTIFIER:
+            customProvider || nativeRecipe !== undefined
+              ? environment.CODEX_SAFETY_IDENTIFIER
+              : undefined,
           CODEX_SECURITY_CONFIG_PATH: undefined,
           CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH: undefined,
         };
@@ -552,6 +553,9 @@ process.exit(0);
                       ? ""
                       : "Post-scan instructions once.",
                   cyberAccessProgram: "daybreak_blue",
+                  ...(customProvider
+                    ? { safetyIdentifier: environment.CODEX_SAFETY_IDENTIFIER }
+                    : {}),
                 }),
             savedDeepScanSettings: {
               workers: 1,
@@ -1874,6 +1878,7 @@ process.exit(0);
           expect(existsSync(accountLog)).toBe(false);
           expect(nativeRecipe!["safetyIdentifier"]).toBe("ambient-identifier");
         } else {
+          expect(nativeRecipe).not.toHaveProperty("safetyIdentifier");
           const accounts = (await readFile(accountLog, "utf8"))
             .trim()
             .split("\n")

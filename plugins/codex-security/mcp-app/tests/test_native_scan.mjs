@@ -856,7 +856,7 @@ test("native launches snapshot safety identifiers and prefer saved recipes", asy
     );
     const launches = [
       ["synthetic-fresh", undefined, "synthetic-fresh"],
-      ["synthetic-resumed", {}, "synthetic-resumed"],
+      ["synthetic-resumed", {}, undefined],
       [
         "synthetic-current",
         { safetyIdentifier: "synthetic-saved" },
@@ -1847,6 +1847,7 @@ else {
   const provider = effective.model_providers?.[effective.model_provider];
   fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify({ argv, path: process.env.PATH, codex: process.env.CODEX_API_KEY, openai: process.env.OPENAI_API_KEY, home: process.env.CODEX_HOME, state: process.env.CODEX_SECURITY_STATE_DIR, executable: process.argv[1], knowledge: process.env.CODEX_SECURITY_KNOWLEDGE_BASE,
     modelProvider: effective.model_provider,
+    safetyIdentifier: process.env.CODEX_SAFETY_IDENTIFIER,
     provider,
     profileProvider: profile.model_providers?.[effective.model_provider],
     providerToken: provider && (provider.experimental_bearer_token ?? process.env[provider.env_key]),
@@ -1884,6 +1885,7 @@ async function nativeWorkerSession(prepared, repository) {
         prepared.options.inheritedPermissions,
       ),
       inheritedPermissions: prepared.options.inheritedPermissions,
+      safetyIdentifier: prepared.options.safetyIdentifier,
       authentication: source.authentication,
       approvalPolicy: "never",
       python: process.execPath,
@@ -1908,6 +1910,9 @@ for (const scenario of [
   "saved-present-knowledge",
   "tilde-home-and-selected-config",
   "explicit-state-directory",
+  "fresh-safety-identifier",
+  "saved-absent-safety-identifier",
+  "saved-explicit-safety-identifier",
   "openrouter-env-key",
   "openrouter-selected-env-key",
   "fireworks-env-key",
@@ -1949,6 +1954,13 @@ for (const scenario of [
           ? "fireworks"
           : undefined;
       const selectedConfiguration = scenario === "openrouter-selected-env-key";
+      const safetyScenario = scenario.endsWith("-safety-identifier");
+      const expectedSafetyIdentifier =
+        scenario === "fresh-safety-identifier"
+          ? "synthetic-current-attribution"
+          : scenario === "saved-explicit-safety-identifier"
+            ? "synthetic-saved-attribution"
+            : undefined;
       const restore = captureEnvironment([
         "PATH",
         "HOME",
@@ -1964,6 +1976,7 @@ for (const scenario of [
         "CODEX_SECURITY_CONFIG_PATH",
         "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
         "CODEX_SECURITY_STATE_DIR",
+        "CODEX_SAFETY_IDENTIFIER",
       ]);
       try {
         await mkdir(home);
@@ -2011,6 +2024,12 @@ for (const scenario of [
         delete process.env.CODEX_SECURITY_CONFIG_PATH;
         delete process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
         delete process.env.CODEX_SECURITY_STATE_DIR;
+        delete process.env.CODEX_SAFETY_IDENTIFIER;
+        if (safetyScenario)
+          process.env.CODEX_SAFETY_IDENTIFIER =
+            scenario === "fresh-safety-identifier"
+              ? "synthetic-current-attribution"
+              : "synthetic-later-attribution";
         if (scenario === "explicit-state-directory")
           process.env.CODEX_SECURITY_STATE_DIR = join(root, "ambient-state");
         const credential = scenario.endsWith("-env-key")
@@ -2140,6 +2159,7 @@ for (const scenario of [
             "CODEX_SECURITY_CONFIG_PATH",
             "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
             "CODEX_SECURITY_STATE_DIR",
+            "CODEX_SAFETY_IDENTIFIER",
           ].map((name) => [name, process.env[name]]),
         );
         const samePath = [
@@ -2248,6 +2268,9 @@ for (const scenario of [
               },
             },
           };
+          if (scenario === "fresh-safety-identifier") delete request.recipe;
+          else if (scenario === "saved-explicit-safety-identifier")
+            request.recipe.safetyIdentifier = expectedSafetyIdentifier;
           if (samePath && savedLiteral !== currentLiteral) {
             await assert.rejects(
               prepareNativeScan(request),
@@ -2342,6 +2365,7 @@ for (const scenario of [
                 await assert.rejects(readFile(decoyLaunch), { code: "ENOENT" });
               }
               assert.equal(observed.openai, "synthetic-selected-key");
+              assert.equal(observed.safetyIdentifier, expectedSafetyIdentifier);
               assert.equal(
                 observed.codex,
                 externalProvider ? "synthetic-competing-key" : undefined,
@@ -2432,7 +2456,7 @@ for (const scenario of [
                 savedLiteral
                   ? filesystem[savedPath]["."]
                   : filesystem[savedPath],
-                "deny",
+                request.recipe ? "deny" : undefined,
               );
               assert.equal(
                 currentLiteral
@@ -2540,6 +2564,7 @@ test(
       "OPENAI_API_KEY",
       "NATIVE_PROFILE_CAPTURE",
       "NATIVE_PROFILE_MARKER",
+      "CODEX_SAFETY_IDENTIFIER",
       "CODEX_SECURITY_KNOWLEDGE_BASE",
       "CODEX_SECURITY_CONFIG_PATH",
       "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
@@ -2565,6 +2590,7 @@ test(
           preflights: join(root, `preflights-${id}.jsonl`),
           decoyLaunch: join(root, `decoy-${id}.jsonl`),
           selectedConfigPath: join(root, `selected-${id}.toml`),
+          safetyIdentifier: id === "a" ? undefined : "synthetic-saved-b",
         };
         fixture.lexicalBin = join(fixture.lexicalRepository, "bin");
         fixture.executable = join(fixture.toolBin, "codex");
@@ -2663,6 +2689,7 @@ test(
           OPENAI_API_KEY: `synthetic-key-${fixture.id}`,
           NATIVE_PROFILE_CAPTURE: fixture.preflights,
           NATIVE_PROFILE_MARKER: fixture.id,
+          CODEX_SAFETY_IDENTIFIER: `synthetic-later-${fixture.id}`,
         });
         return prepareNativeScan({
           ...input(`synthetic-${fixture.id}`),
@@ -2674,7 +2701,12 @@ test(
             targetProtectionRoots: [fixture.lexicalRepository],
             scanDir: fixture.scanDir,
           },
-          recipe: { auth: "api-key" },
+          recipe: {
+            auth: "api-key",
+            ...(fixture.safetyIdentifier === undefined
+              ? {}
+              : { safetyIdentifier: fixture.safetyIdentifier }),
+          },
         });
       });
       const prepared = await Promise.all(pending);
@@ -2716,6 +2748,10 @@ test(
                 assert.equal(observed.path, fixture.expectedPath);
                 assert.equal(observed.home, fixture.home);
                 assert.equal(observed.openai, `synthetic-key-${fixture.id}`);
+                assert.equal(
+                  observed.safetyIdentifier,
+                  fixture.safetyIdentifier,
+                );
                 assert.deepEqual(observed.provider, fixture.provider);
                 assert.deepEqual(observed.profileProvider, fixture.provider);
                 const fragments = [];
@@ -2778,6 +2814,7 @@ test(
       );
       assert.equal(process.env.OPENAI_API_KEY, "synthetic-key-b");
       assert.equal(process.env.NATIVE_PROFILE_MARKER, "b");
+      assert.equal(process.env.CODEX_SAFETY_IDENTIFIER, "synthetic-later-b");
     } finally {
       restore();
       await rm(root, { recursive: true, force: true });

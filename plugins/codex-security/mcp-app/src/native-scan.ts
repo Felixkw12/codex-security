@@ -405,7 +405,9 @@ export async function prepareNativeScan(
       safetyIdentifier:
         typeof recipe.safetyIdentifier === "string"
           ? recipe.safetyIdentifier
-          : environment.CODEX_SAFETY_IDENTIFIER,
+          : input.recipe === undefined
+            ? environment.CODEX_SAFETY_IDENTIFIER
+            : undefined,
       registeredScan: {
         scanId: input.scan.scanId,
         scanDir: input.scan.scanDir,
