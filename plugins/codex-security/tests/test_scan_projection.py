@@ -33,6 +33,7 @@ def test_coverage_union_keeps_distinct_rows_with_the_same_id(workbench_api) -> N
         ],
         "explicitExclusions": [],
         "deferred": [],
+        "resolvedDeferred": [],
         "openQuestions": [{"question": "Remaining coverage?"}],
     }
 
