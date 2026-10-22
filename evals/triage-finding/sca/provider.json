@@ -4,7 +4,7 @@
   "config": {
     "working_dir": "{{triage_runtime_root}}",
     "additional_directories": [
-      "{{env.SCA_EVAL_RUNTIME_ROOT}}",
+      "{{target_repo}}",
       "{{env.SCA_EVAL_CODEX_RUNTIME_ROOT}}",
       "{{triage_node_root}}"
     ],

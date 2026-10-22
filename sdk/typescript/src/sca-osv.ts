@@ -411,6 +411,15 @@ function inputProvenance(
   });
 }
 
+function installedDependencyDirectory(name: string, parent?: string): boolean {
+  return (
+    name === "node_modules" ||
+    name === ".venv" ||
+    name === "venv" ||
+    (parent === "vendor" && name === "bundle")
+  );
+}
+
 /** Use the same tracked/untracked, non-ignored scope as other repository operations. */
 async function repositoryFiles(
   repository: string,
@@ -469,7 +478,13 @@ async function repositoryFiles(
     const prefixes = new Map<string, boolean>();
     const inScope = async (path: string): Promise<string | null> => {
       const parts = path.split("/");
-      if (parts.length <= depth || parts.slice(depth).includes("node_modules"))
+      const scoped = parts.slice(depth);
+      if (
+        scoped.length === 0 ||
+        scoped.some((name, index) =>
+          installedDependencyDirectory(name, scoped[index - 1]),
+        )
+      )
         return null;
       if (depth === 0) return path;
       const prefix = parts.slice(0, depth).join("/");
@@ -532,11 +547,7 @@ async function repositoryFiles(
       if (entry.name === ".git" || entry.name === "node_modules") continue;
       const path = join(directory, entry.name);
       if (entry.isDirectory()) {
-        if (
-          entry.name === ".venv" ||
-          entry.name === "venv" ||
-          (basename(directory) === "vendor" && entry.name === "bundle")
-        )
+        if (installedDependencyDirectory(entry.name, basename(directory)))
           continue;
         pending.push(path);
       } else files.push(relative(repository, path));
