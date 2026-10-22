@@ -972,6 +972,29 @@ def test_projection_links_detailed_writeup_without_repeating_inline_finding() ->
     assert "## Injected remediation" not in markdown
 
 
+@pytest.mark.parametrize("coverage_mode", ["repository", "scoped_path"])
+def test_projection_keeps_standard_candidate_findings_in_the_standard_table(
+    coverage_mode: str,
+) -> None:
+    manifest, findings, coverage = canonical_documents()
+    coverage.update(mode=coverage_mode, inventoryStrategy=coverage_mode)
+    finding = findings["findings"][0]
+    finding["title"] = "First parser review"
+    finding["provenance"] = {"candidateId": "review/parser"}
+    sibling = copy.deepcopy(finding)
+    sibling.update(occurrenceId="occ_2", title="Second parser review")
+    findings["findings"].append(sibling)
+
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+
+    assert "| Reportable findings | 2 |" in markdown
+    assert "| Finding | Severity | Confidence | Detailed write-up |" in markdown
+    assert "[First parser review](#finding-1)" in markdown
+    assert "[Second parser review](#finding-2)" in markdown
+    assert "Reportable DSS findings" not in markdown
+    assert "| Report instances |" not in markdown
+
+
 @pytest.mark.parametrize("coverage_mode", ["deep_repository", "scoped_path"])
 def test_projection_groups_deep_reports_by_candidate_id(coverage_mode: str) -> None:
     manifest, findings, coverage = canonical_documents()
@@ -1019,17 +1042,19 @@ def test_projection_groups_deep_reports_by_candidate_id(coverage_mode: str) -> N
 
 
 @pytest.mark.parametrize(
-    ("coverage_mode", "candidate_ids", "legacy_ids", "expected_groups"),
+    ("coverage_mode", "candidate_ids", "legacy_ids", "owner_field", "expected_groups"),
     [
-        ("deep_repository", ("candidate-one", "candidate-one"), ("old-one", "old-two"), 1),
-        ("deep_repository", ("candidate-one", "candidate-two"), ("old-one", "old-one"), 2),
-        ("scoped_path", ("candidate-one", "candidate-one"), (None, None), 1),
+        ("deep_repository", ("candidate-one", "candidate-one"), ("old-one", "old-two"), None, 1),
+        ("deep_repository", ("candidate-one", "candidate-two"), ("old-one", "old-one"), None, 2),
+        ("scoped_path", ("candidate-one", "candidate-one"), (None, None), "sourceWorkerId", 1),
+        ("scoped_path", ("candidate-one", "candidate-one"), (None, None), "workerId", 1),
     ],
 )
 def test_projection_groups_deep_reports_by_canonical_provenance(
     coverage_mode: str,
     candidate_ids: tuple[str, str],
     legacy_ids: tuple[str | None, str | None],
+    owner_field: str | None,
     expected_groups: int,
 ) -> None:
     manifest, findings, coverage = canonical_documents()
@@ -1045,6 +1070,8 @@ def test_projection_groups_deep_reports_by_canonical_provenance(
         findings["findings"], candidate_ids, legacy_ids, strict=True
     ):
         report["provenance"] = {"candidateId": candidate_id}
+        if owner_field is not None:
+            report["provenance"][owner_field] = "discovery-worker"
         if legacy_id is not None:
             report["extensions"] = {"candidateId": legacy_id}
 

@@ -99,11 +99,9 @@ def _deep_report_id(finding: dict[str, Any]) -> str:
 
 
 def _has_deep_child_metadata(finding: dict[str, Any]) -> bool:
-    provenance = finding.get("provenance")
-    if isinstance(provenance, dict):
-        candidate_id = provenance.get("candidateId")
-        if isinstance(candidate_id, str) and candidate_id.strip():
-            return True
+    candidate = finding_candidate_key(finding)
+    if candidate is not None and candidate[0] is not None:
+        return True
     extensions = finding.get("extensions")
     if not isinstance(extensions, dict):
         return False
@@ -118,8 +116,8 @@ def uses_deep_presentation(coverage: dict[str, Any], findings: list[dict[str, An
         return True
     if coverage.get("mode") != "scoped_path":
         return False
-    # Scoped deep scans can arrive as scoped_path artifacts. The child ids are
-    # the stable deep-scan signal; ordinary scoped scans do not emit them.
+    # Standard scans also use candidate IDs. Deep children add worker ownership
+    # or the legacy extension identifiers to scoped_path artifacts.
     return any(_has_deep_child_metadata(finding) for finding in findings)
 
 
