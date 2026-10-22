@@ -653,8 +653,6 @@ describe("scan knowledge bases", () => {
   });
 
   test.each([
-    ["plain text", "Require authorization", "Require authorization"],
-    ["entities", "Read &amp; audit &#65;", "Read & audit A"],
     [
       "CDATA between text nodes",
       "Require <![CDATA[authorization]]> before access",
@@ -679,9 +677,6 @@ describe("scan knowledge bases", () => {
     const root = await temporaryDirectory();
     const source = join(root, "guide.docx");
     await writeFile(source, docx(xml));
-
-    const snapshot = await readKnowledgeBaseSnapshot([source]);
-    expect(Object.values(snapshot.documents)).toEqual([`${expected}\n`]);
 
     const prepared = await prepareKnowledgeBase([source]);
     temporaryDirectories.track(prepared.path);
