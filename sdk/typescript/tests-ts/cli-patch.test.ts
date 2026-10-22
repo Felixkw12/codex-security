@@ -1,4 +1,16 @@
 import {
+  CURRENT_REPOSITORY,
+  SAVED_REPOSITORY,
+  STATE_DIRECTORY,
+  resultWithFindings,
+  savedScan,
+  completePatches,
+  patchRiskSummary,
+  patchRiskAssessment,
+  patchRiskReport,
+  runWorkflow,
+  repositoryGit,
+  runGitRepositoryCommand,
   readAppliedText,
   publicationRepository as createPublicationRepository,
 } from "./cli-patch-fixtures.js";
@@ -7,7 +19,7 @@ import { requestMetadata } from "./support/request-metadata.js";
 import { emptyPage } from "./support/linear-pagination.js";
 import { resolving } from "./support/promises.js";
 import { parse as parseToml } from "smol-toml";
-import { afterEach, beforeEach, describe, expect, test, mock } from "bun:test";
+import { afterEach, describe, expect, test, mock } from "bun:test";
 import { execFile, execFileSync } from "node:child_process";
 import { hash } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -38,11 +50,11 @@ import {
 import { pathToFileURL } from "node:url";
 import { Writable } from "node:stream";
 import { promisify, stripVTControlCharacters } from "node:util";
-import type { Finding, JsonObject, SeverityLevel } from "../src/index.js";
+import type { Finding, JsonObject } from "../src/index.js";
 import { main } from "../src/cli.js";
 import { resolveTrustedExecutable } from "../src/trusted-executable.js";
 import type { LinearClientFactory } from "../src/linear.js";
-import { capture, dependencies, fakeResult } from "./cli-fixtures.js";
+import { capture, dependencies, type OnCodex } from "./cli-fixtures.js";
 import {
   temporaryDirectory,
   createTemporaryDirectories,
@@ -51,147 +63,6 @@ import { throwing } from "./support/errors.js";
 import { createCliTest } from "./support/cli-run.js";
 import { resolvePluginPython, runWorkbench } from "../src/runtime.js";
 import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
-
-const workflowDirectories = createTemporaryDirectories(true);
-let CURRENT_REPOSITORY: string;
-let SAVED_REPOSITORY: string;
-beforeEach(async () => {
-  const root = await workflowDirectories.create("patch-workflow-");
-  CURRENT_REPOSITORY = join(root, "current", "repository");
-  SAVED_REPOSITORY = join(root, "saved", "repository");
-  await Promise.all(
-    [
-      CURRENT_REPOSITORY,
-      SAVED_REPOSITORY,
-      resolve(CURRENT_REPOSITORY, "../other/repository"),
-    ].map((directory) => mkdir(directory, { recursive: true })),
-  );
-});
-afterEach(workflowDirectories.cleanup);
-const STATE_DIRECTORY = resolve("/tmp/codex-security-state");
-
-function resultWithFindings(severities: readonly SeverityLevel[]) {
-  const result = fakeResult(severities);
-  result.findings.findings.forEach((finding, index) => {
-    Object.assign(finding, {
-      findingId: `csf_${index + 1}`,
-      occurrenceId: `occ_${index + 1}`,
-      title: `Finding ${index + 1}`,
-      summary: `Summary ${index + 1}`,
-      locations: [
-        { path: `src/finding-${index + 1}.ts`, startLine: index + 1 },
-      ],
-    });
-  });
-  return result;
-}
-
-function savedScan(
-  result: ReturnType<typeof resultWithFindings>,
-  scanId = "scan-1",
-  targetPath = SAVED_REPOSITORY,
-): JsonObject {
-  return {
-    scan: {
-      scanId,
-      targetPath,
-      findings: result.findings.findings as unknown as JsonObject[],
-    },
-  };
-}
-
-function completePatches(
-  args: readonly string[],
-  output?: Parameters<ReturnType<typeof dependencies>["runCodex"]>[1],
-  status: "verified" | "blocked" = "verified",
-): Finding[] {
-  const prompt = output?.appServer?.prompt ?? args.at(-1)!;
-  const findings = JSON.parse(prompt.split("\n").at(-1)!) as Finding[];
-  output?.stdout.write(
-    JSON.stringify({
-      patches: findings.map((finding) => ({
-        occurrenceId: finding.occurrenceId,
-        status,
-        files: status === "verified" ? [finding.locations[0]!.path] : [],
-        ...(status === "verified"
-          ? { verification: "The exploit fails and focused tests pass." }
-          : { reason: "The required service is unavailable." }),
-      })),
-    }),
-  );
-  return findings;
-}
-
-function patchRiskSummary() {
-  return [
-    "### Recommendation: human review required",
-    "",
-    "The patch has moderate impact and low regression likelihood.",
-    "",
-    "- Protection: focused tests passed",
-    "- Recovery: revert the patch commit",
-  ].join("\n");
-}
-
-function patchRiskAssessment() {
-  const summary = patchRiskSummary();
-  return {
-    report: [
-      "<!-- codex-security:patch-risk-summary:start -->",
-      summary,
-      "<!-- codex-security:patch-risk-summary:end -->",
-      "",
-      "```json",
-      '{"schemaVersion":1,"recommendation":"merge","workflowLabel":"human_review_required"}',
-      "```",
-    ].join("\n"),
-  };
-}
-
-function patchRiskReport() {
-  return [
-    patchRiskSummary(),
-    "",
-    "```json",
-    '{"schemaVersion":1,"recommendation":"merge","workflowLabel":"human_review_required"}',
-    "```",
-  ].join("\n");
-}
-
-async function runWorkflow(
-  arguments_: string[],
-  fixtures: Parameters<typeof dependencies>[0] = {},
-  options: {
-    interactive?: boolean;
-    review?: boolean;
-    configure?: (value: ReturnType<typeof dependencies>) => void;
-  } = {},
-) {
-  const { stdout, stderr, runCli } = createCliTest(main, {
-    stderr: options.interactive,
-  });
-
-  const current = dependencies({
-    currentDirectory: CURRENT_REPOSITORY,
-    onCodex: (args, output) => {
-      completePatches(args, output);
-      return 0;
-    },
-    ...fixtures,
-  });
-  if (options.interactive) {
-    current.confirmPatchReview = async (question) => {
-      stderr.stream.write(`\n${question} (y/N)\n`);
-      return options.review ?? true;
-    };
-  }
-  options.configure?.(current);
-  return {
-    exitCode: await runCli(arguments_, current),
-    stdout: stdout.text(),
-    stderr: stderr.text(),
-  };
-}
 
 describe("scan and patch workflow", () => {
   const repositories = createTemporaryDirectories();
@@ -1492,6 +1363,48 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
       JSON.parse(schema.stdout).options.properties.validationPromptFile,
     ).toMatchObject({ type: "string" });
   });
+
+  test.each([false, true])(
+    "passes static verification to patching (saved findings: %p)",
+    async (saved) => {
+      const result = resultWithFindings(["high"]);
+      const report =
+        "Source review confirms the guard; runtime checks were not performed.";
+      const onCodex = mock<OnCodex>((_args, output) => {
+        expect(output?.appServer?.prompt).toContain(
+          "Verification mode: static",
+        );
+        output?.stdout.write(
+          saved
+            ? JSON.stringify({
+                patches: [
+                  {
+                    occurrenceId: "occ_1",
+                    status: "verified",
+                    files: ["guard.ts"],
+                    verification: report,
+                  },
+                ],
+              })
+            : report,
+        );
+        return 0;
+      });
+      const outcome = await runWorkflow(
+        [
+          "patch",
+          ...(saved ? ["--scan", "scan-1"] : ["Synthetic finding"]),
+          "--verification-mode",
+          "static",
+          "--json",
+        ],
+        { result, onWorkbench: () => savedScan(result), onCodex },
+      );
+      expect(outcome.exitCode).toBe(0);
+      expect(onCodex).toHaveBeenCalledTimes(1);
+      expect(outcome.stdout).toContain(report);
+    },
+  );
 
   test.each([
     [0, false, 0],
@@ -2926,6 +2839,7 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
       ["--create-pr"],
       ["--assess-patch-risk"],
       ["--validation-prompt-file", "validation.md"],
+      ["--verification-mode", "static"],
       ["--external-sandbox"],
       ["occ_1"],
     ]) {
@@ -6686,34 +6600,6 @@ describe("patch publication integrity", () => {
   );
 });
 
-function repositoryGit(repository: string) {
-  return (...args: string[]) =>
-    execFileSync("git", args, {
-      cwd: repository,
-      encoding: "utf8",
-      maxBuffer: Infinity,
-      stdio: ["ignore", "pipe", "pipe"],
-    }).trim();
-}
-
-const runGitRepositoryCommand: NonNullable<
-  NonNullable<Parameters<typeof dependencies>[0]>["onRepositoryCommand"]
-> = (command, args, workingDirectory, options) => {
-  expect(command).toBe("git");
-  const result = execFileSync("git", args, {
-    encoding: options?.encoding === "base64" ? "buffer" : "utf8",
-    cwd: options?.directory ?? workingDirectory,
-    env: { ...process.env, ...options?.environment },
-    maxBuffer: options?.maxBuffer,
-    input: options?.input,
-    stdio: [options?.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
-  });
-  const output = Buffer.isBuffer(result)
-    ? result.toString(options?.encoding ?? "utf8")
-    : result;
-  return options?.trim === false ? output : output.trim();
-};
-
 test.each(["untracked", "tracked"])(
   "keeps unrelated %s edits made during assessment out of publication",
   async (kind) => {
@@ -8022,21 +7908,7 @@ describe("patch change tracking", () => {
   const fixtures = createTemporaryDirectories(true);
   afterEach(fixtures.cleanup);
 
-  async function publicationRepository() {
-    const directory = await fixtures.create("patch-destination-");
-    const git = repositoryGit(directory);
-    git("init", "--initial-branch=main");
-    git("config", "user.name", "Synthetic User");
-    git("config", "user.email", "synthetic@example.test");
-    await mkdir(join(directory, "src"));
-    await writeFile(join(directory, "src/finding-1.ts"), "original\n");
-    git("add", ".");
-    git("commit", "-m", "Synthetic baseline");
-    const remote = await fixtures.create("patch-destination-origin-");
-    git("init", "--bare", remote);
-    git("remote", "add", "origin", remote);
-    return { directory, git, remote };
-  }
+  const publicationRepository = () => createPublicationRepository(fixtures);
 
   test.each(["patch", "scan"])(
     "keeps dirty rename destinations out of %s publication across findings",
