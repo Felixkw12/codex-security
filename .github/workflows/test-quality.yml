@@ -8,6 +8,11 @@ on:
         type: boolean
         default: false
   workflow_dispatch:
+    inputs:
+      snapshot-diagnostic:
+        description: Run the four snapshot configuration diagnostics instead of the runner matrix.
+        type: boolean
+        default: false
   schedule:
     - cron: "23 9 * * 1"
 
@@ -29,7 +34,7 @@ jobs:
 
   runner:
     needs: native
-    if: ${{ !cancelled() && (inputs.native-artifacts-ready || needs.native.result == 'success') }}
+    if: ${{ !inputs.snapshot-diagnostic && !cancelled() && (inputs.native-artifacts-ready || needs.native.result == 'success') }}
     name: ${{ matrix.os }} / ${{ matrix.mode }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.os == 'windows-latest' && (matrix.mode == 'baseline' && 240 || matrix.mode == 'parallel' && 150 || 120) || 30 }}
@@ -163,7 +168,7 @@ jobs:
 
   compare:
     name: Runner inventory and timing
-    if: always() && !cancelled()
+    if: always() && !cancelled() && !inputs.snapshot-diagnostic
     needs: [runner]
     runs-on: ubuntu-latest
     steps:
@@ -193,6 +198,7 @@ jobs:
           exit "$comparison_status"
 
   mutation:
+    if: ${{ !inputs.snapshot-diagnostic }}
     name: Pure-module mutation trial
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -220,3 +226,72 @@ jobs:
           path: sdk/typescript/reports/mutation/
           if-no-files-found: warn
           retention-days: 14
+
+  snapshot-diagnostic:
+    if: inputs.snapshot-diagnostic
+    needs: native
+    name: Snapshot diagnostic / Bun ${{ matrix.bun }}
+    runs-on: windows-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        bun: ["1.3.14", "1.4.2"]
+    env:
+      CODEX_SECURITY_INTEGRATION: "0"
+      CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "false"
+    steps:
+      - name: Checkout diagnostic source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Prepare native runtime for this source
+        uses: ./.github/actions/download-native
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Set up TypeScript tools
+        uses: ./.github/actions/setup-tools
+        with:
+          cache-dependency-path: |
+            sdk/typescript/pnpm-lock.yaml
+            plugins/codex-security/mcp-app/pnpm-lock.yaml
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: ${{ matrix.bun }}
+      - name: Install dependencies and project the plugin
+        shell: pwsh
+        run: |
+          pnpm --dir sdk/typescript install --frozen-lockfile
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm --dir sdk/typescript run build:plugin
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Prepare private Windows test root
+        id: windows-temp
+        shell: pwsh
+        run: ./sdk/typescript/scripts/prepare-windows-test-root.ps1
+      - name: Run the four original snapshot assertions with diagnostics
+        shell: pwsh
+        env:
+          TEMP: ${{ steps.windows-temp.outputs.path }}
+          TMP: ${{ steps.windows-temp.outputs.path }}
+          TMPDIR: ${{ steps.windows-temp.outputs.path }}
+        run: |
+          $outputDirectory = "sdk/typescript/reports/patch-snapshot-diagnostic"
+          New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
+          git rev-parse HEAD "HEAD^{tree}" "HEAD:plugins/codex-security/native" | Set-Content "$outputDirectory/source.txt"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node .github/scripts/prepare-diagnostic.mjs . $outputDirectory --sibling --run 2>&1 | Tee-Object -FilePath "$outputDirectory/run.log"
+          exit $LASTEXITCODE
+      - name: Upload diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: patch-snapshot-diagnostic-${{ github.sha }}-bun-${{ matrix.bun }}
+          path: sdk/typescript/reports/patch-snapshot-diagnostic/
+          if-no-files-found: warn
+          retention-days: 7
