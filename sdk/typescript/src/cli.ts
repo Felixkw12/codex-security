@@ -7282,7 +7282,6 @@ async function runDependencyScan(
 ): Promise<ScanOutcome> {
   const verbose = scanVerbose(presentation.verbose, dependencies.environment);
   const controller = new AbortController();
-  const removeSignals = listenForAbort(dependencies, controller);
   let security: Pick<CodexSecurity, "scanDependencies" | "close"> | undefined;
   let result: DependencyScanResult | undefined;
   let failure: unknown;
@@ -7297,6 +7296,13 @@ async function runDependencyScan(
   let lastObservedAt = dependencies.now();
   let lastMilestone: string | undefined;
   let stopped = false;
+  const removeSignals = listenForAbort(dependencies, controller, (signal) => {
+    stopped = true;
+    notify(() => progress.stopTimer());
+    if (progress.interactive)
+      notify(() => dependencies.writeSynchronously(errorOutput, SHOW_CURSOR));
+    dependencies.forceExit(signal);
+  });
   const showCost = presentation.showCost || options.maxCostUsd !== undefined;
   const timerMessage = (): string => {
     const { summary, detail } = dependencyProgressDescription(update);
