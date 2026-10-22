@@ -648,10 +648,10 @@ process.exit(0);
                 args.includes("--parent-scan-id") ? "deep_pass" : undefined,
               );
               const scanId = result["scanId"] as string;
+              // A rejoining native caller keeps the original saved recipe.
               registrations.set(scanId, {
                 ...result,
-                mode: JSON.parse(input!).recipe.mode,
-                recipe: JSON.parse(input!).recipe,
+                mode: (result["recipe"] as JsonObject)["mode"] as string,
               });
               workbenches.set(scanId, options);
             }
