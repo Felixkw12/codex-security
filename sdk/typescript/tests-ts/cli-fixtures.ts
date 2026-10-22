@@ -214,6 +214,7 @@ export function dependencies(
     onCodex?: OnCodex;
     linearClient?: MainDependencies["linearClient"];
     importGitHubAlerts?: MainDependencies["importGitHubAlerts"];
+    importGitHubAdvisories?: MainDependencies["importGitHubAdvisories"];
     onRepositoryCommand?: (
       ...arguments_: Parameters<MainDependencies["runRepositoryCommand"]>
     ) => string | Promise<string>;
@@ -301,6 +302,9 @@ export function dependencies(
     ...(options.linearClient === undefined
       ? {}
       : { linearClient: options.linearClient }),
+    ...(options.importGitHubAdvisories === undefined
+      ? {}
+      : { importGitHubAdvisories: options.importGitHubAdvisories }),
     ...(options.importGitHubAlerts === undefined
       ? {}
       : { importGitHubAlerts: options.importGitHubAlerts }),
