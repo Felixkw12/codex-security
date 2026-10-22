@@ -200,7 +200,7 @@ async function fixture(
     changeSourceAt?: "scanner" | "model";
     changeRevision?: boolean;
     changeRefs?: boolean;
-    snapshotErrorAt?: 1 | 2 | 3;
+    snapshotErrorAt?: 1 | 2 | 5;
     workbenchSnapshot?: boolean;
     mcpConfig?: string;
     mcpOverrides?: JsonObject;
@@ -2302,7 +2302,7 @@ test.each(["unchanged", "changed", "snapshot unavailable"] as const)(
   "final cost collection preserves source integrity: %s",
   async (source) => {
     const { client, repository, outputDir, codexHome, turns } = await fixture({
-      ...(source === "snapshot unavailable" ? { snapshotErrorAt: 3 } : {}),
+      ...(source === "snapshot unavailable" ? { snapshotErrorAt: 5 } : {}),
     });
     await using security = client;
     const sessions = join(codexHome, "sessions");

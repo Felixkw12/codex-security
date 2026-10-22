@@ -1532,9 +1532,10 @@ export class CodexSecurity {
           verifyCost(snapshot.cost);
         }
         throwIfAborted(signal, outputDir);
-        if ((await sourceDigest()) !== source.digest)
+        const currentSource = await sourceSnapshot();
+        if (currentSource.digest !== source.digest)
           throw new CodexSecurityError(
-            "Source changed during dependency assessment; earlier assessments describe the original source. Rerun the dependency scan.",
+            `Source changed during dependency assessment (original revision ${String(source.revision)}, current revision ${String(currentSource.revision)}); earlier assessments describe the original source. Rerun the dependency scan.`,
           );
         throwIfAborted(signal, outputDir);
         if (
