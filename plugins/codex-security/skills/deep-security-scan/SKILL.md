@@ -49,6 +49,6 @@ After the canonical result is available, call `complete_codex_security_scan({ sc
 
 If completion fails, surface its exact error without retrying in the same response or changing the durable scan's status. Preserve resumable work and its handoff claim. On explicit cancellation, call `cancel_codex_security_scan` and do not accept subsequent scan progress as success.
 
-Return the report and canonical artifact links after completion succeeds and `report.md` exists. Include complete measured total, input, and cached-input token counts when available; leave pending usage to host finalization and identify unavailable counts. Distinguish an empty finding set after completed review from a time limit reached before any source review finished.
+Return the report and canonical artifact links after completion succeeds and `report.md` exists. Report usage according to `../../references/final-report.md`. Distinguish an empty finding set after completed review from a time limit reached before any source review finished.
 
 Detailed write-ups and hardening proposals are optional requested outputs. Read `get_codex_security_completed_scan` only when the requested output needs the full sealed documents. Preserve repository source and scope, and expose internal worker bookkeeping only when requested.
