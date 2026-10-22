@@ -152,7 +152,7 @@ export function renderScaReport(result: ScaResult): string {
       `Application assessment: **${assessment?.status ?? "not_started"}**${triage ? `; **${triage.verdict}** (${triage.confidence} confidence)` : ""}. Scope: static review of the current repository context.`,
     );
     if (assessment?.error)
-      sections.push(`Assessment error: ${assessment.error}`);
+      sections.push(`Assessment error: ${code(assessment.error)}`);
     if (triage) {
       sections.push(
         "Evidence:",
