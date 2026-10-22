@@ -317,26 +317,33 @@ export class ScanCostTracker {
     // continue in the current home. Apply the same scan membership to both.
     const directories = new Set<string>();
     for (const home of homes) {
-      let directory: string;
-      try {
-        directory = await realpath(join(home, "sessions"));
-      } catch (error) {
-        if (isMissingFile(error)) continue;
-        throw error;
-      }
-      if (directories.has(directory)) continue;
-      directories.add(directory);
-      for await (const path of sessionFiles(directory)) {
-        let session = this.#sessions.get(path);
-        if (session === undefined) {
-          session = createSessionUsage();
-          this.#sessions.set(path, session);
-        }
+      for (const location of ["sessions", "archived_sessions"]) {
+        let directory: string;
         try {
-          await readSessionUsage(path, session, repository, this.#attribution);
+          directory = await realpath(join(home, location));
         } catch (error) {
-          if (session.threadId === null) throw error;
-          unreadable.push({ session, error });
+          if (isMissingFile(error)) continue;
+          throw error;
+        }
+        if (directories.has(directory)) continue;
+        directories.add(directory);
+        for await (const path of sessionFiles(directory)) {
+          let session = this.#sessions.get(path);
+          if (session === undefined) {
+            session = createSessionUsage();
+            this.#sessions.set(path, session);
+          }
+          try {
+            await readSessionUsage(
+              path,
+              session,
+              repository,
+              this.#attribution,
+            );
+          } catch (error) {
+            if (session.threadId === null) throw error;
+            unreadable.push({ session, error });
+          }
         }
       }
     }

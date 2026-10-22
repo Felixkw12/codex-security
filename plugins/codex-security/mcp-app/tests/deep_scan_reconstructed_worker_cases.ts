@@ -104,7 +104,7 @@ export function reconstructedWorkerCases({
         model_reasoning_summary: "concise",
         service_tier: name === "first" ? "default" : "fast",
       };
-      const accessProgram = "daybreak_blue";
+      const accessProgram = name === "first" ? "standard" : "daybreak_blue";
       const apiFeatures = {
         api_key_cyber_access_programs: name === "first",
         api_key_model_discovery: name !== "first",
@@ -126,7 +126,9 @@ export function reconstructedWorkerCases({
           (name === "second"
             ? '[model_providers.amazon-bedrock.aws]\nregion = "us-west-2"\nprofile = "fixture-profile"\n'
             : "") +
-          `\n[codex_security]\ncyber_access_program = "${accessProgram}"\n[features]\napi_key_cyber_access_programs = ${apiFeatures.api_key_cyber_access_programs}\napi_key_model_discovery = ${apiFeatures.api_key_model_discovery}\n`,
+          '\n[codex_security]\ncyber_access_program = "daybreak_red"\n[features]\n' +
+          (name === "first" ? "" : "api_key_cyber_access_programs = false\n") +
+          `api_key_model_discovery = ${apiFeatures.api_key_model_discovery}\n`,
       );
       const providerKeys =
         name === "first"
@@ -211,16 +213,18 @@ export function reconstructedWorkerCases({
               model: "native-parent-model",
               effort: "medium",
               summary: "none",
+              cyber_access_program: accessProgram,
             },
           },
           {
             type: "turn_context",
-            timestamp: "2026-01-01T00:02:00Z",
+            timestamp: "2026-01-01T00:00:30Z",
             payload: {
               turn_id: "later-turn",
               model: "later-parent-model",
               effort: "low",
               summary: "detailed",
+              cyber_access_program: "daybreak_red",
             },
           },
         ]
@@ -256,6 +260,20 @@ export function reconstructedWorkerCases({
         saved.nativeServiceTierAbsent,
         name === "first" ? true : undefined,
       );
+      assert.equal(saved.cyberAccessProgram, accessProgram);
+      assert.deepEqual(saved.apiFeatures, apiFeatures);
+      const legacy = await loadDeepScanExecutionSettings(
+        fixture.root,
+        {
+          ...settings,
+          workflowVersion: "deep-security-scan/v1",
+          createdAt: "2026-01-01T00:01:00Z",
+        },
+        async () => ({ config: parseToml(await readFile(configPath, "utf8")) }),
+        codexOptions.env,
+      );
+      assert.equal(legacy.cyberAccessProgram, accessProgram);
+      assert.deepEqual(legacy.apiFeatures, apiFeatures);
       const targetPath = path.join(fixture.root, "target");
       await mkdir(targetPath);
       const workbenchPath = fileURLToPath(
@@ -437,6 +455,8 @@ export function reconstructedWorkerCases({
         "reconstructed-fresh",
         "reconstructed",
         "incomplete",
+        "program-missing-fresh",
+        "program-missing",
       ]) {
         if (phase.startsWith("readopted")) {
           for (const scan of scans) {
@@ -453,7 +473,11 @@ export function reconstructedWorkerCases({
             scan.executor = new CodexSdkWorkerExecutor(restored);
           }
         }
-        if (phase.startsWith("reconstructed") || phase === "incomplete") {
+        if (
+          phase.startsWith("reconstructed") ||
+          phase === "incomplete" ||
+          phase.startsWith("program-missing")
+        ) {
           for (const scan of scans) {
             scan.run = await scan.readRun();
             // Resume supplies current configuration while restoring recorded
@@ -482,6 +506,13 @@ export function reconstructedWorkerCases({
               if (scan.name === "first") delete saved.settings.serviceTier;
               await writeFile(scan.snapshotPath, JSON.stringify(saved));
               // Emulate an older trusted record with missing optional selections.
+              scan.run.executionSettings = saved;
+            }
+            if (phase.startsWith("program-missing")) {
+              const saved = JSON.parse(scan.snapshot);
+              delete saved.settings.cyberAccessProgram;
+              if (scan.name === "first")
+                delete saved.settings.apiFeatures.api_key_cyber_access_programs;
               scan.run.executionSettings = saved;
             }
             const snapshotBeforeRead = await readFile(
@@ -532,6 +563,7 @@ export function reconstructedWorkerCases({
                 "fresh",
                 "readopted-fresh",
                 "reconstructed-fresh",
+                "program-missing-fresh",
               ].includes(phase)
                 ? undefined
                 : `fixture-${scan.name}-resumed`;

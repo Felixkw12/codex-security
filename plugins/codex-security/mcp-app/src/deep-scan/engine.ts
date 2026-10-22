@@ -44,6 +44,7 @@ export function startDeepScanEngine(options: {
           process.env,
           {
             threadId,
+            turnId: options.parentTurn?.turnId,
             startedAt: active.createdAt,
             created: true,
           },

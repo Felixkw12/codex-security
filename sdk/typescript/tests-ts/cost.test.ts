@@ -2761,6 +2761,62 @@ describe("live scan cost tracking", () => {
 });
 
 describe("recorded Deep worker homes", () => {
+  test.each(["current", "recorded"])(
+    "counts archived worker spend before enforcing the budget: %s home",
+    async (location) => {
+      const home = await codexHome();
+      const workerHome = location === "current" ? home : await codexHome();
+      const worker = await writeSession(workerHome, "worker", {});
+      const at = "2026-09-01T00:00:02Z";
+      await appendFile(
+        worker,
+        JSON.stringify({
+          type: "token_usage_record",
+          timestamp: at,
+          payload: {
+            thread_id: "worker",
+            turn_id: "turn",
+            response_id: "archive-response",
+            model: "gpt-5.6-sol",
+            usage: { input_tokens: 1_000, output_tokens: 0 },
+          },
+        }) + "\n",
+      );
+      const archive = join(workerHome, "archived_sessions");
+      await mkdir(archive);
+      await fs.rename(worker, join(archive, "worker.jsonl"));
+      const tracker = new ScanCostTracker({
+        codexHome: home,
+        model: "gpt-5.6-sol",
+      });
+      tracker.setAttributionReader(async () => ({
+        formatVersion: 1,
+        codexHome: workerHome,
+        executionThreadIds: ["worker"],
+        owner: {
+          threadId: "worker",
+          turnId: "turn",
+          startedAt: at,
+          dedicated: true,
+        },
+        startedAt: at,
+        completedAt: null,
+      }));
+      tracker.start("worker");
+      try {
+        const snapshot = await tracker.refresh();
+        expect(tokenUsage(snapshot.usage)?.input_tokens).toBe(1_000);
+        expect(snapshot.cost?.estimatedUsd).toBeGreaterThan(0.003);
+        await tracker.refresh();
+        expect(tokenUsage((await tracker.stop()).usage)?.input_tokens).toBe(
+          1_000,
+        );
+      } finally {
+        await tracker.stop();
+      }
+    },
+  );
+
   test("only enforces a priced subtotal from a valid attributed usage partition", () => {
     const known = {
       model: "gpt-5.6-sol",

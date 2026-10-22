@@ -2282,17 +2282,36 @@ export class CodexSecurity {
             "The workbench returned mismatched scan resume context.",
           );
         }
-        const savedSession = await findScanSession(
-          runtime.codexHome,
-          resumeThreadId,
-        );
-        if (
-          savedSession === null ||
-          savedSession.workingDirectory !== scanDir
-        ) {
-          throw new CodexSecurityError(
-            `The original Codex session for scan ${scanId} is unavailable. Restore its session logs in the original Codex Security state directory before resuming.`,
+        const savedDeep =
+          mode === "deep"
+            ? (
+                await workbench(workbenchOptions, [
+                  "get-deep-scan",
+                  "--scan-id",
+                  scanId,
+                  "--thread-id",
+                  resumeThreadId,
+                ])
+              )["deepScan"]
+            : undefined;
+        const selectedCompletion =
+          isRecord(savedDeep) &&
+          isRecord(savedDeep["finalizationInput"]) &&
+          (savedDeep["status"] === "running" ||
+            savedDeep["status"] === "succeeded");
+        if (!selectedCompletion) {
+          const savedSession = await findScanSession(
+            runtime.codexHome,
+            resumeThreadId,
           );
+          if (
+            savedSession === null ||
+            savedSession.workingDirectory !== scanDir
+          ) {
+            throw new CodexSecurityError(
+              `The original Codex session for scan ${scanId} is unavailable. Restore its session logs in the original Codex Security state directory before resuming.`,
+            );
+          }
         }
         if (typeof registration["sealedProducerVersion"] === "string") {
           expectation.pluginVersion = registration["sealedProducerVersion"];

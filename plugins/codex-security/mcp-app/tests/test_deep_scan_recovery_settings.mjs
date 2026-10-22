@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
+import * as zlib from "node:zlib";
 import { build } from "esbuild";
 
 const bundle = await build({
@@ -929,6 +930,80 @@ access_key_id = "synthetic-secret"
     undefined,
     "a compatibility summary is not a recorded native default",
   );
+  for (const compressed of [
+    false,
+    ...(typeof zlib.zstdCompressSync === "function" ? [true] : []),
+  ]) {
+    const threadId = `fixture-replayed-${compressed}`;
+    const archive = join(root, "archived_sessions");
+    await mkdir(archive, { recursive: true });
+    const records =
+      [
+        {
+          type: "session_meta",
+          timestamp: "2026-01-01T00:00:00Z",
+          payload: { id: threadId, model_provider: "original-provider" },
+        },
+        {
+          type: "session_meta",
+          timestamp: "2025-12-31T23:00:00Z",
+          payload: { id: "copied-parent", model_provider: "copied-provider" },
+        },
+        {
+          type: "turn_context",
+          timestamp: "2025-12-31T23:00:01Z",
+          payload: { model: "copied-model", effort: "low" },
+        },
+        {
+          type: "event_msg",
+          timestamp: "2026-01-01T00:00:01Z",
+          payload: {
+            type: "task_started",
+            started_at: Date.parse("2026-01-01T00:00:01Z") / 1000,
+          },
+        },
+        {
+          type: "turn_context",
+          timestamp: "2026-01-01T00:00:02Z",
+          payload: {
+            turn_id: "original-turn",
+            model: "original-model",
+            effort: "ultra",
+            summary: "concise",
+          },
+        },
+        {
+          type: "turn_context",
+          timestamp: "2026-01-01T00:02:00Z",
+          payload: {
+            turn_id: "later-turn",
+            model: "later-model",
+            effort: "low",
+          },
+        },
+      ]
+        .map(JSON.stringify)
+        .join("\n") + "\n";
+    await writeFile(
+      join(archive, `${threadId}.jsonl${compressed ? ".zst" : ""}`),
+      compressed ? zlib.zstdCompressSync(records) : records,
+    );
+    const replayed = await captureSettings(
+      {
+        usageOwner: {
+          threadId,
+          turnId: "original-turn",
+          startedAt: "2026-01-01T00:01:00Z",
+        },
+      },
+      { filesystemDenies: [] },
+      parentEnvironment,
+    );
+    assert.equal(replayed.model, "original-model");
+    assert.equal(replayed.modelProvider, "original-provider");
+    assert.equal(replayed.reasoningEffort, "ultra");
+    assert.equal(replayed.reasoningSummary, "concise");
+  }
   const incompleteDir = join(root, "incomplete");
   const incomplete = {
     codexPath: process.execPath,

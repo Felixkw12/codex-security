@@ -56,7 +56,12 @@ export async function captureDeepScanExecutionSettings(
   original: Pick<DeepScanRunState, "model" | "reasoningEffort" | "usageOwner">,
   parentSandbox: DeepWorkerParentSandbox,
   environment: NodeJS.ProcessEnv = process.env,
-  parent?: { threadId: string; startedAt?: string; created?: true },
+  parent?: {
+    threadId: string;
+    turnId?: string;
+    startedAt?: string;
+    created?: true;
+  },
 ): Promise<DeepScanExecutionSettings> {
   const codexHome = environment.CODEX_HOME || join(homedir(), ".codex");
   const configPath =
@@ -117,8 +122,9 @@ export async function captureDeepScanExecutionSettings(
     ...(selected.service_tier === undefined && native.nativeServiceTierAbsent
       ? { nativeServiceTierAbsent: true as const }
       : {}),
-    cyberAccessProgram: cyberAccessProgram(resolved),
-    apiFeatures: apiFeatures(selected.features),
+    cyberAccessProgram:
+      native.cyberAccessProgram ?? cyberAccessProgram(resolved),
+    apiFeatures: apiFeatures(selected.features, native.cyberAccessProgram),
     providerConfig: selected.model_providers as JsonObject | undefined,
     parentSandbox,
   });
@@ -207,6 +213,10 @@ async function originalParentSettings(
       }
       if (event.type === "turn_context") {
         if (parent.turnId && context.turn_id !== parent.turnId) continue;
+        settings.cyberAccessProgram =
+          typeof context.cyber_access_program === "string"
+            ? (context.cyber_access_program as CyberAccessProgram)
+            : undefined;
         if (typeof context.model === "string") settings.model = context.model;
         if (typeof context.effort === "string")
           settings.reasoningEffort = context.effort;
@@ -289,10 +299,9 @@ export async function loadDeepScanExecutionSettings(
         native.nativeServiceTierAbsent
           ? { nativeServiceTierAbsent: true as const }
           : {}),
-        cyberAccessProgram: cyberAccessProgram(
-          resolveWorkerProfile(context?.config ?? {}),
-        ),
-        apiFeatures: apiFeatures(selected.features),
+        cyberAccessProgram:
+          native.cyberAccessProgram ?? cyberAccessProgram(resolved),
+        apiFeatures: apiFeatures(selected.features, native.cyberAccessProgram),
         providerConfig:
           typeof selected.model_provider === "string" &&
           isRecord(resolved.model_providers) &&
@@ -311,7 +320,8 @@ export async function loadDeepScanExecutionSettings(
       settings.reasoningEffort !== undefined &&
       settings.modelProvider !== undefined &&
       settings.reasoningSummary !== undefined &&
-      settings.serviceTier !== undefined)
+      settings.serviceTier !== undefined &&
+      settings.cyberAccessProgram !== undefined)
   )
     return settings;
   // Earlier snapshots can omit native selections. Recover only from the saved
@@ -336,6 +346,14 @@ export async function loadDeepScanExecutionSettings(
     modelProvider: settings.modelProvider ?? native.modelProvider,
     reasoningSummary: settings.reasoningSummary ?? native.reasoningSummary,
     serviceTier: settings.serviceTier ?? native.serviceTier,
+    cyberAccessProgram:
+      settings.cyberAccessProgram ?? native.cyberAccessProgram,
+    apiFeatures: apiFeatures(
+      settings.apiFeatures,
+      settings.cyberAccessProgram === undefined
+        ? native.cyberAccessProgram
+        : undefined,
+    ),
     ...(settings.serviceTier === undefined && native.nativeServiceTierAbsent
       ? { nativeServiceTierAbsent: true as const }
       : {}),
@@ -510,9 +528,11 @@ function executionSettings(
   return settings;
 }
 
-function apiFeatures(value: unknown): DeepScanExecutionSettings["apiFeatures"] {
-  if (typeof value !== "object" || value === null) return undefined;
-  const features = value as Record<string, unknown>;
+function apiFeatures(
+  value: unknown,
+  nativeProgram?: CyberAccessProgram,
+): DeepScanExecutionSettings["apiFeatures"] {
+  const features = isRecord(value) ? value : {};
   const result: NonNullable<DeepScanExecutionSettings["apiFeatures"]> = {};
   for (const key of [
     "api_key_cyber_access_programs",
@@ -520,6 +540,11 @@ function apiFeatures(value: unknown): DeepScanExecutionSettings["apiFeatures"] {
   ] as const) {
     if (typeof features[key] === "boolean") result[key] = features[key];
   }
+  if (
+    nativeProgram !== undefined &&
+    result.api_key_cyber_access_programs === undefined
+  )
+    result.api_key_cyber_access_programs = true;
   return Object.keys(result).length > 0 ? result : undefined;
 }
 

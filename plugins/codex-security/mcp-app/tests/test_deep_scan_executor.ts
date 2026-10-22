@@ -3818,51 +3818,6 @@ async function testWorkerProviderSelection() {
   }
 }
 
-async function testNullUsageCompletion() {
-  const fixture = await fakeCodexFixture();
-  const previousPath = process.env.CODEX_CLI_PATH;
-  const originalSpawn = childProcess.spawn;
-  childProcess.spawn = ((
-    command: string,
-    args: readonly string[] = [],
-    options: SpawnOptions = {},
-  ) =>
-    originalSpawn(
-      command,
-      command === process.execPath ||
-        command === path.toNamespacedPath(process.execPath)
-        ? [fixture.executablePath, ...args]
-        : args,
-      options,
-    )) as typeof childProcess.spawn;
-  syncBuiltinESMExports();
-  process.env.CODEX_CLI_PATH = process.execPath;
-  try {
-    const promptPath = path.join(fixture.root, "prompt.md");
-    await writeFile(promptPath, "NULL_USAGE\n");
-    for (const kind of ["discovery", "dedup"] as const) {
-      for (const resumeThreadId of [undefined, "fixture-resumed-thread"]) {
-        const result = await new CodexSdkWorkerExecutor({
-          parentSandbox: trustedParentSandbox,
-        }).run({
-          kind,
-          promptPath,
-          workingDirectory: fixture.root,
-          subagents: 0,
-          resumeThreadId,
-          signal: new AbortController().signal,
-        });
-        assert.equal(result.threadId, resumeThreadId ?? "fixture-thread-id");
-        assert.ok(result.threadId, "null-usage completion retains its thread");
-      }
-    }
-  } finally {
-    childProcess.spawn = originalSpawn;
-    syncBuiltinESMExports();
-    restoreEnv("CODEX_CLI_PATH", previousPath);
-  }
-}
-
 async function testWorkerCancellation() {
   const fixture = await fakeCodexFixture();
   const previousPath = process.env.CODEX_CLI_PATH;

@@ -2,7 +2,9 @@ import { createReadStream } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
+import { pipeline } from "node:stream";
 import { isDeepStrictEqual } from "node:util";
+import * as zlib from "node:zlib";
 import { isRecord } from "../record.js";
 
 /** Read the original owner's canonical native rollout, including archived copies. */
@@ -34,8 +36,8 @@ export async function readOriginalParentEvents(
       ) {
         selected = records;
         startedAt =
-          typeof metadata["timestamp"] === "string"
-            ? Date.parse(metadata["timestamp"])
+          typeof first["timestamp"] === "string"
+            ? Date.parse(first["timestamp"])
             : Number.NaN;
       }
     }
@@ -74,7 +76,13 @@ async function* sessionFiles(directory: string): AsyncGenerator<string> {
   for (const entry of entries) {
     const path = join(directory, entry.name);
     if (entry.isDirectory()) yield* sessionFiles(path);
-    else if (entry.isFile() && entry.name.endsWith(".jsonl")) yield path;
+    else if (
+      entry.isFile() &&
+      (entry.name.endsWith(".jsonl") ||
+        (typeof zlib.createZstdDecompress === "function" &&
+          entry.name.endsWith(".jsonl.zst")))
+    )
+      yield path;
   }
 }
 async function sessionEvents(
@@ -82,7 +90,10 @@ async function sessionEvents(
   threadId: string,
 ): Promise<Record<string, unknown>[]> {
   const events: Record<string, unknown>[] = [];
-  const stream = createReadStream(path, { encoding: "utf8" });
+  const file = createReadStream(path);
+  const stream = path.endsWith(".zst")
+    ? pipeline(file, zlib.createZstdDecompress(), () => {})
+    : file;
   const lines = createInterface({ input: stream, crlfDelay: Infinity });
   try {
     for await (const line of lines) {
@@ -109,6 +120,7 @@ async function sessionEvents(
   } finally {
     lines.close();
     stream.destroy();
+    file.destroy();
   }
   return events;
 }

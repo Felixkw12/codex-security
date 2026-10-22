@@ -6,7 +6,7 @@ import { syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { CodexWorkerRequest } from "../src/deep-scan/types.js";
-import { nativeConfigOverrides } from "./assertions.ts";
+import { assertFlagPair, nativeConfigOverrides } from "./assertions.ts";
 import { trustedParentSandbox } from "./deep_scan_executor_diagnostic_cases.ts";
 import { importModule } from "./import-module.ts";
 import { readJson } from "./support/json.ts";
@@ -63,6 +63,37 @@ export async function testLargeScopeTransport({
     process.env.CODEX_HOME = fixture.root;
     delete process.env.CODEX_SECURITY_CONFIG_PATH;
     delete process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
+    await mkdir(path.join(fixture.root, "sessions"));
+    for (const index of [0, 1]) {
+      await writeFile(
+        path.join(fixture.root, "sessions", `parent-${index}.jsonl`),
+        [
+          {
+            type: "session_meta",
+            timestamp: "2026-01-01T00:00:00Z",
+            payload: { id: `scope-parent-${index}` },
+          },
+          {
+            type: "turn_context",
+            timestamp: "2026-01-01T00:00:01Z",
+            payload: {
+              turn_id: "original-turn",
+              cyber_access_program: index === 0 ? "standard" : "daybreak_blue",
+            },
+          },
+          {
+            type: "turn_context",
+            timestamp: "2026-01-01T00:00:30Z",
+            payload: {
+              turn_id: "later-turn",
+              cyber_access_program: "daybreak_red",
+            },
+          },
+        ]
+          .map((event) => JSON.stringify(event))
+          .join("\n") + "\n",
+      );
+    }
     childProcess.spawn = ((
       command: string,
       args: readonly string[],
@@ -110,10 +141,23 @@ export async function testLargeScopeTransport({
                 scope: ".",
                 includePaths,
                 filePaths: includePaths.filter((_, index) => index % 2 === 0),
+                startDisposition: resumed ? "resumed" : "created",
+                createdAt: "2026-01-01T00:01:00Z",
+                usageOwner: {
+                  threadId: `scope-parent-${index}`,
+                  turnId: "original-turn",
+                  startedAt: "2026-01-01T00:01:00Z",
+                },
                 executionSettings: {
                   version: 1,
                   settings: await captureDeepScanExecutionSettings(
-                    {},
+                    {
+                      usageOwner: {
+                        threadId: `scope-parent-${index}`,
+                        turnId: "original-turn",
+                        startedAt: "2026-01-01T00:01:00Z",
+                      },
+                    },
                     trustedParentSandbox,
                   ),
                 },
@@ -126,11 +170,13 @@ export async function testLargeScopeTransport({
                 pluginRoot: fixture.root,
                 pythonCommand: process.env.PYTHON || "python3",
                 parentSandbox: trustedParentSandbox,
-                threadId: "scope-parent",
+                threadId: `scope-parent-${index}`,
+                parentTurn: {
+                  threadId: `scope-parent-${index}`,
+                  turnId: "original-turn",
+                },
               });
-              const executor = resumed
-                ? await captured.options.prepareExecutor(run)
-                : captured.options.executor;
+              const executor = await captured.options.prepareExecutor(run);
               await executor.run(
                 workerRequest(prompt, output, {
                   kind,
@@ -160,6 +206,11 @@ export async function testLargeScopeTransport({
                 }),
               );
               const invocation = await readJson(output, "invocation.json");
+              assertFlagPair(
+                invocation.argv,
+                "--cyber-access-program",
+                index === 0 ? "standard" : "daybreak_blue",
+              );
               assert.deepEqual(invocation.scopeInput.paths, includePaths);
               assert.deepEqual(
                 invocation.scopeInput.filePaths,

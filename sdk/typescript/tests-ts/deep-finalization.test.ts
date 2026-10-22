@@ -1,6 +1,13 @@
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { execFileSync } from "node:child_process";
-import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  mkdir,
+  readFile,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, expect, test, spyOn } from "bun:test";
@@ -113,6 +120,8 @@ const outcomes = [
   "failed",
   "completed",
   "restart",
+  "restart-without-session",
+  "restart-archived-session",
   "canceled-before-publication",
   "canceled-during-publication",
   "canceled-during-resumed-publication",
@@ -195,7 +204,10 @@ for (const {
   unpricedUsage,
 } of cases) {
   const resumedStop = outcome.includes("-resumed-");
-  const restart = outcome === "restart" || resumedStop;
+  const restart = outcome.startsWith("restart") || resumedStop;
+  const localRecovery =
+    outcome === "restart-without-session" ||
+    outcome === "restart-archived-session";
   const closed = outcome.startsWith("closed-");
   const budgeted = outcome.startsWith("budget-");
   const canceledFollowUp = outcome.endsWith("followup-canceled");
@@ -678,6 +690,14 @@ for (const {
         await client.close();
         client = makeClient();
         if (initialResumeUsage) await recordBudgetUsage();
+        if (outcome === "restart-without-session") await rm(usagePath);
+        if (outcome === "restart-archived-session") {
+          await mkdir(join(codexHome, "archived_sessions"));
+          await rename(
+            usagePath,
+            join(codexHome, "archived_sessions", "owner.jsonl"),
+          );
+        }
       }
       if (budgeted || closed) {
         const running = client.run(repository, {
@@ -958,7 +978,9 @@ for (const {
         mode: "deep",
         signal: cancellation.signal,
         postScanPrompt:
-          outcome === "published-before-cancellation" ? undefined : followUp,
+          outcome === "published-before-cancellation" || localRecovery
+            ? undefined
+            : followUp,
         ...(restart ? { resumeScanId: scanId, outputDir: scanDir } : {}),
       });
       expect(result.threadId).toBe(threadId);
@@ -976,7 +998,13 @@ for (const {
       // postScanPrompt retains its existing behavior on each caller invocation.
       expect(modelInputs.filter((input) => input !== followUp).length).toBe(1);
       expect(modelInputs.filter((input) => input === followUp).length).toBe(
-        outcome === "published-before-cancellation" ? 0 : restart ? 2 : 1,
+        outcome === "published-before-cancellation"
+          ? 0
+          : localRecovery
+            ? 1
+            : restart
+              ? 2
+              : 1,
       );
       const completed = await runWorkbench(
         { ...workbenchOptions!, signal: undefined },
