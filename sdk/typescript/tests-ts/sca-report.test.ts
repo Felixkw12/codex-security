@@ -671,19 +671,137 @@ describe("SCA comparison", () => {
     },
   );
 
-  test("keeps separate versions and correlates an unambiguous version change", () => {
+  test.each([false, true])(
+    "keeps separate versions and correlates an unambiguous version change (reverse order: %s)",
+    (reverseOrder) => {
+      const base = fixture();
+      const head = fixture();
+      addMatch(base, "old-version", "2.0.0");
+      addMatch(head, "new-version", "2.0.1");
+      if (reverseOrder) {
+        base.matches.reverse();
+        head.matches.reverse();
+      }
+      const comparison = compareScaResults(base, head);
+      expect(comparison.persisting).toEqual([
+        { baseMatchIds: ["match-1"], headMatchIds: ["match-1"] },
+      ]);
+      expect(comparison.changedVersion).toEqual([
+        { baseMatchIds: ["old-version"], headMatchIds: ["new-version"] },
+      ]);
+      expect(comparison.noLongerObserved).toEqual([]);
+    },
+  );
+
+  test("retains exact versions when aliases connect transitively within each scan", () => {
     const base = fixture();
     const head = fixture();
-    addMatch(base, "old-version", "2.0.0");
-    addMatch(head, "new-version", "2.0.1");
+    for (const result of [base, head]) {
+      result.matches[0]!.advisoryIds = ["SYNTHETIC-A"];
+      result.matches[0]!.aliases = ["SYNTHETIC-X"];
+      addMatch(result, "second", "2.0.0");
+      result.matches[1]!.advisoryIds = ["SYNTHETIC-B"];
+      result.matches[1]!.aliases = ["SYNTHETIC-X", "SYNTHETIC-Y"];
+      addMatch(result, "third", "3.0.0");
+      result.matches[2]!.advisoryIds = ["SYNTHETIC-C"];
+      result.matches[2]!.aliases = ["SYNTHETIC-Y"];
+    }
+    head.components[1]!.version = "2.0.1";
+    head.components[2]!.version = "3.0.1";
     const comparison = compareScaResults(base, head);
     expect(comparison.persisting).toEqual([
       { baseMatchIds: ["match-1"], headMatchIds: ["match-1"] },
     ]);
-    expect(comparison.changedVersion).toEqual([
-      { baseMatchIds: ["old-version"], headMatchIds: ["new-version"] },
+    expect(comparison.ambiguous).toEqual([
+      {
+        baseMatchIds: ["second", "third"],
+        headMatchIds: ["second", "third"],
+      },
     ]);
     expect(comparison.noLongerObserved).toEqual([]);
+    expect(comparison.introduced).toEqual([]);
+  });
+
+  test.each([
+    {
+      name: "a merged advisory group",
+      base: [
+        { version: "1.0.0", ids: ["SYNTHETIC-A"] },
+        { version: "2.0.0", ids: ["SYNTHETIC-B"] },
+      ],
+      head: [{ version: "1.0.0", ids: ["SYNTHETIC-A", "SYNTHETIC-B"] }],
+    },
+    {
+      name: "a bridge connected to another same-version occurrence",
+      base: [
+        { version: "1.0.0", ids: ["SYNTHETIC-A"] },
+        { version: "2.0.0", ids: ["SYNTHETIC-B"] },
+        { version: "3.0.0", ids: ["SYNTHETIC-A"] },
+      ],
+      head: [
+        { version: "1.0.0", ids: ["SYNTHETIC-A"] },
+        { version: "2.0.0", ids: ["SYNTHETIC-A", "SYNTHETIC-B"] },
+      ],
+    },
+  ])("keeps $name ambiguous across versions and input order", (scenario) => {
+    function report(
+      packages: readonly { version: string; ids: readonly string[] }[],
+    ) {
+      const result = fixture();
+      const normalized = normalizeOsvOutput(
+        {
+          results: [
+            {
+              source: { path: "package-lock.json", type: "lockfile" },
+              packages: packages.map(({ version, ids }) => ({
+                package: {
+                  name: "synthetic-package",
+                  ecosystem: "npm",
+                  version,
+                },
+                vulnerabilities: ids.map((id) => ({
+                  id,
+                  aliases: ids.filter((alias) => alias !== id),
+                })),
+              })),
+            },
+          ],
+        },
+        {
+          repositoryPath: result.repository.path,
+          inputs: result.coverage.inputs,
+        },
+      );
+      expect(normalized.diagnostics).toEqual([]);
+      result.components = normalized.components;
+      result.matches = normalized.matches;
+      return result;
+    }
+    for (const base of [scenario.base, scenario.base.toReversed()]) {
+      for (const head of [scenario.head, scenario.head.toReversed()]) {
+        const before = report(base);
+        const after = report(head);
+        for (const [left, right] of [
+          [before, after],
+          [after, before],
+        ] as const) {
+          const comparison = compareScaResults(left, right);
+          expect(comparison.comparable).toBe(true);
+          expect(comparison.persisting).toEqual([]);
+          expect(comparison.changedVersion).toEqual([]);
+          expect(comparison.noLongerObserved).toEqual([]);
+          expect(comparison.newlyObserved).toEqual([]);
+          expect(comparison.introduced).toEqual([]);
+          expect(comparison.ambiguous).toHaveLength(1);
+          expect(comparison.ambiguous[0]!.baseMatchIds.toSorted()).toEqual(
+            left.matches.map(({ id }) => id).sort(),
+          );
+          expect(comparison.ambiguous[0]!.headMatchIds.toSorted()).toEqual(
+            right.matches.map(({ id }) => id).sort(),
+          );
+        }
+      }
+    }
   });
 
   test("reports many-to-many version correlations as ambiguous", () => {
