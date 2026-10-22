@@ -3627,9 +3627,6 @@ describe("CodexSecurity orchestration", () => {
           return mockWorkbench(args, input);
         },
         hostedScan: {
-          ownerCodex: {
-            startThread: () => fail("owner inference must not run"),
-          },
           context: {
             repository,
             revision: "deadbeef",
@@ -6496,11 +6493,13 @@ describe("CodexSecurity orchestration", () => {
       const { root, repository, codexHome, scanDir } = await scanDirectories();
       const warnings = mock((_warning: string) => {});
       const commands: Array<readonly string[]> = [];
+      let threads = 0;
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: recordingWorkbench(commands),
         createCodex: (options: CodexOptions) => ({
           startThread(threadOptions: Parameters<Codex["startThread"]>[0]) {
+            threads++;
             const thread = new Codex({
               ...options,
               codexPathOverride: process.execPath,
@@ -6524,6 +6523,7 @@ describe("CodexSecurity orchestration", () => {
       try {
         const scan = client.run(repository, {
           ...(limited ? { maxCostUsd: 1 } : {}),
+          ownerSuggestions: true,
           onWarning: warnings,
         });
         if (limited) {
@@ -6551,6 +6551,7 @@ describe("CodexSecurity orchestration", () => {
             "fail-scan",
           );
         }
+        expect(threads).toBe(1);
         expect(warnings).not.toHaveBeenCalled();
       } finally {
         await client.close();
