@@ -478,9 +478,11 @@ export class ScanCostTracker {
       if (
         session.usage !== null &&
         (session.usage.total_tokens > (receipt?.total_tokens ?? -1) ||
-          // The SDK inserts zero when the final receipt omits cache writes.
+          // Worker receipts retain field presence; the SDK may default to zero.
           (session.usage.total_tokens === receipt?.total_tokens &&
-            receipt.cache_write_input_tokens === 0))
+            (receipt.cache_write_input_tokens_reported === false ||
+              (receipt === this.#receipts.get(threadId) &&
+                receipt.cache_write_input_tokens === 0))))
       ) {
         usages.set(threadId, session.usage);
       }

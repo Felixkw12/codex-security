@@ -3190,6 +3190,71 @@ describe("live scan cost tracking", () => {
     },
   );
 
+  test.each([
+    ["reported zero", { cache_write_input_tokens: 0 }, {}, 0],
+    ["missing writes", {}, { cache_write_input_tokens: 12 }, 12],
+    [
+      "defaulted zero",
+      {
+        cache_write_input_tokens: 0,
+        cache_write_input_tokens_reported: false,
+      },
+      { cache_write_input_tokens: 12 },
+      12,
+    ],
+  ] as const)(
+    "preserves worker receipt provenance for %s during native reconciliation",
+    async (_name, receiptWrites, nativeWrites, expectedWrites) => {
+      const home = await codexHome();
+      const scanId = "receipt-provenance";
+      const directory = join(home, "worker-usage", scanId);
+      await fs.mkdir(directory, { recursive: true });
+      await writeSession(home, "scan-thread", {
+        input_tokens: 100,
+        cache_write_input_tokens: 0,
+        output_tokens: 10,
+      });
+      const workerUsage = { input_tokens: 200, output_tokens: 20 };
+      await writeFile(
+        join(directory, "worker-attempt.json"),
+        JSON.stringify({
+          schemaVersion: 1,
+          source: "codex_sdk",
+          usageScope: "thread_cumulative",
+          scanId,
+          attemptId: "worker-attempt",
+          threadId: "worker-thread",
+          usage: { ...workerUsage, ...receiptWrites },
+        }),
+      );
+      await writeSession(
+        home,
+        "worker-thread",
+        { ...workerUsage, ...nativeWrites },
+        { parent: "scan-thread" },
+      );
+      const tracker = costTracker(home, {
+        workerReceipts: { directory, scanId },
+      });
+      tracker.start("scan-thread");
+      const snapshot = await tracker.stop();
+      expect(snapshot.measurement).toMatchObject({
+        coverage: "complete",
+        threadCount: 2,
+        missingThreadCount: 0,
+      });
+      expect(snapshot.usage).toMatchObject({
+        input_tokens: 300,
+        cache_write_input_tokens: expectedWrites,
+        output_tokens: 30,
+      });
+      expect(snapshot.usage).not.toHaveProperty(
+        "cache_write_input_tokens_reported",
+      );
+      expect(snapshot.cost).not.toHaveProperty("cacheWriteInputTokensReported");
+    },
+  );
+
   test("retains cumulative resumed worker receipts without counting earlier turns twice", async () => {
     const home = await codexHome();
     const scanDirectory = join(home, "scans", "receipts");
