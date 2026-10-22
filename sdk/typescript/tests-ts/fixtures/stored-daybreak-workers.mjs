@@ -1,70 +1,83 @@
 import childProcess from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { join } from "node:path";
-import { mock } from "bun:test";
 import { createInterface } from "node:readline";
-import { parse as parseToml } from "smol-toml";
+import { fileURLToPath } from "node:url";
+import { mock } from "bun:test";
 
-const spawn = childProcess.spawn;
-let workerArgs;
-let workerProcess;
-let workerEnvironment;
-let workerConfig;
-// Capture the actual native launch, including the temporary per-scan home config.
-const recordedSpawn = (command, args, options) => {
-  if (args[0] === "exec") {
-    workerArgs = args;
-    workerEnvironment = { ...options.env };
-    workerConfig = parseToml(
-      readFileSync(join(workerEnvironment.CODEX_HOME, "config.toml"), "utf8"),
+if (process.argv[2] === "exec") {
+  const { readDeepScanRuntimeConfig } =
+    await import("../../../../plugins/codex-security/mcp-app/src/deep-scan/permission-profile-preflight.ts");
+  const args = process.argv.slice(2);
+  process.stdin.resume();
+  await once(process.stdin, "end");
+  // Resolve the launched worker's actual home and overrides with native Codex,
+  // before thread.started lets the wrapper release its configuration lock.
+  // Only turn events are synthetic: this test does not require an OS sandbox.
+  const config = await readDeepScanRuntimeConfig({
+    codexPath: process.env.CODEX_CLI_PATH,
+    cwd: args[args.indexOf("--cd") + 1],
+    configOverrides: args.flatMap((arg, index) =>
+      arg === "--config" || arg === "-c" ? [args[index + 1]] : [],
+    ),
+    env: process.env,
+    signal: new AbortController().signal,
+  });
+  const threadId = args.includes("resume")
+    ? args[args.indexOf("resume") + 1]
+    : randomUUID();
+  for (const event of [
+    { type: "thread.started", thread_id: threadId },
+    {
+      type: "item.completed",
+      item: {
+        id: "native-config",
+        type: "agent_message",
+        text: JSON.stringify({
+          config,
+          codexHome: process.env.CODEX_HOME,
+          codexPath: process.env.CODEX_CLI_PATH,
+          apiKey: process.env.CODEX_API_KEY,
+          resumed: args.includes("resume"),
+        }),
+      },
+    },
+    {
+      type: "turn.completed",
+      usage: { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0 },
+    },
+  ])
+    process.stdout.write(JSON.stringify(event) + "\n");
+} else {
+  const spawn = childProcess.spawn;
+  let workerCommand;
+  // Preserve the SDK's worker argv and environment at the child-process boundary.
+  // Native app-server launches, including permission preflight, remain untouched.
+  const recordedSpawn = (command, args, options) => {
+    if (args[0] !== "exec") return spawn(command, args, options);
+    workerCommand = command;
+    return spawn(
+      process.execPath,
+      [fileURLToPath(import.meta.url), ...args],
+      options,
     );
-  }
-  const child = spawn(command, args, options);
-  if (args[0] === "exec") workerProcess = child;
-  return child;
-};
-for (const name of ["node:child_process", "child_process"])
-  mock.module(name, () => ({ ...childProcess, spawn: recordedSpawn }));
-const {
-  createExecutionCodex,
-  lockExecutionConfiguration,
-  nativeScanConfiguration,
-  prepareDiscoveryExecution,
-  prepareExecutionSource,
-  prepareMergeExecution,
-} = await import("../../src/execution-preparation.ts");
-const { scanRuntimeCodexConfig } = await import("../../src/api.ts");
-const { preparedRuntime } = await import("../support/api-events.ts");
-const { readDeepScanRuntimeConfig } =
-  await import("../../../../plugins/codex-security/mcp-app/src/deep-scan/permission-profile-preflight.ts");
-const requests = [];
-const server = Bun.serve({
-  hostname: "127.0.0.1",
-  port: 0,
-  async fetch(request) {
-    if (new URL(request.url).pathname !== "/v1/responses")
-      return Response.json({});
-    if (request.method !== "POST") return new Response(null, { status: 426 });
-    requests.push(await request.json());
-    return new Response(
-      'event: response.completed\ndata: {"type":"response.completed","response":{"id":"synthetic-response","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}\n\n',
-      { headers: { "content-type": "text/event-stream" } },
-    );
-  },
-});
-process.env.OPENAI_BASE_URL = `${server.url}v1`;
-let session;
-process.stdout.write(
-  JSON.stringify({ baseUrl: process.env.OPENAI_BASE_URL }) + "\n",
-);
-try {
+  };
+  for (const name of ["node:child_process", "child_process"])
+    mock.module(name, () => ({ ...childProcess, spawn: recordedSpawn }));
+  const {
+    createExecutionCodex,
+    nativeScanConfiguration,
+    prepareDiscoveryExecution,
+    prepareExecutionSource,
+    prepareMergeExecution,
+  } = await import("../../src/execution-preparation.ts");
+  const { scanRuntimeCodexConfig } = await import("../../src/api.ts");
+  const { preparedRuntime } = await import("../support/api-events.ts");
+  let session;
   for await (const line of createInterface({ input: process.stdin })) {
     const request = JSON.parse(line);
-    const requestCount = requests.length;
-    workerArgs = undefined;
-    workerProcess = undefined;
+    workerCommand = undefined;
     if (session === undefined) {
       const configuration = await nativeScanConfiguration(
         process.env,
@@ -118,42 +131,23 @@ try {
         signal: new AbortController().signal,
       },
     );
+    let receipt;
     for await (const event of events) {
       if (event.type === "turn.failed") throw new Error(event.error.message);
+      if (
+        event.type === "item.completed" &&
+        event.item.type === "agent_message"
+      )
+        receipt = JSON.parse(event.item.text);
     }
-    if (!workerArgs)
-      throw new Error("Native worker arguments were not captured");
-    if (requests.length === requestCount)
-      throw new Error("Worker completed without a synthetic Responses request");
-    // Turn completion can precede exec's exit. Release its SQLite handles before
-    // this fixture starts a separate app-server against the same Codex home.
-    if (workerProcess.exitCode === null && workerProcess.signalCode === null)
-      await once(workerProcess, "exit");
-    const signal = new AbortController().signal;
-    const release = await lockExecutionConfiguration(
-      worker,
-      workerConfig,
-      signal,
-    );
-    let config;
-    try {
-      config = await readDeepScanRuntimeConfig({
-        codexPath: process.env.CODEX_CLI_PATH,
-        cwd: process.cwd(),
-        configOverrides: workerArgs.flatMap((arg, index) =>
-          arg === "--config" || arg === "-c" ? [workerArgs[index + 1]] : [],
-        ),
-        env: workerEnvironment,
-        signal,
-      });
-    } finally {
-      await release?.();
-    }
+    if (!receipt || !workerCommand)
+      throw new Error("Worker configuration was not captured");
+    const { config, ...launch } = receipt;
     process.stdout.write(
       JSON.stringify({
+        ...launch,
+        executable: workerCommand,
         threadId: thread.id,
-        resumed: workerArgs.includes("resume"),
-        program: requests.at(-1)?.access_programs?.cyber,
         daybreak: config.daybreak ?? null,
         daybreakFeatures: Object.fromEntries(
           [
@@ -162,9 +156,9 @@ try {
             "api_key_model_discovery",
           ].map((key) => [key, config.features?.[key] ?? null]),
         ),
+        permissionProfile: config.default_permissions,
+        permissions: config.permissions?.[config.default_permissions],
       }) + "\n",
     );
   }
-} finally {
-  server.stop(true);
 }
