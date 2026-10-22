@@ -180,6 +180,30 @@ def test_finding_artifacts_include_all_safe_files_and_directories(tmp_path):
         ("alice@git.example:~owner/project.git", "bob@git.example:~owner/project.git", True),
         ("ssh://alice@git.example/~/project.git", "ssh://bob@git.example/~/project.git", False),
         ("https://github.com/example/project.git", "git@github.com:example/project.git", True),
+        ("https://gitlab.com/group/project.git", "git@gitlab.com:group/project.git", True),
+        (
+            "https://gitlab.com/group/subgroup/project.git",
+            "git@GITLAB.com:group/subgroup/project.git",
+            True,
+        ),
+        (
+            "git@gitlab.com:group/project.git",
+            "ssh://git@gitlab.com:22/group/project.git",
+            True,
+        ),
+        (
+            "https://gitlab.com/group/project.git",
+            "ssh://git@gitlab.com:2222/group/project.git",
+            False,
+        ),
+        ("git@gitlab.com:group/project.git", "alice@gitlab.com:group/project.git", False),
+        ("git@gitlab.com:group/project.git", "git@gitlab.com:~/group/project.git", False),
+        (
+            "git@gitlab.com:group/project.git",
+            "ssh://git@gitlab.com/~/group/project.git",
+            False,
+        ),
+        ("https://git.example/group/project.git", "git@git.example:group/project.git", False),
     ],
 )
 def test_registered_clone_scope_preserves_ssh_accounts(

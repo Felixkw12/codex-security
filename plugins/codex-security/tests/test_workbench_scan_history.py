@@ -700,7 +700,8 @@ def test_scan_history_resolves_unique_prefixes_and_rejects_ambiguity(tmp_path: P
     assert get_scan(state_dir, scan["scanId"])["scan"]["scanId"] == scan["scanId"]
 
 
-def test_scan_list_includes_related_git_worktrees_and_clones(tmp_path: Path) -> None:
+@pytest.mark.parametrize("host", ["github.com", "gitlab.com"])
+def test_scan_list_includes_related_git_worktrees_and_clones(tmp_path: Path, host: str) -> None:
     state_dir = tmp_path / "state"
     repository = tmp_path / "repository"
     worktree = tmp_path / "worktree"
@@ -714,9 +715,9 @@ def test_scan_list_includes_related_git_worktrees_and_clones(tmp_path: Path) -> 
         check=True,
     )
     for target, origin in (
-        (repository, "https://user:token@GITHUB.com/example/project.git"),
-        (clone, "git@github.com:example/project"),
-        (unrelated, "https://github.com/example/unrelated"),
+        (repository, f"https://user:token@{host.upper()}/example/project.git"),
+        (clone, f"git@{host}:example/project"),
+        (unrelated, f"https://{host}/example/unrelated"),
     ):
         subprocess.run(["git", "-C", str(target), "remote", "add", "origin", origin], check=True)
 
