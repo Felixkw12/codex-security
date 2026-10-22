@@ -399,6 +399,11 @@ export class ScanCostTracker {
           this.#sessions.set(path, session);
         } catch (error) {
           collectionErrors.push(error);
+          if (
+            session.usage !== null &&
+            session.usage.total_tokens >= (tracked.usage?.total_tokens ?? -1)
+          )
+            tracked.usage = session.usage;
           session = tracked;
         }
       } else if (path.endsWith(".zst") && !session.compressedRead) {
@@ -746,7 +751,8 @@ async function readSessionUsage(
   }
   let file;
   try {
-    if ((await stat(path)).size === session.offset) return;
+    const metadata = await stat(path);
+    if (metadata.isFile() && metadata.size === session.offset) return;
     file = await open(path, "r");
   } catch (error) {
     if (isMissingFile(error)) return;

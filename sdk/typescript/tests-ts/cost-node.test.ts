@@ -30,9 +30,14 @@ beforeAll(async () => {
 });
 
 for (const capabilities of ["native", "without zstd"]) {
-  test.each(["complete", "truncated"])(
-    `accounts for every compressed frame in Node with ${capabilities} capabilities (%s)`,
-    async (tail) => {
+  test.each([
+    ["complete", false],
+    ["complete", true],
+    ["truncated", false],
+    ["truncated", true],
+  ] as const)(
+    `accounts for every compressed frame in Node with ${capabilities} capabilities (%s; session events=%p)`,
+    async (tail, observeSessionEvents) => {
       const root = await temporaryDirectory();
       const home = join(root, "home");
       await writeSession(home, "parent", {
@@ -57,9 +62,9 @@ for (const capabilities of ["native", "without zstd"]) {
           type: "session_meta",
           payload: { id: "worker", parent_thread_id: "parent" },
         },
-        usage(100, 10),
+        usage(900, 90),
       ]);
-      const lastFrame = frame([usage(900, 90)]);
+      const lastFrame = frame([usage(1_900, 190)]);
       await writeFile(
         join(home, "sessions", "rollout-worker.jsonl.zst"),
         Buffer.concat([
@@ -98,6 +103,7 @@ for (const capabilities of ["native", "without zstd"]) {
               model: "gpt-5.6-sol",
               onMeasurement: (value) => { measurement = value; },
               onError: () => {},
+              ${observeSessionEvents ? "onSessionEvent: () => {}," : ""}
             });
             tracker.start("parent");
             let error = null;
@@ -116,14 +122,22 @@ for (const capabilities of ["native", "without zstd"]) {
         expect(result.error).not.toBeNull();
         expect(result.measurement.coverage).toBe("partial");
         expect(result.measurement.missingThreadCount).toBeGreaterThan(0);
+        expect(result.measurement.usage).toMatchObject({
+          input_tokens: 1_000,
+          output_tokens: 100,
+        });
+        expect(result.measurement.cost).toMatchObject({
+          inputTokens: 1_000,
+          outputTokens: 100,
+        });
       } else {
         expect(result.error).toBeNull();
         expect(result.measurement).toMatchObject({
           coverage: "complete",
           threadCount: 2,
           missingThreadCount: 0,
-          usage: { input_tokens: 1_000, output_tokens: 100 },
-          cost: { inputTokens: 1_000, outputTokens: 100 },
+          usage: { input_tokens: 2_000, output_tokens: 200 },
+          cost: { inputTokens: 2_000, outputTokens: 200 },
         });
       }
     },

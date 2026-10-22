@@ -3498,7 +3498,27 @@ describe("CodexSecurity orchestration", () => {
       "complete-scan",
       "--scan-id",
       "scan_example_001",
+      "--cost-json",
+      expect.any(String),
     ]);
+    const completionReceipt = JSON.parse(commands[4]![4]!);
+    expect(completionReceipt).toMatchObject({
+      usage: {
+        source: "codex_runtime",
+        coverage: "complete",
+        observedAt: expect.any(String),
+        threadCount: 1,
+        missingThreadCount: 0,
+        coverageScope: ["thread:thread-1"],
+        inputTokens: 10,
+        cachedInputTokens: 2,
+        cacheWriteInputTokens: 0,
+        outputTokens: 3,
+        reasoningOutputTokens: 1,
+        totalTokens: 13,
+      },
+    });
+    expect(completionReceipt).not.toHaveProperty("cost");
     await client.close();
   });
 

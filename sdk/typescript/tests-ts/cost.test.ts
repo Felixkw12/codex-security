@@ -3098,6 +3098,15 @@ describe("live scan cost tracking", () => {
             return entries;
           },
         );
+        const originalStat = filesystem.stat;
+        const stating = spyOn(filesystem, "stat").mockImplementation(
+          async (...args: unknown[]) => {
+            const result = await Reflect.apply(originalStat, filesystem, args);
+            // Windows directories can report zero bytes, like an unread empty file.
+            if (args[0] === path && result.isDirectory()) result.size = 0;
+            return result;
+          },
+        );
         try {
           const stopped = tracker.stop({ input_tokens: 500, output_tokens: 0 });
           if (missing) {
@@ -3120,6 +3129,7 @@ describe("live scan cost tracking", () => {
           expect(changed).toBe(true);
         } finally {
           reading.mockRestore();
+          stating.mockRestore();
           await tracker.stop().catch(() => {});
         }
       },

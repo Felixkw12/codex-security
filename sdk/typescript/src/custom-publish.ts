@@ -73,10 +73,10 @@ export async function publishScanToCustomInternal(
   } catch (error) {
     telemetry.notify(
       telemetry.snapshot(
-        options.signal?.aborted
-          ? "canceled"
-          : telemetry.outcome === "indeterminate"
-            ? "indeterminate"
+        telemetry.outcome === "indeterminate"
+          ? "indeterminate"
+          : options.signal?.aborted
+            ? "canceled"
             : "failed",
       ),
     );

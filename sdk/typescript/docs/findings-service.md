@@ -352,7 +352,6 @@ submitted findings. Hosts should group repeated receipt snapshots by attempt ID
 and use the latest observation. Callback failures do not change publication
 results, and these callbacks add no network destination or separate files.
 
-
 ## Compatible endpoint contract
 
 The retained HTTP clients use these endpoints on the supplied base URL,
