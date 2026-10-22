@@ -261,53 +261,71 @@ test.each(["explicit", "saved"] as const)(
   },
 );
 
-test("resume keeps the operation identity and replay deduplicates terminal receipts", async () => {
-  const directory = await temporaryDirectory();
-  const first = new OperationTelemetry({
-    directory,
-    protectedOutput: join(directory, "scan-artifacts"),
-    command: "scan",
-    surface: "sdk",
-  });
-  await first.start();
-  await first.bindScan("synthetic-scan");
-  await first.finish("failed");
-  await first.finish("completed");
-  const resumed = new OperationTelemetry({
-    directory,
-    protectedOutput: join(directory, "scan-artifacts"),
-    command: "scan",
-    surface: "sdk",
-    resumeScanId: "synthetic-scan",
-  });
-  await resumed.start();
-  expect(resumed.operationId).toBe(first.operationId);
-  expect(resumed.attemptId).not.toBe(first.attemptId);
-  await resumed.finish("completed");
-  const interrupted = new OperationTelemetry({
-    directory,
-    command: "scan",
-    surface: "sdk",
-  });
-  await interrupted.start();
-  const { events } = await readOperationTelemetry(directory);
-  expect(events).toHaveLength(5);
-  expect(
-    events
-      .filter((event) => event.attemptId === resumed.attemptId)
-      .map((event) => event.operationId),
-  ).toEqual([first.operationId, first.operationId]);
-  const summary = summarizeOperationTelemetry(
-    [...events].reverse().concat(events),
-  );
-  expect(summary).toMatchObject({
-    attempts: 3,
-    outcomes: { completed: 1, failed: 1, canceled: 0, unresolved: 1 },
-    usageCoverage: { complete: 0, partial: 0, unavailable: 3 },
-    duplicates: 5,
-    pricedAttempts: 0,
-  });
-});
+test.each(["immediate", "deferred"] as const)(
+  "resume keeps one operation identity and deduplicates receipts, %s",
+  async (persistence) => {
+    const deferPersistence = persistence === "deferred";
+    const directory = await temporaryDirectory();
+    const first = new OperationTelemetry({
+      directory,
+      protectedOutput: join(directory, "scan-artifacts"),
+      command: "scan",
+      surface: "sdk",
+    });
+    await first.start();
+    await first.bindScan("synthetic-scan");
+    await first.finish("failed");
+    await first.finish("completed");
+    const observed: OperationTelemetryEvent[] = [];
+    const resumed = new OperationTelemetry({
+      directory,
+      deferPersistence,
+      onEvent: (event) => observed.push(structuredClone(event)),
+      protectedOutput: join(directory, "scan-artifacts"),
+      command: "scan",
+      surface: "sdk",
+      resumeScanId: "synthetic-scan",
+    });
+    await resumed.start();
+    if (deferPersistence) {
+      expect(observed).toHaveLength(0);
+      await resumed.activatePersistence([]);
+    }
+    expect(resumed.operationId).toBe(first.operationId);
+    expect(resumed.attemptId).not.toBe(first.attemptId);
+    await resumed.finish("completed");
+    expect(observed.map((event) => event.operationId)).toEqual([
+      first.operationId,
+      first.operationId,
+    ]);
+    expect(new Set(observed.map((event) => event.usageScopeId))).toEqual(
+      new Set([first.attemptId]),
+    );
+    const interrupted = new OperationTelemetry({
+      directory,
+      command: "scan",
+      surface: "sdk",
+    });
+    await interrupted.start();
+    const { events } = await readOperationTelemetry(directory);
+    expect(events).toHaveLength(5);
+    expect(
+      events
+        .filter((event) => event.attemptId === resumed.attemptId)
+        .map((event) => event.operationId),
+    ).toEqual([first.operationId, first.operationId]);
+    const summary = summarizeOperationTelemetry(
+      [...events].reverse().concat(events),
+    );
+    expect(summary).toMatchObject({
+      attempts: 3,
+      outcomes: { completed: 1, failed: 1, canceled: 0, unresolved: 1 },
+      usageCoverage: { complete: 0, partial: 0, unavailable: 3 },
+      duplicates: 5,
+      pricedAttempts: 0,
+    });
+  },
+);
 
 test("reports corrupt trailing records and keeps usable receipts", async () => {
   const directory = await temporaryDirectory();
@@ -369,9 +387,70 @@ test("counts reused results once while preserving completed call outcomes", asyn
     successfulOperations: 1,
     attempts: 2,
     reusedAttempts: 1,
+    usageCoverage: { complete: 0, partial: 0, unavailable: 1 },
     outcomes: { completed: 2, failed: 0, canceled: 0, unresolved: 0 },
     duplicates: 4,
   });
+});
+
+test.each([
+  ["operation ID", { operationId: undefined }],
+  ["usage scope ID", { usageScopeId: undefined }],
+  ["outcome", { outcome: "unknown" }],
+  ["terminal outcome", { outcome: undefined }],
+  ["measurement coverage", { measurement: { coverage: "unknown" } }],
+] as const)(
+  "reports incomplete journal %s without changing valid summaries",
+  async (_field, invalid) => {
+    const directory = await temporaryDirectory();
+    const journal = new OperationTelemetry({
+      directory,
+      command: "scan",
+      surface: "sdk",
+    });
+    await journal.start();
+    await journal.finish("completed");
+    const original = await readOperationTelemetry(directory);
+    const terminal = original.events.find(
+      (event) => event.type === "attempt_finished",
+    )!;
+    await appendFile(
+      join(directory, "telemetry", `${journal.attemptId}.jsonl`),
+      `${JSON.stringify({ ...terminal, eventId: "invalid-event", attemptId: "invalid-attempt", ...invalid })}\n`,
+    );
+    const result = await readOperationTelemetry(directory);
+    expect(result.parseFailures).toBe(1);
+    expect(result.events).toEqual(original.events);
+    expect(summarizeOperationTelemetry(result.events)).toEqual(
+      summarizeOperationTelemetry(original.events),
+    );
+  },
+);
+
+test("deferred resume failures emit matching in-memory start and terminal events", async () => {
+  const directory = join(await temporaryDirectory(), "not-created");
+  const observed: OperationTelemetryEvent[] = [];
+  const journal = new OperationTelemetry({
+    directory,
+    command: "scan",
+    surface: "sdk",
+    deferPersistence: true,
+    resumeScanId: "synthetic-scan",
+    onEvent: (event) => observed.push(structuredClone(event)),
+  });
+  await journal.start();
+  await journal.finish("failed", { failureCategory: "input" });
+  expect(observed.map((event) => event.type)).toEqual([
+    "attempt_started",
+    "attempt_finished",
+  ]);
+  expect(observed[1]).toMatchObject({
+    operationId: observed[0]!.operationId,
+    usageScopeId: observed[0]!.usageScopeId,
+    attemptId: observed[0]!.attemptId,
+    collection: { persisted: 0, writeFailures: 0 },
+  });
+  await expect(access(directory)).rejects.toThrow();
 });
 
 test("journal and observer failures cannot stop an operation", async () => {

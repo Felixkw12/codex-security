@@ -127,14 +127,18 @@ export class OperationTelemetry {
     if (!this.#deferred || this.#finished) return;
     this.#deferred = false;
     await this.#preparePersistence(protectedRoots);
-    if (this.#ready && this.#startedEvent !== undefined) {
-      await this.#persist({
+    if (this.#startedEvent !== undefined) {
+      const event = {
         ...this.#startedEvent,
+        ...this.context,
+        usageScopeId: this.#usageScopeId,
         collection: {
-          persisted: this.#persisted + 1,
+          persisted: this.#persisted + (this.#ready ? 1 : 0),
           writeFailures: this.#writeFailures,
         },
-      });
+      };
+      if (this.#ready) await this.#persist(event);
+      if (this.#options.resumeScanId !== undefined) this.#notify(event);
     }
     this.#startedEvent = undefined;
   }
@@ -226,6 +230,13 @@ export class OperationTelemetry {
   ): Promise<void> {
     if (this.#finished) return;
     this.#finished = true;
+    if (
+      this.#startedEvent !== undefined &&
+      this.#options.resumeScanId !== undefined
+    ) {
+      this.#notify(this.#startedEvent);
+      this.#startedEvent = undefined;
+    }
     await this.#emit("attempt_finished", {
       outcome,
       reusedResult: this.reusedResult,
@@ -294,8 +305,15 @@ export class OperationTelemetry {
       },
     };
     if (this.#ready) await this.#persist(event);
-    else if (this.#deferred && type === "attempt_started")
+    else if (this.#deferred && type === "attempt_started") {
       this.#startedEvent = event;
+      // Resume identity is restored only after the caller protects output paths.
+      if (this.#options.resumeScanId !== undefined) return;
+    }
+    this.#notify(event);
+  }
+
+  #notify(event: OperationTelemetryEvent): void {
     // Observers cannot delay or fail the operation. Replay uses the same event ID.
     void Promise.resolve()
       .then(() => this.#options.onEvent?.(event))
@@ -328,7 +346,17 @@ export async function readOperationTelemetry(stateDirectory: string): Promise<{
           event.schemaVersion !== 1 ||
           typeof event.eventId !== "string" ||
           typeof event.attemptId !== "string" ||
-          !["attempt_started", "attempt_finished"].includes(event.type)
+          typeof event.operationId !== "string" ||
+          typeof event.usageScopeId !== "string" ||
+          !["attempt_started", "attempt_finished"].includes(event.type) ||
+          ((event.type === "attempt_finished" || event.outcome !== undefined) &&
+            !["completed", "failed", "canceled", "unresolved"].includes(
+              event.outcome ?? "",
+            )) ||
+          (event.measurement !== undefined &&
+            !["complete", "partial", "unavailable"].includes(
+              event.measurement?.coverage,
+            ))
         ) {
           parseFailures++;
         } else events.push(event);
@@ -376,7 +404,7 @@ export function summarizeOperationTelemetry(
     );
     outcomes[event.outcome ?? "unresolved"]++;
     if (event.reusedResult === true) reusedAttempts++;
-    usageCoverage[event.measurement?.coverage ?? "unavailable"]++;
+    else usageCoverage[event.measurement?.coverage ?? "unavailable"]++;
     if (event.durationMs !== undefined) durationMs.push(event.durationMs);
     if (event.measurement?.cost != null) {
       costsByScope.set(
