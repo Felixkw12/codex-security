@@ -66,7 +66,7 @@ type Part =
  * the consumer can return after reading a logical prefix.
  * https://github.com/facebook/zstd/blob/dev/doc/zstd_compression_format.md
  */
-class FrameSegments {
+export class FrameSegments {
   private part: Part = "magic";
   private remaining = 4;
   private header = new Uint8Array(18); // Maximum Zstandard frame header size.

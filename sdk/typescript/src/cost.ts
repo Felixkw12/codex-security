@@ -8,7 +8,7 @@ import {
 } from "node:fs/promises";
 import { pipeline, Readable } from "node:stream";
 import zlib from "node:zlib";
-import { decodeZstd } from "./zstd.js";
+import { decodeZstd, FrameSegments } from "./zstd.js";
 import { join } from "node:path";
 import { isRecord } from "./record.js";
 import {
@@ -1003,9 +1003,22 @@ async function* compressedSessionChunks(
   let position = 0;
   for (;;) {
     const decoder = zlib.createZstdDecompress();
-    const source = Readable.from(sessionFileChunks(file, position), {
-      objectMode: false,
-    });
+    const frames = new FrameSegments();
+    let framingError: unknown;
+    async function* framedInput() {
+      for await (const chunk of sessionFileChunks(file, position)) {
+        if (framingError === undefined) {
+          try {
+            for (const _segment of frames.push(chunk)) {
+            }
+          } catch (error) {
+            framingError = error;
+          }
+        }
+        yield chunk;
+      }
+    }
+    const source = Readable.from(framedInput(), { objectMode: false });
     const stream = pipeline(source, decoder, () => {});
     try {
       for await (const chunk of stream) yield chunk as Buffer;
@@ -1016,7 +1029,13 @@ async function* compressedSessionChunks(
     // Older supported Node decoders stop after one frame, even when their
     // input contains more. Continue from the bytes actually consumed.
     position += decoder.bytesWritten;
-    if (position >= (await file.stat()).size) return;
+    if (position >= (await file.stat()).size) {
+      // Native decoders may accept a truncated final frame. Check complete
+      // reads here so a verified logical prefix can still stop before EOF.
+      if (framingError !== undefined) throw framingError;
+      frames.finish();
+      return;
+    }
     if (decoder.bytesWritten === 0)
       throw new Error(
         "The Zstandard decoder did not consume the remaining rollout data.",

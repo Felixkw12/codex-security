@@ -59,7 +59,8 @@ for (const decoder of ["available", "portable"] as const) {
     checksum[checksum.length - 1]! ^= 1;
     for (const [kind, contents] of [
       ["valid", valid],
-      ["truncated", valid.subarray(0, -2)],
+      ["truncated-checksum", valid.subarray(0, -2)],
+      ["truncated-block", valid.subarray(0, -5)],
       ["checksum", checksum],
     ] as const) {
       const home = join(root, kind);
@@ -79,7 +80,7 @@ for (const decoder of ["available", "portable"] as const) {
       import { join } from "node:path";
       if (${JSON.stringify(decoder)} === "portable") { delete zlib.createZstdDecompress; syncBuiltinESMExports(); }
       const { ScanCostTracker } = createRequire(import.meta.url)(${JSON.stringify(modulePath)});
-      for (const kind of ["valid", "truncated", "checksum"]) {
+      for (const kind of ["valid", "truncated-checksum", "truncated-block", "checksum"]) {
         const home = join(${JSON.stringify(root)}, kind);
         const live = join(home, "sessions/root.jsonl");
         const archived = join(home, "archived_sessions/root.jsonl.zst");
@@ -101,9 +102,9 @@ for (const decoder of ["available", "portable"] as const) {
           } else await assert.rejects(tracker.stop());
         } finally { await tracker.stop().catch(() => {}); }
       }
-      console.log(JSON.stringify({ decoder: ${JSON.stringify(decoder)}, cases: 3 }));
+      console.log(JSON.stringify({ decoder: ${JSON.stringify(decoder)}, cases: 4 }));
     `,
     ]);
-    expect(JSON.parse(stdout)).toEqual({ decoder, cases: 3 });
+    expect(JSON.parse(stdout)).toEqual({ decoder, cases: 4 });
   });
 }
