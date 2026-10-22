@@ -1157,20 +1157,6 @@ def merge_saved_results(
                 if field == "surfaces":
                     retained_surface_rows.update(id(original) for original in originals)
 
-    def retain_coverage_row(output: list[Any], item: Any, *originals: Any) -> Any:
-        for retained in output:
-            if retained == item:
-                break
-        else:
-            retained = copy.deepcopy(item)
-            output.append(retained)
-        _inherit_coverage_sources(retained, [item, *originals], coverage_sources)
-        if output is coverage.get("surfaces"):
-            retained_surface_rows.update(id(original) for original in (item, *originals))
-        if any(id(original) in canonical_rows for original in (item, *originals)):
-            canonical_rows.add(id(retained))
-        return retained
-
     findings: list[dict[str, Any]] = []
     finding_positions: dict[str, int] = {}
     canonical_finding_keys: set[str] = set()
