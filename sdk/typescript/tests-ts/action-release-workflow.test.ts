@@ -1,13 +1,11 @@
 import { afterEach, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import {
   copyFileSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
-  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -73,10 +71,8 @@ afterEach(() => {
   }
 });
 
-function fixture(includeAction = true, withUploadWorker = true) {
-  const directory = realpathSync(
-    mkdtempSync(join(tmpdir(), "action release workflow ")),
-  );
+function fixture(includeAction = true) {
+  const directory = mkdtempSync(join(tmpdir(), "action release workflow "));
   directories.push(directory);
   const repository = join(directory, "release-source");
   const output = join(directory, "outputs");
@@ -159,12 +155,6 @@ function fixture(includeAction = true, withUploadWorker = true) {
   };
   if (includeAction) {
     write("action.yml", "name: Synthetic Action\n");
-    if (withUploadWorker) {
-      write(
-        "github-action/src/artifact-upload.ts",
-        "// Synthetic upload worker source.\n",
-      );
-    }
     writeJson("github-action/package.json", actionPackage);
     writeJson("github-action/package-lock.json", {
       version: actionPackage.version,
@@ -204,7 +194,6 @@ function fixture(includeAction = true, withUploadWorker = true) {
     for (const path of [
       "github-action/dist/index.cjs",
       "github-action/dist/post.cjs",
-      ...(withUploadWorker ? ["github-action/dist/artifact-upload.cjs"] : []),
     ]) {
       write(path, "Synthetic generated release content\n");
     }
@@ -560,18 +549,15 @@ const changedDistributions: Array<{
 ];
 
 for (const job of ["action-verify", "action"]) {
-  test.each([false, true])(
-    `${job} reuses the exact CLI release before installing dependencies (upload worker=%p)`,
-    (withUploadWorker) => {
-      const release = fixture(true, withUploadWorker);
-      const distribution = release.distribution();
-      const result = release.run(reuseAndInstall(job));
-      expect(result.status, result.stderr).toBe(0);
-      expect(result.output).toBe("existing=true\n");
-      expect(readFileSync(release.npmMarker, "utf8")).toContain("npm\n");
-      expect(release.git("rev-parse", "HEAD")).toBe(distribution);
-    },
-  );
+  test(`${job} reuses the exact CLI release before installing dependencies`, () => {
+    const release = fixture();
+    const distribution = release.distribution();
+    const result = release.run(reuseAndInstall(job));
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.output).toBe("existing=true\n");
+    expect(readFileSync(release.npmMarker, "utf8")).toContain("npm\n");
+    expect(release.git("rev-parse", "HEAD")).toBe(distribution);
+  });
 
   test.each(changedDistributions)(
     `${job} rejects changed $name before installing dependencies`,
@@ -596,80 +582,6 @@ test("leaves the CLI source ready for first Action publication", () => {
   expect(result.output).toBe("");
   expect(release.git("rev-parse", "HEAD")).toBe(release.source);
 });
-
-test("rejects an upload bundle without a worker in the release source", () => {
-  const release = fixture(true, false);
-  release.distribution(() =>
-    release.write(
-      "github-action/dist/artifact-upload.cjs",
-      "Unexpected worker bundle\n",
-    ),
-  );
-  const result = release.run(reuse);
-  expect(result.status).not.toBe(0);
-  expect(result.stderr).toContain("outside release packaging");
-  expect(result.output).toBe("");
-  expect(release.git("rev-parse", "HEAD")).toBe(release.source);
-});
-
-test.each([false, true])(
-  "commits the built release bundles and verifies metadata (upload worker=%p)",
-  (withUploadWorker) => {
-    const release = fixture(true, withUploadWorker);
-    const distribution = release.distribution();
-    release.git(
-      "restore",
-      "--source",
-      distribution,
-      "--worktree",
-      "--",
-      "github-action",
-    );
-    const read = (path: string) =>
-      readFileSync(join(release.repository, "github-action", path));
-    const hash = (bytes: Buffer) =>
-      createHash("sha256").update(bytes).digest("hex");
-    const bundles = [
-      "dist/index.cjs",
-      "dist/post.cjs",
-      ...(withUploadWorker ? ["dist/artifact-upload.cjs"] : []),
-    ];
-    release.write(
-      "github-action/build/release-manifest.json",
-      JSON.stringify({
-        actionVersion: version,
-        cliVersion: version,
-        actionLockSha256: hash(read("package-lock.json")),
-        runtimeLockSha256: hash(read("runtime/package-lock.json")),
-        files: Object.fromEntries(
-          bundles.map((path) => {
-            const bytes = read(path);
-            return [path, { sha256: hash(bytes), bytes: bytes.length }];
-          }),
-        ),
-      }),
-    );
-    const result = release.run(
-      script("action", "Commit and verify release metadata"),
-      { EXISTING: "false" },
-    );
-    expect(result.status, result.stderr).toBe(0);
-    expect(release.git("rev-parse", "HEAD^")).toBe(release.source);
-    const committed = release
-      .git("ls-tree", "-r", "--name-only", "HEAD", "github-action/dist")
-      .split("\n");
-    expect(committed.sort()).toEqual(
-      bundles.map((path) => `github-action/${path}`).sort(),
-    );
-    expect(
-      JSON.parse(read("build/release-manifest.json").toString()),
-    ).toMatchObject({
-      status: "released",
-      sourceCommit: release.source,
-      actionCommit: release.git("rev-parse", "HEAD"),
-    });
-  },
-);
 
 test("rejects an Action distribution derived from a different source commit", () => {
   const release = fixture();

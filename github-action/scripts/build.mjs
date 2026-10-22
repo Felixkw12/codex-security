@@ -9,7 +9,7 @@ const root = resolve(import.meta.dirname, '..');
 const patches = (await readdir(resolve(root, 'patches'))).filter(name => name.endsWith('.patch')).sort();
 const hash = value => createHash('sha256').update(value).digest('hex');
 const bundle = await build({
-  absWorkingDir: root, entryPoints: {index: 'src/entry.ts', post: 'src/post.ts', 'artifact-upload': 'src/artifact-upload.ts'}, outdir: 'dist',
+  absWorkingDir: root, entryPoints: {index: 'src/entry.ts', post: 'src/post.ts'}, outdir: 'dist',
   outExtension: {'.js': '.cjs'}, platform: 'node', target: 'node24', format: 'cjs',
   bundle: true, write: false, sourcemap: false, legalComments: 'eof', metafile: true,
 });
@@ -55,4 +55,4 @@ await mkdir(resolve(root, 'build'), {recursive: true});
 for (const [name, value] of [['release-manifest.json', manifest], ['sbom.cdx.json', sbom]]) {
   await writeFile(resolve(root, 'build', name), JSON.stringify(value, null, 2) + '\n');
 }
-console.log(check ? 'Distribution matches source; generated release metadata.' : 'Built action, cleanup and upload entrypoints, and release metadata.');
+console.log(check ? 'Distribution matches source; generated release metadata.' : 'Built action, cleanup entrypoint, and release metadata.');

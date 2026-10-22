@@ -97,14 +97,8 @@ export async function writeReleaseMetadata(actionRoot, version, sourceCommit, cl
   for (const [key, value] of Object.entries(hashes)) {
     assert.equal(manifest[key], value, 'Rebuild the Action after updating its locks');
   }
-  // Release recovery can build a historical source with only the original two entrypoints.
-  const workerSource = execFileSync('git', ['ls-tree', '--full-tree', '--name-only', sourceCommit, '--', 'github-action/src/artifact-upload.ts'], {
-    cwd: actionRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
-  }).trim();
-  const bundles = ['dist/index.cjs', 'dist/post.cjs', ...(workerSource ? ['dist/artifact-upload.cjs'] : [])];
-  for (const file of bundles) {
+  for (const file of ['dist/index.cjs', 'dist/post.cjs']) {
     const bytes = await readFile(resolve(actionRoot, file));
-    assert.ok(manifest.files[file], `${file} is missing from the built release metadata`);
     assert.equal(manifest.files[file].sha256, sha256(bytes), `${file} differs from the built release metadata`);
     assert.equal(manifest.files[file].bytes, bytes.length, `${file} length differs from the built release metadata`);
   }

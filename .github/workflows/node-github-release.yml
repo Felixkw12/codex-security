@@ -1,4 +1,5 @@
 name: node-github-release
+run-name: Publish ${{ inputs.tag }}
 
 on:
   workflow_dispatch:
@@ -550,16 +551,10 @@ jobs:
               echo 'The existing Action tag must derive from the exact CLI source.' >&2
               exit 1
             fi
-            packaging_exclusions=(
-              ':!github-action/package.json' ':!github-action/package-lock.json'
-              ':!github-action/runtime/package.json' ':!github-action/runtime/package-lock.json'
-              ':!github-action/dist/index.cjs' ':!github-action/dist/post.cjs'
-            )
-            if [[ -f github-action/src/artifact-upload.ts ]]; then
-              packaging_exclusions+=(':!github-action/dist/artifact-upload.cjs')
-            fi
             changed_source="$(git diff --name-only "$RELEASE_SHA" "$action_sha" -- . \
-              "${packaging_exclusions[@]}")"
+              ':!github-action/package.json' ':!github-action/package-lock.json' \
+              ':!github-action/runtime/package.json' ':!github-action/runtime/package-lock.json' \
+              ':!github-action/dist/index.cjs' ':!github-action/dist/post.cjs')"
             if [[ -n "$changed_source" ]]; then
               echo 'The existing Action tag contains changes outside release packaging.' >&2
               exit 1
@@ -668,9 +663,6 @@ jobs:
             git add github-action/package.json github-action/package-lock.json \
               github-action/runtime/package.json github-action/runtime/package-lock.json \
               github-action/dist/index.cjs github-action/dist/post.cjs
-            if [[ -f github-action/src/artifact-upload.ts ]]; then
-              git add github-action/dist/artifact-upload.cjs
-            fi
             git -c user.name='github-actions[bot]' \
               -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
               -c commit.gpgsign=false commit --allow-empty -m "chore(release): package Action $RELEASE_VERSION"

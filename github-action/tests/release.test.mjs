@@ -16,7 +16,7 @@ const writeJson = (path, data) => writeFile(path, JSON.stringify(data, null, 2) 
 const readJson = async path => JSON.parse(await readFile(path, 'utf8'));
 const digest = async path => createHash('sha256').update(await readFile(path)).digest('hex');
 
-async function fixture(t, withUploadWorker = true) {
+async function fixture(t) {
   const root = await mkdtemp(join(tmpdir(), 'action-release-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const actionRoot = join(root, 'github-action');
@@ -25,11 +25,6 @@ async function fixture(t, withUploadWorker = true) {
   await mkdir(join(actionRoot, 'dist'));
   await writeFile(join(actionRoot, 'dist/index.cjs'), 'console.log("synthetic Action");\n');
   await writeFile(join(actionRoot, 'dist/post.cjs'), 'console.log("synthetic cleanup");\n');
-  if (withUploadWorker) {
-    await mkdir(join(actionRoot, 'src'));
-    await writeFile(join(actionRoot, 'src/artifact-upload.ts'), '// Synthetic upload worker source.\n');
-    await writeFile(join(actionRoot, 'dist/artifact-upload.cjs'), 'console.log("synthetic upload");\n');
-  }
   await mkdir(join(root, 'sdk/typescript'), { recursive: true });
   await writeJson(join(root, 'sdk/typescript/package.json'), { name: packageName, version });
   await writeJson(join(actionRoot, 'package.json'), { name: 'codex-security-action', version: '0.2.0', private: true, dependencies: { '@actions/core': '3.0.1' } });
@@ -43,9 +38,9 @@ async function fixture(t, withUploadWorker = true) {
   return { actionRoot, sourceCommit: git('rev-parse', 'HEAD').trim() };
 }
 
-async function buildMetadata(actionRoot, withUploadWorker = true) {
+async function buildMetadata(actionRoot) {
   const files = {};
-  for (const file of ['dist/index.cjs', 'dist/post.cjs', ...(withUploadWorker ? ['dist/artifact-upload.cjs'] : [])]) {
+  for (const file of ['dist/index.cjs', 'dist/post.cjs']) {
     const bytes = await readFile(join(actionRoot, file));
     files[file] = { sha256: createHash('sha256').update(bytes).digest('hex'), bytes: bytes.length };
   }
@@ -121,28 +116,11 @@ test('release metadata ties built locks to the verified CLI and immutable distri
   assert.equal(await readFile(join(actionRoot, 'build/release-manifest.json'), 'utf8'), first);
 });
 
-test('release recovery preserves historical source with only Action and cleanup bundles', async t => {
-  const { actionRoot, sourceCommit } = await fixture(t, false);
-  await updateReleaseManifests(actionRoot, version);
-  await buildMetadata(actionRoot, false);
-  await writeReleaseMetadata(actionRoot, version, sourceCommit, cliIntegrity, actionCommit);
-  const metadata = await readJson(join(actionRoot, 'build/release-manifest.json'));
-  assert.equal(metadata.status, 'released');
-  assert.deepEqual(Object.keys(metadata.files).sort(), ['dist/index.cjs', 'dist/post.cjs']);
-});
-
-test('release metadata requires the upload bundle for source containing its entrypoint', async t => {
-  const { actionRoot, sourceCommit } = await fixture(t);
-  await updateReleaseManifests(actionRoot, version);
-  await buildMetadata(actionRoot, false);
-  await assert.rejects(writeReleaseMetadata(actionRoot, version, sourceCommit, cliIntegrity, actionCommit), /artifact-upload.cjs is missing/);
-});
-
 test('release metadata rejects a bundle changed or removed after the build', async t => {
   const { actionRoot, sourceCommit } = await fixture(t);
   await updateReleaseManifests(actionRoot, version);
   await buildMetadata(actionRoot);
-  for (const file of ['dist/index.cjs', 'dist/post.cjs', 'dist/artifact-upload.cjs']) {
+  for (const file of ['dist/index.cjs', 'dist/post.cjs']) {
     const path = join(actionRoot, file);
     const original = await readFile(path);
     const changed = Buffer.from(original);

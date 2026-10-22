@@ -1,17 +1,20 @@
 import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { once } from 'node:events';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import * as core from '@actions/core';
+import { DefaultArtifactClient } from '@actions/artifact';
+import { BlobClient } from '@azure/storage-blob';
 import { runAction } from '../src/main.js';
 import { INPUT_NAMES } from '../src/inputs.js';
 import { gitEnvironment } from '../src/targets.js';
 import { runtimeEnvironment, type Runtime } from '../src/runtime.js';
 import type { ProcessResult } from '../src/process.js';
 import { copyCompletedScan } from './fixtures.js';
-import { buildUploadWorker, uploadEnvironment, uploadFailure, uploadReceipt, type UploadBehavior } from './artifact-fixtures.js';
 
 type Scenario = 'schedule' | 'pr' | 'policy-pr';
 const inputKey = (name: string): string => `INPUT_${name.toUpperCase()}`;
@@ -79,7 +82,6 @@ async function harness(t: TestContext, scenario: Scenario = 'schedule', serverUr
     GITHUB_REF: scenario === 'schedule' ? 'refs/heads/main' : 'refs/pull/4/merge',
     GITHUB_ACTOR: 'trusted-maintainer', GITHUB_SERVER_URL: serverUrl,
     GITHUB_OUTPUT: outputPath, GITHUB_STATE: statePath, RUNNER_TEMP: root,
-    ...uploadEnvironment,
     OPENAI_API_KEY: 'synthetic-offline-test-key', INPUT_SUMMARY: 'true', INPUT_ANNOTATIONS: 'false',
     INPUT_SCOPE: scenario === 'schedule' ? 'repository' : 'diff',
   });
@@ -134,7 +136,6 @@ async function harness(t: TestContext, scenario: Scenario = 'schedule', serverUr
   }
   return {
     repository, sha, git,
-    uploadWorker: (behavior?: UploadBehavior) => buildUploadWorker(root, behavior),
     setInput: (name: string, value: string) => { process.env[inputKey(name)] = value; },
     configure: (options: typeof configuration) => Object.assign(configuration, options),
     run: async () => {
@@ -225,17 +226,20 @@ for (const [scenario, mode] of [['schedule', 'standard'], ['pr', 'standard'], ['
     const serverUrl = 'https://example-enterprise.ghe.com';
     const app = await harness(t, scenario, serverUrl);
     app.setInput('mode', mode); app.setInput('upload-artifacts', 'true'); app.setInput('annotations', 'true');
-    await app.uploadWorker();
+    let uploadedFiles: string[] = [];
+    t.mock.method(DefaultArtifactClient.prototype, 'uploadArtifact', async (_name: string, files: string[]) => {
+      assert.equal(process.env.GITHUB_SERVER_URL, serverUrl);
+      uploadedFiles = files.map(file => basename(file));
+      for (const file of files) assert.ok((await readFile(file)).length);
+      return {id:1, size:1};
+    });
     const result = await app.run();
-    const receipt = uploadReceipt(result.logs);
-    assert.equal(receipt.serverUrl, serverUrl);
-    for (const file of receipt.reports) assert.ok(Buffer.from(file.contents, 'base64').length);
     assert.equal(result.exitCode, 0); assert.equal(result.processes, 1); assert.equal(result.cleanups, 1);
     assert.equal(result.outputs['scan-status'], 'completed'); assert.equal(result.outputs['report-status'], 'ready');
     assert.equal(result.outputs['policy-status'], 'passed'); assert.equal(result.outputs['sarif-upload-ready'], 'true');
     assert.equal(result.outputs['scanned-sha'], app.sha);
     assert.equal(result.outputs['analysis-ref'], scenario === 'pr' ? 'refs/pull/4/head' : 'refs/heads/main');
-    assert.deepEqual(receipt.entries, ['coverage.json', 'findings.json', 'results.sarif', 'scan-manifest.json']);
+    assert.deepEqual(uploadedFiles.sort(), ['coverage.json', 'findings.json', 'results.sarif', 'scan-manifest.json']);
     const sarif = JSON.parse(await readFile(result.outputs['sarif-path'], 'utf8'));
     assert.equal(sarif.runs[0].versionControlProvenance[0].repositoryUri, `${serverUrl}/example/repo`);
     assert.match(result.logs, /^::warning .*file=src\/extract\.py/m);
@@ -567,24 +571,22 @@ test('scope conflict fails without runtime setup', async (t) => {
   assert.equal(result.exitCode, 1); assert.equal(result.setups, 0); assert.match(result.logs, /paths cannot be combined/u);
 });
 
-test('missing optional CLI SARIF preserves a successful scan and uploads the remaining reports', {timeout: 10_000}, async (t) => {
+test('missing optional CLI SARIF preserves a successful scan and uploads the remaining reports', async (t) => {
   const app = await harness(t); app.configure({ missingSarif: true });
   app.setInput('annotations', 'true'); app.setInput('upload-artifacts', 'true');
-  await app.uploadWorker();
+  let uploadedFiles: string[] = [];
+  t.mock.method(DefaultArtifactClient.prototype, 'uploadArtifact', async (_name: string, files: string[]) => {
+    uploadedFiles = files.map(file => basename(file));
+    for (const file of files) assert.ok((await readFile(file)).length);
+    return {id: 1, size: 1};
+  });
   const result = await app.run();
   assert.equal(result.exitCode, 0); assert.equal(result.processes, 1); assert.equal(result.cleanups, 1);
   assert.equal(result.outputs['scan-status'], 'completed'); assert.equal(result.outputs['policy-status'], 'passed');
   assert.equal(result.outputs['report-status'], 'partial'); assert.equal(result.outputs['sarif-upload-ready'], 'false');
   assert.equal(result.outputs['sarif-path'], ''); assert.equal(result.outputs['high-count'], '1');
   assert.ok(result.outputs['json-path']); assert.ok(result.outputs['coverage-path']); assert.ok(result.outputs['results-directory']);
-  const receipt = uploadReceipt(result.logs);
-  assert.deepEqual(receipt.reports.map(file => file.name).sort(), ['coverage.json', 'findings.json', 'scan-manifest.json']);
-  assert.equal(receipt.name, 'codex-security');
-  assert.deepEqual(receipt.options, {retentionDays: 7, compressionLevel: 0});
-  for (const file of receipt.reports) {
-    assert.deepEqual(Buffer.from(file.contents, 'base64'), await readFile(join(result.outputs['results-directory'], file.name)));
-  }
-  await assert.rejects(stat(receipt.staging), {code: 'ENOENT'});
+  assert.deepEqual(uploadedFiles.sort(), ['coverage.json', 'findings.json', 'scan-manifest.json']);
   assert.match(result.logs, /::warning::SARIF report is unavailable; scan results and other reports are still available\./);
   assert.match(result.logs, /^::warning .*file=src\/extract\.py/m);
   assert.doesNotMatch(result.logs, /::error::/);
@@ -603,49 +605,77 @@ test('missing SARIF does not mask a findings threshold failure', async (t) => {
   assert.match(result.summary, /\*\*Scan completed\. Findings meet the configured failure threshold\.\*\*/);
 });
 
-test('requested artifact upload failure remains fatal without SARIF', {timeout: 10_000}, async (t) => {
+test('requested artifact upload failure remains fatal without SARIF', async (t) => {
   const app = await harness(t); app.configure({missingSarif: true});
   app.setInput('upload-artifacts', 'true');
-  await app.uploadWorker('reject');
+  const upload = t.mock.method(DefaultArtifactClient.prototype, 'uploadArtifact', async () => {
+    throw new Error('Synthetic artifact upload failure');
+  });
   const result = await app.run();
-  assert.equal(result.exitCode, 1); assert.equal(result.cleanups, 1);
+  assert.equal(upload.mock.callCount(), 1); assert.equal(result.exitCode, 1);
   assert.equal(result.outputs['scan-status'], 'completed'); assert.equal(result.outputs['policy-status'], 'passed');
   assert.equal(result.outputs['report-status'], 'failed'); assert.equal(result.outputs['sarif-upload-ready'], 'false');
   assert.ok(result.outputs['json-path']); assert.ok(result.outputs['coverage-path']);
   assert.ok(result.outputs['results-directory']); assert.equal(result.outputs['sarif-path'], '');
   assert.match(result.logs, /::error::Scan completed, but required reporting failed\./);
-  assert.ok(result.summary.includes(uploadFailure));
-  await assert.rejects(stat(uploadReceipt(result.logs).staging), {code: 'ENOENT'});
+  assert.match(result.summary, /Synthetic artifact upload failure/);
 });
 
-for (const behavior of ['stream-error', 'unhandled-rejection'] as const) {
-  test(`${behavior} in artifact upload preserves scan outputs, summary and cleanup`, {timeout: 10_000}, async t => {
-    const app = await harness(t);
-    app.setInput('upload-artifacts', 'true');
-    app.setInput('artifact-name', 'synthetic-custom-reports');
-    app.setInput('retention-days', '21');
-    await app.uploadWorker(behavior);
-    const result = await app.run();
-    assert.equal(result.exitCode, 1); assert.equal(result.processes, 1); assert.equal(result.cleanups, 1);
-    assert.equal(result.outputs['scan-status'], 'completed'); assert.equal(result.outputs['policy-status'], 'passed');
-    assert.equal(result.outputs['report-status'], 'failed'); assert.equal(result.outputs['sarif-upload-ready'], 'false');
-    assert.equal(result.outputs['exit-code'], '0'); assert.equal(result.outputs['high-count'], '1');
-    assert.equal(result.outputs['scanned-sha'], app.sha);
-    for (const name of ['json-path', 'coverage-path', 'sarif-path']) {
-      assert.ok((await readFile(result.outputs[name])).length);
-    }
-    const receipt = uploadReceipt(result.logs);
-    assert.equal(receipt.name, 'synthetic-custom-reports');
-    assert.deepEqual(receipt.options, {retentionDays: 21, compressionLevel: 0});
-    assert.deepEqual(receipt.reports.map(file => file.name).sort(), ['coverage.json', 'findings.json', 'results.sarif', 'scan-manifest.json']);
-    assert.match(result.logs, /::error::Scan completed, but required reporting failed\./);
-    assert.ok(result.logs.includes(`Synthetic uploader stdout: ${uploadFailure}`));
-    assert.ok(result.logs.includes(`Synthetic uploader stderr: ${uploadFailure}`));
-    assert.ok(result.summary.includes(uploadFailure));
-    assert.match(result.summary, /\*\*Scan completed, but required reporting failed\.\*\*/);
-    await assert.rejects(stat(receipt.staging), {code: 'ENOENT'});
+test('archive read failure preserves scan reports, summary and cleanup', {
+  skip: process.platform === 'win32' || process.getuid?.() === 0,
+}, async t => {
+  const app = await harness(t);
+  app.setInput('upload-artifacts', 'true');
+  const requests: string[] = [];
+  const server = createServer(async (request, response) => {
+    for await (const _chunk of request) { /* Read the artifact creation request. */ }
+    requests.push(request.url ?? '');
+    response.writeHead(200, {'Content-Type': 'application/json'});
+    response.end(JSON.stringify({ok: true, signed_upload_url: 'https://example.invalid/artifact'}));
   });
-}
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  t.after(() => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())));
+  const address = server.address();
+  assert.ok(address && typeof address !== 'string');
+  const payload = Buffer.from(JSON.stringify({scp: 'Actions.Results:synthetic-run:synthetic-job'})).toString('base64url');
+  Object.assign(process.env, {
+    ACTIONS_RESULTS_URL: `http://127.0.0.1:${address.port}`,
+    ACTIONS_RUNTIME_TOKEN: `e30.${payload}.synthetic-signature`,
+  });
+  let signal: AbortSignal | undefined;
+  t.mock.method(BlobClient.prototype, 'getBlockBlobClient', () => ({
+    uploadStream: async (input: AsyncIterable<Buffer>, _bufferSize: number, _concurrency: number, options: {abortSignal: AbortSignal}) => {
+      signal = options.abortSignal;
+      for await (const _chunk of input) { /* Consume the real archive stream. */ }
+    },
+  }));
+  let staging = '';
+  let unreadable = '';
+  const uploadArtifact = DefaultArtifactClient.prototype.uploadArtifact;
+  t.mock.method(DefaultArtifactClient.prototype, 'uploadArtifact', async function (this: DefaultArtifactClient, ...args: Parameters<typeof uploadArtifact>) {
+    staging = args[2];
+    unreadable = args[1][0];
+    // Fail the archive's actual file read without altering the saved scan report.
+    await chmod(unreadable, 0);
+    return uploadArtifact.apply(this, args);
+  });
+  const result = await app.run();
+  assert.equal(result.exitCode, 1); assert.equal(result.cleanups, 1);
+  assert.equal(result.outputs['scan-status'], 'completed');
+  assert.equal(result.outputs['policy-status'], 'passed');
+  assert.equal(result.outputs['report-status'], 'failed');
+  assert.equal(result.outputs['sarif-upload-ready'], 'false');
+  for (const name of ['json-path', 'coverage-path', 'sarif-path']) {
+    assert.ok((await readFile(result.outputs[name])).length);
+  }
+  assert.match(result.summary, /EACCES/);
+  assert.ok(result.summary.includes(unreadable));
+  assert.match(result.logs, /::error::Scan completed, but required reporting failed\./);
+  assert.deepEqual(requests, ['/twirp/github.actions.results.api.v1.ArtifactService/CreateArtifact']);
+  assert.equal(signal?.aborted, true);
+  await assert.rejects(stat(staging), {code: 'ENOENT'});
+});
 
 test('CLI authentication failure leaves findings unavailable instead of reporting a threshold failure', async (t) => {
   const app = await harness(t); app.configure({exitCode: 2, cliFailure: true});
