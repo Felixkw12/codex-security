@@ -15,6 +15,8 @@ const refusalMessages = {
     "Review cannot proceed. Safety policy: this request is refused.",
   "policy-prefix-due-text":
     "Safety policy: this request is refused due to disallowed content.",
+  "policy-prefix-unsafe-text":
+    "Safety policy: this request is refused due to unsafe content.",
   "policy-prefix-under-text":
     "Safety policy: your request was blocked under the applicable restrictions.",
   "policy-suffix-text": "Request refused: safety policy.",
