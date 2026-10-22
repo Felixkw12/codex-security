@@ -1,5 +1,6 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
+import * as filesystem from "node:fs/promises";
 import {
   mkdir,
   mkdtemp,
@@ -12,7 +13,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import {
   discoverScaInputs,
   normalizeOsvOutput,
@@ -21,10 +22,12 @@ import {
   runOsvScan,
   type OsvProcessOptions,
   type OsvProcessResult,
+  type OsvScanResult,
 } from "../src/sca-osv.js";
 import type { ScaInput } from "../src/sca-types.js";
 import type { DependencyScanProgress } from "../src/sca-progress.js";
 import { dependencyScanResult, saveDependencyScan } from "../src/sca.js";
+import { runTestInSubprocess } from "./support/test-subprocess.js";
 
 const execFile = promisify(execFileCallback);
 const temporaryDirectories: string[] = [];
@@ -396,6 +399,122 @@ describe("SCA input selection", () => {
       discovered.inputs.every((item) => /^[a-f0-9]{64}$/u.test(item.sha256)),
     ).toBe(true);
   });
+  test("excludes installed Python and Bundler trees from non-Git discovery", async () => {
+    const { repository } = await setup();
+    const installed = [
+      ".venv/lib/python3.12/site-packages/synthetic/requirements.txt",
+      "venv/Lib/site-packages/synthetic/requirements.txt",
+      "vendor/bundle/ruby/3.3.0/gems/synthetic/Gemfile.lock",
+      "packages/app/.venv/lib/python3.12/site-packages/synthetic/requirements.txt",
+      "packages/app/vendor/bundle/ruby/3.3.0/gems/synthetic/Gemfile.lock",
+    ];
+    const selected = [
+      "package-lock.json",
+      "packages/app/package-lock.json",
+      "vendor/source-project/package-lock.json",
+    ];
+    for (const path of [...installed, ...selected]) {
+      await mkdir(join(repository, path, ".."), { recursive: true });
+      await writeFile(
+        join(repository, path),
+        path.endsWith("requirements.txt")
+          ? "synthetic==1.2.3\n"
+          : path.endsWith("Gemfile.lock")
+            ? "GEM\n  remote: https://rubygems.org/\n  specs:\n    synthetic (1.2.3)\n"
+            : npmLock(),
+      );
+    }
+    expect(
+      (await discoverScaInputs(repository)).inputs.map((item) => item.path),
+    ).toEqual(selected);
+  });
+  test("scans every pnpm lockfile document", async () => {
+    const { repository, output } = await setup();
+    const content = ["synthetic-tool", "synthetic-lib"]
+      .map((name) => `lockfileVersion: '9.0'\npackages:\n  ${name}@1.2.0: {}\n`)
+      .join("---\n");
+    await writeFile(join(repository, "pnpm-lock.yaml"), content);
+    const calls: string[][] = [];
+    const result = await runOsvScan(
+      { repositoryPath: repository, outputDir: output },
+      {
+        executable: process.execPath,
+        runProcess: async (_executable, argv) => {
+          calls.push(argv);
+          if (argv[0] === "--version")
+            return { stdout: "2.6.0", stderr: "", exitCode: 0 };
+          const raw = rawOutput("pnpm-lock.yaml");
+          raw.results[0]!.packages.push({
+            ...raw.results[0]!.packages[0]!,
+            package: {
+              name: "synthetic-tool",
+              version: "1.2.0",
+              ecosystem: "npm",
+            },
+          });
+          return { stdout: JSON.stringify(raw), stderr: "", exitCode: 0 };
+        },
+      },
+    );
+    expect(result.status).toBe("completed");
+    expect(result.coverage.inputs).toEqual([
+      expect.objectContaining({
+        path: "pnpm-lock.yaml",
+        status: "scanned",
+        sha256: createHash("sha256").update(content).digest("hex"),
+      }),
+    ]);
+    expect(result.components.map((item) => item.name).sort()).toEqual([
+      "synthetic-lib",
+      "synthetic-tool",
+    ]);
+    expect(calls.filter((argv) => argv[0] === "scan")).toHaveLength(1);
+  });
+  test("retains local references from every pnpm document", async () => {
+    const { repository } = await setup();
+    await writeFile(
+      join(repository, "pnpm-lock.yaml"),
+      ["first", "second"]
+        .map(
+          (name) =>
+            `lockfileVersion: '9.0'\nimporters:\n  .:\n    dependencies:\n      ${name}:\n        version: link:../${name}\n`,
+        )
+        .join("---\n"),
+    );
+    const result = await discoverScaInputs(repository);
+    expect(result.inputs[0]?.status).toBe("scanned");
+    expect(
+      result.localReferences.map(({ name, resolution }) => ({
+        name,
+        resolution,
+      })),
+    ).toEqual([
+      { name: "first", resolution: "link:../first" },
+      { name: "second", resolution: "link:../second" },
+    ]);
+  });
+  test.each([
+    ["", "unsupported", "Unsupported pnpm lockfile version: undefined."],
+    [
+      "lockfileVersion: '9.0'\n---\nlockfileVersion: '8.0'\n",
+      "unsupported",
+      "Unsupported pnpm lockfile version: 8.0.",
+    ],
+    [
+      "lockfileVersion: '9.0'\n---\nlockfileVersion: [\n",
+      "failed",
+      "end with a ]",
+    ],
+  ] as const)(
+    "retains pnpm rejection for %p",
+    async (content, status, reason) => {
+      const { repository } = await setup();
+      await writeFile(join(repository, "pnpm-lock.yaml"), content);
+      const result = await discoverScaInputs(repository);
+      expect(result.inputs[0]?.status).toBe(status);
+      expect(result.inputs[0]?.reason).toContain(reason);
+    },
+  );
   test.each([true, false])(
     "gitlink coverage remains incomplete when initialized: %p",
     async (initialized) => {
@@ -1683,6 +1802,67 @@ snapshots:
     );
     expect(result.status).toBe("failed");
     expect(result.diagnostics.join(" ")).toContain("not installed");
+  });
+  test("preserves hashed inputs when discovery is cancelled between candidates", async () => {
+    const name =
+      "preserves hashed inputs when discovery is cancelled between candidates";
+    if (runTestInSubprocess(import.meta.path, name)) return;
+    const { repository, output } = await setup();
+    for (const directory of ["a", "b"]) {
+      await mkdir(join(repository, directory));
+      await writeFile(
+        join(repository, directory, "package-lock.json"),
+        npmLock(),
+      );
+    }
+    const controller = new AbortController();
+    const reason = new Error("requested stop after first input digest");
+    const original = filesystem.lstat;
+    const checking = spyOn(filesystem, "lstat").mockImplementation((async (
+      ...args: Parameters<typeof original>
+    ) => {
+      try {
+        return await original(...args);
+      } finally {
+        if (args[0] === join(repository, "a", "npm-shrinkwrap.json"))
+          controller.abort(reason);
+      }
+    }) as typeof original);
+    let calls = 0;
+    let interruption: (Error & { osvResult: OsvScanResult }) | undefined;
+    try {
+      await runOsvScan(
+        {
+          repositoryPath: repository,
+          outputDir: output,
+          signal: controller.signal,
+        },
+        {
+          executable: process.execPath,
+          runProcess: async () => {
+            calls += 1;
+            throw new Error("scanner must not start after cancellation");
+          },
+        },
+      );
+    } catch (error) {
+      interruption = error as Error & { osvResult: OsvScanResult };
+    } finally {
+      checking.mockRestore();
+    }
+    expect(interruption).toBeDefined();
+    expect(calls).toBe(0);
+    expect(interruption!.osvResult.coverage.inputs).toEqual([
+      expect.objectContaining({
+        path: "a/package-lock.json",
+        sha256: createHash("sha256").update(npmLock()).digest("hex"),
+        status: "failed",
+        reason: reason.message,
+      }),
+    ]);
+    let cause: Error = interruption!;
+    while (cause.cause instanceof Error) cause = cause.cause;
+    expect(cause).toBe(reason);
   });
   test("passes explicit selected lockfiles and inherited environment at the child boundary", async () => {
     const { repository, output } = await setup();

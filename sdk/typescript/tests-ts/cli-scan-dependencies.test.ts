@@ -268,7 +268,7 @@ describe("scan dependencies CLI", () => {
   });
 
   test.each([false, true])(
-    "redirected progress is opt-in with verbose=%s",
+    "redirected progress is opt-in with verbose=%p",
     async (verbose) => {
       const result = dependencyResult();
       const { stdout, stderr, runCli } = createCliTest(main);
@@ -671,7 +671,7 @@ describe("scan dependencies CLI", () => {
   );
 
   test.each([false, true])(
-    "keeps completed JSON successful when optional diagnostics cannot be written (TTY=%s)",
+    "keeps completed JSON successful when optional diagnostics cannot be written (TTY=%p)",
     async (interactive) => {
       const result = dependencyResult();
       const { stdout, stderr, runCli } = createCliTest(main, {

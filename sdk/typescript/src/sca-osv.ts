@@ -21,7 +21,7 @@ import {
 } from "node:path";
 import { finished } from "node:stream/promises";
 import { promisify } from "node:util";
-import { parse as parseYaml } from "yaml";
+import { parseAllDocuments } from "yaml";
 import { parse as parseToml } from "smol-toml";
 import semverValid from "semver/functions/valid.js";
 import { errorMessage } from "./errors.js";
@@ -531,8 +531,15 @@ async function repositoryFiles(
     for (const entry of await readdir(directory, { withFileTypes: true })) {
       if (entry.name === ".git" || entry.name === "node_modules") continue;
       const path = join(directory, entry.name);
-      if (entry.isDirectory()) pending.push(path);
-      else files.push(relative(repository, path));
+      if (entry.isDirectory()) {
+        if (
+          entry.name === ".venv" ||
+          entry.name === "venv" ||
+          (basename(directory) === "vendor" && entry.name === "bundle")
+        )
+          continue;
+        pending.push(path);
+      } else files.push(relative(repository, path));
     }
   }
   return { files, submodules: [], nestedRepositories: [], skipWorktree: [] };
@@ -589,179 +596,196 @@ export async function discoverScaInputs(
     "Inventory covers observed package tuples in supported dependency files, not every installed instance, runtime, or a complete dependency graph.",
     ...diagnostics,
   ];
-  for (const candidate of candidates) {
-    signal?.throwIfAborted();
-    const path = join(repository, candidate);
-    const additional = additionalScaFormat(path);
-    const input: ScaInput = {
-      path: slash(candidate),
-      sha256: "",
-      format:
-        additional ?? (basename(path) === "pnpm-lock.yaml" ? "pnpm" : "npm"),
-      status: "scanned",
-      reason: null,
-    };
-    inputs.push(input);
-    try {
-      const metadata = await lstat(path).catch(
-        (error: NodeJS.ErrnoException) => {
-          if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
-          throw error;
-        },
-      );
-      if (metadata === null) {
-        if (skipWorktree.includes(candidate)) {
-          input.status = "unsupported";
-          input.reason =
-            "Tracked lockfile is unavailable in this sparse checkout; coverage is incomplete.";
-          continue;
-        }
-        // The Git index can still list a file deleted from the working tree.
-        inputs.pop();
-        continue;
-      }
-      if (
-        !metadata.isFile() ||
-        relativePathIsOutside(relative(repository, await realpath(path)))
-      ) {
-        input.status = "unsupported";
-        input.reason =
-          "Lockfile is not a regular file within the selected repository.";
-        continue;
-      }
-      const content = await readFile(path);
-      input.sha256 = digest(content);
-      if (
-        basename(path) === "package-lock.json" &&
-        (await lstat(join(dirname(path), "npm-shrinkwrap.json")).then(
-          () => true,
+  try {
+    for (const candidate of candidates) {
+      signal?.throwIfAborted();
+      const path = join(repository, candidate);
+      const additional = additionalScaFormat(path);
+      const input: ScaInput = {
+        path: slash(candidate),
+        sha256: "",
+        format:
+          additional ?? (basename(path) === "pnpm-lock.yaml" ? "pnpm" : "npm"),
+        status: "scanned",
+        reason: null,
+      };
+      inputs.push(input);
+      try {
+        const metadata = await lstat(path).catch(
           (error: NodeJS.ErrnoException) => {
-            if (error.code === "ENOENT") return false;
+            if (error.code === "ENOENT" || error.code === "ENOTDIR")
+              return null;
             throw error;
           },
-        ))
-      ) {
-        input.status = "excluded";
-        input.reason =
-          "npm-shrinkwrap.json takes precedence in this directory.";
-        // A gitignored shrinkwrap still changes npm and OSV interpretation.
-        const shrinkwrap = slash(
-          relative(repository, join(dirname(path), "npm-shrinkwrap.json")),
         );
-        if (!candidates.includes(shrinkwrap)) {
+        if (metadata === null) {
+          if (skipWorktree.includes(candidate)) {
+            input.status = "unsupported";
+            input.reason =
+              "Tracked lockfile is unavailable in this sparse checkout; coverage is incomplete.";
+            continue;
+          }
+          // The Git index can still list a file deleted from the working tree.
+          inputs.pop();
+          continue;
+        }
+        if (
+          !metadata.isFile() ||
+          relativePathIsOutside(relative(repository, await realpath(path)))
+        ) {
           input.status = "unsupported";
           input.reason =
-            "An npm-shrinkwrap.json outside the selected file scope takes precedence; the package-lock.json cannot be assessed as effective input.";
+            "Lockfile is not a regular file within the selected repository.";
+          continue;
         }
-        continue;
-      }
-      if (additional !== null) {
-        const inspected = inspectAdditionalScaInput(
-          content.toString("utf8"),
-          additional,
-          input.path,
-        );
-        input.status = inspected.status;
-        input.reason = inspected.reason;
+        const content = await readFile(path);
+        input.sha256 = digest(content);
         if (
-          additional === "cargo" &&
-          inspected.references.some(
-            (reference) => reference.resolution === "workspace-or-path",
-          )
-        ) {
-          const manifestPath = join(dirname(path), "Cargo.toml");
-          const metadata = await lstat(manifestPath).catch(
+          basename(path) === "package-lock.json" &&
+          (await lstat(join(dirname(path), "npm-shrinkwrap.json")).then(
+            () => true,
             (error: NodeJS.ErrnoException) => {
-              if (error.code === "ENOENT") return null;
+              if (error.code === "ENOENT") return false;
               throw error;
             },
+          ))
+        ) {
+          input.status = "excluded";
+          input.reason =
+            "npm-shrinkwrap.json takes precedence in this directory.";
+          // A gitignored shrinkwrap still changes npm and OSV interpretation.
+          const shrinkwrap = slash(
+            relative(repository, join(dirname(path), "npm-shrinkwrap.json")),
           );
+          if (!candidates.includes(shrinkwrap)) {
+            input.status = "unsupported";
+            input.reason =
+              "An npm-shrinkwrap.json outside the selected file scope takes precedence; the package-lock.json cannot be assessed as effective input.";
+          }
+          continue;
+        }
+        if (additional !== null) {
+          const inspected = inspectAdditionalScaInput(
+            content.toString("utf8"),
+            additional,
+            input.path,
+          );
+          input.status = inspected.status;
+          input.reason = inspected.reason;
           if (
-            metadata?.isFile() &&
-            !relativePathIsOutside(
-              relative(repository, await realpath(manifestPath)),
+            additional === "cargo" &&
+            inspected.references.some(
+              (reference) => reference.resolution === "workspace-or-path",
             )
           ) {
-            let manifest: Record<string, unknown> | undefined;
-            try {
-              manifest = parseToml(await readFile(manifestPath, "utf8"));
-            } catch (error) {
-              diagnostics.push(
-                `Could not identify the local package from ${slash(relative(repository, manifestPath))}: ${errorMessage(error)}`,
-              );
-            }
-            const pkg = manifest?.["package"];
-            if (record(pkg))
-              for (
-                let index = inspected.references.length - 1;
-                index >= 0;
-                index--
-              ) {
-                const reference = inspected.references[index]!;
-                if (
-                  reference.resolution === "workspace-or-path" &&
-                  reference.name === pkg["name"] &&
-                  reference.version !== null &&
-                  reference.version === pkg["version"]
-                ) {
-                  firstPartyPackages.push({
-                    name: reference.name,
-                    version: reference.version,
-                    sourcePath: input.path,
-                    manifestPath: slash(relative(repository, manifestPath)),
-                  });
-                  inspected.references.splice(index, 1);
-                  limitations.push(
-                    `${input.path}: ${reference.name}@${reference.version} is the local first-party package declared in ${slash(relative(repository, manifestPath))}; registry advisory coverage does not apply to that local package.`,
-                  );
-                }
+            const manifestPath = join(dirname(path), "Cargo.toml");
+            const metadata = await lstat(manifestPath).catch(
+              (error: NodeJS.ErrnoException) => {
+                if (error.code === "ENOENT") return null;
+                throw error;
+              },
+            );
+            if (
+              metadata?.isFile() &&
+              !relativePathIsOutside(
+                relative(repository, await realpath(manifestPath)),
+              )
+            ) {
+              let manifest: Record<string, unknown> | undefined;
+              try {
+                manifest = parseToml(await readFile(manifestPath, "utf8"));
+              } catch (error) {
+                diagnostics.push(
+                  `Could not identify the local package from ${slash(relative(repository, manifestPath))}: ${errorMessage(error)}`,
+                );
               }
+              const pkg = manifest?.["package"];
+              if (record(pkg))
+                for (
+                  let index = inspected.references.length - 1;
+                  index >= 0;
+                  index--
+                ) {
+                  const reference = inspected.references[index]!;
+                  if (
+                    reference.resolution === "workspace-or-path" &&
+                    reference.name === pkg["name"] &&
+                    reference.version !== null &&
+                    reference.version === pkg["version"]
+                  ) {
+                    firstPartyPackages.push({
+                      name: reference.name,
+                      version: reference.version,
+                      sourcePath: input.path,
+                      manifestPath: slash(relative(repository, manifestPath)),
+                    });
+                    inspected.references.splice(index, 1);
+                    limitations.push(
+                      `${input.path}: ${reference.name}@${reference.version} is the local first-party package declared in ${slash(relative(repository, manifestPath))}; registry advisory coverage does not apply to that local package.`,
+                    );
+                  }
+                }
+            }
+          }
+          localReferences.push(...inspected.references);
+          diagnostics.push(...inspected.diagnostics);
+          limitations.push(...inspected.limitations);
+          if (inspected.references.length > 0)
+            limitations.push(
+              `${input.path} includes unresolved dependency origins: ${inspected.references.map((reference) => `${reference.ecosystem}/${reference.name}@${reference.version ?? "unresolved"} (${reference.resolution})`).join(", ")}.`,
+            );
+          continue;
+        }
+        const documents: unknown[] =
+          input.format === "npm"
+            ? [JSON.parse(content.toString("utf8"))]
+            : parseAllDocuments(content.toString("utf8")).map((document) => {
+                for (const warning of document.warnings)
+                  process.emitWarning(warning);
+                if (document.errors.length > 0) throw document.errors[0];
+                return document.toJS();
+              });
+        // An empty YAML stream still lacks a supported lockfile version.
+        if (documents.length === 0) documents.push(undefined);
+        for (const parsed of documents) {
+          const version = record(parsed)
+            ? parsed["lockfileVersion"]
+            : undefined;
+          if (
+            input.format === "npm"
+              ? version !== 2 && version !== 3
+              : String(version) !== "9.0" && String(version) !== "9"
+          ) {
+            input.status = "unsupported";
+            input.reason = `Unsupported ${input.format} lockfile version: ${String(version)}.`;
+            break;
           }
         }
-        localReferences.push(...inspected.references);
-        diagnostics.push(...inspected.diagnostics);
-        limitations.push(...inspected.limitations);
-        if (inspected.references.length > 0)
-          limitations.push(
-            `${input.path} includes unresolved dependency origins: ${inspected.references.map((reference) => `${reference.ecosystem}/${reference.name}@${reference.version ?? "unresolved"} (${reference.resolution})`).join(", ")}.`,
+        if (input.status === "scanned") {
+          const references = documents.flatMap((parsed) =>
+            record(parsed)
+              ? input.format === "pnpm"
+                ? pnpmLocalReferences(parsed, input.path)
+                : npmLocalReferences(parsed, input.path)
+              : [],
           );
-        continue;
+          localReferences.push(...references);
+          if (references.length > 0)
+            limitations.push(
+              `${input.path} includes local or direct URL dependency references outside npm registry matching: ${references.map((reference) => `${reference.name}@${reference.resolution}`).join(", ")}.`,
+            );
+        }
+      } catch (error) {
+        signal?.throwIfAborted();
+        input.status = "failed";
+        input.reason = errorMessage(error);
       }
-      const parsed: unknown =
-        input.format === "npm"
-          ? JSON.parse(content.toString("utf8"))
-          : parseYaml(content.toString("utf8"));
-      const version = record(parsed) ? parsed["lockfileVersion"] : undefined;
-      if (
-        input.format === "npm"
-          ? version !== 2 && version !== 3
-          : String(version) !== "9.0" && String(version) !== "9"
-      ) {
-        input.status = "unsupported";
-        input.reason = `Unsupported ${input.format} lockfile version: ${String(version)}.`;
-      } else if (record(parsed)) {
-        const references =
-          input.format === "pnpm"
-            ? pnpmLocalReferences(parsed, input.path)
-            : npmLocalReferences(parsed, input.path);
-        localReferences.push(...references);
-        if (references.length > 0)
-          limitations.push(
-            `${input.path} includes local or direct URL dependency references outside npm registry matching: ${references.map((reference) => `${reference.name}@${reference.resolution}`).join(", ")}.`,
-          );
-      }
-    } catch (error) {
-      signal?.throwIfAborted();
-      input.status = "failed";
-      input.reason = errorMessage(error);
     }
-  }
-  const directories = unique(
-    inputs
-      .filter((input) => input.status === "scanned")
-      .map((input) => dirname(join(repository, input.path))),
-  );
-  try {
+    const directories = unique(
+      inputs
+        .filter((input) => input.status === "scanned")
+        .map((input) => dirname(join(repository, input.path))),
+    );
     for (const directory of directories) {
       const path = join(directory, "osv-scanner.toml");
       const metadata = await lstat(path).catch(

@@ -101,6 +101,36 @@ describe("additional SCA input contracts", () => {
     ).toEqual(["synthetic-local"]);
   });
 
+  test.each(["uv", "poetry", "pipenv"] as const)(
+    "recognizes %s public index scheme and host casing without changing paths",
+    (format) => {
+      for (const [url, publicIndex] of [
+        ["HTTPS://PYPI.ORG/simple", true],
+        ["http://PyPi.Python.Org/simple/", true],
+        ["https://pypi.org/simple", true],
+        ["HTTPS://PYPI.ORG/Simple", false],
+        ["https://pypi.org/simple?source=synthetic", false],
+        ["https://pypi.org/other/../simple", false],
+        ["https://index.example.test/simple", false],
+      ] as const) {
+        const content =
+          format === "pipenv"
+            ? JSON.stringify({
+                _meta: { sources: [{ name: "selected", url }] },
+                default: {
+                  synthetic: { version: "==1.2.3", index: "selected" },
+                },
+              })
+            : `[[package]]\nname="synthetic"\nversion="1.2.3"\nsource={${format === "uv" ? "registry" : 'type="legacy",url'}=${JSON.stringify(url)}}`;
+        const result = inspect(content, format);
+        expect(result.status).toBe("scanned");
+        expect(result.references, url).toHaveLength(publicIndex ? 0 : 1);
+        if (!publicIndex)
+          expect(result.references[0]?.resolution).toContain(url);
+      }
+    },
+  );
+
   test("counts Pipenv omitted local, unpinned, and custom-category entries", () => {
     const result = inspect(
       JSON.stringify({
