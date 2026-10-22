@@ -8724,6 +8724,7 @@ async function patchCommandContext(
   gitDirectory: string;
   administrationReferences: readonly PatchGitAdministrationReference[];
   environment: NodeJS.ProcessEnv;
+  glabConfigurationPaths: Record<string, string>;
 }> {
   const gitPath = async (args: string[]) =>
     (
@@ -8889,6 +8890,21 @@ async function patchCommandContext(
             value,
           );
   }
+  const glabConfigurationPaths: Record<string, string> = {};
+  for (const name of ["HOME", "USERPROFILE", "XDG_CONFIG_HOME"]) {
+    const value = environmentEntry(dependencies.environment, name);
+    // Leave native drive-relative paths and XDG home expressions to glab.
+    const homeExpression =
+      name === "XDG_CONFIG_HOME" &&
+      (process.platform === "win32"
+        ? value?.startsWith("%USERPROFILE%")
+        : value?.startsWith("~") || value?.startsWith("$HOME"));
+    if (value && !parse(value).root && !homeExpression)
+      glabConfigurationPaths[name] = resolve(
+        process.platform === "win32" ? directory : physicalDirectory,
+        value,
+      );
+  }
   return {
     root: await realpath(repository),
     callerDirectory: directory,
@@ -8896,6 +8912,7 @@ async function patchCommandContext(
     gitDirectory: canonicalGitDirectory,
     administrationReferences,
     environment,
+    glabConfigurationPaths,
   };
 }
 
@@ -8959,7 +8976,19 @@ async function bindPatchCommandContext(
         dependencies.runRepositoryCommand(command, args, root, {
           ...options,
           directory,
-          environment: { ...context.environment, ...options?.environment },
+          environment: {
+            ...context.environment,
+            // Keep relative fallbacks relative: glab versions differ on
+            // accepting relative XDG paths and on legacy config precedence.
+            ...(command === "glab"
+              ? Object.fromEntries(
+                  Object.entries(context.glabConfigurationPaths).map(
+                    ([name, path]) => [name, relative(directory, path) || "."],
+                  ),
+                )
+              : {}),
+            ...options?.environment,
+          },
         }),
     },
   };
