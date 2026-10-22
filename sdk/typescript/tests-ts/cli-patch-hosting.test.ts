@@ -24,6 +24,162 @@ describe("patch change tracking", () => {
   const publicationRepository = () => createPublicationRepository(fixtures);
 
   test.each(
+    [false, true].flatMap((resume) =>
+      ["github.com", "gitlab.com"].flatMap((host) =>
+        [false, true].map((fileUrl) => ({ resume, host, fileUrl })),
+      ),
+    ),
+  )(
+    "rejects all-local pushes with a hosted fetch URL: $host, resume=$resume, file=$fileUrl",
+    async ({ resume, host, fileUrl }) => {
+      const { directory, git, remote } = await publicationRepository();
+      git(
+        "remote",
+        "set-url",
+        "origin",
+        `https://${host}/example/repository.git`,
+      );
+      git(
+        "remote",
+        "set-url",
+        "--push",
+        "origin",
+        fileUrl ? pathToFileURL(remote).href : remote,
+      );
+      const branch = "codex-security/patch-scan-1";
+      const commit = git("rev-parse", "HEAD");
+      if (resume) {
+        git("branch", branch);
+        git("config", `branch.${branch}.codexSecurityPatchCommit`, commit);
+      }
+      const model = mock(async () => 0);
+      const hosting = mock(() => "[]");
+      let pushes = 0;
+      const outcome = await runWorkflow(
+        resume
+          ? ["patch", "--resume-pr", branch, "--json"]
+          : ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+        {
+          currentDirectory: directory,
+          onWorkbench: () =>
+            savedScan(resultWithFindings(["high"]), "scan-1", directory),
+          onCodex: model,
+          onRepositoryCommand: (command, args, cwd, options) => {
+            if (command !== "git") return hosting();
+            if (args[0] === "push") pushes++;
+            return runGitRepositoryCommand(command, args, cwd, options);
+          },
+        },
+        { localHosting: false },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(2);
+      expect(outcome.stderr).toContain("network push URL");
+      expect(model).not.toHaveBeenCalled();
+      expect(hosting).not.toHaveBeenCalled();
+      expect(pushes).toBe(0);
+      expect(git("rev-parse", "HEAD")).toBe(commit);
+      expect(git("ls-remote", remote, `refs/heads/${branch}`)).toBe("");
+    },
+  );
+
+  test.each(
+    [false, true].flatMap((resume) =>
+      ["https", "scp", "ssh", "same-repository", "transferred"].map(
+        (transport) => ({ resume, transport }),
+      ),
+    ),
+  )(
+    "publishes the pushed GitHub head: $transport, resume=$resume",
+    async ({ resume, transport }) => {
+      const { directory, git, remote } = await publicationRepository();
+      const base = "https://github.example.test/example/repository";
+      const pushOwner =
+        transport === "same-repository" ? "example" : "synthetic-user";
+      const configuredOwner =
+        transport === "transferred" ? "previous-owner" : pushOwner;
+      const path = `${configuredOwner}/repository.git`;
+      const push =
+        transport === "scp"
+          ? `git@github.example.test:${path}`
+          : transport === "ssh"
+            ? `ssh://git@github.example.test/${path}`
+            : `https://github.example.test/${path}`;
+      git("remote", "set-url", "origin", `${base}.git`);
+      git("remote", "set-url", "--push", "origin", push);
+      const branch = "codex-security/patch-scan-1";
+      if (resume) {
+        git("branch", branch);
+        git(
+          "config",
+          `branch.${branch}.codexSecurityPatchCommit`,
+          git("rev-parse", "HEAD"),
+        );
+      }
+      let creates = 0;
+      const outcome = await runWorkflow(
+        resume
+          ? ["patch", "--resume-pr", branch, "--json"]
+          : ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+        {
+          currentDirectory: directory,
+          environment: { GH_REPO: "example/repository" },
+          onWorkbench: () =>
+            savedScan(resultWithFindings(["high"]), "scan-1", directory),
+          onCodex: async (args, output) => {
+            await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
+            completePatches(args, output);
+            return 0;
+          },
+          onRepositoryCommand: (command, args, cwd, options) => {
+            if (command === "git") {
+              if (args.includes("ls-remote"))
+                return runGitRepositoryCommand(
+                  command,
+                  ["ls-remote", "--heads", "--", remote],
+                  cwd,
+                  options,
+                );
+              if (args[0] === "push")
+                return runGitRepositoryCommand(
+                  command,
+                  args.map((arg) => (arg === "origin" ? remote : arg)),
+                  cwd,
+                  options,
+                );
+              return runGitRepositoryCommand(command, args, cwd, options);
+            }
+            expect(command).toBe("gh");
+            if (args[1] === "list") return "[]";
+            if (args.at(-1) === ".url") return base;
+            if (args[1] === "set-default")
+              return `${configuredOwner}/repository`;
+            if (args.at(-1) === "tojson" && args.includes("id,url")) {
+              return JSON.stringify({
+                id: "synthetic-origin-id",
+                url: `https://github.example.test/${pushOwner}/repository`,
+              });
+            }
+            expect(args[args.indexOf("--head") + 1]).toBe(
+              transport === "same-repository"
+                ? branch
+                : `${pushOwner}:${branch}`,
+            );
+            expect(git("--git-dir", remote, "rev-parse", branch)).toBe(
+              git("rev-parse", branch),
+            );
+            creates++;
+            return `${base}/pull/1`;
+          },
+        },
+        { localHosting: false },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(creates).toBe(1);
+      expect(JSON.parse(outcome.stdout).pullRequest.url).toBe(`${base}/pull/1`);
+    },
+  );
+
+  test.each(
     ["local", "remote"].flatMap((location) =>
       [
         "codex-security",
@@ -833,6 +989,8 @@ process.exit(result.status ?? 1);
               }
               return runGitRepositoryCommand(command, args, cwd, options);
             }
+            if (args.at(-1) === ".url")
+              return `${hostingUrl}/upstream/repository`;
             if (args[0] === "repo") {
               const selectedToken = gitText(
                 ["config", "--get", "remote.codex-security-push.url"],
@@ -946,9 +1104,20 @@ process.exit(result.status ?? 1);
             return 0;
           },
         },
+        { localHosting: false },
       );
+      if (transport === "local" || localOnly) {
+        expect(outcome.exitCode, outcome.stderr).toBe(2);
+        expect(outcome.stderr).toContain("network push URL");
+        expect(modelCalls).toBe(0);
+        expect(pushes).toBe(0);
+        expect(repositoryLookups).toBe(0);
+        expect(sshLookups).toBe(0);
+        return;
+      }
+      const creating = !matchingRequest;
       expect(outcome.exitCode, outcome.stderr).toBe(
-        !resume && matchingRequest ? 2 : 0,
+        (!resume && matchingRequest) || unresolvedPush ? 2 : 0,
       );
       const attempts = !resume && !matchingRequest ? 2 : 1;
       expect(repositoryLookups).toBe(
@@ -956,14 +1125,17 @@ process.exit(result.status ?? 1);
           ? 0
           : transport === "multiple-hosted"
             ? 2
-            : 1) * attempts,
+            : 1) *
+          attempts +
+          (creating && !unresolvedPush ? 1 : 0),
       );
       expect(sshLookups).toBe(
-        (aliasLookup || mirror?.startsWith("ssh:") ? 1 : 0) * attempts,
+        (aliasLookup || mirror?.startsWith("ssh:") ? 1 : 0) *
+          (attempts + (creating ? 1 : 0)),
       );
       expect(modelCalls).toBe(resume || matchingRequest ? 0 : 1);
-      expect(pushes).toBe(matchingRequest ? 0 : 1);
-      if (resume || !matchingRequest)
+      expect(pushes).toBe(matchingRequest || unresolvedPush ? 0 : 1);
+      if ((resume || !matchingRequest) && !unresolvedPush)
         expect(JSON.parse(outcome.stdout).pullRequest.url).toBe(
           matchingRequest ? ownUrl : createdUrl,
         );
@@ -1054,6 +1226,7 @@ process.exit(result.status ?? 1);
         },
         onCodex: throwing("must reuse the saved patch"),
       },
+      { localHosting: false },
     );
     expect(outcome.exitCode, outcome.stderr).toBe(0);
     expect(JSON.parse(outcome.stdout).pullRequest.url).toBe(url);
