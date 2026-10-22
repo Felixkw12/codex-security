@@ -4,6 +4,46 @@ import { relativePatchPath } from "../src/patch-byte-path.js";
 
 const key = (path: string) => Buffer.from(path).toString("latin1");
 
+test("Node filesystem spelling preserves exact Unicode and opaque byte names", () => {
+  const output = execFileSync(
+    "node",
+    [
+      "--experimental-strip-types",
+      "--input-type=module",
+      "--eval",
+      `
+import assert from "node:assert/strict";
+import { existsSync, linkSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, sep } from "node:path";
+import { canonicalPatchPath } from ${JSON.stringify(new URL("../src/patch-byte-path.ts", import.meta.url).href)};
+const root = mkdtempSync(join(tmpdir(), "patch-path-spelling-"));
+const key = value => Buffer.from(value).toString("latin1");
+try {
+  writeFileSync(join(root, "RÉADME.md"), "synthetic");
+  assert.equal(canonicalPatchPath(root, key("RÉADME.md")), key("RÉADME.md"));
+  if (!existsSync(join(root, "réadme.md"))) {
+    linkSync(join(root, "RÉADME.md"), join(root, "réadme.md"));
+    assert.equal(canonicalPatchPath(root, key("réadme.md")), key("réadme.md"));
+  } else {
+    assert.equal(canonicalPatchPath(root, key("réadme.md")), key("RÉADME.md"));
+  }
+  if (process.platform !== "win32") {
+    const raw = Buffer.concat([Buffer.from("name-"), Buffer.from([0xff])]);
+    writeFileSync(Buffer.concat([Buffer.from(root + sep), raw]), "synthetic raw");
+    writeFileSync(join(root, "name-\\ufffd"), "synthetic Unicode");
+    assert.equal(canonicalPatchPath(root, raw.toString("latin1")), raw.toString("latin1"));
+    assert.equal(canonicalPatchPath(root, key("name-\\ufffd")), key("name-\\ufffd"));
+  }
+  console.log("filesystem spelling preserved");
+} finally { rmSync(root, { recursive: true, force: true }); }
+`,
+    ],
+    { encoding: "utf8" },
+  );
+  expect(output.trim()).toBe("filesystem spelling preserved");
+});
+
 test("Node Windows comparisons preserve Unicode aliases and dirty overlap", () => {
   const cases = [
     ["C:\\work\\RÉPO", "C:\\work\\répo\\src\\file.ts"],

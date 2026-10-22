@@ -2,7 +2,7 @@
 import { classificationRunsSchema } from "./severity-review.js";
 import { workbenchArgs } from "./workbench-arguments.js";
 import { listenForAbort } from "./cli-signals.js";
-import { relativePatchPath } from "./patch-byte-path.js";
+import { canonicalPatchPath, relativePatchPath } from "./patch-byte-path.js";
 import { appServerCyberAccessProgram } from "./cli-daybreak.js";
 import { withCodexPreflightLock } from "./provider-profile.js";
 import { isNonEmptyString, notify, parseJson } from "./value.js";
@@ -9029,12 +9029,31 @@ async function preparePatchPublication(
     );
   const local = await dependencies.runRepositoryCommand(
     "git",
-    ["for-each-ref", "--format=%(refname)", ...refs],
+    ["for-each-ref", "--format=%(refname)", "refs/heads"],
     repository,
   );
   const conflicts = (ref: string) =>
     refs.includes(ref) || ref.startsWith(`refs/heads/${branch}/`);
-  let existing = local.split("\n").some(conflicts);
+  const localRefs = local.split("\n").filter(Boolean);
+  let existing = localRefs.some(conflicts);
+  if (!existing && localRefs.length > 0) {
+    const directory = (
+      await dependencies.runRepositoryCommand(
+        "git",
+        ["rev-parse", "--path-format=absolute", "--git-path", "refs/heads"],
+        repository,
+        { trim: false },
+      )
+    ).replace(/\n$/u, "");
+    const selected = canonicalPatchPath(directory, patchPathKey(branch));
+    existing = localRefs.some((candidate) => {
+      const stored = patchPathKey(candidate.slice("refs/heads/".length));
+      return (
+        !isOutsidePath(relativePatchPath(selected, stored)) ||
+        !isOutsidePath(relativePatchPath(stored, selected))
+      );
+    });
+  }
   if (!existing) {
     const destination = await patchPublicationDestination(
       repository,
@@ -9574,7 +9593,7 @@ async function verifiedPatchFiles(
   return files;
 }
 
-// Changes and returned paths are byte keys; caller-supplied selections are UTF-8.
+// Changes and returned paths are opaque byte keys; files are Unicode paths.
 function patchChangeSources(
   changes: string[],
   root: string,
@@ -9582,7 +9601,9 @@ function patchChangeSources(
   files: readonly string[],
   scope = repository,
 ): { files: string[]; transferred: Set<string>; deleted: Set<string> } {
-  const selections = files.map(patchPathKey);
+  const selections = files.map((file) =>
+    canonicalPatchPath(repository, patchPathKey(file)),
+  );
   const selected = new Set(selections);
   const localPath = (path: string) =>
     relativePatchPath(
@@ -9669,7 +9690,9 @@ async function createPatchPullRequest(
     ],
     dependencies,
   );
-  const reportedFiles = files.map(patchPathKey);
+  const reportedFiles = files.map((file) =>
+    canonicalPatchPath(directory, patchPathKey(file)),
+  );
   const sources = patchChangeSources(changes, root, directory, files);
   const selectedFiles = sources.files;
   if (ignoredFiles.size > 0) {
@@ -9718,6 +9741,9 @@ async function createPatchPullRequest(
           dependencies,
         );
   // A deleted dirty source may have been moved into a reported clean path.
+  const dirtyPaths = [...dirtyFiles].map((file) =>
+    canonicalPatchPath(directory, file),
+  );
   const dirty = [
     ...new Set([
       ...selectedFiles,
@@ -9748,9 +9774,7 @@ async function createPatchPullRequest(
         ),
     ]),
   ].filter((file) =>
-    [...dirtyFiles].some(
-      (dirty) => !isOutsidePath(relativePatchPath(file, dirty)),
-    ),
+    dirtyPaths.some((dirty) => !isOutsidePath(relativePatchPath(file, dirty))),
   );
   if (dirty.length > 0) {
     throw new CodexSecurityError(
