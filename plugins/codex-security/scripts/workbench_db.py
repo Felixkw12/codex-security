@@ -876,9 +876,9 @@ def _join_deep_scan(
     handoff.require_current_continuation(
         scan, claim_token, error_message="Deep Scan is owned by another continuation."
     )
-    if scan["status"] == "running" and scan["canceled_at"] is None:
-        require_scan_target_identity(scan)
     if scan["status"] == "running" and sealed_scan_producer_version(scan) is None:
+        if scan["canceled_at"] is None:
+            require_scan_target_identity(scan)
         scan_history.require_current_deep_scan(connection, scan)
     return {**scan_context(connection, scan["id"]), "startDisposition": "joined"}
 

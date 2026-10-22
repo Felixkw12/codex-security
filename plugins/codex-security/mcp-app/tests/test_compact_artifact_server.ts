@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -1432,7 +1439,8 @@ process.exit(1);
     );
     assert.deepEqual(paths, expectedResult);
     assert.equal(usage.coverage, "unavailable");
-    assert.deepEqual(warnings, []);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /selected checkout is no longer accessible/);
     assert.equal(cost, undefined);
     assert.deepEqual(response.content, [{ type: "text", text: instructions }]);
   };
@@ -1452,15 +1460,36 @@ process.exit(1);
       }),
       "write native parent aggregate",
     );
-    const completed = runWorkbenchFixture(environment, [
-      "complete-scan",
+    runWorkbenchFixture(environment, [
+      "prepare-scan-completion",
       "--scan-id",
       scanId,
       "--claim-token",
       handoffClaimToken,
     ]);
-    assert.equal(completed.scan.progress.status, "complete");
     const originalDraft = await snapshotScanDraft(scanDir);
+    assert.equal(
+      runWorkbenchFixture(environment, ["get-scan", "--scan-id", scanId]).scan
+        .progress.status,
+      "running",
+    );
+    const movedRepo = path.join(fixtureRoot, "moved-repository");
+    await rename(repoRoot, movedRepo);
+    try {
+      assertCompleted(
+        await rejoin(),
+        "publish sealed running native parent after checkout moves",
+      );
+      assert.equal(
+        runWorkbenchFixture(environment, ["get-scan", "--scan-id", scanId]).scan
+          .progress.status,
+        "complete",
+      );
+      assert.deepEqual(await snapshotScanDraft(scanDir), originalDraft);
+      await assert.rejects(readFile(invocationPath), { code: "ENOENT" });
+    } finally {
+      await rename(movedRepo, repoRoot);
+    }
 
     for (let repeat = 0; repeat < 2; repeat += 1) {
       assertCompleted(await rejoin(), "rejoin intact completed native parent");

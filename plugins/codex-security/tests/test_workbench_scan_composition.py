@@ -4,6 +4,7 @@ import copy
 import io
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -489,6 +490,77 @@ def native_scan_completion(tmp_path: Path, request):
         )["scan"]
 
     return state, target, arguments, started, complete
+
+
+@pytest.mark.parametrize("target_state", ["deleted", "moved", "replaced"])
+@pytest.mark.parametrize("artifact_state", ["sealed", "unsealed", "tampered"])
+def test_native_rejoin_without_original_checkout_requires_verified_seal(
+    native_scan_completion, target_state: str, artifact_state: str
+) -> None:
+    state, target, _, started, complete = native_scan_completion
+    scan = started["scan"]
+    directory = Path(scan["scanDir"])
+    if artifact_state != "unsealed":
+        run_workbench(
+            state,
+            "prepare-scan-completion",
+            "--scan-id",
+            scan["scanId"],
+            "--claim-token",
+            scan["handoffClaimToken"],
+        )
+    if artifact_state == "tampered":
+        with (directory / "findings.json").open("a") as findings:
+            findings.write(" ")
+    artifacts = {
+        name: (directory / name).read_bytes()
+        for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
+    }
+    identity_query = (
+        "SELECT target_path, target_id, target_revision, recipe_json, "
+        "deep_scan_owner_thread_id, handoff_claim_token FROM scans WHERE id = ?"
+    )
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        original_identity = connection.execute(identity_query, (scan["scanId"],)).fetchone()
+    if target_state == "deleted":
+        shutil.rmtree(target)
+    else:
+        target.rename(target.with_name("moved-target"))
+        if target_state == "replaced":
+            target.mkdir()
+            (target / "app.py").write_text("raise RuntimeError('replacement must not execute')\n")
+    joined = run_workbench(
+        state,
+        "begin-deep-scan",
+        "--scan-id",
+        scan["scanId"],
+        "--thread-id",
+        "native-owner",
+        "--claim-token",
+        scan["handoffClaimToken"],
+        check=artifact_state == "sealed",
+    )
+    if artifact_state == "sealed":
+        assert joined["startDisposition"] == "joined"
+        assert joined["scan"]["scanId"] == scan["scanId"]
+        assert joined["scan"]["handoffClaimToken"] == scan["handoffClaimToken"]
+        assert joined["scan"]["progress"]["status"] == "running"
+        assert complete()["progress"]["status"] == "complete"
+    else:
+        assert joined["returncode"] != 0
+        if artifact_state == "tampered":
+            assert "Cannot resume sealed scan" in joined["stderr"]
+        else:
+            assert "checkout" in joined["stderr"].lower()
+        assert (
+            run_workbench(state, "get-scan", "--scan-id", scan["scanId"])["scan"]["progress"][
+                "status"
+            ]
+            == "running"
+        )
+    assert {name: (directory / name).read_bytes() for name in artifacts} == artifacts
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        assert connection.execute(identity_query, (scan["scanId"],)).fetchone() == original_identity
 
 
 @pytest.mark.parametrize("saved_recipe", [False, True])
