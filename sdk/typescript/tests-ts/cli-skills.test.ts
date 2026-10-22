@@ -1509,6 +1509,18 @@ process.stdout.write(JSON.stringify({
         ] as const
       ).map(([detail, advice]) => [command, detail, advice] as const),
     ),
+    ...(["validate", "patch", "verify-fix"] as const).flatMap((command) =>
+      (
+        [
+          ["response_code=401", "Authentication failed."],
+          [
+            "response-code=403",
+            "The selected model is unavailable for the current credentials.",
+          ],
+          ["responseCode=429", "The request was rate limited. Wait and retry."],
+        ] as const
+      ).map(([detail, advice]) => [command, detail, advice] as const),
+    ),
     [
       "validate",
       "Provider configured in config.toml returned 401 Unauthorized",
@@ -1711,6 +1723,10 @@ process.stdout.write(JSON.stringify({
         `HTTP response code ${status}`,
         `response code: ${status}`,
         `response code: "${status}"`,
+        `response_code=${status}`,
+        `response-code=${status}`,
+        `responseCode=${status}`,
+        `HTTP response_code=${status}`,
         `status code ${status}`,
         `status_code=${status}`,
         `{"status":${status}}`,
@@ -1723,6 +1739,9 @@ process.stdout.write(JSON.stringify({
         `parse failed on line "${status}"`,
         `failed after ${status} bytes`,
         `error code: ${status}`,
+        `response_code_cache=${status}`,
+        `response-code-count ${status}`,
+        `responseCodeCount=${status}`,
         `${status} bytes read`,
         status,
       ].map((detail) => [detail, null] as const),
@@ -1777,11 +1796,15 @@ process.stdout.write(JSON.stringify({
     "model.not.found",
     "invalid.api.key",
     "token.expired",
+    "response_code=401",
+    "response-code=403",
+    "responseCode=429",
   ])("keeps endpoint components separate from diagnostic code %s", (code) => {
     for (const url of [
       `https://${code}.example/v1`,
       `https://example.test/${code}/v1`,
       `https://example.test/${code}`,
+      `https://example.test/v1?${code}`,
       `https://example.test/v1?error=${code}`,
       `https://example.test/v1?${code}=synthetic`,
       `https://example.test/v1#${code}`,
@@ -1793,6 +1816,7 @@ process.stdout.write(JSON.stringify({
       expect(message).toContain("could not connect");
       expect(message).not.toContain("Authentication failed");
       expect(message).not.toContain("selected model is unavailable");
+      expect(message).not.toContain("rate limited");
     }
   });
 

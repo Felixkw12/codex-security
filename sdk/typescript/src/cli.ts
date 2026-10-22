@@ -9021,7 +9021,7 @@ export function skillCommandFailure(
     ? ""
     : diagnosticDetail;
   const classificationDetail = adviceDetail.replace(
-    /\b(?:(?:http(?:\/\d+(?:\.\d+)?)?(?:[ \t]*(?:response[ \t]+code|error(?:[ \t]+code)?|status(?:[ _-]?code)?|code))?|response[ \t]+code|status(?:[ _-]?code)?)(?:["']?[ \t]*[:=][ \t]*|[ \t]+)["']?(401|403|429)|(401|403|429))\b/giu,
+    /\b(?:(?:http(?:\/\d+(?:\.\d+)?)?(?:[ \t]*(?:response(?:[ \t]+|[_-])?code|error(?:[ \t]+code)?|status(?:[ _-]?code)?|code))?|response(?:[ \t]+|[_-])?code|status(?:[ _-]?code)?)(?:["']?[ \t]*[:=][ \t]*|[ \t]+)["']?(401|403|429)|(401|403|429))\b/giu,
     (match, status: string | undefined) => (status ? match : ""),
   );
   const classification = classifyConnectionFailure(classificationDetail);
