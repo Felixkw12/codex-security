@@ -486,6 +486,141 @@ describe("SCA input selection", () => {
       expect(direct.diagnostics).toEqual([]);
     },
   );
+  test.each([
+    "checkout",
+    "worktree",
+    "invalid-marker",
+    "case-variant",
+  ] as const)(
+    "filesystem inventory respects nested %s boundaries",
+    async (kind) => {
+      const { root, repository, output } = await setup();
+      const nested = join(repository, "container", "nested-checkout");
+      await mkdir(join(repository, "ordinary", "deep"), { recursive: true });
+      await mkdir(join(repository, "container"));
+      const git = (cwd: string, args: string[]) =>
+        execFile("git", [
+          "-c",
+          `core.hooksPath=${join(root, "empty-hooks")}`,
+          "-c",
+          "commit.gpgSign=false",
+          "-c",
+          "user.name=Synthetic",
+          "-c",
+          "user.email=synthetic@example.test",
+          "-C",
+          cwd,
+          ...args,
+        ]);
+      let nestedRepository = true;
+      if (kind === "worktree") {
+        const owner = join(root, "worktree-owner");
+        await mkdir(owner);
+        await git(owner, ["init", "--quiet"]);
+        await writeFile(join(owner, "README"), "Synthetic worktree fixture\n");
+        await git(owner, ["add", "README"]);
+        await git(owner, ["commit", "--quiet", "-m", "Synthetic fixture"]);
+        await git(owner, [
+          "worktree",
+          "add",
+          "--quiet",
+          "--detach",
+          nested,
+          "HEAD",
+        ]);
+      } else {
+        await mkdir(nested);
+        if (kind === "invalid-marker")
+          await writeFile(join(nested, ".git"), "invalid gitfile\n");
+        else {
+          await git(nested, ["init", "--quiet"]);
+          if (kind === "case-variant") {
+            await filesystem.rename(
+              join(nested, ".git"),
+              join(nested, "git-metadata"),
+            );
+            await filesystem.rename(
+              join(nested, "git-metadata"),
+              join(nested, ".GIT"),
+            );
+            nestedRepository = await git(nested, [
+              "rev-parse",
+              "--is-inside-work-tree",
+            ]).then(
+              ({ stdout }) => stdout.trim() === "true",
+              () => false,
+            );
+          }
+        }
+      }
+      for (const directory of [
+        repository,
+        join(repository, "ordinary"),
+        join(repository, "ordinary", "deep"),
+        nested,
+      ])
+        await writeFile(join(directory, "package-lock.json"), npmLock());
+      const scanned: string[] = [];
+      const result = await runOsvScan(
+        { repositoryPath: repository, outputDir: output },
+        {
+          executable: process.execPath,
+          runProcess: async (_executable, argv) => {
+            if (argv[0] === "--version")
+              return { stdout: "2.6.0", stderr: "", exitCode: 0 };
+            const path = argv.at(-1)!;
+            scanned.push(path);
+            return {
+              stdout: JSON.stringify(rawOutput(path)),
+              stderr: "",
+              exitCode: 0,
+            };
+          },
+        },
+      );
+      expect(result.status).toBe(nestedRepository ? "partial" : "completed");
+      expect(result.coverage.status).toBe(
+        nestedRepository ? "partial" : "complete",
+      );
+      const expected = [
+        "ordinary/deep/package-lock.json",
+        "ordinary/package-lock.json",
+        "package-lock.json",
+      ];
+      if (!nestedRepository)
+        expected.unshift("container/nested-checkout/package-lock.json");
+      expect(result.coverage.inputs.map((input) => input.path)).toEqual(
+        expected,
+      );
+      expect(
+        result.components.map((component) => component.sourcePath).sort(),
+      ).toEqual(expected);
+      expect(scanned).toHaveLength(expected.length);
+      expect(scanned.some((path) => path.includes("nested-checkout"))).toBe(
+        !nestedRepository,
+      );
+      expect(result.diagnostics).toHaveLength(nestedRepository ? 1 : 0);
+      if (nestedRepository) {
+        expect(result.diagnostics[0]).toContain(
+          "Untracked nested Git repository container/nested-checkout",
+        );
+        expect(result.coverage.limitations.join("\n")).toContain(
+          "coverage is incomplete",
+        );
+      }
+      if (kind === "invalid-marker")
+        await expect(discoverScaInputs(nested)).rejects.toThrow(
+          "Could not determine the Git worktree root",
+        );
+      else {
+        const direct = await discoverScaInputs(nested);
+        expect(direct.inputs.map((input) => input.path)).toEqual([
+          "package-lock.json",
+        ]);
+        expect(direct.diagnostics).toEqual([]);
+      }
+    },
+  );
   test("selected directory inventory does not include sibling files or gitlinks", async () => {
     const { repository, output } = await setup();
     await initializedSubmodule(repository);

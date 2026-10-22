@@ -536,10 +536,18 @@ async function repositoryFiles(
     };
   }
   const files: string[] = [];
+  const nestedRepositories: string[] = [];
   const pending = [repository];
   while (pending.length) {
     signal?.throwIfAborted();
     const directory = pending.pop()!;
+    if (
+      directory !== repository &&
+      (await gitMarkerRoot(directory, signal, "nearest")) === directory
+    ) {
+      nestedRepositories.push(slash(relative(repository, directory)));
+      continue;
+    }
     for (const entry of await readdir(directory, { withFileTypes: true })) {
       if (entry.name === ".git" || entry.name === "node_modules") continue;
       const path = join(directory, entry.name);
@@ -550,7 +558,7 @@ async function repositoryFiles(
       } else files.push(relative(repository, path));
     }
   }
-  return { files, submodules: [], nestedRepositories: [], skipWorktree: [] };
+  return { files, submodules: [], nestedRepositories, skipWorktree: [] };
 }
 
 type ScaInputDiscovery = Pick<
