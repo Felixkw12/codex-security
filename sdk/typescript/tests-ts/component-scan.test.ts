@@ -1864,7 +1864,7 @@ test.each([
         const [command, argv, options] = args;
         // Node needs a script argument before Codex's app-server flags. The
         // preload implements its permission RPC and leaves exec launches intact.
-        return command === node &&
+        return command === runtime.executablePathForSpawn(node) &&
           Array.isArray(argv) &&
           argv.includes("app-server")
           ? spawn(command, ["exec", ...argv], options)
