@@ -1916,18 +1916,26 @@ test("complete zero-match scan needs no authentication or model", async () => {
   expect(calls).toEqual({ runtime: 0, model: 0, scanner: 1 });
 });
 
-test("completed assessment cannot promote incomplete matching coverage", async () => {
-  const { client, repository, outputDir } = await fixture({
+test("completed assessment cannot promote or continue incomplete matching coverage", async () => {
+  const { client, repository, outputDir, calls } = await fixture({
     scannerStatus: "partial",
   });
   await using security = client;
-  const result = await security.scanDependencies({
-    repositoryPath: repository,
-    outputDir,
-  });
+  const options = { repositoryPath: repository, outputDir };
+  const result = await security.scanDependencies(options);
   expect(result.status).toBe("partial");
   expect(result.coverage.status).toBe("partial");
   expect(result.assessments[0]!.status).toBe("completed");
+  const checkpoint = await readFile(join(outputDir, "sca-result.json"));
+  const report = await readFile(join(outputDir, "report.md"));
+  await expect(security.scanDependencies(options)).rejects.toThrow(
+    "Start a new run in a new output directory to refresh matching",
+  );
+  expect(calls).toEqual({ runtime: 1, model: 1, scanner: 1 });
+  expect(await readFile(join(outputDir, "sca-result.json"))).toEqual(
+    checkpoint,
+  );
+  expect(await readFile(join(outputDir, "report.md"))).toEqual(report);
 });
 
 test("failed matching without assessable matches retains its failure status", async () => {
@@ -2839,6 +2847,36 @@ test("finalizes an interrupted checkpoint with all assessments already saved", a
   expect(result.model.cost).toEqual(checkpoint.model.cost);
   expect(f.turns).toHaveLength(2);
   expect(f.calls.scanner).toBe(1);
+});
+
+test("continues unfinished assessments after incomplete matching without repeating matching", async () => {
+  const f = await fixture({
+    scannerStatus: "partial",
+    turns: ["completed", "malformed"],
+  });
+  await using security = f.client;
+  const options = { repositoryPath: f.repository, outputDir: f.outputDir };
+  const initial = await security.scanDependencies(options);
+  expect(initial.coverage.status).toBe("partial");
+  expect(initial.assessments.map((item) => item.status)).toEqual([
+    "completed",
+    "failed",
+  ]);
+  const resumed = await security.scanDependencies(options);
+  expect(resumed.status).toBe("partial");
+  expect(resumed.coverage).toEqual(initial.coverage);
+  expect(resumed.assessments[0]).toEqual(initial.assessments[0]);
+  expect(resumed.assessments[1]!.status).toBe("completed");
+  expect(f.turns).toHaveLength(3);
+  expect(f.calls).toEqual({ runtime: 1, model: 2, scanner: 1 });
+  const checkpoint = await readFile(join(f.outputDir, "sca-result.json"));
+  await expect(security.scanDependencies(options)).rejects.toThrow(
+    "Start a new run in a new output directory to refresh matching",
+  );
+  expect(await readFile(join(f.outputDir, "sca-result.json"))).toEqual(
+    checkpoint,
+  );
+  expect(f.calls).toEqual({ runtime: 1, model: 2, scanner: 1 });
 });
 
 test("source drift during inventory does not create a resumable checkpoint", async () => {

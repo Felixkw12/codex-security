@@ -2833,7 +2833,9 @@ cs scan dependencies . --output-dir /path/outside/repository/dependency-results 
 ```
 
 Continuation retains completed assessments and scanner facts, and retries only
-unfinished or failed assessments. It verifies the original source snapshot
+unfinished or failed assessments. If matching was incomplete and every recorded
+advisory has already been assessed, start a new run in a new output directory to
+repeat matching. Continuation verifies the original source snapshot
 (including dirty and ignored files), model, reasoning effort, other native
 `model_*` settings (such as verbosity and context limits), provider,
 developer, model, and compaction instructions (including selected file paths

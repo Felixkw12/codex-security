@@ -67,11 +67,14 @@ function componentFor(result: ScaResult, match: ScaMatch): ScaComponent {
 }
 
 function code(value: string): string {
-  value = value.replace(/\r\n?|\n/g, " ");
   const longest = Math.max(
     0,
     ...(value.match(/`+/g) ?? []).map((run) => run.length),
   );
+  if (/[\r\n]/u.test(value)) {
+    const fence = "`".repeat(Math.max(3, longest + 1));
+    return `\n\n${fence}\n${value}\n${fence}\n\n`;
+  }
   const delimiter = "`".repeat(longest + 1);
   return `${delimiter} ${value} ${delimiter}`;
 }

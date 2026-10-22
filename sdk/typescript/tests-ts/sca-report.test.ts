@@ -301,10 +301,10 @@ describe("SCA report", () => {
   });
 
   test.each(["\n", "\r\n", "\r"])(
-    "renders affected-package values as literal inline text with %p line breaks",
+    "renders affected-package values as literal text with %p line breaks",
     (newline) => {
       const result = fixture();
-      const value = `synthetic\`one\`\`two${newline}${newline}# Fabricated summary${newline}${newline}[synthetic](https://example.test/package) <img src="https://example.test/image.png">`;
+      const value = `synthetic\`one\`\`two${newline}\`\`\`${newline}${newline}# Fabricated summary${newline}${newline}[synthetic](https://example.test/package) <img src="https://example.test/image.png">`;
       Object.assign(result.components[0]!, {
         name: value,
         version: value,
@@ -337,6 +337,7 @@ describe("SCA report", () => {
       const summary = renderScaReport(result)
         .split("## Affected packages\n\n")[1]!
         .split("\n\n## ")[0]!;
+      expect(summary).toContain(value);
       const rendered = Bun.markdown.html(summary);
       expect(rendered).not.toMatch(/<(?:a|img|h[1-6])\b/u);
       expect(rendered).toContain("<code>");

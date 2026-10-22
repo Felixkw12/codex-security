@@ -989,7 +989,11 @@ export class CodexSecurity {
           throw new CodexSecurityError(
             "This dependency run has no source checkpoint for continuation. Start a new run in a new output directory.",
           );
-        if (result.status === "completed")
+        if (
+          result.status === "completed" ||
+          (result.coverage.status !== "complete" &&
+            result.assessments.every((item) => item.status === "completed"))
+        )
           throw new CodexSecurityError(
             "All advisory assessments are already complete. Start a new run in a new output directory to refresh matching.",
           );
