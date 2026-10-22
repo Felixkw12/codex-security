@@ -1741,6 +1741,80 @@ packages:
       ).toBe(true);
     },
   );
+  test.each(
+    ["https", "HTTPS", "HtTpS", "HTTP"].flatMap((scheme) =>
+      ["bare", "named", "importer", "snapshot", "registry"].map((layout) => ({
+        scheme,
+        layout,
+      })),
+    ),
+  )(
+    "preserves pnpm $scheme URL provenance in $layout references",
+    async ({ scheme, layout }) => {
+      const { repository, output } = await setup();
+      const resolution = `${scheme}://registry.npmjs.org/synthetic-lib/-/synthetic-lib-1.2.0.tgz`;
+      const key =
+        layout === "bare"
+          ? resolution
+          : layout === "named"
+            ? `synthetic-lib@${resolution}`
+            : "synthetic-lib@1.2.0";
+      await writeFile(
+        join(repository, "pnpm-lock.yaml"),
+        JSON.stringify({
+          lockfileVersion: "9.0",
+          ...(layout === "importer"
+            ? {
+                importers: {
+                  ".": {
+                    dependencies: {
+                      "direct-lib": {
+                        specifier: resolution,
+                        version: resolution,
+                      },
+                    },
+                  },
+                },
+              }
+            : {}),
+          packages: {
+            [key]: {
+              name: "synthetic-lib",
+              version: "1.2.0",
+              resolution: { tarball: resolution },
+            },
+          },
+          snapshots: {
+            [key]:
+              layout === "snapshot"
+                ? { dependencies: { "direct-lib": resolution } }
+                : {},
+          },
+        }),
+      );
+      const result = await runOsvScan(
+        { repositoryPath: repository, outputDir: output },
+        {
+          executable: process.execPath,
+          runProcess: async (_exe, argv) => ({
+            stdout:
+              argv[0] === "--version"
+                ? "2.6.0"
+                : JSON.stringify(rawOutput("pnpm-lock.yaml", [advisory("A")])),
+            stderr: "",
+            exitCode: argv[0] === "--version" ? 0 : 1,
+          }),
+        },
+      );
+      const direct = layout !== "registry";
+      expect(result.status).toBe(direct ? "partial" : "completed");
+      expect(result.coverage.unresolvedPackages).toBe(direct ? 1 : 0);
+      if (direct)
+        expect(result.coverage.limitations.join("\n")).toContain(resolution);
+      expect(result.components).toHaveLength(1);
+      expect(result.matches).toHaveLength(1);
+    },
+  );
   test.each([true, false])(
     "accounts for pnpm local and direct URL references when file tuples are emitted: %p",
     async (emitted) => {

@@ -183,7 +183,8 @@ function pnpmLocalReferences(
         "@",
         packageKey.startsWith("@") ? 1 : 0,
       );
-      const directReference = /^(?:file:|https?:\/\/)/u.test(packageKey);
+      const directReference =
+        packageKey.startsWith("file:") || /^https?:\/\//iu.test(packageKey);
       const keyName =
         directReference || separator === -1
           ? ""
@@ -198,12 +199,14 @@ function pnpmLocalReferences(
         : null;
       // Public registry tarballs retain registry identity; explicit direct URL
       // keys and alternate tarball origins remain unresolved.
-      const resolution = /^(?:file:|link:|https?:\/\/)/u.test(keyVersion)
-        ? keyVersion
-        : typeof tarball === "string" &&
-            (/^(?:file|link):/u.test(tarball) || alternateNpmTarball(tarball))
-          ? tarball
-          : null;
+      const resolution =
+        /^(?:file:|link:)/u.test(keyVersion) ||
+        /^https?:\/\//iu.test(keyVersion)
+          ? keyVersion
+          : typeof tarball === "string" &&
+              (/^(?:file|link):/u.test(tarball) || alternateNpmTarball(tarball))
+            ? tarball
+            : null;
       if (resolution === null) continue;
       const name =
         typeof entry["name"] === "string" && entry["name"] !== ""
@@ -242,7 +245,8 @@ function pnpmLocalReferences(
             : dependency;
           if (
             typeof version !== "string" ||
-            !/^(?:file:|link:|https?:\/\/)/u.test(version)
+            (!/^(?:file:|link:)/u.test(version) &&
+              !/^https?:\/\//iu.test(version))
           )
             continue;
           if (
