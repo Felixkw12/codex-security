@@ -2637,6 +2637,7 @@ describe("connected Linear publication", () => {
     const publication = preparedPublication(3);
     const controller = new AbortController();
     const updates: PublishScanProgress[] = [];
+    const observations: PublicationTelemetry[] = [];
     let handoffFile: string | undefined;
     let publicationFile: string | undefined;
     let childStopped = false;
@@ -2650,6 +2651,7 @@ describe("connected Linear publication", () => {
           ...OPTIONS,
           signal: controller.signal,
           onProgress: (event) => updates.push(event),
+          onTelemetry: (event) => observations.push(event),
         },
         dependencies(publication, {
           runCodex: async (
@@ -2710,7 +2712,19 @@ describe("connected Linear publication", () => {
       ],
       failed: [{ findingId: "finding-3" }],
       counts: { findings: 3, created: 2, failed: 1 },
+      telemetry: {
+        outcome: "indeterminate",
+        attempted: true,
+        counts: { created: 2, acknowledged: 2, failed: null },
+      },
     });
+    expect(observations).toMatchObject([
+      {
+        outcome: "indeterminate",
+        attempted: true,
+        counts: { created: 2, acknowledged: 2, failed: null },
+      },
+    ]);
     expect(JSON.stringify(receipt)).not.toContain("SEC-UNVERIFIED");
     expect(updates.some((event) => event.type === "completed")).toBe(false);
 

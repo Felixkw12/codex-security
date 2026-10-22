@@ -267,10 +267,10 @@ export async function publishScanInternal(
   } catch (error) {
     telemetry.notify(
       telemetry.snapshot(
-        options.signal?.aborted
-          ? "canceled"
-          : telemetry.outcome === "indeterminate"
-            ? "indeterminate"
+        telemetry.outcome === "indeterminate"
+          ? "indeterminate"
+          : options.signal?.aborted
+            ? "canceled"
             : "failed",
       ),
     );
@@ -327,10 +327,10 @@ async function publishScanAttempt(
     environment: NodeJS.ProcessEnv,
   ) => {
     receipt.telemetry = telemetry.snapshot(
-      options.signal?.aborted
-        ? "canceled"
-        : receipt.indeterminate
-          ? "indeterminate"
+      receipt.indeterminate
+        ? "indeterminate"
+        : options.signal?.aborted
+          ? "canceled"
           : telemetry.outcome,
     );
     await (dependencies.writeReceipt ?? writePublicationReceipt)(
