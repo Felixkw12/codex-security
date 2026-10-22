@@ -426,8 +426,7 @@ def test_legacy_tied_root_parent_preserves_accepted_pending_evidence(
     originals = {path: (scan.scan_dir / path).read_bytes() for path in frozen}
     children = saved._children
     monkeypatch.setattr(
-        saved,
-        "_children",
+        "workbench.saved_sources._children",
         lambda root, relative: sorted(children(root, relative), reverse=reverse_listing),
     )
     prepared_documents = []
@@ -600,8 +599,7 @@ def test_legacy_pending_ties_aggregate_accepted_provenance(
     originals = {path: (scan.scan_dir / path).read_bytes() for path in frozen}
     children = saved._children
     monkeypatch.setattr(
-        saved,
-        "_children",
+        "workbench.saved_sources._children",
         lambda root, relative: sorted(
             children(root, relative),
             key=lambda name: (name == unobserved_path.name) == accepted_first,

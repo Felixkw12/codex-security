@@ -682,8 +682,7 @@ def test_head_reselection_preserves_equal_or_newer_pending_evidence(
     os.utime(pending, ns=(pending_time, pending_time))
     children = saved._children
     monkeypatch.setattr(
-        saved,
-        "_children",
+        "workbench.saved_sources._children",
         lambda root, relative: sorted(children(root, relative), reverse=reverse_order),
     )
 
@@ -732,8 +731,7 @@ def test_reselection_keeps_the_selected_model_and_newer_result_precedence(
             )
     children = saved._children
     monkeypatch.setattr(
-        saved,
-        "_children",
+        "workbench.saved_sources._children",
         lambda root, relative: sorted(children(root, relative), reverse=reverse_order),
     )
 
@@ -772,8 +770,7 @@ def test_partial_reselection_keeps_independent_accepted_dispositions(
     os.utime(head, ns=(head_time, head_time))
     children = saved._children
     monkeypatch.setattr(
-        saved,
-        "_children",
+        "workbench.saved_sources._children",
         lambda root, relative: sorted(children(root, relative), reverse=reverse_order),
     )
 
@@ -1436,8 +1433,7 @@ def test_unreadable_heads_preserve_legacy_accepted_results(
     # Content-addressed filenames can place either disposition first.
     children = saved._children
     monkeypatch.setattr(
-        saved,
-        "_children",
+        "workbench.saved_sources._children",
         lambda root, relative: sorted(children(root, relative), reverse=reverse_order),
     )
     relative = result.relative_to(scan.scan_dir).as_posix()
@@ -1932,8 +1928,7 @@ def test_inherited_model_uses_same_selection_on_initial_and_frozen_publication(
         os.utime(unselected, ns=(50, 50))
         children = saved._children
         monkeypatch.setattr(
-            saved,
-            "_children",
+            "workbench.saved_sources._children",
             lambda root, relative: sorted(
                 children(root, relative), key=lambda name: name != unselected.name
             ),
@@ -2060,8 +2055,7 @@ def test_successful_completion_keeps_accepted_root_model_fallback(
     os.utime(unaccepted, ns=(50, 50))
     children = saved._children
     monkeypatch.setattr(
-        saved,
-        "_children",
+        "workbench.saved_sources._children",
         lambda root, relative: sorted(
             children(root, relative), key=lambda name: name != unaccepted.name
         ),
@@ -2133,8 +2127,7 @@ def test_recovery_keeps_known_model_source_with_equal_model_duplicates(
         os.utime(duplicate_path, ns=(50, 50))
         children = saved._children
         monkeypatch.setattr(
-            saved,
-            "_children",
+            "workbench.saved_sources._children",
             lambda root, relative: sorted(
                 children(root, relative),
                 key=lambda name: (

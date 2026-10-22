@@ -190,7 +190,7 @@ def test_head_capture_includes_checkpoint_published_after_enumeration(
             published.append(checkpoint)
         return names
 
-    monkeypatch.setattr(saved, "_children", publish_after_listing)
+    monkeypatch.setattr("workbench.saved_sources._children", publish_after_listing)
     call_workbench(
         monkeypatch,
         state,
