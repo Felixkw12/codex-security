@@ -1098,6 +1098,7 @@ process.stdout.write(input);
       initial("worktree", "add", "-b", "linked", repository);
       checkout = repository;
     }
+    const originalContents = await readFile(join(checkout, "app.ts"));
     const index = repositoryGit(checkout)(
       "rev-parse",
       "--path-format=absolute",
@@ -1148,7 +1149,9 @@ process.stdout.write(input);
       expect(result.stdout + result.stderr).toContain(
         "Windows sandbox cannot protect Git control",
       );
-      expect(await readFile(join(checkout, "app.ts"), "utf8")).toBe("before\n");
+      expect(await readFile(join(checkout, "app.ts"))).toEqual(
+        originalContents,
+      );
     } else if (
       (mode === "symlink" ||
         mode === "directory-symlink" ||
@@ -1161,7 +1164,9 @@ process.stdout.write(input);
         expect(result.stdout + result.stderr).toContain(
           "cannot enforce sandbox read-only path",
         );
-      expect(await readFile(join(checkout, "app.ts"), "utf8")).toBe("before\n");
+      expect(await readFile(join(checkout, "app.ts"))).toEqual(
+        originalContents,
+      );
     } else {
       expect(result.exitCode, result.stderr).toBe(0);
       expect(JSON.parse(result.stdout).files).toContain(
