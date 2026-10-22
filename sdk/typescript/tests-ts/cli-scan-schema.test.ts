@@ -163,6 +163,37 @@ const retainedThreatModels: (ThreatModel | null)[] = [
   { format: "markdown", content: "# Synthetic threat model\n" },
 ];
 
+test.each(["absent", "saved", "failed"] as const)(
+  "declares optional owner-suggestion fields for a %s result",
+  async (outcome) => {
+    const schema = await scanOutputSchema();
+    const result = fakeResult();
+    if (outcome === "saved")
+      result.ownerSuggestionsPath = join(result.scanDir, "owners.json");
+    if (outcome === "failed")
+      result.ownerSuggestionsError = "Synthetic owner suggestion failure.";
+    const stdout = capture();
+    expect(
+      await main(
+        ["scan", ".", "--json"],
+        stdout.stream,
+        capture().stream,
+        dependencies({ result }),
+      ),
+    ).toBe(0);
+    const data = JSON.parse(stdout.text());
+    expect(data).toEqual(result.toJSON());
+    const validate = new Ajv2020({ strict: false }).compile(schema);
+    expect(validate(data), JSON.stringify(validate.errors)).toBe(true);
+    for (const field of ["ownerSuggestionsPath", "ownerSuggestionsError"]) {
+      expect(validate({ ...data, [field]: "Synthetic optional value." })).toBe(
+        true,
+      );
+      expect(validate({ ...data, [field]: 1 })).toBe(false);
+    }
+  },
+);
+
 test.each(retainedThreatModels)(
   "declares nullable threat-model fields from actual scan output: %j",
   async (threatModel) => {

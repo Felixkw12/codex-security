@@ -1109,6 +1109,8 @@ const completedScanOutputSchema = z.looseObject({
   cost: z.record(z.string(), z.unknown()).nullable(),
   turn: z.record(z.string(), z.unknown()),
   warnings: z.array(z.string()).optional(),
+  ownerSuggestionsPath: z.string().optional(),
+  ownerSuggestionsError: z.string().optional(),
   patchSeverity: FailureSeveritySchema.optional(),
   patches: z.array(z.record(z.string(), z.unknown())).optional(),
   pullRequest: z.record(z.string(), z.unknown()).optional(),
@@ -4511,7 +4513,7 @@ export async function main(
               failureSeverity: options.failOnSeverity,
               maxCostUsd: options.maxCost,
               maxTimeMinutes: options.maxTime,
-              codexOverrides: parseScanCodexOverrides(
+              codexOverrides: parseCodexOverrides(
                 options.codex,
                 options.model,
                 options.effort,
@@ -5133,7 +5135,7 @@ export async function main(
               ...pickScanSettings({ ...options, workers: undefined }),
               knowledgeBasePaths: options.knowledgeBase,
               maxCostUsd: options.maxCost,
-              codexOverrides: parseScanCodexOverrides(
+              codexOverrides: parseCodexOverrides(
                 options.codex,
                 options.model,
                 options.effort,
@@ -5449,7 +5451,7 @@ export async function main(
             config: {
               codexOverrides: mergeCodexOverrides(
                 resolved.config.codexOverrides,
-                parseScanCodexOverrides(
+                parseCodexOverrides(
                   options.codex,
                   options.model,
                   options.effort,
@@ -11056,21 +11058,6 @@ export function parseCodexOverrides(
       );
     }
   }
-  requireExternalProviderModel(
-    mergeCodexOverrides(defaults ?? {}, result),
-    provider,
-  );
-  return result;
-}
-
-function parseScanCodexOverrides(
-  values: readonly string[],
-  model?: string,
-  effort?: ModelCliOptions["effort"],
-  provider?: "openai" | "amazon-bedrock" | ExternalModelProvider,
-  defaults?: JsonObject,
-): JsonObject {
-  const result = parseCodexOverrides(values, model, effort, provider, defaults);
   const effective = mergeCodexOverrides(defaults ?? {}, result);
   requireExternalProviderModel(effective, scanModelProvider(effective));
   return result;

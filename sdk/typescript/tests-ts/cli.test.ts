@@ -2957,6 +2957,54 @@ describe("CLI", () => {
     }
   });
 
+  test.each(["openrouter", "fireworks", "amazon-bedrock"])(
+    "requires a model for native %s policy overrides before runtime creation",
+    async (provider) => {
+      for (const profile of [false, true]) {
+        const overrides = profile
+          ? ['profile="review"', `profiles.review.model_provider="${provider}"`]
+          : [`model_provider="${provider}"`];
+        for (const model of [undefined, "synthetic-provider-model"]) {
+          const stderr = capture();
+          const createPolicySecurity = mock((_config: CodexSecurityConfig) => {
+            throw new Error("Synthetic policy runtime reached.");
+          });
+          const deps = dependencies();
+          deps.createPolicySecurity = createPolicySecurity;
+          expect(
+            await main(
+              [
+                "policy",
+                ".",
+                "--headless",
+                "--json",
+                ...overrides.flatMap((value) => ["--codex", value]),
+                ...(model === undefined ? [] : ["--model", model]),
+              ],
+              capture().stream,
+              stderr.stream,
+              deps,
+            ),
+          ).toBe(2);
+          if (model === undefined) {
+            expect(createPolicySecurity).not.toHaveBeenCalled();
+            expect(stderr.text()).toContain(
+              `--model is required when using --provider ${provider}`,
+            );
+          } else {
+            expect(createPolicySecurity).toHaveBeenCalledTimes(1);
+            expect(
+              createPolicySecurity.mock.lastCall?.[0].codexOverrides,
+            ).toMatchObject({ model });
+            expect(stderr.text()).toContain(
+              "Synthetic policy runtime reached.",
+            );
+          }
+        }
+      }
+    },
+  );
+
   test("ignores override key whitespace and preserves literal string contents", () => {
     expect(
       parseCodexOverrides([
