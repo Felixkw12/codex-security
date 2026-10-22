@@ -18,6 +18,7 @@ import {
   readFile,
   rename,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 
@@ -98,7 +99,11 @@ async function interruptedScan(
     | "auth"
     | "inheritedPermissions"
     | "preserveProviderEnvironment"
-  > & { config?: JsonObject } = {},
+  > & {
+    config?: JsonObject;
+    savedTarget?: { kind: "paths"; paths: string[] };
+    savedRepositoryAlias?: boolean;
+  } = {},
   resolvedDeep = false,
   startedMerge = true,
   ordinaryPass: {
@@ -203,10 +208,17 @@ async function interruptedScan(
     !bulk && knowledgeState === "saved" && settings.knowledgeBasePaths?.length
       ? await readKnowledgeBaseSnapshot(settings.knowledgeBasePaths)
       : undefined;
-  const { config: savedConfig, ...scanSettings } = settings;
+  const {
+    config: savedConfig,
+    savedTarget,
+    savedRepositoryAlias,
+    ...scanSettings
+  } = settings;
   const recipe = {
-    repository,
-    target: { kind: "repository", paths: [] },
+    repository: savedRepositoryAlias
+      ? `${repository}/../repository`
+      : repository,
+    target: savedTarget ?? { kind: "repository", paths: [] },
     mode,
     config: {
       model: "gpt-5.6-sol",
@@ -1625,6 +1637,20 @@ test.each([
   "wrong-target",
   "wrong-output",
   "changed-artifact",
+  "deleted-target",
+  "moved-target",
+  "managed-deleted-target",
+  "managed-moved-target",
+  "git-deleted-target",
+  "scoped-symlink",
+  "native-recipe-alias",
+  "state-in-target",
+  "state-in-wrong-target",
+  "temp-in-aliased-target",
+  "plain-parent-caller",
+  "wrong-scope",
+  "unsealed-deleted-target",
+  "lost-seal",
 ] as const)(
   "sealed publication reads without authentication or execution (%s)",
   async (scenario) => {
@@ -1636,9 +1662,23 @@ test.each([
       input_tokens: 1375,
       output_tokens: 13,
     })!;
-    const f = await interruptedScan("deep", false, {}, true, true, {
-      cost: childCost,
-    });
+    const f = await interruptedScan(
+      "deep",
+      scenario === "git-deleted-target",
+      {
+        ...(scenario === "scoped-symlink"
+          ? { savedTarget: { kind: "paths" as const, paths: ["source.py"] } }
+          : {}),
+        ...(scenario === "native-recipe-alias"
+          ? { savedRepositoryAlias: true }
+          : {}),
+      },
+      true,
+      true,
+      {
+        cost: childCost,
+      },
+    );
     await appendFile(
       f.sessionPath,
       JSON.stringify(
@@ -1656,7 +1696,8 @@ test.each([
     }
     await finishDiscovery(f);
     await f.command(["prepare-scan-completion", "--scan-id", f.scanId]);
-    const native = scenario !== "managed" && scenario !== "selected-python";
+    const native =
+      !scenario.startsWith("managed") && scenario !== "selected-python";
     const owner = "synthetic-native-owner";
     const claim = randomUUID();
     if (native) {
@@ -1677,7 +1718,7 @@ with sqlite3.connect(sys.argv[1]) as connection:
     }
     let repository = f.repository;
     let outputDir = f.scanDir;
-    if (scenario === "wrong-target") {
+    if (scenario === "wrong-target" || scenario === "state-in-wrong-target") {
       repository = join(f.root, "other-repository");
       await mkdir(repository);
       await writeFile(
@@ -1692,6 +1733,35 @@ with sqlite3.connect(sys.argv[1]) as connection:
     }
     if (scenario === "changed-artifact")
       await appendFile(join(f.scanDir, "findings.json"), "\n");
+    if (scenario.endsWith("deleted-target"))
+      await rm(repository, { recursive: true });
+    if (scenario.endsWith("moved-target"))
+      await rename(repository, join(f.root, "moved-repository"));
+    if (scenario === "scoped-symlink")
+      await symlink(repository, join(repository, "alias"), "junction");
+    if (
+      scenario === "state-in-target" ||
+      scenario === "state-in-wrong-target"
+    ) {
+      const state = join(repository, "state");
+      await cp(f.environment.CODEX_SECURITY_STATE_DIR, state, {
+        recursive: true,
+      });
+      f.environment.CODEX_SECURITY_STATE_DIR = state;
+    }
+    if (scenario === "temp-in-aliased-target") {
+      repository = join(f.root, "repository-alias");
+      await symlink(f.repository, repository, "junction");
+      await mkdir(join(f.repository, "temp"));
+    }
+    const removeSeal = async () => {
+      const path = join(f.scanDir, "scan-manifest.json");
+      const manifest = JSON.parse(await readFile(path, "utf8"));
+      delete manifest.scan.sealedAt;
+      delete manifest.scan.artifacts;
+      await writeFile(path, JSON.stringify(manifest));
+    };
+    if (scenario === "unsealed-deleted-target") await removeSeal();
     const artifactNames = [
       "scan-manifest.json",
       "findings.json",
@@ -1706,10 +1776,18 @@ with sqlite3.connect(sys.argv[1]) as connection:
     const commands: string[] = [];
     let authentications = 0;
     const originalPython = runtimeModule.resolvePluginPython;
+    const rejectsBeforePython =
+      scenario === "state-in-target" ||
+      scenario === "state-in-wrong-target" ||
+      scenario === "temp-in-aliased-target";
     const selectedPython =
-      scenario === "selected-python"
+      scenario === "selected-python" || rejectsBeforePython
         ? spyOn(runtimeModule, "resolvePluginPython").mockImplementation(
             (options) => {
+              if (rejectsBeforePython)
+                throw new Error(
+                  "Unsafe output must reject before Python lookup.",
+                );
               if (options?.configuredPath === undefined)
                 throw new Error("Synthetic ambient Python unavailable");
               return originalPython(options);
@@ -1744,15 +1822,27 @@ with sqlite3.connect(sys.argv[1]) as connection:
         resolvePluginPython: async () => f.python,
         runWorkbench: async (options, args, input) => {
           commands.push(args[0]!);
+          if (scenario === "lost-seal" && args[0] === "get-scan")
+            await removeSeal();
           return runWorkbench(options, args, input);
         },
       },
     );
+    const originalCwd = process.cwd();
+    const temporaryKey = process.platform === "win32" ? "TEMP" : "TMPDIR";
+    const originalTemporary = process.env[temporaryKey];
     try {
+      if (scenario === "plain-parent-caller") process.chdir(f.root);
+      if (scenario === "temp-in-aliased-target")
+        process.env[temporaryKey] = join(f.repository, "temp");
       const pending = client.run(repository, {
         mode: "deep",
         outputDir,
         maxCostUsd: 1,
+        ...(scenario === "wrong-scope" ? { target: ["source.py"] } : {}),
+        ...(scenario === "scoped-symlink"
+          ? { target: ["alias/source.py"] }
+          : {}),
         ...(native
           ? {
               registeredScan: {
@@ -1771,18 +1861,31 @@ with sqlite3.connect(sys.argv[1]) as connection:
       if (
         scenario === "managed" ||
         scenario === "native" ||
-        scenario === "selected-python"
+        scenario === "selected-python" ||
+        scenario === "deleted-target" ||
+        scenario === "moved-target" ||
+        scenario === "managed-deleted-target" ||
+        scenario === "managed-moved-target" ||
+        scenario === "git-deleted-target" ||
+        scenario === "scoped-symlink" ||
+        scenario === "native-recipe-alias" ||
+        scenario === "plain-parent-caller"
       ) {
         const result = await pending;
         if (scenario === "selected-python") {
           expect(result.threatModelPath).toBe(
             join(f.scanDir, "threatmodel.md"),
           );
-          for (const [options] of selectedPython!.mock.calls)
+          for (const [options] of selectedPython!.mock.calls) {
             expect(options).toMatchObject({
               configuredPath: f.python,
-              protectedRoot: f.repository,
             });
+            expect(
+              Array.isArray(options?.protectedRoot)
+                ? options.protectedRoot
+                : [options?.protectedRoot],
+            ).toContain(f.repository);
+          }
         }
         expect(result.cost).toEqual(expectedCost);
         expect(result.threadId).toBe(f.threadId);
@@ -1797,20 +1900,165 @@ with sqlite3.connect(sys.argv[1]) as connection:
             ? "another continuation"
             : scenario === "changed-artifact"
               ? "Cannot resume sealed scan"
-              : "match its target, directory and mode",
+              : scenario === "unsealed-deleted-target"
+                ? "Repository is not a directory"
+                : scenario === "lost-seal"
+                  ? "no longer sealed"
+                  : rejectsBeforePython
+                    ? "outside"
+                    : "match its target, directory and mode",
         );
         expect(commands).not.toContain("complete-scan");
+        if (rejectsBeforePython) expect(selectedPython).not.toHaveBeenCalled();
       }
       expect(authentications).toBe(0);
       expect(commands).not.toContain("get-scan-feedback");
+      if (scenario !== "lost-seal")
+        expect(
+          await Promise.all(
+            artifactNames.map((name) => readFile(join(f.scanDir, name))),
+          ),
+        ).toEqual(artifacts);
+    } finally {
+      process.chdir(originalCwd);
+      if (originalTemporary === undefined) delete process.env[temporaryKey];
+      else process.env[temporaryKey] = originalTemporary;
+      await client.close();
+      selectedPython?.mockRestore();
+    }
+  },
+);
+
+test.each([
+  "missing-home",
+  "denial-collision",
+  "missing-knowledge",
+  "corrupt-knowledge",
+] as const)(
+  "native preparation publishes sealed results without execution prerequisites (%s)",
+  async (scenario) => {
+    const denied = "/synthetic/private[archive]";
+    const knowledge = scenario.endsWith("knowledge")
+      ? join(await temporaryDirectory(), "architecture.md")
+      : undefined;
+    if (knowledge) await writeFile(knowledge, "Synthetic architecture.\n");
+    const f = await interruptedScan(
+      "deep",
+      false,
+      {
+        ...(knowledge ? { knowledgeBasePaths: [knowledge] } : {}),
+        inheritedPermissions: {
+          filesystem: { [denied]: "deny" },
+          network: { enabled: false },
+        },
+      },
+      true,
+    );
+    await finishDiscovery(f);
+    await f.command(["prepare-scan-completion", "--scan-id", f.scanId]);
+    if (scenario === "missing-knowledge")
+      await rm(join(f.scanDir, ".scan-knowledge.json"));
+    if (scenario === "corrupt-knowledge")
+      await writeFile(
+        join(f.scanDir, ".scan-knowledge.json"),
+        "invalid synthetic snapshot",
+      );
+    const owner = "synthetic-native-owner";
+    const claim = randomUUID();
+    execFileSync(f.python, [
+      "-c",
+      `import sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as connection:
+    connection.execute("UPDATE scans SET deep_scan_owner_thread_id = ?, handoff_claim_token = ? WHERE id = ?", sys.argv[2:])
+`,
+      join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+      owner,
+      claim,
+      f.scanId,
+    ]);
+    const artifactNames = [
+      "scan-manifest.json",
+      "findings.json",
+      "coverage.json",
+      "report.md",
+      DEEP_SCAN_CHECKPOINT,
+    ];
+    const before = await Promise.all(
+      artifactNames.map((name) => readFile(join(f.scanDir, name))),
+    );
+    const environment = {
+      ...f.environment,
+      CODEX_HOME:
+        scenario === "missing-home" ? join(f.root, "new-home") : f.codexHome,
+      CODEX_CLI_PATH: join(f.root, "unavailable-codex"),
+      CODEX_SECURITY_CONFIG_PATH: join(f.root, "unavailable-config.toml"),
+      CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH: join(
+        f.root,
+        "unavailable-deep-config.toml",
+      ),
+    };
+    const previous = Object.keys(environment).map(
+      (key) => [key, process.env[key]] as const,
+    );
+    const moduleUrl = new URL(
+      "../../../plugins/codex-security/mcp-app/src/native-scan.ts",
+      import.meta.url,
+    );
+    const { prepareNativeScan } = await import(moduleUrl.href);
+    let client: { close(): Promise<void> } | undefined;
+    try {
+      for (const [key, value] of Object.entries(environment)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      const prepared = await prepareNativeScan({
+        scan: {
+          scanId: f.scanId,
+          scanDir: f.scanDir,
+          targetPath: f.repository,
+          mode: "deep",
+          artifacts: {},
+          findingCount: 0,
+          findings: [],
+          handoffStatus: "delivered",
+          resultsRecoveryNeeded: true,
+          handoffClaimToken: claim,
+        },
+        recipe: f.recipe,
+        threadId: owner,
+        pluginRoot: PLUGIN_ROOT,
+        pythonPath: f.python,
+        stateDirectory: f.environment.CODEX_SECURITY_STATE_DIR,
+        parentSandbox: {
+          workspaceAccess: "read",
+          filesystemDenies: [],
+          ...(scenario === "denial-collision"
+            ? { literalFilesystemDenies: [denied] }
+            : {}),
+        },
+      });
+      if (knowledge) {
+        expect(prepared.options.knowledgeBasePaths).toBeUndefined();
+        expect(prepared.options.knowledgeBaseSnapshot).toBeUndefined();
+      }
+      client = prepared.client;
+      const result = await prepared.client.run(f.repository, prepared.options);
+      expect(result.manifest.scan.id).toBe(f.scanId);
+      expect(result.manifest.scan.sealedAt).toBeString();
+      expect(
+        (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
+      ).toMatchObject({ progress: { status: "complete" } });
       expect(
         await Promise.all(
           artifactNames.map((name) => readFile(join(f.scanDir, name))),
         ),
-      ).toEqual(artifacts);
+      ).toEqual(before);
     } finally {
-      await client.close();
-      selectedPython?.mockRestore();
+      await client?.close();
+      for (const [key, value] of previous) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
     }
   },
 );

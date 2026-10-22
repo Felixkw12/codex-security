@@ -19,7 +19,7 @@ import {
 import { capture } from "./cli-fixtures.js";
 
 test.each([0, 23])(
-  "native configuration fixture preserves early exit %s with its input still open",
+  "native configuration fixture preserves early exit %p with its input still open",
   async (exitCode) => {
     const child = spawn(
       process.execPath,
@@ -391,7 +391,6 @@ test.each(["omitted", "omitted with changed gates", "explicit"] as const)(
       }) => {
         await writeCodexConfig(join(ambientHome, "config.toml"), {});
         const scanConfig = join(root, "scan.toml");
-        const workerConfig = join(root, "workers.toml");
         const workerRuntime: JsonObject =
           settings !== "explicit"
             ? {}
@@ -403,14 +402,9 @@ test.each(["omitted", "omitted with changed gates", "explicit"] as const)(
                   api_key_model_discovery: true,
                 },
               };
-        await writeCodexConfig(scanConfig, {});
-        await writeCodexConfig(workerConfig, { worker_runtime: workerRuntime });
+        await writeCodexConfig(scanConfig, workerRuntime);
         const prompt = join(root, "prompt.md");
         await writeFile(prompt, "Synthetic worker request.");
-        const executor = new URL(
-          "../../../plugins/codex-security/mcp-app/src/deep-scan/executor.ts",
-          import.meta.url,
-        );
         const catalog = join(root, "catalog.json");
         await writeFile(
           catalog,
@@ -444,7 +438,6 @@ test.each(["omitted", "omitted with changed gates", "explicit"] as const)(
                 import.meta.url,
               ),
             ),
-            fileURLToPath(executor),
             prompt,
           ],
           {
@@ -455,7 +448,6 @@ test.each(["omitted", "omitted with changed gates", "explicit"] as const)(
               CODEX_CLI_PATH: environment["SYNTHETIC_NATIVE_CODEX"],
               CODEX_API_KEY: "SYNTHETIC_KEY",
               CODEX_SECURITY_CONFIG_PATH: scanConfig,
-              CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH: workerConfig,
             },
             stdio: ["pipe", "pipe", "pipe"],
             windowsHide: true,
@@ -489,7 +481,7 @@ test.each(["omitted", "omitted with changed gates", "explicit"] as const)(
             features: { plugins: false },
             analytics: { enabled: false },
           });
-          // The first worker initializes the executor's per-scan snapshot.
+          // The first worker initializes the composed scan's execution snapshot.
           const { threadId, resumed, ...baseline } = await worker("discovery");
           expect(threadId).toBeString();
           expect(resumed).toBe(false);

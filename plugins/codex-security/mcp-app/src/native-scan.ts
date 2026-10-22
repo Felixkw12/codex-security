@@ -1,3 +1,5 @@
+import { readKnowledgeBaseSnapshot } from "../../../../sdk/typescript/src/knowledge-base.js";
+import { canonicalizeModelSafePath } from "../../../../sdk/typescript/src/runtime.js";
 import { expandHomePath } from "../../../../sdk/typescript/src/codex-home.js";
 import { hasSealedScanArtifacts } from "../../../../sdk/typescript/src/scan-publication.js";
 import { join } from "node:path";
@@ -36,6 +38,7 @@ import type { NativeParentSandbox } from "./native-permissions.js";
 import {
   prepareAmbientExecution,
   nativeScanConfiguration,
+  readOnlyFilesystem,
 } from "../../../../sdk/typescript/src/execution-preparation.js";
 export { nativeScanConfiguration } from "../../../../sdk/typescript/src/execution-preparation.js";
 import type { ScanResults } from "./types.js";
@@ -130,21 +133,47 @@ export async function prepareNativeScan(
   input: NativeScanInput,
   signal?: AbortSignal,
 ): Promise<PreparedNativeScan> {
-  const environment: NodeJS.ProcessEnv = await snapshotNativeEnvironment();
+  const scanEnvironment = { ...process.env };
+  const originalCwd = process.cwd();
+  const recipe = input.recipe ?? {};
+  const postScanPrompt = ScanSettingsSchema.shape.postScanPrompt.parse(
+    recipe.postScanPrompt,
+  );
+  const publicationOnly =
+    input.recipe !== undefined &&
+    !postScanPrompt?.trim() &&
+    (await hasSealedScanArtifacts(input.scan.scanDir, signal));
+  const environment: NodeJS.ProcessEnv = await snapshotNativeEnvironment(
+    publicationOnly ? canonicalizeModelSafePath : undefined,
+    scanEnvironment,
+    originalCwd,
+  );
   if (input.recipe !== undefined)
     delete environment.CODEX_SECURITY_KNOWLEDGE_BASE;
-  const originalCwd = process.cwd();
   const resolveCommand = async () => {
+    if (publicationOnly)
+      throw new CodexSecurityError(
+        "The native scan was prepared for sealed-result publication only. Rejoin the scan to resume execution.",
+      );
     const codex = await resolveTrustedCodex(
       environment,
-      (await gitMarkerRoot(input.scan.targetPath, signal, "outermost")) ??
-        input.scan.targetPath,
+      [
+        (await gitMarkerRoot(input.scan.targetPath, signal, "outermost")) ??
+          input.scan.targetPath,
+        ...(knowledgeBaseSnapshot?.protectedRoots ??
+          (await Promise.all(
+            (knowledgeBaseSnapshot?.sources ?? []).map(
+              async (source) =>
+                (await gitMarkerRoot(source, signal, "outermost")) ?? source,
+            ),
+          ))),
+      ],
       process.platform,
       originalCwd,
     );
     if (codex === null) {
       throw new CodexSecurityError(
-        `Could not resolve a Codex executable outside the scan target: ${resolveCodexPath(environment, process.platform, originalCwd)}`,
+        `Could not resolve a Codex executable outside the scan target or knowledge base: ${resolveCodexPath(environment, process.platform, originalCwd)}`,
       );
     }
     Object.assign(environment, codex.environment, {
@@ -154,83 +183,98 @@ export async function prepareNativeScan(
   };
   if (input.stateDirectory)
     environment.CODEX_SECURITY_STATE_DIR = input.stateDirectory;
-  const recipe = input.recipe ?? {};
   const savedPermissions =
     recipe.inheritedPermissions as ScanOptions["inheritedPermissions"];
-  const savedGlobDepth = savedPermissions?.filesystem.glob_scan_max_depth;
-  for (const path of input.parentSandbox.literalFilesystemDenies ?? []) {
-    const saved = savedPermissions?.filesystem[path];
-    if (/[?*\[]/u.test(path) && (saved === "deny" || saved === "none"))
-      throw new CodexSecurityError(
-        "Saved glob and current literal filesystem denials with the same key cannot be preserved.",
-      );
+  let inheritedPermissions = savedPermissions;
+  if (!publicationOnly) {
+    const savedGlobDepth = savedPermissions?.filesystem.glob_scan_max_depth;
+    for (const path of input.parentSandbox.literalFilesystemDenies ?? []) {
+      const saved = savedPermissions?.filesystem[path];
+      if (/[?*\[]/u.test(path) && (saved === "deny" || saved === "none"))
+        throw new CodexSecurityError(
+          "Saved glob and current literal filesystem denials with the same key cannot be preserved.",
+        );
+    }
+    for (const path of input.parentSandbox.filesystemDenies) {
+      const saved = savedPermissions?.filesystem[path];
+      if (
+        /[?*\[]/u.test(path) &&
+        isRecord(saved) &&
+        (saved["."] === "deny" || saved["."] === "none")
+      )
+        throw new CodexSecurityError(
+          "Saved literal and current glob filesystem denials with the same key cannot be preserved.",
+        );
+    }
+    inheritedPermissions = {
+      filesystem: Object.fromEntries([
+        [":workspace_roots", input.parentSandbox.workspaceAccess],
+        ...Object.entries(
+          input.parentSandbox.workspaceAccess === "read"
+            ? readOnlyFilesystem(savedPermissions?.filesystem ?? {})
+            : (savedPermissions?.filesystem ?? {}),
+        ),
+        ...input.parentSandbox.filesystemDenies.map((path) => [path, "deny"]),
+        ...(input.parentSandbox.literalFilesystemDenies ?? []).map((path) => [
+          path,
+          { ".": "deny" },
+        ]),
+        ...(input.parentSandbox.globScanMaxDepth === undefined
+          ? []
+          : [
+              [
+                "glob_scan_max_depth",
+                typeof savedGlobDepth === "number"
+                  ? Math.max(
+                      savedGlobDepth,
+                      input.parentSandbox.globScanMaxDepth,
+                    )
+                  : input.parentSandbox.globScanMaxDepth,
+              ],
+            ]),
+      ]) as JsonObject,
+      network: { enabled: false },
+    };
+    const hasUncappedDenials =
+      (savedGlobDepth === undefined &&
+        Object.entries(savedPermissions?.filesystem ?? {}).some(
+          ([path, access]) =>
+            (access === "deny" || access === "none") && /[*?\[\]]/.test(path),
+        )) ||
+      (input.parentSandbox.globScanMaxDepth === undefined &&
+        input.parentSandbox.filesystemDenies.some((path) =>
+          /[*?\[\]]/.test(path),
+        ));
+    if (hasUncappedDenials)
+      delete inheritedPermissions.filesystem["glob_scan_max_depth"];
   }
-  for (const path of input.parentSandbox.filesystemDenies) {
-    const saved = savedPermissions?.filesystem[path];
-    if (
-      /[?*\[]/u.test(path) &&
-      isRecord(saved) &&
-      (saved["."] === "deny" || saved["."] === "none")
-    )
-      throw new CodexSecurityError(
-        "Saved literal and current glob filesystem denials with the same key cannot be preserved.",
-      );
-  }
-  const inheritedPermissions = {
-    filesystem: Object.fromEntries([
-      [":workspace_roots", "write"],
-      ...Object.entries(savedPermissions?.filesystem ?? {}),
-      ...input.parentSandbox.filesystemDenies.map((path) => [path, "deny"]),
-      ...(input.parentSandbox.literalFilesystemDenies ?? []).map((path) => [
-        path,
-        { ".": "deny" },
-      ]),
-      ...(input.parentSandbox.globScanMaxDepth === undefined
-        ? []
-        : [
-            [
-              "glob_scan_max_depth",
-              typeof savedGlobDepth === "number"
-                ? Math.max(savedGlobDepth, input.parentSandbox.globScanMaxDepth)
-                : input.parentSandbox.globScanMaxDepth,
-            ],
-          ]),
-    ]) as JsonObject,
-    network: { enabled: false },
-  };
-  const hasUncappedDenials =
-    (savedGlobDepth === undefined &&
-      Object.entries(savedPermissions?.filesystem ?? {}).some(
-        ([path, access]) =>
-          (access === "deny" || access === "none") && /[*?\[\]]/.test(path),
-      )) ||
-    (input.parentSandbox.globScanMaxDepth === undefined &&
-      input.parentSandbox.filesystemDenies.some((path) =>
-        /[*?\[\]]/.test(path),
-      ));
-  if (hasUncappedDenials)
-    delete inheritedPermissions.filesystem["glob_scan_max_depth"];
   const options = ScanSettingsSchema.parse({
     ...input.savedDeepScanSettings,
     ...(recipe.deepScan as JsonObject | undefined),
     auth: recipe.auth,
     cyberAccessProgram: recipe.cyberAccessProgram,
-    knowledgeBasePaths:
-      recipe.knowledgeBasePaths ??
-      (input.recipe === undefined && environment.CODEX_SECURITY_KNOWLEDGE_BASE
-        ? [environment.CODEX_SECURITY_KNOWLEDGE_BASE]
-        : undefined),
+    knowledgeBasePaths: publicationOnly
+      ? undefined
+      : (recipe.knowledgeBasePaths ??
+        (input.recipe === undefined && environment.CODEX_SECURITY_KNOWLEDGE_BASE
+          ? [environment.CODEX_SECURITY_KNOWLEDGE_BASE]
+          : undefined)),
     maxCostUsd: recipe.maxCostUsd,
-    postScanPrompt: recipe.postScanPrompt,
+    postScanPrompt,
     failureSeverity: recipe.failOnSeverity,
     mode: "deep",
     scanPrompt: input.scan.userContext ?? undefined,
     outputDir: input.scan.scanDir,
   });
-  const publicationOnly =
-    input.recipe !== undefined &&
-    !options.postScanPrompt?.trim() &&
-    (await hasSealedScanArtifacts(input.scan.scanDir, signal));
+  const knowledgeBaseSnapshot = options.knowledgeBasePaths?.length
+    ? input.recipe === undefined
+      ? await readKnowledgeBaseSnapshot(options.knowledgeBasePaths, signal)
+      : await restoreScanKnowledge(
+          input.scan.scanDir,
+          input.scan.targetPath,
+          recipe.scanInputs,
+        )
+    : undefined;
   const command = publicationOnly ? undefined : await resolveCommand();
   const deep = await resolveDeepScanConfig(
     options,
@@ -330,19 +374,11 @@ export async function prepareNativeScan(
     options: {
       ...options,
       ...deep.settings,
+      ...(knowledgeBaseSnapshot === undefined ? {} : { knowledgeBaseSnapshot }),
       ...(input.recipe === undefined
         ? {}
         : {
             resumeScanId: input.scan.scanId,
-            ...(options.knowledgeBasePaths?.length
-              ? {
-                  knowledgeBaseSnapshot: await restoreScanKnowledge(
-                    input.scan.scanDir,
-                    input.scan.targetPath,
-                    recipe.scanInputs,
-                  ),
-                }
-              : {}),
           }),
       inheritedPermissions,
       ...(configuredProvider ? { preserveProviderEnvironment: true } : {}),

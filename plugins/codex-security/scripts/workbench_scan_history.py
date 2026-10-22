@@ -76,18 +76,29 @@ def cli_scan_resume(
     require_current_continuation(
         scan, claim_token, error_message="Resume requires the original owning CLI session."
     )
-    try:
-        repository = require_scan_target_identity(scan)
-    except SystemExit as exc:
-        raise SystemExit(
-            "Cannot resume: the original checkout is missing or was replaced."
-        ) from exc
-    if scan_target_identity(repository, None) != stored_scan_target_identity(scan):
-        raise SystemExit("Cannot resume: the original checkout revision or contents changed.")
-    recipe = parse_scan_recipe(scan["recipe_json"], repository)
+    producer_version = sealed_producer_version(scan)
+    if producer_version is None:
+        try:
+            repository = require_scan_target_identity(scan)
+        except SystemExit as exc:
+            raise SystemExit(
+                "Cannot resume: the original checkout is missing or was replaced."
+            ) from exc
+        if scan_target_identity(repository, None) != stored_scan_target_identity(scan):
+            raise SystemExit("Cannot resume: the original checkout revision or contents changed.")
+        recipe = parse_scan_recipe(scan["recipe_json"], repository)
+    else:
+        # The complete seal was checked against the stored target binding above.
+        recipe = json.loads(scan["recipe_json"])
+        requested_repository = recipe.get("repository")
+        if (
+            not isinstance(requested_repository, str)
+            or not Path(requested_repository).expanduser().is_absolute()
+            or Path(requested_repository).expanduser().resolve() != Path(scan["target_path"])
+        ):
+            raise SystemExit("Scan launch recipe repository must match the scanned repository.")
     result = scan_registration(connection, scan, scan_contract)
     result["recipe"] = recipe
-    producer_version = sealed_producer_version(scan)
     if producer_version is None:
         require_current_deep_scan(connection, scan)
     else:

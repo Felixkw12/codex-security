@@ -45,9 +45,12 @@ test.each(["ready", "denied", "canceled"])(
     await mkdir(scan, { mode: 0o700 });
     const original = runtime.requirePrivateCredentialHome;
     let protectedDirectory: string | undefined;
+    const protectedDirectories = new Set<string>();
+    let lastConfigFile: string | undefined;
     let launched = false;
     let operation: "deep" | "standard" | "validation" = "deep";
     const controller = new AbortController();
+    const reached = new Error("synthetic scan reached");
     const install = stubPluginInstall();
     const guard = spyOn(
       runtime,
@@ -60,6 +63,7 @@ test.each(["ready", "denied", "canceled"])(
         secureWindowsHome: async (directory) => {
           expect(await readdir(directory)).toEqual([]);
           protectedDirectory = directory;
+          protectedDirectories.add(directory);
           expect(dirname(directory)).toBe(
             process.platform === "win32"
               ? join(root, "state")
@@ -96,11 +100,13 @@ test.each(["ready", "denied", "canceled"])(
         createCodex: (options) =>
           codexFactory(async function runStreamed() {
             launched = true;
-            const file = join(protectedDirectory!, "config-preflight.toml");
+            const file =
+              options.env!["CODEX_SECURITY_CONFIG_PATH"] ?? lastConfigFile!;
+            lastConfigFile = file;
             expect(options.env!["CODEX_SECURITY_CONFIG_PATH"]).toBe(
               operation === "validation" ? undefined : file,
             );
-            expect(dirname(file)).toBe(protectedDirectory!);
+            expect(protectedDirectories.has(dirname(file))).toBe(true);
             expect(await readFile(file, "utf8")).not.toContain(
               "synthetic-client-secret",
             );
@@ -134,23 +140,25 @@ test.each(["ready", "denied", "canceled"])(
               expect((await stat(file)).mode & 0o777).toBe(0o600);
               expect((await stat(dirname(file))).mode & 0o777).toBe(0o700);
             }
-            throw new Error("synthetic scan reached");
+            if (operation === "deep") controller.abort(reached);
+            throw reached;
           })(),
       },
     );
     try {
-      await expect(
-        client.run(repository, {
-          mode: "deep",
-          signal: controller.signal,
-        }),
-      ).rejects.toThrow(
-        preparation === "denied"
-          ? "synthetic ACL denial"
-          : preparation === "canceled"
-            ? "interrupted during preparation"
-            : "synthetic scan reached",
-      );
+      const scanResult = client.run(repository, {
+        mode: "deep",
+        signal: controller.signal,
+      });
+      if (preparation === "ready") {
+        await expect(scanResult).rejects.toMatchObject({ cause: reached });
+      } else {
+        await expect(scanResult).rejects.toThrow(
+          preparation === "denied"
+            ? "synthetic ACL denial"
+            : "interrupted during preparation",
+        );
+      }
       expect(protectedDirectory).toBeDefined();
       expect(launched).toBe(preparation === "ready");
       if (preparation !== "ready") {

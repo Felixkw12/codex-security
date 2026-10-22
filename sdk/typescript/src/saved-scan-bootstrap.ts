@@ -41,6 +41,7 @@ export async function savedScanWorkbench(
   options: {
     environment: ProcessEnvironment;
     pluginRoot: string;
+    pythonPath?: string;
     currentDirectory: string;
     signal?: AbortSignal;
   },
@@ -48,6 +49,7 @@ export async function savedScanWorkbench(
   SavedScanDependencies["runWorkbench"] & {
     environment: ProcessEnvironment;
     readonly protectedRoots: readonly string[];
+    readonly targetPaths: readonly string[];
   }
 > {
   options.signal?.throwIfAborted();
@@ -121,6 +123,7 @@ export async function savedScanWorkbench(
       );
     // Pin the interpreter selected with every candidate and the caller checkout protected.
     python ??= await resolvePluginPython({
+      configuredPath: options.pythonPath,
       environment,
       protectedRoot: protectedRoots,
       currentDirectory: options.currentDirectory,
@@ -164,6 +167,7 @@ export async function savedScanWorkbench(
   return Object.assign(workbench, {
     environment,
     protectedRoots: [options.currentDirectory, ...protectedRoots],
+    targetPaths: targets.map((row) => row.target_path),
   });
 }
 

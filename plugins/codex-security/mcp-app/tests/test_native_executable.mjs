@@ -79,6 +79,16 @@ async function testExplicitAndPathExecutables() {
     assert.equal(await realpath(trusted.executable), await realpath(selected));
     assert.equal(trusted.environment.PATH, await realpath(external));
   }
+  for (const configured of [`~/external/${name}`, `~\\external\\${name}`]) {
+    const environment = {
+      HOME: root,
+      USERPROFILE: root,
+      CODEX_CLI_PATH: configured,
+    };
+    assert.equal(resolveCodexPath(environment), selected);
+    const trusted = await resolveTrustedCodex(environment, repository);
+    assert.equal(await realpath(trusted.executable), await realpath(selected));
+  }
   assert.equal(
     await resolveTrustedCodex(
       { CODEX_CLI_PATH: path.join(bin, name) },

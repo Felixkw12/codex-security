@@ -722,6 +722,7 @@ process.exit(0);
               codex_security_surface: "sdk",
               codex_security_command: "compare",
               codex_security_package_version: VERSION,
+              codex_security_provider: "openai",
             },
           });
           expect(profileClient.profiles).toHaveLength(0);

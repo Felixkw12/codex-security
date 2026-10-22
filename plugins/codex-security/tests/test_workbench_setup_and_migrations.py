@@ -91,8 +91,9 @@ EXPECTED_MIGRATIONS = [
     (50, "persist authorized source excerpt scopes"),
     (51, "preserve deep scan worker thread history"),
     (52, "record severity classification review counts"),
-    (53, "persist composition child membership"),
-    (54, "reuse scan severity assessments"),
+    (53, "store external source findings without assessments"),
+    (54, "persist composition child membership"),
+    (55, "reuse scan severity assessments"),
 ]
 
 
@@ -720,6 +721,128 @@ def test_comparison_indexes_upgrade_without_skipping_findings_migrations(
         assert set(indexes) == {"finding_occurrences_by_finding", "scan_comparisons_by_after_scan"}
         if previous_indexes:
             assert indexes == previous_indexes
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+@pytest.mark.parametrize(
+    "previous_history",
+    ["main-53", "composition-43", "composition-48", "composition-52", "composition-53"],
+)
+def test_composition_migrations_preserve_released_and_development_history(
+    previous_history: str,
+) -> None:
+    namespace = runpy.run_path(str(SCRIPT), run_name="composition_migration_upgrade")
+    migrations = namespace["MIGRATIONS"]
+    membership = next(
+        item for item in migrations if item[1] == "persist composition child membership"
+    )
+    reuse = next(item for item in migrations if item[1] == "reuse scan severity assessments")
+    if previous_history == "main-53":
+        previous = tuple(item for item in migrations if item[0] <= 53)
+    else:
+        membership_version = int(previous_history.removeprefix("composition-"))
+        if membership_version == 43:
+            severity = next(
+                item for item in migrations if item[1] == "preserve severity assessments per scan"
+            )
+            previous = tuple(item for item in migrations if item[0] <= 41) + ((42, *severity[1:]),)
+        else:
+            previous = tuple(item for item in migrations if item[0] < membership_version)
+        previous += ((membership_version, *membership[1:]), (membership_version + 1, *reuse[1:]))
+    timestamp = "2026-08-01T00:00:00Z"
+    with sqlite3.connect(":memory:") as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        create_migration_history(connection)
+        apply_historical_migrations(connection, previous, timestamp)
+        history = dict(connection.execute("SELECT name, applied_at FROM schema_migrations"))
+        connection.execute(
+            "INSERT INTO workspaces (id, created_at, updated_at) VALUES (?, ?, ?)",
+            ("workspace", timestamp, timestamp),
+        )
+        for scan_id, parent_scan_id in (("parent", None), ("child", "parent")):
+            connection.execute(
+                """INSERT INTO scans (id, workspace_id, target_path, target_revision, scope,
+                    mode, scan_dir, status, phase, started_at, created_at, updated_at, parent_scan_id)
+                    VALUES (?, 'workspace', '/synthetic/repository', 'revision', '.', 'standard',
+                        ?, 'complete', 'reporting', ?, ?, ?, ?)""",
+                (
+                    scan_id,
+                    f"/synthetic/scans/{scan_id}",
+                    timestamp,
+                    timestamp,
+                    timestamp,
+                    parent_scan_id,
+                ),
+            )
+        if previous_history != "main-53":
+            connection.execute("UPDATE scans SET parent_scan_role = 'deep_pass' WHERE id = 'child'")
+        else:
+            connection.execute(
+                """INSERT INTO external_source_reports VALUES ('report', 'synthetic-repository',
+                    'synthetic-provider', 'source', 'source-finding', '{"retained":true}', 1, ?, ?)""",
+                (timestamp, timestamp),
+            )
+        connection.execute(
+            """INSERT INTO findings (id, fingerprint, rule_id, identity_anchor, created_at, updated_at)
+                VALUES ('finding', 'fingerprint', 'rule', 'anchor', ?, ?)""",
+            (timestamp, timestamp),
+        )
+        connection.execute(
+            """INSERT INTO scan_severity_classifications (scan_id, finding_ids_json, assessed_at)
+                VALUES ('child', '["finding"]', ?)""",
+            (timestamp,),
+        )
+        connection.execute(
+            """INSERT INTO scan_severity_assessments
+                (scan_id, finding_id, input_sha256, assessed_at, source, decision, level, rationale)
+                VALUES ('child', 'finding', 'digest', ?, 'existing-severity', 'assessed',
+                    'high', 'Synthetic retained assessment')""",
+            (timestamp,),
+        )
+        indexes = dict(
+            connection.execute(
+                "SELECT name, rootpage FROM sqlite_master WHERE name IN ('scans_by_composition_parent', 'scan_severity_reuse')"
+            )
+        )
+
+        namespace["apply_migrations"](connection)
+        namespace["apply_migrations"](connection)
+
+        assert [
+            tuple(row)
+            for row in connection.execute(
+                "SELECT version, name FROM schema_migrations ORDER BY version"
+            )
+        ] == EXPECTED_MIGRATIONS
+        upgraded_history = dict(
+            connection.execute("SELECT name, applied_at FROM schema_migrations")
+        )
+        assert all(upgraded_history[name] == applied_at for name, applied_at in history.items())
+        assert tuple(
+            connection.execute(
+                "SELECT parent_scan_id, parent_scan_role FROM scans WHERE id = 'child'"
+            ).fetchone()
+        ) == ("parent", None if previous_history == "main-53" else "deep_pass")
+        assert tuple(
+            connection.execute(
+                "SELECT finding_id, level, rationale FROM scan_severity_assessments WHERE scan_id = 'child'"
+            ).fetchone()
+        ) == ("finding", "high", "Synthetic retained assessment")
+        reports = [
+            tuple(row)
+            for row in connection.execute("SELECT id, evidence_json FROM external_source_reports")
+        ]
+        assert reports == (
+            [("report", '{"retained":true}')] if previous_history == "main-53" else []
+        )
+        upgraded_indexes = dict(
+            connection.execute(
+                "SELECT name, rootpage FROM sqlite_master WHERE name IN ('scans_by_composition_parent', 'scan_severity_reuse')"
+            )
+        )
+        assert set(upgraded_indexes) == {"scans_by_composition_parent", "scan_severity_reuse"}
+        assert all(upgraded_indexes[name] == rootpage for name, rootpage in indexes.items())
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
 

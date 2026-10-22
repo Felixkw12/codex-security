@@ -18,6 +18,8 @@ import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 
+let onNativeSealRead;
+
 const bundle = await build({
   bundle: true,
   stdin: {
@@ -41,6 +43,30 @@ const bundle = await build({
   write: false,
   plugins: [
     {
+      name: "observe-native-seal-boundary",
+      setup(build) {
+        build.onResolve(
+          { filter: /sdk\/typescript\/src\/scan-publication\.js$/ },
+          (args) =>
+            args.importer.replaceAll("\\", "/").endsWith("/native-scan.ts")
+              ? { path: "seal", namespace: "native-seal-fixture" }
+              : undefined,
+        );
+        build.onLoad(
+          { filter: /.*/, namespace: "native-seal-fixture" },
+          () => ({
+            resolveDir: fileURLToPath(new URL("../src/", import.meta.url)),
+            contents: `import { hasSealedScanArtifacts as original } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/scan-publication.ts", import.meta.url)))};
+            export async function hasSealedScanArtifacts(...args) {
+              const sealed = await original(...args);
+              await afterNativeSealRead();
+              return sealed;
+            }`,
+          }),
+        );
+      },
+    },
+    {
       name: "capture-ordinary-client",
       setup(build) {
         build.onResolve({ filter: /sdk\/typescript\/src\/api\.js$/ }, () => ({
@@ -57,10 +83,14 @@ const bundle = await build({
   ],
 });
 const module = { exports: {} };
-new Function("require", "module", "exports", bundle.outputFiles[0].text)(
-  createRequire(import.meta.url),
-  module,
-  module.exports,
+new Function(
+  "require",
+  "module",
+  "exports",
+  "afterNativeSealRead",
+  bundle.outputFiles[0].text,
+)(createRequire(import.meta.url), module, module.exports, () =>
+  onNativeSealRead?.(),
 );
 const {
   NativeScanHost,
@@ -156,7 +186,7 @@ function input(id = "parent") {
     threadId: "native-owner",
     pluginRoot: tmpdir(),
     pythonPath: process.execPath,
-    parentSandbox: { filesystemDenies: [] },
+    parentSandbox: { workspaceAccess: "write", filesystemDenies: [] },
   };
 }
 
@@ -719,6 +749,74 @@ if (process.argv.includes("app-server")) {
   },
 );
 
+test("native relative home stays bound when cwd changes during seal inspection", async () => {
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "native-relative-home-")),
+  );
+  const originalCwd = process.cwd();
+  const first = join(root, "first");
+  const second = join(root, "second");
+  const restore = captureEnvironment([
+    "CODEX_HOME",
+    "CODEX_CLI_PATH",
+    "CODEX_API_KEY",
+    "OPENAI_API_KEY",
+    "CODEX_SECURITY_CONFIG_PATH",
+    "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+    "CODEX_SECURITY_KNOWLEDGE_BASE",
+  ]);
+  try {
+    for (const directory of [first, second]) {
+      await mkdir(join(directory, "actual", "nested"), { recursive: true });
+      await mkdir(join(directory, "actual", "home"));
+      await mkdir(join(directory, "home"));
+      await symlink(
+        join(directory, "actual", "nested"),
+        join(directory, "alias"),
+        process.platform === "win32" ? "junction" : "dir",
+      );
+    }
+    Object.assign(process.env, {
+      CODEX_HOME: ["alias", "..", "home"].join(sep),
+      CODEX_CLI_PATH: process.execPath,
+      CODEX_API_KEY: "synthetic-relative-home-key",
+    });
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.CODEX_SECURITY_CONFIG_PATH;
+    delete process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
+    delete process.env.CODEX_SECURITY_KNOWLEDGE_BASE;
+    for (const sealed of [false, true]) {
+      const scanDir = join(root, String(sealed));
+      await mkdir(scanDir, { mode: 0o700 });
+      if (sealed)
+        await writeFile(
+          join(scanDir, "scan-manifest.json"),
+          JSON.stringify({ scan: { sealedAt: "2026-01-01T00:00:00Z" } }),
+        );
+      onNativeSealRead = () => {
+        process.chdir(second);
+      };
+      process.chdir(first);
+      const expectedHome = await realpath(process.env.CODEX_HOME);
+      const prepared = await prepareNativeScan({
+        ...input(),
+        scan: { ...input().scan, scanDir },
+        recipe: { auth: "api-key", config: {} },
+      });
+      assert.equal(process.cwd(), second);
+      assert.equal(
+        prepared.client.dependencies.environment.CODEX_HOME,
+        expectedHome,
+      );
+    }
+  } finally {
+    onNativeSealRead = undefined;
+    process.chdir(originalCwd);
+    restore();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("native launches snapshot safety identifiers and prefer saved recipes", async () => {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "native-safety-identifier-")),
@@ -816,13 +914,20 @@ test(
     const target = join(repository, "src");
     const repositoryBin = join(repository, "bin");
     const selectedTools = join(root, "selected tools");
+    const knowledge = join(root, "knowledge");
+    const knowledgeBin = join(knowledge, "bin");
+    const document = join(knowledge, "architecture.md");
+    const scanDir = join(root, "scan");
     const keys = [
       "PATH",
+      "HOME",
+      "USERPROFILE",
       "CODEX_HOME",
       "CODEX_API_KEY",
       "OPENAI_API_KEY",
       "CODEX_CLI_PATH",
       "CODEX_SECURITY_CONFIG_PATH",
+      "CODEX_SECURITY_KNOWLEDGE_BASE",
       "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
     ];
     const before = Object.fromEntries(
@@ -844,6 +949,9 @@ test(
         mkdir(repositoryBin),
         mkdir(join(repository, ".git")),
         mkdir(selectedTools),
+        mkdir(join(knowledge, ".git"), { recursive: true }),
+        mkdir(knowledgeBin, { recursive: true }),
+        mkdir(scanDir, { mode: 0o700 }),
         mkdir(join(root, "alias")),
         mkdir(join(root, "real-child")),
       ]);
@@ -858,13 +966,34 @@ test(
         "inert executable fixture",
         { mode: 0o700 },
       );
+      await writeFile(document, "Synthetic architecture context.\n");
+      await writeFile(
+        join(knowledgeBin, "codex"),
+        "inert knowledge-source executable",
+        { mode: 0o700 },
+      );
+      const knowledgeSnapshot = await readKnowledgeBaseSnapshot([document]);
+      await saveScanKnowledge(scanDir, knowledgeSnapshot);
+      const savedKnowledge = {
+        knowledgeBasePaths: [document],
+        scanInputs: scanInputIdentity(
+          input().scan.userContext,
+          knowledgeSnapshot,
+        ),
+      };
       Object.assign(process.env, {
         CODEX_HOME: root,
+        CODEX_SECURITY_KNOWLEDGE_BASE: document,
+        HOME: root,
+        USERPROFILE: root,
         CODEX_API_KEY: "synthetic-source-key",
         OPENAI_API_KEY: "synthetic-other-key",
-        PATH: [repositoryBin, `${root}/alias/link/..`, selectedTools].join(
-          delimiter,
-        ),
+        PATH: [
+          repositoryBin,
+          knowledgeBin,
+          `${root}/alias/link/..`,
+          selectedTools,
+        ].join(delimiter),
       });
       delete process.env.CODEX_CLI_PATH;
       delete process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
@@ -909,9 +1038,16 @@ if (process.argv.includes("app-server")) {
         ["merge", "recipe"],
         ["merge", "config"],
         ["merge", "parent"],
+        ["discovery", "home-slash"],
+        ["merge", "home-backslash"],
       ]) {
         if (programSource === "recipe") {
           process.env.CODEX_CLI_PATH = `${relative(process.cwd(), root)}/alias/link/../codex`;
+        } else if (programSource.startsWith("home-")) {
+          process.env.CODEX_CLI_PATH =
+            programSource === "home-slash"
+              ? "~/alias/link/../codex"
+              : "~\\alias\\link\\..\\codex";
         } else {
           delete process.env.CODEX_CLI_PATH;
         }
@@ -932,7 +1068,7 @@ if (process.argv.includes("app-server")) {
         );
         const native = await prepareNativeScan({
           ...input(),
-          scan: { ...input().scan, targetPath: target },
+          scan: { ...input().scan, scanDir, targetPath: target },
           ...(programSource === "parent"
             ? {
                 parentTurn: {
@@ -940,14 +1076,16 @@ if (process.argv.includes("app-server")) {
                   turnId: "synthetic-parent-turn",
                 },
                 recipe: {
+                  ...savedKnowledge,
                   auth: "api-key",
                   cyberAccessProgram: "daybreak_blue",
                 },
               }
             : {}),
-          ...(programSource === "recipe"
+          ...(programSource === "recipe" || programSource.startsWith("home-")
             ? {
                 recipe: {
+                  ...savedKnowledge,
                   auth: "api-key",
                   cyberAccessProgram: selectedProgram,
                 },
@@ -970,9 +1108,12 @@ if (process.argv.includes("app-server")) {
         );
         assert.equal(
           process.env.PATH,
-          [repositoryBin, `${root}/alias/link/..`, selectedTools].join(
-            delimiter,
-          ),
+          [
+            repositoryBin,
+            knowledgeBin,
+            `${root}/alias/link/..`,
+            selectedTools,
+          ].join(delimiter),
         );
         const gitEnvironment = {
           PATH: selectedEnvironment.PATH,
@@ -1470,6 +1611,7 @@ test("native saved scans retain settings, auth environment, permissions and iden
       reasoningEffort: "ultra",
       stateDirectory: join(root, "state"),
       parentSandbox: {
+        workspaceAccess: "write",
         filesystemDenies: ["/fixture/.env"],
         globScanMaxDepth: 3,
       },
@@ -1693,6 +1835,7 @@ for (const scenario of [
   "saved-glob-current-literal",
   "saved-literal-current-glob",
   "repeated-literal",
+  "read-only-parent",
   "saved-absent-knowledge",
   "saved-present-knowledge",
   "tilde-home-and-selected-config",
@@ -1937,6 +2080,8 @@ else {
             model: "explicit-current-model",
             reasoningEffort: "ultra",
             parentSandbox: {
+              workspaceAccess:
+                scenario === "read-only-parent" ? "read" : "write",
               filesystemDenies: currentLiteral ? [] : [currentPath],
               ...(currentLiteral
                 ? { literalFilesystemDenies: [currentPath] }
@@ -1964,6 +2109,12 @@ else {
               ...(savedKnowledge ? { knowledgeBasePaths: [document] } : {}),
               inheritedPermissions: {
                 filesystem: {
+                  ...(scenario === "read-only-parent"
+                    ? {
+                        ":workspace_roots": "write",
+                        [join(repository, "saved-write")]: { ".": "write" },
+                      }
+                    : {}),
                   [savedPath]: savedLiteral ? { ".": "deny" } : "deny",
                   ...(savedDepth === undefined
                     ? {}
@@ -2148,6 +2299,15 @@ else {
               );
               assert.equal(filesystem.glob_scan_max_depth, expectedDepth);
               assert.equal(
+                filesystem[":workspace_roots"],
+                scenario === "read-only-parent" ? "read" : "write",
+              );
+              if (scenario === "read-only-parent")
+                assert.equal(
+                  filesystem[join(repository, "saved-write")]["."],
+                  "read",
+                );
+              assert.equal(
                 await readFile(join(home, "config.toml"), "utf8"),
                 configText,
               );
@@ -2198,6 +2358,109 @@ else {
   );
 }
 
+test(
+  "native preflight rejects executables from fresh and saved knowledge sources",
+  {
+    skip:
+      process.platform === "win32"
+        ? "Synthetic executable uses a POSIX shebang."
+        : false,
+  },
+  async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "native-knowledge-preflight-")),
+    );
+    const knowledge = join(root, "knowledge");
+    const document = join(knowledge, "architecture.md");
+    const executable = join(knowledge, "codex");
+    const external = join(root, "codex");
+    const marker = join(root, "launched.json");
+    const scanDir = join(root, "scan");
+    const restore = captureEnvironment([
+      "CODEX_HOME",
+      "CODEX_CLI_PATH",
+      "CODEX_SECURITY_KNOWLEDGE_BASE",
+      "CODEX_SECURITY_CONFIG_PATH",
+      "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+      "CODEX_API_KEY",
+      "OPENAI_API_KEY",
+    ]);
+    try {
+      await mkdir(join(knowledge, ".git"), { recursive: true });
+      await mkdir(scanDir, { mode: 0o700 });
+      await writeFile(document, "Synthetic architecture.\n");
+      const script = `#!${process.execPath}\nrequire("node:fs").writeFileSync(${JSON.stringify(marker)}, JSON.stringify(process.argv.slice(2))); console.log("Not logged in"); process.exitCode = 1;\n`;
+      await writeFile(executable, script, { mode: 0o700 });
+      await writeFile(external, script, { mode: 0o700 });
+      Object.assign(process.env, {
+        CODEX_HOME: root,
+        CODEX_CLI_PATH: executable,
+        CODEX_SECURITY_KNOWLEDGE_BASE: document,
+        OPENAI_API_KEY: "synthetic-preflight-key",
+      });
+      delete process.env.CODEX_API_KEY;
+      delete process.env.CODEX_SECURITY_CONFIG_PATH;
+      delete process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
+      const snapshot = await readKnowledgeBaseSnapshot([document]);
+      await saveScanKnowledge(scanDir, snapshot);
+      const request = { ...input(), scan: { ...input().scan, scanDir } };
+      const recipe = {
+        knowledgeBasePaths: [document],
+        scanInputs: scanInputIdentity(request.scan.userContext, snapshot),
+      };
+      for (const state of ["fresh", "resumed", "deleted-source", "legacy"]) {
+        if (state === "deleted-source") await rm(document);
+        let savedRecipe = recipe;
+        if (state === "legacy") {
+          const { protectedRoots, ...legacy } = snapshot;
+          await rm(join(scanDir, ".scan-knowledge.json"));
+          await saveScanKnowledge(scanDir, legacy);
+          savedRecipe = {
+            ...recipe,
+            scanInputs: scanInputIdentity(request.scan.userContext, legacy),
+          };
+        }
+        await assert.rejects(
+          prepareNativeScan({
+            ...request,
+            ...(state === "fresh" ? {} : { recipe: savedRecipe }),
+          }),
+          /outside the scan target or knowledge base/,
+        );
+        await assert.rejects(readFile(marker), { code: "ENOENT" });
+      }
+      await rm(join(scanDir, ".scan-knowledge.json"));
+      await saveScanKnowledge(scanDir, snapshot);
+      process.env.CODEX_CLI_PATH = external;
+      const trusted = await prepareNativeScan({ ...request, recipe });
+      assert.equal(
+        trusted.client.dependencies.ambientExecution.command.command,
+        external,
+      );
+      assert.deepEqual(JSON.parse(await readFile(marker, "utf8")), [
+        "login",
+        "status",
+      ]);
+      await rm(marker);
+      await writeFile(
+        join(scanDir, ".scan-knowledge.json"),
+        JSON.stringify({
+          ...snapshot,
+          documents: { "architecture.txt": "Changed synthetic context." },
+        }),
+      );
+      await assert.rejects(
+        prepareNativeScan({ ...request, recipe }),
+        /saved knowledge-base snapshot changed/,
+      );
+      await assert.rejects(readFile(marker), { code: "ENOENT" });
+    } finally {
+      restore();
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
+
 test("native rejoin restores bound knowledge without overwriting its snapshot", async () => {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "native-knowledge-resume-")),
@@ -2228,7 +2491,10 @@ test("native rejoin restores bound knowledge without overwriting its snapshot", 
     const request = { ...input(), scan: { ...input().scan, scanDir } };
     const fresh = await prepareNativeScan(request);
     assert.equal(fresh.options.resumeScanId, undefined);
-    assert.equal(fresh.options.knowledgeBaseSnapshot, undefined);
+    assert.deepEqual(
+      fresh.options.knowledgeBaseSnapshot,
+      await readKnowledgeBaseSnapshot([document]),
+    );
     assert.deepEqual(fresh.options.knowledgeBasePaths, [document]);
     const snapshot = await readKnowledgeBaseSnapshot([document]);
     await saveScanKnowledge(scanDir, snapshot);
@@ -2452,7 +2718,7 @@ test("sealed native publication defers executable selection while retaining ambi
     process.env.CODEX_CLI_PATH = process.execPath;
     await assert.rejects(
       prepared.client.dependencies.resolveCodexCommand(),
-      /Could not resolve a Codex executable/,
+      /prepared for sealed-result publication only/,
     );
     const executing = await prepareNativeScan({
       ...request,
@@ -2467,3 +2733,117 @@ test("sealed native publication defers executable selection while retaining ambi
     await rm(root, { recursive: true, force: true });
   }
 });
+
+for (const scenario of [
+  "missing-home",
+  "missing-home-traversal",
+  "denial-collision",
+]) {
+  test(
+    `sealed native publication skips execution preparation: ${scenario}`,
+    {
+      skip:
+        scenario === "missing-home-traversal" && process.platform === "win32"
+          ? "POSIX symlink parent traversal differs from Windows path resolution."
+          : false,
+    },
+    async () => {
+      const root = await realpath(
+        await mkdtemp(join(tmpdir(), "native-sealed-read-")),
+      );
+      const restore = captureEnvironment([
+        "CODEX_HOME",
+        "CODEX_CLI_PATH",
+        "CODEX_SECURITY_CONFIG_PATH",
+        "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+        "CODEX_SECURITY_KNOWLEDGE_BASE",
+      ]);
+      try {
+        const scanDir = join(root, "scan");
+        await mkdir(scanDir, { mode: 0o700 });
+        await writeFile(
+          join(scanDir, "scan-manifest.json"),
+          JSON.stringify({ scan: { sealedAt: "2026-01-01T00:00:00Z" } }),
+        );
+        let home =
+          scenario === "missing-home" ? join(root, "missing-home") : root;
+        let expectedHome = home;
+        if (scenario === "missing-home-traversal") {
+          await mkdir(join(root, "actual", "nested"), { recursive: true });
+          await mkdir(join(root, "absent", "deeper", "home"), {
+            recursive: true,
+          });
+          await symlink(
+            join(root, "actual", "nested"),
+            join(root, "alias"),
+            process.platform === "win32" ? "junction" : "dir",
+          );
+          home = `${root}${sep}alias${sep}..${sep}absent${sep}deeper${sep}home`;
+          expectedHome = join(root, "actual", "absent", "deeper", "home");
+        }
+        Object.assign(process.env, {
+          CODEX_HOME: home,
+          CODEX_CLI_PATH: process.execPath,
+        });
+        delete process.env.CODEX_SECURITY_CONFIG_PATH;
+        delete process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
+        delete process.env.CODEX_SECURITY_KNOWLEDGE_BASE;
+        const denied = join(root, "[private]");
+        const savedPermissions = {
+          filesystem: { [denied]: "deny" },
+          network: { enabled: false },
+        };
+        const request = {
+          ...input(),
+          scan: { ...input().scan, scanDir },
+          parentSandbox: {
+            workspaceAccess: "read",
+            filesystemDenies: [],
+            ...(scenario === "denial-collision"
+              ? { literalFilesystemDenies: [denied] }
+              : {}),
+          },
+          recipe: {
+            config: { model: "synthetic-saved" },
+            inheritedPermissions: savedPermissions,
+          },
+        };
+        const prepared = await prepareNativeScan(request);
+        assert.equal(
+          prepared.client.dependencies.ambientExecution.environment.CODEX_HOME,
+          expectedHome,
+        );
+        assert.deepEqual(
+          prepared.options.inheritedPermissions,
+          savedPermissions,
+        );
+        await assert.rejects(
+          prepareNativeScan({
+            ...request,
+            recipe: {
+              ...request.recipe,
+              postScanPrompt: "Synthetic follow-up.",
+            },
+          }),
+          scenario.startsWith("missing-home")
+            ? { code: "ENOENT" }
+            : /glob.*literal/u,
+        );
+        await rm(join(scanDir, "scan-manifest.json"));
+        await assert.rejects(
+          prepared.client.dependencies.resolveCodexCommand(),
+          /prepared for sealed-result publication only/u,
+        );
+        await assert.rejects(
+          prepareNativeScan(request),
+          scenario.startsWith("missing-home")
+            ? { code: "ENOENT" }
+            : /glob.*literal/u,
+        );
+      } finally {
+        restore();
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+}

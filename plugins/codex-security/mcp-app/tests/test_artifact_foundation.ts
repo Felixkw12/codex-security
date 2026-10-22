@@ -13,14 +13,15 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 
 const compiled = await build({
   bundle: true,
   entryPoints: [
-    new URL("../src/artifact-io.ts", import.meta.url).pathname,
-    new URL("../src/artifact-context.ts", import.meta.url).pathname,
-    new URL("../src/artifact-contracts.ts", import.meta.url).pathname,
+    fileURLToPath(new URL("../src/artifact-io.ts", import.meta.url)),
+    fileURLToPath(new URL("../src/artifact-context.ts", import.meta.url)),
+    fileURLToPath(new URL("../src/artifact-contracts.ts", import.meta.url)),
   ],
   format: "esm",
   outdir: "codex-security-artifact-foundation",

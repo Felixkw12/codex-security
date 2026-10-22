@@ -988,6 +988,10 @@ def _start_prompt_driven_scan(
                     AND workspaces.submitted = 1 AND scans.target_revision = ?
                     AND scans.target_snapshot_digest IS ? AND scans.target_device = ?
                     AND scans.target_inode = ? AND scans.status IN ('running', ?)
+                    AND (
+                        scans.status = 'running'
+                        OR (scans.model IS ? AND scans.reasoning_effort IS ?)
+                    )
                     AND scans.handoff_status = 'delivered'
                     AND (
                         (? = 0 AND scans.handoff_claim_token IS NULL)
@@ -1008,6 +1012,8 @@ def _start_prompt_driven_scan(
                     *diff_identity,
                     *target_identity,
                     "complete" if args.mode == "deep" else "running",
+                    args.model,
+                    args.reasoning_effort,
                     int(headless_standard),
                     int(headless_standard),
                     thread_id,
@@ -1591,13 +1597,7 @@ def register_cli_scan(
     *,
     before_archive: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
-    repository = require_target(args.repository)
-    require_scannable_target(repository)
     scan_dir = None
-    if not args.registration_json_stdin and (
-        not args.archive_existing or args.archived_scan_dir is not None
-    ):
-        require_cli_scan_directory(repository, args)
     user_context = None
     registration = {}
     workflow_id = None
@@ -1608,23 +1608,8 @@ def register_cli_scan(
         workflow_id = registration.get("workflowId")
     else:
         recipe_json = sys.stdin.read() if args.recipe_json_stdin else args.recipe_json
-    if (
-        args.registration_json_stdin
-        and registration.get("scanId") is None
-        and (not args.archive_existing or args.archived_scan_dir is not None)
-    ):
-        require_cli_scan_directory(repository, args)
-    recipe = parse_scan_recipe(recipe_json, repository)
     if registration.get("scanId") is not None:
         scan_dir = require_canonical_scan_directory(Path(args.scan_dir).expanduser())
-        if (
-            scan_dir == repository
-            or repository in scan_dir.parents
-            or scan_dir in repository.parents
-        ):
-            raise SystemExit(
-                "The scan artifact directory must be outside and not contain the selected target."
-            )
         scan_id = require_uuid(registration["scanId"], "scan-id")
         with scan_completion_lock(scan_id), connection:
             scan = require_scan(connection, scan_id)
@@ -1639,20 +1624,50 @@ def register_cli_scan(
             )
             if scan["status"] != "running" or scan["canceled_at"] is not None:
                 raise SystemExit("Only a running scan can bind a saved launch recipe.")
+            sealed_version = sealed_scan_producer_version(scan)
+            saved_recipe = json.loads(scan["recipe_json"]) if scan["recipe_json"] else None
+            if sealed_version is not None and saved_recipe is not None:
+                # Sealed publication uses the persisted recipe; no live checkout is executed.
+                if not Path(args.repository).expanduser().is_absolute():
+                    raise SystemExit("Scan target must be an absolute local directory path.")
+                repository = Path(args.repository).expanduser().resolve()
+                recipe = registration["recipe"]
+                requested_repository = (
+                    recipe.get("repository") if isinstance(recipe, dict) else None
+                )
+                if (
+                    not isinstance(requested_repository, str)
+                    or not Path(requested_repository).expanduser().is_absolute()
+                    or Path(requested_repository).expanduser().resolve() != repository
+                ):
+                    raise SystemExit(
+                        "Scan launch recipe repository must match the scanned repository."
+                    )
+                registered_target = Path(scan["target_path"])
+            else:
+                repository = require_target(args.repository)
+                require_scannable_target(repository)
+                recipe = parse_scan_recipe(recipe_json, repository)
+                registered_target = require_scan_target_identity(scan)
             if (
-                require_scan_target_identity(scan) != repository
+                scan_dir == repository
+                or repository in scan_dir.parents
+                or scan_dir in repository.parents
+            ):
+                raise SystemExit(
+                    "The scan artifact directory must be outside and not contain the selected target."
+                )
+            if (
+                registered_target != repository
                 or Path(scan["scan_dir"]) != scan_dir
-                or scan["mode"] != recipe["mode"]
+                or scan["mode"] != recipe.get("mode")
             ):
                 raise SystemExit(
                     "Saved scan registration must match its target, directory and mode."
                 )
-            saved_recipe = json.loads(scan["recipe_json"]) if scan["recipe_json"] else None
-            if saved_recipe is not None and saved_recipe["target"] != recipe["target"]:
+            if saved_recipe is not None and saved_recipe["target"] != recipe.get("target"):
                 raise SystemExit("Saved scan registration must preserve the original scope.")
-            resume_verifier = sealed_scan_producer_version
             if saved_recipe is None:
-                sealed_version = sealed_scan_producer_version(scan)
                 expected_paths = [] if scan["scope"] == "." else [scan["scope"]]
                 if recipe["target"]["paths"] != expected_paths:
                     raise SystemExit("Saved scan registration must preserve the original scope.")
@@ -1666,14 +1681,18 @@ def register_cli_scan(
                         scan_id,
                     ),
                 )
-                resume_verifier = lambda _: sealed_version
             scan = require_scan(connection, scan_id)
             return cli_scan_resume(
                 connection,
                 scan,
                 registration.get("claimToken"),
-                sealed_producer_version=resume_verifier,
+                sealed_producer_version=lambda _: sealed_version,
             )
+    repository = require_target(args.repository)
+    require_scannable_target(repository)
+    if not args.archive_existing or args.archived_scan_dir is not None:
+        require_cli_scan_directory(repository, args)
+    recipe = parse_scan_recipe(recipe_json, repository)
     requested_target = recipe["target"]
     paths = requested_target["paths"]
     recipe.pop("_codexSecurityFileScopes", None)

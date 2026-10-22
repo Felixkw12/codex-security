@@ -9,6 +9,7 @@ import {
 } from "node:fs";
 import { createRequire } from "node:module";
 import {
+  basename,
   delimiter,
   dirname,
   isAbsolute,
@@ -23,7 +24,7 @@ import {
 
 export async function resolveTrustedCodex(
   environment: NodeJS.ProcessEnv,
-  protectedRoot: string,
+  protectedRoot: string | readonly string[],
   platform: NodeJS.Platform = process.platform,
   originalCwd: string = process.cwd(),
   architecture: NodeJS.Architecture = process.arch,
@@ -45,11 +46,13 @@ export async function resolveTrustedCodex(
   return null;
 }
 
-export async function snapshotNativeEnvironment(): Promise<
-  Record<string, string>
-> {
+export async function snapshotNativeEnvironment(
+  canonicalizeMissingHome?: (path: string) => Promise<string>,
+  source: NodeJS.ProcessEnv = process.env,
+  originalCwd: string = process.cwd(),
+): Promise<Record<string, string>> {
   const environment = Object.fromEntries(
-    Object.entries(process.env)
+    Object.entries(source)
       .filter((entry): entry is [string, string] => entry[1] !== undefined)
       .map(([name, value]) => [
         process.platform === "win32" ? name.toUpperCase() : name,
@@ -61,9 +64,42 @@ export async function snapshotNativeEnvironment(): Promise<
     delete environment.CODEX_HOME;
   } else if (codexHome !== undefined && codexHome.length > 0) {
     // Resolve symlink/.. paths before consumers normalize them or change cwd.
-    environment.CODEX_HOME = await fs.realpath(
+    const expanded = absoluteCodexPath(
       expandHomePath(codexHome, environment),
+      process.platform,
+      originalCwd,
     );
+    try {
+      environment.CODEX_HOME = await fs.realpath(expanded);
+    } catch (error) {
+      if (
+        canonicalizeMissingHome === undefined ||
+        (error as NodeJS.ErrnoException).code !== "ENOENT"
+      )
+        throw error;
+      const missing = [basename(expanded)];
+      let parent = dirname(expanded);
+      while (true) {
+        let existing: string;
+        try {
+          existing = await fs.realpath(parent);
+        } catch (error) {
+          const next = dirname(parent);
+          if (
+            (error as NodeJS.ErrnoException).code !== "ENOENT" ||
+            next === parent
+          )
+            throw error;
+          missing.unshift(basename(parent));
+          parent = next;
+          continue;
+        }
+        environment.CODEX_HOME = await canonicalizeMissingHome(
+          join(existing, ...missing),
+        );
+        break;
+      }
+    }
   }
   return environment;
 }
@@ -92,7 +128,7 @@ function* codexPathCandidates(
   const configured =
     platform === "win32" && requested && isWindowsAppsPath(requested)
       ? undefined
-      : requested;
+      : requested && expandHomePath(requested, env);
   const command = configured || "codex";
   if (platform === "win32" && !configured) {
     const managedRoot = environmentVariable(

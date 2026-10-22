@@ -411,11 +411,12 @@ export class ScanCostTracker {
       session.filesTotal = progress.filesTotal;
       session.filesCompleted = progress.filesCompleted;
       this.#workerProgress.set(session.threadId, progress.filesCompleted);
+      let reviewedFiles = 0;
+      for (const reviewed of this.#workerProgress.values())
+        reviewedFiles += reviewed;
       const filesCompleted = Math.min(
         expectedFilesTotal ?? Number.MAX_SAFE_INTEGER,
-        this.#workerProgress
-          .values()
-          .reduce((total, reviewed) => total + reviewed, 0),
+        reviewedFiles,
       );
       if (filesCompleted < this.#highestFilesCompleted) continue;
       const update = {

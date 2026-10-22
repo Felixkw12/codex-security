@@ -45,6 +45,7 @@ import {
 import type { ScanProgress } from "../src/worker-progress.js";
 import { readSavedScanLogs, type ScanLogSource } from "../src/scan-logs.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { nodeCommand } from "./support/shell.js";
 
 const pluginRoot = fileURLToPath(
   new URL("../../../plugins/codex-security/", import.meta.url),
@@ -344,12 +345,14 @@ test.each([
     ).version;
     let runtimeVersion = version;
     const customProvider = provider?.["env_key"] === "PROVIDER_KEY";
+    const runtimeNode = nodeCommand().command;
     const environment = {
       ...process.env,
       CODEX_HOME: codexHome,
       CODEX_SECURITY_STATE_DIR: join(root, "state"),
       CODEX_CLI_PATH: process.execPath,
       SYNTHETIC_SCAN_SETTING: "inherited",
+      ...(!native ? { CODEX_MCP_NODE_PATH: process.execPath } : {}),
       ...(queuedNativeKnowledge
         ? { CODEX_SECURITY_KNOWLEDGE_BASE: knowledgeDocument }
         : {}),
@@ -370,6 +373,7 @@ test.each([
     const inheritedSettings = {
       openai_base_url: "https://endpoint.example.test/v1",
       web_search: "cached",
+      developer_instructions: "Synthetic composed-scan instructions.",
       analytics: { enabled: false },
       otel: { environment: "synthetic-composed-scan" },
       responses_api_metadata: {
@@ -397,6 +401,7 @@ test.each([
       service_tier: "priority",
       forced_login_method: "chatgpt",
       cli_auth_credentials_store: "file",
+      projects: { [repo]: { trust_level: "trusted" } },
       ...(provider === undefined
         ? {}
         : { model_provider: "custom", model_providers: { custom: provider } }),
@@ -558,7 +563,10 @@ process.exit(0);
             threadId: registeredScan!.threadId,
             pluginRoot: PLUGIN_ROOT,
             pythonPath: python,
-            parentSandbox: { filesystemDenies: [join(root, "private")] },
+            parentSandbox: {
+              workspaceAccess: "write",
+              filesystemDenies: [join(root, "private")],
+            },
           };
           prepared = queuedPrepared ?? (await prepareNative(nativeInput));
           if (queuedNativeKnowledge && preparedCount++ === 0) {
@@ -611,7 +619,11 @@ process.exit(0);
           prepareRuntime: async () => ({
             codexHome,
             preserveCodexHomeConfig: true,
-            environment,
+            environment: {
+              ...environment,
+              SYNTHETIC_SCAN_SETTING: "prepared default",
+              CODEX_MCP_NODE_PATH: runtimeNode,
+            },
             credentialsAvailable: true,
             persistentCredentialHome: true,
             plugin: {
@@ -701,6 +713,8 @@ process.exit(0);
               );
             }
             const env = options.env!;
+            expect(env["SYNTHETIC_SCAN_SETTING"]).toBe("inherited");
+            if (!native) expect(env["CODEX_MCP_NODE_PATH"]).toBe(runtimeNode);
             const id = env["CODEX_SECURITY_SCAN_ID"]!;
             const makeThread = (
               threadOptions: ThreadOptions,
@@ -754,12 +768,20 @@ process.exit(0);
                       "--scan-id",
                       id,
                     ]);
+                    // These merges feed the next discovery stop decision.
+                    const pendingCheckpoint = JSON.parse(
+                      await readFile(
+                        join(scanDir, DEEP_SCAN_CHECKPOINT),
+                        "utf8",
+                      ),
+                    );
+                    expect(pendingCheckpoint.terminalReason).toBeUndefined();
                     expect(
                       (saved["scan"] as JsonObject)["progress"],
                     ).toMatchObject({
-                      phase: "reporting",
+                      phase: "discovery",
                       status: "running",
-                      independentReviews: { active: 0, consolidating: true },
+                      independentReviews: { active: 0, consolidating: false },
                     });
                     const mergePath = join(
                       record["scanDir"] as string,
@@ -815,6 +837,7 @@ process.exit(0);
                     const {
                       model_providers: providerDefinitions,
                       responses_api_metadata,
+                      projects: _privateProjects,
                       ...publicSettings
                     } = nativeSettings;
                     expect(options.config).toMatchObject({
@@ -1515,7 +1538,10 @@ process.exit(0);
               pluginRoot,
               pythonPath: python,
               stateDirectory: environment.CODEX_SECURITY_STATE_DIR,
-              parentSandbox: { filesystemDenies: [join(root, "private")] },
+              parentSandbox: {
+                workspaceAccess: "write",
+                filesystemDenies: [join(root, "private")],
+              },
             });
             if (missingReplay === "follow-up" || missingReplay === "unsealed") {
               await expect(preparation).rejects.toThrow("ENOENT");
@@ -1699,6 +1725,10 @@ process.exit(0);
           expect(await readFile(join(scanDir, path))).toEqual(bytes);
         expect(result.manifest.scan.producer.version).toBe(version);
       }
+      if (!budget)
+        expect(progressRuns.flat()).toContainEqual(
+          expect.objectContaining({ phase: "reporting" }),
+        );
       expect(result.findings.findings).toHaveLength(budget ? 2 : 1);
       expect(result.coverage).not.toHaveProperty("completeness");
       const checkpoint = JSON.parse(
@@ -1756,6 +1786,10 @@ process.exit(0);
       }
       for (const turn of turns) {
         expect(turn.config).toMatchObject(expectedSettings());
+        expect(turn.config).not.toHaveProperty("projects");
+        expect(
+          turn.overrides?.filter((value) => /^projects[.=]/.test(value)),
+        ).toEqual([]);
         expect(requestMetadata(turn.overrides)).toMatchObject(
           inheritedMetadata,
         );

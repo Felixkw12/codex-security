@@ -428,18 +428,47 @@ test("real severity producer reuses unchanged evidence across occurrences", asyn
     ruleId: "synthetic-rule",
     identity: { anchor: "synthetic-anchor" },
   };
+  const reviewPrompts: string[] = [];
+  const codex = {
+    startThread() {
+      return {
+        async run(prompt: string) {
+          reviewPrompts.push(prompt);
+          return {
+            finalResponse: JSON.stringify({
+              findingId: finding.findingId,
+              decision: "assessed",
+              level: "high",
+              rubricLabel: "HIGH",
+              rationale: "Synthetic evidence supports the assessment.",
+              confidence: "high",
+              reviewTrigger: "Changed evidence requires another review.",
+            }),
+          };
+        },
+      };
+    },
+  };
+  const classificationOptions = { codex, environment: {} };
   const first = await classifySeverityInternal(
     [finding],
-    {},
+    classificationOptions,
     "sdk",
     store.checkpoint("scan-a", [finding.findingId], false),
   );
+  assert.equal(reviewPrompts.length, 3);
   const next = { ...finding, occurrenceId: "occurrence-b" };
   const checkpoint = store.checkpoint("scan-b", [finding.findingId], false);
   const cached = await checkpoint.load(first, [next]);
   assert.equal(cached.length, 1);
   assert.equal(cached[0].occurrenceId, "occurrence-a");
-  const second = await classifySeverityInternal([next], {}, "sdk", checkpoint);
+  const second = await classifySeverityInternal(
+    [next],
+    classificationOptions,
+    "sdk",
+    checkpoint,
+  );
+  assert.equal(reviewPrompts.length, 3);
   assert.equal(
     second.assessments[0].inputSha256,
     first.assessments[0].inputSha256,

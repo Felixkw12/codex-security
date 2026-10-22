@@ -255,7 +255,8 @@ export async function runDeepScans(
           )) ?? null,
         );
       } else if (
-        input.onUsage !== undefined &&
+        (input.onUsage !== undefined ||
+          input.scanOptions.onWorkerEvent !== undefined) &&
         record.continuationThreadId &&
         record.progress.status === "complete"
       ) {
@@ -379,14 +380,6 @@ export async function runDeepScans(
       state.mergeStarted = true;
       await save();
     }
-    if (!clean)
-      await workbench([
-        "update-progress",
-        "--scan-id",
-        scanId,
-        "--phase",
-        "reporting",
-      ]).catch(() => undefined);
     let merged: ReturnType<typeof validateScanMerge>;
     let validationError: unknown;
     for (;;) {
@@ -586,7 +579,8 @@ export async function runDeepScans(
       const batch = unfinished.slice(0, settings.workers);
       while (
         batch.length < settings.workers &&
-        state.passes.length < settings.maxDiscoveryRuns
+        state.passes.length < settings.maxDiscoveryRuns &&
+        state.noNewStreak < settings.stopAfterNoNew
       ) {
         batch.push(reservePass(state));
       }
@@ -599,6 +593,13 @@ export async function runDeepScans(
       }
       await refreshPasses();
     }
+    await workbench([
+      "update-progress",
+      "--scan-id",
+      scanId,
+      "--phase",
+      "reporting",
+    ]).catch(() => undefined);
     await mergePending(true);
     updateAggregateCoverage();
     await save();

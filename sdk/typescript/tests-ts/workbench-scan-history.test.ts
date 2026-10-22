@@ -101,7 +101,7 @@ for index, (scan, repository) in enumerate([
     ('unrelated-before', 'unrelated'), ('unrelated-after', 'unrelated'),
     ('before', 'selected'), ('after', 'selected')
 ]):
-    seed(connection, 'scans', ('id', 'target_id', 'target_path', 'status', 'started_at'), (lambda items: (items[0], None, items[1], items[2], items[3],))((scan, str(Path(sys.argv[2]) / repository), 'complete', str(index))))
+    seed(connection, 'scans', ('id', 'target_id', 'target_path', 'status', 'started_at'), (lambda items: (items[0], None, items[1], items[2], items[3],))((scan, str(Path(sys.argv[2]) / repository), 'complete', f'2026-08-01T00:00:{index:02d}Z')))
 seed_many(connection, 'finding_occurrences', ('id', 'finding_id', 'scan_id'), [
     ('unrelated-first', 'unrelated-identity-a', 'unrelated-before'),
     ('unrelated-second', 'unrelated-identity-b', 'unrelated-after')
@@ -296,7 +296,7 @@ import workbench_scan_history as history
 connection = migrated_connection()
 for index in range(3):
     scan = f'scan-{index}'
-    seed(connection, 'scans', ('id', 'target_path', 'target_id', 'status', 'started_at'), (lambda items: (items[0], items[1], None, items[2], items[3],))((scan, sys.argv[2], 'complete', str(index))))
+    seed(connection, 'scans', ('id', 'target_path', 'target_id', 'status', 'started_at'), (lambda items: (items[0], items[1], None, items[2], items[3],))((scan, sys.argv[2], 'complete', f'2026-08-01T00:00:{index:02d}Z')))
     seed(connection, 'finding_occurrences', ('id', 'finding_id', 'scan_id', 'details_json', 'remediation', 'severity', 'summary', 'title'), (scan, scan, scan, '{}', 'fix', 'high', 'summary', 'title'))
 queries = []
 connection.set_trace_callback(queries.append)
@@ -315,7 +315,7 @@ scoped = history._saved_finding_links(connection, {'scan-0', 'scan-1'})
 link_queries = [query for query in queries if 'FROM scan_comparison_matches' in query]
 for index in (3, 4):
     scan = f'scan-{index}'
-    seed(connection, 'scans', ('id', 'target_path', 'target_id', 'status', 'started_at'), (lambda items: (items[0], items[1], None, items[2], items[3],))((scan, sys.argv[2], 'complete', str(index))))
+    seed(connection, 'scans', ('id', 'target_path', 'target_id', 'status', 'started_at'), (lambda items: (items[0], items[1], None, items[2], items[3],))((scan, sys.argv[2], 'complete', f'2026-08-01T00:00:{index:02d}Z')))
     seed(connection, 'finding_occurrences', ('id', 'finding_id', 'scan_id', 'details_json', 'remediation', 'severity', 'summary', 'title'), (scan, f'scan-{index - 3}', scan, '{}', 'fix', 'high', 'summary', 'title'))
 def coverage(scan):
     if scan['id'] in {'scan-0', 'scan-1', 'scan-2'}:
@@ -587,7 +587,7 @@ from workbench_scan_history import finding_matches
 connection = migrated_connection()
 scans = [('a', 'a'), ('b', 'b'), ('c', 'c'), ('a-repeat', 'a'), ('c-repeat', 'c'), ('unlinked', 'unlinked')]
 for index, (scan, finding) in enumerate(scans):
-    seed(connection, 'scans', ('id', 'started_at'), (scan, str(index)))
+    seed(connection, 'scans', ('id', 'started_at'), (scan, f'2026-08-01T00:00:{index:02d}Z'))
     seed(connection, 'finding_occurrences', ('id', 'finding_id', 'scan_id', 'title'), (scan, finding, scan, scan))
 seed_many(connection, 'scan_comparison_matches', ('before_scan_id', 'after_scan_id', 'before_occurrence_id', 'after_occurrence_id', 'reason'), [
     ('a', 'b', 'a', 'b', 'First confirmed link.'),

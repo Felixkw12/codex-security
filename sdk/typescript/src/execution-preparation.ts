@@ -654,7 +654,7 @@ export function prepareReadOnlyExecution(
   };
 }
 
-function readOnlyFilesystem(filesystem: JsonObject): JsonObject {
+export function readOnlyFilesystem(filesystem: JsonObject): JsonObject {
   return Object.fromEntries(
     Object.entries(filesystem).map(([path, access]) => [
       path,

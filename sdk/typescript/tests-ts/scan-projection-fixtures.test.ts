@@ -133,9 +133,10 @@ test("completed projection follows the shared canonical child fixture", async ()
       ...("writeup" in expected ? { writeup: expected.writeup } : {}),
     });
   }
-  expect<unknown>(combineScanCoverage([projected.draft.coverage])).toEqual(
-    fixture.expected.coverage,
-  );
+  expect<unknown>(combineScanCoverage([projected.draft.coverage])).toEqual({
+    ...fixture.expected.coverage,
+    resolvedDeferred: [],
+  });
   expect(
     await writer.projectChild(
       fixture.parentScanId,

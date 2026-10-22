@@ -787,6 +787,79 @@ describe("CodexSecurity orchestration", () => {
     expect(existsSync(dedicatedHome)).toBe(true);
   });
 
+  test("keeps the current scan environment when reusing a prepared runtime", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const runtimeHome = join(root, "runtime");
+    await mkdir(repository);
+    await mkdir(runtimeHome, { mode: 0o700 });
+    const environment: Record<string, string | undefined> = {
+      CODEX_HOME: runtimeHome,
+      SYNTHETIC_REMOVED_INPUT: "initial input",
+    };
+    const launches: Array<CodexOptions["env"]> = [];
+    let preparations = 0;
+    let outputs = 0;
+    const runtimeNode = nodeCommand().command;
+    const client = new TestClient(
+      { pluginPath: PLUGIN_ROOT },
+      {
+        environment,
+        prepareRuntime: async () => {
+          preparations += 1;
+          return {
+            ...preparedRuntime(runtimeHome),
+            environment: {
+              SYNTHETIC_SCAN_SETTING: "prepared default",
+              SYNTHETIC_PREPARATION_ONLY: "prepared setting",
+              SYNTHETIC_REMOVED_INPUT: "initial input",
+              CODEX_MCP_NODE_PATH: runtimeNode,
+            },
+          };
+        },
+        resolvePluginPython: async () => "/managed/python",
+        prepareOutputDir: async () => {
+          const directory = join(root, `scan-${++outputs}`);
+          await mkdir(directory, { mode: 0o700 });
+          return directory;
+        },
+        repositoryRevision: async () => "deadbeef",
+        createCodex: (options) => {
+          launches.push(structuredClone(options.env));
+          throw new Error("selected environment reached execution");
+        },
+      },
+    );
+    try {
+      await expect(client.run(repository)).rejects.toThrow(
+        "selected environment reached execution",
+      );
+      expect(launches[0]).toMatchObject({
+        SYNTHETIC_SCAN_SETTING: "prepared default",
+        SYNTHETIC_PREPARATION_ONLY: "prepared setting",
+        SYNTHETIC_REMOVED_INPUT: "initial input",
+        CODEX_MCP_NODE_PATH: runtimeNode,
+      });
+
+      environment["SYNTHETIC_SCAN_SETTING"] = "current scan selection";
+      environment["CODEX_MCP_NODE_PATH"] = join(root, "caller-node");
+      delete environment["SYNTHETIC_REMOVED_INPUT"];
+      await expect(client.run(repository)).rejects.toThrow(
+        "selected environment reached execution",
+      );
+      expect(preparations).toBe(1);
+      expect(launches[1]).toMatchObject({
+        SYNTHETIC_SCAN_SETTING: "current scan selection",
+        SYNTHETIC_PREPARATION_ONLY: "prepared setting",
+        CODEX_MCP_NODE_PATH: runtimeNode,
+      });
+      expect(launches[1]).not.toHaveProperty("SYNTHETIC_REMOVED_INPUT");
+      expect(launches[0]!["SYNTHETIC_SCAN_SETTING"]).toBe("prepared default");
+    } finally {
+      await client.close();
+    }
+  });
+
   test("does not reimport ambient credentials after an explicit logout", async () => {
     const root = await temporaryDirectory();
     const ambientHome = join(root, "ambient-home");

@@ -4,6 +4,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   realpath,
   rm,
   writeFile,
@@ -50,9 +51,9 @@ async function fixture() {
   return { root, repository, codexHome, inheritedPermissions };
 }
 
-test("saved ordinary passes retain native permissions and attribution at the resumed Codex process boundary", async () => {
+async function assertResumedPermissions(nativeRejoin: boolean) {
   const { root, repository, codexHome, inheritedPermissions } = await fixture();
-  const scanDir = join(root, "scan");
+  let scanDir = join(root, "scan");
   const captures = join(root, "launches.jsonl");
   const preload = join(root, "codex-stub.mjs");
   const threadId = randomUUID();
@@ -96,6 +97,31 @@ await new Promise(() => {});
     OPENAI_API_KEY: "synthetic-fixture-key",
     SYNTHETIC_PROVIDER_KEY: "synthetic-provider-key",
   };
+  let registeredScan: ScanOptions["registeredScan"];
+  if (nativeRejoin) {
+    const started = await runWorkbench(
+      { python: process.env["PYTHON"] ?? "python", pluginRoot, environment },
+      [
+        "start-headless-standard-scan",
+        "--thread-id",
+        "synthetic-native-owner",
+        "--target-path",
+        repository,
+        "--scope",
+        ".",
+        "--scan-root",
+        join(root, "native-scans"),
+      ],
+    );
+    const scan = started["scan"] as JsonObject;
+    scanDir = scan["scanDir"] as string;
+    registeredScan = {
+      scanId: scan["scanId"] as string,
+      scanDir,
+      threadId: "synthetic-native-owner",
+      handoffClaimToken: scan["handoffClaimToken"] as string,
+    };
+  }
   let registration: JsonObject | undefined;
   let workbenchOptions: WorkbenchCommandOptions | undefined;
   const makeClient = (native: boolean, config: JsonObject) =>
@@ -176,6 +202,7 @@ await new Promise(() => {});
       first.run(repository, {
         mode: "standard",
         outputDir: scanDir,
+        registeredScan,
         deepScanPass: true,
         preserveProviderEnvironment: true,
         safetyIdentifier: "synthetic-saved-identifier",
@@ -188,6 +215,9 @@ await new Promise(() => {});
     "get-cli-scan-resume",
     "--scan-id",
     registration!["scanId"] as string,
+    ...(registeredScan?.handoffClaimToken
+      ? ["--claim-token", registeredScan.handoffClaimToken]
+      : []),
   ]);
   const recipe = saved["recipe"] as JsonObject;
   expect(recipe["inheritedPermissions"]).toEqual(inheritedPermissions);
@@ -198,6 +228,18 @@ await new Promise(() => {});
   expect(JSON.stringify(recipe)).not.toContain("saved-mcp-setting");
   expect(JSON.stringify(recipe)).not.toContain("saved-provider-header");
   expect(recipe["replayProfile"]).toMatchObject({ home: "ambient" });
+  const replayProfile = recipe["replayProfile"] as JsonObject;
+  const savedProfilePath = join(
+    codexHome,
+    `${replayProfile["name"]}.config.toml`,
+  );
+  const savedProfileBytes = await readFile(savedProfilePath);
+  const replayProfiles = async () =>
+    (await readdir(codexHome))
+      .filter((name) => /^codex_security_.*\.config\.toml$/.test(name))
+      .sort();
+  const retainedProfiles = await replayProfiles();
+  expect(retainedProfiles).toEqual([`${replayProfile["name"]}.config.toml`]);
   expect(recipe["config"]).not.toHaveProperty("plugins");
   expect(recipe["config"]).not.toHaveProperty("marketplaces");
   expect(recipe["config"]).not.toHaveProperty("features.plugins");
@@ -227,7 +269,9 @@ await new Promise(() => {});
       resumed.run(repository, {
         mode: "standard",
         outputDir: scanDir,
-        resumeScanId: saved["scanId"] as string,
+        ...(registeredScan === undefined
+          ? { resumeScanId: saved["scanId"] as string }
+          : { registeredScan }),
         deepScanPass: true,
         preserveProviderEnvironment:
           recipe["preserveProviderEnvironment"] === true,
@@ -240,6 +284,8 @@ await new Promise(() => {});
   } finally {
     await resumed.close();
   }
+  expect(await replayProfiles()).toEqual(retainedProfiles);
+  expect(await readFile(savedProfilePath)).toEqual(savedProfileBytes);
   const launches = (await readFile(captures, "utf8"))
     .trim()
     .split("\n")
@@ -287,7 +333,12 @@ await new Promise(() => {});
   }
   expect(launches[1]!.args).toContain("resume");
   expect(launches[1]!.args).toContain(threadId);
-});
+}
+
+test.each([false, true])(
+  "saved ordinary passes retain native permissions and attribution at the resumed Codex process boundary (native rejoin: %p)",
+  assertResumedPermissions,
+);
 
 test("CLI resume restores saved native permissions into the shared SDK operation", async () => {
   const { root, repository, inheritedPermissions } = await fixture();

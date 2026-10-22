@@ -396,7 +396,7 @@ def test_native_parent_serializes_concurrent_starts_with_different_context(
 
 
 @pytest.fixture
-def native_scan_completion(tmp_path: Path):
+def native_scan_completion(tmp_path: Path, request):
     state, target = _scan_workspace(tmp_path)
     arguments = (
         "begin-deep-scan",
@@ -409,6 +409,14 @@ def native_scan_completion(tmp_path: Path):
         "--user-context",
         "Original optional context.",
     )
+    if getattr(request, "param", False):
+        arguments = (
+            *arguments,
+            "--model",
+            "synthetic-selected-model",
+            "--reasoning-effort",
+            "synthetic-selected-effort",
+        )
     started = run_workbench(state, *arguments)
     scan = started["scan"]
     token = scan["handoffClaimToken"]
@@ -605,6 +613,7 @@ def test_native_registration_returns_verified_sealed_resume(native_scan_completi
     assert manifest.read_bytes() == sealed
 
 
+@pytest.mark.parametrize("native_scan_completion", [False, True], indirect=True)
 def test_native_target_retry_reuses_completed_result(
     native_scan_completion,
 ) -> None:
@@ -632,18 +641,28 @@ def test_native_target_retry_reuses_completed_result(
     assert {path: path.read_bytes() for path in artifacts} == artifacts
 
 
-@pytest.mark.parametrize("change", ["context", "snapshot", "owner", "explicit_start"])
+@pytest.mark.parametrize("native_scan_completion", [False, True], indirect=True)
+@pytest.mark.parametrize(
+    "change", ["context", "snapshot", "owner", "explicit_start", "model", "reasoning_effort"]
+)
 def test_completed_native_result_does_not_prevent_new_scans(native_scan_completion, change):
     state, target, arguments, started, complete = native_scan_completion
     complete()
     if change == "context":
-        arguments = (*arguments[:-1], "Different optional context.")
+        arguments = tuple(
+            "Different optional context." if value == "Original optional context." else value
+            for value in arguments
+        )
     elif change == "snapshot":
         (target / "app.py").write_text("print('changed')\n")
     elif change == "owner":
         arguments = tuple(
             "another-owner" if value == "native-owner" else value for value in arguments
         )
+    elif change == "model":
+        arguments = (*arguments, "--model", "synthetic-next-model")
+    elif change == "reasoning_effort":
+        arguments = (*arguments, "--reasoning-effort", "synthetic-next-effort")
     if change == "explicit_start":
         created = run_workbench(state, "start-scan", "--workspace-id", started["workspace"]["id"])[
             "results"

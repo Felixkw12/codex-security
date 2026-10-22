@@ -50,6 +50,7 @@ export function mockWorkbench(
   if (args[0] === "register-cli-scan") {
     return mockScanRegistration(args, input);
   }
+  if (args[0] === "list-scans") return { scans: [] };
   if (args[0] === "get-scan-feedback") {
     return {
       scanId: "scan_example_001",

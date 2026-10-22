@@ -87,7 +87,11 @@ export function discoveryStopReason(
     stopAfterNoNew: number;
   },
 ): "saturated" | "capped" | undefined {
-  if (!input.deadlineReached && state.noNewStreak >= input.stopAfterNoNew)
+  if (
+    !input.deadlineReached &&
+    !input.hasUnfinishedPasses &&
+    state.noNewStreak >= input.stopAfterNoNew
+  )
     return "saturated";
   if (
     input.deadlineReached ||

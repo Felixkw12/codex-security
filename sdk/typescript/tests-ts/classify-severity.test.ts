@@ -305,7 +305,7 @@ test("votes independently for each imported report and retains the winning answe
 });
 
 test.each([2, 3, 10])(
-  "does not return a partial vote when review %s fails or is invalid",
+  "does not return a partial vote when review %p fails or is invalid",
   async (failedRun) => {
     for (const invalid of [false, true]) {
       const { codex, calls } = fakeCodex((call: number) => {
@@ -325,7 +325,7 @@ test.each([2, 3, 10])(
 );
 
 test.each([1, 2, 3])(
-  "cancellation after review %s stops classification",
+  "cancellation after review %p stops classification",
   async (canceledRun) => {
     const controller = new AbortController();
     const { codex, calls } = fakeCodex((call: number) => {
@@ -357,7 +357,7 @@ test.each([1, 2, 4, 10])(
 );
 
 test.each([0, -1, 11, 1.5, NaN, Infinity])(
-  "rejects invalid local run count %s before model work",
+  "rejects invalid local run count %p before model work",
   async (classificationRuns) => {
     const { codex, calls } = fakeCodex(assessed);
     await expect(

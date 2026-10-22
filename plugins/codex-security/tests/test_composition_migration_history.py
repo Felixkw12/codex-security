@@ -9,7 +9,12 @@ import pytest
 
 @pytest.mark.parametrize(
     ("shared_version", "relocations"),
-    [(41, ((42, 43), (43, 53), (44, 54))), (47, ((48, 53), (49, 54)))],
+    [
+        (41, ((42, 43), (43, 54), (44, 55))),
+        (47, ((48, 54), (49, 55))),
+        (51, ((52, 54), (53, 55))),
+        (52, ((53, 54), (54, 55))),
+    ],
 )
 def test_composition_preview_history_preserves_rows_and_migration_timestamps(
     shared_version, relocations
@@ -19,7 +24,7 @@ def test_composition_preview_history_preserves_rows_and_migration_timestamps(
     )
     current = schema["MIGRATIONS"]
     by_version = {version: (name, sql) for version, name, sql in current}
-    # Both published composition histories must retain their original data and receipts.
+    # Published composition histories must retain their original data and receipts.
     previous = tuple(row for row in current if row[0] <= shared_version) + tuple(
         (old, *by_version[new]) for old, new in relocations
     )
@@ -71,7 +76,10 @@ def test_composition_preview_history_preserves_rows_and_migration_timestamps(
             row["version"]: (row["name"], row["applied_at"])
             for row in connection.execute("SELECT * FROM schema_migrations")
         }
-        assert history[52] == ("record severity classification review counts", upgrade_time)
+        assert history[52] == (
+            "record severity classification review counts",
+            original_time if shared_version >= 52 else upgrade_time,
+        )
         for old, new in relocations:
             assert history[new] == (previous[old - 1][1], original_time)
         assert history[42] == (

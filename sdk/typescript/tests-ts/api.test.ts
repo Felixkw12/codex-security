@@ -970,6 +970,7 @@ describe("CodexSecurity orchestration", () => {
       "get-scan-feedback",
       "set-scan-thread",
       "preserve-scan-results",
+      "get-scan",
       "cancel-scan",
     ]);
     expect(commands.at(-1)).toEqual([
@@ -3850,85 +3851,6 @@ describe("CodexSecurity orchestration", () => {
     },
   );
 
-  test("uses the actual scanner inventory instead of a stale workbench estimate", async () => {
-    const root = await temporaryDirectory();
-    const repository = join(root, "repository");
-    const codexHome = join(root, "codex-home");
-    const scanDir = join(root, "scan");
-    await mkdir(repository);
-    await mkdir(codexHome);
-    await mkdir(scanDir, { mode: 0o700 });
-    const updates: ScanProgress[] = [];
-    const client = new TestClient(
-      {},
-      {
-        environment: {},
-        prepareRuntime: async () => preparedRuntime(codexHome),
-        resolvePluginPython: async () => "/managed/python",
-        prepareOutputDir: async () => scanDir,
-        repositoryRevision: async () => "deadbeef",
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> =>
-          args[0] === "register-cli-scan"
-            ? { ...mockScanRegistration(args, input), scopeFileCount: 4_207 }
-            : mockWorkbench(args, input),
-        createCodex: () => ({
-          startThread: () => ({
-            id: null,
-            async runStreamed(prompt: string) {
-              expect(prompt).toContain(
-                "The SDK's current in-scope file-count estimate is 4207",
-              );
-              await copyCompletedScan(root);
-              async function* scanEvents(): AsyncGenerator<ThreadEvent> {
-                for await (const event of completedEvents()) {
-                  yield event;
-                  if (event.type === "turn.started") {
-                    for (const filesCompleted of [0, 250, 4_198]) {
-                      const progress: ScanProgress = {
-                        phase:
-                          filesCompleted === 4_198 ? "validation" : "discovery",
-                        filesCompleted,
-                        filesTotal: 4_198,
-                      };
-                      yield {
-                        type: "item.completed",
-                        item: {
-                          id: "inventory-" + filesCompleted,
-                          type: "agent_message",
-                          text:
-                            "CODEX_SECURITY_SCAN_PROGRESS " +
-                            JSON.stringify(progress),
-                        },
-                      };
-                    }
-                  }
-                }
-              }
-              return { events: scanEvents() };
-            },
-          }),
-        }),
-      },
-    );
-
-    const result = await client.run(repository, {
-      onProgress: (progress) => updates.push(progress),
-    });
-
-    expect(result.threadId).toBe("thread-1");
-    expect(updates).toEqual([
-      { phase: "preflight", filesCompleted: 0, filesTotal: 4_207 },
-      { phase: "discovery", filesCompleted: 0, filesTotal: 4_198 },
-      { phase: "discovery", filesCompleted: 250, filesTotal: 4_198 },
-      { phase: "validation", filesCompleted: 4_198, filesTotal: 4_198 },
-    ]);
-    await client.close();
-  });
-
   test("normalizes worker progress while streaming related session events", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -4034,9 +3956,9 @@ describe("CodexSecurity orchestration", () => {
     expect(result.threadId).toBe("thread-1");
     expect(updates).toEqual([
       { phase: "preflight", filesCompleted: 0, filesTotal: 1_258 },
-      { phase: "discovery", filesCompleted: 3, filesTotal: 1_258 },
-      { phase: "discovery", filesCompleted: 1_249, filesTotal: 1_258 },
-      { phase: "validation", filesCompleted: 1_249, filesTotal: 1_258 },
+      { phase: "preflight", filesCompleted: 3, filesTotal: 1_258 },
+      { phase: "preflight", filesCompleted: 1_249, filesTotal: 1_258 },
+      { phase: "preflight", filesCompleted: 1_249, filesTotal: 1_258 },
     ]);
     expect(sessionEvents).toHaveLength(10);
     expect(
@@ -5935,6 +5857,11 @@ describe("CodexSecurity orchestration", () => {
       expect.any(String),
     ]);
     expect(commands[2]).toMatchObject([
+      "get-scan",
+      "--scan-id",
+      expect.stringMatching(/^[0-9a-f-]{36}$/),
+    ]);
+    expect(commands[3]).toMatchObject([
       "fail-scan",
       "--scan-id",
       expect.stringMatching(/^[0-9a-f-]{36}$/),

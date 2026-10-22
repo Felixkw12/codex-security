@@ -28,6 +28,7 @@ const pinnedReadOnly = {
 
 assert.equal(CODEX_SANDBOX_STATE_META_CAPABILITY, "codex/sandbox-state-meta");
 assert.deepEqual(resolveNativeParentSandbox(extra(pinnedReadOnly)), {
+  workspaceAccess: "read",
   filesystemDenies: [],
 });
 assert.deepEqual(
@@ -38,6 +39,7 @@ assert.deepEqual(
     }),
   ),
   {
+    workspaceAccess: "read",
     filesystemDenies: [],
   },
 );
@@ -50,6 +52,7 @@ assert.deepEqual(
     }),
   ),
   {
+    workspaceAccess: "write",
     filesystemDenies: [],
   },
 );
@@ -74,6 +77,7 @@ assert.deepEqual(
     }),
   ),
   {
+    workspaceAccess: "write",
     filesystemDenies: [],
   },
 );
@@ -107,6 +111,7 @@ assert.deepEqual(
     }),
   ),
   {
+    workspaceAccess: "read",
     filesystemDenies: [
       "/repo/.env",
       "/repo/.secrets",
@@ -148,6 +153,7 @@ assert.deepEqual(
     requestInfo: parentMetadata,
   }),
   {
+    workspaceAccess: "read",
     filesystemDenies: [],
   },
 );
@@ -157,6 +163,7 @@ assert.deepEqual(
     requestInfo: parentMetadata,
   }),
   {
+    workspaceAccess: "read",
     filesystemDenies: [],
   },
 );
@@ -171,6 +178,7 @@ assert.deepEqual(
     ),
   ),
   {
+    workspaceAccess: "read",
     filesystemDenies: [],
   },
 );
@@ -189,7 +197,11 @@ for (const deniedPath of ["/repo/*.env", "/repo/?.env", "/repo/[literal]"]) {
         },
       }),
     ),
-    { filesystemDenies: [], literalFilesystemDenies: [deniedPath] },
+    {
+      workspaceAccess: "read",
+      filesystemDenies: [],
+      literalFilesystemDenies: [deniedPath],
+    },
   );
 }
 
@@ -355,4 +367,37 @@ function extra(permissionProfile, sandboxCwd, sandboxPolicy) {
       },
     },
   };
+}
+
+for (const [grant, expected] of [
+  [
+    { path: { type: "special", value: { kind: "root" } }, access: "write" },
+    "write",
+  ],
+  [
+    {
+      path: {
+        type: "special",
+        value: { kind: "project_roots", subpath: "generated" },
+      },
+      access: "write",
+    },
+    "read",
+  ],
+  [
+    {
+      path: { type: "path", path: "/synthetic/workspace/generated" },
+      access: "write",
+    },
+    "read",
+  ],
+]) {
+  const profile = {
+    ...pinnedReadOnly,
+    file_system: { type: "restricted", entries: [rootRead, grant] },
+  };
+  assert.equal(
+    resolveNativeParentSandbox(extra(profile)).workspaceAccess,
+    expected,
+  );
 }

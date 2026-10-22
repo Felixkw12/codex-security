@@ -2374,7 +2374,7 @@ describe("live scan cost tracking", () => {
     expect(JSON.stringify(activities)).not.toContain("must-never-be-displayed");
   });
 
-  test("forwards reviewed-file progress from descendant workers only", async () => {
+  test("forwards reviewed-file progress from descendant workers without iterator helpers", async () => {
     const home = await codexHome();
     const usage = { input_tokens: 100, output_tokens: 10 };
     const parent = await writeSession(home, "scan-thread", usage);
@@ -2403,8 +2403,19 @@ describe("live scan cost tracking", () => {
       expectedFilesTotal: 8,
       onProgress: (progress) => updates.push(progress),
     });
-    tracker.start("scan-thread");
-    await tracker.stop();
+    const iteratorPrototype = Object.getPrototypeOf(new Map().values());
+    const reduce = Object.getOwnPropertyDescriptor(iteratorPrototype, "reduce");
+    Object.defineProperty(iteratorPrototype, "reduce", {
+      configurable: true,
+      value: undefined,
+    });
+    try {
+      tracker.start("scan-thread");
+      await tracker.stop();
+    } finally {
+      if (reduce) Object.defineProperty(iteratorPrototype, "reduce", reduce);
+      else delete iteratorPrototype.reduce;
+    }
 
     expect(updates).toEqual([
       { phase: "discovery", filesCompleted: expect.any(Number), filesTotal: 8 },

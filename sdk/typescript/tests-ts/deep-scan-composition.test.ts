@@ -89,6 +89,7 @@ function result(
   scanId: string,
   scanDir: string,
   identity?: string,
+  usage?: { input_tokens: number; output_tokens: number },
 ): ScanResult {
   const manifest = structuredClone(exampleManifest);
   manifest.scan.id = scanId;
@@ -105,7 +106,7 @@ function result(
     coverage,
     scanDir,
     threadId: `thread-${scanId}`,
-    turnResult: {},
+    turnResult: usage === undefined ? {} : { model: "gpt-6-astra", usage },
   });
 }
 
@@ -525,6 +526,34 @@ describe("ordinary scan composition", () => {
           options.deepScanPass === true,
       ),
     ).toBe(true);
+  });
+
+  test("keeps the parent in discovery while merging intermediate batches", async () => {
+    const h = await harness({ workers: 1, maxDiscoveryRuns: 2 });
+    const events: string[] = [];
+    const workbench = h.input.workbench;
+    h.input.workbench = async (args, contents) => {
+      if (args[0] === "update-progress") {
+        events.push(args[4]!);
+        return {};
+      }
+      return workbench(args, contents);
+    };
+    const merge = h.input.merge;
+    h.input.merge = async (...args) => {
+      events.push("merge");
+      return merge(...args);
+    };
+    h.setRun(async (options) => {
+      events.push("pass");
+      return result(
+        options.resumeScanId!,
+        options.outputDir!,
+        "retained-issue",
+      );
+    });
+    await runDeepScans(h.input);
+    expect(events).toEqual(["pass", "merge", "pass", "merge", "reporting"]);
   });
 
   test.each([false, true])(
@@ -1139,6 +1168,18 @@ describe("ordinary scan composition", () => {
           : usage && threadSaved
             ? recoveredCost
             : null;
+      const resumedUsage = { input_tokens: 1200, output_tokens: 120 };
+      const resumedCost = estimateScanCost("gpt-6-astra", resumedUsage)!;
+      h.setRun(async (options) => {
+        h.records.get(options.resumeScanId!)!.cost = resumedCost;
+        return result(
+          options.resumeScanId!,
+          options.outputDir!,
+          undefined,
+          resumedUsage,
+        );
+      });
+      const continued = status === "running" && budget === "none";
       if (
         (budget === "required" && expectedReceipt === null) ||
         budget === "exhausted"
@@ -1165,12 +1206,17 @@ describe("ordinary scan composition", () => {
       } else {
         await runDeepScans(h.input);
         expect(h.mergeInputs).toEqual([]);
-        expect(costsBeforePublication).toEqual([expectedReceipt]);
+        expect(costsBeforePublication).toEqual(
+          continued ? [expectedReceipt, resumedCost] : [expectedReceipt],
+        );
         expect((await h.checkpoint()).terminalReason).toBe("saturated");
       }
-      expect(h.calls).toEqual([]);
+      expect(h.calls).toHaveLength(continued ? 1 : 0);
+      if (continued) expect(h.calls[0]!.resumeScanId).toBe(childId);
       expect(historyReads).toBe(aggregate ? 2 : threadSaved ? 1 : 0);
-      expect(costs.get(directory)).toEqual(expectedReceipt);
+      expect(costs.get(directory)).toEqual(
+        continued ? resumedCost : expectedReceipt,
+      );
     },
   );
 
@@ -1220,7 +1266,7 @@ describe("ordinary scan composition", () => {
     h.input.historicalCost = async (threadId, scanDirectory, usageOnly) => {
       expect(usageOnly).toBe(true);
       historicalReads.push(threadId);
-      h.input.onUsage!(
+      h.input.onUsage?.(
         relative(h.input.scanDir, scanDirectory!).split(sep).join("/"),
         {
           input_tokens: 150,
@@ -1239,6 +1285,14 @@ describe("ordinary scan composition", () => {
       "artifacts/deep-scan/passes/pass-1",
       "artifacts/deep-scan/passes/pass-2",
     ]);
+
+    reports.length = 0;
+    historicalReads.length = 0;
+    h.input.onUsage = undefined;
+    h.input.scanOptions.onWorkerEvent = () => {};
+    await runDeepScans(h.input);
+    expect(historicalReads).toHaveLength(2);
+    expect(reports).toEqual([]);
   });
 
   test.each([
@@ -2446,8 +2500,12 @@ test("caps an expired empty composition without requesting a model merge", async
   expect(h.published).toHaveLength(1);
 });
 
-test("persists a completed child while its sibling is running before the first merge", async () => {
-  const h = await harness({ workers: 2, maxDiscoveryRuns: 2 });
+test("resumes an unfinished sibling before saturation after mid-batch transport loss", async () => {
+  const h = await harness({
+    workers: 2,
+    maxDiscoveryRuns: 4,
+    stopAfterNoNew: 1,
+  });
   const sibling = Promise.withResolvers<void>();
   const transport = new ScanTransportClosedError(
     "Synthetic mid-batch transport loss.",
@@ -2484,6 +2542,21 @@ test("persists a completed child while its sibling is running before the first m
   expect(state.terminalReason).toBeUndefined();
   expect(h.mergeInputs).toEqual([]);
   expect(h.metrics()).toEqual({ closed: 2, maximumActive: 2 });
+
+  h.input.workbench = workbench;
+  h.input.signal = new AbortController().signal;
+  h.setRun(async (options) =>
+    result(options.resumeScanId!, options.outputDir!),
+  );
+  const resumed = await runDeepScans(h.input);
+  expect(h.calls).toHaveLength(3);
+  expect(h.calls[2]!.resumeScanId).toBe(state.passes[1]!.scanId);
+  expect(resumed.mergedScanIds).toHaveLength(2);
+  expect(resumed.aggregate!.findings).toHaveLength(0);
+  expect(resumed.terminalReason).toBe("saturated");
+  expect(
+    [...h.records.values()].map((record) => record.progress.status),
+  ).toEqual(["complete", "complete"]);
 });
 
 for (const boundary of ["projection", "checkpoint"] as const) {
