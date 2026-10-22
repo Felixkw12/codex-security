@@ -284,6 +284,7 @@ export class CodexReviewRunner {
           environmentEntry(environment, "CODEX_HOME") ||
             join(homedir(), ".codex"),
           ...codexSecurityPrivatePaths(environment),
+          ...codexSecurityPrivatePaths(environment, workingDirectory),
           sqliteHome,
           directory,
         ].map((path) => resolve(expandHome(path, environment))),

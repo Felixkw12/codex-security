@@ -115,9 +115,10 @@ function packageName(pkg: Record<string, unknown>): string {
 }
 
 function isPublicPypiIndex(url: string | null): boolean {
+  const index = /^([^/]+:\/\/[^/]+)\/simple\/?$/u.exec(url ?? "");
   return (
-    url !== null &&
-    /^https?:\/\/pypi\.(?:org|python\.org)\/simple\/?$/u.test(url)
+    index !== null &&
+    /^https?:\/\/pypi\.(?:org|python\.org)$/u.test(index[1]!.toLowerCase())
   );
 }
 

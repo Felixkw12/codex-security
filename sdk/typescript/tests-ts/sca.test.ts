@@ -2,6 +2,7 @@ import { requestMetadata } from "./support/request-metadata.js";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import * as childProcess from "node:child_process";
+import * as filesystem from "node:fs/promises";
 import {
   chmod,
   mkdir,
@@ -2023,6 +2024,51 @@ test.each(["scanner", "model"] as const)(
     ).toBe(false);
   },
 );
+
+test("cancellation during the final dependency artifact save retains completed assessments", async () => {
+  const controller = new AbortController();
+  const reason = new Error("synthetic cancellation during final artifact save");
+  const { client, repository, outputDir } = await fixture();
+  await using security = client;
+  const originalRename = filesystem.rename;
+  const rename = spyOn(filesystem, "rename").mockImplementation(
+    async (source, destination) => {
+      await originalRename(source, destination);
+      if (String(destination) !== join(outputDir, "report.md")) return;
+      const saved = JSON.parse(
+        await readFile(join(outputDir, "sca-result.json"), "utf8"),
+      ) as ScaResult;
+      if (saved.status === "completed") controller.abort(reason);
+    },
+  );
+  try {
+    const error = await security
+      .scanDependencies({
+        repositoryPath: repository,
+        outputDir,
+        signal: controller.signal,
+      })
+      .then(
+        () => null,
+        (error: unknown) => error,
+      );
+    expect(controller.signal.aborted).toBe(true);
+    expect(error).toBeInstanceOf(ScanInterruptedError);
+    expect((error as ScanInterruptedError).cause).toBe(reason);
+    expect((error as ScanInterruptedError).scanDir).toBe(outputDir);
+    const saved = JSON.parse(
+      await readFile(join(outputDir, "sca-result.json"), "utf8"),
+    ) as ScaResult;
+    expect(saved.status).toBe("partial");
+    expect(saved.matches).toHaveLength(1);
+    expect(saved.assessments[0]!.status).toBe("completed");
+    expect(await readFile(join(outputDir, "report.md"), "utf8")).toContain(
+      "partial",
+    );
+  } finally {
+    rename.mockRestore();
+  }
+});
 
 test("requested cost limit interrupts while retaining completed evidence", async () => {
   const { client, repository, outputDir } = await fixture();
