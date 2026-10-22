@@ -21,6 +21,9 @@ for (const kind of [
     ? join(directory, "physical", "repository")
     : join(directory, "repository");
   const remote = join(directory, "remote.git");
+  const gitlab = kind.startsWith("glab");
+  const hostedRepository = `https://${gitlab ? "gitlab.com" : "github.example.test"}/example/repository`;
+  const origin = `${hostedRepository}.git`;
   const alias = join(directory, "alias");
   await mkdir(repository, { recursive: true });
   const environment: NodeJS.ProcessEnv = {
@@ -145,16 +148,26 @@ for (const kind of [
       onRepositoryCommand: async (command, args, cwd, options) => {
         const selectedEnvironment = { ...environment, ...options?.environment };
         if (command === "git") {
-          if (kind.startsWith("glab") && args[0] === "remote")
-            return "https://gitlab.com/example/repository.git";
-          if (kind.startsWith("glab") && args[0] === "ls-remote")
-            args = [...args.slice(0, 3), remote, ...args.slice(4)];
-          const result = git(
+          if (args[0] === "ls-remote") {
+            for (const key of Object.keys(selectedEnvironment)) {
+              if (
+                key.startsWith("GIT_CONFIG_KEY_") &&
+                selectedEnvironment[key] === `url.${origin}.insteadOf`
+              )
+                selectedEnvironment[key] = `url.${remote}.insteadOf`;
+            }
+          }
+          let result = git(
             args,
             options?.directory ?? cwd,
             selectedEnvironment,
             options?.encoding,
           );
+          if (args[args.indexOf("remote") + 1] === "get-url")
+            result = result
+              .split("\n")
+              .map((value) => (value === remote ? origin : value))
+              .join("\n");
           return options?.trim === false ? result : result.trim();
         }
         if (!kind.includes("Git alias")) {
@@ -178,8 +191,14 @@ for (const kind of [
               `Provider configuration changed ${patched ? "after" : "before"} patching`,
             );
         }
+        if (command === "gh" && args[0] === "repo") {
+          if (args[1] === "set-default") return "example/repository";
+          return args.at(-1) === ".url"
+            ? hostedRepository
+            : JSON.stringify({ id: "R_synthetic", url: hostedRepository });
+        }
         return args[1] === "create"
-          ? "https://github.example.test/example/repository/pull/17"
+          ? `${hostedRepository}/${gitlab ? "-/merge_requests" : "pull"}/17`
           : command === "gh" && args[1] === "list"
             ? "[]"
             : "";

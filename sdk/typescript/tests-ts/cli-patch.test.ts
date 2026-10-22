@@ -2,6 +2,7 @@ import {
   CURRENT_REPOSITORY,
   SAVED_REPOSITORY,
   STATE_DIRECTORY,
+  setupPatchWorkflowFixtures,
   resultWithFindings,
   savedScan,
   completePatches,
@@ -63,6 +64,8 @@ import { throwing } from "./support/errors.js";
 import { createCliTest } from "./support/cli-run.js";
 import { resolvePluginPython, runWorkbench } from "../src/runtime.js";
 import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
+
+setupPatchWorkflowFixtures();
 
 describe("scan and patch workflow", () => {
   const repositories = createTemporaryDirectories();
@@ -2688,7 +2691,9 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
       const remote = join(directory, "remote.git");
       const branch = "codex-security/patch-scan-1";
       const gitlab = provider === "gitlab";
-      const origin = "https://gitlab.com/example/subgroup/repository.git";
+      const origin = gitlab
+        ? "https://gitlab.com/example/subgroup/repository.git"
+        : "https://github.example.test/example/repository.git";
       const url = gitlab
         ? "https://gitlab.com/example/subgroup/repository/-/merge_requests/16"
         : "https://github.example.test/example/repository/pull/16";
@@ -2724,10 +2729,8 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
             completePatches(args, output);
             return 0;
           },
-          onRepositoryCommand: (command, args, cwd, options) => {
+          onRepositoryCommand: async (command, args, cwd, options) => {
             if (command === "git") {
-              if (gitlab && args.join(" ") === "remote get-url origin")
-                return origin;
               if (args[0] === "push") {
                 pushCalls += 1;
                 if (failure === "push" && failOnce) {
@@ -2735,13 +2738,33 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
                   throw new Error("Synthetic push failure");
                 }
               }
-              return runGitRepositoryCommand(command, args, cwd, options);
+              const environment = { ...options?.environment };
+              if (args[0] === "ls-remote")
+                for (const key of Object.keys(environment))
+                  if (
+                    key.startsWith("GIT_CONFIG_KEY_") &&
+                    environment[key] === `url.${origin}.insteadOf`
+                  )
+                    environment[key] = `url.${remote}.insteadOf`;
+              const output = await runGitRepositoryCommand(command, args, cwd, {
+                ...options,
+                environment,
+              });
+              return args[args.indexOf("remote") + 1] === "get-url"
+                ? output
+                    .split("\n")
+                    .map((value) => (value === remote ? origin : value))
+                    .join("\n")
+                : output;
             }
             expect(command).toBe(gitlab ? "glab" : "gh");
-            if (!gitlab && args[0] === "repo")
-              return args[1] === "set-default"
-                ? "example/repository"
-                : JSON.stringify({ id: "R_synthetic", url });
+            if (!gitlab && args[0] === "repo") {
+              if (args[1] === "set-default") return "example/repository";
+              const repositoryUrl = origin.replace(/\.git$/u, "");
+              return args.at(-1) === ".url"
+                ? repositoryUrl
+                : JSON.stringify({ id: "R_synthetic", url: repositoryUrl });
+            }
             if (args[1] === "list") {
               if (!publishedUrl) return "";
               const request = {
@@ -2769,6 +2792,7 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
         const first = await runWorkflow(
           ["patch", "--scan", "scan-1", "--create-pr", "--json"],
           fixtures,
+          { localHosting: false },
         );
         expect(first.exitCode).toBe(2);
         expect(first.stderr).toContain(`patch --resume-pr ${branch}`);
@@ -2784,6 +2808,7 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
         const retry = await runWorkflow(
           ["patch", "--resume-pr", branch, "--json"],
           fixtures,
+          { localHosting: false },
         );
         expect(retry.exitCode).toBe(0);
         expect(JSON.parse(retry.stdout)).toEqual({
@@ -2799,6 +2824,7 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
         const repeated = await runWorkflow(
           ["patch", "--resume-pr", branch],
           fixtures,
+          { localHosting: false },
         );
         expect(repeated.exitCode).toBe(0);
         expect(created).toBe(1);
@@ -3526,6 +3552,7 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
                 return runGitRepositoryCommand(command, args, target, options);
               if (args.includes("--cached")) return "";
               if (args[0] === "remote") {
+                if (args.length === 1) return "origin";
                 expect([
                   ["remote", "get-url", "--push", "--all", "origin"],
                   ["remote", "get-url", "origin"],
@@ -3537,10 +3564,18 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
               );
             }
             expect(command).toBe(client);
+            if (command === "gh" && args[0] === "repo") {
+              if (args[1] === "set-default") return "example/repository";
+              const repositoryUrl = origin.replace(/\.git$/u, "");
+              return args.at(-1) === ".url"
+                ? repositoryUrl
+                : JSON.stringify({ id: "R_synthetic", url: repositoryUrl });
+            }
             publicationCommands.push(args);
             return args[1] === "create" ? url : "";
           },
         },
+        { localHosting: false },
       );
 
       expect(outcome.exitCode, outcome.stderr).toBe(0);
@@ -5125,6 +5160,10 @@ describe("patch publication integrity", () => {
         GIT_CONFIG_PARAMETERS:
           "'remote.origin.gh-resolved=upstream/repository'",
       };
+      const hostedRemote = "https://github.example.test/example/repository.git";
+      const localRemotes = new Map([[hostedRemote, remote]]);
+      if (collisionRemote !== remote)
+        localRemotes.set(`${hostedRemote}-secondary`, collisionRemote);
       let identityCalls = 0;
       const result = resultWithFindings(["high"]);
       const onCodex = mock(() => 0);
@@ -5136,16 +5175,42 @@ describe("patch publication integrity", () => {
           result,
           onWorkbench: () => savedScan(result, "scan-1", directory),
           onCodex,
-          onRepositoryCommand: (command, args, cwd, options) => {
+          onRepositoryCommand: async (command, args, cwd, options) => {
             const selected = {
               ...options,
-              environment: { ...environment, ...options?.environment },
+              environment: {
+                ...environment,
+                ...options?.environment,
+              } as NodeJS.ProcessEnv,
             };
-            if (command === "git")
-              return runGitRepositoryCommand(command, args, cwd, selected);
+            if (command === "git") {
+              for (const key of Object.keys(selected.environment)) {
+                if (!key.startsWith("GIT_CONFIG_KEY_")) continue;
+                for (const [hosted, local] of localRemotes)
+                  if (selected.environment[key] === `url.${hosted}.insteadOf`)
+                    selected.environment[key] = `url.${local}.insteadOf`;
+              }
+              const output = await runGitRepositoryCommand(
+                command,
+                args,
+                cwd,
+                selected,
+              );
+              if (args[args.indexOf("remote") + 1] === "get-url")
+                return output
+                  .split("\n")
+                  .map(
+                    (url) =>
+                      [...localRemotes].find(
+                        ([, local]) => local === url,
+                      )?.[0] ?? url,
+                  )
+                  .join("\n");
+              return output;
+            }
             if (args[0] === "repo") {
               identityCalls++;
-              expect(selected.environment.GH_REPO).toBe("");
+              expect(selected.environment["GH_REPO"]).toBe("");
               expect(
                 runGitRepositoryCommand(
                   "git",
@@ -5161,8 +5226,8 @@ describe("patch publication integrity", () => {
                     url: "https://github.example.test/example/repository",
                   });
             }
-            expect(selected.environment.GH_REPO).toBe(environment.GH_REPO);
-            expect(selected.environment.GIT_CONFIG_PARAMETERS).toBe(
+            expect(selected.environment["GH_REPO"]).toBe(environment.GH_REPO);
+            expect(selected.environment["GIT_CONFIG_PARAMETERS"]).toBe(
               environment.GIT_CONFIG_PARAMETERS,
             );
             const foreign = {
@@ -5194,6 +5259,7 @@ describe("patch publication integrity", () => {
               : "";
           },
         },
+        { localHosting: false },
       );
       expect(outcome.exitCode).toBe(2);
       expect(git("ls-remote", collisionRemote, `refs/heads/${branch}`)).toBe(
@@ -6085,20 +6151,32 @@ describe("patch publication integrity", () => {
     );
     const diagnostics = JSON.stringify({ outcome, modelCalls, gitTrace });
     expect(modelCalls, diagnostics).toBe(1);
-    const applied = changed || shallow || replaced;
+    // Replacing or moving captured administration fails before risk assessment.
+    const administrationChanged = replaced || moved;
+    const applied = !administrationChanged && (changed || shallow);
     expect(assessments, diagnostics).toBe(applied ? 1 : 0);
     expect(outcome.exitCode, diagnostics).toBe(applied ? 0 : 2);
-    expect(JSON.parse(outcome.stdout), diagnostics).toMatchObject({
-      applied,
-      files: [
-        ...(replaced ? [".gitmodules"] : []),
-        ...(shallow || replaced ? ["dependency"] : []),
-        ...(shallow || replaced ? ["dependency/HEAD"] : []),
-        ...(changed || shallow || replaced ? ["dependency/app.ts"] : []),
-        ...(shallow ? ["dependency/upstream.ts"] : []),
-      ],
-      ...(applied ? {} : { error: { code: "NO_PATCH_APPLIED" } }),
-    });
+    expect(JSON.parse(outcome.stdout), diagnostics).toMatchObject(
+      administrationChanged
+        ? {
+            applied: false,
+            files: [],
+            error: {
+              code: "PATCH_FAILED",
+              message: `Nested Git administration changed during the patch: ${child}`,
+            },
+          }
+        : {
+            applied,
+            files: [
+              ...(shallow ? ["dependency"] : []),
+              ...(shallow ? ["dependency/HEAD"] : []),
+              ...(changed || shallow ? ["dependency/app.ts"] : []),
+              ...(shallow ? ["dependency/upstream.ts"] : []),
+            ],
+            ...(applied ? {} : { error: { code: "NO_PATCH_APPLIED" } }),
+          },
+    );
     expect(git("write-tree")).toBe(expectedIndex);
     expect(git("ls-tree", "HEAD", "dependency")).toBe(originalGitlink);
     if (expectedContents === undefined)
