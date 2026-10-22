@@ -676,6 +676,7 @@ describe("deep scan workbench ownership", () => {
           candidate?: (typeof candidates)[number];
           reason: string;
           paths?: string[];
+          surfaceIds?: string[];
         }>;
         surfaces: Array<{ id: string; disposition: string }>;
       };
