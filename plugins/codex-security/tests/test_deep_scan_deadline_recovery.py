@@ -33,6 +33,64 @@ def worker_finding(scan, anchor):
     return finding
 
 
+@pytest.mark.parametrize(
+    ("task_state", "task_id", "marker_count"),
+    [
+        ("resolvedDeferred", "scan-deadline", 0),
+        ("resolvedDeferred", "prior-review", 1),
+        ("deferred", "scan-deadline", 0),
+    ],
+)
+def test_deadline_completion_preserves_existing_tasks_and_recovered_findings(
+    workbench_api, workbench_db, deadline_scan, task_state, task_id, marker_count
+):
+    scan = deadline_scan
+    task = {"id": task_id, "reason": "Existing review outcome."}
+    scan.coverage[task_state] = [task]
+    (scan.scan_dir / "coverage.json").write_text(json.dumps(scan.coverage))
+    worker_id, output = canceled_discovery_output(workbench_db, scan)
+    recovered = worker_finding(scan, "saved-before-deadline")
+    checkpoint = write_checkpoint(
+        output / "checkpoints",
+        saved_draft(
+            scan.scan_id,
+            findings=[recovered],
+            deferred=[{"id": "unfinished-review", "reason": "Review remains unfinished."}],
+        ),
+    )
+    original_checkpoint = checkpoint.read_bytes()
+
+    finish(workbench_api, workbench_db, scan, terminal_reason="capped")
+    completed = complete(workbench_api, workbench_db, scan)
+
+    assert completed["progress"]["status"] == "complete"
+    assert (
+        workbench_db.execute("SELECT status FROM scans WHERE id = ?", (scan.scan_id,)).fetchone()[0]
+        == "complete"
+    )
+    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    assert task in coverage[task_state]
+    if task_state == "resolvedDeferred":
+        assert coverage[task_state] == [task]
+    assert any(
+        row.get("workerId") == worker_id and row["reason"] == "Review remains unfinished."
+        for row in coverage["deferred"]
+    )
+    assert (
+        sum(row.get("id") == "scan-deadline" and row != task for row in coverage["deferred"])
+        == marker_count
+    )
+    findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
+    assert {row["title"] for row in findings} == {scan.findings[0]["title"], recovered["title"]}
+    assert (
+        next(row for row in findings if row["title"] == recovered["title"])["provenance"][
+            "workerId"
+        ]
+        == worker_id
+    )
+    assert checkpoint.read_bytes() == original_checkpoint
+
+
 def interrupt_finish_before_commit(workbench_api, database, scan):
     child = os.fork()
     if child == 0:

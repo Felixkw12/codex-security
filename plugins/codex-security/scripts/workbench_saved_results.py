@@ -2354,7 +2354,11 @@ def preserve_deep_deadline_draft(
                         "pending work from unfinished source reviews were preserved."
                     ),
                 }
-                if marker not in documents[2]["deferred"]:
+                if not any(
+                    marker["id"] in (row.get("id"), row.get("candidateId"))
+                    for key in ("deferred", "resolvedDeferred")
+                    for row in documents[2].get(key, [])
+                ):
                     documents[2]["deferred"].append(marker)
             documents[0]["scan"].pop("complete", None)
             # Validate recovered evidence against the current finding contract,
