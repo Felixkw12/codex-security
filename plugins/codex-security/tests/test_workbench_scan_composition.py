@@ -714,7 +714,10 @@ def test_native_target_retry_reuses_completed_result(
     assert {path: path.read_bytes() for path in artifacts} == artifacts
 
 
-@pytest.mark.parametrize("changed", [None, "knowledge", "deep_settings", "missing_saved_inputs"])
+@pytest.mark.parametrize(
+    "changed",
+    [None, "knowledge", "deep_settings", "model", "reasoning_effort", "missing_saved_inputs"],
+)
 def test_native_completed_reuse_compares_registered_semantic_inputs(
     native_scan_completion, changed: str | None
 ) -> None:
@@ -723,6 +726,7 @@ def test_native_completed_reuse_compares_registered_semantic_inputs(
     semantic = {
         "scanInputs": {"scanPromptSha256": "synthetic-prompt", "knowledgeBase": None},
         "deepScan": {"workers": 2, "subagents": 1},
+        "config": {"model": "synthetic-model", "model_reasoning_effort": "synthetic-effort"},
     }
     with sqlite3.connect(state / "workbench.sqlite3") as connection:
         saved = json.loads(
@@ -743,6 +747,10 @@ def test_native_completed_reuse_compares_registered_semantic_inputs(
         semantic["scanInputs"]["knowledgeBase"] = {"sha256": "synthetic-changed-knowledge"}
     elif changed == "deep_settings":
         semantic["deepScan"]["workers"] = 3
+    elif changed == "model":
+        semantic["config"]["model"] = "another-synthetic-model"
+    elif changed == "reasoning_effort":
+        semantic["config"]["model_reasoning_effort"] = "another-synthetic-effort"
     selected = run_workbench(
         state,
         *arguments,
@@ -751,6 +759,8 @@ def test_native_completed_reuse_compares_registered_semantic_inputs(
             {
                 "knowledgeBase": semantic["scanInputs"]["knowledgeBase"],
                 "deepScan": semantic["deepScan"],
+                "model": semantic["config"]["model"],
+                "reasoningEffort": semantic["config"]["model_reasoning_effort"],
             }
         ),
     )

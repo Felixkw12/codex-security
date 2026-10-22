@@ -24,7 +24,9 @@ const bundle = await build({
     contents: `
     export { readKnowledgeBaseSnapshot } from ${JSON.stringify(path.join(sdkRoot, "src/knowledge-base.ts"))};
     export { scanInputIdentity, saveScanKnowledge } from ${JSON.stringify(path.join(sdkRoot, "src/scan-inputs.ts"))};
-    export { resolveDeepScanConfig } from ${JSON.stringify(path.join(sdkRoot, "src/deep-config.ts"))};`,
+    export { resolveDeepScanConfig } from ${JSON.stringify(path.join(sdkRoot, "src/deep-config.ts"))};
+    export { nativeScanConfiguration } from ${JSON.stringify(path.join(sdkRoot, "src/execution-preparation.ts"))};
+    export { mergedCodexConfig, scanModelConfiguration } from ${JSON.stringify(path.join(sdkRoot, "src/config.ts"))};`,
     resolveDir: applicationRoot,
   },
 });
@@ -39,6 +41,9 @@ const {
   scanInputIdentity,
   saveScanKnowledge,
   resolveDeepScanConfig,
+  nativeScanConfiguration,
+  mergedCodexConfig,
+  scanModelConfiguration,
 } = module.exports;
 
 for (const change of [
@@ -49,12 +54,35 @@ for (const change of [
   "added knowledge",
   "missing knowledge",
   "legacy recipe",
+  "selected model",
+  "selected effort",
+  "unchanged selected profile",
+  "equivalent selected profile",
+  "turn metadata precedence",
 ]) {
   test(`completed native target reuse after MCP restart: ${change}`, async () => {
     const root = await mkdtemp(path.join(tmpdir(), "native-completed-reuse-"));
     const repository = path.join(root, "repository");
     const knowledgePath = path.join(root, "knowledge.md");
     const configPath = path.join(root, "deep.toml");
+    const selectedConfigPath = path.join(root, "selected.toml");
+    const selectedProfile =
+      change.endsWith("selected profile") ||
+      change === "turn metadata precedence";
+    const selectedConfig =
+      selectedProfile ||
+      change === "selected model" ||
+      change === "selected effort";
+    const initialSelectedConfig = selectedProfile
+      ? 'model = "synthetic-unused-root-model"\nmodel_reasoning_effort = "synthetic-unused-root-effort"\nprofile = "scan"\n[profiles.scan]\nmodel = "synthetic-model-a"\nmodel_reasoning_effort = "synthetic-effort-a"\n'
+      : 'model = "synthetic-model-a"\nmodel_reasoning_effort = "synthetic-effort-a"\n';
+    const turnSettings =
+      change === "turn metadata precedence"
+        ? {
+            model: "synthetic-turn-model",
+            reasoningEffort: "synthetic-turn-effort",
+          }
+        : {};
     const environment = {
       CODEX_SECURITY_SCAN_ROOT: path.join(root, "scans"),
       CODEX_SECURITY_STATE_DIR: path.join(root, "state"),
@@ -62,6 +90,7 @@ for (const change of [
       CODEX_SECURITY_KNOWLEDGE_BASE:
         change === "added knowledge" ? "" : knowledgePath,
       CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH: configPath,
+      CODEX_SECURITY_CONFIG_PATH: selectedConfig ? selectedConfigPath : "",
       // A replacement scan must reach preparation; no model service is used.
       CODEX_CLI_PATH: path.join(root, "missing-codex"),
       CODEX_API_KEY: "",
@@ -100,6 +129,14 @@ for (const change of [
         arguments: args,
         _meta: {
           "openai/threadId": owner,
+          ...(turnSettings.model
+            ? {
+                "x-codex-turn-metadata": {
+                  model: turnSettings.model,
+                  reasoning_effort: turnSettings.reasoningEffort,
+                },
+              }
+            : {}),
           "codex/sandbox-state-meta": {
             permissionProfile: {
               type: "managed",
@@ -131,10 +168,24 @@ for (const change of [
       await writeFile(path.join(repository, "app.py"), "print('fixture')\n");
       await writeFile(knowledgePath, "Original security guidance.\n");
       await writeFile(configPath, "[deep_scan]\nworkers = 2\nsubagents = 1\n");
+      if (selectedConfig)
+        await writeFile(selectedConfigPath, initialSelectedConfig);
       const knowledge = environment.CODEX_SECURITY_KNOWLEDGE_BASE
         ? await readKnowledgeBaseSnapshot([knowledgePath])
         : undefined;
       const deep = (await resolveDeepScanConfig({}, configPath)).settings;
+      const savedConfig = await mergedCodexConfig({
+        codexOverrides: await nativeScanConfiguration(
+          { ...process.env, ...environment },
+          turnSettings,
+          deep.subagents,
+        ),
+      });
+      if (selectedConfig)
+        assert.deepEqual(scanModelConfiguration(savedConfig), {
+          model: turnSettings.model ?? "synthetic-model-a",
+          reasoningEffort: turnSettings.reasoningEffort ?? "synthetic-effort-a",
+        });
       const begun = workbench([
         "begin-deep-scan",
         "--target-path",
@@ -143,13 +194,21 @@ for (const change of [
         owner,
         "--user-context",
         userContext,
+        ...(turnSettings.model
+          ? [
+              "--model",
+              turnSettings.model,
+              "--reasoning-effort",
+              turnSettings.reasoningEffort,
+            ]
+          : []),
       ]);
       const { scanId, scanDir, handoffClaimToken } = begun.scan;
       const recipe = {
         repository,
         mode: "deep",
         target: { kind: "repository", paths: [] },
-        config: {},
+        config: savedConfig,
         ...(knowledge ? { knowledgeBasePaths: [knowledgePath] } : {}),
         ...(change === "legacy recipe"
           ? {}
@@ -223,6 +282,7 @@ for (const change of [
       await rm(knowledgePath);
       if (change !== "legacy recipe")
         await writeFile(configPath, "invalid TOML [");
+      if (selectedConfig) await writeFile(selectedConfigPath, "invalid TOML [");
       successful(
         await call("start_codex_security_deep_scan", {
           scanId,
@@ -231,6 +291,8 @@ for (const change of [
       );
       await writeFile(knowledgePath, "Original security guidance.\n");
       await writeFile(configPath, "[deep_scan]\nworkers = 2\nsubagents = 1\n");
+      if (selectedConfig)
+        await writeFile(selectedConfigPath, initialSelectedConfig);
       const artifacts = [
         "scan-manifest.json",
         "findings.json",
@@ -256,6 +318,26 @@ for (const change of [
       if (change === "added knowledge")
         environment.CODEX_SECURITY_KNOWLEDGE_BASE = knowledgePath;
       if (change === "missing knowledge") await rm(knowledgePath);
+      if (change === "selected model")
+        await writeFile(
+          selectedConfigPath,
+          'model = "synthetic-model-b"\nmodel_reasoning_effort = "synthetic-effort-a"\n',
+        );
+      if (change === "selected effort")
+        await writeFile(
+          selectedConfigPath,
+          'model = "synthetic-model-a"\nmodel_reasoning_effort = "synthetic-effort-b"\n',
+        );
+      if (change === "equivalent selected profile")
+        await writeFile(
+          selectedConfigPath,
+          '# Same effective profile; reordered keys and an inactive root value change.\nprofile = "scan"\nmodel_reasoning_effort = "different-unused-effort"\nmodel = "different-unused-model"\n[profiles.scan]\nmodel_reasoning_effort = "synthetic-effort-a"\nmodel = "synthetic-model-a"\n',
+        );
+      if (change === "turn metadata precedence")
+        await writeFile(
+          selectedConfigPath,
+          'profile = "scan"\n[profiles.scan]\nmodel = "synthetic-model-b"\nmodel_reasoning_effort = "synthetic-effort-b"\n',
+        );
       client = await connect();
       // The public explicit identity remains authoritative after the restart.
       assert.equal(
@@ -271,7 +353,15 @@ for (const change of [
         targetPath: repository,
         userContext,
       });
-      if (change === "unchanged" || change === "equivalent config") {
+      if (
+        [
+          "unchanged",
+          "equivalent config",
+          "unchanged selected profile",
+          "equivalent selected profile",
+          "turn metadata precedence",
+        ].includes(change)
+      ) {
         assert.equal(successful(response).scanId, scanId);
         assert.equal(workbench(["list-scans"]).scans.length, 1);
       } else if (change === "missing knowledge") {

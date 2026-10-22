@@ -995,6 +995,7 @@ export function createCodexSecurityServer(): McpServer {
         ) {
           semanticInputs = await readNativeScanSemanticInputs(
             abortSignalFromExtra(extra),
+            modelSettings,
           );
           begun = await runWorkbench(
             [
@@ -1006,6 +1007,7 @@ export function createCodexSecurityServer(): McpServer {
                   semanticInputs.knowledgeBaseSnapshot,
                 ).knowledgeBase,
                 deepScan: semanticInputs.deepScanSettings,
+                ...semanticInputs.modelSettings,
               }),
             ],
             normalizedUserContext,

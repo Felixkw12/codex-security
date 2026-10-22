@@ -13,7 +13,10 @@ import {
 } from "../../../../sdk/typescript/src/api.js";
 import {
   inlineToml,
+  mergedCodexConfig,
+  scanModelConfiguration,
   type JsonObject,
+  type ScanModelConfiguration,
 } from "../../../../sdk/typescript/src/config.js";
 import {
   readDeepScanParentCyberAccessProgram,
@@ -55,6 +58,8 @@ export interface NativeScanSemanticInputs {
   knowledgeBasePaths?: string[];
   knowledgeBaseSnapshot?: KnowledgeBaseSnapshot;
   deepScanSettings: Required<DeepScanOptions>;
+  config: JsonObject;
+  modelSettings: ScanModelConfiguration;
 }
 
 export interface NativeScanInput {
@@ -158,23 +163,34 @@ function nativeDeepScanConfigPath(environment: NodeJS.ProcessEnv): string {
 /** Read once for completed-result comparison and any new execution it requires. */
 export async function readNativeScanSemanticInputs(
   signal?: AbortSignal,
+  modelSettings: Pick<NativeScanInput, "model" | "reasoningEffort"> = {},
 ): Promise<NativeScanSemanticInputs> {
   const environment = await snapshotNativeEnvironment();
   const knowledgeBasePaths = environment.CODEX_SECURITY_KNOWLEDGE_BASE
     ? [environment.CODEX_SECURITY_KNOWLEDGE_BASE]
     : undefined;
+  const deepScanSettings = (
+    await resolveDeepScanConfig(
+      {},
+      nativeDeepScanConfigPath(environment),
+      signal,
+    )
+  ).settings;
+  const config = await nativeScanConfiguration(
+    environment,
+    modelSettings,
+    deepScanSettings.subagents,
+  );
   return {
+    config,
+    modelSettings: scanModelConfiguration(
+      await mergedCodexConfig({ codexOverrides: config }),
+    ),
     knowledgeBasePaths,
     knowledgeBaseSnapshot: knowledgeBasePaths
       ? await readKnowledgeBaseSnapshot(knowledgeBasePaths, signal)
       : undefined,
-    deepScanSettings: (
-      await resolveDeepScanConfig(
-        {},
-        nativeDeepScanConfigPath(environment),
-        signal,
-      )
-    ).settings,
+    deepScanSettings,
   };
 }
 
@@ -351,11 +367,13 @@ export async function prepareNativeScan(
   // Read-only publication does not need the model's private configuration.
   const config = publicationOnly
     ? ((recipe.config as JsonObject | undefined) ?? {})
-    : await nativeScanConfiguration(
-        environment,
-        input,
-        deep.settings.subagents,
-      );
+    : semanticInputs
+      ? structuredClone(semanticInputs.config)
+      : await nativeScanConfiguration(
+          environment,
+          input,
+          deep.settings.subagents,
+        );
   const security = config["codex_security"];
   if (
     input.recipe === undefined &&

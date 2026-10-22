@@ -1848,6 +1848,8 @@ else {
   const provider = effective.model_providers?.[effective.model_provider];
   fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify({ argv, path: process.env.PATH, codex: process.env.CODEX_API_KEY, openai: process.env.OPENAI_API_KEY, home: process.env.CODEX_HOME, state: process.env.CODEX_SECURITY_STATE_DIR, executable: process.argv[1], knowledge: process.env.CODEX_SECURITY_KNOWLEDGE_BASE,
     knowledgeDocuments: process.env.CODEX_SECURITY_KNOWLEDGE_BASE && Object.fromEntries(fs.readdirSync(process.env.CODEX_SECURITY_KNOWLEDGE_BASE).map(name => [name, fs.readFileSync(path.join(process.env.CODEX_SECURITY_KNOWLEDGE_BASE, name), "utf8")])),
+    model: effective.model,
+    reasoningEffort: effective.model_reasoning_effort,
     modelProvider: effective.model_provider,
     safetyIdentifier: process.env.CODEX_SAFETY_IDENTIFIER,
     provider,
@@ -2594,6 +2596,12 @@ test(
           preflights: join(root, `preflights-${id}.jsonl`),
           decoyLaunch: join(root, `decoy-${id}.jsonl`),
           selectedConfigPath: join(root, `selected-${id}.toml`),
+          model: capturedInputs
+            ? `${id === "c" ? "selected" : "ambient"}-model-${id}`
+            : `synthetic-model-${id}`,
+          reasoningEffort: capturedInputs
+            ? `${id === "c" ? "selected" : "ambient"}-effort-${id}`
+            : `synthetic-effort-${id}`,
           safetyIdentifier: capturedInputs
             ? `synthetic-later-${id}`
             : id === "a"
@@ -2629,6 +2637,8 @@ test(
           api_key_cyber_access_programs: true,
         };
         fixture.configText = stringifyToml({
+          model: `ambient-model-${id}`,
+          model_reasoning_effort: `ambient-effort-${id}`,
           model_provider: "openai",
           model_reasoning_summary: "auto",
           model_providers: {
@@ -2643,6 +2653,12 @@ test(
           features: { goals: true, api_key_model_discovery: id !== "a" },
         });
         fixture.selectedConfigText = stringifyToml({
+          ...(id === "c"
+            ? {
+                model: fixture.model,
+                model_reasoning_effort: fixture.reasoningEffort,
+              }
+            : {}),
           model_providers: {
             openai: {
               name: fixture.provider.name,
@@ -2671,10 +2687,19 @@ test(
           );
           Object.assign(process.env, {
             CODEX_HOME: fixture.home,
+            CODEX_SECURITY_CONFIG_PATH: fixture.selectedConfigPath,
             CODEX_SECURITY_KNOWLEDGE_BASE: fixture.document,
             CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH: fixture.deepConfigPath,
           });
           fixture.semanticInputs = await readNativeScanSemanticInputs();
+          assert.deepEqual(fixture.semanticInputs.modelSettings, {
+            model: fixture.model,
+            reasoningEffort: fixture.reasoningEffort,
+          });
+          assert.equal(
+            Object.hasOwn(fixture.semanticInputs.config, "windows"),
+            false,
+          );
           assert.equal(
             typeof fixture.semanticInputs.deepScanSettings.workers,
             "number",
@@ -2696,6 +2721,26 @@ test(
           await writeFile(
             fixture.deepConfigPath,
             "[deep_scan]\nworkers=8\nsubagents=9\nmax_discovery_runs=10\n",
+          );
+          const laterConfig = parseToml(fixture.configText);
+          laterConfig.model = `later-ambient-model-${id}`;
+          laterConfig.model_reasoning_effort = `later-ambient-effort-${id}`;
+          laterConfig.model_reasoning_summary = "detailed";
+          laterConfig.features.goals = false;
+          fixture.configText = stringifyToml(laterConfig);
+          const laterSelectedConfig = parseToml(fixture.selectedConfigText);
+          laterSelectedConfig.model = `later-selected-model-${id}`;
+          laterSelectedConfig.model_reasoning_effort = `later-selected-effort-${id}`;
+          laterSelectedConfig.model_providers.openai.name = `Later synthetic provider ${id}`;
+          laterSelectedConfig.features.api_key_cyber_access_programs = false;
+          fixture.selectedConfigText = stringifyToml(laterSelectedConfig);
+          await writeFile(
+            join(fixture.home, "config.toml"),
+            fixture.configText,
+          );
+          await writeFile(
+            fixture.selectedConfigPath,
+            fixture.selectedConfigText,
           );
         }
         await writeNativeWorkerExecutable(fixture.executable, fixture.capture);
@@ -2756,7 +2801,12 @@ test(
           ...input(`synthetic-${fixture.id}`),
           pluginRoot,
           stateDirectory: fixture.stateDirectory,
-          model: `synthetic-model-${fixture.id}`,
+          ...(fixture.semanticInputs
+            ? {}
+            : {
+                model: fixture.model,
+                reasoningEffort: fixture.reasoningEffort,
+              }),
           semanticInputs:
             fixture.semanticInputs ?? fixtures[index + 2].semanticInputs,
           scan: {
@@ -2849,6 +2899,8 @@ test(
                 assert.equal(observed.executable, fixture.executable);
                 assert.equal(observed.path, fixture.expectedPath);
                 assert.equal(observed.home, fixture.home);
+                assert.equal(observed.model, fixture.model);
+                assert.equal(observed.reasoningEffort, fixture.reasoningEffort);
                 assert.equal(observed.openai, `synthetic-key-${fixture.id}`);
                 assert.equal(
                   observed.safetyIdentifier,
@@ -2884,11 +2936,7 @@ test(
                   assert.equal(config.features[key], value);
                 assert.equal(config.model_reasoning_summary, "auto");
                 assert.equal(observed.argv.includes("resume"), resumed);
-                assert.ok(
-                  observed.argv.includes(
-                    `model="synthetic-model-${fixture.id}"`,
-                  ),
-                );
+                assert.ok(observed.argv.includes(`model="${fixture.model}"`));
                 assert.equal(observed.state, fixture.stateDirectory);
                 await assert.rejects(readFile(fixture.decoyLaunch), {
                   code: "ENOENT",

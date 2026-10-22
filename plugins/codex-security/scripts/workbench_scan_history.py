@@ -187,10 +187,13 @@ def independent_review_progress(
 def completed_scan_inputs_match(scan: sqlite3.Row, requested: dict[str, Any]) -> bool:
     recipe = json.loads(scan["recipe_json"] or "{}")
     inputs = recipe.get("scanInputs") or {}
+    config = recipe.get("config") or {}
     return (
         "knowledgeBase" in inputs
         and inputs["knowledgeBase"] == requested["knowledgeBase"]
         and recipe.get("deepScan") == requested["deepScan"]
+        and config.get("model") == requested["model"]
+        and config.get("model_reasoning_effort") == requested["reasoningEffort"]
     )
 
 
