@@ -159,6 +159,9 @@ without a model price. Repeated terminal updates reconcile late observations
 without changing the saved outcome or summing overlapping receipts. Component
 and bulk receipts also keep failed/canceled usage. Legacy receipt status values
 are preserved; their additive `outcome` distinguishes cancellation.
+Bulk recovery of an already sealed scan copies the saved `usage` object with its
+original source, observation time, coverage, and scope into the receipt without
+creating a new inference attempt or live measurement.
 
 Both live and saved collectors read plain and compressed rollouts. Deep workers
 persist a receipt per attempt before validating their output, including failed

@@ -2120,6 +2120,12 @@ def test_late_missing_worker_invalidates_saved_complete_coverage(
     )["scan"]["usage"]
     assert resolved["totalTokens"] == partial["totalTokens"]
     assert resolved["coverage"] == "complete"
+    assert resolved["threadCount"] == 2
+    if runtime_ahead:
+        assert "byRole" not in resolved
+    else:
+        assert resolved["byRole"]["parent"]["threadCount"] == 1
+        assert resolved["byRole"]["workers"]["threadCount"] == 1
     assert resolved.get("missingThreadCount", 0) == 0
     assert not resolved.get("warnings")
     assert resolved["observedAt"] > partial["observedAt"]
@@ -2221,6 +2227,8 @@ def test_narrower_observations_preserve_other_thread_gaps(tmp_path: Path) -> Non
     )["scan"]["usage"]
     assert complete["coverage"] == "complete"
     assert complete["totalTokens"] == 45
+    assert complete["threadCount"] == 4
+    assert "byRole" not in complete
     assert complete["coverageScope"] == narrower_partial["coverageScope"]
     assert not complete.get("missingThreadCount")
     assert not complete.get("warnings")
@@ -2315,6 +2323,65 @@ def test_stopped_scan_preserves_incomparable_scope_uncertainty(tmp_path: Path) -
 
 
 @pytest.mark.parametrize(
+    ("previous_input", "previous_output", "latest_roles"),
+    [(21, 8, True), (37, 8, True), (20, 9, True), (21, 8, False)],
+    ids=["equal-subtotal", "older-larger-subtotal", "different-token-fields", "no-latest-roles"],
+)
+def test_coverage_counts_and_roles_follow_the_latest_observation(
+    workbench_api, previous_input: int, previous_output: int, latest_roles: bool
+) -> None:
+    merge = workbench_api["_WORKBENCH_DB_CONTEXT"].scan_usage.merge_scan_usage_fields
+    previous = {
+        "coverage": "complete",
+        "coverageScope": ["thread:parent"],
+        "source": "codex_runtime",
+        "threadCount": 1,
+        "observedAt": "2026-01-01T00:00:00Z",
+        **_counts(previous_input, 0, previous_output),
+        "byRole": {
+            "parent": {"threadCount": 1, **_counts(previous_input, 0, previous_output)},
+            "workers": {"threadCount": 0, **_counts(0, 0, 0)},
+        },
+    }
+    observed = {
+        "coverage": "complete",
+        "coverageScope": ["thread:parent", "thread:worker"],
+        "source": "codex_rollout" if latest_roles else "codex_runtime",
+        "threadCount": 2,
+        "observedAt": "2026-01-01T00:00:01Z",
+        "cacheWriteInputTokensReported": False,
+        **_counts(21, 0, 8),
+    }
+    if latest_roles:
+        observed["byRole"] = {
+            "parent": {
+                "threadCount": 1,
+                "cacheWriteInputTokensReported": False,
+                **_counts(21, 0, 8),
+            },
+            "workers": {"threadCount": 1, **_counts(0, 0, 0)},
+        }
+    for observation in [previous, observed]:
+        workbench_api["parse_scan_cost"](json.dumps({"usage": observation}))
+
+    merged = merge({"usage": previous}, {"usage": observed})
+    usage = merged["usage"]
+    assert usage["threadCount"] == 2
+    assert usage["coverage"] == "complete"
+    assert usage["coverageScope"] == observed["coverageScope"]
+    assert usage["observedAt"] == observed["observedAt"]
+    for field, value in _counts(previous_input, 0, previous_output).items():
+        assert usage[field] == value
+    if latest_roles and (previous_input, previous_output) == (21, 8):
+        assert usage["byRole"] == observed["byRole"]
+    else:
+        assert "byRole" not in usage
+    assert json.loads(workbench_api["parse_scan_cost"](json.dumps(merged))) == merged
+    assert merge({"usage": observed}, {"usage": previous}) == merged
+    assert merge(merged, {"usage": previous}) == merged
+
+
+@pytest.mark.parametrize(
     ("previous_threads", "previous_tokens", "new_threads", "new_tokens", "combined_tokens"),
     [
         (["parent", "validation"], 1_000, ["parent", "worker"], 1_200, 1_400),
@@ -2357,6 +2424,7 @@ def test_newer_scoped_subtotals_need_encompassing_complete_evidence(
         set(previous["coverageScope"]) | set(observed["coverageScope"])
     )
     assert partial["usage"]["observedAt"] == observed["observedAt"]
+    assert partial["usage"]["threadCount"] == len(new_threads)
     assert merge({"usage": observed}, {"usage": previous}) == partial
     assert merge(partial, {"usage": previous}) == partial
 

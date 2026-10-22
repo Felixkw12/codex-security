@@ -5294,6 +5294,7 @@ export async function main(
                         cost:
                           (scan["cost"] as unknown as ScanCost | undefined) ??
                           null,
+                        usage: scan["usage"] as JsonObject | undefined,
                       };
                     }
                     if (status !== "running" || scan["mode"] !== "deep")
@@ -5347,6 +5348,9 @@ export async function main(
                       return await security.run(recipe.repository!, {
                         ...pickScanSettings(recipe),
                         knowledgeBaseSnapshot: prompts.knowledgeBaseSnapshot,
+                        telemetryContext: prompts.telemetryContext,
+                        onTelemetry: prompts.onTelemetry,
+                        onMeasurement: prompts.onMeasurement,
                         resumeScanId: scan.scanId,
                         outputDir: scanDir,
                         safetyIdentifier: recipe.safetyIdentifier,

@@ -114,15 +114,23 @@ def merge_scan_usage_fields(*observations: Mapping[str, Any]) -> dict[str, Any]:
         for field in (
             "coverage",
             "coverageScope",
+            "threadCount",
             "missingThreadCount",
             "warnings",
             "observedAt",
             "completion",
+            "byRole",
         ):
             if field in latest_coverage:
                 usage[field] = latest_coverage[field]
             else:
                 usage.pop(field, None)
+        # Counts describe the coverage observation, even when its scope narrows.
+        # Its whole role breakdown must still sum to the retained token subtotal.
+        if "byRole" in usage and any(
+            usage.get(field) != latest_coverage.get(field) for field in TOKEN_FIELDS.values()
+        ):
+            usage.pop("byRole")
         merged["usage"] = usage
     cost_warning = "cost_estimate_covers_earlier_usage"
     if (

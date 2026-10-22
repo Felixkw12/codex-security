@@ -21,8 +21,8 @@ import { hostname } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import Papa from "papaparse";
-import type { CodexSecurity } from "./api.js";
-import type { CodexSecurityConfig } from "./config.js";
+import type { CodexSecurity, ScanOptions } from "./api.js";
+import type { CodexSecurityConfig, JsonObject } from "./config.js";
 import { ContractSchemaError, loadContract } from "./contract.js";
 import type { ScanCost, ScanUsageMeasurement } from "./cost.js";
 import { deepScanOptions } from "./deep-config.js";
@@ -78,6 +78,7 @@ interface MultiscanReceipt extends MultiscanTask {
   threatModelPath?: string;
   cost?: ScanCost;
   measurement?: Readonly<ScanUsageMeasurement>;
+  usage?: JsonObject;
   outcome?: "completed" | "failed" | "canceled";
   error?: string;
   warnings?: string[];
@@ -109,10 +110,18 @@ export interface MultiscanOptions extends ScanPromptSettings {
   maxAttempts: number;
   recoverScan?(
     scanDir: string,
-    prompts: ScanPromptSettings & {
-      knowledgeBaseSnapshot?: KnowledgeBaseSnapshot;
-    },
-  ): Promise<Pick<ScanResult, "manifest" | "cost" | "findings"> | undefined>;
+    prompts: ScanPromptSettings &
+      Pick<ScanOptions, "onMeasurement" | "onTelemetry"> & {
+        knowledgeBaseSnapshot?: KnowledgeBaseSnapshot;
+        /** @internal Preserve correlation when the resumed SDK has no saved binding. */
+        telemetryContext?: { operationId: string; parentAttemptId?: string };
+      },
+  ): Promise<
+    | (Pick<ScanResult, "manifest" | "cost" | "findings"> & {
+        usage?: JsonObject;
+      })
+    | undefined
+  >;
   maxCostUsd?: number;
   // Prompts are shared across modes and prepared from the top-level options.
   scanOptionsByMode?: Partial<
@@ -425,7 +434,7 @@ async function runCampaign(
       if (task === undefined) return;
       const knowledge = knowledgeByMode[task.mode];
       const history = receipts.get(task.id.toLowerCase());
-      const operationId = history?.scan?.operationId ?? randomUUID();
+      let operationId = history?.scan?.operationId;
       let maxAttempt = history?.maxAttempt ?? 0;
       let recoveryAttempt = history?.scan?.attempt ?? 0;
       const artifactRoot = join(output, "artifacts", task.id);
@@ -454,6 +463,16 @@ async function runCampaign(
         let attemptPolicyFailed: boolean | undefined;
         let cost: Readonly<ScanCost> | null = null;
         let measurement: Readonly<ScanUsageMeasurement> | null = null;
+        let savedUsage: JsonObject | undefined;
+        const observers: Pick<ScanOptions, "onMeasurement" | "onTelemetry"> = {
+          onMeasurement: (value) => {
+            measurement = value;
+            cost = value.cost;
+          },
+          onTelemetry: (event) => {
+            operationId = event.operationId;
+          },
+        };
         let threatModelPath: string | null | undefined;
         let exhaustedBudget = false;
         let requiresRecovery = false;
@@ -462,7 +481,9 @@ async function runCampaign(
           await ensureOutputDirectory(artifactRoot);
           let result:
             | (Pick<ScanResult, "manifest" | "cost" | "findings"> &
-                Partial<Pick<ScanResult, "threatModelPath">>)
+                Partial<Pick<ScanResult, "threatModelPath">> & {
+                  usage?: JsonObject;
+                })
             | undefined;
           if (
             options.recoverScan !== undefined &&
@@ -499,6 +520,10 @@ async function runCampaign(
               result = await options.recoverScan(scanDir, {
                 ...options,
                 knowledgeBaseSnapshot: knowledge?.snapshot,
+                ...observers,
+                ...(operationId === undefined
+                  ? {}
+                  : { telemetryContext: { operationId } }),
               });
               attemptedResume = result !== undefined;
             }
@@ -555,6 +580,7 @@ async function runCampaign(
             const scanPrompt = [options.scanPrompt?.trim(), task.prompt]
               .filter(Boolean)
               .join("\n\n");
+            operationId ??= randomUUID();
             result = await security.run(checkout, {
               ...scanSettings,
               knowledgeBaseSnapshot: knowledge?.snapshot,
@@ -577,10 +603,7 @@ async function runCampaign(
               ...(options.maxCostUsd === undefined
                 ? {}
                 : { maxCostUsd: options.maxCostUsd }),
-              onMeasurement: (value) => {
-                measurement = value;
-                cost = value.cost;
-              },
+              ...observers,
               onWarning: (warning) => {
                 runWarnings.push(warning);
                 notifyProgress(options, {
@@ -597,6 +620,7 @@ async function runCampaign(
           }
           threatModelPath = result.threatModelPath;
           cost = result.cost;
+          savedUsage = result.usage;
           const failureSeverity = scanSettings?.failureSeverity;
           if (failureSeverity !== undefined) {
             attemptPolicyFailed = result.findings.findings.some((finding) =>
@@ -642,11 +666,12 @@ async function runCampaign(
           ...task,
           status,
           attempt,
-          operationId,
+          ...(operationId === undefined ? {} : { operationId }),
           outputDir: scanDir,
           ...(threatModelPath === null ? {} : { threatModelPath }),
           ...(cost === null ? {} : { cost }),
           ...(measurement === null ? {} : { measurement }),
+          ...(savedUsage === undefined ? {} : { usage: savedUsage }),
           outcome: options.signal?.aborted ? "canceled" : status,
           ...(reportedError === undefined ? {} : { error: reportedError }),
           ...(recoveryCheckout !== undefined

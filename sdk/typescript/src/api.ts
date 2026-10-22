@@ -1730,7 +1730,7 @@ export class CodexSecurity {
     let scanProgressTracker: ScanProgressTracker | null = null;
     let artifactRestorationFailure: OutputDirectoryError | null = null;
     let customValidationComplete = false;
-    let completionCost: ScanCost | null = null;
+    let completionCost: ScanCost | ReturnType<typeof measuredScanCost> = null;
     let scanTurnStatus: "in_progress" | "completed" | "failed" | null = null;
     let budgetRecovery: {
       expectation: ScanExpectation;
@@ -2827,7 +2827,11 @@ export class CodexSecurity {
           const snapshot = await tracker.stop(usage).catch((error: unknown) => {
             if (options.maxCostUsd !== undefined) throw error;
             reportTrackingError(error);
-            return { usage, cost: estimateScanCost(model, usage) };
+            return {
+              usage,
+              cost: estimateScanCost(model, usage),
+              measurement: latestMeasurement,
+            };
           });
           throwIfAborted(signal, scanDir);
           if (options.maxCostUsd !== undefined && snapshot.cost === null) {
@@ -2838,7 +2842,8 @@ export class CodexSecurity {
               "Scan completed, but its cost limit could not be verified because model pricing or token usage is unavailable.",
             );
           }
-          completionCost = snapshot.cost;
+          completionCost =
+            measuredScanCost(snapshot.measurement) ?? snapshot.cost;
           let preparation: JsonObject;
           try {
             preparation = await workbench(
@@ -3185,7 +3190,11 @@ export class CodexSecurity {
               "--scan-id",
               activeScan.id,
               "--cost-json",
-              JSON.stringify(snapshot?.cost ?? failure.cost),
+              JSON.stringify(
+                measuredScanCost(snapshot?.measurement ?? latestMeasurement) ??
+                  snapshot?.cost ??
+                  failure.cost,
+              ),
               `--message=${failure.message.slice(0, 2400)}`,
             ],
           );

@@ -5515,11 +5515,12 @@ describe("CodexSecurity orchestration", () => {
     const { root, repository, codexHome, scanDir } = await scanDirectories();
     const usages: unknown[] = [];
     const observerErrors: string[] = [];
+    const commands: Array<readonly string[]> = [];
     const client = new TestClient(
       { codexOverrides: { model: "synthetic-unpriced-model" } },
       {
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: recordingWorkbench([]),
+        runWorkbench: recordingWorkbench(commands),
         createCodex: completedCodex(root),
       },
     );
@@ -5537,6 +5538,20 @@ describe("CodexSecurity orchestration", () => {
         expect.objectContaining({ input_tokens: 10, output_tokens: 3 }),
       ]);
       expect(observerErrors).toEqual(["onUsage"]);
+      const completion = commands.find((args) => args[0] === "complete-scan");
+      const costIndex = completion?.indexOf("--cost-json") ?? -1;
+      expect(costIndex).toBeGreaterThan(0);
+      const receipt = JSON.parse(completion![costIndex + 1]!);
+      expect(receipt).toMatchObject({
+        usage: {
+          coverage: "complete",
+          threadCount: 1,
+          inputTokens: 10,
+          outputTokens: 3,
+          totalTokens: 13,
+        },
+      });
+      expect(receipt.cost).toBeUndefined();
     } finally {
       await client.close();
     }
@@ -5591,9 +5606,16 @@ describe("CodexSecurity orchestration", () => {
     expect(completion).toBeDefined();
     const costIndex = completion?.indexOf("--cost-json") ?? -1;
     expect(costIndex).toBeGreaterThan(0);
-    expect(JSON.parse(completion?.[costIndex + 1] ?? "null")).toEqual(
-      expectedCost,
-    );
+    expect(JSON.parse(completion?.[costIndex + 1] ?? "null")).toMatchObject({
+      cost: expectedCost,
+      usage: {
+        coverage: "complete",
+        threadCount: 1,
+        inputTokens: 10,
+        outputTokens: 3,
+        totalTokens: 13,
+      },
+    });
 
     await client.close();
   });
@@ -6273,9 +6295,14 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
-  test.each(["completed", "failed", "unavailable"] as const)(
-    "recovers exhausted deep-scan budget when completion is %s",
-    async (completion) => {
+  test.each([
+    ["completed", false],
+    ["failed", false],
+    ["unavailable", false],
+    ["completed", true],
+  ] as const)(
+    "recovers exhausted deep-scan budget when completion is %s (missing worker=%p)",
+    async (completion, missingWorker) => {
       const { root, repository, codexHome, scanDir } = await scanDirectories();
       const commands: Array<readonly string[]> = [];
       const warnings: string[] = [];
@@ -6288,6 +6315,13 @@ describe("CodexSecurity orchestration", () => {
               cached_input_tokens: 200,
               output_tokens: 30,
             });
+            if (missingWorker)
+              await writeUsageSession(
+                codexHome,
+                "missing-worker",
+                {},
+                { parent: "scan-thread" },
+              );
             await (options.signal.aborted
               ? undefined
               : once(options.signal, "abort"));
@@ -6379,7 +6413,8 @@ describe("CodexSecurity orchestration", () => {
           expect(recovered.coverage).not.toHaveProperty("completeness");
           expect(recovered.findings.findings).toHaveLength(1);
           expect(recovered.threadId).toBe("scan-thread");
-          expect(recovered.cost?.estimatedUsd).toBe(0.00488);
+          if (missingWorker) expect(recovered.cost).toBeNull();
+          else expect(recovered.cost?.estimatedUsd).toBe(0.00488);
           expect(warnings).toEqual([
             `Scan stopped: short-context budget baseline $0.00488 exceeded the $0.004 limit; estimated cost $0.00488–$0.01156 (standard, context unknown, cache writes unknown); partial output remains at ${scanDir}.`,
           ]);
@@ -6403,6 +6438,19 @@ describe("CodexSecurity orchestration", () => {
           (args) => args[0] === "complete-budget-exhausted-scan",
         );
         expect(recovery?.includes("--cost-json")).toBe(true);
+        const costIndex = recovery!.indexOf("--cost-json");
+        expect(JSON.parse(recovery![costIndex + 1]!)).toMatchObject({
+          usage: {
+            coverage: missingWorker ? "partial" : "complete",
+            threadCount: 1,
+            missingThreadCount: missingWorker ? 1 : 0,
+            inputTokens: 1_250,
+            cachedInputTokens: 200,
+            outputTokens: 30,
+            totalTokens: 1_280,
+          },
+          cost: { estimatedUsd: 0.00488 },
+        });
         expect(recovery?.some((value) => value.startsWith("--message="))).toBe(
           true,
         );
