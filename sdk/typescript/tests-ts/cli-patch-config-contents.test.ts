@@ -1,15 +1,18 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import {
   appendFile,
   chmod,
   link,
   mkdir,
+  mkdtemp,
   readFile,
+  rm,
   stat,
   writeFile,
 } from "node:fs/promises";
 import { dirname, join, sep } from "node:path";
+import { pathToFileURL } from "node:url";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import { runGitRepositoryCommand, runWorkflow } from "./cli-patch-fixtures.js";
 
@@ -194,6 +197,35 @@ for (const configuration of configurations) {
   }
 }
 
+let unreadableBundle: string | undefined;
+let unreadableFixture: string;
+beforeAll(async () => {
+  if (process.platform === "win32") return;
+  // Use the supported Node filesystem semantics; Bun's macOS realpath opens
+  // the target for reading and cannot resolve these mode-000 inputs.
+  unreadableBundle = await mkdtemp(
+    join(import.meta.dirname, "..", ".patch-config-node-"),
+  );
+  const built = await Bun.build({
+    entrypoints: [
+      join(
+        import.meta.dirname,
+        "fixtures",
+        "patch-unreadable-configuration-node.ts",
+      ),
+    ],
+    outdir: unreadableBundle,
+    target: "node",
+    packages: "external",
+  });
+  expect(built.success).toBe(true);
+  unreadableFixture = built.outputs[0]!.path;
+});
+afterAll(async () => {
+  if (unreadableBundle)
+    await rm(unreadableBundle, { recursive: true, force: true });
+});
+
 for (const configuration of [
   "global",
   "global activation",
@@ -258,40 +290,36 @@ for (const configuration of [
           code: "EACCES",
         });
         expect(() => git("config", "--includes", "--list")).not.toThrow();
-        let launches = 0;
-        const postModelGit: string[][] = [];
-        const outcome = await runWorkflow(
-          ["patch", "Synthetic issue", "--json"],
-          {
-            currentDirectory: root,
-            environment,
-            onRepositoryCommand: (command, args, cwd, options) => {
-              if (launches > 0) postModelGit.push([...args]);
-              return runGitRepositoryCommand(command, args, cwd, {
-                ...options,
-                environment: { ...environment, ...options?.environment },
-              });
+        const outcome = JSON.parse(
+          execFileSync(
+            "node",
+            [
+              "--input-type=module",
+              "--eval",
+              `await import(${JSON.stringify(pathToFileURL(unreadableFixture).href)})`,
+            ],
+            {
+              input: JSON.stringify({
+                root,
+                control,
+                alias,
+                activate,
+                environment,
+              }),
+              encoding: "utf8",
             },
-            onCodex: async (_args, output) => {
-              launches++;
-              if (activate) {
-                expect((await stat(alias)).ino).toBe((await stat(control)).ino);
-                await chmod(alias, 0o600);
-                await appendFile(alias, "[synthetic]\n value = activated\n");
-              }
-              await writeFile(join(root, "app.ts"), "after\n");
-              output?.stdout.write("Synthetic patch complete.\n");
-              return 0;
-            },
-          },
-        );
-        expect(launches).toBe(1);
+          ),
+        ) as Awaited<ReturnType<typeof runWorkflow>> & {
+          launches: number;
+          postModelGit: string[][];
+        };
+        expect(outcome.launches).toBe(1);
         if (activate) {
           expect(outcome.exitCode, outcome.stderr).toBe(2);
           expect(outcome.stderr).toContain(
             "Git configuration became readable during the patch",
           );
-          expect(postModelGit).toEqual([]);
+          expect(outcome.postModelGit).toEqual([]);
         } else {
           expect(outcome.exitCode, outcome.stderr).toBe(0);
           expect(JSON.parse(outcome.stdout).files).toEqual(["app.ts"]);
