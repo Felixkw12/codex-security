@@ -13,6 +13,14 @@ const refusalMessages = {
     "Safety policy: this request is refused due to harmful content.",
   "policy-bare-harmful-content-text":
     "Safety policy: request refused due to harmful content.",
+  "policy-restrictions-text":
+    "Safety policy: this request is refused due to policy restrictions.",
+  "policy-bare-restrictions-text":
+    "Safety policy: request refused due to policy restrictions.",
+  "policy-service-impact-text":
+    "Safety policy: this request is refused because it would make the service unavailable.",
+  "policy-multiline-explanation-text":
+    "Safety policy: this request is refused.\nI can offer a defensive alternative.",
   "policy-prefix-text": "Safety policy: request refused.",
   "policy-review-text": "Review refused: safety policy.",
   "policy-intro-text":

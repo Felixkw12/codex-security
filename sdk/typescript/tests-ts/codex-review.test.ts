@@ -135,6 +135,14 @@ const failureReasons: Record<string, string> = {
     "Safety policy: this request is refused due to harmful content.",
   "policy-bare-harmful-content-text":
     "Safety policy: request refused due to harmful content.",
+  "policy-restrictions-text":
+    "Safety policy: this request is refused due to policy restrictions.",
+  "policy-bare-restrictions-text":
+    "Safety policy: request refused due to policy restrictions.",
+  "policy-service-impact-text":
+    "Safety policy: this request is refused because it would make the service unavailable.",
+  "policy-multiline-explanation-text":
+    "Safety policy: this request is refused.\nI can offer a defensive alternative.",
   "policy-prefix-text": "Safety policy: request refused.",
   "policy-review-text": "Review refused: safety policy.",
   "policy-intro-text":
@@ -992,6 +1000,8 @@ test.each([
   "Safety policy: request refused due to disallowed content.",
   "Safety policy: request refused due to potentially harmful content.",
   "Safety policy: request refused due to harmful assistance.",
+  "Safety policy: this review is refused because complying would violate applicable restrictions.",
+  "Safety policy: request refused under the applicable policy restrictions. I can offer a defensive alternative.",
   "Safety policy: request blocked under the applicable restrictions.",
   "Safety policy: request refused because it would facilitate unauthorized access.",
   "Review refusal due to the content policy.",
@@ -1052,6 +1062,7 @@ test.each([
   "Review refused: safety policy. Service unavailable.",
   "Safety policy: request refused: service unavailable",
   "Safety policy: request refused. Service unavailable.",
+  "Safety policy: this request is refused.\nService unavailable.",
   "Safety policy: request refused due to upstream service unavailability.",
   "Safety policy: request refused due to upstream service unavailability for content processing.",
   "Safety policy: request refused due to upstream service unavailability while fetching content.",
