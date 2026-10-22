@@ -511,7 +511,7 @@ jobs:
     name: windows-latest / node-22 / tests-${{ matrix.shard }}
     needs: [classify-changes, package]
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: ${{ matrix.shard == 4 && 70 || 60 }}
     strategy:
       fail-fast: false
       matrix:
