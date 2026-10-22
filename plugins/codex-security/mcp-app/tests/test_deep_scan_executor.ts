@@ -1695,6 +1695,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             configuration: {
               ...parsedConfiguration,
               ...inheritedTelemetry,
+              projects: { [fixture.root]: { trust_level: "trusted" } },
               ...Object.fromEntries(
                 Object.entries(nativePaths).map(([key, value]) => [
                   key,
@@ -1785,6 +1786,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                   ...entry.authentication,
                   ...entry.workerTelemetry,
                   ...entry.nativePaths,
+                  projects: { [fixture.root]: { trust_level: "untrusted" } },
                   approval_policy: "on-request",
                   default_permissions: "parent",
                   permissions: { parent: { filesystem: { ":root": "write" } } },
@@ -2110,6 +2112,13 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               web_search: workerConfigurations[index].webSearch,
               "windows.sandbox": workerConfigurations[index].windowsSandbox,
             });
+            assert.deepEqual(
+              nativeConfigOverrides(invocation.argv).filter((override) =>
+                /^projects[.=]/.test(override),
+              ),
+              [],
+              "Patch project trust is not forwarded to discovery, reducer or resumed workers.",
+            );
             assert.deepEqual(
               JSON.parse(
                 JSON.stringify(
