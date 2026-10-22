@@ -18,7 +18,7 @@ The matching `action-vX.Y.Z` release lists the full distribution commit SHA
 and links to the product changelog after the Action has passed release checks.
 When using a fork, replace `openai` with the fork owner.
 
-The [repository workflow](examples/repository.yml) below uses `gpt-6-sol` and
+The [repository workflow](examples/repository.yml) below uses `gpt-5.6-sol` and
 an estimated $5 cost limit. Change `max-cost` to adjust the budget, or remove it
 for no estimated cost limit. Requests already in progress can exceed the limit.
 Daybreak is optional; see [Daybreak access and refusals](#daybreak-access-and-refusals).
@@ -540,28 +540,12 @@ the next product version. This development pin does not necessarily track the
 latest CLI release. To upgrade it, update it and regenerate
 `runtime/package-lock.json`, rebuild the bundles, and run validation.
 
-Releases use the product version from `sdk/typescript/package.json`. Before npm
-publication, the release workflow exercises the Action's compatibility suite
-against the packed CLI candidate. After publication and provenance verification,
-the Action release workflow starts from that exact CLI source commit, updates
-the runtime pin and integrity lock, and fetches the locked runtime through
-Socket Firewall with an empty cache before running the CLI. The lock keeps
-public npm URLs for Action consumers. The workflow rebuilds the bundles and
-runs the Action checks in a job with read-only repository permissions.
-A fresh publisher takes only the tested runtime lock, rebuilds
-from the same source, and verifies the bundle hashes without executing the CLI.
-It creates a distribution commit and an immutable `action-vX.Y.Z` tag with the
-same version as `npm-vX.Y.Z`. The companion Action release includes the manifest
-and SBOM before publication, lists the full distribution commit SHA, and links
-to the npm release's canonical changelog. It is never marked Latest.
-
-The Action distribution commit differs from the CLI source commit because the
-registry integrity lock is finalized after publication. Release metadata records
-both commits, both tags, and the verified CLI integrity. A failed Action stage
-can be rerun without republishing npm or changing its immutable release assets.
-Recovery verifies existing Action assets and can finish a partial draft release.
-Existing version tags are never moved.
-See [the release process](../RELEASING.md) for the orchestration and recovery flow.
+The `action-vX.Y.Z` release uses the same version as the corresponding
+`npm-vX.Y.Z` CLI release. Its distribution commit includes the built bundles and
+final runtime lock and differs from the CLI source commit. Pin the full Action
+distribution SHA listed in the Action release, which also includes its manifest,
+SBOM, and a link to the product changelog. See [the release process](../RELEASING.md)
+for publication, verification, and recovery instructions.
 
 <!-- prettier-ignore-start -->
 
