@@ -143,7 +143,9 @@ for (const mode of [
       expect(pushes).toBe(1);
       expect(creations).toBe(1);
       if (dormantWorktree) {
-        expect(git("config", "--get", "core.worktree")).toBe(alternate);
+        expect(git("config", "--get", "core.worktree")).toBe(
+          alternate.replaceAll("\\", "/"),
+        );
         expect(git("rev-parse", "--show-toplevel").replaceAll("\\", "/")).toBe(
           directory.replaceAll("\\", "/"),
         );
