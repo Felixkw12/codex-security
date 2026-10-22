@@ -57,8 +57,8 @@ isolates prompt behavior; it is **not** an end-to-end benchmark of the SDK's
 The runner stages only label-free case files and its provider adapter in a temporary
 directory. It uses the checkout's plugin runtime and the selected Node executable,
 including for Promptfoo, Codex, and the security-policy helper. The provider keeps
-the existing named read-only filesystem profile, allowing the plugin, staged cases,
-Node executable directory, and installed native Codex CLI package. Tool network
+the existing named read-only filesystem profile, allowing the plugin, the selected
+case, the Node executable directory, and the installed native Codex CLI package. Tool network
 access, web search, inherited MCP servers, apps, and plugin/memory context remain
 disabled. Per-run provider overrides retain the existing Codex home for saved
 logins and token refreshes. Gold labels, scoring scripts, and the corpus manifest
