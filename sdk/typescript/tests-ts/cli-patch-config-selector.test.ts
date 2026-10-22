@@ -122,7 +122,9 @@ test.each([
     expect(controls).toContain(effectiveConfig);
     expect(controls).toContain(hook);
     expect(controls).not.toContain(selector);
-    const inventory = calls.filter(({ args }) => args.includes("config"));
+    const inventory = calls.filter(
+      ({ args }) => args.includes("config") && !args.includes("--git-path"),
+    );
     expect(inventory.some(({ args }) => args.includes("--list"))).toBe(true);
     expect(inventory.some(({ args }) => args.includes("--get-regexp"))).toBe(
       true,
@@ -137,7 +139,7 @@ test.each([
     for (const { args } of lfsLookups) expect(args).toContain("--includes");
     for (const call of calls) {
       expect(call.environment["GIT_CONFIG"]).toBe(
-        call.args.includes("config") && call.args.at(-1) !== "lfs.storage"
+        inventory.includes(call) && call.args.at(-1) !== "lfs.storage"
           ? undefined
           : selector,
       );

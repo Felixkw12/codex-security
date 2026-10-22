@@ -8499,6 +8499,10 @@ describe("patch change tracking", () => {
       git("update-index", "--assume-unchanged", "old.ts");
     const head = git("rev-parse", "HEAD");
     const index = git("write-tree");
+    const indexBytes = await readFile(join(directory, ".git", "index"));
+    const nestedCommands: string[][] = [];
+    let pushes = 0;
+    let creates = 0;
     const result = resultWithFindings(["high"]);
     const outcome = await runWorkflow(
       ["patch", "--scan", "scan-1", "--create-pr", "--json"],
@@ -8506,12 +8510,21 @@ describe("patch change tracking", () => {
         currentDirectory: directory,
         result,
         onWorkbench: () => savedScan(result, "scan-1", directory),
-        onRepositoryCommand: (command, args, cwd, options) =>
-          command === "git"
-            ? runGitRepositoryCommand(command, args, cwd, options)
-            : args[1] === "list"
-              ? "[]"
-              : "https://github.example.test/example/repository/pull/1",
+        onRepositoryCommand: (command, args, cwd, options) => {
+          if (command === "git") {
+            if (args.includes("push")) pushes++;
+            if (
+              cwd === join(directory, "old.ts") ||
+              args.includes(join(directory, "old.ts"))
+            )
+              nestedCommands.push([...args]);
+            return runGitRepositoryCommand(command, args, cwd, options);
+          }
+          if (args[1] === "create") creates++;
+          return args[1] === "list"
+            ? "[]"
+            : "https://github.example.test/example/repository/pull/1";
+        },
         onCodex: async (_args, output) => {
           await writeFile(
             join(directory, "new.ts"),
@@ -8556,12 +8569,23 @@ describe("patch change tracking", () => {
         },
       },
     );
-    expect(outcome.exitCode, outcome.stderr).toBe(state === "clean" ? 0 : 2);
-    if (state !== "clean") {
-      expect(outcome.stderr).toContain("uncommitted changes before patching");
+    const rejected = state !== "clean" || transfer === "gitlink";
+    expect(outcome.exitCode, outcome.stderr).toBe(rejected ? 2 : 0);
+    if (rejected) {
+      expect(outcome.stderr).toContain(
+        transfer === "gitlink"
+          ? "Git metadata outside the pre-patch administration directories"
+          : "uncommitted changes before patching",
+      );
       expect(git("rev-parse", "HEAD")).toBe(head);
+      expect(await readFile(join(directory, ".git", "index"))).toEqual(
+        indexBytes,
+      );
       expect(git("write-tree")).toBe(index);
       expect(git("ls-remote", "origin")).toBe("");
+      expect(pushes).toBe(0);
+      expect(creates).toBe(0);
+      if (transfer === "gitlink") expect(nestedCommands).toEqual([]);
     } else {
       expect(git("show", "HEAD:new.ts")).toBe(
         local.replace("unsafe", "fixed").trim(),
@@ -8569,6 +8593,9 @@ describe("patch change tracking", () => {
       if (transfer === "rename")
         expect(git("ls-tree", "HEAD", "old.ts")).toBe("");
     }
+    expect(await readFile(join(directory, "new.ts"), "utf8")).toBe(
+      local.replace("unsafe", "fixed"),
+    );
   });
 
   test.each(
