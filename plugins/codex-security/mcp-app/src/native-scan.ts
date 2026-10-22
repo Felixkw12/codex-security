@@ -27,7 +27,10 @@ import {
 import type { SavedScanRecipe } from "../../../../sdk/typescript/src/scan-registration.js";
 import { restoreProviderProfile } from "../../../../sdk/typescript/src/provider-profile.js";
 import { configuredCodexHome } from "../../../../sdk/typescript/src/auth.js";
-import { expandHome } from "../../../../sdk/typescript/src/codex-home.js";
+import {
+  environmentValue,
+  expandHome,
+} from "../../../../sdk/typescript/src/codex-home.js";
 import { gitMarkerRoot } from "../../../../sdk/typescript/src/targets.js";
 import { CodexSecurityError } from "../../../../sdk/typescript/src/errors.js";
 import { resolveDeepScanConfig } from "../../../../sdk/typescript/src/deep-config.js";
@@ -184,8 +187,12 @@ export async function readNativeScanSemanticInputs(
   savedRecipe?: SavedScanRecipe,
 ): Promise<NativeScanSemanticInputs> {
   const environment = await snapshotNativeEnvironment();
-  const knowledgeBasePaths = environment.CODEX_SECURITY_KNOWLEDGE_BASE
-    ? [environment.CODEX_SECURITY_KNOWLEDGE_BASE]
+  const knowledgeBasePath = environmentValue(
+    environment,
+    "CODEX_SECURITY_KNOWLEDGE_BASE",
+  );
+  const knowledgeBasePaths = knowledgeBasePath
+    ? [knowledgeBasePath]
     : undefined;
   const knowledgeBaseSnapshot = knowledgeBasePaths
     ? await readKnowledgeBaseSnapshot(knowledgeBasePaths, signal)
@@ -277,6 +284,10 @@ export async function prepareNativeScan(
   const recipe = input.recipe;
   const semanticInputs =
     recipe === undefined ? input.semanticInputs : undefined;
+  const knowledgeBasePath = environmentValue(
+    inheritedEnvironment,
+    "CODEX_SECURITY_KNOWLEDGE_BASE",
+  );
   const options = ScanSettingsSchema.parse({
     ...input.savedDeepScanSettings,
     ...semanticInputs?.deepScanSettings,
@@ -287,8 +298,8 @@ export async function prepareNativeScan(
         ? recipe.knowledgeBasePaths
         : semanticInputs
           ? semanticInputs.knowledgeBasePaths
-          : inheritedEnvironment.CODEX_SECURITY_KNOWLEDGE_BASE
-            ? [inheritedEnvironment.CODEX_SECURITY_KNOWLEDGE_BASE]
+          : knowledgeBasePath
+            ? [knowledgeBasePath]
             : undefined,
     maxCostUsd: recipe?.maxCostUsd,
     cyberAccessProgram: recipe?.cyberAccessProgram,

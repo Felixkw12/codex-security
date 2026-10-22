@@ -2098,6 +2098,13 @@ test(
         effort: "medium",
         summary: "detailed",
       },
+      {
+        id: "absent",
+        workers: 4,
+        subagents: 2,
+        effort: "medium",
+        summary: "none",
+      },
     ].map((fixture) => ({
       ...fixture,
       model: `synthetic-${fixture.id}-model`,
@@ -2140,7 +2147,7 @@ else {
   fs.appendFileSync(process.env.NATIVE_PROFILE_CAPTURE, JSON.stringify({
     kind: "exec", argv: process.argv.slice(2), marker: process.env.NATIVE_PROFILE_MARKER,
     knowledgePath: knowledge,
-    documents: Object.fromEntries(fs.readdirSync(knowledge).map(name => [name, fs.readFileSync(path.join(knowledge, name), "utf8")])),
+    documents: knowledge ? Object.fromEntries(fs.readdirSync(knowledge).map(name => [name, fs.readFileSync(path.join(knowledge, name), "utf8")])) : {},
   }) + "\\n");
   console.log(JSON.stringify({ type: "thread.started", thread_id: "synthetic-semantic-worker" }));
   console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0 } }));
@@ -2182,15 +2189,19 @@ else {
           }),
         );
         selectEnvironment(fixture);
+        if (fixture.id === "first")
+          process.env.CODEX_SECURITY_KNOWLEDGE_BASE = `  ${fixture.document}  `;
+        else if (fixture.id === "absent")
+          process.env.CODEX_SECURITY_KNOWLEDGE_BASE = "   ";
         fixture.semanticInputs = await readNativeScanSemanticInputs({
           model: fixture.model,
           reasoningEffort: fixture.effort,
         });
         assert.deepEqual(
-          fixture.semanticInputs.knowledgeBaseSnapshot.documents,
-          {
-            "0-architecture.md.txt": fixture.documentText,
-          },
+          fixture.semanticInputs.knowledgeBaseSnapshot?.documents,
+          fixture.id === "absent"
+            ? undefined
+            : { "0-architecture.md.txt": fixture.documentText },
         );
         if (fixture.id === "saved") {
           const savedDocument = join(root, fixture.id, "saved-architecture.md");
@@ -2277,17 +2288,25 @@ else {
           assert.deepEqual(native.options.knowledgeBaseSnapshot, snapshot);
           assert.deepEqual(
             native.options.knowledgeBasePaths,
-            saved ? fixture.recipe.knowledgeBasePaths : [fixture.document],
+            saved
+              ? fixture.recipe.knowledgeBasePaths
+              : fixture.id === "absent"
+                ? undefined
+                : [fixture.document],
           );
           const ambient = native.client.dependencies.ambientExecution;
+          assert.equal(
+            ambient.environment.CODEX_SECURITY_KNOWLEDGE_BASE,
+            undefined,
+          );
           await mergedCodexConfig({
             ...native.client.config,
             codexOverrides: ambient.configuration,
           });
           const runtime = await prepareAmbientRuntime(ambient);
-          const knowledge = await prepareKnowledgeBase(
-            native.options.knowledgeBaseSnapshot,
-          );
+          const knowledge = snapshot
+            ? await prepareKnowledgeBase(snapshot)
+            : undefined;
           try {
             const source = prepareExecutionSource(ambient);
             const session = {
@@ -2319,7 +2338,9 @@ else {
                 {
                   NATIVE_PROFILE_CAPTURE: fixture.capture,
                   NATIVE_PROFILE_MARKER: fixture.id,
-                  CODEX_SECURITY_KNOWLEDGE_BASE: knowledge.path,
+                  ...(knowledge === undefined
+                    ? {}
+                    : { CODEX_SECURITY_KNOWLEDGE_BASE: knowledge.path }),
                 },
               );
               for (const resumed of [false, true]) {
@@ -2380,11 +2401,11 @@ else {
                 native.options.subagents + 1,
               );
               assert.equal(observed.marker, fixture.id);
-              assert.equal(observed.knowledgePath, knowledge.path);
-              assert.deepEqual(observed.documents, snapshot.documents);
+              assert.equal(observed.knowledgePath, knowledge?.path);
+              assert.deepEqual(observed.documents, snapshot?.documents ?? {});
             }
           } finally {
-            await knowledge.cleanup();
+            await knowledge?.cleanup();
             await rm(runtime.bootstrapWorkspace, {
               recursive: true,
               force: true,
@@ -3757,7 +3778,7 @@ else {
   );
 }
 
-test("native rejoin restores bound knowledge without overwriting its snapshot", async () => {
+test("native rejoin restores bound knowledge without overwriting its snapshot", async (t) => {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "native-knowledge-resume-")),
   );
@@ -3783,6 +3804,17 @@ test("native rejoin restores bound knowledge without overwriting its snapshot", 
     delete process.env.CODEX_SECURITY_CONFIG_PATH;
     delete process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
     const request = { ...input(), scan: { ...input().scan, scanDir } };
+    for (const [selection, value, expected] of [
+      ["blank", "   ", undefined],
+      ["padded", `  ${document}  `, [document]],
+    ]) {
+      await t.test(`${selection} fresh knowledge environment`, async () => {
+        process.env.CODEX_SECURITY_KNOWLEDGE_BASE = value;
+        const selected = await prepareNativeScan(request);
+        assert.deepEqual(selected.options.knowledgeBasePaths, expected);
+      });
+    }
+    process.env.CODEX_SECURITY_KNOWLEDGE_BASE = document;
     const fresh = await prepareNativeScan(request);
     assert.equal(fresh.options.resumeScanId, undefined);
     assert.equal(fresh.options.knowledgeBaseSnapshot, undefined);

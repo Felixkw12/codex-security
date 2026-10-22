@@ -54,6 +54,9 @@ for (const change of [
   "knowledge",
   "added knowledge",
   "missing knowledge",
+  "whitespace knowledge",
+  "padded knowledge path",
+  "plain knowledge path",
   "deep config",
   "model",
   "reasoning effort",
@@ -71,7 +74,12 @@ for (const change of [
   test(`native target reuse after MCP restart: ${change}`, async () => {
     const root = await privateDirectory("native-completed-reuse-");
     const repository = path.join(root, "repository");
-    const knowledgePath = path.join(root, "knowledge.md");
+    const knowledgePath = path.join(
+      root,
+      change === "padded knowledge path" || change === "plain knowledge path"
+        ? "knowledge guidance.md"
+        : "knowledge.md",
+    );
     const deepConfigPath = path.join(root, "deep.toml");
     const selectedConfigPath = path.join(root, "selected.toml");
     const environment = {
@@ -80,7 +88,9 @@ for (const change of [
       CODEX_SECURITY_STATE_DIR: path.join(root, "state"),
       CODEX_HOME: path.join(root, "home"),
       CODEX_SECURITY_KNOWLEDGE_BASE:
-        change === "added knowledge" || change === "legacy recipe"
+        change === "added knowledge" ||
+        change === "legacy recipe" ||
+        change === "whitespace knowledge"
           ? ""
           : knowledgePath,
       CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH: deepConfigPath,
@@ -340,6 +350,10 @@ for (const change of [
         );
       if (change === "added knowledge")
         environment.CODEX_SECURITY_KNOWLEDGE_BASE = knowledgePath;
+      if (change === "whitespace knowledge")
+        environment.CODEX_SECURITY_KNOWLEDGE_BASE = " \t ";
+      if (change === "padded knowledge path")
+        environment.CODEX_SECURITY_KNOWLEDGE_BASE = `  ${knowledgePath}  `;
       if (
         change === "instructions changed" ||
         change === "instructions added" ||
@@ -393,7 +407,10 @@ for (const change of [
         change === "equivalent config" ||
         change === "turn metadata precedence" ||
         change === "instructions unchanged" ||
-        change === "instructions absent"
+        change === "instructions absent" ||
+        change === "whitespace knowledge" ||
+        change === "padded knowledge path" ||
+        change === "plain knowledge path"
       ) {
         assert.equal(successful(response).scanId, scanId);
         assert.equal(workbench(["list-scans"]).scans.length, 1);
