@@ -262,7 +262,7 @@ describe("SCA input selection", () => {
     ).toBe(true);
   });
   test.each(["non-Git", "Git untracked", "Git tracked", "Git subdirectory"])(
-    "excludes installed Python and Bundler trees from %s discovery",
+    "excludes installed dependency trees from %s discovery",
     async (mode) => {
       const { repository: checkout } = await setup();
       const repository =
@@ -276,28 +276,34 @@ describe("SCA input selection", () => {
         "venv/Lib/site-packages/synthetic/requirements.txt",
         ".tox/py312/lib/python3.12/site-packages/synthetic/requirements.txt",
         ".nox/tests/Lib/site-packages/synthetic/requirements.txt",
+        ".m2/repository/example/synthetic/1.2.3/synthetic-1.2.3.pom",
         "vendor/bundle/ruby/3.3.0/gems/synthetic/Gemfile.lock",
         "packages/app/.venv/lib/python3.12/site-packages/synthetic/requirements.txt",
         "packages/app/.tox/py312/Lib/site-packages/synthetic/requirements.txt",
         "packages/app/.nox/tests/lib/python3.12/site-packages/synthetic/requirements.txt",
+        "packages/app/.m2/repository/example/synthetic/1.2.3/synthetic-1.2.3.pom",
         "packages/app/vendor/bundle/ruby/3.3.0/gems/synthetic/Gemfile.lock",
       ];
       const selected = [
+        ".m2/source-project/pom.xml",
         "package-lock.json",
         "packages/app/package-lock.json",
         "packages/nox/requirements.txt",
         "packages/tox/requirements.txt",
+        "repository/pom.xml",
         "vendor/source-project/package-lock.json",
       ];
       for (const path of [...installed, ...selected]) {
         await mkdir(join(repository, path, ".."), { recursive: true });
         await writeFile(
           join(repository, path),
-          path.endsWith("requirements.txt")
-            ? "synthetic==1.2.3\n"
-            : path.endsWith("Gemfile.lock")
-              ? "GEM\n  remote: https://rubygems.org/\n  specs:\n    synthetic (1.2.3)\n"
-              : npmLock(),
+          path.endsWith(".pom") || path.endsWith("pom.xml")
+            ? "<project><modelVersion>4.0.0</modelVersion><groupId>example</groupId><artifactId>synthetic</artifactId><version>1.2.3</version></project>"
+            : path.endsWith("requirements.txt")
+              ? "synthetic==1.2.3\n"
+              : path.endsWith("Gemfile.lock")
+                ? "GEM\n  remote: https://rubygems.org/\n  specs:\n    synthetic (1.2.3)\n"
+                : npmLock(),
         );
       }
       if (mode === "Git tracked")

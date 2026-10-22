@@ -61,6 +61,7 @@ function componentFor(result: ScaResult, match: ScaMatch): ScaComponent {
 }
 
 function code(value: string): string {
+  if (/[\r\n]/u.test(value)) value = JSON.stringify(value);
   const longest = Math.max(
     0,
     ...(value.match(/`+/g) ?? []).map((run) => run.length),
@@ -100,7 +101,7 @@ export function renderScaReport(result: ScaResult): string {
     bullets(
       result.coverage.inputs.map(
         (input) =>
-          `${code(input.path)}: **${input.status}**${input.reason ? ` — ${input.reason}` : ""}.`,
+          `${code(input.path)}: **${input.status}**${input.reason ? ` — ${code(input.reason)}` : ""}.`,
       ),
       "No lockfile inputs were evaluated; this is not a clean-repository result.",
     ),
@@ -117,7 +118,7 @@ export function renderScaReport(result: ScaResult): string {
     );
   }
   if (result.coverage.limitations.length)
-    sections.push(bullets(result.coverage.limitations, ""));
+    sections.push(bullets(result.coverage.limitations.map(code), ""));
   if (result.matches.length === 0) {
     sections.push(
       result.coverage.status === "complete"
@@ -126,7 +127,7 @@ export function renderScaReport(result: ScaResult): string {
     );
   }
   if (result.diagnostics.length)
-    sections.push("## Diagnostics", bullets(result.diagnostics, ""));
+    sections.push("## Diagnostics", bullets(result.diagnostics.map(code), ""));
   sections.push(
     "## Observed components",
     bullets(
