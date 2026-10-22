@@ -2800,6 +2800,7 @@ capabilities, no-new-privileges, and seccomp policy. Hosts that permit nested us
 namespaces do not need it. The legacy Landlock fallback is unsupported.
 See the [Docker guide](https://github.com/openai/codex-security/blob/main/docker/README.md)
 for deployment and source-build instructions.
+
 ## Dependency assessment (SCA MVP)
 
 `cs scan dependencies [repository]` and the SDK's `scanDependencies()` run an

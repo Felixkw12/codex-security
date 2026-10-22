@@ -1201,6 +1201,7 @@ export class CodexSecurity {
         return result;
       }
       await saveDependencyScan(result);
+      throwIfAborted(signal, outputDir);
       return result;
     } catch (error) {
       if (result !== undefined) {
