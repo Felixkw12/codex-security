@@ -1057,6 +1057,47 @@ def test_projection_groups_deep_reports_by_canonical_provenance(
     assert '<a id="finding-2"></a>' in markdown
 
 
+@pytest.mark.parametrize("coverage_mode", ["deep_repository", "scoped_path"])
+@pytest.mark.parametrize(
+    "owner_metadata", ["canonical", "legacy-worker", "extension", "canonical-over-extension"]
+)
+def test_projection_keeps_same_id_deep_candidates_separate_by_worker(
+    coverage_mode: str, owner_metadata: str
+) -> None:
+    manifest, findings, coverage = canonical_documents()
+    coverage.update(mode=coverage_mode, inventoryStrategy=coverage_mode)
+    template = findings["findings"][0]
+    findings["findings"] = []
+    for report_id, owner, title, severity in [
+        ("first-report", "worker-one", "First parser review", "high"),
+        ("first-repeat", "worker-one", "First parser review", "medium"),
+        ("second-report", "worker-two", "Second parser review", "low"),
+    ]:
+        report = copy.deepcopy(template)
+        report.update(occurrenceId=report_id, title=title)
+        report["severity"]["level"] = severity
+        report["extensions"] = {"reportId": report_id}
+        if owner_metadata == "extension":
+            report["extensions"].update(candidateId="review/auth", sourceWorkerId=owner)
+        else:
+            owner_field = "workerId" if owner_metadata == "legacy-worker" else "sourceWorkerId"
+            report["provenance"] = {"candidateId": "review/auth", owner_field: owner}
+            if owner_metadata == "canonical-over-extension":
+                report["extensions"]["sourceWorkerId"] = "stale-worker"
+        findings["findings"].append(report)
+
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+
+    assert "| Reportable DSS findings | 2 |" in markdown
+    assert "| Report instances | 3 |" in markdown
+    assert (
+        "| First parser review | [first-report](#finding-1)<br>[first-repeat](#finding-2) "
+        "| high<br>medium | high |" in markdown
+    )
+    assert "| Second parser review | [second-report](#finding-3) | low | high |" in markdown
+    assert "First parser review<br>Second parser review" not in markdown
+
+
 def test_projection_moves_legacy_deep_title_annotations_to_reports() -> None:
     manifest, findings, coverage = canonical_documents()
     coverage["mode"] = "deep_repository"

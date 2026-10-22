@@ -13,9 +13,10 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from candidate_identity import (
+    CandidateKey,
     coverage_candidate_key,
     coverage_owner,
-    finding_candidate_id,
+    finding_candidate_key,
     unresolved_candidate_rows,
     unresolved_candidates,
 )
@@ -97,10 +98,6 @@ def _deep_report_id(finding: dict[str, Any]) -> str:
     )
 
 
-def _deep_candidate_id(finding: dict[str, Any]) -> str:
-    return finding_candidate_id(finding) or _deep_report_id(finding)
-
-
 def _has_deep_child_metadata(finding: dict[str, Any]) -> bool:
     provenance = finding.get("provenance")
     if isinstance(provenance, dict):
@@ -152,9 +149,10 @@ def _deep_title_parts(finding: dict[str, Any]) -> tuple[str, str | None]:
 def _deep_finding_groups(
     findings: list[dict[str, Any]], writeup_paths: list[str | None]
 ) -> list[list[tuple[int, dict[str, Any], str | None]]]:
-    groups: dict[str, list[tuple[int, dict[str, Any], str | None]]] = {}
+    groups: dict[CandidateKey, list[tuple[int, dict[str, Any], str | None]]] = {}
     for number, (finding, report_path) in enumerate(zip(findings, writeup_paths, strict=True), 1):
-        groups.setdefault(_deep_candidate_id(finding), []).append((number, finding, report_path))
+        key = finding_candidate_key(finding) or (None, _deep_report_id(finding))
+        groups.setdefault(key, []).append((number, finding, report_path))
     return list(groups.values())
 
 
