@@ -14,7 +14,7 @@ describe("deinitialized patch submodule availability", () => {
   const fixtures = createTemporaryDirectories(true);
   afterEach(fixtures.cleanup);
 
-  async function fixture() {
+  async function fixture(published = false, initialized = false) {
     const outer = await publicationRepository(fixtures);
     const { directory, git } = outer;
     const hooks = await fixtures.create("patch-submodule-hooks-");
@@ -43,7 +43,6 @@ describe("deinitialized patch submodule availability", () => {
     const pushes: string[][] = [];
     const nativePushes: { exitCode: number; stderr: string }[] = [];
     let interruptPush = false;
-    let initializedChild = false;
     let creations = 0;
     let modelRuns = 0;
     const run = (
@@ -60,7 +59,7 @@ describe("deinitialized patch submodule availability", () => {
                 interruptPush = false;
                 throw new Error("Synthetic publication interruption");
               }
-              if (initializedChild) {
+              if (initialized) {
                 // Native recursive push uses the parent's branch refspec for the child.
                 const branch = arguments_.at(-1)!;
                 if (
@@ -103,16 +102,24 @@ describe("deinitialized patch submodule availability", () => {
           return onCodex(arguments_, output);
         },
       });
-    const update = async (published = false, initialized = false) => {
+    const commitUpdate = async () => {
       await writeFile(join(nested, "app.ts"), "fixed\n");
       inner("commit", "-am", "Synthetic nested update");
-      const commit = inner("rev-parse", "HEAD");
+      return inner("rev-parse", "HEAD");
+    };
+    let preparedCommit = "";
+    if (initialized) {
+      inner("branch", "--set-upstream-to", "origin/main", "main");
+    } else {
+      // Configuration setup precedes capture; the patch changes only the gitlink.
+      preparedCommit = await commitUpdate();
       if (published) inner("push", "origin", "HEAD:main");
-      git("add", "nested");
-      initializedChild = initialized;
-      if (initialized)
-        inner("branch", "--set-upstream-to", "origin/main", "main");
-      else git("submodule", "deinit", "--force", "--", "nested");
+      git("submodule", "deinit", "--force", "--", "nested");
+    }
+    const update = async () => {
+      const commit = initialized ? await commitUpdate() : preparedCommit;
+      if (initialized) git("add", "nested");
+      else git("update-index", "--cacheinfo", `160000,${commit},nested`);
       return commit;
     };
     return {
@@ -211,12 +218,12 @@ describe("deinitialized patch submodule availability", () => {
   test.each([false, true])(
     "publishes an available commit with deleted current registration: %p",
     async (deleteRegistration) => {
-      const current = await fixture();
+      const current = await fixture(true);
       let commit = "";
       const result = await current.run(
         ["patch", "Synthetic issue", "--create-pr", "--json"],
         async (_args, output) => {
-          commit = await current.update(true);
+          commit = await current.update();
           if (deleteRegistration)
             await rm(join(current.directory, ".gitmodules"));
           output?.stdout.write("Synthetic patch complete.");
@@ -352,7 +359,10 @@ describe("deinitialized patch submodule availability", () => {
     "%s on initial publication and resume",
     async (_name, configuration) => {
       for (const phase of ["initial", "resume"]) {
-        const current = await fixture();
+        const current = await fixture(
+          configuration.published,
+          configuration.initialized,
+        );
         for (const [key, value] of configuration.settings) {
           if (value === undefined) {
             const [section, name] = key.split(".");
@@ -377,10 +387,7 @@ describe("deinitialized patch submodule availability", () => {
         const initial = await current.run(
           ["patch", "Synthetic issue", "--create-pr", "--json"],
           async (_args, output) => {
-            commit = await current.update(
-              configuration.published,
-              configuration.initialized,
-            );
+            commit = await current.update();
             output?.stdout.write("Synthetic patch complete.");
             return 0;
           },
