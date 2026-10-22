@@ -8311,6 +8311,23 @@ async function patchPublicationDestination(
           gitlabHost.includes("://") ? gitlabHost : `https://${gitlabHost}`,
         ));
   const command: "glab" | "gh" = gitlab ? "glab" : "gh";
+  const target =
+    gitlab &&
+    isNetworkPatchRemote(fetchRemote) &&
+    patchRemoteHost(fetchRemote) === host
+      ? fetchRemote
+      : remote;
+  let gitlabSource = ".target_project_id";
+  if (gitlab && gitlabPatchRepository(remote) !== gitlabPatchRepository(target))
+    gitlabSource = await run("glab", [
+      "repo",
+      "view",
+      gitlabPatchRepository(remote),
+      "--output",
+      "json",
+      "--jq",
+      ".id",
+    ]);
   const output = await run(
     command,
     gitlab
@@ -8323,9 +8340,9 @@ async function patchPublicationDestination(
           "--output",
           "json",
           "--jq",
-          "map(select(.source_project_id == .target_project_id))[0] | select(. != null) | {url: .web_url, head: .sha}",
+          `map(select(.source_project_id == ${gitlabSource}))[0] | select(. != null) | {url: .web_url, head: .sha}`,
           "--repo",
-          gitlabPatchRepository(remote),
+          gitlabPatchRepository(target),
         ]
       : [
           "pr",
@@ -8349,7 +8366,14 @@ async function patchPublicationDestination(
     crossRepository?: boolean;
   }[];
   if (gitlab || !candidates.length)
-    return { remote, gitlab, command, pushRemotes, existing: candidates[0] };
+    return {
+      remote,
+      target,
+      gitlab,
+      command,
+      pushRemotes,
+      existing: candidates[0],
+    };
   const { hostname: apiHost, host: apiEndpoint } = new URL(candidates[0]!.url);
   let existing = candidates.find(
     (candidate) => candidate.repository && !candidate.crossRepository,
@@ -8381,7 +8405,7 @@ async function patchPublicationDestination(
     }
     if (hosted) break;
   }
-  return { remote, gitlab, command, pushRemotes, existing };
+  return { remote, target, gitlab, command, pushRemotes, existing };
 }
 
 function isNetworkPatchRemote(remote: string) {
@@ -8870,7 +8894,7 @@ async function publishPatchBranch(
   const run = (command: "git" | "gh" | "glab", args: string[]) =>
     dependencies.runRepositoryCommand(command, args, repository);
   try {
-    const { remote, gitlab, command, pushRemotes, existing } =
+    const { remote, target, gitlab, command, pushRemotes, existing } =
       await patchPublicationDestination(repository, branch, dependencies);
     const gitlabRepository = gitlab ? gitlabPatchRepository(remote) : remote;
     let url = existing?.url;
@@ -8988,7 +9012,7 @@ async function publishPatchBranch(
               gitlabPatchDescription(body),
               "--yes",
               "--repo",
-              gitlabRepository,
+              gitlabPatchRepository(target),
             ]
           : [
               "pr",
