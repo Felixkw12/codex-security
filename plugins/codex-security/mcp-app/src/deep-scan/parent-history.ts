@@ -1,6 +1,6 @@
 import { createReadStream } from "node:fs";
 import { readdir } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { createInterface } from "node:readline";
 import { pipeline } from "node:stream";
 import { isDeepStrictEqual } from "node:util";
@@ -116,7 +116,19 @@ async function sessionEvents(
       }
     }
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      // This lookup needs one exact parent, not its descendants. A native
+      // filename can exclude another thread only before metadata is decoded.
+      const archivedThreadId =
+        events.length === 0
+          ? /^rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-([\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12})(?:_[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12})?\.jsonl\.zst$/u.exec(
+              basename(path),
+            )?.[1]
+          : undefined;
+      if (archivedThreadId !== undefined && archivedThreadId !== threadId)
+        return [];
+      throw error;
+    }
   } finally {
     lines.close();
     stream.destroy();

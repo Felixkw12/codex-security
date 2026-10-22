@@ -6,7 +6,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
-import { assertConfigOverrides } from "./assertions.ts";
+import { assertConfigOverrides, assertFlagPair } from "./assertions.ts";
 import type { DeepWorkerParentSandbox } from "../src/deep-scan/parent-sandbox.js";
 
 export async function testCapturedCustomProviderSettings({
@@ -91,7 +91,9 @@ export async function testCapturedCustomProviderSettings({
             CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH: workerConfigPath,
           });
         }
-        const threadId = `legacy-provider-${index}`;
+        const threadId = `0198ff20-1b40-7000-8000-${String(index + 1).padStart(12, "0")}`;
+        const parentModel = `fixture-parent-${index}`;
+        const parentEffort = provider === "openrouter" ? "high" : "ultra";
         await mkdir(path.join(codexHome, "sessions"));
         await writeFile(
           path.join(codexHome, "sessions", "owner.jsonl"),
@@ -99,8 +101,30 @@ export async function testCapturedCustomProviderSettings({
             type: "session_meta",
             timestamp: "2026-01-01T00:00:00Z",
             payload: { id: threadId, model_provider: provider },
-          }) + "\n",
+          }) +
+            "\n" +
+            JSON.stringify({
+              type: "turn_context",
+              timestamp: "2026-01-01T00:00:00Z",
+              payload: { model: parentModel, effort: parentEffort },
+            }) +
+            "\n",
         );
+        if (mode === "legacy-native") {
+          const archives = path.join(codexHome, "archived_sessions");
+          await mkdir(archives);
+          const reverted =
+            provider === "openrouter"
+              ? ""
+              : "_0198ff20-1b40-7000-8000-000000000098";
+          await writeFile(
+            path.join(
+              archives,
+              `rollout-2026-01-01T00-00-00-0198ff20-1b40-7000-8000-000000000099${reverted}.jsonl.zst`,
+            ),
+            "synthetic corrupt foreign archive",
+          );
+        }
         const saved = mode.startsWith("current")
           ? await captureDeepScanExecutionSettings(
               { model: `fixture-${index}`, usageOwner: null },
@@ -145,6 +169,8 @@ export async function testCapturedCustomProviderSettings({
           definition,
           provider,
           mode,
+          parentModel,
+          parentEffort,
           codexHome,
           promptPath,
           executor: new CodexSdkWorkerExecutor(restored),
@@ -184,6 +210,12 @@ export async function testCapturedCustomProviderSettings({
             );
             assert.equal(invocation.argv.includes("resume"), resume);
             assert.equal(invocation.codexHome, scan.codexHome);
+            if (scan.mode === "legacy-native") {
+              assertFlagPair(invocation.argv, "--model", scan.parentModel);
+              assertConfigOverrides(invocation.argv, {
+                model_reasoning_effort: scan.parentEffort,
+              });
+            }
             assertConfigOverrides(invocation.argv, {
               model_provider: scan.provider,
             });

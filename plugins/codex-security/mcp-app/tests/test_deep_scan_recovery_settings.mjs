@@ -1012,6 +1012,139 @@ access_key_id = "synthetic-secret"
     assert.equal(replayed.reasoningEffort, "ultra");
     assert.equal(replayed.reasoningSummary, "concise");
   }
+  if (typeof zlib.zstdCompressSync === "function") {
+    const parentId = "0198ff20-1b40-7000-8000-000000000001";
+    const foreignId = "0198ff20-1b40-7000-8000-000000000002";
+    const owner = {
+      threadId: parentId,
+      turnId: "original-history-turn",
+      startedAt: "2026-09-01T00:00:01Z",
+    };
+    const nativeSelections = {
+      model: "original-history-model",
+      modelProvider: "openai",
+      reasoningEffort: "ultra",
+      reasoningSummary: "concise",
+    };
+    const observed = [];
+    const expected = [];
+    for (const layout of ["ordinary", "reverted"]) {
+      const home = join(root, `corrupt-foreign-history-${layout}`);
+      const sessions = join(home, "sessions");
+      const archive = join(home, "archived_sessions");
+      await mkdir(sessions, { recursive: true });
+      await mkdir(archive);
+      await writeFile(
+        join(sessions, `rollout-2026-09-01T00-00-00-${parentId}.jsonl`),
+        [
+          {
+            type: "session_meta",
+            timestamp: "2026-09-01T00:00:00Z",
+            payload: {
+              id: parentId,
+              timestamp: "2026-09-01T00:00:00Z",
+              model_provider: nativeSelections.modelProvider,
+            },
+          },
+          {
+            type: "turn_context",
+            timestamp: owner.startedAt,
+            payload: {
+              turn_id: owner.turnId,
+              model: nativeSelections.model,
+              effort: nativeSelections.reasoningEffort,
+              summary: nativeSelections.reasoningSummary,
+            },
+          },
+        ]
+          .map(JSON.stringify)
+          .join("\n") + "\n",
+      );
+      const compressed = zlib.zstdCompressSync(
+        JSON.stringify({ type: "session_meta", payload: { id: foreignId } }) +
+          "\n",
+      );
+      compressed[0] ^= 0xff;
+      const suffix =
+        layout === "reverted" ? "_0198ff20-1b40-7000-8000-000000000003" : "";
+      await writeFile(
+        join(
+          archive,
+          `rollout-2026-09-01T00-00-00-${foreignId}${suffix}.jsonl.zst`,
+        ),
+        compressed,
+      );
+      const environment = {
+        CODEX_HOME: home,
+        CODEX_CLI_PATH: process.execPath,
+      };
+      const incompleteDir = join(home, "incomplete");
+      await writeSnapshot(incompleteDir, {
+        codexPath: process.execPath,
+        codexHome: home,
+      });
+      const snapshotPath = join(
+        incompleteDir,
+        "artifacts/deep_discovery/execution-settings.json",
+      );
+      const snapshotBytes = await readFile(snapshotPath, "utf8");
+      const recovered = await Promise.all([
+        captureSettings(
+          { usageOwner: null },
+          { filesystemDenies: [] },
+          environment,
+          { ...owner, created: true },
+        ),
+        loadSettings(
+          join(home, "legacy"),
+          {
+            workflowVersion: "deep-security-scan/v1",
+            usageOwner: owner,
+            createdAt: owner.startedAt,
+          },
+          async () => ({ config: {} }),
+          environment,
+        ),
+        loadSettings(incompleteDir, {
+          usageOwner: owner,
+          createdAt: owner.startedAt,
+        }),
+      ]);
+      for (const [index, mode] of ["fresh", "legacy", "incomplete"].entries()) {
+        const selection = recovered[index];
+        const worker = restoreSettings(
+          selection,
+          { filesystemDenies: [] },
+          () => environment,
+        );
+        observed.push({
+          layout,
+          mode,
+          model: selection.model,
+          modelProvider: selection.modelProvider,
+          reasoningEffort: selection.reasoningEffort,
+          reasoningSummary: selection.reasoningSummary,
+          workerModel: worker.model,
+          workerProvider: worker.codexOptions.config.model_provider,
+          workerEffort: worker.reasoningEffort,
+        });
+        expected.push({
+          layout,
+          mode,
+          ...nativeSelections,
+          workerModel: nativeSelections.model,
+          workerProvider: nativeSelections.modelProvider,
+          workerEffort: nativeSelections.reasoningEffort,
+        });
+      }
+      assert.equal(await readFile(snapshotPath, "utf8"), snapshotBytes);
+    }
+    assert.deepEqual(
+      observed,
+      expected,
+      "foreign corrupt archives must preserve original parent selections for capture, legacy recovery, and incomplete snapshots",
+    );
+  }
   const incompleteDir = join(root, "incomplete");
   const incomplete = {
     codexPath: process.execPath,
