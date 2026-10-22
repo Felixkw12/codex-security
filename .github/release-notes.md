@@ -5,6 +5,7 @@
 ## Highlights
 
 - simplify user guides and correct setup instructions ([#1857](https://github.com/openai/codex-security/pull/1857))
+- verify Codex before caching installation ([#1855](https://github.com/openai/codex-security/pull/1855))
 
 <!-- release-section: highlights:end -->
 
