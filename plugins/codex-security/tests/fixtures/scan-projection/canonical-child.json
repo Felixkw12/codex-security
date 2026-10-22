@@ -239,6 +239,12 @@
           "surface"
         ]
       }
+    ],
+    "resolvedDeferred": [
+      {
+        "id": "review-closeout",
+        "reason": "The synthetic review is complete."
+      }
     ]
   },
   "files": {
@@ -370,6 +376,12 @@
           "surfaceIds": [
             "@CHILD@/surface"
           ]
+        }
+      ],
+      "resolvedDeferred": [
+        {
+          "id": "@CHILD@/review-closeout",
+          "reason": "The synthetic review is complete."
         }
       ]
     },

@@ -135,7 +135,6 @@ test("completed projection follows the shared canonical child fixture", async ()
   }
   expect<unknown>(combineScanCoverage([projected.draft.coverage])).toEqual({
     ...fixture.expected.coverage,
-    resolvedDeferred: [],
   });
   expect(
     await writer.projectChild(
@@ -166,6 +165,167 @@ test("completed projection follows the shared canonical child fixture", async ()
     h.source,
   );
   expect(await readFile(join(h.parent, evidence[0]))).toEqual(replacement);
+});
+
+test("publishes combined child closures with independent deferred identities", async () => {
+  if (python === null)
+    throw new Error("Python is required for projection fixtures.");
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "projection-closures-")),
+  );
+  roots.push(root);
+  const parent = join(root, "parent");
+  const environment = {
+    ...process.env,
+    CODEX_SECURITY_STATE_DIR: join(root, "state"),
+  };
+  const prepared = await runCodexCommand(
+    { command: python },
+    [
+      "-I",
+      "-X",
+      "utf8",
+      "-B",
+      "-c",
+      `
+import json, os, sys
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]) / "tests"))
+sys.path.insert(0, str(Path(sys.argv[2]) / "scripts"))
+import workbench_test_support as support
+support.SCRIPT = Path(sys.argv[2]) / "scripts/workbench_db.py"
+root = Path(sys.argv[3])
+target = root / "target"
+target.mkdir()
+(target / "app.py").write_text("print('synthetic fixture')\\n")
+state = Path(os.environ["CODEX_SECURITY_STATE_DIR"])
+parent = support.register(state, target, root / "parent", mode="deep")
+children = []
+for index in range(2):
+    directory = root / "parent" / "artifacts/deep-scan/passes" / f"pass-{index + 1}"
+    child = support.register(state, target, directory, parent=parent["scanId"], role="deep_pass")
+    support.write_completed_contract(directory, child["scanId"], target, relative_path="app.py")
+    findings = directory / "findings.json"
+    findings.write_text(json.dumps({**json.loads(findings.read_text()), "findings": []}))
+    coverage = directory / "coverage.json"
+    closures = [{"id": "review-closeout", "reason": f"Completed review {index + 1}."}]
+    deferred = []
+    if index == 0:
+        closures.append({"id": "local-review", "reason": "First child's local review is complete."})
+    else:
+        deferred.append({"id": "local-review", "reason": "Second child's local review remains open."})
+    coverage.write_text(json.dumps({**json.loads(coverage.read_text()), "surfaces": [], "resolvedDeferred": closures, "deferred": deferred}))
+    support.run_workbench(state, "complete-scan", "--scan-id", child["scanId"])
+    children.append(child)
+print(json.dumps({"parent": parent, "children": children}))
+`,
+      sourcePlugin,
+      PLUGIN_ROOT,
+      root,
+    ],
+    environment,
+  );
+  expect(prepared.success, prepared.stderr).toBe(true);
+  const fixture = JSON.parse(prepared.stdout) as {
+    parent: { scanId: string };
+    children: Array<{ scanId: string; scanDir: string }>;
+  };
+  const originalCoverage = await Promise.all(
+    fixture.children.map((child) =>
+      readFile(join(child.scanDir, "coverage.json")),
+    ),
+  );
+  const writer = await prepareScanArtifactRestorer(
+    { python, pluginRoot: PLUGIN_ROOT, environment },
+    parent,
+  );
+  const projected = await Promise.all(
+    fixture.children.map((child) =>
+      writer.projectChild(fixture.parent.scanId, child.scanId, child.scanDir),
+    ),
+  );
+  const coverage = combineScanCoverage(
+    projected.map((child) => child.draft.coverage),
+  );
+  const published = await runCodexCommand(
+    { command: python },
+    [
+      "-I",
+      "-X",
+      "utf8",
+      "-B",
+      "-c",
+      `
+import json, os, sys
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]) / "tests"))
+sys.path.insert(0, str(Path(sys.argv[2]) / "scripts"))
+import workbench_test_support as support
+support.SCRIPT = Path(sys.argv[2]) / "scripts/workbench_db.py"
+root = Path(sys.argv[3])
+request = json.load(sys.stdin)
+parent, children, coverage = request["parent"], request["children"], request["coverage"]
+state = Path(os.environ["CODEX_SECURITY_STATE_DIR"])
+directory = root / "parent"
+support.write_completed_contract(directory, parent["scanId"], root / "target", relative_path="app.py", coverage_mode="deep_repository")
+for name, values in (("findings", {"findings": []}), ("coverage", coverage)):
+    path = directory / f"{name}.json"
+    path.write_text(json.dumps({**json.loads(path.read_text()), **values}))
+saved = support.checkpoint(state, parent, passes=[{"directory": child["scanDir"], "scanId": child["scanId"], "completed": True} for child in children], merged=[child["scanId"] for child in children], terminal="saturated")
+saved["aggregate"] = {"scanId": parent["scanId"], "findings": [], "coverage": coverage}
+support.run_workbench(state, "save-scan-artifact", "--scan-id", parent["scanId"], "--artifact-path", "artifacts/deep-scan/checkpoint.json", input_text=json.dumps(saved))
+prepared = support.run_workbench(state, "prepare-scan-completion", "--scan-id", parent["scanId"], check=False)
+if prepared["returncode"]:
+    sys.stderr.write(prepared["stderr"])
+    raise SystemExit(prepared["returncode"])
+print(json.dumps(support.run_workbench(state, "complete-scan", "--scan-id", parent["scanId"])))
+`,
+      sourcePlugin,
+      PLUGIN_ROOT,
+      root,
+    ],
+    environment,
+    JSON.stringify({ ...fixture, coverage }),
+  );
+  expect(published.success, published.stderr).toBe(true);
+  expect(JSON.parse(published.stdout).scan.progress.status).toBe("complete");
+  expect(coverage.resolvedDeferred).toEqual([
+    {
+      id: `${fixture.children[0]!.scanId}/review-closeout`,
+      reason: "Completed review 1.",
+    },
+    {
+      id: `${fixture.children[0]!.scanId}/local-review`,
+      reason: "First child's local review is complete.",
+    },
+    {
+      id: `${fixture.children[1]!.scanId}/review-closeout`,
+      reason: "Completed review 2.",
+    },
+  ]);
+  expect(coverage.deferred).toEqual([
+    {
+      id: `${fixture.children[1]!.scanId}/local-review`,
+      reason: "Second child's local review remains open.",
+    },
+  ]);
+  const publishedCoverage = JSON.parse(
+    await readFile(join(parent, "coverage.json"), "utf8"),
+  );
+  expect(publishedCoverage.resolvedDeferred).toEqual(coverage.resolvedDeferred);
+  expect(publishedCoverage.deferred).toEqual(coverage.deferred);
+  for (const [index, child] of fixture.children.entries()) {
+    expect(
+      await writer.projectChild(
+        fixture.parent.scanId,
+        child.scanId,
+        child.scanDir,
+      ),
+    ).toEqual(projected[index]);
+    expect(await readFile(join(child.scanDir, "coverage.json"))).toEqual(
+      originalCoverage[index],
+    );
+  }
 });
 
 test("normalizes sealed legacy findings for merging while retaining exact source evidence", async () => {

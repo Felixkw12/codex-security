@@ -150,7 +150,13 @@ def project_scan_artifacts(
         "inventoryStrategy",
     ):
         semantic_coverage.pop(field, None)
-    for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions"):
+    for field in (
+        "surfaces",
+        "explicitExclusions",
+        "deferred",
+        "resolvedDeferred",
+        "openQuestions",
+    ):
         for row in semantic_coverage.get(field, []):
             if not isinstance(row, dict):
                 continue
