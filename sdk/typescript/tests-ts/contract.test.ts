@@ -1931,6 +1931,30 @@ for (const receiptRefs of [
   );
 }
 
+test.each([
+  { receiptRefs: ["artifacts/opaque.bin"] },
+  { receiptRefs: { opaque: true } },
+])(
+  "loads current generic exclusion receipt metadata without treating it as proof: %p",
+  async ({ receiptRefs }) => {
+    const scanDir = await copyExample();
+    const coverage = await readJson(join(scanDir, "coverage.json"));
+    const exclusion = {
+      pattern: "src/generated.ts",
+      reason: "Synthetic scope exclusion.",
+      receiptRefs,
+    };
+    coverage["receiptSealVersion"] = 1;
+    coverage["explicitExclusions"] = [exclusion];
+    await writeJson(join(scanDir, "coverage.json"), coverage);
+    await reseal(scanDir);
+    const original = await readFile(join(scanDir, "coverage.json"));
+    const loaded = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+    expect(loaded.coverage.explicitExclusions).toEqual([exclusion]);
+    expect(await readFile(join(scanDir, "coverage.json"))).toEqual(original);
+  },
+);
+
 for (const change of ["inventory", "bytes"]) {
   test(
     "new exclusion receipts remain sealed across readers after " +

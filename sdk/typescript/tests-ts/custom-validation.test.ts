@@ -218,40 +218,49 @@ async function* responseEvents(
 for (const section of ["surfaces", "explicitExclusions"] as const) {
   for (const disposition of ["rejected", "not_applicable"] as const) {
     for (const sameOwner of [false, true]) {
-      test(`current custom validation replaces ${section}/${disposition}/${sameOwner ? "same" : "other"} owner decisions`, async () => {
-        const f = await fixture();
-        const finding = f.findings.findings[0]!;
-        finding.provenance["candidateId"] = "validated-candidate";
-        finding.provenance["sourceWorkerId"] = "worker-current";
-        await save(join(f.scanDir, "findings.json"), f.findings);
-        const coverage = await json<CoverageDocument>(
-          join(f.scanDir, "coverage.json"),
-        );
-        const previous = {
-          id: "older-decision",
-          candidateId: "validated-candidate",
-          sourceWorkerId: sameOwner ? "worker-current" : "worker-other",
-          label: "Older review",
-          pattern: "src/older.ts",
-          reason: "Older authored rationale.",
-          disposition,
-          notes: "Older authored evidence.",
-          receiptRefs: [],
-        };
-        coverage[section].push(previous);
-        await save(join(f.scanDir, "coverage.json"), coverage);
-        await runCustomValidation({
-          ...f,
-          run: async () => JSON.stringify(result("deferred")),
-        });
-        const saved = await loadResult(f.scanDir);
-        expect(saved.unresolvedCandidates).toHaveLength(1);
-        expect(saved.unresolvedCandidates[0]!.candidateId).toBe(
-          "validated-candidate",
-        );
-        if (!sameOwner)
-          expect(saved.coverage[section]).toContainEqual(previous);
-      });
+      test.each(["sourceWorkerId", "workerId"])(
+        `current custom validation replaces ${section}/${disposition}/${sameOwner ? "same" : "other"} owner decisions (%s)`,
+        async (ownerField) => {
+          const f = await fixture();
+          const finding = f.findings.findings[0]!;
+          finding.provenance["candidateId"] = "validated-candidate";
+          finding.provenance["sourceWorkerId"] = "worker-current";
+          await save(join(f.scanDir, "findings.json"), f.findings);
+          const coverage = await json<CoverageDocument>(
+            join(f.scanDir, "coverage.json"),
+          );
+          const previous = {
+            id: "older-decision",
+            candidateId: "validated-candidate",
+            [ownerField]: sameOwner ? "worker-current" : "worker-other",
+            label: "Older review",
+            pattern: "src/older.ts",
+            reason: "Older authored rationale.",
+            disposition,
+            notes: "Older authored evidence.",
+            receiptRefs: [],
+          };
+          coverage[section].push(previous);
+          await save(join(f.scanDir, "coverage.json"), coverage);
+          await runCustomValidation({
+            ...f,
+            run: async () => JSON.stringify(result("deferred")),
+          });
+          const saved = await loadResult(f.scanDir);
+          expect(saved.unresolvedCandidates).toHaveLength(1);
+          expect(saved.unresolvedCandidates[0]!.candidateId).toBe(
+            "validated-candidate",
+          );
+          if (sameOwner) {
+            expect(saved.coverage[section]).not.toContainEqual(previous);
+            expect(saved.unresolvedCandidates[0]!.candidate).toMatchObject({
+              provenance: {
+                originalCandidates: expect.arrayContaining([previous]),
+              },
+            });
+          } else expect(saved.coverage[section]).toContainEqual(previous);
+        },
+      );
     }
   }
 }
@@ -361,9 +370,17 @@ describe("custom validation", () => {
     },
   );
 
-  test.each([undefined, "worker-current"])(
+  test.each([
+    {},
+    { sourceWorkerId: "worker-current" },
+    { workerId: "worker-current" },
+  ])(
     "replaces superseded candidate rows while preserving other owners (%s)",
-    async (sourceWorkerId) => {
+    async (owner) => {
+      const sourceWorkerId =
+        "sourceWorkerId" in owner || "workerId" in owner
+          ? "worker-current"
+          : undefined;
       const f = await fixture();
       const finding = f.findings.findings[0]!;
       finding.provenance["candidateId"] = "candidate-shared";
@@ -376,7 +393,7 @@ describe("custom validation", () => {
       const old = {
         id: "previous-candidate",
         candidateId: "candidate-shared",
-        ...(sourceWorkerId === undefined ? {} : { sourceWorkerId }),
+        ...owner,
         reason: "Obsolete checkpoint proof gap.",
         candidate: { title: "Older candidate payload" },
       };
@@ -406,6 +423,7 @@ describe("custom validation", () => {
         ...unrelated,
         {
           ...old,
+          ...(sourceWorkerId === undefined ? {} : { sourceWorkerId }),
           candidate: {
             ...finding,
             provenance: {
@@ -2061,7 +2079,7 @@ for (const prior of ["rejected", "not_applicable"] as const) {
 }
 
 for (const mapped of [false, true]) {
-  test(`repeated custom validation retains historical follow-up links, mapped=${mapped}`, async () => {
+  test(`repeated custom validation retains legacy-owned follow-up links, mapped=${mapped}`, async () => {
     const f = await fixture();
     const finding = f.findings.findings[0]!;
     finding.provenance["candidateId"] = "validated-candidate";
@@ -2073,7 +2091,7 @@ for (const mapped of [false, true]) {
     const previous = {
       id: "saved-follow-up",
       ...(mapped ? { candidateId: "validated-candidate" } : {}),
-      sourceWorkerId: "worker-current",
+      workerId: "worker-current",
       label: "Earlier route review",
       disposition: "needs_follow_up" as const,
       receiptRefs: [],
@@ -2132,6 +2150,7 @@ for (const owner of [{ worker: "historical-worker" }, ["historical-worker"]]) {
     test(`historical structured deferred remains independent: ${Array.isArray(owner) ? "array" : "object"}/${disposition}`, async () => {
       const f = await fixture();
       f.findings.findings[0]!.provenance["candidateId"] = "validated-candidate";
+      f.findings.findings[0]!.provenance["sourceWorkerId"] = "worker-current";
       await save(join(f.scanDir, "findings.json"), f.findings);
       const coverage = await json<CoverageDocument>(
         join(f.scanDir, "coverage.json"),
@@ -2140,6 +2159,7 @@ for (const owner of [{ worker: "historical-worker" }, ["historical-worker"]]) {
         id: "historical-deferred",
         candidateId: "validated-candidate",
         sourceWorkerId: owner,
+        workerId: "worker-current",
         reason: "Independent historical review remains.",
         surfaceIds: [coverage.surfaces[0]!.id],
       };
@@ -2157,7 +2177,7 @@ for (const owner of [{ worker: "historical-worker" }, ["historical-worker"]]) {
       );
       if (disposition === "deferred") {
         const current = saved.unresolvedCandidates[0]!;
-        expect(current["sourceWorkerId"]).toBeUndefined();
+        expect(current["sourceWorkerId"]).toBe("worker-current");
         expect(current.reason).toBe("The required service was unavailable.");
       }
     });
@@ -2444,44 +2464,56 @@ for (const disposition of ["reportable", "suppressed"] as const) {
 }
 
 for (const reassessed of [false, true]) {
-  test(`mapped historical decision respects current reassessment: ${reassessed}`, async () => {
-    const f = await fixture(reassessed ? 2 : 1);
-    f.findings.findings[0]!.provenance["candidateId"] = "candidate-a";
-    if (reassessed)
-      f.findings.findings[1]!.provenance["candidateId"] = "candidate-b";
-    await save(join(f.scanDir, "findings.json"), f.findings);
-    const coverage = await json<CoverageDocument>(
-      join(f.scanDir, "coverage.json"),
-    );
-    const previous = {
-      ...coverage.surfaces[0]!,
-      candidateId: "candidate-b",
-      disposition: "rejected" as const,
-      notes: "Original candidate B rejection evidence.",
-    };
-    coverage.surfaces[0] = previous;
-    await save(join(f.scanDir, "coverage.json"), coverage);
-    await runCustomValidation({
-      ...f,
-      run: async () =>
-        JSON.stringify(
-          reassessed ? result("reportable", "deferred") : result("reportable"),
-        ),
-    });
-    const saved = await loadResult(f.scanDir);
-    const old = saved.coverage.surfaces.filter(
-      (row) =>
-        row.candidateId === "candidate-b" && row.disposition === "rejected",
-    );
-    expect(old).toHaveLength(reassessed ? 0 : 1);
-    if (reassessed) {
-      expect(saved.unresolvedCandidates).toHaveLength(1);
-      expect(saved.unresolvedCandidates[0]!.candidateId).toBe("candidate-b");
-      expect(saved.unresolvedCandidates[0]!.candidate).toMatchObject({
-        provenance: { originalCandidates: expect.arrayContaining([previous]) },
+  test.each([undefined, "worker-current"])(
+    `mapped historical decision respects current reassessment: ${reassessed}, legacy owner=%s`,
+    async (workerId) => {
+      const f = await fixture(reassessed ? 2 : 1);
+      if (workerId !== undefined) {
+        for (const finding of f.findings.findings)
+          finding.provenance["sourceWorkerId"] = workerId;
+      }
+      f.findings.findings[0]!.provenance["candidateId"] = "candidate-a";
+      if (reassessed)
+        f.findings.findings[1]!.provenance["candidateId"] = "candidate-b";
+      await save(join(f.scanDir, "findings.json"), f.findings);
+      const coverage = await json<CoverageDocument>(
+        join(f.scanDir, "coverage.json"),
+      );
+      const previous = {
+        ...coverage.surfaces[0]!,
+        ...(workerId === undefined ? {} : { workerId }),
+        candidateId: "candidate-b",
+        disposition: "rejected" as const,
+        notes: "Original candidate B rejection evidence.",
+      };
+      coverage.surfaces[0] = previous;
+      await save(join(f.scanDir, "coverage.json"), coverage);
+      await runCustomValidation({
+        ...f,
+        run: async () =>
+          JSON.stringify(
+            reassessed
+              ? result("reportable", "deferred")
+              : result("reportable"),
+          ),
       });
-    }
-  });
+      const saved = await loadResult(f.scanDir);
+      const old = saved.coverage.surfaces.filter(
+        (row) =>
+          row.candidateId === "candidate-b" && row.disposition === "rejected",
+      );
+      expect(old).toHaveLength(reassessed ? 0 : 1);
+      if (reassessed) {
+        expect(saved.unresolvedCandidates).toHaveLength(1);
+        expect(saved.unresolvedCandidates[0]!.candidateId).toBe("candidate-b");
+        expect(saved.unresolvedCandidates[0]!.candidate).toMatchObject({
+          provenance: {
+            originalCandidates: expect.arrayContaining([previous]),
+          },
+        });
+      }
+    },
+  );
 }
 
 for (const section of ["surfaces", "explicitExclusions"] as const) {

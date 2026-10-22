@@ -497,7 +497,7 @@ async function preserveScanDraft(
     return retained;
   };
   const surfaceKey = (id: unknown, item: JsonObject) =>
-    candidateKey(id, owner ?? item.sourceWorkerId);
+    candidateKey(id, owner ?? item.sourceWorkerId ?? item.workerId);
   const previousState = await readPreviousScanDraft(context);
   const previous = previousState.input;
   if (previous && previous.scanId !== input.scanId)
@@ -2284,7 +2284,7 @@ function coverageEntryIdentities(entry: JsonObject): string[] {
     const value = entry[field];
     if (typeof value === "string" && value.trim())
       stable.push(
-        `${field}:${candidateKey(value, genericDeferred(entry) ? undefined : entry.sourceWorkerId)}`,
+        `${field}:${candidateKey(value, genericDeferred(entry) ? undefined : (entry.sourceWorkerId ?? entry.workerId))}`,
       );
   }
   return stable;
@@ -2904,7 +2904,10 @@ function normalizeCoverageEntries(
       };
     });
   for (const [index, surface] of surfaces.entries()) {
-    const originalKey = candidateKey(surface.id, surface.sourceWorkerId);
+    const originalKey = candidateKey(
+      surface.id,
+      surface.sourceWorkerId ?? surface.workerId,
+    );
     if (typeof surface.id === "string" && !renamedSurfaces.has(originalKey!))
       renamedSurfaces.set(
         originalKey!,

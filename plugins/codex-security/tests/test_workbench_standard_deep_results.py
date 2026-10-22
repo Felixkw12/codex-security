@@ -2829,6 +2829,7 @@ def test_recovery_applies_surface_update_with_generic_closure(
         remaining = {"id": "other-review", "reason": "Another caller needs review."}
         pending["coverage"]["deferred"].append(remaining)
         closed["coverage"]["deferred"].append(remaining)
+        closed["coverage"]["completeness"] = "partial"
 
     if layout in {"reopened_parent", "worker_idless_reopened"}:
         pending, closed = closed, pending

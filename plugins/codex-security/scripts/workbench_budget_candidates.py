@@ -433,6 +433,8 @@ def preserve_budget_candidates(
         key = (None, candidate_id)
         deferred = deferred_by_candidate.get(key, [])
         disposition = dispositions[key]
+        unlinked_deferred = []
+        surfaces = []
         # An interrupted budget completion can leave generated candidate rows.
         # Refresh them before retaining pending work, including shared surfaces.
         generated_surfaces = [
@@ -506,10 +508,31 @@ def preserve_budget_candidates(
                     item.update(refreshed)
                 else:
                     item.setdefault("candidate", candidate)
-            continue
+            unlinked_deferred = [
+                item
+                for item in deferred
+                if isinstance(item.get("surfaceIds", []), list)
+                and not any(
+                    surface.get("disposition") == "needs_follow_up"
+                    and candidate_key(surface_id, coverage_owner(surface))
+                    == surface_reference_key(surface_id, item, surfaces_by_id[surface_id])
+                    for surface_id in item.get("surfaceIds", [])
+                    if isinstance(surface_id, str)
+                    for surface in surfaces_by_id.get(surface_id, [])
+                )
+            ]
+            if not unlinked_deferred:
+                continue
+            surfaces = [
+                surface
+                for surface in surfaces_by_candidate.get(key, [])
+                if surface.get("disposition") == "needs_follow_up"
+                and isinstance(surface.get("id"), str)
+                and surface["id"].strip()
+            ]
         # A surface may also carry evidence for unfinished work from another
         # candidate or owner. Preserve those shared rows and add a dedicated decision.
-        surfaces = [
+        surfaces = surfaces or [
             item
             for item in surfaces_by_candidate.get(key, [])
             if isinstance(item.get("id"), str)
@@ -548,6 +571,13 @@ def preserve_budget_candidates(
                 archive_candidate_payloads(surface, [{"candidate": previous}])
             archive_candidate_payloads(surface, deferred)
         if disposition != "needs_follow_up":
+            continue
+        if unlinked_deferred:
+            for item in unlinked_deferred:
+                saved_ids = item.setdefault("surfaceIds", [])
+                saved_ids.extend(
+                    surface["id"] for surface in surfaces if surface["id"] not in saved_ids
+                )
             continue
         coverage["deferred"].append(
             {

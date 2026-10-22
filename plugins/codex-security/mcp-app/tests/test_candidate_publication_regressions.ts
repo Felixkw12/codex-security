@@ -19,6 +19,151 @@ const {
 } = await importSource(
   new URL("../src/deep-scan/artifact-validation.ts", import.meta.url).pathname,
 );
+const { preserveDiffCandidateDecisions } = await importSource(
+  new URL("../src/artifact-diff-candidates.ts", import.meta.url).pathname,
+);
+
+for (const field of ["surfaces", "explicitExclusions", "deferred"] as const) {
+  test(`coverage history retains separate legacy workers in ${field}`, () => {
+    const rows = ["worker-one", "worker-two"].map((workerId) => ({
+      id: workerId,
+      candidateId: "shared-candidate",
+      workerId,
+      reason: "Independent synthetic review evidence.",
+    }));
+    const coverage = (row: (typeof rows)[number]) => ({
+      surfaces: [],
+      explicitExclusions: [],
+      deferred: [],
+      [field]: [row],
+    });
+    const result = draftApi.preserveScanCoverage(coverage(rows[1]), [
+      coverage(rows[0]),
+    ]);
+    assert.deepEqual(result[field], [rows[1], rows[0]]);
+  });
+}
+
+test("a resolved legacy candidate preserves a surface shared with pending work", () => {
+  const surface = {
+    id: "shared-review",
+    workerId: "legacy-worker",
+    candidateId: "accepted",
+    label: "Synthetic shared review",
+    disposition: "rejected",
+  };
+  const pending = {
+    candidateId: "pending",
+    workerId: "legacy-worker",
+    reason: "Independent synthetic evidence remains unresolved.",
+    surfaceIds: [surface.id],
+  };
+  const result = preserveDiffCandidateDecisions(
+    {
+      findings: [
+        { provenance: { candidateId: "accepted", workerId: "legacy-worker" } },
+      ],
+      coverage: {
+        surfaces: [surface],
+        explicitExclusions: [],
+        deferred: [pending],
+      },
+    },
+    [],
+  );
+  assert.deepEqual(result.coverage.surfaces, [
+    { ...surface, disposition: "reported" },
+  ]);
+  assert.deepEqual(result.coverage.deferred, [pending]);
+});
+
+for (const layout of ["standard", "deep"] as const) {
+  test(`${layout}: a finding resolves only its legacy worker candidate`, async (t) => {
+    const f = await fixture(t, layout);
+    const owners = ["worker-one", "worker-two"];
+    await f.write(
+      f.draft({
+        deferred: owners.map((workerId) => ({
+          candidateId: "shared-candidate",
+          workerId,
+          reason: "Synthetic evidence requires review.",
+        })),
+      }),
+    );
+    await f.write({
+      ...f.draft({}, layout !== "deep"),
+      findings: [
+        {
+          ...finding("confirmed", "src/example.ts"),
+          provenance: {
+            source: "local_plugin",
+            candidateId: "shared-candidate",
+            workerId: owners[0],
+          },
+        },
+      ],
+    });
+    for (let replay = 0; replay < 2; replay++) {
+      const coverage = await f.read();
+      assert.deepEqual(
+        coverage.deferred.map((row: { workerId: string }) => row.workerId),
+        [owners[1]],
+      );
+      await f.write(f.draft({}, layout !== "deep"));
+    }
+  });
+}
+
+test("legacy worker surface references survive colliding local IDs", async (t) => {
+  const f = await fixture(t, "standard");
+  const owners = ["worker-one", "worker-two"];
+  await f.write(
+    f.draft({
+      surfaces: owners.map((workerId) => ({
+        id: "shared-surface",
+        workerId,
+        label: "Synthetic worker review",
+        disposition: "needs_follow_up",
+      })),
+      deferred: owners.map((workerId) => ({
+        candidateId: "shared-candidate",
+        workerId,
+        reason: "Synthetic evidence requires review.",
+        surfaceIds: ["shared-surface"],
+      })),
+    }),
+  );
+  const coverage = await f.read();
+  for (const workerId of owners) {
+    const surface = coverage.surfaces.find(
+      (row: { workerId: string }) => row.workerId === workerId,
+    );
+    const candidate = coverage.deferred.find(
+      (row: { workerId: string }) => row.workerId === workerId,
+    );
+    assert.deepEqual(candidate.surfaceIds, [surface.id]);
+  }
+  await f.write({
+    ...f.draft({}, true),
+    findings: [
+      {
+        ...finding("confirmed", "src/example.ts"),
+        provenance: {
+          source: "local_plugin",
+          candidateId: "shared-candidate",
+          workerId: owners[0],
+        },
+      },
+    ],
+  });
+  const updated = await f.read();
+  assert.equal(updated.deferred.length, 1);
+  assert.equal(updated.deferred[0].workerId, owners[1]);
+  const retainedSurface = updated.surfaces.find(
+    (row: { workerId: string }) => row.workerId === owners[1],
+  );
+  assert.deepEqual(updated.deferred[0].surfaceIds, [retainedSurface.id]);
+});
 
 const savedOwners = [
   null,

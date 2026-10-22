@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from candidate_identity import (
     coverage_candidate_key,
     coverage_owner,
+    finding_candidate_id,
     unresolved_candidate_rows,
     unresolved_candidates,
 )
@@ -97,15 +98,15 @@ def _deep_report_id(finding: dict[str, Any]) -> str:
 
 
 def _deep_candidate_id(finding: dict[str, Any]) -> str:
-    extensions = finding.get("extensions")
-    if isinstance(extensions, dict):
-        candidate_id = extensions.get("candidateId")
-        if isinstance(candidate_id, str) and candidate_id.strip():
-            return candidate_id
-    return _deep_report_id(finding)
+    return finding_candidate_id(finding) or _deep_report_id(finding)
 
 
 def _has_deep_child_metadata(finding: dict[str, Any]) -> bool:
+    provenance = finding.get("provenance")
+    if isinstance(provenance, dict):
+        candidate_id = provenance.get("candidateId")
+        if isinstance(candidate_id, str) and candidate_id.strip():
+            return True
     extensions = finding.get("extensions")
     if not isinstance(extensions, dict):
         return False

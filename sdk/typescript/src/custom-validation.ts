@@ -14,6 +14,7 @@ import { readScanFile, requireScanFile } from "./contract.js";
 import { IncompleteScanError, errorMessage } from "./errors.js";
 import {
   candidateIdentity,
+  coverageCandidateOwner,
   findingCandidateIds,
   findingCandidateOwner,
 } from "./candidates.js";
@@ -403,13 +404,13 @@ export async function runCustomValidation(options: {
   ]);
   const previousDeferred = new Map<string, DeferredCoverage[]>();
   coverage.deferred = coverage.deferred.filter((item) => {
+    const owner = coverageCandidateOwner(item);
     if (
       typeof item.candidateId !== "string" ||
-      (item["sourceWorkerId"] != null &&
-        typeof item["sourceWorkerId"] !== "string")
+      (owner != null && typeof owner !== "string")
     )
       return true;
-    const key = candidateIdentity(item.candidateId, item["sourceWorkerId"]);
+    const key = candidateIdentity(item.candidateId, owner);
     if (!candidateIdentityCounts.has(key)) return true;
     const rows = previousDeferred.get(key) ?? [];
     rows.push(item);
@@ -421,15 +422,15 @@ export async function runCustomValidation(options: {
   );
   const previousDecisions = new Map<string, Record<string, unknown>[]>();
   const retainDecision = (item: Record<string, unknown>, mapped: boolean) => {
+    const owner = coverageCandidateOwner(item);
     if (
       typeof item["candidateId"] !== "string" ||
-      (item["sourceWorkerId"] != null &&
-        typeof item["sourceWorkerId"] !== "string") ||
+      (owner != null && typeof owner !== "string") ||
       (item["disposition"] !== "rejected" &&
         item["disposition"] !== "not_applicable")
     )
       return true;
-    const key = candidateIdentity(item["candidateId"], item["sourceWorkerId"]);
+    const key = candidateIdentity(item["candidateId"], owner);
     if (!candidateIdentityCounts.has(key)) return true;
     const rows = previousDecisions.get(key) ?? [];
     rows.push(structuredClone(item));
@@ -498,14 +499,11 @@ export async function runCustomValidation(options: {
           sharedSurfaceIds.has(surface.id)
         )
           continue;
+        const owner = coverageCandidateOwner(surface);
         const sameCandidate =
           typeof surface.candidateId === "string"
-            ? (surface["sourceWorkerId"] == null ||
-                typeof surface["sourceWorkerId"] === "string") &&
-              candidateIdentity(
-                surface.candidateId,
-                surface["sourceWorkerId"],
-              ) === key
+            ? (owner == null || typeof owner === "string") &&
+              candidateIdentity(surface.candidateId, owner) === key
             : previousSurfaceIds.has(surface.id) &&
               surfaceIdCounts.get(surface.id) === 1;
         if (sameCandidate) surfaceIds.add(surface.id);
@@ -603,17 +601,18 @@ export async function runCustomValidation(options: {
   for (const surface of coverage.surfaces) {
     const updates = decisions.get(surface.id);
     if (updates === undefined) continue;
+    const owner = coverageCandidateOwner(surface);
     if (
       typeof surface.candidateId === "string" &&
       (surface.disposition === "rejected" ||
         surface.disposition === "not_applicable") &&
       !surfaceCandidateKeys
         .get(surface.id)
-        ?.has(candidateIdentity(surface.candidateId, surface["sourceWorkerId"]))
+        ?.has(candidateIdentity(surface.candidateId, owner))
     ) {
       if (
         !candidateIdentityCounts.has(
-          candidateIdentity(surface.candidateId, surface["sourceWorkerId"]),
+          candidateIdentity(surface.candidateId, owner),
         )
       ) {
         const baseId = `${surface.id}-decision`;
@@ -639,7 +638,7 @@ export async function runCustomValidation(options: {
         surface.disposition === "not_applicable") &&
       !surfaceCandidateKeys
         .get(surface.id)
-        ?.has(candidateIdentity(surface.candidateId, surface["sourceWorkerId"]))
+        ?.has(candidateIdentity(surface.candidateId, owner))
     )
       delete surface.candidateId;
     surface.receiptRefs = [

@@ -49,7 +49,10 @@ export function coverageCandidateKey(
   item: JsonObject,
   owner?: string,
 ): string | undefined {
-  const sourceOwner = candidateOwner(owner) ?? item.sourceWorkerId;
+  const sourceOwner =
+    candidateOwner(owner) ??
+    item.sourceWorkerId ??
+    candidateOwner(item.workerId);
   if (sourceOwner != null && typeof sourceOwner !== "string") return undefined;
   return candidateKey(item.candidateId, sourceOwner);
 }
@@ -64,11 +67,14 @@ export function surfaceReferenceKey(
   const matches = surfaces.filter((surface) => surface.id === id);
   const sameOwner = matches.find(
     (surface) =>
-      candidateOwner(owner, surface.sourceWorkerId) ===
-      candidateOwner(owner, source.sourceWorkerId),
+      candidateOwner(owner, surface.sourceWorkerId ?? surface.workerId) ===
+      candidateOwner(owner, source.sourceWorkerId ?? source.workerId),
   );
   const target = sameOwner ?? (matches.length === 1 ? matches[0]! : source);
-  return candidateKey(id, candidateOwner(owner, target.sourceWorkerId));
+  return candidateKey(
+    id,
+    candidateOwner(owner, target.sourceWorkerId ?? target.workerId),
+  );
 }
 
 export function isTerminalCandidateDecision<Item extends JsonObject>(

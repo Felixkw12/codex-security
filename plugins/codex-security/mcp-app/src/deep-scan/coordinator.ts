@@ -3,7 +3,6 @@ import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { getCodexSecurityDeepReducerInputs } from "../artifact-deep-reducer.js";
 import {
   createDeepScanArtifacts,
   ensureDeepScanDirectories,
@@ -12,6 +11,7 @@ import {
   aggregateDiscoveryCoverage,
   collectUnresolvedCandidates,
   deepReductionScanDraft,
+  discoveryReductionInput,
   validateDiscoveryArtifacts,
   validateReducerArtifacts,
   type DeepReductionInput,
@@ -1171,28 +1171,17 @@ export class DeepScanCoordinator {
         },
         this.state.scanId,
       );
-      if (result.unresolvedCandidates === undefined) {
-        // Older reducers saved findings only. Recover their host-owned candidate
-        // state from the accepted inputs without changing historical artifacts.
-        const sources = await getCodexSecurityDeepReducerInputs({
-          root: worker.artifactDir,
-          repoRoot: this.state.targetPath,
-          scanId: this.state.scanId,
-          layout: "reducer",
-          deepReducer: {
-            scanRoot: this.artifacts.scanDir,
-            claimedWorkers: consumed.map((source) => ({
-              id: source!.id,
-              resultPath: source!.resultPath,
-            })),
-          },
-        });
-        const pending = collectUnresolvedCandidates(
-          sources.discoveries,
-          latestResult ?? null,
-        );
-        if (pending.length > 0) result.unresolvedCandidates = pending;
-      }
+      // Receipt recovery can reopen candidates even in current reducers. Derive
+      // their state from the accepted inputs without rewriting saved artifacts.
+      const pending = collectUnresolvedCandidates(
+        consumed.map((source) => ({
+          workerId: source!.id,
+          result: discoveryReductionInput(source!.result, source!.id),
+        })),
+        latestResult ?? null,
+      );
+      if (pending.length > 0) result.unresolvedCandidates = pending;
+      else delete result.unresolvedCandidates;
       latestResult = result;
       resultPath = worker.resultManifestPath;
     }

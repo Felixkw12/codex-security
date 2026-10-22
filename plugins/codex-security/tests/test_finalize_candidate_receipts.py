@@ -15,6 +15,43 @@ class FinalizeCandidateReceiptsTest(unittest.TestCase):
     write_json = fixtures.FinalizeScanContractTest.write_json
     read_json = fixtures.FinalizeScanContractTest.read_json
 
+    def test_unverified_disposition_retains_owned_candidate_evidence(self) -> None:
+        original = copy.deepcopy(self.coverage)
+        for disposition in (
+            {},
+            {"disposition": None},
+            {"disposition": "unknown"},
+            {"disposition": []},
+        ):
+            with self.subTest(disposition=disposition):
+                self.coverage = copy.deepcopy(original)
+                self.coverage["deferred"] = []
+                surface = self.coverage["surfaces"][0]
+                surface.pop("disposition")
+                surface.update(
+                    **disposition,
+                    candidateId="candidate-review",
+                    sourceWorkerId="worker-current",
+                    receiptRefs=[],
+                    candidate={"evidence": "Saved candidate evidence remains available."},
+                )
+                self.write_scan()
+                source_bytes = (self.scan_dir / "coverage.json").read_bytes()
+                prepared = FINALIZER._prepare_scan_finalization(
+                    self.scan_dir, recover_unsealed=True
+                )
+                self.assertEqual((self.scan_dir / "coverage.json").read_bytes(), source_bytes)
+                self.assertEqual(prepared.coverage["surfaces"][0]["disposition"], "needs_follow_up")
+                self.assertEqual(len(prepared.coverage["deferred"]), 1)
+                pending = prepared.coverage["deferred"][0]
+                self.assertEqual(pending["candidateId"], surface["candidateId"])
+                self.assertEqual(pending["sourceWorkerId"], surface["sourceWorkerId"])
+                self.assertEqual(pending["surfaceIds"], [surface["id"]])
+                self.assertEqual(pending["candidate"], surface["candidate"])
+                self.assertIn("the review disposition could not be verified", pending["reason"])
+                _, _, published = FINALIZER._write_prepared_scan_finalization(prepared)
+                self.assertEqual(FINALIZER.finalize_scan(self.scan_dir)[2], published)
+
     def test_recovered_receipt_decision_retains_owned_pending_evidence(self) -> None:
         original = copy.deepcopy(self.coverage)
         for disposition in ("rejected", "not_applicable"):

@@ -313,10 +313,7 @@ test("streams diagnostics before a blocked shard finishes and preserves large ou
   const large = "synthetic-large-diagnostic-".repeat(12_000);
   await mkdir(join(root, "scripts"));
   await mkdir(join(root, "tests-ts"));
-  await copyFile(
-    new URL("../scripts/run-ci-tests.mts", import.meta.url),
-    join(root, "scripts", "run-ci-tests.mts"),
-  );
+  await copyRunner(root);
   await writeFile(
     join(root, "tests-ts", "probe.test.ts"),
     `
@@ -398,10 +395,7 @@ test.each([false, true])(
     const root = await temporaryDirectory("codex-security-disconnected-shard-");
     await mkdir(join(root, "scripts"));
     await mkdir(join(root, "tests-ts"));
-    await copyFile(
-      new URL("../scripts/run-ci-tests.mts", import.meta.url),
-      join(root, "scripts", "run-ci-tests.mts"),
-    );
+    await copyRunner(root);
     await writeFile(
       join(root, "tests-ts", "probe.test.ts"),
       `import { test, expect } from "bun:test";

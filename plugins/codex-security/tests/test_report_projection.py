@@ -1018,6 +1018,45 @@ def test_projection_groups_deep_reports_by_candidate_id(coverage_mode: str) -> N
     assert '<a id="finding-2"></a>' in markdown
 
 
+@pytest.mark.parametrize(
+    ("coverage_mode", "candidate_ids", "legacy_ids", "expected_groups"),
+    [
+        ("deep_repository", ("candidate-one", "candidate-one"), ("old-one", "old-two"), 1),
+        ("deep_repository", ("candidate-one", "candidate-two"), ("old-one", "old-one"), 2),
+        ("scoped_path", ("candidate-one", "candidate-one"), (None, None), 1),
+    ],
+)
+def test_projection_groups_deep_reports_by_canonical_provenance(
+    coverage_mode: str,
+    candidate_ids: tuple[str, str],
+    legacy_ids: tuple[str | None, str | None],
+    expected_groups: int,
+) -> None:
+    manifest, findings, coverage = canonical_documents()
+    coverage["mode"] = coverage_mode
+    if coverage_mode == "scoped_path":
+        coverage["inventoryStrategy"] = "scoped_path"
+    finding = findings["findings"][0]
+    finding["title"] = "Parser boundary review"
+    sibling = copy.deepcopy(finding)
+    sibling["occurrenceId"] = "occ_2"
+    findings["findings"].append(sibling)
+    for report, candidate_id, legacy_id in zip(
+        findings["findings"], candidate_ids, legacy_ids, strict=True
+    ):
+        report["provenance"] = {"candidateId": candidate_id}
+        if legacy_id is not None:
+            report["extensions"] = {"candidateId": legacy_id}
+
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+
+    assert f"| Reportable DSS findings | {expected_groups} |" in markdown
+    assert "| Report instances | 2 |" in markdown
+    assert markdown.count("| Parser boundary review |") == expected_groups
+    assert '<a id="finding-1"></a>' in markdown
+    assert '<a id="finding-2"></a>' in markdown
+
+
 def test_projection_moves_legacy_deep_title_annotations_to_reports() -> None:
     manifest, findings, coverage = canonical_documents()
     coverage["mode"] = "deep_repository"

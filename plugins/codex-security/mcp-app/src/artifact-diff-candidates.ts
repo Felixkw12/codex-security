@@ -315,7 +315,10 @@ function isGeneratedFollowUp(
         other.surfaceIds.some(
           (id) =>
             surfaceReferenceKey(id, other, surfaces) ===
-            candidateKey(surface.id, surface.sourceWorkerId),
+            candidateKey(
+              surface.id,
+              surface.sourceWorkerId ?? surface.workerId,
+            ),
         ),
     )
   );
@@ -452,7 +455,9 @@ export function preserveDiffCandidateDecisions(
   const surfaces: DraftCoverage["surfaces"] = inputSurfaces
     .map((item) =>
       !retainDecision(item) &&
-      pendingReferences.has(candidateKey(item.id, item.sourceWorkerId))
+      pendingReferences.has(
+        candidateKey(item.id, item.sourceWorkerId ?? item.workerId),
+      )
         ? { ...item, disposition: "reported" as const }
         : item,
     )
@@ -767,7 +772,10 @@ export function preserveUnresolvedDiffCandidates(
             other.surfaceIds.some(
               (id) =>
                 surfaceReferenceKey(id, other, input.coverage.surfaces) ===
-                candidateKey(surface.id, surface.sourceWorkerId),
+                candidateKey(
+                  surface.id,
+                  surface.sourceWorkerId ?? surface.workerId,
+                ),
             ),
         )
       )
@@ -813,7 +821,10 @@ export function preserveUnresolvedDiffCandidates(
           surfaceIds.some(
             (id) =>
               surfaceReferenceKey(id, item, surfaces) ===
-              candidateKey(surface.id, surface.sourceWorkerId),
+              candidateKey(
+                surface.id,
+                surface.sourceWorkerId ?? surface.workerId,
+              ),
           ),
       )
     )

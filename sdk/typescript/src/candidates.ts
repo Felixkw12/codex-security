@@ -38,7 +38,7 @@ export function candidateIdentity(
   return JSON.stringify([candidateOwner(sourceWorkerId) ?? null, candidateId]);
 }
 
-function coverageCandidateOwner(row: Record<string, unknown>): unknown {
+export function coverageCandidateOwner(row: Record<string, unknown>): unknown {
   return row["sourceWorkerId"] ?? candidateOwner(row["workerId"]);
 }
 

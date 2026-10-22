@@ -1541,7 +1541,7 @@ def _recover_unsealed_coverage(
                 surface_ids.add(surface_id)
                 if (
                     surface_recovered
-                    and disposition in ("rejected", "not_applicable")
+                    and disposition not in ("reported", "no_issue_found", "needs_follow_up")
                     and isinstance(item.get("candidateId"), str)
                 ):
                     recovered_candidates.append((item, "\n".join(warnings[warning_start:])))
@@ -1995,7 +1995,9 @@ def _validate_coverage(manifest: dict[str, Any], coverage: dict[str, Any], scan_
     for field in receipt_fields:
         for index, item in enumerate(coverage.get(field, [])):
             if not isinstance(item, dict):
-                continue  # The canonical schema reports malformed rows.
+                continue
+            if field == "explicitExclusions" and coverage_candidate_key(item) is None:
+                continue
             context = f"coverage.{field}[{index}]"
             receipt_refs = item.get("receiptRefs", [])
             if not isinstance(receipt_refs, list):
@@ -2886,6 +2888,7 @@ def _supplementary_artifact_refs(scan: dict[str, Any], coverage: dict[str, Any])
             else ("surfaces",)
         )
         for row in coverage.get(field, [])
+        if field != "explicitExclusions" or coverage_candidate_key(row) is not None
         for ref in row.get("receiptRefs", [])
     }
     extensions = scan.get("extensions")

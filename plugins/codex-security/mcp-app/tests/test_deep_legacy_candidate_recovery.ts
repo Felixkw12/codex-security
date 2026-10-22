@@ -30,8 +30,12 @@ const { createDeepScanArtifacts, validateDiscoveryArtifacts } =
 after(() => temporaryDirectories.cleanup());
 
 for (const continueReduction of [false, true]) {
-  for (const missingReceipt of [false, true]) {
-    test(`resumes legacy candidates without rewriting accepted artifacts: continue=${continueReduction}, missingReceipt=${missingReceipt}`, async () => {
+  for (const { missingReceipt, reducerVersion } of [
+    { missingReceipt: false, reducerVersion: "legacy" },
+    { missingReceipt: true, reducerVersion: "legacy" },
+    { missingReceipt: true, reducerVersion: "current" },
+  ]) {
+    test(`resumes ${reducerVersion} candidates without rewriting accepted artifacts: continue=${continueReduction}, missingReceipt=${missingReceipt}`, async () => {
       const fixture = await fixtureRun({
         workers: 2,
         stopAfterNoNew: 10,
@@ -43,8 +47,16 @@ for (const continueReduction of [false, true]) {
         reason: "The earlier worker retained this evidence.",
         candidate: { evidence: "Synthetic handler requires validation." },
       };
+      const existingPending = {
+        candidateId: "existing-pending",
+        reason: "Independent synthetic evidence remains unresolved.",
+      };
       const executor = new FakeExecutor({
-        discoveryDeferred: missingReceipt ? [] : [pending],
+        discoveryDeferred: missingReceipt
+          ? reducerVersion === "current"
+            ? [existingPending]
+            : []
+          : [pending],
       });
       if (missingReceipt) {
         const run = executor.run.bind(executor);
@@ -103,8 +115,12 @@ for (const continueReduction of [false, true]) {
       for (const worker of accepted) {
         const result = await readJson(worker.resultManifestPath!);
         if (worker.kind === "dedup") {
-          delete result.unresolvedCandidates;
-          await writeJson(worker.resultManifestPath!, result);
+          if (reducerVersion === "legacy") {
+            delete result.unresolvedCandidates;
+            await writeJson(worker.resultManifestPath!, result);
+          } else {
+            assert.equal(result.unresolvedCandidates.length, 2);
+          }
         } else {
           assert.equal(result.coverage.completeness, undefined);
           if (missingReceipt) {
@@ -167,10 +183,22 @@ for (const continueReduction of [false, true]) {
       );
       assert.equal(replacement.discoveryCalls, Number(continueReduction));
       assert.equal(replacement.dedupCalls, Number(continueReduction));
+      if (reducerVersion === "current") {
+        assert.deepEqual(
+          published[0].coverage.deferred
+            .filter((row) => row.candidateId === existingPending.candidateId)
+            .map((row) => row.sourceWorkerId)
+            .sort(),
+          [...store.dedupClaims[0].workerIds].sort(),
+        );
+      }
       if (continueReduction) {
         const reducer = store.workers.get(store.dedupClaims.at(-1)!.id)!;
         const result = await readJson(reducer.resultManifestPath!);
-        assert.equal(result.unresolvedCandidates.length, 3);
+        assert.equal(
+          result.unresolvedCandidates.length,
+          reducerVersion === "current" ? 5 : 3,
+        );
       }
       assert.deepEqual(
         await Promise.all(

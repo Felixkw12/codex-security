@@ -287,14 +287,13 @@ def test_budget_exhaustion_retains_original_deferred_finding_evidence(
         row for row in preserved["deferred"] if row.get("candidateId") == candidate["candidate_id"]
     ]
     assert bool(pending) is still_pending
+    surface = next(
+        row for row in preserved["surfaces"] if row.get("candidateId") == candidate["candidate_id"]
+    )
     if still_pending:
-        assert pending[0] == coverage["deferred"][0]
+        assert pending[0] == {**coverage["deferred"][0], "surfaceIds": [surface["id"]]}
+        assert surface["disposition"] == "needs_follow_up"
     else:
-        surface = next(
-            row
-            for row in preserved["surfaces"]
-            if row.get("candidateId") == candidate["candidate_id"]
-        )
         assert original in surface["previousFindings"]
 
 
@@ -419,6 +418,86 @@ def test_budget_exhaustion_retains_ledger_candidate_when_recovering_nonobject_su
     assert pending["candidate"] == candidate
     assert None not in recovered["surfaces"]
     assert json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["sealedAt"]
+
+
+@pytest.mark.parametrize("surface_state", ["absent", "empty", "unlinked", "linked"])
+def test_budget_completion_links_existing_pending_candidate_to_follow_up_surface(
+    tmp_path: Path, workbench_api: dict[str, Any], surface_state: str
+) -> None:
+    state_dir, target, scan_dir, scan_id, ledger = budget_scan_fixture(tmp_path)
+    candidate = {**json.loads(ledger.read_text()), "validation": {"disposition": "deferred"}}
+    ledger.write_text(json.dumps(candidate) + "\n")
+    write_completed_contract(
+        scan_dir, scan_id, target, relative_path="app.py", coverage_mode="deep_repository"
+    )
+    findings_path = scan_dir / "findings.json"
+    findings = json.loads(findings_path.read_text())
+    findings["findings"] = []
+    findings_path.write_text(json.dumps(findings))
+    pending = {
+        "id": "authored-proof-gap",
+        "candidateId": candidate["candidate_id"],
+        "candidate": {**candidate, "evidence": "Saved authored source evidence."},
+        "reason": "Authored proof gap still requires validation.",
+        "paths": ["app.py"],
+        "reviewContext": {"note": "Keep this review context."},
+    }
+    if surface_state != "absent":
+        pending["surfaceIds"] = ["authored-candidate-review"] if surface_state == "linked" else []
+    generic_surface = {
+        "id": f"candidate-{candidate['candidate_id']}",
+        "label": "Independent generic review",
+        "disposition": "needs_follow_up",
+        "receiptRefs": [],
+    }
+    generic = {
+        "id": "generic-proof-gap",
+        "reason": "Keep independent unfinished work.",
+        "surfaceIds": [generic_surface["id"]],
+    }
+    surfaces = [generic_surface]
+    if surface_state in {"unlinked", "linked"}:
+        surfaces.append(
+            {
+                "id": "authored-candidate-review",
+                "candidateId": candidate["candidate_id"],
+                "label": "Authored candidate review",
+                "disposition": "needs_follow_up",
+                "notes": "Keep authored coverage evidence.",
+                "receiptRefs": [],
+            }
+        )
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage.update(completeness="partial", surfaces=surfaces, deferred=[pending, generic])
+    coverage_path.write_text(json.dumps(coverage))
+
+    completed = complete_budget_scan(state_dir, scan_id)["scan"]
+
+    saved = json.loads(coverage_path.read_text())
+    assert completed["progress"]["status"] == "complete"
+    assert completed["progress"]["candidates"]["unresolved"] == 1
+    assert generic in saved["deferred"]
+    assert generic_surface in saved["surfaces"]
+    candidate_deferred = [
+        row for row in saved["deferred"] if row.get("candidateId") == candidate["candidate_id"]
+    ]
+    assert len(candidate_deferred) == 1
+    actual = candidate_deferred[0]
+    assert {key: value for key, value in actual.items() if key != "surfaceIds"} == {
+        key: value for key, value in pending.items() if key != "surfaceIds"
+    }
+    candidate_surfaces = [
+        row for row in saved["surfaces"] if row.get("candidateId") == candidate["candidate_id"]
+    ]
+    assert len(candidate_surfaces) == 1
+    surface = candidate_surfaces[0]
+    assert surface["disposition"] == "needs_follow_up"
+    assert actual["surfaceIds"] == [surface["id"]]
+    assert surface["label"] in (scan_dir / "report.md").read_text()
+    before_retry = copy.deepcopy(saved)
+    workbench_api["saved_results"].preserve_budget_candidates(saved, [], [candidate])
+    assert saved == before_retry
 
 
 def test_budget_candidate_projection_preserves_owner_references_and_unique_ids_at_scale(
@@ -558,7 +637,13 @@ def test_budget_exhaustion_resolves_candidates_only_with_recoverable_findings(
     assert scan["progress"]["candidates"]["unresolved"] == int(missing_rule_id)
     recovered = json.loads(coverage_path.read_text())
     if missing_rule_id:
-        assert pending in recovered["deferred"]
+        surface = next(
+            row
+            for row in recovered["surfaces"]
+            if row.get("candidateId") == candidate["candidate_id"]
+        )
+        assert {**pending, "surfaceIds": [surface["id"]]} in recovered["deferred"]
+        assert surface["disposition"] == "needs_follow_up"
     else:
         assert not any(
             row.get("candidateId") == candidate["candidate_id"] for row in recovered["deferred"]
@@ -1061,7 +1146,16 @@ def test_budget_receipts_are_recovered_before_shared_surface_decisions(
     assert bool(rows) is (receipt != "valid")
     assert completed["progress"]["candidates"]["unresolved"] == int(receipt != "valid")
     if rows:
-        assert pending in rows
+        if receipt == "blank-label":
+            follow_up = next(
+                row
+                for row in saved["surfaces"]
+                if row.get("candidateId") == candidate["candidate_id"]
+                and row.get("disposition") == "needs_follow_up"
+            )
+            assert {**pending, "surfaceIds": [*pending["surfaceIds"], follow_up["id"]]} in rows
+        else:
+            assert pending in rows
         assert not any(
             row.get("candidateId") == candidate["candidate_id"]
             and row.get("disposition") in {"rejected", "not_applicable"}

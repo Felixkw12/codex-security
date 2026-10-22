@@ -121,6 +121,29 @@ def test_exclusion_proof_recovery_matches_public_entrypoints(
 
 
 @pytest.mark.parametrize("entrypoint", ["standalone", "workbench"])
+@pytest.mark.parametrize("receipt", ["valid", "missing", "malformed"])
+def test_generic_exclusion_receipt_metadata_remains_opaque_on_publication(
+    tmp_path: Path, entrypoint: str, receipt: str
+):
+    state, scan_id, scan_dir, _, decision = exclusion_scan(tmp_path, "rejected", receipt)
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage["deferred"] = []
+    decision.pop("candidateId")
+    coverage["explicitExclusions"] = [decision]
+    coverage_path.write_text(json.dumps(coverage))
+
+    publish(state, scan_id, scan_dir, entrypoint)
+    published = json.loads(coverage_path.read_text())
+    assert published["receiptSealVersion"] == 1
+    assert published["explicitExclusions"] == [decision]
+    manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
+    assert "artifacts/review.bin" not in {row["path"] for row in manifest["scan"]["artifacts"]}
+    (scan_dir / "artifacts/review.bin").unlink(missing_ok=True)
+    assert FINALIZER.finalize_scan(scan_dir)[2] == published
+
+
+@pytest.mark.parametrize("entrypoint", ["standalone", "workbench"])
 @pytest.mark.parametrize("field", ["surfaces", "explicitExclusions"])
 @pytest.mark.parametrize("change", ["delete", "modify"])
 def test_exclusion_and_surface_proof_are_sealed_and_verified(
