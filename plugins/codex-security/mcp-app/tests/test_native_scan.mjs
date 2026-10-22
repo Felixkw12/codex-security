@@ -29,7 +29,7 @@ const bundle = await build({
       export { acquireScanExecution } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/scan-execution.ts", import.meta.url)))};
       export { prepareAmbientRuntime, prepareExecutionSource, createExecutionCodex, prepareDiscoveryExecution, prepareMergeExecution } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/execution-preparation.ts", import.meta.url)))};
       export { createPermissionCheckedCodex } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/permission-profile.ts", import.meta.url)))};
-      export { createReplayProfile } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/provider-profile.ts", import.meta.url)))};
+      export { createProviderProfile, createReplayProfile } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/provider-profile.ts", import.meta.url)))};
       export { scanRuntimeCodexConfig, scanPreflightCodexConfig } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/api.ts", import.meta.url)))};`,
     resolveDir: fileURLToPath(new URL("../src/", import.meta.url)),
   },
@@ -104,6 +104,7 @@ const {
   scanRuntimeCodexConfig,
   scanPreflightCodexConfig,
   createReplayProfile,
+  createProviderProfile,
   createPermissionCheckedCodex,
   prepareAmbientRuntime,
   prepareExecutionSource,
@@ -1840,12 +1841,14 @@ else {
   const path = require("node:path");
   const effective = parse(fs.readFileSync(path.join(process.env.CODEX_HOME, "config.toml"), "utf8"));
   const merge = (target, value) => { for (const [key, child] of Object.entries(value)) target[key] = child && typeof child === "object" && !Array.isArray(child) ? merge(target[key] ?? {}, child) : child; return target; };
-  if (argv.includes("--profile")) merge(effective, parse(fs.readFileSync(path.join(process.env.CODEX_HOME, argv[argv.indexOf("--profile") + 1] + ".config.toml"), "utf8")));
+  const profile = argv.includes("--profile") ? parse(fs.readFileSync(path.join(process.env.CODEX_HOME, argv[argv.indexOf("--profile") + 1] + ".config.toml"), "utf8")) : {};
+  merge(effective, profile);
   for (let i = 0; i < argv.length; i++) if (["--config", "-c"].includes(argv[i])) merge(effective, parse(argv[++i]));
   const provider = effective.model_providers?.[effective.model_provider];
   fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify({ argv, path: process.env.PATH, codex: process.env.CODEX_API_KEY, openai: process.env.OPENAI_API_KEY, home: process.env.CODEX_HOME, state: process.env.CODEX_SECURITY_STATE_DIR, executable: process.argv[1], knowledge: process.env.CODEX_SECURITY_KNOWLEDGE_BASE,
     modelProvider: effective.model_provider,
     provider,
+    profileProvider: profile.model_providers?.[effective.model_provider],
     providerToken: provider && (provider.experimental_bearer_token ?? process.env[provider.env_key]),
     providerHeaders: provider && {...provider.http_headers, ...Object.fromEntries(Object.entries(provider.env_http_headers ?? {}).map(([header, key]) => [header, process.env[key]]))},
     literalCredentialInEnvironment: ["synthetic-provider-token", "synthetic-provider-header"].some(value => Object.values(process.env).includes(value)),
@@ -1861,6 +1864,10 @@ else {
 async function nativeWorkerSession(prepared, repository) {
   const ambient = prepared.client.dependencies.ambientExecution;
   const runtime = await prepareAmbientRuntime(ambient);
+  runtime.providerProfile = await createProviderProfile(
+    runtime.codexHome,
+    ambient.configuration,
+  );
   const source = prepareExecutionSource(ambient);
   return {
     runtime,
@@ -1902,6 +1909,7 @@ for (const scenario of [
   "tilde-home-and-selected-config",
   "explicit-state-directory",
   "openrouter-env-key",
+  "openrouter-selected-env-key",
   "fireworks-env-key",
   "openrouter-bearer",
   "fireworks-bearer",
@@ -1940,6 +1948,7 @@ for (const scenario of [
         : scenario.startsWith("fireworks-")
           ? "fireworks"
           : undefined;
+      const selectedConfiguration = scenario === "openrouter-selected-env-key";
       const restore = captureEnvironment([
         "PATH",
         "HOME",
@@ -2027,10 +2036,56 @@ for (const scenario of [
               : { env_key: "OPENAI_API_KEY", requires_openai_auth: true },
           },
         };
-        const configText = stringifyToml(configuration);
+        let ambientConfiguration = configuration;
+        let selectedConfigText;
+        let selectedConfigPath;
+        if (selectedConfiguration) {
+          Object.assign(configuration.model_providers[externalProvider], {
+            name: "Selected synthetic provider",
+            request_max_retries: 7,
+          });
+          configuration.features = {
+            goals: true,
+            api_key_model_discovery: true,
+            api_key_cyber_access_programs: true,
+          };
+          configuration.model_reasoning_summary = "auto";
+          ambientConfiguration = structuredClone(configuration);
+          Object.assign(
+            ambientConfiguration.model_providers[externalProvider],
+            {
+              name: "Ambient synthetic provider",
+              request_max_retries: 2,
+            },
+          );
+          delete ambientConfiguration.model_providers[externalProvider]
+            .wire_api;
+          ambientConfiguration.features.api_key_model_discovery = false;
+          delete ambientConfiguration.features.api_key_cyber_access_programs;
+          selectedConfigText = stringifyToml({
+            model_providers: {
+              [externalProvider]: {
+                name: "Selected synthetic provider",
+                wire_api: "responses",
+                request_max_retries: 7,
+              },
+            },
+            features: {
+              api_key_model_discovery: true,
+              api_key_cyber_access_programs: true,
+            },
+          });
+          selectedConfigPath = join(root, "selected.toml");
+          await writeFile(selectedConfigPath, selectedConfigText);
+          process.env.CODEX_SECURITY_CONFIG_PATH = selectedConfigPath;
+        }
+        const configText = stringifyToml(ambientConfiguration);
         await writeFile(join(home, "config.toml"), configText);
         const replay = externalProvider
           ? await createReplayProfile(home, configuration)
+          : undefined;
+        const replayText = replay
+          ? await readFile(replay.path, "utf8")
           : undefined;
         const scanDir = join(root, "scan");
         await mkdir(scanDir, { mode: 0o700 });
@@ -2297,6 +2352,10 @@ for (const scenario of [
                   observed.provider,
                   configuration.model_providers[externalProvider],
                 );
+                assert.deepEqual(
+                  observed.profileProvider,
+                  configuration.model_providers[externalProvider],
+                );
                 assert.equal(config.model_provider, externalProvider);
                 assert.equal(config.model_providers, undefined);
                 if (
@@ -2344,6 +2403,18 @@ for (const scenario of [
               }
               assert.equal(config.model, "explicit-current-model");
               assert.equal(config.model_reasoning_effort, "ultra");
+              if (selectedConfiguration) {
+                for (const [key, value] of Object.entries(
+                  configuration.features,
+                ))
+                  assert.equal(config.features[key], value);
+                assert.equal(config.model_reasoning_summary, "auto");
+                assert.equal(
+                  await readFile(selectedConfigPath, "utf8"),
+                  selectedConfigText,
+                );
+                assert.equal(await readFile(replay.path, "utf8"), replayText);
+              }
               assert.equal(
                 config.features.multi_agent_v2
                   .max_concurrent_threads_per_session,
@@ -2390,6 +2461,7 @@ for (const scenario of [
             }
           } finally {
             await knowledge?.cleanup();
+            await runtime.providerProfile.cleanup();
             await rm(runtime.bootstrapWorkspace, {
               recursive: true,
               force: true,
@@ -2427,7 +2499,7 @@ for (const scenario of [
             assert.equal(row.codex, "synthetic-competing-key");
             assert.equal(row.modelProvider, externalProvider);
             assert.deepEqual(row.provider, {
-              name: "Synthetic provider",
+              name: configuration.model_providers[externalProvider].name,
               wire_api: "responses",
             });
             for (const value of [
@@ -2449,7 +2521,7 @@ for (const scenario of [
 }
 
 test(
-  "native lexical target protection stays isolated across concurrent worker launches",
+  "native target protection and selected configuration stay isolated across concurrent worker launches",
   {
     skip:
       process.platform === "win32"
@@ -2492,6 +2564,7 @@ test(
           capture: join(root, `worker-${id}.json`),
           preflights: join(root, `preflights-${id}.jsonl`),
           decoyLaunch: join(root, `decoy-${id}.jsonl`),
+          selectedConfigPath: join(root, `selected-${id}.toml`),
         };
         fixture.lexicalBin = join(fixture.lexicalRepository, "bin");
         fixture.executable = join(fixture.toolBin, "codex");
@@ -2508,10 +2581,48 @@ test(
           join(fixture.lexicalRepository, "selected"),
           "dir",
         );
-        await writeFile(
-          join(fixture.home, "config.toml"),
-          'model_provider="openai"\n[model_providers.openai]\nenv_key="OPENAI_API_KEY"\nrequires_openai_auth=true\n',
-        );
+        fixture.provider = {
+          name: `Selected synthetic provider ${id}`,
+          base_url: `https://example.invalid/${id}`,
+          env_key: "OPENAI_API_KEY",
+          requires_openai_auth: true,
+          wire_api: "responses",
+          request_max_retries: id === "a" ? 3 : 7,
+        };
+        fixture.features = {
+          goals: true,
+          api_key_model_discovery: id === "a",
+          api_key_cyber_access_programs: true,
+        };
+        fixture.configText = stringifyToml({
+          model_provider: "openai",
+          model_reasoning_summary: "auto",
+          model_providers: {
+            openai: {
+              name: `Ambient synthetic provider ${id}`,
+              base_url: fixture.provider.base_url,
+              env_key: "OPENAI_API_KEY",
+              requires_openai_auth: true,
+              request_max_retries: 1,
+            },
+          },
+          features: { goals: true, api_key_model_discovery: id !== "a" },
+        });
+        fixture.selectedConfigText = stringifyToml({
+          model_providers: {
+            openai: {
+              name: fixture.provider.name,
+              wire_api: "responses",
+              request_max_retries: fixture.provider.request_max_retries,
+            },
+          },
+          features: {
+            api_key_model_discovery: fixture.features.api_key_model_discovery,
+            api_key_cyber_access_programs: true,
+          },
+        });
+        await writeFile(join(fixture.home, "config.toml"), fixture.configText);
+        await writeFile(fixture.selectedConfigPath, fixture.selectedConfigText);
         await writeNativeWorkerExecutable(fixture.executable, fixture.capture);
         await writeFile(
           join(fixture.lexicalBin, "codex"),
@@ -2548,6 +2659,7 @@ test(
         Object.assign(process.env, {
           PATH: fixture.path,
           CODEX_HOME: fixture.home,
+          CODEX_SECURITY_CONFIG_PATH: fixture.selectedConfigPath,
           OPENAI_API_KEY: `synthetic-key-${fixture.id}`,
           NATIVE_PROFILE_CAPTURE: fixture.preflights,
           NATIVE_PROFILE_MARKER: fixture.id,
@@ -2604,6 +2716,16 @@ test(
                 assert.equal(observed.path, fixture.expectedPath);
                 assert.equal(observed.home, fixture.home);
                 assert.equal(observed.openai, `synthetic-key-${fixture.id}`);
+                assert.deepEqual(observed.provider, fixture.provider);
+                assert.deepEqual(observed.profileProvider, fixture.provider);
+                const fragments = [];
+                for (let i = 0; i < observed.argv.length; i++)
+                  if (["-c", "--config"].includes(observed.argv[i]))
+                    fragments.push(parseToml(observed.argv[++i]));
+                const config = Object.assign({}, ...fragments);
+                for (const [key, value] of Object.entries(fixture.features))
+                  assert.equal(config.features[key], value);
+                assert.equal(config.model_reasoning_summary, "auto");
                 assert.equal(observed.argv.includes("resume"), resumed);
                 assert.ok(
                   observed.argv.includes(
@@ -2625,6 +2747,14 @@ test(
               .map(JSON.parse)
               .filter((row) => row.kind === "preflight");
             assert.equal(preflights.length, 4);
+            assert.equal(
+              await readFile(join(fixture.home, "config.toml"), "utf8"),
+              fixture.configText,
+            );
+            assert.equal(
+              await readFile(fixture.selectedConfigPath, "utf8"),
+              fixture.selectedConfigText,
+            );
             for (const observed of preflights) {
               assert.equal(observed.executable, fixture.executable);
               assert.equal(observed.gitEnvironment.PATH, fixture.expectedPath);
@@ -2632,6 +2762,7 @@ test(
               assert.equal(observed.openai, `synthetic-key-${fixture.id}`);
             }
           } finally {
+            await runtime.providerProfile.cleanup();
             await rm(runtime.bootstrapWorkspace, {
               recursive: true,
               force: true,
@@ -2641,6 +2772,10 @@ test(
       );
       assert.equal(process.env.PATH, fixtures[1].path);
       assert.equal(process.env.CODEX_HOME, fixtures[1].home);
+      assert.equal(
+        process.env.CODEX_SECURITY_CONFIG_PATH,
+        fixtures[1].selectedConfigPath,
+      );
       assert.equal(process.env.OPENAI_API_KEY, "synthetic-key-b");
       assert.equal(process.env.NATIVE_PROFILE_MARKER, "b");
     } finally {

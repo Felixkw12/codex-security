@@ -564,10 +564,7 @@ export async function nativeScanConfiguration(
       )
     : {};
   const config = scanCompositionOverrides(
-    {
-      ...parseToml(ambient),
-      ...selected,
-    } as JsonObject,
+    deepMerge(parseToml(ambient) as JsonObject, selected as JsonObject),
     subagents,
   );
   if (input.model) config["model"] = input.model;
