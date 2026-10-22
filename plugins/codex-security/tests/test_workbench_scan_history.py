@@ -1901,6 +1901,162 @@ def test_semantic_scan_comparison_accepts_linked_git_worktrees(tmp_path: Path) -
     assert saved["summary"]["persisting"] == 1
 
 
+def test_scan_comparison_keeps_distinct_repositories_after_target_replacement(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / "state"
+    before_repository = tmp_path / "before"
+    after_repository = tmp_path / "after"
+    revision = initialize_git_repository(before_repository)
+    subprocess.run(
+        ["git", "clone", "-q", str(before_repository), str(after_repository)], check=True
+    )
+    subprocess.run(["git", "-C", str(after_repository), "remote", "remove", "origin"], check=True)
+    for repository, origin in (
+        (before_repository, "https://github.com/example/first.git"),
+        (after_repository, "https://github.com/example/second.git"),
+    ):
+        subprocess.run(
+            ["git", "-C", str(repository), "remote", "add", "origin", origin], check=True
+        )
+    before = create_cli_scan(
+        state_dir, tmp_path / "before-results", before_repository, target_revision=revision
+    )
+    after = create_cli_scan(
+        state_dir,
+        tmp_path / "after-results",
+        after_repository,
+        target_revision=revision,
+        identity_anchor="separate-repository-control",
+    )
+    rejected = compare_scan_pair(state_dir, before, after, check=False)
+    assert rejected["returncode"] != 0
+    assert "same repository target" in rejected["stderr"]
+
+    before_repository.rename(tmp_path / "before-saved")
+    if os.name == "nt":
+        subprocess.run(
+            f'cmd /d /s /c "mklink /J "{before_repository}" "{after_repository}""',
+            check=True,
+        )
+    else:
+        before_repository.symlink_to(after_repository, target_is_directory=True)
+    rejected = compare_scan_pair(state_dir, before, after, check=False)
+    assert rejected["returncode"] != 0
+    assert "same repository target" in rejected["stderr"]
+
+
+@pytest.mark.parametrize("checkout_kind", ["worktree", "clone"])
+def test_scan_comparison_keeps_saved_repository_identity(
+    tmp_path: Path, checkout_kind: str
+) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    other = tmp_path / "other"
+    revision = initialize_git_repository(repository)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/example/shared.git",
+        ],
+        check=True,
+    )
+    if checkout_kind == "worktree":
+        subprocess.run(
+            ["git", "-C", str(repository), "worktree", "add", "-q", "--detach", str(other)],
+            check=True,
+        )
+    else:
+        subprocess.run(["git", "clone", "-q", str(repository), str(other)], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(other),
+                "remote",
+                "set-url",
+                "origin",
+                "git@github.com:example/shared",
+            ],
+            check=True,
+        )
+    before = create_cli_scan(
+        state_dir, tmp_path / "before-results", repository, target_revision=revision
+    )
+    after = create_cli_scan(
+        state_dir,
+        tmp_path / "after-results",
+        other,
+        target_revision=revision,
+        identity_anchor="corresponding-repository-control",
+    )
+    assert compare_scan_pair(state_dir, before, after)["summary"]["persisting"] == 1
+
+    repository.rename(tmp_path / "repository-saved")
+    initialize_git_repository(repository)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/example/unrelated.git",
+        ],
+        check=True,
+    )
+    compared = compare_scan_pair(state_dir, before, after)
+    assert compared["summary"]["persisting"] == 1
+    assert compared["summary"]["new"] == compared["summary"]["not_observed"] == 0
+
+
+def test_legacy_git_identity_preserves_saved_matches_without_inference(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    revision = initialize_git_repository(repository)
+    before = create_cli_scan(
+        state_dir, tmp_path / "before-results", repository, target_revision=revision
+    )
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute("ALTER TABLE scans DROP COLUMN target_git_identity_json")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 55")
+    after = create_cli_scan(
+        state_dir,
+        tmp_path / "after-results",
+        repository,
+        target_revision=revision,
+        identity_anchor="legacy-repository-control",
+    )
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT target_git_identity_json FROM scans WHERE id = ?", (before["scanId"],)
+        ).fetchone() == (None,)
+        saved_identity = connection.execute(
+            "SELECT target_git_identity_json FROM scans WHERE id = ?", (after["scanId"],)
+        ).fetchone()[0]
+        assert json.loads(saved_identity)["commonDirectory"] == str(repository / ".git")
+    compared = compare_scan_pair(state_dir, before, after, "--include-matching-inputs")
+    assert compared["summary"]["persisting"] == 0
+    assert compared["summary"]["new"] == compared["summary"]["not_observed"] == 1
+    saved = save_scan_matches(
+        state_dir,
+        before,
+        after,
+        confirmed_match(
+            compared["matchingInputs"]["before"][0]["occurrenceId"],
+            compared["matchingInputs"]["after"][0]["occurrenceId"],
+        ),
+    )
+    assert saved["summary"]["persisting"] == 1
+    assert get_scan(state_dir, before["scanId"])["scan"]["scanId"] == before["scanId"]
+
+
 @pytest.mark.parametrize("checkout_kind", ["same", "worktree", "clone"])
 def test_equivalent_locations_require_same_git_target_prefix(
     tmp_path: Path, checkout_kind: str
@@ -2034,6 +2190,9 @@ def test_semantic_scan_comparison_accepts_matching_git_origins(tmp_path: Path) -
     after = create_cli_scan(
         state_dir, tmp_path / "after-results", after_repository, target_revision=after_revision
     )
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        for (identity_json,) in connection.execute("SELECT target_git_identity_json FROM scans"):
+            assert json.loads(identity_json)["origin"] == ["github.com", "example/project"]
     for target in (before_repository, after_repository):
         pending = run_workbench(state_dir, "list-unmatched-scan-pairs", "--repository", str(target))
         assert pending["scanCount"] == 2

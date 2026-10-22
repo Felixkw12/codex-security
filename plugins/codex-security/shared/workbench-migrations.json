@@ -446,5 +446,10 @@
     "version": 54,
     "name": "save scan target Git positions",
     "statements": ["ALTER TABLE scans ADD COLUMN target_git_prefix TEXT;"]
+  },
+  {
+    "version": 55,
+    "name": "save scan Git repository identities",
+    "statements": ["ALTER TABLE scans ADD COLUMN target_git_identity_json TEXT;"]
   }
 ]

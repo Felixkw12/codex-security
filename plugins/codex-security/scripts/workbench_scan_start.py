@@ -24,7 +24,9 @@ from workbench_feedback import get_scan_feedback
 from workbench_target import (
     directory_content_digest,
     git_bytes,
+    git_output,
     git_revision,
+    repository_origin,
     worktree_content_digest,
 )
 from workbench_validation import optional_text
@@ -251,15 +253,29 @@ def insert_running_scan(
     git_prefix = (
         git_bytes(target, "rev-parse", "--show-prefix") if revision != "unversioned" else None
     )
+    git_common_directory = (
+        git_output(target, "rev-parse", "--path-format=absolute", "--git-common-dir")
+        if revision != "unversioned"
+        else None
+    )
+    git_identity = (
+        {
+            "commonDirectory": str(Path(git_common_directory).resolve()),
+            "origin": repository_origin(target),
+        }
+        if git_common_directory is not None
+        else None
+    )
     connection.execute(
         """
         INSERT INTO scans (
             id, workspace_id, target_id, target_path, target_revision, target_snapshot_digest,
-            target_device, target_inode, target_git_prefix, source_scopes_json, scope, mode, user_context,
+            target_device, target_inode, target_git_prefix, target_git_identity_json,
+            source_scopes_json, scope, mode, user_context,
             deep_scan_owner_thread_id, diff_target_kind, diff_base_revision,
             diff_head_revision, diff_content_digest, target_summary, scan_dir, model,
             reasoning_effort, status, phase, handoff_status, started_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             'running', 'preflight', ?, ?, ?, ?)
         """,
         (
@@ -269,6 +285,7 @@ def insert_running_scan(
             str(target),
             *target_identity,
             os.fsdecode(git_prefix).removesuffix("\n") if git_prefix is not None else None,
+            json.dumps(git_identity, separators=(",", ":")) if git_identity is not None else None,
             json.dumps(source_scopes, allow_nan=False, separators=(",", ":"), sort_keys=True),
             scope,
             workspace["default_mode"],

@@ -96,6 +96,7 @@ EXPECTED_MIGRATIONS = [
     (52, "record severity classification review counts"),
     (53, "store external source findings without assessments"),
     (54, "save scan target Git positions"),
+    (55, "save scan Git repository identities"),
 ]
 
 
