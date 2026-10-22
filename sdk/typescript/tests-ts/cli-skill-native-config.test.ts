@@ -17,6 +17,7 @@ import {
   resolveCodexCommand,
 } from "../src/runtime.js";
 import { capture } from "./cli-fixtures.js";
+import { executablePathForSpawn } from "../src/executable-path.js";
 
 test.each([0, 23])(
   "native configuration fixture preserves early exit %p with its input still open",
@@ -405,30 +406,6 @@ test.each(["omitted", "omitted with changed gates", "explicit"] as const)(
         await writeCodexConfig(scanConfig, workerRuntime);
         const prompt = join(root, "prompt.md");
         await writeFile(prompt, "Synthetic worker request.");
-        const catalog = join(root, "catalog.json");
-        await writeFile(
-          catalog,
-          JSON.stringify({
-            models: [
-              {
-                slug: "gpt-test",
-                display_name: "Synthetic",
-                base_instructions: "Synthetic instructions",
-                supported_reasoning_levels: [],
-                shell_type: "disabled",
-                visibility: "list",
-                supported_in_api: true,
-                priority: 0,
-                support_verbosity: false,
-                truncation_policy: { mode: "tokens", limit: 10000 },
-                experimental_supported_tools: [],
-                available_access_programs: {
-                  cyber: ["standard", "daybreak_red", "daybreak_blue"],
-                },
-              },
-            ],
-          }),
-        );
         const child = spawn(
           process.execPath,
           [
@@ -473,10 +450,7 @@ test.each(["omitted", "omitted with changed gates", "explicit"] as const)(
           return await response();
         };
         try {
-          const { baseUrl } = await response();
           await writeCodexConfig(join(sharedHome, "config.toml"), {
-            model_catalog_json: catalog,
-            openai_base_url: baseUrl,
             cli_auth_credentials_store: "file",
             features: { plugins: false },
             analytics: { enabled: false },
@@ -485,7 +459,22 @@ test.each(["omitted", "omitted with changed gates", "explicit"] as const)(
           const { threadId, resumed, ...baseline } = await worker("discovery");
           expect(threadId).toBeString();
           expect(resumed).toBe(false);
-          expect(baseline.program).toBe("standard");
+          expect(baseline).toMatchObject({
+            codexHome: sharedHome,
+            codexPath: environment["SYNTHETIC_NATIVE_CODEX"],
+            executable: executablePathForSpawn(
+              environment["SYNTHETIC_NATIVE_CODEX"]!,
+            ),
+            apiKey: "SYNTHETIC_KEY",
+            permissionProfile: "codex_security_deep_scan_worker",
+          });
+          expect(baseline.permissions).toMatchObject({
+            filesystem: {
+              ":root": "read",
+              ":workspace_roots": "write",
+              [sharedHome]: { ".": "deny" },
+            },
+          });
           expect(baseline.daybreak).toBe(
             settings === "explicit" ? false : null,
           );
@@ -494,7 +483,11 @@ test.each(["omitted", "omitted with changed gates", "explicit"] as const)(
               workerRuntime["features"],
             );
           const reducer = await worker("merge");
-          expect(reducer).toMatchObject({ ...baseline, resumed: false });
+          expect(reducer).toEqual({
+            ...baseline,
+            threadId: reducer.threadId,
+            resumed: false,
+          });
           const previousThreads = {
             discovery: threadId,
             merge: reducer.threadId,
@@ -515,7 +508,11 @@ test.each(["omitted", "omitted with changed gates", "explicit"] as const)(
                 kind,
                 resume ? previousThreads[kind] : undefined,
               );
-              expect(receipt).toMatchObject({ ...baseline, resumed: resume });
+              expect(receipt).toEqual({
+                ...baseline,
+                threadId: receipt.threadId,
+                resumed: resume,
+              });
               if (resume) expect(receipt.threadId).toBe(previousThreads[kind]);
             }
           }

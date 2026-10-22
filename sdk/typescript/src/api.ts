@@ -660,6 +660,7 @@ interface ClientDependencies {
   matchFindings?: typeof matchScanFindingsInternal;
 }
 
+/** @internal */
 export const DEFAULT_DEPENDENCIES: ClientDependencies = {
   environment: process.env,
 };

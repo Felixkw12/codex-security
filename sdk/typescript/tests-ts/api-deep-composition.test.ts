@@ -155,9 +155,14 @@ test("ordinary children and reducer share one immutable preparation and knowledg
       independentReviews: expect.objectContaining({ consolidating: false }),
     }),
     expect.objectContaining({
-      phase: "reporting",
+      phase: "discovery",
       status: "running",
-      independentReviews: expect.objectContaining({ consolidating: true }),
+      independentReviews: {
+        active: 0,
+        completed: 2,
+        maximum: 2,
+        consolidating: false,
+      },
     }),
   ]);
   expect(result.cost).not.toBeNull();
@@ -169,23 +174,58 @@ test("ordinary children and reducer share one immutable preparation and knowledg
   );
 });
 
-test("Deep progress distinguishes discovery batches from active merge work", async () => {
+test("Deep progress keeps inter-batch merges in discovery until the stop decision", async () => {
   const h = await fixture();
   await using client = h.makeClient();
-  await client.run(h.repository, {
+  const result = await client.run(h.repository, {
     ...h.options,
     workers: 1,
     maxDiscoveryRuns: 3,
   });
+  expect(
+    h.launches.map(
+      (launch) =>
+        h.records.get(launch.options.env!["CODEX_SECURITY_SCAN_ID"]!)!.mode,
+    ),
+  ).toEqual(["standard", "standard", "deep", "standard", "deep"]);
   expect(h.parentPhases).toEqual(
-    [false, false, true, false, true].map((consolidating, index) =>
+    [
+      { active: 1, completed: 0 },
+      { active: 1, completed: 1 },
+      { active: 0, completed: 2 },
+      { active: 1, completed: 2 },
+      { active: 0, completed: 3 },
+    ].map((reviews) =>
       expect.objectContaining({
-        phase: index < 2 ? "discovery" : "reporting",
+        phase: "discovery",
         status: "running",
-        independentReviews: expect.objectContaining({ consolidating }),
+        independentReviews: {
+          ...reviews,
+          maximum: 3,
+          consolidating: false,
+        },
       }),
     ),
   );
+  const parent = h.records.get(result.manifest.scan.id)!;
+  const saved = await runWorkbench({ ...parent.options, signal: undefined }, [
+    "get-scan",
+    "--scan-id",
+    result.manifest.scan.id,
+  ]);
+  expect((saved["scan"] as JsonObject)["progress"]).toMatchObject({
+    phase: "reporting",
+    status: "complete",
+    independentReviews: {
+      active: 0,
+      completed: 3,
+      maximum: 3,
+      consolidating: false,
+    },
+  });
+  expect(await loadDeepScanCheckpoint(h.outputDir)).toMatchObject({
+    terminalReason: "capped",
+  });
 });
 
 test("a deterministic child receipt verifies the final cost without a reducer", async () => {

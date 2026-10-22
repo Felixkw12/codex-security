@@ -4275,6 +4275,7 @@ test.each(["command", "environment", "permissions"] as const)(
             {
               ...(mode === "permissions"
                 ? {
+                    default_permissions: "audit",
                     permissions: {
                       audit: { filesystem: { [home]: { ".": "read" } } },
                     },
