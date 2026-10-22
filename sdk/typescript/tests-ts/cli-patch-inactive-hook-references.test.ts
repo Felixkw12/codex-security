@@ -206,6 +206,7 @@ for (const nested of [false, true]) {
       await writeFile(
         script,
         `const fs = require("node:fs");
+fs.writeSync(2, "Synthetic native hook probe started.\\n");
 let denied = false;
 try { fs.writeFileSync(${JSON.stringify(hook)}, ${JSON.stringify(changed)}); }
 catch (error) { if (!["EACCES", "EPERM", "EROFS"].includes(error.code)) throw error; denied = true; }
@@ -215,6 +216,9 @@ process.stdout.write(JSON.stringify({ denied }));
       );
       let denied: boolean | undefined;
       let hookProtected = false;
+      let nativeStage = "before model callback";
+      let nativeStdout: string | undefined;
+      const nativeStderr: Buffer[] = [];
       const outcome = await runWorkflow(
         ["patch", "Synthetic issue", "--create-pr", "--json"],
         {
@@ -227,6 +231,7 @@ process.stdout.write(JSON.stringify({ denied }));
                 ? "[]"
                 : "https://github.example.test/example/repository/pull/1",
           onCodex: async (_args, output) => {
+            nativeStage = "before native command";
             const paths = output?.appServer?.permissions?.readOnlyPaths ?? [];
             hookProtected = paths.includes(hook);
             const result = await runRepositoryCommand(
@@ -238,6 +243,7 @@ process.stdout.write(JSON.stringify({ denied }));
               ],
               directory,
               {
+                onStderr: (chunk) => nativeStderr.push(chunk),
                 sandbox: {
                   directory,
                   environment,
@@ -252,13 +258,24 @@ process.stdout.write(JSON.stringify({ denied }));
                 },
               },
             );
+            nativeStdout = result;
+            nativeStage = "parsing native output";
             denied = (JSON.parse(result) as { denied: boolean }).denied;
+            nativeStage = "native output parsed";
             output?.stdout.write("Synthetic patch complete.\n");
             return 0;
           },
         },
       );
-      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(
+        outcome.exitCode,
+        [
+          outcome.stderr,
+          `Native hook probe stage: ${nativeStage}`,
+          `Native stdout: ${JSON.stringify(nativeStdout)}`,
+          `Native stderr: ${JSON.stringify(Buffer.concat(nativeStderr).toString("utf8"))}`,
+        ].join("\n"),
+      ).toBe(0);
       expect({
         hookProtected,
         denied,
