@@ -8409,15 +8409,11 @@ async function patchPublicationDestination(
     ).slice(output.length);
     if (appended) remotes.push(appended.replace(/\n$/u, ""));
   }
-  const fetchRemote = (
-    await run("git", ["remote", "get-url", "origin"], { trim: false })
-  ).replace(/\n$/u, "");
-  const isNetwork = (remote: string) =>
-    !isAbsolute(remote) &&
-    !win32.isAbsolute(remote) &&
-    !remote.startsWith("file://") &&
-    patchRemoteHost(remote);
-  const remote = [...remotes, fetchRemote].find(isNetwork) ?? "";
+  const remote = remotes.find(isNetworkPatchRemote);
+  if (!remote)
+    throw new CodexSecurityError(
+      "Patch publication requires a network push URL for origin.",
+    );
   const host = patchRemoteHost(remote);
   const gitlabHost =
     dependencies.environment["GITLAB_HOST"] ||
@@ -8474,146 +8470,35 @@ async function patchPublicationDestination(
   let limit = 30;
   if (candidates.length > 0) {
     const requestUrl = new URL(candidates[0]!.url);
-    const names = (await run("git", ["remote"])).split("\n");
-    let lookup = "codex-security-push";
-    while (names.some((name) => name.startsWith(lookup))) lookup += "-";
     let lookupError: unknown;
-    const pushRemotes = remotes.filter(isNetwork);
-    let hosted = false;
-    for (const pushRemote of pushRemotes.length ? pushRemotes : [fetchRemote]) {
-      let identityRemote = pushRemote.replace(/^ssh\+git:/u, "ssh:");
-      if (isNetwork(pushRemote)) {
-        const uri = pushRemote.includes("://");
-        const url = uri ? new URL(pushRemote) : patchScpRemote(pushRemote)!;
-        const ssh = ["ssh:", "git+ssh:", "ssh+git:"].includes(url.protocol);
-        let hostname =
-          url.hostname.toLowerCase() === "ssh.github.com"
-            ? "github.com"
-            : url.hostname;
-        if (ssh && patchApiHostname(hostname) !== requestUrl.hostname) {
-          const sshHost = hostname.replace(/^\[|\]$/gu, "");
-          const username = uri
-            ? decodeURIComponent(url.username)
-            : url.username;
-          const sshCommand =
-            dependencies.environment["GIT_SSH_COMMAND"] ??
-            (await run("git", ["config", "--get", "core.sshCommand"]).catch(
-              (error: unknown) => {
-                if (isJsonObject(error) && error["code"] === 1)
-                  return undefined;
-                throw error;
-              },
-            ));
-          const settings = await run("git", [
-            "-c",
-            `alias.codex-security-ssh-config=!${sshCommand ?? (dependencies.environment["GIT_SSH"] !== undefined ? '"$GIT_SSH"' : "ssh")} -G`,
-            "codex-security-ssh-config",
-            ...(url.port ? ["-p", url.port] : []),
-            username ? `${username}@${sshHost}` : sshHost,
-          ]).catch((error: unknown) => {
-            if (isJsonObject(error) && typeof error["code"] === "number")
-              return "";
-            throw error;
-          });
-          const resolved = /^hostname (.+)$/mu.exec(settings)?.[1] ?? hostname;
-          hostname =
-            resolved.toLowerCase() === "ssh.github.com"
-              ? "github.com"
-              : resolved;
-        }
-        if (ssh && patchApiHostname(hostname) === requestUrl.hostname) {
-          const path = (uri ? decodeURIComponent(url.pathname) : url.pathname)
-            .replace(/^\/+|\/+$/gu, "")
-            .replace(/\.git$/u, "");
-          // Preserve literal SCP path bytes when giving the identity URL to gh.
-          identityRemote = `${requestUrl.origin}/${path.split("/").map(encodeURIComponent).join("/")}`;
-        }
-      }
-      await withResolvedPatchRemote(
-        identityRemote,
+    for (const pushRemote of remotes.filter(isNetworkPatchRemote)) {
+      const selected = await githubPatchRepository(
+        pushRemote,
+        requestUrl,
         repository,
         dependencies,
-        async (token, include) => {
-          const config = await run("git", [
-            "rev-parse",
-            "--sq-quote",
-            ...names.map((name) => `remote.${name}.gh-resolved=`),
-            `remote.${lookup}.url=${token}`,
-            `remote.${lookup}context.url=${new URL("..", requestUrl)}`,
-            `remote.${lookup}.gh-resolved=base`,
-          ]);
-          const options = {
-            environment: {
-              GIT_CONFIG: undefined,
-              GIT_CONFIG_PARAMETERS: [
-                dependencies.environment["GIT_CONFIG_PARAMETERS"],
-                config,
-                include,
-              ]
-                .filter(Boolean)
-                .join(" "),
-              GH_REPO: "",
-              GH_HOST: requestUrl.hostname,
-            },
-          };
-          const selected = await dependencies.runRepositoryCommand(
-            "gh",
-            ["repo", "set-default", "--view"],
-            repository,
-            options,
-          );
-          if (!selected) return;
-          hosted = true;
-          let repositoryJson: string;
-          try {
-            repositoryJson = await dependencies.runRepositoryCommand(
-              "gh",
-              [
-                "repo",
-                "view",
-                ...(requestUrl.port ? [`${requestUrl.host}/${selected}`] : []),
-                "--json",
-                "id,url",
-                "--jq",
-                "tojson",
-              ],
-              repository,
-              options,
-            );
-          } catch (error) {
-            lookupError ??= error;
-            return;
-          }
-          const headRepository = JSON.parse(repositoryJson) as {
-            id: string;
-            url: string;
-          };
-          for (;;) {
-            found = candidates.find(
-              (candidate) =>
-                candidate.repositoryId === headRepository.id &&
-                new URL(candidate.url).host ===
-                  new URL(headRepository.url).host,
-            );
-            if (found || candidates.length < limit) break;
-            limit *= 2;
-            candidates = JSON.parse(
-              (await run("gh", [
-                ...requestArguments,
-                "--limit",
-                String(limit),
-              ])) || "[]",
-            ) as ExistingRequest[];
-          }
-        },
       );
+      if (selected && "lookupError" in selected) {
+        lookupError ??= selected.lookupError;
+        continue;
+      }
+      const headRepository = selected?.repository;
+      if (!headRepository) continue;
+      for (;;) {
+        found = candidates.find(
+          (candidate) =>
+            candidate.repositoryId === headRepository.id &&
+            new URL(candidate.url).host === new URL(headRepository.url).host,
+        );
+        if (found || candidates.length < limit) break;
+        limit *= 2;
+        candidates = JSON.parse(
+          (await run("gh", [...requestArguments, "--limit", String(limit)])) ||
+            "[]",
+        ) as ExistingRequest[];
+      }
       if (found) break;
     }
-    if (!hosted && ![...remotes, fetchRemote].some(isNetwork))
-      found = candidates.find(
-        (candidate) =>
-          candidate.repositoryId && candidate.crossRepository === false,
-      );
     if (!found && lookupError !== undefined) throw lookupError;
   }
   return {
@@ -8624,6 +8509,131 @@ async function patchPublicationDestination(
     command,
     existing: found,
   };
+}
+
+function isNetworkPatchRemote(remote: string) {
+  return (
+    !isAbsolute(remote) &&
+    !win32.isAbsolute(remote) &&
+    !remote.startsWith("file://") &&
+    patchRemoteHost(remote)
+  );
+}
+
+async function githubPatchRepository(
+  pushRemote: string,
+  requestUrl: URL,
+  repository: string,
+  dependencies: CliDependencies,
+): Promise<
+  | { repository?: { id: string; url: string }; lookupError?: unknown }
+  | undefined
+> {
+  const run = (command: "git" | "gh" | "glab", args: string[]) =>
+    dependencies.runRepositoryCommand(command, args, repository);
+  const names = (await run("git", ["remote"])).split("\n");
+  let lookup = "codex-security-push";
+  while (names.some((name) => name.startsWith(lookup))) lookup += "-";
+  let identityRemote = pushRemote.replace(/^ssh\+git:/u, "ssh:");
+  if (isNetworkPatchRemote(pushRemote)) {
+    const uri = pushRemote.includes("://");
+    const url = uri ? new URL(pushRemote) : patchScpRemote(pushRemote)!;
+    const ssh = ["ssh:", "git+ssh:", "ssh+git:"].includes(url.protocol);
+    let hostname =
+      url.hostname.toLowerCase() === "ssh.github.com"
+        ? "github.com"
+        : url.hostname;
+    if (ssh && patchApiHostname(hostname) !== requestUrl.hostname) {
+      const sshHost = hostname.replace(/^\[|\]$/gu, "");
+      const username = uri ? decodeURIComponent(url.username) : url.username;
+      const sshCommand =
+        dependencies.environment["GIT_SSH_COMMAND"] ??
+        (await run("git", ["config", "--get", "core.sshCommand"]).catch(
+          (error: unknown) => {
+            if (isJsonObject(error) && error["code"] === 1) return undefined;
+            throw error;
+          },
+        ));
+      const settings = await run("git", [
+        "-c",
+        `alias.codex-security-ssh-config=!${sshCommand ?? (dependencies.environment["GIT_SSH"] !== undefined ? '"$GIT_SSH"' : "ssh")} -G`,
+        "codex-security-ssh-config",
+        ...(url.port ? ["-p", url.port] : []),
+        username ? `${username}@${sshHost}` : sshHost,
+      ]).catch((error: unknown) => {
+        if (isJsonObject(error) && typeof error["code"] === "number") return "";
+        throw error;
+      });
+      const resolved = /^hostname (.+)$/mu.exec(settings)?.[1] ?? hostname;
+      hostname =
+        resolved.toLowerCase() === "ssh.github.com" ? "github.com" : resolved;
+    }
+    if (ssh && patchApiHostname(hostname) === requestUrl.hostname) {
+      const path = (uri ? decodeURIComponent(url.pathname) : url.pathname)
+        .replace(/^\/+|\/+$/gu, "")
+        .replace(/\.git$/u, "");
+      // Preserve literal SCP path bytes when giving the identity URL to gh.
+      identityRemote = `${requestUrl.origin}/${path.split("/").map(encodeURIComponent).join("/")}`;
+    }
+  }
+  return withResolvedPatchRemote(
+    identityRemote,
+    repository,
+    dependencies,
+    async (token, include) => {
+      const config = await run("git", [
+        "rev-parse",
+        "--sq-quote",
+        ...names.map((name) => `remote.${name}.gh-resolved=`),
+        `remote.${lookup}.url=${token}`,
+        `remote.${lookup}context.url=${new URL("..", requestUrl)}`,
+        `remote.${lookup}.gh-resolved=base`,
+      ]);
+      const options = {
+        environment: {
+          GIT_CONFIG: undefined,
+          GIT_CONFIG_PARAMETERS: [
+            dependencies.environment["GIT_CONFIG_PARAMETERS"],
+            config,
+            include,
+          ]
+            .filter(Boolean)
+            .join(" "),
+          GH_REPO: "",
+          GH_HOST: requestUrl.hostname,
+        },
+      };
+      const selected = await dependencies.runRepositoryCommand(
+        "gh",
+        ["repo", "set-default", "--view"],
+        repository,
+        options,
+      );
+      if (!selected) return undefined;
+      let repositoryJson: string;
+      try {
+        repositoryJson = await dependencies.runRepositoryCommand(
+          "gh",
+          [
+            "repo",
+            "view",
+            ...(requestUrl.port ? [`${requestUrl.host}/${selected}`] : []),
+            "--json",
+            "id,url",
+            "--jq",
+            "tojson",
+          ],
+          repository,
+          options,
+        );
+      } catch (lookupError) {
+        return { lookupError };
+      }
+      return {
+        repository: JSON.parse(repositoryJson) as { id: string; url: string },
+      };
+    },
+  );
 }
 
 async function patchRepositoryRoot(
@@ -9302,7 +9312,7 @@ async function publishPatchBranch(
     dependencies.runRepositoryCommand(command, args, repository);
   let retryable = true;
   try {
-    const { remote, gitlab, command, existing } =
+    const { remote, remotes, gitlab, command, existing } =
       await patchPublicationDestination(repository, branch, dependencies);
     const gitlabRepository = gitlab ? gitlabPatchRepository(remote) : remote;
     let url = existing?.url;
@@ -9324,6 +9334,37 @@ async function publishPatchBranch(
     }
 
     if (!url) {
+      let head = branch;
+      if (!gitlab) {
+        const base = new URL(
+          await run("gh", ["repo", "view", "--json", "url", "--jq", ".url"]),
+        );
+        let headRepository: URL | undefined;
+        for (const pushRemote of remotes.filter(isNetworkPatchRemote)) {
+          const lookup = await githubPatchRepository(
+            pushRemote,
+            base,
+            repository,
+            dependencies,
+          );
+          if (lookup && "lookupError" in lookup) throw lookup.lookupError;
+          const hosted = lookup?.repository;
+          if (!hosted) continue;
+          const selected = new URL(hosted.url);
+          if (selected.host !== base.host) continue;
+          headRepository = selected;
+          break;
+        }
+        if (!headRepository)
+          throw new CodexSecurityError(
+            "Patch publication requires an origin push URL on the pull request host.",
+          );
+        if (
+          headRepository.pathname.toLowerCase() !== base.pathname.toLowerCase()
+        )
+          head = `${headRepository.pathname.split("/")[1]}:${branch}`;
+      }
+
       const configuredRecursion = (
         await run("git", ["config", "--list", "--name-only"])
       )
@@ -9370,7 +9411,7 @@ async function publishPatchBranch(
               "create",
               "--draft",
               "--head",
-              branch,
+              head,
               "--title",
               PATCH_PR_TITLE,
               "--body",
