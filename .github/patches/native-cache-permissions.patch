@@ -1,0 +1,1163 @@
+diff --git a/codex-rs/windows-sandbox-rs/src/allow.rs b/codex-rs/windows-sandbox-rs/src/allow.rs
+index 4eb4ec29614aa18ebf7f8c2fe31ed559f4c1c737..f29cac285fcc8a6f60ccf413fd7fee52a82a99e8 100644
+--- a/codex-rs/windows-sandbox-rs/src/allow.rs
++++ b/codex-rs/windows-sandbox-rs/src/allow.rs
+@@ -41,6 +41,20 @@ pub(crate) fn compute_allow_paths_for_permissions(
+     AllowDenyPaths { allow, deny }
+ }
+ 
++pub(crate) fn effective_write_deny_paths(
++    permissions: &ResolvedWindowsSandboxPermissions,
++    command_cwd: &Path,
++    env_map: &HashMap<String, String>,
++    explicit_deny_write_paths: &[PathBuf],
++) -> Vec<PathBuf> {
++    let mut paths: Vec<PathBuf> = explicit_deny_write_paths
++        .iter()
++        .map(|path| crate::path_normalization::canonicalize_path(path))
++        .collect();
++    paths.extend(compute_allow_paths_for_permissions(permissions, command_cwd, env_map).deny);
++    paths
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+diff --git a/codex-rs/windows-sandbox-rs/src/cap.rs b/codex-rs/windows-sandbox-rs/src/cap.rs
+index 41b33b63fda6f9bbc648fef98e5c9065f8f17b5e..dc45b9d81941f5c631d9c1b8ae21316b05d259af 100644
+--- a/codex-rs/windows-sandbox-rs/src/cap.rs
++++ b/codex-rs/windows-sandbox-rs/src/cap.rs
+@@ -9,6 +9,11 @@ use serde::Deserialize;
+ use serde::Serialize;
+ use std::collections::HashMap;
+ use std::fs;
++use std::fs::OpenOptions;
++use std::io::Read;
++use std::io::Seek;
++use std::io::SeekFrom;
++use std::io::Write;
+ use std::path::Path;
+ use std::path::PathBuf;
+ 
+@@ -125,6 +130,91 @@ pub fn workspace_write_cap_sid_for_root(
+     }
+ }
+ 
++/// Capability identities used by write policies must not share persistent deny ACEs.
++/// Keep this store separate from `cap_sid`: older binaries rewrite that legacy file.
++pub(crate) fn workspace_write_cap_sid_for_policy(
++    codex_home: &Path,
++    root: &Path,
++    deny_write_paths: &[PathBuf],
++) -> Result<String> {
++    let mut deny_keys: Vec<String> = deny_write_paths
++        .iter()
++        .map(|path| policy_path_key(path))
++        .collect();
++    deny_keys.sort();
++    deny_keys.dedup();
++    let key = serde_json::to_string(&(policy_path_key(root), deny_keys))?;
++    fs::create_dir_all(codex_home)
++        .with_context(|| format!("create capability directory {}", codex_home.display()))?;
++    let path = codex_home.join("write_policy_cap_sids");
++    let mut file = OpenOptions::new()
++        .read(true)
++        .write(true)
++        .create(true)
++        .truncate(false)
++        .open(&path)
++        .with_context(|| format!("open write policy capabilities {}", path.display()))?;
++    // Setup and token construction can run in different processes. Hold one file lock
++    // across allocation and persistence so both receive the same SID on first use.
++    file.lock()
++        .with_context(|| format!("lock write policy capabilities {}", path.display()))?;
++    let mut contents = String::new();
++    file.read_to_string(&mut contents)?;
++    let mut capabilities: HashMap<String, String> = if contents.is_empty() {
++        HashMap::new()
++    } else {
++        serde_json::from_str(&contents)
++            .with_context(|| format!("read write policy capabilities {}", path.display()))?
++    };
++    if let Some(sid) = capabilities.get(&key) {
++        return Ok(sid.clone());
++    }
++    let sid = make_random_cap_sid_string();
++    capabilities.insert(key, sid.clone());
++    let serialized = serde_json::to_vec(&capabilities)?;
++    file.seek(SeekFrom::Start(0))?;
++    file.write_all(&serialized)?;
++    file.set_len(serialized.len() as u64)?;
++    Ok(sid)
++}
++
++/// Serialize policy ACL refreshes that share the same capability namespace.
++/// SID allocation alone cannot prevent concurrent whole-DACL updates losing grants.
++pub(crate) fn lock_write_policy_acls(codex_home: &Path) -> Result<fs::File> {
++    fs::create_dir_all(codex_home)?;
++    let path = codex_home.join("write_policy_acl_lock");
++    let file = OpenOptions::new()
++        .read(true)
++        .write(true)
++        .create(true)
++        .truncate(false)
++        .open(&path)
++        .with_context(|| format!("open write policy ACL lock {}", path.display()))?;
++    file.lock()
++        .with_context(|| format!("lock write policy ACLs {}", path.display()))?;
++    Ok(file)
++}
++
++fn policy_path_key(path: &Path) -> String {
++    // Setup materializes missing carveouts. Resolve their existing ancestor now so
++    // their key stays the same after creation, including paths through junctions.
++    let mut ancestor = path;
++    let mut suffix = Vec::new();
++    loop {
++        if let Ok(mut canonical) = dunce::canonicalize(ancestor) {
++            for component in suffix.iter().rev() {
++                canonical.push(component);
++            }
++            return canonical_path_key(&canonical);
++        }
++        let (Some(parent), Some(name)) = (ancestor.parent(), ancestor.file_name()) else {
++            return canonical_path_key(path);
++        };
++        suffix.push(name);
++        ancestor = parent;
++    }
++}
++
+ pub fn workspace_write_root_contains_path(root: &Path, path: &Path) -> bool {
+     canonicalize_path(path).starts_with(canonicalize_path(root))
+ }
+@@ -200,4 +290,136 @@ mod tests {
+         assert_eq!(caps.workspace_by_cwd.len(), 1);
+         assert_eq!(caps.writable_root_by_path.len(), 1);
+     }
++
++    #[test]
++    fn write_policy_capabilities_preserve_legacy_and_isolate_denies() {
++        let temporary = tempfile::tempdir().expect("temporary");
++        let home = temporary.path().join("home");
++        let root = temporary.path().join("workspace");
++        std::fs::create_dir_all(&root).expect("workspace");
++        let legacy = workspace_write_cap_sid_for_root(&home, &root, &root).expect("legacy SID");
++        let legacy_bytes = std::fs::read(super::cap_sid_file(&home)).expect("legacy state");
++        let model_paths = [root.join("objects"), root.join("tmp")];
++        let model = super::workspace_write_cap_sid_for_policy(&home, &root, &model_paths)
++            .expect("model SID");
++        let snapshot =
++            super::workspace_write_cap_sid_for_policy(&home, &root, &[]).expect("snapshot SID");
++        assert_ne!(model, snapshot);
++        assert_ne!(legacy, model);
++        assert_ne!(legacy, snapshot);
++        assert_eq!(
++            std::fs::read(super::cap_sid_file(&home)).expect("legacy state after allocation"),
++            legacy_bytes
++        );
++        assert_eq!(
++            super::workspace_write_cap_sid_for_policy(&home, &root, &model_paths)
++                .expect("resumed model SID"),
++            model
++        );
++        assert_eq!(
++            super::workspace_write_cap_sid_for_policy(&home, &root, &[])
++                .expect("resumed snapshot SID"),
++            snapshot
++        );
++    }
++
++    #[test]
++    fn write_policy_capabilities_normalize_paths_and_materialized_carveouts() {
++        let temporary = tempfile::tempdir().expect("temporary");
++        let home = temporary.path().join("home");
++        let root = temporary.path().join("workspace");
++        std::fs::create_dir_all(&root).expect("workspace");
++        let objects = root.join("objects");
++        let pending = root.join("tmp");
++        let before = super::workspace_write_cap_sid_for_policy(
++            &home,
++            &root,
++            &[objects.clone(), pending.clone(), objects.clone()],
++        )
++        .expect("missing carveouts");
++        std::fs::create_dir_all(&objects).expect("objects");
++        std::fs::create_dir_all(&pending).expect("tmp");
++        let after = super::workspace_write_cap_sid_for_policy(
++            &home,
++            &root.join("."),
++            &[pending.join("."), objects.join(".")],
++        )
++        .expect("created carveouts");
++        assert_eq!(before, after);
++    }
++
++    #[cfg(unix)]
++    #[test]
++    fn write_policy_capabilities_resolve_missing_children_through_aliases() {
++        let temporary = tempfile::tempdir().expect("temporary");
++        let home = temporary.path().join("home");
++        let root = temporary.path().join("workspace");
++        let alias = temporary.path().join("alias");
++        std::fs::create_dir_all(&root).expect("workspace");
++        std::os::unix::fs::symlink(&root, &alias).expect("alias");
++        let before = super::workspace_write_cap_sid_for_policy(
++            &home,
++            &alias,
++            &[alias.join("cache/objects")],
++        )
++        .expect("missing aliased carveout");
++        std::fs::create_dir_all(root.join("cache/objects")).expect("create carveout");
++        let after =
++            super::workspace_write_cap_sid_for_policy(&home, &root, &[root.join("cache/objects")])
++                .expect("materialized carveout");
++        assert_eq!(before, after);
++    }
++
++    #[test]
++    fn write_policy_capabilities_are_process_safe() {
++        const CHILD_HOME: &str = "CODEX_TEST_POLICY_CAPABILITY_HOME";
++        const CHILD_RESULT: &str = "CODEX_TEST_POLICY_CAPABILITY_RESULT";
++        if let Some(home) = std::env::var_os(CHILD_HOME) {
++            let home = PathBuf::from(home);
++            let root = home.join("workspace");
++            let model =
++                super::workspace_write_cap_sid_for_policy(&home, &root, &[root.join("objects")])
++                    .expect("child model SID");
++            let snapshot = super::workspace_write_cap_sid_for_policy(&home, &root, &[])
++                .expect("child snapshot SID");
++            std::fs::write(
++                std::env::var_os(CHILD_RESULT).expect("result path"),
++                serde_json::to_vec(&(model, snapshot)).expect("serialize result"),
++            )
++            .expect("write child result");
++            return;
++        }
++        let temporary = tempfile::tempdir().expect("temporary");
++        let home = temporary.path().join("home");
++        std::fs::create_dir_all(home.join("workspace")).expect("workspace");
++        let children = (0..8)
++            .map(|index| {
++                let output = temporary.path().join(format!("result-{index}.json"));
++                let child =
++                    std::process::Command::new(std::env::current_exe().expect("test executable"))
++                        .args([
++                            "--exact",
++                            "cap::tests::write_policy_capabilities_are_process_safe",
++                        ])
++                        .env(CHILD_HOME, &home)
++                        .env(CHILD_RESULT, &output)
++                        .stdout(std::process::Stdio::piped())
++                        .stderr(std::process::Stdio::piped())
++                        .spawn()
++                        .expect("spawn capability allocator");
++                (child, output)
++            })
++            .collect::<Vec<_>>();
++        let mut results = Vec::new();
++        for (child, result) in children {
++            let output = child.wait_with_output().expect("wait allocator");
++            assert!(output.status.success(), "{:?}", output);
++            let pair: (String, String) =
++                serde_json::from_slice(&std::fs::read(result).expect("child result"))
++                    .expect("parse child result");
++            assert_ne!(pair.0, pair.1);
++            results.push(pair);
++        }
++        assert!(results.iter().all(|pair| pair == &results[0]));
++    }
+ }
+diff --git a/codex-rs/windows-sandbox-rs/src/desktop_tests.rs b/codex-rs/windows-sandbox-rs/src/desktop_tests.rs
+index 00d516058f21b2185c7328b253529efc064e4c79..a0d4c3bfc0fe5afd83f1a579cdbffa63de0539fb 100644
+--- a/codex-rs/windows-sandbox-rs/src/desktop_tests.rs
++++ b/codex-rs/windows-sandbox-rs/src/desktop_tests.rs
+@@ -6,6 +6,7 @@ use crate::resolved_permissions::ResolvedWindowsSandboxPermissions;
+ use crate::setup::SandboxSetupRequest;
+ use crate::setup::SetupRootOverrides;
+ use crate::spawn_prep::legacy_session_capability_roots;
++use crate::spawn_prep::legacy_write_deny_paths;
+ use crate::spawn_prep::prepare_legacy_session_security;
+ use anyhow::Result;
+ use codex_protocol::models::PermissionProfile;
+@@ -194,6 +195,7 @@ fn legacy_desktop_reuses_only_equivalent_permissions() -> Result<()> {
+         &codex_home,
+         &workspace,
+         legacy_session_capability_roots(&permissions, &workspace, &env, &codex_home),
++        &legacy_write_deny_paths(&permissions, &workspace, &env, &[]),
+     )?;
+     let _token = unsafe { OwnedHandle::from_raw_handle(security.h_token as *mut _) };
+     let desktop = |deny_write_paths| {
+diff --git a/codex-rs/windows-sandbox-rs/src/elevated_impl.rs b/codex-rs/windows-sandbox-rs/src/elevated_impl.rs
+index 69cdb39ea670c04d36717ed3e1ab47b37cf5450d..8eb17682a40c262443058c0d0d8097f2572b8b55 100644
+--- a/codex-rs/windows-sandbox-rs/src/elevated_impl.rs
++++ b/codex-rs/windows-sandbox-rs/src/elevated_impl.rs
+@@ -26,7 +26,7 @@ mod windows_impl {
+     use super::ElevatedSandboxProfileCaptureRequest;
+     use crate::acl::allow_null_device;
+     use crate::cap::load_or_create_cap_sids;
+-    use crate::cap::workspace_write_cap_sid_for_root;
++    use crate::cap::workspace_write_cap_sid_for_policy;
+     use crate::env::ensure_non_interactive_pager;
+     use crate::env::inherit_path_env;
+     use crate::env::normalize_null_device_env;
+@@ -140,6 +140,12 @@ mod windows_impl {
+ 
+         let logs_base_dir: Option<&Path> = Some(sandbox_base.as_path());
+         log_start(&command, logs_base_dir);
++        let effective_deny_write_paths = crate::allow::effective_write_deny_paths(
++            &permissions,
++            cwd,
++            &env_map,
++            &deny_write_paths_override,
++        );
+         let sandbox_creds = require_logon_sandbox_creds(
+             &permissions,
+             cwd,
+@@ -166,7 +172,13 @@ mod windows_impl {
+             );
+             let cap_sids = write_roots
+                 .iter()
+-                .map(|root| workspace_write_cap_sid_for_root(codex_home, cwd, root))
++                .map(|root| {
++                    workspace_write_cap_sid_for_policy(
++                        codex_home,
++                        root,
++                        &effective_deny_write_paths,
++                    )
++                })
+                 .collect::<Result<Vec<_>>>()?;
+             if cap_sids.is_empty() {
+                 anyhow::bail!("workspace-write sandbox has no writable root capability SIDs");
+diff --git a/codex-rs/windows-sandbox-rs/src/lib.rs b/codex-rs/windows-sandbox-rs/src/lib.rs
+index f3de67d568970363e0e609efae7bbaa5be174058..eb2a574c280c20d6ed1c95ae630d9bb825328b82 100644
+--- a/codex-rs/windows-sandbox-rs/src/lib.rs
++++ b/codex-rs/windows-sandbox-rs/src/lib.rs
+@@ -563,6 +563,7 @@ mod windows_impl {
+     use super::spawn_prep::allow_null_device_for_workspace_write;
+     use super::spawn_prep::apply_legacy_session_acl_rules;
+     use super::spawn_prep::legacy_session_capability_roots;
++    use super::spawn_prep::legacy_write_deny_paths;
+     use super::spawn_prep::prepare_legacy_session_security;
+     use super::spawn_prep::prepare_legacy_spawn_context;
+     use super::spawn_prep::root_capability_sids;
+@@ -753,11 +754,18 @@ mod windows_impl {
+         }
+         let capability_roots =
+             legacy_session_capability_roots(&permissions, &current_dir, &env_map, codex_home);
++        let capability_deny_write_paths = legacy_write_deny_paths(
++            &permissions,
++            &current_dir,
++            &env_map,
++            &additional_deny_write_paths,
++        );
+         let security = prepare_legacy_session_security(
+             uses_write_capabilities,
+             codex_home,
+             cwd,
+             capability_roots,
++            &capability_deny_write_paths,
+         )?;
+         allow_null_device_for_workspace_write(uses_write_capabilities);
+         apply_legacy_session_acl_rules(
+@@ -957,7 +965,14 @@ mod windows_impl {
+         let current_dir = cwd.to_path_buf();
+         let capability_roots =
+             legacy_session_capability_roots(&permissions, &current_dir, env_map, codex_home);
+-        let write_root_sids = root_capability_sids(codex_home, cwd, capability_roots)?;
++        let capability_deny_write_paths =
++            legacy_write_deny_paths(&permissions, &current_dir, env_map, &[]);
++        let write_root_sids = root_capability_sids(
++            codex_home,
++            cwd,
++            capability_roots,
++            &capability_deny_write_paths,
++        )?;
+         apply_legacy_session_acl_rules(
+             &permissions,
+             codex_home,
+diff --git a/codex-rs/windows-sandbox-rs/src/setup.rs b/codex-rs/windows-sandbox-rs/src/setup.rs
+index 7c9cd6362c58425098f730aa7cdddeb4be403211..5b0404a6399991e936693af9488c73f3a5760ad0 100644
+--- a/codex-rs/windows-sandbox-rs/src/setup.rs
++++ b/codex-rs/windows-sandbox-rs/src/setup.rs
+@@ -16,8 +16,6 @@ use std::sync::Condvar;
+ use std::sync::Mutex;
+ use std::sync::OnceLock;
+ 
+-use crate::allow::AllowDenyPaths;
+-use crate::allow::compute_allow_paths_for_permissions;
+ use crate::app_package::registered_core_requested;
+ use crate::deny_read_resolver::resolve_windows_deny_read_paths;
+ use crate::helper_materialization::bundled_executable_path_for_exe;
+@@ -1333,18 +1331,12 @@ pub(crate) fn build_payload_deny_write_paths(
+     request: &SandboxSetupRequest<'_>,
+     explicit_deny_write_paths: Option<Vec<PathBuf>>,
+ ) -> Vec<PathBuf> {
+-    let allow_deny_paths: AllowDenyPaths = compute_allow_paths_for_permissions(
++    crate::allow::effective_write_deny_paths(
+         request.permissions,
+         request.command_cwd,
+         request.env_map,
+-    );
+-    let mut deny_write_paths: Vec<PathBuf> = explicit_deny_write_paths
+-        .unwrap_or_default()
+-        .into_iter()
+-        .map(|path| canonicalize_path(&path))
+-        .collect();
+-    deny_write_paths.extend(allow_deny_paths.deny);
+-    deny_write_paths
++        &explicit_deny_write_paths.unwrap_or_default(),
++    )
+ }
+ 
+ fn build_payload_deny_read_paths(explicit_deny_read_paths: Option<Vec<PathBuf>>) -> Vec<PathBuf> {
+diff --git a/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs b/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs
+index d4557688e93703b5a7e9a32d9f450e4581a992d7..385522eb475038654c274dfc4b30d7c5d7e47c4c 100644
+--- a/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs
++++ b/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs
+@@ -15,6 +15,7 @@ use crate::SetupFailure;
+ use crate::SetupRuntime;
+ use crate::acquire_sandbox_setup_lock;
+ use crate::add_deny_write_ace;
++use crate::cap::workspace_write_cap_sid_for_policy;
+ use crate::convert_string_sid_to_sid;
+ use crate::ensure_allow_mask_aces_with_inheritance;
+ use crate::ensure_allow_write_aces;
+@@ -39,7 +40,6 @@ use crate::setup_log_writer;
+ use crate::string_from_sid_bytes;
+ use crate::sync_persistent_deny_read_acls;
+ use crate::to_wide;
+-use crate::workspace_write_cap_sid_for_root;
+ use crate::workspace_write_root_overlaps_path;
+ use crate::write_file_atomically;
+ use crate::write_setup_error_report;
+@@ -178,30 +178,31 @@ fn workspace_write_cap_sids_for_path(
+     command_cwd: &Path,
+     write_roots: &[PathBuf],
+     path: &Path,
++    deny_write_paths: &[PathBuf],
+ ) -> Result<Vec<String>> {
+     let mut sid_strs = Vec::new();
+     for root in write_roots {
+         if workspace_write_root_overlaps_path(root, path) {
+-            sid_strs.push(workspace_write_cap_sid_for_root(
++            sid_strs.push(workspace_write_cap_sid_for_policy(
+                 codex_home,
+-                command_cwd,
+                 root,
++                deny_write_paths,
+             )?);
+         }
+     }
+     if sid_strs.is_empty() {
+         if write_roots.is_empty() {
+-            sid_strs.push(workspace_write_cap_sid_for_root(
++            sid_strs.push(workspace_write_cap_sid_for_policy(
+                 codex_home,
+                 command_cwd,
+-                command_cwd,
++                deny_write_paths,
+             )?);
+         } else {
+             for root in write_roots {
+-                sid_strs.push(workspace_write_cap_sid_for_root(
++                sid_strs.push(workspace_write_cap_sid_for_policy(
+                     codex_home,
+-                    command_cwd,
+                     root,
++                    deny_write_paths,
+                 )?);
+             }
+         }
+@@ -234,6 +235,7 @@ struct ReadAclSubjects<'a> {
+ }
+ 
+ fn apply_read_acls(
++    codex_home: &Path,
+     read_roots: &[PathBuf],
+     subjects: &ReadAclSubjects<'_>,
+     log: &mut dyn Write,
+@@ -243,6 +245,7 @@ fn apply_read_acls(
+     inheritance: u32,
+ ) -> Result<()> {
+     for root in read_roots {
++        let _policy_acl_guard = crate::cap::lock_write_policy_acls(codex_home)?;
+         if !root.exists() {
+             log_line(
+                 log,
+@@ -680,6 +683,7 @@ fn run_read_acl_only(payload: &Payload, log: &mut dyn Write) -> Result<()> {
+             rx_psids: &rx_psids,
+         };
+         apply_read_acls(
++            &payload.codex_home,
+             &payload.read_roots,
+             &subjects,
+             log,
+@@ -915,6 +919,10 @@ fn run_setup_full(payload: &Payload, log: &mut dyn Write, sbx_dir: &Path) -> Res
+         provision_sandbox(payload, log, sbx_dir)?;
+     }
+ 
++    // Keep policy grants and denies atomic relative to other refresh helpers.
++    // The read helper is asynchronous and locks one root at a time after launch.
++    let _policy_acl_guard = crate::cap::lock_write_policy_acls(&payload.codex_home)?;
++
+     let sandbox_group_sid = resolve_sandbox_users_group_sid().map_err(|err| {
+         anyhow::Error::new(SetupFailure::new(
+             SetupErrorCode::HelperSidResolveFailed,
+@@ -1050,8 +1058,11 @@ fn run_setup_full(payload: &Payload, log: &mut dyn Write, sbx_dir: &Path) -> Res
+             )?;
+             continue;
+         }
+-        let root_cap_sid_str =
+-            workspace_write_cap_sid_for_root(&payload.codex_home, &payload.command_cwd, root)?;
++        let root_cap_sid_str = workspace_write_cap_sid_for_policy(
++            &payload.codex_home,
++            root,
++            &payload.deny_write_paths,
++        )?;
+         let root_cap_psid = unsafe {
+             convert_string_sid_to_sid(&root_cap_sid_str)
+                 .ok_or_else(|| anyhow::anyhow!("convert write root capability SID failed"))?
+@@ -1157,6 +1168,7 @@ fn run_setup_full(payload: &Payload, log: &mut dyn Write, sbx_dir: &Path) -> Res
+             &payload.command_cwd,
+             &payload.write_roots,
+             path,
++            &payload.deny_write_paths,
+         )?;
+         for deny_sid_str in deny_sid_strs {
+             let deny_psid = unsafe {
+@@ -1235,12 +1247,12 @@ mod tests {
+     use super::WRITE_ROOT_ALLOW_MASK;
+     use super::convert_string_sid_to_sid;
+     use super::workspace_write_cap_sids_for_path;
++    use crate::cap::workspace_write_cap_sid_for_policy;
+     use crate::ensure_allow_mask_aces;
+     use crate::ensure_allow_write_aces;
+     use crate::load_or_create_cap_sids;
+     use crate::path_mask_allows;
+     use crate::path_write_aces_need_refresh;
+-    use crate::workspace_write_cap_sid_for_root;
+     use codex_otel::StatsigMetricsSettings;
+     use pretty_assertions::assert_eq;
+     use serde_json::json;
+@@ -1312,7 +1324,7 @@ mod tests {
+         fs::create_dir_all(&codex_home).expect("create codex home");
+         fs::create_dir_all(&workspace).expect("create workspace");
+ 
+-        let sid = workspace_write_cap_sid_for_root(&codex_home, &workspace, &workspace)
++        let sid = workspace_write_cap_sid_for_policy(&codex_home, &workspace, &[])
+             .expect("workspace sid");
+         let psid = unsafe { convert_string_sid_to_sid(&sid).expect("convert workspace sid") };
+         let stale_write_mask = WRITE_ROOT_ALLOW_MASK | FILE_DELETE_CHILD;
+@@ -1344,9 +1356,9 @@ mod tests {
+         fs::create_dir_all(&workspace).expect("create workspace");
+         fs::create_dir_all(&other_root).expect("create other root");
+ 
+-        let workspace_sid = workspace_write_cap_sid_for_root(&codex_home, &workspace, &workspace)
++        let workspace_sid = workspace_write_cap_sid_for_policy(&codex_home, &workspace, &[])
+             .expect("workspace sid");
+-        let other_sid = workspace_write_cap_sid_for_root(&codex_home, &workspace, &other_root)
++        let other_sid = workspace_write_cap_sid_for_policy(&codex_home, &other_root, &[])
+             .expect("other root sid");
+         let workspace_psid =
+             unsafe { convert_string_sid_to_sid(&workspace_sid).expect("convert workspace sid") };
+@@ -1384,7 +1396,7 @@ mod tests {
+         fs::create_dir_all(&codex_home).expect("create codex home");
+         fs::create_dir_all(&workspace).expect("create workspace");
+ 
+-        let sid = workspace_write_cap_sid_for_root(&codex_home, &workspace, &workspace)
++        let sid = workspace_write_cap_sid_for_policy(&codex_home, &workspace, &[])
+             .expect("workspace sid");
+         let psid = unsafe { convert_string_sid_to_sid(&sid).expect("convert workspace sid") };
+         let seeded_explicit =
+@@ -1438,12 +1450,16 @@ mod tests {
+         fs::create_dir_all(&stale_root).expect("create stale root");
+         fs::create_dir_all(&deny_path).expect("create deny path");
+ 
+-        let stale_sid = workspace_write_cap_sid_for_root(&codex_home, &workspace, &stale_root)
+-            .expect("stale sid");
+-        let active_sid = workspace_write_cap_sid_for_root(&codex_home, &workspace, &active_root)
+-            .expect("active sid");
+-        let workspace_sid = workspace_write_cap_sid_for_root(&codex_home, &workspace, &workspace)
+-            .expect("workspace sid");
++        let deny_write_paths = [deny_path.clone()];
++        let stale_sid =
++            workspace_write_cap_sid_for_policy(&codex_home, &stale_root, &deny_write_paths)
++                .expect("stale sid");
++        let active_sid =
++            workspace_write_cap_sid_for_policy(&codex_home, &active_root, &deny_write_paths)
++                .expect("active sid");
++        let workspace_sid =
++            workspace_write_cap_sid_for_policy(&codex_home, &workspace, &deny_write_paths)
++                .expect("workspace sid");
+         let caps = load_or_create_cap_sids(&codex_home).expect("load caps");
+ 
+         let deny_sids = workspace_write_cap_sids_for_path(
+@@ -1451,6 +1467,7 @@ mod tests {
+             &workspace,
+             &[workspace.clone(), active_root],
+             &deny_path,
++            &deny_write_paths,
+         )
+         .expect("deny sids");
+ 
+@@ -1474,12 +1491,16 @@ mod tests {
+         fs::create_dir_all(&stale_root).expect("create stale root");
+         fs::create_dir_all(&deny_path).expect("create deny path");
+ 
+-        let stale_sid = workspace_write_cap_sid_for_root(&codex_home, &workspace, &stale_root)
+-            .expect("stale sid");
+-        let active_sid = workspace_write_cap_sid_for_root(&codex_home, &workspace, &active_root)
+-            .expect("active sid");
+-        let workspace_sid = workspace_write_cap_sid_for_root(&codex_home, &workspace, &workspace)
+-            .expect("workspace sid");
++        let deny_write_paths = [deny_path.clone()];
++        let stale_sid =
++            workspace_write_cap_sid_for_policy(&codex_home, &stale_root, &deny_write_paths)
++                .expect("stale sid");
++        let active_sid =
++            workspace_write_cap_sid_for_policy(&codex_home, &active_root, &deny_write_paths)
++                .expect("active sid");
++        let workspace_sid =
++            workspace_write_cap_sid_for_policy(&codex_home, &workspace, &deny_write_paths)
++                .expect("workspace sid");
+         let caps = load_or_create_cap_sids(&codex_home).expect("load caps");
+ 
+         let deny_sids = workspace_write_cap_sids_for_path(
+@@ -1487,6 +1508,7 @@ mod tests {
+             &workspace,
+             &[workspace.clone(), active_root],
+             &deny_path,
++            &deny_write_paths,
+         )
+         .expect("deny sids");
+ 
+@@ -1508,16 +1530,20 @@ mod tests {
+         fs::create_dir_all(&workspace).expect("create workspace");
+         fs::create_dir_all(&nested_root).expect("create nested root");
+ 
+-        let workspace_sid = workspace_write_cap_sid_for_root(&codex_home, &workspace, &workspace)
+-            .expect("workspace sid");
+-        let nested_sid = workspace_write_cap_sid_for_root(&codex_home, &workspace, &nested_root)
+-            .expect("nested sid");
++        let deny_write_paths = [protected_dir.clone()];
++        let workspace_sid =
++            workspace_write_cap_sid_for_policy(&codex_home, &workspace, &deny_write_paths)
++                .expect("workspace sid");
++        let nested_sid =
++            workspace_write_cap_sid_for_policy(&codex_home, &nested_root, &deny_write_paths)
++                .expect("nested sid");
+ 
+         let deny_sids = workspace_write_cap_sids_for_path(
+             &codex_home,
+             &workspace,
+             &[workspace.clone(), nested_root],
+             &protected_dir,
++            &deny_write_paths,
+         )
+         .expect("deny sids");
+ 
+diff --git a/codex-rs/windows-sandbox-rs/src/setup_provisioning/acl_tests.rs b/codex-rs/windows-sandbox-rs/src/setup_provisioning/acl_tests.rs
+index 876d60501b3e9010ba2a39b82b9c021650c47fe1..3e09826d5cb820c29085159b26da924f9b0e8b3c 100644
+--- a/codex-rs/windows-sandbox-rs/src/setup_provisioning/acl_tests.rs
++++ b/codex-rs/windows-sandbox-rs/src/setup_provisioning/acl_tests.rs
+@@ -14,6 +14,7 @@ use super::lock_sandbox_bin_dir;
+ use super::lock_sandbox_dir;
+ use super::resolve_sid;
+ use super::sid_bytes_to_psid;
++use crate::cap::workspace_write_cap_sid_for_policy;
+ use crate::ensure_allow_write_aces;
+ use crate::extract_setup_failure;
+ use crate::path_mask_allows;
+@@ -26,6 +27,217 @@ use windows_sys::Win32::Foundation::ERROR_PATH_NOT_FOUND;
+ use windows_sys::Win32::Foundation::HLOCAL;
+ use windows_sys::Win32::Foundation::LocalFree;
+ 
++#[test]
++fn snapshot_capability_preserves_model_and_legacy_write_denies() -> anyhow::Result<()> {
++    use crate::acl::add_deny_write_ace;
++    use crate::acl::dacl_has_write_deny_for_sid;
++    use crate::acl::fetch_dacl_handle;
++    use crate::token::LocalSid;
++    use crate::token::create_workspace_write_token_with_caps_from;
++    use crate::token::get_current_token_for_restriction;
++    use crate::token::get_user_sid_bytes;
++    use anyhow::ensure;
++    use std::os::windows::io::AsRawHandle;
++    use std::os::windows::io::FromRawHandle;
++    use std::os::windows::io::OwnedHandle;
++    use windows_sys::Win32::Foundation::GetLastError;
++    use windows_sys::Win32::Security::AccessCheck;
++    use windows_sys::Win32::Security::DuplicateToken;
++    use windows_sys::Win32::Security::GENERIC_MAPPING;
++    use windows_sys::Win32::Security::InitializeSecurityDescriptor;
++    use windows_sys::Win32::Security::SECURITY_DESCRIPTOR;
++    use windows_sys::Win32::Security::SecurityImpersonation;
++    use windows_sys::Win32::Security::SetSecurityDescriptorDacl;
++    use windows_sys::Win32::Security::SetSecurityDescriptorGroup;
++    use windows_sys::Win32::Security::SetSecurityDescriptorOwner;
++    use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
++    use windows_sys::Win32::Storage::FileSystem::FILE_WRITE_DATA;
++
++    let temp = tempfile::tempdir()?;
++    let home = temp.path().join("codex-home");
++    let workspace = temp.path().join("workspace");
++    let protected = workspace.join("cache-objects");
++    fs::create_dir_all(&protected)?;
++    let legacy = LocalSid::from_string(&workspace_write_cap_sid_for_root(
++        &home, &workspace, &workspace,
++    )?)?;
++    let model = LocalSid::from_string(&workspace_write_cap_sid_for_policy(
++        &home,
++        &workspace,
++        std::slice::from_ref(&protected),
++    )?)?;
++    let snapshot =
++        LocalSid::from_string(&workspace_write_cap_sid_for_policy(&home, &workspace, &[])?)?;
++
++    unsafe {
++        let base = OwnedHandle::from_raw_handle(get_current_token_for_restriction()? as _);
++        let token = |sid: &LocalSid| -> anyhow::Result<OwnedHandle> {
++            let primary =
++                OwnedHandle::from_raw_handle(create_workspace_write_token_with_caps_from(
++                    base.as_raw_handle() as _,
++                    &[sid.as_ptr()],
++                )? as _);
++            let mut impersonation = std::ptr::null_mut();
++            ensure!(
++                DuplicateToken(
++                    primary.as_raw_handle() as _,
++                    SecurityImpersonation,
++                    &mut impersonation,
++                ) != 0,
++                "DuplicateToken failed: {}",
++                GetLastError(),
++            );
++            Ok(OwnedHandle::from_raw_handle(impersonation as _))
++        };
++        ensure_allow_write_aces(&workspace, &[legacy.as_ptr()])?;
++        add_deny_write_ace(&protected, legacy.as_ptr())?;
++        let legacy_token = token(&legacy)?;
++        ensure_allow_write_aces(&workspace, &[model.as_ptr()])?;
++        add_deny_write_ace(&protected, model.as_ptr())?;
++        let model_token = token(&model)?;
++
++        // Keep both restricted tokens alive while the snapshot refresh adds its grant.
++        ensure_allow_write_aces(&workspace, &[snapshot.as_ptr()])?;
++        let snapshot_token = token(&snapshot)?;
++        let (dacl, original_descriptor) = fetch_dacl_handle(&protected)?;
++        let result = (|| -> anyhow::Result<()> {
++            assert!(dacl_has_write_deny_for_sid(dacl, legacy.as_ptr()));
++            assert!(dacl_has_write_deny_for_sid(dacl, model.as_ptr()));
++            assert!(!dacl_has_write_deny_for_sid(dacl, snapshot.as_ptr()));
++
++            let mut owner = get_user_sid_bytes(base.as_raw_handle() as _)?;
++            let mut descriptor: SECURITY_DESCRIPTOR = std::mem::zeroed();
++            let sd = std::ptr::addr_of_mut!(descriptor).cast();
++            ensure!(InitializeSecurityDescriptor(sd, 1) != 0);
++            ensure!(SetSecurityDescriptorOwner(sd, owner.as_mut_ptr().cast(), 0) != 0);
++            ensure!(SetSecurityDescriptorGroup(sd, owner.as_mut_ptr().cast(), 0) != 0);
++            ensure!(SetSecurityDescriptorDacl(sd, 1, dacl, 0) != 0);
++            let mapping = GENERIC_MAPPING {
++                GenericRead: FILE_GENERIC_READ,
++                GenericWrite: FILE_GENERIC_WRITE,
++                GenericExecute: FILE_GENERIC_EXECUTE,
++                GenericAll: FILE_ALL_ACCESS,
++            };
++            for (name, token, expected) in [
++                ("legacy", &legacy_token, false),
++                ("model", &model_token, false),
++                ("snapshot", &snapshot_token, true),
++            ] {
++                let mut privileges = [0u64; 128];
++                let mut privilege_bytes = std::mem::size_of_val(&privileges) as u32;
++                let mut granted = 0;
++                let mut allowed = 0;
++                ensure!(
++                    AccessCheck(
++                        sd,
++                        token.as_raw_handle() as _,
++                        FILE_WRITE_DATA,
++                        &mapping,
++                        privileges.as_mut_ptr().cast(),
++                        &mut privilege_bytes,
++                        &mut granted,
++                        &mut allowed,
++                    ) != 0,
++                    "AccessCheck({name}) failed: {}",
++                    GetLastError(),
++                );
++                assert_eq!(allowed != 0, expected, "{name} write access");
++            }
++            Ok(())
++        })();
++        LocalFree(original_descriptor as HLOCAL);
++        result?;
++    }
++    Ok(())
++}
++
++#[test]
++fn concurrent_policy_refreshes_preserve_scoped_root_grants() -> anyhow::Result<()> {
++    use crate::acl::add_deny_write_ace;
++    use crate::acl::dacl_has_write_deny_for_sid;
++    use crate::acl::fetch_dacl_handle;
++    use crate::cap::lock_write_policy_acls;
++    use crate::token::LocalSid;
++    use std::collections::HashSet;
++    use std::path::Path;
++    use std::sync::Barrier;
++
++    let temp = tempfile::tempdir()?;
++    let home = temp.path().join("codex-home");
++    let workspace = temp.path().join("workspace");
++    let legacy_path = workspace.join("legacy-protected");
++    fs::create_dir_all(&legacy_path)?;
++    let legacy = LocalSid::from_string(&workspace_write_cap_sid_for_root(
++        &home, &workspace, &workspace,
++    )?)?;
++    unsafe {
++        ensure_allow_write_aces(&workspace, &[legacy.as_ptr()])?;
++        add_deny_write_ace(&legacy_path, legacy.as_ptr())?;
++    }
++    let has_deny = |path: &Path, sid: &LocalSid| -> anyhow::Result<bool> {
++        unsafe {
++            let (dacl, descriptor) = fetch_dacl_handle(path)?;
++            let denied = dacl_has_write_deny_for_sid(dacl, sid.as_ptr());
++            LocalFree(descriptor as HLOCAL);
++            Ok(denied)
++        }
++    };
++    assert!(has_deny(&legacy_path, &legacy)?);
++
++    let barrier = Barrier::new(8);
++    let policies = std::thread::scope(|scope| {
++        let workers = (0..8)
++            .map(|index| {
++                let home = &home;
++                let workspace = &workspace;
++                let barrier = &barrier;
++                scope.spawn(move || -> anyhow::Result<_> {
++                    barrier.wait();
++                    let _acl_lock = lock_write_policy_acls(home)?;
++                    let protected = workspace.join(format!("policy-{index}-protected"));
++                    fs::create_dir(&protected)?;
++                    let sid_string = workspace_write_cap_sid_for_policy(
++                        home,
++                        workspace,
++                        std::slice::from_ref(&protected),
++                    )?;
++                    let sid = LocalSid::from_string(&sid_string)?;
++                    unsafe {
++                        ensure_allow_write_aces(workspace, &[sid.as_ptr()])?;
++                        add_deny_write_ace(&protected, sid.as_ptr())?;
++                    }
++                    Ok((protected, sid_string))
++                })
++            })
++            .collect::<Vec<_>>();
++        workers
++            .into_iter()
++            .map(|worker| worker.join().expect("ACL refresh worker"))
++            .collect::<anyhow::Result<Vec<_>>>()
++    })?;
++
++    assert_eq!(
++        policies
++            .iter()
++            .map(|(_, sid)| sid)
++            .collect::<HashSet<_>>()
++            .len(),
++        8,
++    );
++    for (protected, sid_string) in policies {
++        let sid = LocalSid::from_string(&sid_string)?;
++        assert!(path_mask_allows(
++            &workspace,
++            &[sid.as_ptr()],
++            FILE_GENERIC_WRITE,
++            /*require_all_bits*/ true,
++        )?);
++        assert!(has_deny(&protected, &sid)?);
++    }
++    assert!(has_deny(&legacy_path, &legacy)?);
++    Ok(())
++}
++
+ #[test]
+ fn bin_lock_report_retains_native_open_error() {
+     let temp = tempfile::tempdir().expect("tempdir");
+@@ -93,7 +305,7 @@ fn lock_sandbox_dir_blocks_inherited_write_for_runner_files() {
+         let sandbox_bin = workspace.join(".sandbox-bin");
+         fs::create_dir(&workspace).expect("create workspace");
+ 
+-        let workspace_sid = workspace_write_cap_sid_for_root(temp.path(), temp.path(), temp.path())
++        let workspace_sid = workspace_write_cap_sid_for_policy(temp.path(), temp.path(), &[])
+             .expect("workspace SID");
+         let workspace_psid =
+             unsafe { convert_string_sid_to_sid(&workspace_sid).expect("convert workspace SID") };
+diff --git a/codex-rs/windows-sandbox-rs/src/spawn_prep.rs b/codex-rs/windows-sandbox-rs/src/spawn_prep.rs
+index a19f0eeaac0818b661b0cf4452e21f254a1f8630..97f95831c77300da566046680a5f9e998176305c 100644
+--- a/codex-rs/windows-sandbox-rs/src/spawn_prep.rs
++++ b/codex-rs/windows-sandbox-rs/src/spawn_prep.rs
+@@ -5,7 +5,7 @@ use crate::acl::ensure_allow_write_aces;
+ use crate::allow::AllowDenyPaths;
+ use crate::allow::compute_allow_paths_for_permissions;
+ use crate::cap::load_or_create_cap_sids;
+-use crate::cap::workspace_write_cap_sid_for_root;
++use crate::cap::workspace_write_cap_sid_for_policy;
+ use crate::cap::workspace_write_root_contains_path;
+ use crate::cap::workspace_write_root_overlaps_path;
+ use crate::cap::workspace_write_root_specificity;
+@@ -149,11 +149,13 @@ pub(crate) fn prepare_legacy_session_security(
+     codex_home: &Path,
+     cwd: &Path,
+     capability_roots: impl IntoIterator<Item = PathBuf>,
++    deny_write_paths: &[PathBuf],
+ ) -> Result<LegacySessionSecurity> {
+     let caps = load_or_create_cap_sids(codex_home)?;
+     let (h_token, readonly_sid, readonly_sid_str, write_root_sids) = unsafe {
+         if uses_write_capabilities {
+-            let write_root_sids = root_capability_sids(codex_home, cwd, capability_roots)?;
++            let write_root_sids =
++                root_capability_sids(codex_home, cwd, capability_roots, deny_write_paths)?;
+             if write_root_sids.is_empty() {
+                 anyhow::bail!("workspace-write sandbox has no writable root capability SIDs");
+             }
+@@ -204,10 +206,32 @@ pub(crate) fn legacy_session_capability_roots(
+     }
+ }
+ 
++pub(crate) fn legacy_write_deny_paths(
++    permissions: &ResolvedWindowsSandboxPermissions,
++    cwd: &Path,
++    env_map: &HashMap<String, String>,
++    explicit_deny_write_paths: &[PathBuf],
++) -> Vec<PathBuf> {
++    let mut paths = crate::allow::effective_write_deny_paths(
++        permissions,
++        cwd,
++        env_map,
++        explicit_deny_write_paths,
++    );
++    // The legacy ACL path also protects these children independently of the policy.
++    paths.extend(
++        [cwd.join(".codex"), cwd.join(".agents")]
++            .into_iter()
++            .filter(|path| path.is_dir()),
++    );
++    paths
++}
++
+ pub(crate) fn root_capability_sids(
+     codex_home: &Path,
+-    cwd: &Path,
++    _cwd: &Path,
+     allow_paths: impl IntoIterator<Item = PathBuf>,
++    deny_write_paths: &[PathBuf],
+ ) -> Result<Vec<RootCapabilitySid>> {
+     let mut roots: Vec<PathBuf> = allow_paths.into_iter().collect();
+     roots.sort_by_key(|root| canonicalize_path(root.as_path()));
+@@ -215,7 +239,7 @@ pub(crate) fn root_capability_sids(
+ 
+     let mut out = Vec::with_capacity(roots.len());
+     for root in roots {
+-        let sid_str = workspace_write_cap_sid_for_root(codex_home, cwd, &root)?;
++        let sid_str = workspace_write_cap_sid_for_policy(codex_home, &root, deny_write_paths)?;
+         let sid = LocalSid::from_string(&sid_str)?;
+         out.push(RootCapabilitySid { root, sid, sid_str });
+     }
+@@ -274,6 +298,7 @@ pub(crate) fn apply_legacy_session_acl_rules(
+     additional_deny_write_paths: &[PathBuf],
+     acl_sids: LegacyAclSids<'_>,
+ ) -> Result<()> {
++    let _policy_acl_guard = crate::cap::lock_write_policy_acls(codex_home)?;
+     let AllowDenyPaths { allow, mut deny } =
+         compute_allow_paths_for_permissions(permissions, current_dir, env_map);
+     unsafe {
+@@ -399,6 +424,16 @@ pub(crate) fn prepare_elevated_spawn_context_for_permissions(
+     } else {
+         write_roots_override
+     };
++    let effective_deny_write_paths = crate::allow::effective_write_deny_paths(
++        &permissions,
++        cwd,
++        env_map,
++        if deny_write_paths_override.is_empty() {
++            &deny_write_paths
++        } else {
++            deny_write_paths_override
++        },
++    );
+     let sandbox_creds = require_logon_sandbox_creds(
+         &permissions,
+         cwd,
+@@ -418,10 +453,15 @@ pub(crate) fn prepare_elevated_spawn_context_for_permissions(
+     )?;
+     let caps = load_or_create_cap_sids(codex_home)?;
+     let (psid_to_use, cap_sids) = if uses_write_capabilities {
+-        let cap_sids = root_capability_sids(codex_home, cwd, effective_write_roots)?
+-            .into_iter()
+-            .map(|root_sid| root_sid.sid_str)
+-            .collect::<Vec<_>>();
++        let cap_sids = root_capability_sids(
++            codex_home,
++            cwd,
++            effective_write_roots,
++            &effective_deny_write_paths,
++        )?
++        .into_iter()
++        .map(|root_sid| root_sid.sid_str)
++        .collect::<Vec<_>>();
+         if cap_sids.is_empty() {
+             anyhow::bail!("workspace-write sandbox has no writable root capability SIDs");
+         }
+@@ -454,7 +494,7 @@ mod tests {
+     use super::prepare_spawn_context_common;
+     use super::root_capability_sids;
+     use crate::cap::load_or_create_cap_sids;
+-    use crate::cap::workspace_write_cap_sid_for_root;
++    use crate::cap::workspace_write_cap_sid_for_policy;
+     use crate::resolved_permissions::ResolvedWindowsSandboxPermissions;
+     use codex_protocol::models::PermissionProfile;
+     use codex_protocol::permissions::NetworkSandboxPolicy;
+@@ -616,11 +656,11 @@ mod tests {
+         std::fs::create_dir_all(&active_root).expect("create active root");
+         std::fs::create_dir_all(&stale_root).expect("create stale root");
+ 
+-        let stale_sid = workspace_write_cap_sid_for_root(&codex_home, &workspace, &stale_root)
+-            .expect("stale sid");
+-        let active_sid = workspace_write_cap_sid_for_root(&codex_home, &workspace, &active_root)
+-            .expect("active sid");
+-        let workspace_sid = workspace_write_cap_sid_for_root(&codex_home, &workspace, &workspace)
++        let stale_sid =
++            workspace_write_cap_sid_for_policy(&codex_home, &stale_root, &[]).expect("stale sid");
++        let active_sid =
++            workspace_write_cap_sid_for_policy(&codex_home, &active_root, &[]).expect("active sid");
++        let workspace_sid = workspace_write_cap_sid_for_policy(&codex_home, &workspace, &[])
+             .expect("workspace sid");
+         let caps = load_or_create_cap_sids(&codex_home).expect("load caps");
+ 
+@@ -628,6 +668,7 @@ mod tests {
+             &codex_home,
+             &workspace,
+             vec![workspace.clone(), active_root],
++            &[],
+         )
+         .expect("root capabilities")
+         .into_iter()
+@@ -654,17 +695,17 @@ mod tests {
+         std::fs::create_dir_all(&nested_root).expect("create nested root");
+         std::fs::create_dir_all(&unrelated_root).expect("create unrelated root");
+ 
+-        let workspace_sid = workspace_write_cap_sid_for_root(&codex_home, &workspace, &workspace)
++        let workspace_sid = workspace_write_cap_sid_for_policy(&codex_home, &workspace, &[])
+             .expect("workspace sid");
+-        let nested_sid = workspace_write_cap_sid_for_root(&codex_home, &workspace, &nested_root)
+-            .expect("nested sid");
+-        let unrelated_sid =
+-            workspace_write_cap_sid_for_root(&codex_home, &workspace, &unrelated_root)
+-                .expect("unrelated sid");
++        let nested_sid =
++            workspace_write_cap_sid_for_policy(&codex_home, &nested_root, &[]).expect("nested sid");
++        let unrelated_sid = workspace_write_cap_sid_for_policy(&codex_home, &unrelated_root, &[])
++            .expect("unrelated sid");
+         let root_sids = root_capability_sids(
+             &codex_home,
+             &workspace,
+             vec![workspace.clone(), nested_root, unrelated_root],
++            &[],
+         )
+         .expect("root capabilities");
+ 
+diff --git a/codex-rs/windows-sandbox-rs/src/unified_exec/backends/legacy.rs b/codex-rs/windows-sandbox-rs/src/unified_exec/backends/legacy.rs
+index d2bfe7941f5ce2d80c352cc0226a88560ee4374f..212fffdb55485daee4f5ec99aa7c756370b3854d 100644
+--- a/codex-rs/windows-sandbox-rs/src/unified_exec/backends/legacy.rs
++++ b/codex-rs/windows-sandbox-rs/src/unified_exec/backends/legacy.rs
+@@ -17,6 +17,7 @@ use crate::spawn_prep::SpawnPrepOptions;
+ use crate::spawn_prep::allow_null_device_for_workspace_write;
+ use crate::spawn_prep::apply_legacy_session_acl_rules;
+ use crate::spawn_prep::legacy_session_capability_roots;
++use crate::spawn_prep::legacy_write_deny_paths;
+ use crate::spawn_prep::prepare_legacy_session_security;
+ use crate::spawn_prep::prepare_legacy_spawn_context;
+ use anyhow::Result;
+@@ -373,11 +374,18 @@ pub(crate) async fn spawn_windows_sandbox_session_legacy(
+         &env_map,
+         codex_home,
+     );
++    let capability_deny_write_paths = legacy_write_deny_paths(
++        &common.permissions,
++        &common.current_dir,
++        &env_map,
++        &additional_deny_write_paths,
++    );
+     let security = prepare_legacy_session_security(
+         common.uses_write_capabilities,
+         codex_home,
+         cwd,
+         capability_roots,
++        &capability_deny_write_paths,
+     )?;
+     allow_null_device_for_workspace_write(common.uses_write_capabilities);
+ 
+diff --git a/codex-rs/windows-sandbox-rs/src/wrapper.rs b/codex-rs/windows-sandbox-rs/src/wrapper.rs
+index c449505f45cc39cad1b7edbbd402b4296c434b6c..eac443b656a079d29445aaa9bea1ac7509184b20 100644
+--- a/codex-rs/windows-sandbox-rs/src/wrapper.rs
++++ b/codex-rs/windows-sandbox-rs/src/wrapper.rs
+@@ -9,6 +9,7 @@ use std::collections::HashMap;
+ use std::path::Path;
+ use std::path::PathBuf;
+ 
++use crate::allow::effective_write_deny_paths;
+ use crate::cap::load_or_create_cap_sids;
+ use crate::desktop::DesktopPolicy;
+ use crate::desktop::LaunchDesktop;
+@@ -17,6 +18,7 @@ use crate::identity::require_sandbox_account;
+ use crate::setup::effective_write_roots_for_permissions;
+ use crate::spawn_prep::SpawnPrepOptions;
+ use crate::spawn_prep::legacy_session_capability_roots;
++use crate::spawn_prep::legacy_write_deny_paths;
+ use crate::spawn_prep::prepare_legacy_session_security;
+ use crate::spawn_prep::prepare_legacy_spawn_context;
+ use crate::spawn_prep::prepare_spawn_context_common;
+@@ -125,6 +127,12 @@ pub fn create_windows_sandbox_command_args_for_permission_profile(
+             let (sandbox_creds, _) = require_sandbox_account(&request, proxy_settings_mode)?;
+             let caps = load_or_create_cap_sids(codex_home)?;
+             let cap_sids = if common.uses_write_capabilities {
++                let capability_deny_write_paths = effective_write_deny_paths(
++                    &common.permissions,
++                    command_cwd.as_path(),
++                    &desktop_env,
++                    &deny_write_paths,
++                );
+                 root_capability_sids(
+                     codex_home,
+                     command_cwd.as_path(),
+@@ -135,6 +143,7 @@ pub fn create_windows_sandbox_command_args_for_permission_profile(
+                         codex_home,
+                         write_roots_override,
+                     ),
++                    &capability_deny_write_paths,
+                 )?
+                 .into_iter()
+                 .map(|root| root.sid_str)
+@@ -186,11 +195,18 @@ pub fn create_windows_sandbox_command_args_for_permission_profile(
+                 &desktop_env,
+                 codex_home,
+             );
++            let capability_deny_write_paths = legacy_write_deny_paths(
++                &common.permissions,
++                &common.current_dir,
++                &desktop_env,
++                &deny_write_paths,
++            );
+             let security = prepare_legacy_session_security(
+                 common.uses_write_capabilities,
+                 codex_home,
+                 command_cwd.as_path(),
+                 capability_roots,
++                &capability_deny_write_paths,
+             )?;
+             let desktop_name = LaunchDesktop::shared_legacy_name(
+                 &common.permissions,

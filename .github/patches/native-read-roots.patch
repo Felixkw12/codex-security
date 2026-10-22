@@ -1,0 +1,222 @@
+diff --git a/codex-rs/protocol/src/permissions.rs b/codex-rs/protocol/src/permissions.rs
+index bd67575..f2ebc41 100644
+--- a/codex-rs/protocol/src/permissions.rs
++++ b/codex-rs/protocol/src/permissions.rs
+@@ -1451,11 +1451,24 @@ impl FileSystemSandboxPolicy {
+         self.semantic_signature(cwd) == other.semantic_signature(cwd)
+     }
+ 
++    /// Returns effective explicit readable paths even when root reads are allowed.
++    /// Filesystem roots are excluded so native ACL setup can grant individual paths.
++    pub fn get_explicit_readable_roots_with_cwd(&self, cwd: &Path) -> Vec<AbsolutePathBuf> {
++        self.effective_readable_roots_with_cwd(cwd)
++            .into_iter()
++            .filter(|path| path.as_path().parent().is_some())
++            .collect()
++    }
++
+     /// Returns the explicit readable roots resolved against the provided cwd.
+     pub fn get_readable_roots_with_cwd(&self, cwd: &Path) -> Vec<AbsolutePathBuf> {
+         if self.has_full_disk_read_access() {
+             return Vec::new();
+         }
++        self.effective_readable_roots_with_cwd(cwd)
++    }
++
++    fn effective_readable_roots_with_cwd(&self, cwd: &Path) -> Vec<AbsolutePathBuf> {
+         let Some(local_context) = LocalPolicyContext::new(cwd) else {
+             return Vec::new();
+         };
+@@ -2646,7 +2659,6 @@ fn resolve_gitdir_from_file(dot_git: &AbsolutePathBuf) -> Option<AbsolutePathBuf
+ mod tests {
+     use super::*;
+     use pretty_assertions::assert_eq;
+-    #[cfg(unix)]
+     use std::fs;
+     use std::path::Path;
+     use tempfile::TempDir;
+@@ -3639,6 +3651,93 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn explicit_readable_roots_preserve_external_paths_under_root_read() {
++        let tmp = TempDir::new().expect("tempdir");
++        let cwd = tmp.path().join("workspace");
++        let config = tmp.path().join("filter.gitconfig");
++        let objects = tmp.path().join("object-pool");
++        fs::create_dir_all(&cwd).expect("create workspace");
++        fs::create_dir_all(&objects).expect("create object pool");
++        fs::write(&config, "synthetic configuration").expect("create config");
++        let config = AbsolutePathBuf::from_absolute_path(config).expect("absolute config");
++        let objects = AbsolutePathBuf::from_absolute_path(objects).expect("absolute object pool");
++        let root = absolute_root_path_for_cwd(
++            &AbsolutePathBuf::from_absolute_path(&cwd).expect("absolute workspace"),
++        );
++        let baseline = FileSystemSandboxPolicy::read_only();
++        let mut policy = baseline.clone();
++        for path in [root, config.clone(), objects.clone(), config.clone()] {
++            policy.entries.push(FileSystemSandboxEntry::new(
++                path.into(),
++                FileSystemAccessMode::Read,
++            ));
++        }
++
++        assert!(policy.get_readable_roots_with_cwd(&cwd).is_empty());
++        assert!(policy.is_semantically_equivalent_to(&baseline, &cwd));
++        assert_eq!(
++            policy.get_explicit_readable_roots_with_cwd(&cwd),
++            vec![
++                normalize_effective_absolute_path(config),
++                normalize_effective_absolute_path(objects),
++            ]
++        );
++    }
++
++    #[test]
++    fn explicit_readable_roots_preserve_effective_deny_precedence() {
++        let tmp = TempDir::new().expect("tempdir");
++        let denied = AbsolutePathBuf::resolve_path_against_base("denied", tmp.path());
++        let allowed = denied.join("allowed");
++        fs::create_dir_all(allowed.as_path()).expect("create allowed child");
++        for reverse in [false, true] {
++            let mut entries = vec![
++                FileSystemSandboxEntry::new(denied.clone().into(), FileSystemAccessMode::Read),
++                FileSystemSandboxEntry::new(denied.clone().into(), FileSystemAccessMode::Deny),
++                FileSystemSandboxEntry::new(allowed.clone().into(), FileSystemAccessMode::Read),
++            ];
++            if reverse {
++                entries.reverse();
++            }
++            for root_read in [false, true] {
++                let mut policy = if root_read {
++                    FileSystemSandboxPolicy::read_only()
++                } else {
++                    FileSystemSandboxPolicy::restricted(Vec::new())
++                };
++                policy.entries.extend(entries.clone());
++                assert_eq!(
++                    policy.get_explicit_readable_roots_with_cwd(tmp.path()),
++                    vec![normalize_effective_absolute_path(allowed.clone())]
++                );
++            }
++        }
++    }
++
++    #[cfg(unix)]
++    #[test]
++    fn explicit_readable_roots_preserve_symlink_paths_and_missing_suffixes() {
++        let tmp = TempDir::new().expect("tempdir");
++        let target = tmp.path().join("target");
++        let alias = tmp.path().join("alias");
++        fs::create_dir_all(&target).expect("create target");
++        symlink_dir(&target, &alias).expect("create alias");
++        let alias = AbsolutePathBuf::from_absolute_path(alias).expect("absolute alias");
++        let missing = alias.join("missing");
++        let mut policy = FileSystemSandboxPolicy::read_only();
++        for path in [&alias, &missing] {
++            policy.entries.push(FileSystemSandboxEntry::new(
++                path.clone().into(),
++                FileSystemAccessMode::Read,
++            ));
++        }
++        assert_eq!(
++            policy.get_explicit_readable_roots_with_cwd(tmp.path()),
++            vec![alias, missing]
++        );
++    }
++
+     #[cfg(unix)]
+     #[test]
+     fn project_roots_special_path_preserves_symlinked_root() {
+diff --git a/codex-rs/windows-sandbox-rs/src/resolved_permissions.rs b/codex-rs/windows-sandbox-rs/src/resolved_permissions.rs
+index 12e24d9..442fbd4 100644
+--- a/codex-rs/windows-sandbox-rs/src/resolved_permissions.rs
++++ b/codex-rs/windows-sandbox-rs/src/resolved_permissions.rs
+@@ -142,6 +142,14 @@ impl ResolvedWindowsSandboxPermissions {
+             .collect()
+     }
+ 
++    pub(crate) fn explicit_readable_roots_for_cwd(&self, cwd: &Path) -> Vec<PathBuf> {
++        self.file_system
++            .get_explicit_readable_roots_with_cwd(cwd)
++            .into_iter()
++            .map(AbsolutePathBuf::into_path_buf)
++            .collect()
++    }
++
+     pub(crate) fn uses_write_capabilities_for_cwd(
+         &self,
+         cwd: &Path,
+diff --git a/codex-rs/windows-sandbox-rs/src/setup.rs b/codex-rs/windows-sandbox-rs/src/setup.rs
+index 7c9cd63..c3a0da4 100644
+--- a/codex-rs/windows-sandbox-rs/src/setup.rs
++++ b/codex-rs/windows-sandbox-rs/src/setup.rs
+@@ -617,6 +617,15 @@ fn gather_full_read_roots_for_permissions(
+             .into_iter()
+             .filter(|root| root.parent().is_some() || !command_cwd.starts_with(root)),
+     );
++    if permissions.has_full_disk_read_access() {
++        // Root read still needs concrete ACL grants for private external paths.
++        // Resolve aliases before excluding drive/share roots from these grants.
++        roots.extend(
++            canonical_existing(&permissions.explicit_readable_roots_for_cwd(command_cwd))
++                .into_iter()
++                .filter(|root| root.parent().is_some()),
++        );
++    }
+     canonical_existing(&roots)
+ }
+ 
+@@ -2454,6 +2463,51 @@ mod tests {
+         assert_eq!(write_roots, Vec::<PathBuf>::new());
+     }
+ 
++    #[test]
++    fn full_read_payload_retains_explicit_external_read_roots() {
++        let tmp = TempDir::new().expect("tempdir");
++        let command_cwd = tmp.path().join("workspace");
++        let codex_home = tmp.path().join("home");
++        let config = tmp.path().join("filter.gitconfig");
++        let objects = tmp.path().join("object-pool");
++        fs::create_dir_all(&command_cwd).expect("create workspace");
++        fs::create_dir_all(&objects).expect("create object pool");
++        fs::write(&config, "synthetic configuration").expect("create config");
++        let (mut file_system, network) = workspace_write_profile(
++            &[],
++            /*exclude_tmpdir_env_var*/ true,
++            /*exclude_slash_tmp*/ true,
++        )
++        .to_runtime_permissions();
++        for path in [&config, &objects] {
++            file_system.entries.push(FileSystemSandboxEntry::new(
++                AbsolutePathBuf::from_absolute_path(path)
++                    .expect("absolute read path")
++                    .into(),
++                FileSystemAccessMode::Read,
++            ));
++        }
++        let profile = PermissionProfile::from_runtime_permissions(&file_system, network);
++        let permissions = permissions_for(&profile, &workspace_roots_for(&command_cwd));
++        let (read_roots, write_roots) = build_payload_roots(
++            &super::SandboxSetupRequest {
++                permissions: &permissions,
++                command_cwd: &command_cwd,
++                env_map: &HashMap::new(),
++                codex_home: &codex_home,
++                proxy_enforced: false,
++            },
++            &super::SetupRootOverrides::default(),
++            super::SetupRuntime::Registered,
++        );
++        for path in [&config, &objects] {
++            let canonical = dunce::canonicalize(path).expect("canonical read path");
++            assert!(read_roots.contains(&canonical), "missing {canonical:?}");
++            assert!(!write_roots.contains(&canonical));
++        }
++        assert!(read_roots.iter().all(|root| root.parent().is_some()));
++    }
++
+     #[test]
+     fn workspace_write_roots_remain_readable() {
+         let tmp = TempDir::new().expect("tempdir");
