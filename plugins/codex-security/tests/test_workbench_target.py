@@ -1466,7 +1466,7 @@ def test_scoped_git_discovery_excludes_unavailable_target_ancestor_tools(
     monkeypatch.delenv("CODEX_SECURITY_GIT", raising=False)
     monkeypatch.setenv("PATH", os.pathsep.join(map(str, (historical, host))))
     with WORKBENCH_TARGET["scoped_git_discovery"](lambda: (repository, surviving / "missing")):
-        assert trusted_git_executable(repository) == str(host / name)
+        assert trusted_git_executable(repository) is None
 
     # The caller can still explicitly select a tool outside the current repository.
     monkeypatch.setenv("CODEX_SECURITY_GIT", str(historical / name))
@@ -1476,8 +1476,15 @@ def test_scoped_git_discovery_excludes_unavailable_target_ancestor_tools(
 
 @pytest.mark.skipif(os.name == "nt", reason="uses a POSIX executable shim")
 @pytest.mark.parametrize("operation", ["current-query", "missing-query", "missing-migration"])
+@pytest.mark.parametrize("shim_directory", [".", "bin"])
+@pytest.mark.parametrize("configured", [False, True])
 def test_workbench_commands_exclude_saved_checkout_git(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workbench_api: dict[str, Any], operation: str
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    workbench_api: dict[str, Any],
+    operation: str,
+    shim_directory: str,
+    configured: bool,
 ) -> None:
     host_git = shutil.which("git")
     assert host_git is not None
@@ -1511,7 +1518,9 @@ def test_workbench_commands_exclude_saved_checkout_git(
             [("requested", str(requested)), ("historical", str(historical_target))],
         )
     marker = tmp_path / "repository-git-ran"
-    executable = historical / "git"
+    tools = historical / shim_directory
+    tools.mkdir(exist_ok=True)
+    executable = tools / "git"
     executable.write_text(
         '#!/bin/sh\nprintf invoked > "$WORKBENCH_GIT_MARKER"\nexec "$WORKBENCH_HOST_GIT" "$@"\n'
     )
@@ -1519,10 +1528,12 @@ def test_workbench_commands_exclude_saved_checkout_git(
     environment = {key: value for key, value in os.environ.items() if key != "CODEX_SECURITY_GIT"}
     environment.update(
         CODEX_SECURITY_STATE_DIR=str(state),
-        PATH=str(historical) + os.pathsep + os.environ.get("PATH", ""),
+        PATH=str(tools) + os.pathsep + os.environ.get("PATH", ""),
         WORKBENCH_GIT_MARKER=str(marker),
         WORKBENCH_HOST_GIT=host_git,
     )
+    if configured:
+        environment["CODEX_SECURITY_GIT"] = host_git
     arguments = (
         ["list-scans"]
         if operation == "missing-migration"
@@ -1545,8 +1556,81 @@ def test_workbench_commands_exclude_saved_checkout_git(
             identities = dict(
                 connection.execute("SELECT id, repository_identity FROM security_targets")
             )
-            assert identities["requested"] is not None
+            assert (identities["requested"] is not None) is configured
             assert identities["historical"] is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="uses a POSIX executable shim")
+@pytest.mark.parametrize("migrate", [False, True])
+def test_new_workspace_skips_git_in_its_unregistered_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workbench_api: dict[str, Any], migrate: bool
+) -> None:
+    host_git = shutil.which("git")
+    assert host_git is not None
+    repository = tmp_path / "repository"
+    initialize_git_repository(repository)
+    tools = repository / "bin"
+    tools.mkdir()
+    marker = tmp_path / "repository-git-ran"
+    executable = tools / "git"
+    executable.write_text(
+        '#!/bin/sh\nprintf invoked > "$WORKBENCH_GIT_MARKER"\nexec "$WORKBENCH_HOST_GIT" "$@"\n'
+    )
+    executable.chmod(0o700)
+    state = tmp_path / "state"
+    if migrate:
+        saved = tmp_path / "saved"
+        initialize_git_repository(saved)
+        state.mkdir(mode=0o700)
+        with sqlite3.connect(state / "workbench.sqlite3") as connection:
+            connection.row_factory = sqlite3.Row
+            apply_migrations = workbench_api["apply_migrations"]
+            with monkeypatch.context() as migration_patch:
+                migration_patch.setitem(
+                    apply_migrations.__globals__,
+                    "MIGRATIONS",
+                    tuple(item for item in workbench_api["MIGRATIONS"] if item[0] < 54),
+                )
+                apply_migrations(connection)
+            connection.execute(
+                "INSERT INTO security_targets(id, current_path, display_name, created_at, updated_at) "
+                "VALUES ('saved', ?, 'Saved checkout', '2099-01-01T00:00:00Z', '2099-01-01T00:00:00Z')",
+                (str(saved),),
+            )
+    caller = tmp_path / "caller"
+    caller.mkdir()
+    environment = {key: value for key, value in os.environ.items() if key != "CODEX_SECURITY_GIT"}
+    environment.update(
+        CODEX_SECURITY_STATE_DIR=str(state),
+        PATH=str(tools) + os.pathsep + os.environ.get("PATH", ""),
+        WORKBENCH_GIT_MARKER=str(marker),
+        WORKBENCH_HOST_GIT=host_git,
+    )
+    script = Path(__file__).resolve().parents[1] / "scripts" / "workbench_db.py"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "create-workspace",
+            "--workspace-id",
+            "00000000-0000-4000-8000-000000000001",
+            "--target-path",
+            str(repository),
+        ],
+        cwd=caller,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert json.loads(completed.stdout)["targetPath"] == str(repository)
+    assert not marker.exists()
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        identities = connection.execute(
+            "SELECT repository_identity FROM security_targets"
+        ).fetchall()
+        assert len(identities) == (2 if migrate else 1)
+        assert all(row[0] for row in identities)
 
 
 def test_git_discovery_does_not_invoke_through_repository_directory_alias(

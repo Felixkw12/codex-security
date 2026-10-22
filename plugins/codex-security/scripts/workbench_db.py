@@ -232,7 +232,9 @@ def release_completion_file_lock(descriptor: int) -> None:
     windows_file_lock.locking(descriptor, windows_file_lock.LK_UNLCK, 1)
 
 
-def connect(*, deferred: bool = False) -> sqlite3.Connection:
+def connect(
+    *, deferred: bool = False, discovery_roots: tuple[Path, ...] = ()
+) -> sqlite3.Connection:
     path = database_path()
     guidance = (
         f"Workbench database: {path}. Ensure the state directory and SQLite journal files "
@@ -255,7 +257,9 @@ def connect(*, deferred: bool = False) -> sqlite3.Connection:
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("PRAGMA busy_timeout = 5000")
             # Keep writer admission retries; readers only wait when a repair needs to write.
-            apply_migrations(connection, immediate=not deferred or attempt > 0)
+            apply_migrations(
+                connection, immediate=not deferred or attempt > 0, discovery_roots=discovery_roots
+            )
             connection.execute("PRAGMA journal_mode = WAL")
             path.chmod(0o600)
             return connection
@@ -268,9 +272,19 @@ def connect(*, deferred: bool = False) -> sqlite3.Connection:
     raise AssertionError("SQLite retry loop exhausted unexpectedly.")
 
 
-def apply_migrations(connection: sqlite3.Connection, *, immediate: bool = False) -> None:
+def apply_migrations(
+    connection: sqlite3.Connection,
+    *,
+    immediate: bool = False,
+    discovery_roots: tuple[Path, ...] = (),
+) -> None:
     apply_schema_migrations(
-        connection, MIGRATIONS, now, backfill_security_targets, immediate=immediate
+        connection,
+        MIGRATIONS,
+        now,
+        backfill_security_targets,
+        immediate=immediate,
+        discovery_roots=discovery_roots,
     )
 
 
@@ -3418,11 +3432,19 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
         result = publication.finding_issues(_WORKBENCH_PUBLICATION_CONTEXT, json.load(sys.stdin))
         print(json.dumps(result, allow_nan=False, sort_keys=True))
         return
+    command_targets = tuple(
+        Path(value)
+        for field in ("target_path", "repository")
+        if (value := getattr(args, field, None))
+    )
     with (
         closing(
-            connect(deferred=args.command in {"get-scan", "list-scans", "database-info"})
+            connect(
+                deferred=args.command in {"get-scan", "list-scans", "database-info"},
+                discovery_roots=command_targets,
+            )
         ) as connection,
-        scoped_git_discovery(lambda: migration_target_paths(connection)),
+        scoped_git_discovery(lambda: [*migration_target_paths(connection), *command_targets]),
     ):
         remediation_state.require_available(connection, args, require_scan)
         handlers = {

@@ -3220,9 +3220,14 @@ def test_identity_migration_merges_partially_sequenced_completion_history(
         ),
     ],
 )
-@pytest.mark.parametrize("unavailable", ["file-parent", "permission-error"])
-def test_identity_migrations_keep_healthy_targets_when_another_path_is_unavailable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, migration: str, unavailable: str
+@pytest.mark.parametrize("unavailable", ["file-parent", "permission-error", "bounded-missing"])
+@pytest.mark.parametrize("configured", [False, True])
+def test_identity_migrations_respect_git_availability_for_unavailable_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    migration: str,
+    unavailable: str,
+    configured: bool,
 ) -> None:
     repository = tmp_path / "healthy"
     initialize_git_repository(repository)
@@ -3247,6 +3252,8 @@ def test_identity_migrations_keep_healthy_targets_when_another_path_is_unavailab
     missing = tmp_path / "unavailable" / "old-checkout"
     if unavailable == "file-parent":
         missing.parent.write_text("no longer a directory\n")
+    elif unavailable == "bounded-missing":
+        initialize_git_repository(missing.parent)
     else:
         original = target._protected_repository_root
 
@@ -3289,18 +3296,26 @@ def test_identity_migrations_keep_healthy_targets_when_another_path_is_unavailab
     if migration == "linux-v3":
         connection.execute("UPDATE scans SET repository_generation = ?", (stored_identity,))
     monkeypatch.delenv("CODEX_SECURITY_GIT", raising=False)
+    if configured:
+        host_git = shutil.which("git")
+        assert host_git is not None
+        monkeypatch.setenv("CODEX_SECURITY_GIT", host_git)
+    git_available = configured or unavailable == "bounded-missing"
+    expected_identity = (
+        identity.value if git_available else None if migration == "pre-release" else stored_identity
+    )
     for _ in range(2):
         apply_migrations(connection)
         assert (
             connection.execute(
                 "SELECT repository_identity FROM security_targets WHERE id = 'healthy'"
             ).fetchone()[0]
-            == identity.value
+            == expected_identity
         )
         if migration == "linux-v3":
             assert (
                 connection.execute("SELECT repository_generation FROM scans").fetchone()[0]
-                == identity.value
+                == expected_identity
             )
     connection.close()
 

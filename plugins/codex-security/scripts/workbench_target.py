@@ -247,19 +247,15 @@ def _resolve_git_executable(
 
     try:
         repositories = [_protected_repository_root(protected_root)]
-        unavailable_ancestors: set[Path] = set()
         if configured is None:
             for root in discovery_roots:
                 for repository in _historical_repository_roots(root):
+                    if not repository.is_dir():
+                        # A missing target without enclosing Git metadata cannot bound its
+                        # former checkout. Treat ambient Git as unavailable rather than
+                        # selecting an executable from unknown historical repository content.
+                        return None
                     repositories.append(repository)
-                    try:
-                        available = repository.is_dir()
-                    except (OSError, RuntimeError):
-                        available = False
-                    if not available:
-                        # Removed checkout metadata cannot bound this saved subdirectory.
-                        # Exclude ancestor-local tools without excluding shared host trees.
-                        unavailable_ancestors.update(repository.parents)
     except (OSError, RuntimeError):
         return None
 
@@ -286,7 +282,7 @@ def _resolve_git_executable(
             path == repository or repository in path.parents
             for repository in repositories
             for path in (lexical, invocation, canonical)
-        ) or any(path.parent in unavailable_ancestors for path in (lexical, invocation, canonical)):
+        ):
             if configured is not None:
                 raise SystemExit("CODEX_SECURITY_GIT must stay outside the protected repository.")
             continue

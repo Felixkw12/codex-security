@@ -51,12 +51,16 @@ def apply_migrations(
     backfill_security_targets: Callable[[sqlite3.Connection], None],
     *,
     immediate: bool = False,
+    discovery_roots: tuple[Path, ...] = (),
 ) -> None:
     from workbench_target import scoped_git_discovery
 
     connection.commit()
     connection.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
-    with connection, scoped_git_discovery(lambda: migration_target_paths(connection)):
+    with (
+        connection,
+        scoped_git_discovery(lambda: [*migration_target_paths(connection), *discovery_roots]),
+    ):
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS schema_migrations (
