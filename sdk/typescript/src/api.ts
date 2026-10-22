@@ -123,7 +123,6 @@ import {
 } from "@openai/codex-sdk";
 import { z } from "zod";
 import { readThreatModelPath } from "./artifact-export.js";
-import type { HostedScanOptions } from "./hosted-scan.js";
 import {
   STATIC_VERIFICATION_INSTRUCTIONS,
   VerificationModeSchema,
@@ -636,7 +635,6 @@ interface ClientDependencies {
   /** Explicit hosted execution; never falls back to createCodex. */
   hostedScan?: {
     executor: ScanExecutor;
-    ownerCodex: NonNullable<HostedScanOptions["ownerCodex"]>;
     context: Pick<
       ScanExecutionRequest,
       "repository" | "revision" | "scope" | "identity"
@@ -2664,6 +2662,7 @@ export class CodexSecurity {
               options.maxCostUsd !== undefined,
               discoveryPrompt,
               session.source.modelProvider,
+              options.ownerSuggestions,
             );
       checkOpen();
       const feedback = await workbench(
@@ -3068,6 +3067,7 @@ export class CodexSecurity {
                   knowledgeBasePaths: knowledgeBase?.sources,
                   knowledgeBaseSnapshot: knowledgeBase?.snapshot,
                   scanPrompt: effectiveScanPrompt,
+                  ownerSuggestions: options.ownerSuggestions,
                   safetyIdentifier: options.safetyIdentifier,
                   requireCost: options.maxCostUsd !== undefined,
                   onActivity: options.onActivity,
@@ -3298,34 +3298,29 @@ export class CodexSecurity {
           );
         }
       }
-      const inferenceOptions = (
-        command: "compare" | "suggest-owners",
-      ): ReadOnlyCodexOptions => {
-        const inference: ReadOnlyCodexOptions = {
-          environment,
-          config: {
-            ...this.config,
-            codexOverrides: {
-              ...resolveCodexProfile(
-                deepMerge({ ...session.runtimeConfig }, effectiveConfig),
-              ),
-              responses_api_metadata: {
-                ...codexSecurityRequestContext(effectiveConfig, {
-                  surface: this.#surface,
-                  command: "scan",
-                  pluginVersion: runtime.plugin.version,
-                  mode,
-                }).metadata,
-              },
+      const inference: ReadOnlyCodexOptions = {
+        environment,
+        config: {
+          ...this.config,
+          codexOverrides: {
+            ...resolveCodexProfile(
+              deepMerge({ ...session.runtimeConfig }, effectiveConfig),
+            ),
+            responses_api_metadata: {
+              ...codexSecurityRequestContext(effectiveConfig, {
+                surface: this.#surface,
+                command: "scan",
+                pluginVersion: runtime.plugin.version,
+                mode,
+              }).metadata,
             },
           },
-          model,
-          cyberAccessProgram: options.cyberAccessProgram,
-          signal,
-        };
-        const hosted = this.#dependencies.hostedScan;
-        if (hosted !== undefined)
-          return { ...inference, codex: hosted.ownerCodex };
+        },
+        model,
+        cyberAccessProgram: options.cyberAccessProgram,
+        signal,
+      };
+      const comparisonOptions = (): ReadOnlyCodexOptions => {
         const matchingPermissions = (
           session.sessionConfig["permissions"] as JsonObject
         )[SCAN_PERMISSION_PROFILE] as JsonObject;
@@ -3353,7 +3348,7 @@ export class CodexSecurity {
             }
             const { codex } = await this.#createSessionCodex(
               session,
-              command,
+              "compare",
               runtimePaths,
               matcherConfig,
               configOverrides,
@@ -3385,10 +3380,6 @@ export class CodexSecurity {
       };
       if (options.ownerSuggestions && !options.deepScanPass) {
         try {
-          if (options.maxCostUsd !== undefined)
-            throw new Error(
-              "Owner suggestions are unavailable when maxCostUsd is set.",
-            );
           const { writeScanOwnerSuggestions } =
             await import("./scan-owner-suggestions.js");
           const writer = await prepareArtifactRestorer(
@@ -3400,7 +3391,7 @@ export class CodexSecurity {
             result,
             writer,
             {
-              ...inferenceOptions("suggest-owners"),
+              ...inference,
               auth: options.auth,
               reasoningEffort: scanModelConfiguration(session.sessionConfig)
                 .reasoningEffort,
@@ -3451,7 +3442,7 @@ export class CodexSecurity {
                     singleTurn: options.maxCostUsd !== undefined,
                   },
                 ),
-              ...inferenceOptions("compare"),
+              ...comparisonOptions(),
             });
             result.repositoryFindings = (await listRepositoryFindings(
               runWorkbench,

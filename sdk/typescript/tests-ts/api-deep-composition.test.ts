@@ -312,10 +312,20 @@ test.each([
         "utf8",
       ),
     ).findings.slice(0, 1);
+    const ownerSuggestion = {
+      email: "synthetic-contributor@example.test",
+      commit: "1".repeat(40),
+      reason: "Synthetic ownership evidence recorded during discovery.",
+    };
     for (const finding of childFindings) {
       for (const field of ["findingId", "occurrenceId", "fingerprints"])
         delete finding[field];
       finding["locations"] = [{ path: "app.py", startLine: 1, endLine: 1 }];
+      if (ownerOutcome)
+        finding["extensions"] = {
+          ...(finding["extensions"] as JsonObject | undefined),
+          ownerSuggestion,
+        };
       if (partialCheckpoint)
         finding["codeEvidence"] = [
           {
@@ -1244,9 +1254,11 @@ process.exit(0);
             expect(
               options.config?.codexOverrides?.["responses_api_metadata"],
             ).toMatchObject({ codex_security_scan_mode: "deep" });
-            expect(options.inheritedPermissions?.network).toEqual({
-              enabled: false,
-            });
+            expect(options.codex).toBeUndefined();
+            expect(options.createCodex).toBeUndefined();
+            expect(
+              result.findings.findings[0]!.extensions?.["ownerSuggestion"],
+            ).toEqual(ownerSuggestion);
             if (ownerOutcome === "failure")
               throw new Error("Synthetic composed owner failure");
             await writer.restore("owner-suggestions.json", Buffer.from("{}\n"));
@@ -1676,9 +1688,7 @@ process.exit(0);
         );
         for (const registration of registrations.values()) {
           const recipe = registration["recipe"] as JsonObject;
-          expect(recipe["ownerSuggestions"]).toBe(
-            registration["mode"] === "deep" ? true : undefined,
-          );
+          expect(recipe["ownerSuggestions"]).toBe(true);
         }
       }
       for (const observed of workerRuns) {
@@ -1928,6 +1938,9 @@ process.exit(0);
       for (const child of children) {
         expect(child.prompt).toContain("Inspect the synthetic source.");
         expect(child.prompt).not.toContain("sourceFindingIds");
+        expect(child.prompt.includes("extensions.ownerSuggestion")).toBe(
+          ownerOutcome !== undefined,
+        );
         expect(child.config).toMatchObject({
           model: "gpt-6-astra",
           model_reasoning_effort: "ultra",

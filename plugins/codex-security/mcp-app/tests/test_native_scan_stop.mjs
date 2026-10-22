@@ -44,6 +44,7 @@ const bundle = await build({
             async close() {}
           }`,
           "./src/native-scan.js": `
+          export async function readNativeScanSemanticInputs() { throw new Error("explicit scan recovery must not read ambient semantic inputs"); }
           export class NativeScanHost {
             run(...args) { return fixture.run(...args); }
             cancel(...args) { return fixture.cancel(...args); }

@@ -94,11 +94,7 @@ import {
 } from "../src/runtime.js";
 
 import * as ownerArtifacts from "../src/scan-owner-suggestions.js";
-import { CODEX_SECURITY_THREAD_SOURCES } from "../src/thread-source.js";
-import {
-  runReadOnlyCodex,
-  matchScanFindingsInternal,
-} from "../src/scan-comparison.js";
+import { matchScanFindingsInternal } from "../src/scan-comparison.js";
 
 import { ScanPermissionError } from "../src/scan-execution.js";
 
@@ -4612,16 +4608,8 @@ describe("CodexSecurity orchestration", () => {
                     codex_security_provider: "custom",
                   },
                 });
-                await runReadOnlyCodex(
-                  "Synthetic owner inference",
-                  {},
-                  options,
-                  {
-                    surface: "sdk",
-                    command: "suggest-owners",
-                    threadSource: CODEX_SECURITY_THREAD_SOURCES.suggestOwners,
-                  },
-                );
+                expect(options.codex).toBeUndefined();
+                expect(options.createCodex).toBeUndefined();
                 return join(scanDir, "owner-suggestions.json");
               },
             )
@@ -4685,12 +4673,7 @@ describe("CodexSecurity orchestration", () => {
           expect(result.ownerSuggestionsPath).toBe(
             join(scanDir, "owner-suggestions.json"),
           );
-          expect(calls.map(({ kind }) => kind)).toEqual([
-            "mcp",
-            "exec",
-            "mcp",
-            "exec",
-          ]);
+          expect(calls.map(({ kind }) => kind)).toEqual(["mcp", "exec"]);
           const metadata = {
             "synthetic.provider": {
               name: "Synthetic provider",
@@ -5530,6 +5513,7 @@ describe("CodexSecurity orchestration", () => {
     await mkdir(scanDir, { mode: 0o700 });
     const warnings: string[] = [];
     const commands: Array<readonly string[]> = [];
+    let threads = 0;
     const client = new TestClient(
       {},
       {
@@ -5558,6 +5542,7 @@ describe("CodexSecurity orchestration", () => {
         },
         createCodex: (options: CodexOptions) => ({
           startThread(threadOptions: Parameters<Codex["startThread"]>[0]) {
+            threads++;
             const thread = new Codex({
               ...options,
               codexPathOverride: process.execPath,
@@ -5581,15 +5566,17 @@ describe("CodexSecurity orchestration", () => {
 
     const result = await client.run(repository, {
       maxCostUsd: 1,
+      ownerSuggestions: true,
       onWarning: (warning) => {
         warnings.push(warning);
       },
     });
     expect(result.threadId).toBe("scan-thread");
     expect(result.cost).toBeNull();
-    expect(warnings).toEqual([
+    expect(threads).toBe(1);
+    expect(warnings).toContain(
       "Scan completed, but its cost limit could not be verified because model pricing or token usage is unavailable.",
-    ]);
+    );
     expect(commands.map(([command]) => command)).toEqual([
       "register-cli-scan",
       "get-scan-feedback",
@@ -9909,7 +9896,6 @@ test("keeps hosted executor progress authoritative", async () => {
         return mockWorkbench(args, input);
       },
       hostedScan: {
-        ownerCodex: { startThread: () => fail("owner inference must not run") },
         context: {
           repository,
           revision: "deadbeef",
