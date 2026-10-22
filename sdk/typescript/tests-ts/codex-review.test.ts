@@ -139,6 +139,10 @@ const failureReasons: Record<string, string> = {
     "Request refused: safety policy. I can offer a defensive alternative.",
   "policy-colon-explanation-text":
     "Safety policy: request refused due to disallowed content.",
+  "policy-harmful-content-text":
+    "Safety policy: this request is refused due to harmful content.",
+  "policy-bare-harmful-content-text":
+    "Safety policy: request refused due to harmful content.",
   "policy-reported-error":
     "Required review check could not be completed: Request refusal due to the safety policy.",
   "text-only": "Codex did not submit a validated review",
@@ -924,6 +928,8 @@ test.each([
   "Safety policy: request refused.",
   "Safety policy: request was refused.",
   "Safety policy: request refused due to disallowed content.",
+  "Safety policy: request refused due to potentially harmful content.",
+  "Safety policy: request refused due to harmful assistance.",
   "Safety policy: request refused under the applicable restrictions.",
   "Safety policy: request refused because it would facilitate harm.",
   "This request was refused for violating the content policy.",
@@ -955,6 +961,9 @@ test.each([
   "Review refused: safety policy. Service unavailable.",
   "Safety policy: request refused by upstream with 503",
   "Safety policy: request refused. Service unavailable.",
+  "Safety policy: request refused due to upstream service unavailability.",
+  "Safety policy: request refused due to upstream service unavailability for content processing.",
+  "Safety policy: request refused due to upstream service unavailability while fetching content.",
   "Connection refused while fetching content-policy.ts",
   "Artifact upload was blocked by the content policy.",
   "Artifact publication was refused due to the content policy.",
