@@ -11,6 +11,7 @@ import sys
 from argparse import Namespace
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
+from datetime import datetime
 from pathlib import Path
 from threading import Barrier, Event
 from unittest import mock
@@ -1466,6 +1467,223 @@ def test_stopped_standard_does_not_rebind_another_scans_coverage(tmp_path: Path)
     assert (
         run_workbench(state, "get-scan", "--scan-id", scan["scanId"])["scan"]["findingCount"] == 0
     )
+
+
+@pytest.mark.parametrize("action", ["cancel-scan", "fail-scan"])
+@pytest.mark.parametrize(
+    "closure_state",
+    [
+        "sealed",
+        "unsealed",
+        "incomplete",
+        "reopened",
+        "merged",
+        "selected-reopened",
+        "merged-selected-reopened",
+        "older-selected-pending",
+        "equal-selected-pending",
+    ],
+)
+def test_stopped_composition_retains_sealed_child_closures(
+    tmp_path: Path, workbench_api, action: str, closure_state: str
+) -> None:
+    state, target = _scan_workspace(tmp_path)
+    parent = register(state, target, tmp_path / "scan", mode="deep")
+    parent_dir = Path(parent["scanDir"])
+    task_id = "dependency-review"
+    merged = closure_state in {"merged", "merged-selected-reopened"}
+    selected_reopened = closure_state.endswith("selected-reopened")
+    timed_pending = closure_state in {"older-selected-pending", "equal-selected-pending"}
+    reopened = closure_state in {"reopened", "equal-selected-pending"} or selected_reopened
+    closure = {"id": task_id, "reason": "First child completed its dependency review."}
+    pending = {"id": task_id, "reason": "Second child still needs dependency review."}
+    children = []
+    for index, row in enumerate((closure, pending), 1):
+        directory = parent_dir / f"artifacts/deep-scan/passes/pass-{index}"
+        child = register(state, target, directory, parent=parent["scanId"], role="deep_pass")
+        write_completed_contract(
+            directory,
+            child["scanId"],
+            target,
+            relative_path="app.py",
+            identity_anchor=f"synthetic-observation-{index}",
+        )
+        coverage_path = directory / "coverage.json"
+        coverage = json.loads(coverage_path.read_text())
+        coverage["resolvedDeferred" if index == 1 else "deferred"] = [row]
+        coverage_path.write_text(json.dumps(coverage))
+        if index == 1 and closure_state == "incomplete":
+            manifest_path = directory / "scan-manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            manifest["scan"]["complete"] = False
+            manifest_path.write_text(json.dumps(manifest))
+        sealed = index != 1 or closure_state != "unsealed"
+        if index == 1 and closure_state == "incomplete":
+            run_workbench(
+                state,
+                "fail-scan",
+                "--scan-id",
+                child["scanId"],
+                "--message",
+                "Synthetic child stopped before completing its review.",
+            )
+        elif sealed:
+            run_workbench(state, "complete-scan", "--scan-id", child["scanId"])
+        originals = {
+            path.relative_to(directory): path.read_bytes()
+            for path in directory.rglob("*")
+            if path.is_file()
+        }
+        children.append((child, directory, originals if sealed else {}))
+    closed_id = f"{children[0][0]['scanId']}/{task_id}"
+    open_id = f"{children[1][0]['scanId']}/{task_id}"
+    parent_work = {"id": closed_id, "reason": "Parent reopened the first child's review."}
+    saved = checkpoint(
+        state,
+        parent,
+        merged=[children[0][0]["scanId"]] if merged else [],
+        passes=[
+            {"directory": directory.relative_to(parent_dir).as_posix(), "scanId": child["scanId"]}
+            for child, directory, _ in children
+        ],
+    )
+    if closure_state == "reopened":
+        saved["aggregate"] = {
+            "scanId": parent["scanId"],
+            "findings": [],
+            "coverage": {"deferred": [parent_work]},
+        }
+    elif merged:
+        first, directory, originals = children[0]
+        saved["aggregate"] = workbench_api["saved_results"].project_scan_artifacts(
+            parent["scanId"],
+            first["scanId"],
+            directory,
+            parent_dir,
+            *(
+                json.loads(originals[Path(name)])
+                for name in ("scan-manifest.json", "findings.json", "coverage.json")
+            ),
+        )["draft"]
+    if closure_state == "reopened" or merged:
+        run_workbench(
+            state,
+            "save-scan-artifact",
+            "--scan-id",
+            parent["scanId"],
+            "--artifact-path",
+            CHECKPOINT,
+            input_text=json.dumps(saved),
+        )
+    composition_bytes = (parent_dir / CHECKPOINT).read_bytes()
+    selected = write_checkpoint(
+        parent_dir / "checkpoints",
+        {
+            "scanId": parent["scanId"],
+            "complete": False,
+            "findings": [],
+            "coverage": {"deferred": [parent_work]} if selected_reopened or timed_pending else {},
+        },
+    )
+    head = parent_dir / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": selected.name}))
+    if timed_pending:
+        with closing(sqlite3.connect(state / "workbench.sqlite3")) as connection:
+            completed_at = connection.execute(
+                "SELECT completed_at FROM scans WHERE id = ?", (children[0][0]["scanId"],)
+            ).fetchone()[0]
+        completed = datetime.fromisoformat(completed_at)
+        observed = int(completed.timestamp()) * 1_000_000_000 + completed.microsecond * 1000
+        if closure_state == "older-selected-pending":
+            observed -= 1_000_000_000
+        for path in (selected, head):
+            os.utime(path, ns=(observed, observed))
+    head_bytes = head.read_bytes()
+    head_modified = head.stat().st_mtime_ns
+    run_workbench(
+        state,
+        action,
+        "--scan-id",
+        parent["scanId"],
+        *(("--message", "Synthetic interruption before merging.") if action == "fail-scan" else ()),
+    )
+    retained = [
+        json.loads(path.read_text()) for path in (parent_dir / "checkpoints").glob("*.json")
+    ]
+    aggregate = next(
+        draft for draft in retained if draft.get("complete") is False and draft["findings"]
+    )
+    assert aggregate["complete"] is False
+    assert head.read_bytes() == head_bytes
+    assert head.stat().st_mtime_ns == head_modified
+    terminal_observations = [draft for draft in retained if draft.get("complete") is not False]
+    if not merged and not selected_reopened and not timed_pending:
+        assert bool(terminal_observations) is (closure_state in {"sealed", "reopened"})
+    expected_closures = (
+        [{**closure, "id": closed_id}]
+        if closure_state in {"sealed", "merged", "older-selected-pending"}
+        else []
+    )
+    final_coverage = json.loads((parent_dir / "coverage.json").read_text())
+    if closure_state not in {"unsealed", "incomplete"}:
+        assert aggregate["coverage"].get("resolvedDeferred") == [{**closure, "id": closed_id}]
+    assert final_coverage.get("resolvedDeferred", []) == expected_closures
+    for coverage in (aggregate["coverage"], final_coverage):
+        assert {**pending, "id": open_id} in coverage["deferred"]
+    if closure_state == "reopened":
+        assert parent_work in aggregate["coverage"]["deferred"]
+    if reopened:
+        assert parent_work in final_coverage["deferred"]
+    else:
+        assert closed_id not in {row["id"] for row in final_coverage["deferred"]}
+    report = (parent_dir / "report.md").read_text()
+    assert pending["reason"] in report
+    assert f"Review deferred unit {open_id}" in report
+    assert (f"Review deferred unit {closed_id}" in report) is reopened
+    published = {
+        name: (parent_dir / name).read_bytes()
+        for name in ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
+    }
+    if merged:
+        findings = json.loads(published["findings.json"])["findings"]
+        assert len(findings) == 2
+        assert {finding["identity"]["anchor"] for finding in findings} == {
+            "synthetic-observation-1",
+            "synthetic-observation-2",
+        }
+    retained_bytes = {
+        path.name: path.read_bytes() for path in (parent_dir / "checkpoints").glob("*.json")
+    }
+    repeated_command = "recover-scan-results" if action == "fail-scan" else "get-scan"
+    run_workbench(state, repeated_command, "--scan-id", parent["scanId"])
+    saved = json.loads(published["scan-manifest.json"])["scan"]
+    with closing(sqlite3.connect(state / "workbench.sqlite3")) as connection:
+        connection.row_factory = sqlite3.Row
+        record = workbench_api["require_scan"](connection, parent["scanId"])
+        replayed = workbench_api["saved_results"].merge_saved_results(
+            parent_dir,
+            parent["scanId"],
+            workbench_api["workbench_completion_binding"](record, saved["completedAt"]),
+            [],
+            [],
+            stopped=True,
+            reason="Synthetic frozen-source replay.",
+            frozen_source_digests=saved["preservedSources"],
+        )
+    assert replayed is not None
+    assert replayed[2].get("resolvedDeferred", []) == expected_closures
+    assert {**pending, "id": open_id} in replayed[2]["deferred"]
+    if reopened:
+        assert parent_work in replayed[2]["deferred"]
+    assert {name: (parent_dir / name).read_bytes() for name in published} == published
+    assert {
+        path.name: path.read_bytes() for path in (parent_dir / "checkpoints").glob("*.json")
+    } == retained_bytes
+    assert head.read_bytes() == head_bytes
+    assert head.stat().st_mtime_ns == head_modified
+    assert (parent_dir / CHECKPOINT).read_bytes() == composition_bytes
+    for _, directory, originals in children:
+        assert {path: (directory / path).read_bytes() for path in originals} == originals
 
 
 @pytest.mark.parametrize("accepted_membership", ["merged", "represented"])

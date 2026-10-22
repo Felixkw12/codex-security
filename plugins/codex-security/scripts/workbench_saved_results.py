@@ -39,6 +39,7 @@ from finalize_scan_contract import (
     finalize_scan,
     finding_candidate_id,
     open_scan_local_file_descriptor,
+    parse_timestamp,
     write_scan_local_bytes,
     write_threat_model_projection_if_possible,
 )
@@ -2369,15 +2370,38 @@ def save_composed_checkpoint(
             represented.update(source["id"] for source in provenance.get("sourceFindings", []))
     recovery_errors = {}
     for child in children.values():
-        if child["id"] in merged_ids:
-            continue
         try:
             require_deep_pass_target(scan, stored_scan_target_identity(child))
-            draft = _stopped_child_draft(db, db.require_scan(connection, child["id"]), scan_dir)
+            child = db.require_scan(connection, child["id"])
+            draft = _stopped_child_draft(db, child, scan_dir)
         except (ContractError, OSError, SystemExit, ValueError) as exc:
             recovery_errors[child["id"]] = str(exc)
             continue
         if draft is None:
+            continue
+        closures = draft["coverage"].get("resolvedDeferred")
+        if (
+            closures
+            and child["status"] == "complete"
+            and child["seal_manifest_digest"] is not None
+            and draft.get("complete") is not False
+        ):
+            # Preserve the child's original observation time so a later parent
+            # checkpoint can reopen its work. This does not select a parent head.
+            completed = parse_timestamp(child["completed_at"])
+            observed_ns = int(completed.timestamp()) * 1_000_000_000 + completed.microsecond * 1000
+            name = save_pending_checkpoint(
+                scan_dir,
+                _encoded(
+                    {
+                        "scanId": scan["id"],
+                        "findings": [],
+                        "coverage": {"resolvedDeferred": closures},
+                    }
+                ),
+            )
+            os.utime(scan_dir / "checkpoints" / name, ns=(observed_ns, observed_ns))
+        if child["id"] in merged_ids:
             continue
         aggregate["findings"].extend(
             finding

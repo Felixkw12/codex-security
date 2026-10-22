@@ -55,7 +55,13 @@ def _scope_path(value: str) -> str:
 
 def merge_coverage(target: dict[str, Any], source: dict[str, Any]) -> None:
     """Retain distinct coverage rows in their original order."""
-    for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions"):
+    for field in (
+        "surfaces",
+        "explicitExclusions",
+        "deferred",
+        "resolvedDeferred",
+        "openQuestions",
+    ):
         rows = target.setdefault(field, [])
         seen = {json.dumps(row, sort_keys=True) for row in rows}
         for row in source.get(field, []):
