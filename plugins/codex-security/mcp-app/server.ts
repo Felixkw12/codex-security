@@ -1009,6 +1009,8 @@ export function createCodexSecurityServer(): McpServer {
                 ...semanticInputs.modelSettings,
                 developerInstructions:
                   semanticInputs.config["developer_instructions"] ?? null,
+                modelInstructionsFile:
+                  semanticInputs.config["model_instructions_file"] ?? null,
               }),
             ],
             normalizedUserContext,

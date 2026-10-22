@@ -63,6 +63,9 @@ for (const change of [
   "changed developer instructions",
   "removed developer instructions",
   "equivalent developer instructions",
+  "unchanged model instructions file",
+  "changed model instructions file",
+  "removed model instructions file",
   "empty knowledge environment",
   "whitespace knowledge environment",
   "plain knowledge environment",
@@ -78,20 +81,29 @@ for (const change of [
     );
     const configPath = path.join(root, "deep.toml");
     const selectedConfigPath = path.join(root, "selected.toml");
+    const modelInstructionsPath = path.join(root, "model-instructions-a.md");
+    const otherModelInstructionsPath = path.join(
+      root,
+      "model-instructions-b.md",
+    );
     const selectedProfile =
       change.endsWith("selected profile") ||
       change === "turn metadata precedence";
     const developerInstructions = change.endsWith("developer instructions");
+    const modelInstructionsFile = change.endsWith("model instructions file");
     const selectedConfig =
       developerInstructions ||
+      modelInstructionsFile ||
       selectedProfile ||
       change === "selected model" ||
       change === "selected effort";
-    const initialSelectedConfig = developerInstructions
-      ? 'model = "synthetic-model-a"\nmodel_reasoning_effort = "synthetic-effort-a"\ndeveloper_instructions = "Follow synthetic guidance A."\n'
-      : selectedProfile
-        ? 'model = "synthetic-unused-root-model"\nmodel_reasoning_effort = "synthetic-unused-root-effort"\nprofile = "scan"\n[profiles.scan]\nmodel = "synthetic-model-a"\nmodel_reasoning_effort = "synthetic-effort-a"\n'
-        : 'model = "synthetic-model-a"\nmodel_reasoning_effort = "synthetic-effort-a"\n';
+    const initialSelectedConfig = modelInstructionsFile
+      ? `model = "synthetic-model-a"\nmodel_reasoning_effort = "synthetic-effort-a"\ndeveloper_instructions = "Follow synthetic guidance A."\nmodel_instructions_file = ${JSON.stringify(modelInstructionsPath)}\n`
+      : developerInstructions
+        ? 'model = "synthetic-model-a"\nmodel_reasoning_effort = "synthetic-effort-a"\ndeveloper_instructions = "Follow synthetic guidance A."\n'
+        : selectedProfile
+          ? 'model = "synthetic-unused-root-model"\nmodel_reasoning_effort = "synthetic-unused-root-effort"\nprofile = "scan"\n[profiles.scan]\nmodel = "synthetic-model-a"\nmodel_reasoning_effort = "synthetic-effort-a"\n'
+          : 'model = "synthetic-model-a"\nmodel_reasoning_effort = "synthetic-effort-a"\n';
     const turnSettings =
       change === "turn metadata precedence"
         ? {
@@ -187,6 +199,16 @@ for (const change of [
       ]);
       await writeFile(path.join(repository, "app.py"), "print('fixture')\n");
       await writeFile(knowledgePath, "Original security guidance.\n");
+      if (modelInstructionsFile) {
+        await writeFile(
+          modelInstructionsPath,
+          "Synthetic model instructions A.\n",
+        );
+        await writeFile(
+          otherModelInstructionsPath,
+          "Synthetic model instructions B.\n",
+        );
+      }
       await writeFile(configPath, "[deep_scan]\nworkers = 2\nsubagents = 1\n");
       if (selectedConfig)
         await writeFile(selectedConfigPath, initialSelectedConfig);
@@ -201,6 +223,16 @@ for (const change of [
           deep.subagents,
         ),
       });
+      if (modelInstructionsFile) {
+        assert.equal(
+          savedConfig.model_instructions_file,
+          modelInstructionsPath,
+        );
+        assert.equal(
+          savedConfig.developer_instructions,
+          "Follow synthetic guidance A.",
+        );
+      }
       if (selectedConfig)
         assert.deepEqual(scanModelConfiguration(savedConfig), {
           model: turnSettings.model ?? "synthetic-model-a",
@@ -250,6 +282,13 @@ for (const change of [
         ],
         { scanId, threadId: owner, claimToken: handoffClaimToken, recipe },
       );
+      if (modelInstructionsFile) {
+        assert.equal(
+          workbench(["get-scan-recipe", "--scan-id", scanId]).recipe.config
+            .model_instructions_file,
+          modelInstructionsPath,
+        );
+      }
       workbench([
         "set-scan-thread",
         "--scan-id",
@@ -377,6 +416,22 @@ for (const change of [
           selectedConfigPath,
           'profile = "scan"\ndeveloper_instructions = "Inactive root guidance."\n[profiles.scan]\nmodel = "synthetic-model-a"\nmodel_reasoning_effort = "synthetic-effort-a"\ndeveloper_instructions = "Follow synthetic guidance A."\n',
         );
+      if (change === "changed model instructions file")
+        await writeFile(
+          selectedConfigPath,
+          initialSelectedConfig.replace(
+            JSON.stringify(modelInstructionsPath),
+            JSON.stringify(otherModelInstructionsPath),
+          ),
+        );
+      if (change === "removed model instructions file")
+        await writeFile(
+          selectedConfigPath,
+          initialSelectedConfig.replace(
+            `model_instructions_file = ${JSON.stringify(modelInstructionsPath)}\n`,
+            "",
+          ),
+        );
       client = await connect();
       // The public explicit identity remains authoritative after the restart.
       assert.equal(
@@ -402,6 +457,7 @@ for (const change of [
           "turn metadata precedence",
           "unchanged developer instructions",
           "equivalent developer instructions",
+          "unchanged model instructions file",
         ].includes(change)
       ) {
         assert.equal(successful(response).scanId, scanId);
@@ -411,6 +467,13 @@ for (const change of [
         assert.match(response.content[0].text, /knowledge|ENOENT/i);
         assert.equal(workbench(["list-scans"]).scans.length, 1);
       } else {
+        if (modelInstructionsFile) {
+          assert.notEqual(
+            response.structuredContent?.scanId,
+            scanId,
+            `changed model instructions must not reuse the completed scan (${workbench(["list-scans"]).scans.length} persisted scans)`,
+          );
+        }
         assert.equal(response.isError, true);
         assert.match(response.content[0].text, /Codex executable/i);
         const scans = workbench(["list-scans"]).scans;

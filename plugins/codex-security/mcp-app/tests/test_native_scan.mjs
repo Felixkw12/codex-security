@@ -2647,6 +2647,14 @@ test(
           preflights: join(root, `preflights-${id}.jsonl`),
           decoyLaunch: join(root, `decoy-${id}.jsonl`),
           selectedConfigPath: join(root, `selected-${id}.toml`),
+          instructionsFile: join(
+            root,
+            `instructions-${id}-${capturedInputs ? "B" : "A"}.md`,
+          ),
+          laterInstructionsFile: join(
+            root,
+            `instructions-${id}-${capturedInputs ? "A" : "B"}.md`,
+          ),
           developerInstructions: `Selected synthetic guidance ${id}.`,
           parentAccess: id === "a" || id === "c" ? "read" : "write",
           parentDeniedPath: join(root, `parent-private-${id}`),
@@ -2710,6 +2718,7 @@ test(
         });
         fixture.selectedConfigText = stringifyToml({
           developer_instructions: fixture.developerInstructions,
+          model_instructions_file: fixture.instructionsFile,
           ...(id === "c"
             ? {
                 model: fixture.model,
@@ -2730,6 +2739,31 @@ test(
         });
         await writeFile(join(fixture.home, "config.toml"), fixture.configText);
         await writeFile(fixture.selectedConfigPath, fixture.selectedConfigText);
+        await Promise.all(
+          [fixture.instructionsFile, fixture.laterInstructionsFile].map(
+            (path) =>
+              writeFile(path, `Synthetic instruction-file guidance ${id}.\n`),
+          ),
+        );
+        if (!capturedInputs) {
+          fixture.savedConfiguration = await nativeScanConfiguration(
+            {
+              ...process.env,
+              CODEX_HOME: fixture.home,
+              CODEX_SECURITY_CONFIG_PATH: fixture.selectedConfigPath,
+            },
+            { model: fixture.model, reasoningEffort: fixture.reasoningEffort },
+            2,
+          );
+          const laterSelectedConfig = parseToml(fixture.selectedConfigText);
+          laterSelectedConfig.model_instructions_file =
+            fixture.laterInstructionsFile;
+          fixture.selectedConfigText = stringifyToml(laterSelectedConfig);
+          await writeFile(
+            fixture.selectedConfigPath,
+            fixture.selectedConfigText,
+          );
+        }
         if (capturedInputs) {
           const knowledgeDirectory = join(root, `knowledge-${id}`);
           await mkdir(knowledgeDirectory);
@@ -2788,6 +2822,8 @@ test(
           fixture.configText = stringifyToml(laterConfig);
           const laterSelectedConfig = parseToml(fixture.selectedConfigText);
           laterSelectedConfig.developer_instructions = `Later synthetic guidance ${id}.`;
+          laterSelectedConfig.model_instructions_file =
+            fixture.laterInstructionsFile;
           laterSelectedConfig.model = `later-selected-model-${id}`;
           laterSelectedConfig.model_reasoning_effort = `later-selected-effort-${id}`;
           laterSelectedConfig.model_providers.openai.name = `Later synthetic provider ${id}`;
@@ -2914,6 +2950,7 @@ test(
             : {
                 recipe: {
                   auth: "api-key",
+                  config: fixture.savedConfiguration,
                   inheritedPermissions: {
                     filesystem: { [fixture.savedWritePath]: "write" },
                     network: { enabled: false },
@@ -3046,6 +3083,10 @@ test(
                 assert.equal(
                   config.developer_instructions,
                   fixture.developerInstructions,
+                );
+                assert.equal(
+                  config.model_instructions_file,
+                  fixture.instructionsFile,
                 );
                 if (knowledge) {
                   assert.equal(observed.knowledge, knowledge.path);

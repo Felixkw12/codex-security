@@ -724,6 +724,8 @@ def test_native_target_retry_reuses_completed_result(
         "reasoning_effort",
         "developer_instructions",
         "removed_developer_instructions",
+        "model_instructions_file",
+        "removed_model_instructions_file",
         "missing_saved_inputs",
     ],
 )
@@ -732,6 +734,10 @@ def test_native_completed_reuse_compares_registered_semantic_inputs(
 ) -> None:
     state, _, arguments, started, complete = native_scan_completion
     scan = started["scan"]
+    instructions = state.parent / "instructions-a.md"
+    other_instructions = state.parent / "instructions-b.md"
+    for path in (instructions, other_instructions):
+        path.write_text("Follow synthetic guidance.\n")
     semantic = {
         "scanInputs": {"scanPromptSha256": "synthetic-prompt", "knowledgeBase": None},
         "deepScan": {"workers": 2, "subagents": 1},
@@ -739,6 +745,7 @@ def test_native_completed_reuse_compares_registered_semantic_inputs(
             "model": "synthetic-model",
             "model_reasoning_effort": "synthetic-effort",
             "developer_instructions": "Follow synthetic guidance A.",
+            "model_instructions_file": str(instructions),
         },
     }
     with sqlite3.connect(state / "workbench.sqlite3") as connection:
@@ -768,6 +775,24 @@ def test_native_completed_reuse_compares_registered_semantic_inputs(
         semantic["config"]["developer_instructions"] = "Follow synthetic guidance B."
     elif changed == "removed_developer_instructions":
         del semantic["config"]["developer_instructions"]
+    elif changed == "model_instructions_file":
+        semantic["config"]["model_instructions_file"] = str(other_instructions)
+    elif changed == "removed_model_instructions_file":
+        del semantic["config"]["model_instructions_file"]
+    explicit = run_workbench(
+        state,
+        "begin-deep-scan",
+        "--thread-id",
+        "native-owner",
+        "--scan-id",
+        scan["scanId"],
+        "--claim-token",
+        scan["handoffClaimToken"],
+        "--completed-inputs-json",
+        "unused invalid JSON",
+    )
+    assert explicit["scan"]["scanId"] == scan["scanId"]
+    assert explicit["scan"]["progress"]["status"] == "complete"
     selected = run_workbench(
         state,
         *arguments,
@@ -779,6 +804,7 @@ def test_native_completed_reuse_compares_registered_semantic_inputs(
                 "model": semantic["config"]["model"],
                 "reasoningEffort": semantic["config"]["model_reasoning_effort"],
                 "developerInstructions": semantic["config"].get("developer_instructions"),
+                "modelInstructionsFile": semantic["config"].get("model_instructions_file"),
             }
         ),
     )
