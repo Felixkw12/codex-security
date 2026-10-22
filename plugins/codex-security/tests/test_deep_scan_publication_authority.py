@@ -294,8 +294,13 @@ def emulate_windows_atomic_write(monkeypatch, finalizer, files, *, reparse_point
             descriptor = next_directory_handle
             next_directory_handle -= 1
         else:
-            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            streams[descriptor] = files.enter_context(os.fdopen(descriptor, "wb"))
+            stream = open(path, "xb", opener=lambda path, flags: os.open(path, flags, 0o600))
+            try:
+                descriptor = stream.fileno()
+                streams[descriptor] = files.enter_context(stream)
+            except BaseException:
+                stream.close()
+                raise
         paths[descriptor] = path
         return backend._OwnedHandle(descriptor)
 
