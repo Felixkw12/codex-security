@@ -29,6 +29,8 @@ import {
   type ExternalFindingsReaderOptions,
 } from "./external-findings-read.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
+import { snykRepositoryUrls } from "./snyk-findings.js";
+import { endorRepositoryUrls } from "./endor-findings.js";
 import type {
   ExternalFindings,
   ExternalPublicationInput,
@@ -61,6 +63,7 @@ export interface NormalizedExternalPublicationOptions {
 /** File readers accept the vendor formats installed in this SDK. */
 export interface ExternalPublicationOptions extends NormalizedExternalPublicationOptions {
   provider: ExternalFindingsReaderOptions["provider"];
+  sourceRepositoryUrl?: string;
 }
 
 /** Optional transport, account, cancellation, and progress hooks. */
@@ -709,6 +712,14 @@ async function preparePublicationInput(
         finding.evidence.details?.repository?.url,
         ...(options.provider === "wiz"
           ? [wizCsvRepositoryUrl(finding.evidence)]
+          : []),
+        ...(options.provider === "snyk"
+          ? snykRepositoryUrls(finding.evidence.source_data, {
+              cloudRepositoryUrl: destination.url,
+            })
+          : []),
+        ...(options.provider === "endor"
+          ? endorRepositoryUrls(finding.evidence.source_data)
           : []),
       ];
       for (const sourceRepository of sourceRepositories)

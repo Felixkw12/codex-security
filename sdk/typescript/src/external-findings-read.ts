@@ -4,13 +4,18 @@ import type {
   ExternalSourceRepository,
 } from "./external-findings.js";
 import { wizCsvRepositoryUrl } from "./wiz-csv.js";
+import { readSnykFindings, snykRepositoryUrls } from "./snyk-findings.js";
+import { readSemgrepFindings } from "./semgrep-findings.js";
+import { readEndorFindings, endorRepositoryUrls } from "./endor-findings.js";
+import { readGitHubFindings } from "./github-findings.js";
 import { isGitHubCloudHost } from "./git-remote.js";
 import { isRecord } from "./record.js";
 import { readVendorFindingsForPublication } from "./wiz-findings.js";
 
 /** File readers available in this SDK, shared by local and Cloud imports. */
 export interface ExternalFindingsReaderOptions {
-  provider: "wiz";
+  provider: "wiz" | "snyk" | "semgrep" | "endor" | "github";
+  sourceRepositoryUrl?: string;
 }
 
 /** @internal Shared parser output, including immutable Cloud retry projections. */
@@ -24,8 +29,53 @@ export interface ReadExternalFindings {
 /** @internal Read vendor evidence for the local and Cloud import entrypoints. */
 export async function readExternalFindings(
   path: string,
-  _options: ExternalFindingsReaderOptions,
+  options: ExternalFindingsReaderOptions,
 ): Promise<ReadExternalFindings> {
+  if (options.provider === "snyk") {
+    const findings = await readSnykFindings(path);
+    return {
+      findings,
+      sourceRepositories: findings.findings.flatMap(({ evidence }) =>
+        snykRepositoryUrls(evidence.source_data, {
+          normalizeGitRemote: false,
+        }).map((url) => ({ url })),
+      ),
+    };
+  }
+  if (options.provider === "semgrep") {
+    const findings = await readSemgrepFindings(path, {
+      sourceRepositoryUrl: options.sourceRepositoryUrl ?? "",
+    });
+    const sourceRepositories = findings.findings.flatMap(({ evidence }) => {
+      const context = evidence.source_data?.["runContext"];
+      const references = isRecord(context)
+        ? context["versionControlProvenance"]
+        : undefined;
+      return Array.isArray(references)
+        ? references.flatMap((reference) =>
+            isRecord(reference) &&
+            typeof reference["repositoryUri"] === "string" &&
+            reference["repositoryUri"].trim()
+              ? [{ url: reference["repositoryUri"] }]
+              : [],
+          )
+        : [];
+    });
+    return { findings, sourceRepositories };
+  }
+  if (options.provider === "endor") {
+    const parsed = await readEndorFindings(path);
+    return {
+      findings: parsed,
+      sourceRepositories: parsed.findings.flatMap((finding) =>
+        endorRepositoryUrls(finding.evidence.source_data).map((url) => ({
+          url,
+        })),
+      ),
+    };
+  }
+  if (options.provider === "github")
+    return { findings: await readGitHubFindings(path) };
   const publication = await readVendorFindingsForPublication(path);
   // Raw package exports keep repository-branch URLs in retained source data.
   const sourceRepositories = publication.current.findings.flatMap(
