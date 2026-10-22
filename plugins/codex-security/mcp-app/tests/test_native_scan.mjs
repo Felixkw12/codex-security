@@ -994,13 +994,20 @@ test("native waiters join one ordinary scan and detaching leaves it running", as
   const completed = Promise.withResolvers();
   let preparations = 0;
   let closes = 0;
+  let runs = 0;
   let signal;
-  const host = new NativeScanHost(async () => {
+  const policy = input().parentSandbox;
+  const rejectPolicy = () => {
+    throw new Error("unsupported sandbox");
+  };
+  const host = new NativeScanHost(async (request) => {
+    assert.equal(request.parentSandbox(), policy);
     preparations++;
     return {
       options: { mode: "deep" },
       client: {
         run(_repository, options) {
+          runs++;
           signal = options.signal;
           started.resolve();
           return completed.promise;
@@ -1012,9 +1019,16 @@ test("native waiters join one ordinary scan and detaching leaves it running", as
     };
   });
   const waiter = new AbortController();
-  const first = host.run(input(), waiter.signal);
-  const joined = host.run(input());
+  const first = host.run(
+    { ...input(), parentSandbox: () => policy },
+    waiter.signal,
+  );
+  const joined = host.run({ ...input(), parentSandbox: rejectPolicy });
   await started.promise;
+  await assert.rejects(
+    host.run({ ...input("other"), parentSandbox: rejectPolicy }),
+    /unsupported sandbox/,
+  );
   const rejected = assert.rejects(first, /detached/);
   waiter.abort(new Error("detached"));
   await rejected;
@@ -1022,6 +1036,7 @@ test("native waiters join one ordinary scan and detaching leaves it running", as
   completed.resolve({ scanDir: "sealed-parent" });
   assert.deepEqual(await joined, { scanDir: "sealed-parent" });
   assert.equal(preparations, 1);
+  assert.equal(runs, 1);
   assert.equal(closes, 1);
 });
 
@@ -1822,7 +1837,7 @@ test("native launches snapshot safety identifiers and prefer saved recipes", asy
 });
 
 test(
-  "native attribution and selected state stay isolated across concurrent fresh and saved worker launches",
+  "native attribution, state, and lazy sandbox policies stay isolated across concurrent fresh and saved worker launches",
   {
     skip:
       process.platform === "win32"
@@ -1865,13 +1880,16 @@ test(
         recipe: { auth: "api-key", safetyIdentifier: "synthetic-saved" },
         expected: "synthetic-saved",
       },
-    ].map((fixture) => ({
+    ].map((fixture, index) => ({
       ...fixture,
       home: join(root, fixture.id, "home"),
       repository: join(root, fixture.id, "repository"),
       scanDir: join(root, fixture.id, "scan"),
       capture: join(root, `${fixture.id}.jsonl`),
       stateDirectory: join(root, fixture.id, "selected state "),
+      workspaceAccess: index % 2 === 0 ? "read" : "write",
+      deniedPath: join(root, fixture.id, "repository", "private"),
+      sandboxResolutions: 0,
     }));
     try {
       await mkdir(join(pluginRoot, ".codex-plugin"), { recursive: true });
@@ -1930,6 +1948,13 @@ else {
               ...input(fixture.id).scan,
               targetPath: fixture.repository,
               scanDir: fixture.scanDir,
+            },
+            parentSandbox: () => {
+              fixture.sandboxResolutions++;
+              return {
+                workspaceAccess: fixture.workspaceAccess,
+                filesystemDenies: [fixture.deniedPath],
+              };
             },
             ...(fixture.recipe === undefined ? {} : { recipe: fixture.recipe }),
           });
@@ -2021,11 +2046,27 @@ else {
                 fixture.expected,
                 fixture.id,
               );
+              const fragments = [];
+              for (let i = 0; i < observed.argv.length; i++)
+                if (["-c", "--config"].includes(observed.argv[i]))
+                  fragments.push(parseToml(observed.argv[++i]));
+              const config = Object.assign({}, ...fragments);
+              const filesystem =
+                config.permissions[config.default_permissions].filesystem;
+              assert.equal(
+                filesystem[":workspace_roots"],
+                fixture.workspaceAccess,
+              );
+              assert.equal(filesystem[fixture.deniedPath], "deny");
+              for (const other of cases)
+                if (other !== fixture)
+                  assert.equal(filesystem[other.deniedPath], undefined);
               assert.equal(observed.marker, fixture.id);
               assert.equal(observed.home, runtime.codexHome);
               assert.equal(observed.codex, `synthetic-key-${fixture.id}`);
               assert.equal(observed.stateDirectory, fixture.stateDirectory);
             }
+            assert.equal(fixture.sandboxResolutions, 1);
           } finally {
             await rm(runtime.bootstrapWorkspace, {
               recursive: true,

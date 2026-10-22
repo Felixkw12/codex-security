@@ -946,7 +946,6 @@ export function createCodexSecurityServer(): McpServer {
       let startedScan: ScanResults | undefined;
       try {
         const modelSettings = codexModelSettingsFromExtra(extra);
-        const parentSandbox = resolveNativeParentSandbox(extra);
         const beginArguments = [
           "begin-deep-scan",
           ...optionalArg("--scan-id", scanId),
@@ -1017,7 +1016,7 @@ export function createCodexSecurityServer(): McpServer {
               : {}),
             threadId,
             ...modelSettings,
-            parentSandbox,
+            parentSandbox: () => resolveNativeParentSandbox(extra),
             pluginRoot: PLUGIN_ROOT,
             pythonPath: await resolvePythonCommand(),
             stateDirectory: await workbenchStateDirectory(),
