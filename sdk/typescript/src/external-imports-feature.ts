@@ -1,9 +1,13 @@
+import { environmentEntry } from "./auth.js";
 import { CodexSecurityError } from "./errors.js";
 
 export function externalImportsEnabled(
   environment: NodeJS.ProcessEnv = process.env,
 ): boolean {
-  return environment["CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS"] === "1";
+  return (
+    environmentEntry(environment, "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS") ===
+    "1"
+  );
 }
 
 export function requireExternalImports(
