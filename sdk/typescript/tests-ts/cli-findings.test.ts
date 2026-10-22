@@ -504,6 +504,61 @@ describe("CLI findings history", () => {
     expect(stdout.text()).not.toContain("Unrelated finding");
   });
 
+  test.each(["path", "locationPath"])(
+    "shows canonical finding locations instead of an extra %s field",
+    async (field) => {
+      const selected: JsonObject = {
+        occurrenceId: "saved-occurrence",
+        severity: { level: "high" },
+        title: "Missing authorization",
+        locations: [
+          { path: "src/handler.ts", startLine: 34, role: "root_control" },
+        ],
+        [field]: "unrelated/extra-field.ts",
+      };
+      const scan = {
+        scanId: "saved-scan",
+        scanDir: "/results/saved-scan",
+        targetPath: "/current/repository",
+      };
+      const calls: Array<readonly string[]> = [];
+      const deps = dependencies({
+        onWorkbench: (args) => {
+          calls.push(args);
+          return { scan: { ...scan, findings: [selected] } };
+        },
+      });
+      for (const json of [false, true]) {
+        const stdout = capture(!json);
+        const stderr = capture();
+        expect(
+          await main(
+            [
+              "findings",
+              "show",
+              "saved-occurrence",
+              ...(json ? ["--json"] : []),
+            ],
+            stdout.stream,
+            stderr.stream,
+            deps,
+          ),
+        ).toBe(0);
+        expect(stderr.text()).toBe("");
+        if (json) {
+          expect(JSON.parse(stdout.text())).toEqual({ ...selected, ...scan });
+        } else {
+          expect(stdout.text()).toContain("src/handler.ts:34");
+          expect(stdout.text()).not.toContain("unrelated/extra-field.ts");
+        }
+      }
+      expect(calls).toEqual([
+        ["get-finding", "--occurrence-id", "saved-occurrence"],
+        ["get-finding", "--occurrence-id", "saved-occurrence"],
+      ]);
+    },
+  );
+
   test("shows the latest completed scan without requiring its identifier", async () => {
     for (const command of [
       ["scans", "show"],

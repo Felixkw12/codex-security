@@ -151,10 +151,9 @@ export function renderScanHistory(
         ? `  ${accent("·")}  ${strong(`Known since ${KNOWN_SINCE_DATE.format(new Date(clean(entry["knownSince"])))}`)}${knownScans}`
         : "";
     const location = (entry["locations"] as JsonObject[] | undefined)?.[0];
-    const path =
-      entry["path"] ??
-      entry["locationPath"] ??
-      `${location?.["path"]}${location?.["startLine"] ? `:${location["startLine"]}` : ""}`;
+    const path = location
+      ? `${location["path"]}${location["startLine"] ? `:${location["startLine"]}` : ""}`
+      : (entry["path"] ?? entry["locationPath"]);
     lines.push(`              ${dim(clean(path))}${grouped}${knownSince}`);
     if (command === "findings" || command === "finding" || command === "show") {
       const occurrenceId = entry["occurrenceId"];
