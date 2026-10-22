@@ -1349,6 +1349,7 @@ describe("skill authentication", () => {
         command,
         auth,
         overrides: [
+          'model="synthetic-provider-model"',
           `model_provider=${JSON.stringify(provider)}`,
           `model_providers.${provider}.name="Synthetic gateway"`,
           `model_providers.${provider}.base_url="https://gateway.example.test/v1"`,
@@ -1760,6 +1761,7 @@ describe("skill authentication", () => {
       const result = await runProviderSkill(stateDirectory, {
         auth,
         overrides: [
+          'model="synthetic-provider-model"',
           `model_provider=${JSON.stringify(provider)}`,
           `model_providers.${provider}.name="Synthetic gateway"`,
           `model_providers.${provider}.base_url="https://gateway.example.test/v1"`,
