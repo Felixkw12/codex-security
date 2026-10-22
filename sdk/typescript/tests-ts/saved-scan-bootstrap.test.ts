@@ -1811,21 +1811,21 @@ test.each([
   },
 );
 
-test.each([
-  ["2099-01-01T00:00:00.000100Z", "2099-01-01T00:00:00.000200Z"],
-  ["2099-01-01t02:00:00.10+02:00", "2099-01-01t00:00:00.1001z"],
-  ["2099-01-01T23:59:59-01:00", "2099-01-02T01:00:00Z"],
-  ["0001-01-01T00:00:00Z", "0001-01-01T00:00:00.1Z"],
-  ["9999-12-31T23:30:00Z", "9999-12-31T23:30:00-01:00"],
-  [
-    `2099-01-01T00:00:00.${"0".repeat(100_000)}1Z`,
-    `2099-01-01T00:00:00.${"0".repeat(100_000)}2Z`,
-  ],
-  ["2099-01-01T00:00:00", "2099-01-01T01:00:00"],
-] as const)(
-  "latest preserves exact update ordering ahead of scan-ID ties %#",
-  async (olderTime, newerTime) => {
-    const f = await fixture();
+test("latest preserves exact update ordering ahead of scan-ID ties", async () => {
+  const f = await fixture();
+  const cases = [
+    ["2099-01-01T00:00:00.000100Z", "2099-01-01T00:00:00.000200Z"],
+    ["2099-01-01t02:00:00.10+02:00", "2099-01-01t00:00:00.1001z"],
+    ["2099-01-01T23:59:59-01:00", "2099-01-02T01:00:00Z"],
+    ["0001-01-01T00:00:00Z", "0001-01-01T00:00:00.1Z"],
+    ["9999-12-31T23:30:00Z", "9999-12-31T23:30:00-01:00"],
+    [
+      `2099-01-01T00:00:00.${"0".repeat(100_000)}1Z`,
+      `2099-01-01T00:00:00.${"0".repeat(100_000)}2Z`,
+    ],
+    ["2099-01-01T00:00:00", "2099-01-01T01:00:00"],
+  ] as const;
+  for (const [index, [olderTime, newerTime]] of cases.entries()) {
     const [older, newer] = [f.first, f.second].sort((left, right) =>
       left.scanId.localeCompare(right.scanId),
     );
@@ -1847,9 +1847,12 @@ test.each([
     } finally {
       db.close();
     }
-    expect((await latestFor(f, f.repository)).scanId).toBe(newer!.scanId);
-  },
-);
+    expect(
+      (await latestFor(f, f.repository)).scanId,
+      `timestamp case ${index}`,
+    ).toBe(newer!.scanId);
+  }
+});
 
 test.each([false, true])(
   "latest takes the exact scan/progress maximum (progress newer: %p)",
@@ -1910,14 +1913,14 @@ test.each(["not-a-timestamp", `2099-01-01T00:00:00.${"0".repeat(100_000)}1Z`])(
   },
 );
 
-test.each([
-  [".100", ".1"],
-  [".000", ""],
-  [`.${"0".repeat(100_000)}`, ""],
-])(
-  "latest ties equivalent instants by start time, then binary scan ID %#",
-  async (firstFraction, secondFraction) => {
-    const f = await fixture();
+test("latest ties equivalent instants by start time, then binary scan ID", async () => {
+  const f = await fixture();
+  const cases = [
+    [".100", ".1"],
+    [".000", ""],
+    [`.${"0".repeat(100_000)}`, ""],
+  ] as const;
+  for (const [index, [firstFraction, secondFraction]] of cases.entries()) {
     const [first, second] = [f.first, f.second].sort((a, b) =>
       a.scanId < b.scanId ? -1 : 1,
     );
@@ -1936,16 +1939,22 @@ test.each([
           "UPDATE scan_progress SET updated_at = ? WHERE scan_id = ?",
         ).run(timestamp, scan.scanId);
       }
-      expect((await latestFor(f, f.repository)).scanId).toBe(first!.scanId);
+      expect(
+        (await latestFor(f, f.repository)).scanId,
+        `equivalent case ${index}`,
+      ).toBe(first!.scanId);
       db.query(
         "UPDATE scans SET started_at = '2098-01-01T00:00:00.0001Z' WHERE id = ?",
       ).run(second!.scanId);
-      expect((await latestFor(f, f.repository)).scanId).toBe(second!.scanId);
+      expect(
+        (await latestFor(f, f.repository)).scanId,
+        `start-time case ${index}`,
+      ).toBe(second!.scanId);
     } finally {
       db.close();
     }
-  },
-);
+  }
+});
 
 for (const removedComponent of [false, true]) {
   test.skipIf(process.platform === "win32")(

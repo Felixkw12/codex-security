@@ -207,6 +207,7 @@ def _historical_repository_roots(target: Path) -> Iterator[Path]:
     try:
         yield _protected_repository_root(target)
     except (OSError, RuntimeError):
+        # Keep checking lexical ancestry when the saved path cannot be resolved.
         pass
     # A moved or unavailable descendant still excludes its lexical checkout ancestry.
     root = Path(os.path.abspath(target))
@@ -221,6 +222,7 @@ def _historical_repository_roots(target: Path) -> Iterator[Path]:
     try:
         yield protected.resolve()
     except (OSError, RuntimeError):
+        # The lexical root above still excludes tools at an unavailable checkout.
         pass
 
 
@@ -245,12 +247,19 @@ def _resolve_git_executable(
 
     try:
         repositories = [_protected_repository_root(protected_root)]
+        unavailable_ancestors: set[Path] = set()
         if configured is None:
-            repositories.extend(
-                repository
-                for root in discovery_roots
-                for repository in _historical_repository_roots(root)
-            )
+            for root in discovery_roots:
+                for repository in _historical_repository_roots(root):
+                    repositories.append(repository)
+                    try:
+                        available = repository.is_dir()
+                    except (OSError, RuntimeError):
+                        available = False
+                    if not available:
+                        # Removed checkout metadata cannot bound this saved subdirectory.
+                        # Exclude ancestor-local tools without excluding shared host trees.
+                        unavailable_ancestors.update(repository.parents)
     except (OSError, RuntimeError):
         return None
 
@@ -277,7 +286,7 @@ def _resolve_git_executable(
             path == repository or repository in path.parents
             for repository in repositories
             for path in (lexical, invocation, canonical)
-        ):
+        ) or any(path.parent in unavailable_ancestors for path in (lexical, invocation, canonical)):
             if configured is not None:
                 raise SystemExit("CODEX_SECURITY_GIT must stay outside the protected repository.")
             continue
@@ -287,7 +296,7 @@ def _resolve_git_executable(
 
 @contextmanager
 def scoped_git_discovery(protected_roots: Callable[[], Iterable[Path]]) -> Iterator[None]:
-    """Pin ambient Git when a migration first needs to inspect repository targets."""
+    """Pin ambient Git when an operation first needs to inspect repository targets."""
     if os.environ.get("CODEX_SECURITY_GIT") is not None:
         yield
         return

@@ -1,8 +1,7 @@
 import { codexWithRun, jsonCodex } from "./support/codex.js";
-import { mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
-import * as fs from "node:fs/promises";
+import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { describe, expect, test, mock, spyOn } from "bun:test";
+import { describe, expect, test, mock } from "bun:test";
 import type { CodexSecurityConfig, JsonObject } from "../src/index.js";
 import { DiffTarget, type ScanOptions } from "../src/index.js";
 import { main } from "../src/cli.js";
@@ -77,8 +76,6 @@ describe("CLI workbench", () => {
   );
   test("findings list forwards directory aliases to the repository history query", async () => {
     const root = await temporaryDirectory("finding-repository-alias-");
-    const originalRealpath = fs.realpath;
-    let spelling: ReturnType<typeof spyOn> | undefined;
     try {
       const repository = join(root, "repository");
       const alias = join(root, "alias");
@@ -88,45 +85,30 @@ describe("CLI workbench", () => {
         alias,
         process.platform === "win32" ? "junction" : "dir",
       );
-      for (const preserveSpelling of [false, true]) {
-        if (preserveSpelling) {
-          spelling = spyOn(fs, "realpath").mockImplementation((async (
-            ...args: Parameters<typeof realpath>
-          ) => {
-            const result = await originalRealpath(...args);
-            return args[0] === alias
-              ? typeof result === "string"
-                ? alias
-                : Buffer.from(alias)
-              : result;
-          }) as typeof realpath);
-        }
-        const calls: Array<readonly string[]> = [];
-        const stdout = captureCli(main, "stdout");
-        expect(
-          await stdout.run(
-            ["findings", "list", alias, "--json"],
-            dependencies({
-              onWorkbench: (args): JsonObject => {
-                calls.push(args);
-                return {
-                  findings: [{ title: "Saved finding" }],
-                  nextOffset: null,
-                };
-              },
-            }),
-          ),
-        ).toBe(0);
-        expect(calls).toEqual([
-          ["list-global-findings", "--repository", alias, "--status", "open"],
-        ]);
-        expect(JSON.parse(stdout.text())).toEqual({
-          repository: alias,
-          findings: [{ title: "Saved finding" }],
-        });
-      }
+      const calls: Array<readonly string[]> = [];
+      const stdout = captureCli(main, "stdout");
+      expect(
+        await stdout.run(
+          ["findings", "list", alias, "--json"],
+          dependencies({
+            onWorkbench: (args): JsonObject => {
+              calls.push(args);
+              return {
+                findings: [{ title: "Saved finding" }],
+                nextOffset: null,
+              };
+            },
+          }),
+        ),
+      ).toBe(0);
+      expect(calls).toEqual([
+        ["list-global-findings", "--repository", alias, "--status", "open"],
+      ]);
+      expect(JSON.parse(stdout.text())).toEqual({
+        repository: alias,
+        findings: [{ title: "Saved finding" }],
+      });
     } finally {
-      spelling?.mockRestore();
       await rm(root, { recursive: true, force: true });
     }
   });

@@ -92,6 +92,7 @@ from workbench_scan_start import (
 )
 from workbench_schema import (
     MIGRATIONS,
+    migration_target_paths,
 )
 from workbench_schema import (
     apply_migrations as apply_schema_migrations,
@@ -124,6 +125,7 @@ from workbench_target import (
     require_scan_target_identity,
     restore_directory_junctions,
     scan_target_warning,
+    scoped_git_discovery,
     worktree_content_digest,
     worktree_content_digest_for_context,
 )
@@ -3416,9 +3418,12 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
         result = publication.finding_issues(_WORKBENCH_PUBLICATION_CONTEXT, json.load(sys.stdin))
         print(json.dumps(result, allow_nan=False, sort_keys=True))
         return
-    with closing(
-        connect(deferred=args.command in {"get-scan", "list-scans", "database-info"})
-    ) as connection:
+    with (
+        closing(
+            connect(deferred=args.command in {"get-scan", "list-scans", "database-info"})
+        ) as connection,
+        scoped_git_discovery(lambda: migration_target_paths(connection)),
+    ):
         remediation_state.require_available(connection, args, require_scan)
         handlers = {
             "create-workspace": create_workspace,

@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+import test_workbench_scan_history as producer
 from workbench_test_support import (
     create_saved_workspace,
     initialize_git_repository,
@@ -280,13 +281,10 @@ def test_repository_index_reports_latest_scan_open_findings_and_missing_checkout
 def test_native_completion_keeps_same_target_legacy_triage_without_matching(
     tmp_path: Path, legacy: bool, same_target: bool
 ) -> None:
-    from test_workbench_scan_history import create_cli_scan
-    from workbench_test_support import initialize_git_repository
-
     state = tmp_path / "state"
     repository = tmp_path / "repository"
     revision = initialize_git_repository(repository)
-    first = create_cli_scan(
+    first = producer.create_cli_scan(
         state,
         tmp_path / "results",
         repository,
@@ -322,7 +320,7 @@ def test_native_completion_keeps_same_target_legacy_triage_without_matching(
     if not same_target:
         next_target = tmp_path / "other"
         revision = initialize_git_repository(next_target)
-    create_cli_scan(
+    producer.create_cli_scan(
         state,
         tmp_path / "results",
         next_target,
@@ -342,8 +340,6 @@ def test_native_completion_keeps_same_target_legacy_triage_without_matching(
 def test_legacy_linked_comparison_keeps_unbound_triage_target_local(
     tmp_path: Path, saved_comparison: bool
 ) -> None:
-    from test_workbench_scan_history import confirmed_match, create_cli_scan, save_scan_matches
-
     state = tmp_path / "state"
     repository = tmp_path / "repository"
     revision = initialize_git_repository(repository)
@@ -352,8 +348,10 @@ def test_legacy_linked_comparison_keeps_unbound_triage_target_local(
         ["git", "-C", str(repository), "worktree", "add", "-q", "--detach", str(linked)],
         check=True,
     )
-    first = create_cli_scan(state, tmp_path / "results", repository, target_revision=revision)
-    later = create_cli_scan(state, tmp_path / "results", linked, target_revision=revision)
+    first = producer.create_cli_scan(
+        state, tmp_path / "results", repository, target_revision=revision
+    )
+    later = producer.create_cli_scan(state, tmp_path / "results", linked, target_revision=revision)
     first_finding = run_workbench(state, "get-scan", "--scan-id", first["scanId"])["scan"][
         "findings"
     ][0]
@@ -379,17 +377,19 @@ def test_legacy_linked_comparison_keeps_unbound_triage_target_local(
         "Synthetic checked guard.",
     )
     if saved_comparison:
-        match = save_scan_matches(
+        match = producer.save_scan_matches(
             state,
             first,
             later,
-            confirmed_match(first_finding["occurrenceId"], later_finding["occurrenceId"]),
+            producer.confirmed_match(first_finding["occurrenceId"], later_finding["occurrenceId"]),
         )
         assert match["summary"]["persisting"] == 1
-    create_cli_scan(
+    producer.create_cli_scan(
         state, tmp_path / "results", repository, target_revision=revision, finding=False
     )
-    create_cli_scan(state, tmp_path / "results", linked, target_revision=revision, finding=False)
+    producer.create_cli_scan(
+        state, tmp_path / "results", linked, target_revision=revision, finding=False
+    )
     global_findings = run_workbench(state, "list-global-findings")["findings"]
     scoped_findings = run_workbench(state, "list-global-findings", "--repository", str(linked))[
         "findings"
@@ -404,8 +404,6 @@ def test_legacy_linked_comparison_keeps_unbound_triage_target_local(
 def test_sealed_legacy_recurrence_match_keeps_linked_scope_status(
     tmp_path, monkeypatch, legacy_first, saved_current_match
 ):
-    import test_workbench_scan_history as producer
-
     state = tmp_path / "state"
     repository = tmp_path / "repository"
     linked = tmp_path / "linked"
@@ -505,8 +503,6 @@ def test_sealed_legacy_recurrence_match_keeps_linked_scope_status(
 def test_saved_legacy_alias_survives_current_linked_match(
     tmp_path, monkeypatch, saved_legacy_alias, saved_current_match
 ):
-    import test_workbench_scan_history as producer
-
     state = tmp_path / "state"
     repository = tmp_path / "repository"
     linked = tmp_path / "linked"
