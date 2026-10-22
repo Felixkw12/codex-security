@@ -8270,6 +8270,7 @@ interface PatchPublication {
   dirtyFiles: Set<string>;
   ignoredFiles: Set<string>;
   ignoredDigests: Set<string>;
+  untrackedRepositoryDigests: Set<string>;
   tree: string;
   root: string;
 }
@@ -8515,6 +8516,49 @@ async function hashPublicationFile(
   }
 }
 
+async function publicationContentDigests(
+  root: string,
+  paths: string[],
+  signal?: AbortSignal,
+): Promise<Set<string>> {
+  const digests = new Set<string>();
+  if (paths.length === 0) return digests;
+  const canonicalRoot = (await realpath(root, { encoding: "buffer" })).toString(
+    "latin1",
+  );
+  const pending = [...paths];
+  while (pending.length) {
+    signal?.throwIfAborted();
+    const pathKey = pending.pop()!;
+    const path = patchFilePath(root, pathKey);
+    try {
+      const metadata = await lstat(path);
+      if (metadata.isDirectory()) {
+        const canonical = await realpath(path, { encoding: "buffer" });
+        if (
+          isOutsidePath(
+            relativePatchPath(canonicalRoot, canonical.toString("latin1")),
+          )
+        )
+          continue;
+        const entries = await readdir(canonical, { encoding: "buffer" });
+        for (const entry of entries) {
+          const name = Buffer.from(entry).toString("latin1");
+          if (name === ".git" || name === ".svn") continue;
+          pending.push(`${pathKey.replace(/\/$/u, "")}/${name}`);
+        }
+      } else if (metadata.isFile()) {
+        const digest = await hashPublicationFile(root, pathKey, signal);
+        if (digest !== undefined) digests.add(digest);
+      }
+    } catch (error) {
+      if (isJsonObject(error) && error["code"] === "ENOENT") continue;
+      throw error;
+    }
+  }
+  return digests;
+}
+
 async function preparePatchPublication(
   repository: string,
   patchId: string,
@@ -8643,36 +8687,46 @@ async function preparePatchPublication(
       resolve(patchPathKey(root), path),
     );
   const ignoredFiles = new Set<string>();
+  const untrackedRepositories: string[] = [];
   const dirtyFiles = new Set(worktreeChanges.filter(Boolean).map(localPath));
   for (let index = 0; index < paths.length; index += 1) {
     const entry = paths[index]!;
     if (!entry) continue;
+    // Git collapses untracked embedded checkouts instead of listing their files.
+    if (entry.startsWith("?? ") && entry.endsWith("/"))
+      untrackedRepositories.push(entry.slice(3));
     (entry.startsWith("!! ") ? ignoredFiles : dirtyFiles).add(
       localPath(entry.slice(3)),
     );
     if (/[RC]/u.test(entry.slice(0, 2)))
       dirtyFiles.add(localPath(paths[++index]!));
   }
-  const ignoredDigests = new Set<string>();
-  if (ignoredFiles.size) {
-    const ignored = await patchGitRecords(
-      root,
-      ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"],
-      dependencies,
-    );
-    for (const path of ignored.filter(Boolean)) {
-      signal?.throwIfAborted();
-      const digest = await hashPublicationFile(root, path, signal).catch(
-        (error: unknown) => {
-          if (isJsonObject(error) && error["code"] === "ENOENT")
-            return undefined;
-          throw error;
-        },
-      );
-      if (digest !== undefined) ignoredDigests.add(digest);
-    }
-  }
-  return { branch, dirtyFiles, ignoredFiles, ignoredDigests, tree, root };
+  const ignored = ignoredFiles.size
+    ? await patchGitRecords(
+        root,
+        ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"],
+        dependencies,
+      )
+    : [];
+  const ignoredDigests = await publicationContentDigests(
+    root,
+    ignored.filter(Boolean),
+    signal,
+  );
+  const untrackedRepositoryDigests = await publicationContentDigests(
+    root,
+    untrackedRepositories,
+    signal,
+  );
+  return {
+    branch,
+    dirtyFiles,
+    ignoredFiles,
+    ignoredDigests,
+    untrackedRepositoryDigests,
+    tree,
+    root,
+  };
 }
 
 async function checkDeinitializedPatchSubmodules(
@@ -9227,7 +9281,10 @@ async function createPatchPullRequest(
       `Cannot publish files with uncommitted changes before patching: ${dirty.map(patchPathText).join(", ")}. Local edits and patches were kept; review and publish them separately.`,
     );
   }
-  if (publication.ignoredDigests.size) {
+  if (
+    publication.ignoredDigests.size ||
+    publication.untrackedRepositoryDigests.size
+  ) {
     const changed = await patchGitRecords(
       root,
       [
@@ -9272,13 +9329,17 @@ async function createPatchPullRequest(
         );
         capturedDigest = captured.digest("hex");
       }
-      if (
-        (digest !== undefined && publication.ignoredDigests.has(digest)) ||
-        (capturedDigest !== undefined &&
-          publication.ignoredDigests.has(capturedDigest))
-      )
+      const matches = (digests: Set<string>) =>
+        (digest !== undefined && digests.has(digest)) ||
+        (capturedDigest !== undefined && digests.has(capturedDigest));
+      const source = matches(publication.ignoredDigests)
+        ? "ignored"
+        : matches(publication.untrackedRepositoryDigests)
+          ? "untracked repository"
+          : undefined;
+      if (source !== undefined)
         throw new CodexSecurityError(
-          `Cannot automatically publish ${patchPathText(local)}: it matches pre-existing ignored content. Local edits and patches were kept; review and publish them separately.`,
+          `Cannot automatically publish ${patchPathText(local)}: it matches pre-existing ${source} content. Local edits and patches were kept; review and publish them separately.`,
         );
     }
   }
