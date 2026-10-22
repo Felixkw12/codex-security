@@ -261,9 +261,13 @@ describe("SCA input selection", () => {
       discovered.inputs.every((item) => /^[a-f0-9]{64}$/u.test(item.sha256)),
     ).toBe(true);
   });
-  test.each(["non-Git", "Git untracked", "Git tracked", "Git subdirectory"])(
-    "excludes installed dependency trees from %s discovery",
-    async (mode) => {
+  test.each(
+    ["non-Git", "Git untracked", "Git tracked", "Git subdirectory"].flatMap(
+      (mode) => [false, true].map((mixedCase) => [mode, mixedCase] as const),
+    ),
+  )(
+    "excludes installed dependency trees with native casing (%s, mixed case: %p)",
+    async (mode, mixedCase) => {
       const { repository: checkout } = await setup();
       const repository =
         mode === "Git subdirectory"
@@ -271,7 +275,26 @@ describe("SCA input selection", () => {
           : checkout;
       await mkdir(repository, { recursive: true });
       if (mode !== "non-Git") await execFile("git", ["init", checkout]);
+      const caseVariants: Record<string, string> = {
+        node_modules: "Node_Modules",
+        ".venv": ".VENV",
+        venv: "Venv",
+        ".tox": ".Tox",
+        ".nox": ".Nox",
+        ".m2": ".M2",
+        repository: "Repository",
+        vendor: "Vendor",
+        bundle: "Bundle",
+      };
+      const spelling = (path: string) =>
+        mixedCase
+          ? path
+              .split("/")
+              .map((name) => caseVariants[name] ?? name)
+              .join("/")
+          : path;
       const installed = [
+        "node_modules/library/package-lock.json",
         ".venv/lib/python3.12/site-packages/synthetic/requirements.txt",
         "venv/Lib/site-packages/synthetic/requirements.txt",
         ".tox/py312/lib/python3.12/site-packages/synthetic/requirements.txt",
@@ -283,7 +306,7 @@ describe("SCA input selection", () => {
         "packages/app/.nox/tests/lib/python3.12/site-packages/synthetic/requirements.txt",
         "packages/app/.m2/repository/example/synthetic/1.2.3/synthetic-1.2.3.pom",
         "packages/app/vendor/bundle/ruby/3.3.0/gems/synthetic/Gemfile.lock",
-      ];
+      ].map(spelling);
       const selected = [
         ".m2/source-project/pom.xml",
         "package-lock.json",
@@ -292,7 +315,7 @@ describe("SCA input selection", () => {
         "packages/tox/requirements.txt",
         "repository/pom.xml",
         "vendor/source-project/package-lock.json",
-      ];
+      ].map(spelling);
       for (const path of [...installed, ...selected]) {
         await mkdir(join(repository, path, ".."), { recursive: true });
         await writeFile(
@@ -310,7 +333,12 @@ describe("SCA input selection", () => {
         await execFile("git", ["-C", checkout, "add", "."]);
       expect(
         (await discoverScaInputs(repository)).inputs.map((item) => item.path),
-      ).toEqual(selected);
+      ).toEqual(
+        (mixedCase && process.platform !== "win32"
+          ? [...installed, ...selected]
+          : selected
+        ).sort(),
+      );
     },
   );
   test("scans every pnpm lockfile document", async () => {

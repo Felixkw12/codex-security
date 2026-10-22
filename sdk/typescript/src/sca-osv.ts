@@ -410,6 +410,10 @@ function inputProvenance(
 }
 
 function installedDependencyDirectory(name: string, parent?: string): boolean {
+  if (process.platform === "win32") {
+    name = name.toLowerCase();
+    parent = parent?.toLowerCase();
+  }
   return (
     name === "node_modules" ||
     name === ".venv" ||
