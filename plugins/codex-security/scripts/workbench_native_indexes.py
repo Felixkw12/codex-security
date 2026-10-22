@@ -5,7 +5,7 @@ import json
 import sqlite3
 import sys
 from collections import Counter
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from itertools import islice
 from pathlib import Path
 from typing import Any
@@ -589,6 +589,86 @@ def _indexed_active_findings(
     yield from _sorted_findings(combined)
 
 
+def _current_owner_scan_scope(
+    connection: sqlite3.Connection,
+    scope_clauses: str = "",
+    scope_values: Sequence[Any] = (),
+) -> tuple[str, list[Any]]:
+    connection.create_function(
+        "codex_security_path_contains",
+        2,
+        lambda root, path: Path(path).is_relative_to(root),
+        deterministic=True,
+    )
+    current_owner_only = (
+        "AND NOT (scans.target_id IS NULL AND EXISTS ("
+        "SELECT 1 FROM security_targets AS path_owner "
+        "WHERE codex_security_path_contains(path_owner.current_path, scans.target_path)))"
+    )
+    latest_identity = (
+        "FROM scans AS ownership_scan "
+        "WHERE ownership_scan.target_id = scans.target_id "
+        "AND ownership_scan.target_device IS NOT NULL "
+        "AND ownership_scan.target_inode IS NOT NULL "
+        "ORDER BY ownership_scan.rowid DESC LIMIT 1"
+    )
+    current_owner_only += (
+        " AND (scans.target_id IS NULL "
+        "OR (scans.target_device IS NULL AND scans.target_inode IS NULL) OR ("
+        f"scans.target_device IS (SELECT ownership_scan.target_device {latest_identity}) "
+        f"AND scans.target_inode IS (SELECT ownership_scan.target_inode {latest_identity})"
+        "))"
+    )
+    replaced_targets = []
+    transitioned_targets = []
+    ownership_epochs = []
+    for target in connection.execute(
+        "SELECT DISTINCT targets.id, targets.current_path "
+        "FROM security_targets AS targets JOIN scans ON scans.target_id = targets.id "
+        f"WHERE 1 = 1 {scope_clauses}",
+        scope_values,
+    ):
+        checkout = Path(target["current_path"])
+        try:
+            checkout.stat()
+        except FileNotFoundError:
+            recorded_ownership = scan_history._recorded_target_ownership(connection, target["id"])
+            if recorded_ownership is not None and recorded_ownership[1] is not None:
+                transitioned_targets.append(target["id"])
+                ownership_epochs.append((target["id"], recorded_ownership[1]))
+            continue
+        except OSError:
+            replaced_targets.append(target["id"])
+            continue
+        verified = scan_history._verified_target_metadata(connection, target["id"], checkout)
+        if verified is None:
+            replaced_targets.append(target["id"])
+        elif verified[0] is not None:
+            epoch_start = scan_history._ownership_epoch_start(connection, target["id"], verified[0])
+            if epoch_start is not None:
+                transitioned_targets.append(target["id"])
+                ownership_epochs.append((target["id"], epoch_start))
+    owner_values: list[Any] = []
+    if replaced_targets:
+        placeholders = ", ".join("?" for _ in replaced_targets)
+        current_owner_only += (
+            f" AND (scans.target_id IS NULL OR scans.target_id NOT IN ({placeholders}))"
+        )
+        owner_values.extend(replaced_targets)
+    if transitioned_targets:
+        placeholders = ", ".join("?" for _ in transitioned_targets)
+        current_owner_only += (
+            " AND (scans.target_id IS NULL "
+            f"OR scans.target_id NOT IN ({placeholders}) "
+            "OR scans.target_device IS NOT NULL OR scans.target_inode IS NOT NULL)"
+        )
+        owner_values.extend(transitioned_targets)
+    for target_id, epoch_start in ownership_epochs:
+        current_owner_only += " AND (scans.target_id IS NOT ? OR scans.rowid > ?)"
+        owner_values.extend((target_id, epoch_start))
+    return current_owner_only, owner_values
+
+
 def _active_findings(
     connection: sqlite3.Connection,
     read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
@@ -634,77 +714,10 @@ def _active_findings(
         "AND (" + " AND ".join(repository_clauses) + ")" if repository_clauses else ""
     )
     target_values.extend(repository_values)
-    connection.create_function(
-        "codex_security_path_contains",
-        2,
-        lambda root, path: Path(path).is_relative_to(root),
-        deterministic=True,
+    current_owner_only, owner_values = _current_owner_scan_scope(
+        connection, f"{target_filter} {repository_filter}", target_values
     )
-    current_owner_only = (
-        "AND NOT (scans.target_id IS NULL AND EXISTS ("
-        "SELECT 1 FROM security_targets AS path_owner "
-        "WHERE codex_security_path_contains(path_owner.current_path, scans.target_path)))"
-    )
-    latest_identity = (
-        "FROM scans AS ownership_scan "
-        "WHERE ownership_scan.target_id = scans.target_id "
-        "AND ownership_scan.target_device IS NOT NULL "
-        "AND ownership_scan.target_inode IS NOT NULL "
-        "ORDER BY ownership_scan.rowid DESC LIMIT 1"
-    )
-    current_owner_only += (
-        " AND (scans.target_id IS NULL "
-        "OR (scans.target_device IS NULL AND scans.target_inode IS NULL) OR ("
-        f"scans.target_device IS (SELECT ownership_scan.target_device {latest_identity}) "
-        f"AND scans.target_inode IS (SELECT ownership_scan.target_inode {latest_identity})"
-        "))"
-    )
-    replaced_targets = []
-    transitioned_targets = []
-    ownership_epochs = []
-    for target in connection.execute(
-        "SELECT DISTINCT targets.id, targets.current_path "
-        "FROM security_targets AS targets JOIN scans ON scans.target_id = targets.id "
-        f"WHERE 1 = 1 {target_filter} {repository_filter}",
-        target_values,
-    ):
-        checkout = Path(target["current_path"])
-        try:
-            checkout.stat()
-        except FileNotFoundError:
-            recorded_ownership = scan_history._recorded_target_ownership(connection, target["id"])
-            if recorded_ownership is not None and recorded_ownership[1] is not None:
-                transitioned_targets.append(target["id"])
-                ownership_epochs.append((target["id"], recorded_ownership[1]))
-            continue
-        except OSError:
-            replaced_targets.append(target["id"])
-            continue
-        verified = scan_history._verified_target_metadata(connection, target["id"], checkout)
-        if verified is None:
-            replaced_targets.append(target["id"])
-        elif verified[0] is not None:
-            epoch_start = scan_history._ownership_epoch_start(connection, target["id"], verified[0])
-            if epoch_start is not None:
-                transitioned_targets.append(target["id"])
-                ownership_epochs.append((target["id"], epoch_start))
-    if replaced_targets:
-        placeholders = ", ".join("?" for _ in replaced_targets)
-        current_owner_only += (
-            f" AND (scans.target_id IS NULL OR scans.target_id NOT IN ({placeholders}))"
-        )
-        target_values.extend(replaced_targets)
-    if transitioned_targets:
-        placeholders = ", ".join("?" for _ in transitioned_targets)
-        current_owner_only += (
-            " AND (scans.target_id IS NULL "
-            f"OR scans.target_id NOT IN ({placeholders}) "
-            "OR scans.target_device IS NOT NULL OR scans.target_inode IS NOT NULL)"
-        )
-        target_values.extend(transitioned_targets)
-    for target_id, epoch_start in ownership_epochs:
-        current_owner_only += " AND (scans.target_id IS NOT ? OR scans.rowid > ?)"
-        target_values.extend((target_id, epoch_start))
+    target_values.extend(owner_values)
     completed_scans_by_target: dict[str, list[sqlite3.Row]] = {}
     for scan in connection.execute(
         f"""
@@ -819,14 +832,17 @@ def list_repositories(
     *,
     read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
 ) -> dict[str, Any]:
+    current_owner_only, owner_values = _current_owner_scan_scope(connection)
     scan_count_by_target = Counter()
     latest_scan_by_target: dict[str, dict[str, Any]] = {}
     for scan in (
         scan_history.scan_summary(row)
         for row in connection.execute(
             f"""{scan_history.SCAN_SUMMARY_QUERY}
+            WHERE 1 = 1 {current_owner_only}
             ORDER BY scans.rowid DESC
-            """
+            """,
+            owner_values,
         ).fetchall()
     ):
         scan_count_by_target[scan["targetId"]] += 1
