@@ -722,15 +722,17 @@ describe("workbench findings index", () => {
       expect.objectContaining({ targetId: "current-target" }),
     );
 
-    expect(
-      probeFindingsIndex(null, {
-        replacedCheckout: true,
-        repositories: true,
-      }).repositories,
-    ).toContainEqual(
+    const repositories = probeFindingsIndex(null, {
+      replacedCheckout: true,
+      repositories: true,
+    }).repositories;
+    expect(repositories).not.toContainEqual(
+      expect.objectContaining({ targetId: "current-target" }),
+    );
+    expect(repositories).toContainEqual(
       expect.objectContaining({
-        targetId: "current-target",
-        openFindingsCount: 0,
+        targetId: "stale-target",
+        openFindingsCount: 1,
       }),
     );
   });
