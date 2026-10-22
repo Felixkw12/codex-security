@@ -5480,14 +5480,14 @@ describe("patch publication integrity", () => {
     ["uncommitted", "root"],
     ["committed", "component"],
     ["uncommitted", "component"],
-    ["deinitialized", "root"],
-    ["deinitialized", "component"],
-    ["deinitialized and assessed", "root"],
-    ["deinitialized and assessed", "component"],
+    ["removed worktree", "root"],
+    ["removed worktree", "component"],
+    ["removed worktree and assessed", "root"],
+    ["removed worktree and assessed", "component"],
   ])(
     "preserves supplied-issue submodule publication with %s changes from %s",
     async (state, invocation) => {
-      const deinitialized = state.startsWith("deinitialized");
+      const removedWorktree = state.startsWith("removed worktree");
       const assessed = state.endsWith("assessed");
       const committed = state !== "uncommitted";
       const directory = await fixtures.create("patch-submodule-publication-");
@@ -5515,7 +5515,7 @@ describe("patch publication integrity", () => {
       inner("commit", "-m", "Synthetic nested fix");
       const fixed = inner("rev-parse", "HEAD");
       inner("checkout", original);
-      if (deinitialized) {
+      if (removedWorktree) {
         const childRemote = join(directory, "dependency.git");
         git("init", "--bare", childRemote);
         inner("remote", "add", "origin", childRemote);
@@ -5536,7 +5536,7 @@ describe("patch publication integrity", () => {
         );
       }
       git("add", ".");
-      if (deinitialized) git("submodule", "absorbgitdirs", "dependency");
+      if (removedWorktree) git("submodule", "absorbgitdirs", "dependency");
       git("commit", "-m", "Synthetic parent baseline");
       git("config", "diff.relative", "true");
       const head = git("rev-parse", "HEAD");
@@ -5585,9 +5585,10 @@ describe("patch publication integrity", () => {
             }
             if (committed) inner("checkout", fixed);
             else await writeFile(join(nested, "app.ts"), "fixed\n");
-            if (deinitialized) {
+            if (removedWorktree) {
               git("add", "dependency");
-              git("submodule", "deinit", "-f", "--", "dependency");
+              await rm(nested, { recursive: true });
+              await mkdir(nested);
             }
             return 0;
           },
@@ -5611,7 +5612,7 @@ describe("patch publication integrity", () => {
         );
         expect(git("rev-parse", "HEAD:dependency")).toBe(fixed);
         expect(git("ls-remote", "origin")).toContain(git("rev-parse", "HEAD"));
-        if (deinitialized)
+        if (removedWorktree)
           expect(git("submodule", "status", "--", "dependency")).toStartWith(
             "-",
           );
@@ -5952,7 +5953,7 @@ describe("patch publication integrity", () => {
     "shallow initialized with edits",
     "replaced without edits",
     "replaced with edits",
-    "moved with unchanged local edits",
+    "retargeted with unchanged local edits",
   ])("tracks patch changes when a registered child is %s", async (state) => {
     const root = await fixtures.create("patch-submodule-initialization-");
     const repository = join(root, "repository");
@@ -5982,13 +5983,14 @@ describe("patch publication integrity", () => {
     );
     git("add", ".");
     git("commit", "-m", "Synthetic parent baseline");
-    const moved = state === "moved with unchanged local edits";
+    const retargeted = state === "retargeted with unchanged local edits";
     const replaced = state.startsWith("replaced");
-    const retained = state === "already initialized with local edits" || moved;
+    const retained =
+      state === "already initialized with local edits" || retargeted;
     const initialized = retained || replaced;
     const shallow = state.startsWith("shallow initialized");
     const changed =
-      (retained && !moved) ||
+      (retained && !retargeted) ||
       state === "initialized during patching" ||
       state === "shallow initialized with edits" ||
       state === "replaced with edits";
@@ -5997,7 +5999,10 @@ describe("patch publication integrity", () => {
         join(child, "app.ts"),
         (await readFile(join(child, "app.ts"), "utf8")) + "local edit\n",
       );
-    else if (!initialized) git("submodule", "deinit", "-f", "--", "dependency");
+    else if (!initialized) {
+      await rm(child, { recursive: true });
+      await mkdir(child);
+    }
     if (shallow) {
       await rm(join(repository, ".git", "modules", "dependency"), {
         recursive: true,
@@ -6006,6 +6011,29 @@ describe("patch publication integrity", () => {
       sourceGit("add", ".");
       sourceGit("commit", "-m", "Synthetic upstream change");
     }
+    const replacement = join(root, "replacement-source");
+    if (replaced) {
+      await mkdir(replacement);
+      const replacementGit = repositoryGit(replacement);
+      replacementGit("init", "--initial-branch=main");
+      replacementGit("config", "user.name", "Synthetic User");
+      replacementGit("config", "user.email", "synthetic@example.test");
+      await writeFile(join(replacement, "app.ts"), "unsafe\nreplacement\n");
+      replacementGit("add", ".");
+      replacementGit("commit", "-m", "Synthetic replacement child");
+    }
+    const alternateMetadata = join(
+      repository,
+      ".git",
+      "modules",
+      "alternate-dependency",
+    );
+    if (retargeted)
+      await cp(
+        join(repository, ".git", "modules", "dependency"),
+        alternateMetadata,
+        { recursive: true },
+      );
     let expectedIndex = git("write-tree");
     const originalGitlink = git("ls-tree", "HEAD", "dependency");
     const gitTrace: unknown[] = [];
@@ -6077,29 +6105,8 @@ describe("patch publication integrity", () => {
               "dependency",
             );
           if (replaced) {
-            const replacement = join(root, "replacement-source");
-            await mkdir(replacement);
-            const replacementGit = repositoryGit(replacement);
-            replacementGit("init", "--initial-branch=main");
-            replacementGit("config", "user.name", "Synthetic User");
-            replacementGit("config", "user.email", "synthetic@example.test");
-            await writeFile(
-              join(replacement, "app.ts"),
-              "unsafe\nreplacement\n",
-            );
-            replacementGit("add", ".");
-            replacementGit("commit", "-m", "Synthetic replacement child");
-            git("rm", "-f", "--", "dependency");
-            git(
-              "-c",
-              "protocol.file.allow=always",
-              "submodule",
-              "add",
-              "--name",
-              "replacement",
-              pathToFileURL(replacement).href,
-              "dependency",
-            );
+            await rm(child, { recursive: true });
+            await rename(replacement, child);
             expect(() =>
               repositoryGit(child)(
                 "cat-file",
@@ -6108,19 +6115,11 @@ describe("patch publication integrity", () => {
               ),
             ).toThrow();
           }
-          if (moved) {
-            const metadata = join(
-              repository,
-              ".git",
-              "modules",
-              "moved-dependency",
+          if (retargeted)
+            await writeFile(
+              join(child, ".git"),
+              `gitdir: ${alternateMetadata}\n`,
             );
-            await rename(
-              join(repository, ".git", "modules", "dependency"),
-              metadata,
-            );
-            await writeFile(join(child, ".git"), `gitdir: ${metadata}\n`);
-          }
           if (shallow) {
             const childGit = repositoryGit(child);
             expect(childGit("rev-parse", "--is-shallow-repository")).toBe(
@@ -6156,8 +6155,8 @@ describe("patch publication integrity", () => {
     );
     const diagnostics = JSON.stringify({ outcome, modelCalls, gitTrace });
     expect(modelCalls, diagnostics).toBe(1);
-    // Replacing or moving captured administration fails before risk assessment.
-    const administrationChanged = replaced || moved;
+    // Replacing or retargeting captured administration fails before risk assessment.
+    const administrationChanged = replaced || retargeted;
     const applied = !administrationChanged && (changed || shallow);
     expect(assessments, diagnostics).toBe(applied ? 1 : 0);
     expect(outcome.exitCode, diagnostics).toBe(applied ? 0 : 2);
@@ -10128,7 +10127,7 @@ test.each(
     ),
   ),
 )(
-  "keeps assessment Git discovery after component removal: $binding remove=$remove redirect=$redirect",
+  "binds assessment Git discovery and rejects configuration redirects: $binding remove=$remove redirect=$redirect",
   async ({ binding, remove, redirect }) => {
     const root = await temporaryDirectory("patch-assessment-discovery-");
     const metadata = join(root, "metadata");
@@ -10217,8 +10216,12 @@ test.each(
           },
         },
       );
-      expect(outcome.exitCode, outcome.stderr).toBe(0);
-      expect(assessmentCalls).toBe(1);
+      expect(outcome.exitCode, outcome.stderr).toBe(redirect ? 2 : 0);
+      expect(assessmentCalls).toBe(redirect ? 0 : 1);
+      if (redirect)
+        expect(outcome.stderr).toContain(
+          "Git configuration changed during the patch",
+        );
       expect(await readFile(join(worktree, "app.ts"), "utf8")).toBe("fixed\n");
       expect(await readFile(join(metadata, ".git", "index"))).toEqual(index);
       expect(git("rev-parse", "HEAD")).toBe(head);
