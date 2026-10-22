@@ -80,6 +80,13 @@ export async function recoverSelectedScanStartup<T>(input: {
   )
     return null;
   signal.throwIfAborted();
+  if (
+    options.validationPrompt !== undefined ||
+    options.validationPromptFile !== undefined
+  )
+    throw new CodexSecurityError(
+      "Custom validation is not supported for Deep scans.",
+    );
   const repository = resolveRepositoryPath(input.repository);
   const boundRepository = await realpath(repository).catch(
     (error: NodeJS.ErrnoException) => {

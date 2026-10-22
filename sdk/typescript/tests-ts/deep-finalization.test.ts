@@ -151,8 +151,15 @@ const cases: {
   historicalFindings?: boolean;
   changedHistoricalFollowUp?: boolean;
   completeBeforePreparation?: boolean;
+  resumeValidation?: "inline" | "file";
 }[] = [
   ...outcomes.map((outcome) => ({ outcome })),
+  ...(["restart", "restart-deleted-target"] as const).flatMap((outcome) =>
+    (["inline", "file"] as const).map((resumeValidation) => ({
+      outcome,
+      resumeValidation,
+    })),
+  ),
   { outcome: "restart", historicalFindings: true },
   {
     outcome: "restart",
@@ -251,6 +258,7 @@ for (const {
   historicalFindings,
   changedHistoricalFollowUp,
   completeBeforePreparation,
+  resumeValidation,
 } of cases) {
   const resumedStop = outcome.includes("-resumed-");
   const restart = outcome.startsWith("restart") || resumedStop;
@@ -265,7 +273,7 @@ for (const {
   const name =
     outcome === "followup-canceled"
       ? "SDK preserves a selected aggregate when its follow-up is canceled"
-      : `SDK handles selected aggregate: ${outcome}${budgetCompletionFault ? ` (budget completion ${budgetCompletionFault})` : ""}${cancellationFault ? ` (cancellation ${cancellationFault})` : ""}${statusReadFault ? " (selection status unavailable)" : ""}${resumeStatusFault ? ` (resume status ${resumeStatusFault})` : ""}${initialResumeUsage ? " (initial resume cost)" : ""}${unpricedUsage ? " (unpriced remainder)" : ""}${historicalFindings ? " (historical findings)" : ""}${changedHistoricalFollowUp ? " (changed follow-up)" : ""}${completeBeforePreparation ? " (concurrent completion)" : ""}`;
+      : `SDK handles selected aggregate: ${outcome}${budgetCompletionFault ? ` (budget completion ${budgetCompletionFault})` : ""}${cancellationFault ? ` (cancellation ${cancellationFault})` : ""}${statusReadFault ? " (selection status unavailable)" : ""}${resumeStatusFault ? ` (resume status ${resumeStatusFault})` : ""}${initialResumeUsage ? " (initial resume cost)" : ""}${unpricedUsage ? " (unpriced remainder)" : ""}${historicalFindings ? " (historical findings)" : ""}${changedHistoricalFollowUp ? " (changed follow-up)" : ""}${completeBeforePreparation ? " (concurrent completion)" : ""}${resumeValidation ? ` (${resumeValidation} validation on resume)` : ""}`;
   const runCase = async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -897,6 +905,35 @@ for (const {
         resumedStartup = true;
         client = makeClient();
         if (initialResumeUsage) await recordBudgetUsage();
+      }
+      if (resumeValidation) {
+        const validationPrompt = "Remove findings without concrete evidence.";
+        const validationPromptFile = join(root, "validation.md");
+        await writeFile(validationPromptFile, validationPrompt);
+        const previousModelCalls = modelInputs.length;
+        const previousCommands = commands.length;
+        await expect(
+          client.run(repository, {
+            mode: "deep",
+            resumeScanId: scanId,
+            outputDir: scanDir,
+            ...(resumeValidation === "inline"
+              ? { validationPrompt }
+              : { validationPromptFile }),
+          }),
+        ).rejects.toThrow("Custom validation is not supported for Deep scans.");
+        expect(modelInputs).toHaveLength(previousModelCalls);
+        expect(commands).toHaveLength(previousCommands);
+        const pending = await runWorkbench(workbenchOptions!, [
+          "get-scan",
+          "--scan-id",
+          scanId,
+        ]);
+        expect(pending["scan"]).toMatchObject({
+          progress: { status: "running" },
+        });
+        expect(await readFile(selectedPath)).toEqual(selectedBytes!);
+        return;
       }
       if (resumeStatusFault) {
         const previousModelCalls = modelInputs.length;
