@@ -539,6 +539,10 @@ test.each(["absolute", "relative"] as const)(
       },
       onCodex: async (args, output) => {
         grants.push([...(output!.appServer!.snapshotStoragePaths ?? [])]);
+        expect(output!.appServer!.permissions!.modelOnlyReadOnlyPaths).toEqual([
+          join(administration, "lfs", "objects"),
+          join(administration, "lfs", "tmp"),
+        ]);
         const findings = completePatches(args, output);
         expect(findings).toHaveLength(1);
         await writeFile(
@@ -549,12 +553,7 @@ test.each(["absolute", "relative"] as const)(
       },
     });
     expect(outcome.exitCode, outcome.stderr).toBe(0);
-    expect(grants).toEqual(
-      [1, 2].map(() => [
-        join(administration, "lfs", "objects"),
-        join(administration, "lfs", "tmp"),
-      ]),
-    );
+    expect(grants).toEqual([1, 2].map(() => [join(administration, "lfs")]));
     expect(boundCommonDirectories).toEqual(
       new Set([administration.replaceAll(sep, "/")]),
     );
@@ -666,6 +665,10 @@ for (const selection of [
       },
       onCodex: async (args, output) => {
         grants.push([...(output!.appServer!.snapshotStoragePaths ?? [])]);
+        expect(output!.appServer!.permissions!.modelOnlyReadOnlyPaths).toEqual([
+          join(common, "lfs", "objects"),
+          join(common, "lfs", "tmp"),
+        ]);
         const findings = completePatches(args, output);
         expect(findings).toHaveLength(1);
         await writeFile(
@@ -678,12 +681,7 @@ for (const selection of [
       },
     });
     expect(outcome.exitCode, outcome.stderr).toBe(0);
-    expect(grants).toEqual(
-      [1, 2].map(() => [
-        join(common, "lfs", "objects"),
-        join(common, "lfs", "tmp"),
-      ]),
-    );
+    expect(grants).toEqual([1, 2].map(() => [join(common, "lfs")]));
     expect(boundCommonDirectories).toEqual(
       new Set(
         selection === "common override" ? [common.replaceAll(sep, "/")] : [],
@@ -761,6 +759,11 @@ for (const linked of [false, true]) {
             output!.stdout.write(patchRiskAssessment().report);
           } else {
             expect(output!.appServer!.snapshotStoragePaths).toEqual([
+              join(administration, "lfs"),
+            ]);
+            expect(
+              output!.appServer!.permissions!.modelOnlyReadOnlyPaths,
+            ).toEqual([
               join(administration, "lfs", "objects"),
               join(administration, "lfs", "tmp"),
             ]);

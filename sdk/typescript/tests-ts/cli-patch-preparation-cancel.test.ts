@@ -208,12 +208,13 @@ test
     await writeFile(join(repository, "app.ts"), "original\n");
     git("add", ".");
     git("commit", "-m", "Synthetic cancellation baseline");
-    if (preflight) {
-      const remote = join(root, "remote");
-      await mkdir(remote);
-      git("init", "--bare", remote);
-      git("remote", "add", "origin", remote);
-    }
+    if (preflight)
+      git(
+        "remote",
+        "add",
+        "origin",
+        "https://github.com/example/repository.git",
+      );
     const fifo = join(root, "slow-input"),
       ready = join(root, "ready"),
       serverPid = join(root, "server-pid"),
@@ -260,6 +261,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     await writeFile(executor, `#!/bin/sh\nexec ${quoted} "$@"\n`, {
       mode: 0o755,
     });
+    const result = resultWithFindings(["high"]);
     const wrapper = join(root, "wrapper.mts");
     await writeFile(
       wrapper,
@@ -271,10 +273,12 @@ let snapshots = 0;
 const stdout = capture(), stderr = capture();
 const exitCode = await main(${JSON.stringify(saved ? ["patch", "--scan", "scan-1", "--json"] : ["patch", "Synthetic issue", ...(preflight ? ["--create-pr"] : []), "--json"])}, stdout.stream, stderr.stream, dependencies({
   currentDirectory: ${JSON.stringify(repository)}, environment: { ...process.env, CODEX_HOME: ${JSON.stringify(home)}, CODEX_CLI_PATH: ${JSON.stringify(executor)} }, manualCodexPreparation: true,
-  onWorkbench: () => (${JSON.stringify(savedScan(resultWithFindings(["high"]), "scan-1", repository))}),
+  result: ${JSON.stringify(result)},
+  onWorkbench: () => (${JSON.stringify(savedScan(result, "scan-1", repository))}),
   onCodex: (args, output, environment) => runCodexSkillCommand([${JSON.stringify(server)}], { ...output, auth: undefined }, { command: process.execPath }, environment),
   onRepositoryCommand: (command, args, cwd, options) => {
     if (command !== "git") return "[]";
+    if (args[0] === "ls-remote") return "";
     if (options?.sandbox && options.sandbox.environment.CODEX_CLI_PATH !== ${JSON.stringify(executor)})
       throw new Error("Cancellation fixture lost its synthetic executor.");
     if (options?.patchSnapshot && args.includes("write-tree") && ++snapshots === ${snapshotCount}) {
