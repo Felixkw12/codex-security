@@ -33,7 +33,7 @@ jobs:
     name: ${{ matrix.os }} / ${{ matrix.mode }}
     runs-on: ${{ matrix.os }}
     # A complete Ubuntu isolated run took 29m33s, excluding setup and report upload.
-    timeout-minutes: ${{ matrix.os == 'windows-latest' && (matrix.mode == 'baseline' && 110 || matrix.mode == 'parallel' && 90 || 40) || matrix.os == 'ubuntu-latest' && matrix.mode == 'isolated' && 40 || 30 }}
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && (matrix.mode == 'baseline' && 110 || matrix.mode == 'parallel' && 90 || 40) || matrix.os == 'ubuntu-latest' && (matrix.mode == 'baseline' || matrix.mode == 'isolated') && 40 || 30 }}
     env:
       CODEX_SECURITY_PROPERTY_SEED: ${{ github.event_name == 'pull_request' && 1 || github.run_number }}
     strategy:
