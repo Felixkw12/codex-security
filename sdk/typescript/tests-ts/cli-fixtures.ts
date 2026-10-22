@@ -211,6 +211,7 @@ export function dependencies(
     onCodex?: OnCodex;
     linearClient?: MainDependencies["linearClient"];
     importGitHubAlerts?: MainDependencies["importGitHubAlerts"];
+    importGitHubAdvisories?: MainDependencies["importGitHubAdvisories"];
     onRepositoryCommand?: (
       ...arguments_: Parameters<MainDependencies["runRepositoryCommand"]>
     ) => string | Promise<string>;
@@ -219,6 +220,7 @@ export function dependencies(
       input?: string,
       signal?: AbortSignal,
     ) => JsonObject | Promise<JsonObject>;
+    readSavedFindings?: MainDependencies["readSavedFindings"];
     onMatch?: MainDependencies["matchFindings"];
     onUpdateCheck?: (signal: AbortSignal) => Promise<UpdateNotice | undefined>;
     currentDirectory?: string;
@@ -290,11 +292,16 @@ export function dependencies(
     ...(options.linearClient === undefined
       ? {}
       : { linearClient: options.linearClient }),
+    ...(options.importGitHubAdvisories === undefined
+      ? {}
+      : { importGitHubAdvisories: options.importGitHubAdvisories }),
     ...(options.importGitHubAlerts === undefined
       ? {}
       : { importGitHubAlerts: options.importGitHubAlerts }),
     runWorkbench: async (args, input, signal) =>
       (await options.onWorkbench?.(args, input, signal)) ?? { scans: [] },
+    readSavedFindings:
+      options.readSavedFindings ?? (async () => result.findings.findings),
     matchFindings: async (input, comparisonOptions) =>
       (await options.onMatch?.(input, comparisonOptions)) ?? {
         matches: [],

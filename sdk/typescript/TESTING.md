@@ -68,14 +68,36 @@ Refresh the artifact after changing native source or toolchain. The standalone
 plugin supports a host-only build; that does not satisfy the SDK's universal
 packaging tests. See the [native build guide](../../plugins/codex-security/native/README.md).
 
+## Python test dependencies
+
+Use Python 3.10 or later. From the repository root, install the Python test and lint dependencies with:
+
+```sh
+python -m pip install --disable-pip-version-check --no-input -r plugins/codex-security/requirements-test.txt
+```
+
+This replaces `pip install -e 'plugins/codex-security[test]'`. Tests load the plugin scripts from source; the repository does not need an installed Python distribution.
+The requirements file is the single list of pinned Python test dependencies. Ruff and pytest settings remain in `plugins/codex-security/pyproject.toml`; the Ruff dependency and its `required-version` setting must agree.
+
 ## Writing tests
 
 - Test observable results, failures, cancellation, and cleanup. Prefer a
   regression case that fails before a fix over assertions about private calls
   or exact prose.
+- Pair a fault case with a healthy control when that shows the failure's cause.
+  For ordering bugs, coordinate the relevant events explicitly rather than
+  relying on sleeps: for example, persist a checkpoint before cancellation or
+  fail an operation before its cleanup runs.
 - Keep fixtures synthetic and independent. Use real temporary directories,
   Git repositories, SQLite databases, and installed packages when those
   boundaries are the behavior under test. Do not use live model credentials.
+- Follow the changed behavior through its consumer. Parser checks alone do not
+  prove public API output, persisted state, child-process settings, or installed
+  package behavior. Use the relevant boundary without repeating every test at
+  every layer. See the [source map](../../CONTRIBUTING.md#where-to-make-a-change).
+- When a result can be partial, assert what was retained and what remains
+  unknown. Distinguish empty results from unavailable results, and checkpointed
+  worker output from accepted results and published scan artifacts.
 - Use the typed `TestClient` and `createApiTestFixtures` helpers for API tests.
   Do not add a production abstraction solely to support a mock.
 - Test workflow retry, resume, and checkpoint permutations with the existing
@@ -125,12 +147,25 @@ package checks instead of repeating the same Bun suite. MCP and Python tests
 run in separate required jobs. Python uses four isolated pytest-xdist workers
 with work stealing; worker crashes fail the run without automatic restarts.
 
-`scripts/run-ci-tests.mts` discovers every shared test file and passes the
-inventory to Bun's native `--shard` option. Bun sorts the file paths and assigns
-them round-robin across the shards. New files are included automatically;
-there is no timing table to update when adding or splitting tests.
+`scripts/run-ci-tests.mts` discovers every shared test file and balances whole
+files using the platform's recorded durations in `scripts/test-timings.json`.
+It assigns longer files first to the shard with the least estimated work, then
+passes each shard's files directly to Bun. Every job uses the same checked-in
+snapshot. New files are included automatically with the mean known-file duration;
+deleted files in the timing snapshot are ignored. Timing hints never select or
+exclude tests, and adding or splitting tests does not require updating them.
 To reproduce one Windows shard locally after building the plugin, run
 `node --experimental-strip-types scripts/run-ci-tests.mts 3/7 --seed=12345`.
+
+Refresh timing hints from successful CI JUnit artifacts when shard runtimes
+become uneven. From the SDK directory, pass reports for one platform to
+`node --experimental-strip-types scripts/update-test-timings.mts win32 <junit.xml> ...`
+(use `linux` or `darwin` for the other platforms). The updater sums testcase
+durations per file and uses their median across reports, preserving the other
+platforms. Review and commit the generated snapshot. The initial hints use runs
+`39521539826`, `39694506447`, and `39694510011`. Keep runner versions, coverage,
+timeouts, seeds, and platform-specific checks unchanged when comparing scheduling
+changes; compare complete JUnit inventories and outcomes as well as wall time.
 
 Every Bun lane uploads JUnit; Linux lanes also upload LCOV per shard. Python
 reports include case durations, and the MCP runner can upload its JUnit report.

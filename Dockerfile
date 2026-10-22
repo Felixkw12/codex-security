@@ -3,7 +3,7 @@
 FROM node:26-bookworm-slim@sha256:662933cf47f013bc8e4beb31a6116448427a82057ba7c42c97e4c5ba766504c2 AS package
 
 RUN apt-get update \
-    && apt-get install --no-install-recommends --yes python3 \
+    && apt-get install --no-install-recommends --yes git python3 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build/sdk/typescript
@@ -43,6 +43,7 @@ COPY --from=package /build/package/ /tmp/codex-security-package/
 
 RUN npm install --global --include=optional --no-audit --no-fund \
         /tmp/codex-security-package/*.tgz \
+    && node /usr/local/lib/node_modules/@openai/codex-security/node_modules/@openai/codex/bin/codex.js --version \
     && codex-security --version \
     && codex-security bulk-scan --help \
     && rm -rf /tmp/codex-security-package \

@@ -8,7 +8,7 @@ import { importSource } from "./import-module.ts";
 import { createTemporaryDirectories } from "./support/temporary-directories.ts";
 
 const { normalizeCandidatesCommand } = await importSource(
-  new URL("../src/helpers/normalize-candidates.ts", import.meta.url).pathname,
+  path.join(import.meta.dirname, "../src/helpers/normalize-candidates.ts"),
 );
 const { recordCodexSecurityDiscoveryCandidates } = await importSource(
   path.join(import.meta.dirname, "../src/artifact-discovery.ts"),

@@ -38,6 +38,27 @@ def test_accepts_normal_scan_local_path() -> None:
     )
 
 
+@pytest.mark.skipif(os.name != "nt", reason="requires native Win32 security APIs")
+def test_directory_acl_copy_does_not_create_from_a_missing_source(tmp_path: Path) -> None:
+    destination = tmp_path / "replacement"
+    with pytest.raises(WINDOWS_FILES.WindowsScanLocalFileError):
+        WINDOWS_FILES.create_directory_with_same_dacl(destination, tmp_path / "missing")
+    assert not destination.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Win32 security APIs")
+def test_directory_acl_copy_does_not_reuse_an_existing_destination(tmp_path: Path) -> None:
+    source = tmp_path / "original"
+    destination = tmp_path / "replacement"
+    source.mkdir()
+    destination.mkdir()
+    marker = destination / "retained.txt"
+    marker.write_text("synthetic retained data", encoding="utf-8")
+    with pytest.raises(WINDOWS_FILES.WindowsScanLocalFileError):
+        WINDOWS_FILES.create_directory_with_same_dacl(destination, source)
+    assert marker.read_text(encoding="utf-8") == "synthetic retained data"
+
+
 @pytest.mark.skipif(os.name != "nt", reason="requires native Win32 file APIs")
 def test_native_windows_backend_writes_reads_replaces_and_deletes(tmp_path: Path) -> None:
     scan_dir = tmp_path / "scan"
@@ -86,10 +107,10 @@ def test_native_windows_backend_rejects_symlink_ancestor(tmp_path: Path) -> None
 def test_native_copy_junction_retains_raw_target_and_cleanup(
     tmp_path: Path, dangling: bool
 ) -> None:
-    target = tmp_path / "Mixed-Case-日本語"
+    target = tmp_path / "Mixed-Case-日本語&R"
     target.mkdir()
-    source = tmp_path / "source"
-    subprocess.run(["cmd", "/c", "mklink", "/J", str(source), str(target)], check=True)
+    source = tmp_path / "source&junction"
+    subprocess.run(f'cmd /d /s /c "mklink /J "{source}" "{target}""', check=True)
     if dangling:
         target.rmdir()
     else:
@@ -110,10 +131,10 @@ def test_native_copy_junction_retains_raw_target_and_cleanup(
 
 @pytest.mark.skipif(os.name != "nt", reason="requires native Win32 junction APIs")
 def test_native_copy_junction_rejects_nonempty_destination(tmp_path: Path) -> None:
-    target = tmp_path / "outside"
+    target = tmp_path / "outside&target"
     target.mkdir()
-    source = tmp_path / "source"
-    subprocess.run(["cmd", "/c", "mklink", "/J", str(source), str(target)], check=True)
+    source = tmp_path / "source&junction"
+    subprocess.run(f'cmd /d /s /c "mklink /J "{source}" "{target}""', check=True)
     destination = tmp_path / "destination"
     destination.mkdir()
     (destination / "keep.txt").write_text("placeholder contents\n")
