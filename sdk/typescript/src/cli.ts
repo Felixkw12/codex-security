@@ -9889,20 +9889,17 @@ async function createPatchPullRequest(
         throwIfNoEntry: false,
       })?.isDirectory()
     );
-  const stageFiles = selectedFiles
-    .filter(
-      (file) =>
-        !isDeleted(file) &&
-        !selectedFiles.some((parent) => {
-          const descendant = relativePatchPath(parent, file);
-          return (
-            descendant !== "" &&
-            !isDeleted(parent) &&
-            !isOutsidePath(descendant)
-          );
-        }),
-    )
-    .map(patchPathText);
+  const stagePaths = selectedFiles.filter(
+    (file) =>
+      !isDeleted(file) &&
+      !selectedFiles.some((parent) => {
+        const descendant = relativePatchPath(parent, file);
+        return (
+          descendant !== "" && !isDeleted(parent) && !isOutsidePath(descendant)
+        );
+      }),
+  );
+  const stageFiles = stagePaths.map(patchPathText);
   const pathspec = stageFiles.map((file) =>
     relative(stagingDirectory, resolve(directory, file)),
   );
@@ -9939,6 +9936,47 @@ async function createPatchPullRequest(
   );
   const previousBranch = await run(["rev-parse", "--abbrev-ref", "HEAD"]);
   const previousCommit = await run(["rev-parse", "HEAD"]);
+  const treePath = (file: string) =>
+    relativePatchPath(
+      patchPathKey(root),
+      resolve(patchPathKey(directory), file),
+    )
+      .split(sep)
+      .join("/");
+  const stagedTreePaths = stagePaths.map(treePath);
+  const isStagedPath = (file: string) =>
+    stagedTreePaths.some(
+      (path) => !isOutsidePath(relativePatchPath(path, file)),
+    );
+  const expectedTree = await patchTreeEntries(
+    repository,
+    root,
+    previousCommit,
+    dependencies,
+  );
+  for (const file of expectedTree.keys()) {
+    if (isStagedPath(file)) expectedTree.delete(file);
+  }
+  for (const [file, entry] of await patchTreeEntries(
+    repository,
+    root,
+    head,
+    dependencies,
+  )) {
+    if (!isStagedPath(file)) continue;
+    // A selected descendant replaces any parent file or gitlink in the old tree.
+    for (let parent = file; parent.includes("/");) {
+      parent = parent.slice(0, parent.lastIndexOf("/"));
+      expectedTree.delete(parent);
+    }
+    expectedTree.set(file, entry);
+  }
+  for (const file of sources.deleted) expectedTree.delete(treePath(file));
+  const matchesCapturedTree = async () =>
+    isDeepStrictEqual(
+      expectedTree,
+      await patchTreeEntries(repository, root, "HEAD", dependencies),
+    );
   const indexPath = await run([
     "rev-parse",
     "--path-format=absolute",
@@ -10001,6 +10039,10 @@ async function createPatchPullRequest(
         await removeSources(stage);
         await stage(["commit", "-m", PATCH_PR_TITLE]);
         committed = true;
+        if (!(await matchesCapturedTree()))
+          throw new CodexSecurityError(
+            "The patch commit does not match the captured selected changes. Local commit and edits were kept; review the branch before publishing.",
+          );
       },
       pathspec,
     );
@@ -10015,8 +10057,9 @@ async function createPatchPullRequest(
     ) {
       try {
         committed = (await run(["rev-parse", "HEAD"])) !== previousCommit;
-        if (committed) await syncIndex();
-        else {
+        if (committed) {
+          if (await matchesCapturedTree()) await syncIndex();
+        } else {
           await restoreIndex();
           try {
             await run(
