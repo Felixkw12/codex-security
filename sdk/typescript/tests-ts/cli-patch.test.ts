@@ -3463,7 +3463,8 @@ describe("patch publication integrity", () => {
               (failure === "commit" && args.includes("commit")) ||
               (failure === "checkpoint" &&
                 args[0] === "config" &&
-                args[1] === "--local")
+                args[1] === "--local" &&
+                args[2]?.endsWith(".codexSecurityPatchCommit"))
             )
               throw new Error(`Synthetic ${failure} failure`);
             return runGitRepositoryCommand(command, args, cwd, options);
