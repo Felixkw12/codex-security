@@ -1781,12 +1781,22 @@ test.each(["removed", "recreated directory", "replacement Git checkout"])(
     } finally {
       db.close();
     }
+    expect((await latestFor(f, f.repository)).scanId).toBe(newest.scanId);
+    const hostGit = await inspectTrustedExecutable("git", f.environment, [
+      f.repository,
+      linked,
+    ]);
+    expect(hostGit.executable).not.toBeNull();
+    // The direct Python helper needs the same explicit host Git binding as the SDK.
     const canonical = await resolveCompletedScan("latest", {
       currentDirectory: () => f.repository,
       runWorkbench: (args, input, signal) =>
         runWorkbench(
           {
-            environment: f.environment,
+            environment: {
+              ...f.environment,
+              CODEX_SECURITY_GIT: hostGit.executable!,
+            },
             pluginRoot: PLUGIN_ROOT,
             python: f.python,
             signal,
@@ -1796,7 +1806,6 @@ test.each(["removed", "recreated directory", "replacement Git checkout"])(
         ),
     });
     expect(canonical.scanId).toBe(newest.scanId);
-    expect((await latestFor(f, f.repository)).scanId).toBe(newest.scanId);
   },
 );
 
