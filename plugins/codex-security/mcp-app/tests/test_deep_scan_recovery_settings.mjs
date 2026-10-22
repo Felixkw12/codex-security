@@ -942,12 +942,20 @@ access_key_id = "synthetic-secret"
         {
           type: "session_meta",
           timestamp: "2026-01-01T00:00:00Z",
-          payload: { id: threadId, model_provider: "original-provider" },
+          payload: {
+            id: threadId,
+            timestamp: "2026-01-01T00:00:00Z",
+            model_provider: "original-provider",
+          },
         },
         {
           type: "session_meta",
           timestamp: "2025-12-31T23:00:00Z",
-          payload: { id: "copied-parent", model_provider: "copied-provider" },
+          payload: {
+            id: "copied-parent",
+            timestamp: "2025-12-31T23:00:00Z",
+            model_provider: "copied-provider",
+          },
         },
         {
           type: "turn_context",
