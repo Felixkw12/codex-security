@@ -1019,7 +1019,7 @@ with sqlite3.connect(sys.argv[2]) as database:
 `,
       fileURLToPath(new URL("../../scripts", import.meta.url)),
       databasePath,
-      String(through ?? 54),
+      String(through ?? 55),
     ],
     { encoding: "utf8" },
   );
@@ -1049,6 +1049,7 @@ test("Node initialization leaves repository migration semantics to the Python co
   for (const fixture of [
     "main42",
     "main43",
+    "main53",
     "legacy30",
     "legacy31",
     "partial43",
@@ -1058,6 +1059,8 @@ test("Node initialization leaves repository migration semantics to the Python co
     "current49",
     "current50",
     "current51",
+    "current53",
+    "current54",
   ] as const) {
     await t.test(fixture, async () => {
       const currentVersion = fixture.startsWith("current")
@@ -1075,13 +1078,17 @@ test("Node initialization leaves repository migration semantics to the Python co
               ? 29
               : fixture === "legacy31"
                 ? 30
-                : fixture === "main43"
-                  ? 43
-                  : currentVersion !== undefined && currentVersion >= 50
-                    ? 49
-                    : currentVersion !== undefined && currentVersion >= 48
-                      ? 47
-                      : 42),
+                : fixture === "main53"
+                  ? 53
+                  : fixture === "main43"
+                    ? 43
+                    : currentVersion !== undefined && currentVersion >= 53
+                      ? 52
+                      : currentVersion !== undefined && currentVersion >= 50
+                        ? 49
+                        : currentVersion !== undefined && currentVersion >= 48
+                          ? 47
+                          : 42),
         ),
       );
       insertScan(database);
@@ -1090,6 +1097,10 @@ test("Node initialization leaves repository migration semantics to the Python co
         UPDATE workspaces SET target_id='target'; UPDATE scans SET target_id='target';
         UPDATE scans SET status='complete', started_at='2026-01-01T00:00:00Z',
           completed_at='2026-01-01T00:00:01.123456789123z';`);
+      if (fixture === "main53")
+        database.exec(`INSERT INTO external_source_reports
+          (id,repository,provider,source_key,source_finding_id,evidence_json,version,created_at,updated_at)
+          VALUES ('report','/synthetic/repository','synthetic','source','finding','{"title":"Saved report"}',1,'created','updated')`);
       if (["legacy30", "legacy31", "partial43"].includes(fixture)) {
         database.exec(
           "ALTER TABLE security_targets ADD COLUMN repository_identity TEXT",
@@ -1114,7 +1125,13 @@ test("Node initialization leaves repository migration semantics to the Python co
               ...item,
               version:
                 item.version +
-                (currentVersion >= 50 ? 7 : currentVersion >= 48 ? 5 : 0),
+                (currentVersion >= 53
+                  ? 10
+                  : currentVersion >= 50
+                    ? 7
+                    : currentVersion >= 48
+                      ? 5
+                      : 0),
             }))
             .filter((item) => item.version <= currentVersion),
         );
@@ -1130,6 +1147,10 @@ test("Node initialization leaves repository migration semantics to the Python co
         current.close();
       }
       const saved = new DatabaseSync(databasePath);
+      const originalReports =
+        fixture === "main53"
+          ? saved.prepare("SELECT * FROM external_source_reports").all()
+          : [];
       const originalHistory = saved
         .prepare(
           "SELECT name, applied_at FROM schema_migrations WHERE name IN ('persist repository identities', 'stabilize Linux repository generations') ORDER BY name",
@@ -1141,7 +1162,11 @@ test("Node initialization leaves repository migration semantics to the Python co
       pythonMigrations(controlPath);
       await databaseInfo(directory);
       const initialized = new DatabaseSync(databasePath);
-      assertMigrationNames(initialized, 48, 49);
+      assertMigrationNames(initialized, 48, 49, 53);
+      assert.deepEqual(
+        initialized.prepare("SELECT * FROM external_source_reports").all(),
+        originalReports,
+      );
       const identity = initialized
         .prepare("SELECT * FROM security_targets")
         .get()?.repository_identity;
@@ -1149,7 +1174,7 @@ test("Node initialization leaves repository migration semantics to the Python co
         identity,
         currentVersion !== undefined
           ? "synthetic-generation"
-          : fixture === "main42" || fixture === "main43"
+          : fixture === "main42" || fixture === "main43" || fixture === "main53"
             ? undefined
             : "unestablished-legacy-identity",
       );
@@ -1171,6 +1196,10 @@ test("Node initialization leaves repository migration semantics to the Python co
       const expected = new DatabaseSync(controlPath);
       try {
         assert.deepEqual(storedRows(actual), storedRows(expected));
+        assert.deepEqual(
+          actual.prepare("SELECT * FROM external_source_reports").all(),
+          originalReports,
+        );
         for (const row of originalHistory)
           assert.equal(
             actual
@@ -1182,7 +1211,7 @@ test("Node initialization leaves repository migration semantics to the Python co
           actual
             .prepare("SELECT MAX(version) AS version FROM schema_migrations")
             .get()?.version,
-          54,
+          55,
         );
         assert.equal(
           actual.prepare("SELECT completion_sequence FROM scans").get()
@@ -1202,11 +1231,11 @@ test("Node repository migration-label collisions roll back without changing stor
   for (const [name, setup] of [
     [
       "identity destination",
-      "UPDATE schema_migrations SET name='persist repository identities' WHERE version=31; INSERT INTO schema_migrations VALUES(53,'persist repository identities','original')",
+      "UPDATE schema_migrations SET name='persist repository identities' WHERE version=31; INSERT INTO schema_migrations VALUES(54,'persist repository identities','original')",
     ],
     [
       "generation destination",
-      "UPDATE schema_migrations SET name='stabilize Linux repository generations' WHERE version=44; INSERT INTO schema_migrations VALUES(54,'occupied destination','retained')",
+      "UPDATE schema_migrations SET name='stabilize Linux repository generations' WHERE version=44; INSERT INTO schema_migrations VALUES(55,'occupied destination','retained')",
     ],
     [
       "identity collision after generation relocation",
@@ -1332,6 +1361,7 @@ with sqlite3.connect(sys.argv[2]) as connection:
           name !== "local_finding_embeddings" &&
           name !== "finding_issue_receipts" &&
           name !== "deep_scan_worker_threads" &&
+          name !== "external_source_reports" &&
           name !== "sqlite_sequence",
       )
       .map(([name, rows]) => {
@@ -1384,15 +1414,20 @@ with sqlite3.connect(sys.argv[2]) as connection:
       .get()?.count,
     0,
   );
+  assert.deepEqual(
+    initialized.prepare("SELECT * FROM external_source_reports").all(),
+    [],
+  );
+  assertMigrationNames(initialized, 53);
   assert.equal(
     initialized
-      .prepare("SELECT name FROM schema_migrations WHERE version=53")
+      .prepare("SELECT name FROM schema_migrations WHERE version=54")
       .get()?.name,
     "persist repository identities",
   );
   assert.equal(
     initialized
-      .prepare("SELECT name FROM schema_migrations WHERE version=54")
+      .prepare("SELECT name FROM schema_migrations WHERE version=55")
       .get(),
     undefined,
   );
@@ -1415,7 +1450,7 @@ with sqlite3.connect(sys.argv[2]) as connection:
             mode=None, status=None, query=None, limit=None, offset=0)
         scans = history.list_scans(connection, args)['scans']
         assert [scan['scanId'] for scan in scans] == ['scan'], (repository, scans)
-    assert connection.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 54
+    assert connection.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 55
 `,
       scripts,
       databasePath,

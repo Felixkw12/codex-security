@@ -95,8 +95,9 @@ EXPECTED_MIGRATIONS = [
     (50, "persist authorized source excerpt scopes"),
     (51, "preserve deep scan worker thread history"),
     (52, "record severity classification review counts"),
-    (53, "persist repository identities"),
-    (54, "stabilize Linux repository generations"),
+    (53, "store external source findings without assessments"),
+    (54, "persist repository identities"),
+    (55, "stabilize Linux repository generations"),
 ]
 
 
@@ -2978,7 +2979,7 @@ def test_repository_identity_upgrade_keeps_named_scan_history(installed: str) ->
                 for row in connection.execute("SELECT * FROM schema_migrations")
             }
             assert migrations["editable scan names"][0] == 42
-            assert migrations["persist repository identities"][0] == 53
+            assert migrations["persist repository identities"][0] == 54
             for name, timestamp in timestamps.items():
                 assert migrations[name][1] == timestamp
 
@@ -3014,7 +3015,7 @@ def test_correcting_aliased_workspace_setup_retains_target(tmp_path: Path, spell
         )
 
 
-@pytest.mark.parametrize("before_version", [53, 54])
+@pytest.mark.parametrize("before_version", [54, 55])
 @pytest.mark.parametrize("with_scan", [False, True])
 def test_identity_migrations_skip_unavailable_historical_git(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, before_version: int, with_scan: bool
@@ -3035,7 +3036,7 @@ def test_identity_migrations_skip_unavailable_historical_git(
         "VALUES (?, ?, ?, ?, ?)",
         (workspace_id, target_id, historical, timestamp, timestamp),
     )
-    old_identity = "repository_sha256_" + "1" * 64 if before_version == 54 else None
+    old_identity = "repository_sha256_" + "1" * 64 if before_version == 55 else None
     if old_identity is not None:
         connection.execute("UPDATE security_targets SET repository_identity = ?", (old_identity,))
     if with_scan:
@@ -3047,7 +3048,7 @@ def test_identity_migrations_skip_unavailable_historical_git(
             (workspace_id, target_id, historical, timestamp, timestamp, timestamp),
         )
     apply_migrations(connection)
-    assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 54
+    assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 55
     assert tuple(
         connection.execute(
             "SELECT id, current_path, repository_identity FROM security_targets"
@@ -3082,7 +3083,7 @@ def test_identity_migrations_skip_unavailable_historical_git(
 def test_registration_keeps_a_competing_targets_existing_id(tmp_path: Path) -> None:
     repository = tmp_path / "repository"
     repository.mkdir()
-    connection, apply_migrations = create_historical_database(54)
+    connection, apply_migrations = create_historical_database(55)
     connection.executescript("""
         CREATE TRIGGER competing_target BEFORE INSERT ON security_targets
         WHEN NEW.id <> 'existing-target'
@@ -3120,7 +3121,7 @@ def test_identity_migration_excludes_all_history_and_caller_git(
         initialize_git_repository(repository)
     state = tmp_path / "state"
     state.mkdir(mode=0o700)
-    connection, _ = create_historical_database(53)
+    connection, _ = create_historical_database(54)
     timestamp = "2026-08-01T00:00:00Z"
     destination = tmp_path / "destination"
     if executable_source.startswith("redirected-"):
@@ -3179,7 +3180,7 @@ def test_identity_migration_excludes_all_history_and_caller_git(
 def test_identity_migration_merges_partially_sequenced_completion_history(
     clock_reversed: bool,
 ) -> None:
-    connection, apply_migrations = create_historical_database(54)
+    connection, apply_migrations = create_historical_database(55)
     connection.execute(
         "INSERT INTO workspaces(id, created_at, updated_at) VALUES ('workspace', 'created', 'updated')"
     )
@@ -3226,7 +3227,7 @@ def test_identity_migrations_keep_healthy_targets_when_another_path_is_unavailab
     repository = tmp_path / "healthy"
     initialize_git_repository(repository)
     connection, apply_migrations = create_historical_database(
-        53 if migration == "pre-release" else 54
+        54 if migration == "pre-release" else 55
     )
     import workbench_target as target
     import workbench_target_state as state
@@ -3240,7 +3241,7 @@ def test_identity_migrations_keep_healthy_targets_when_another_path_is_unavailab
     if migration == "pre-release":
         connection.execute("ALTER TABLE security_targets ADD COLUMN repository_identity TEXT")
         connection.execute(
-            "INSERT INTO schema_migrations VALUES (53, 'persist repository identities', ?)",
+            "INSERT INTO schema_migrations VALUES (54, 'persist repository identities', ?)",
             (timestamp,),
         )
     missing = tmp_path / "unavailable" / "old-checkout"
@@ -3308,7 +3309,7 @@ def test_identity_migrations_keep_healthy_targets_when_another_path_is_unavailab
 def test_current_database_does_not_inspect_historical_git_paths(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    connection, apply_migrations = create_historical_database(54)
+    connection, apply_migrations = create_historical_database(55)
     connection.executemany(
         "INSERT INTO security_targets(id, current_path, display_name, created_at, updated_at) "
         "VALUES (?, ?, 'Saved checkout', 'created', 'updated')",
