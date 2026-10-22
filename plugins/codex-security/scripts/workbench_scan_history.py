@@ -10,7 +10,6 @@ from collections.abc import Iterable, Iterator
 from itertools import chain, groupby
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
-from urllib.parse import urlsplit
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -20,7 +19,7 @@ from workbench_constants import ARTIFACTS, FINDINGS_PAGE_MAX
 from workbench_scan_start import scan_target_identity
 from workbench_scan_usage import stored_scan_cost_fields
 from workbench_source_scopes import public_scan_recipe
-from workbench_target import git_output, require_scan_target_identity
+from workbench_target import git_output, repository_origin, require_scan_target_identity
 from workbench_validation import timestamp_key
 
 
@@ -151,6 +150,19 @@ def _same_repository(
 ) -> bool:
     if before["target_id"] is not None and before["target_id"] == after["target_id"]:
         return True
+    if all(
+        "target_git_identity_json" in scan.keys() and scan["target_git_identity_json"] is not None
+        for scan in (before, after)
+    ):
+        before_identity = json.loads(before["target_git_identity_json"])
+        saved_after_identity = json.loads(after["target_git_identity_json"])
+        return (
+            Path(before_identity["commonDirectory"])
+            == Path(saved_after_identity["commonDirectory"])
+        ) or (
+            before_identity["origin"] is not None
+            and before_identity["origin"] == saved_after_identity["origin"]
+        )
     before_target = Path(before["target_path"])
     after_target = Path(after["target_path"])
     if before_target.resolve() == after_target.resolve():
@@ -169,37 +181,10 @@ def _same_repository(
         and Path(before_git_dir).resolve() == Path(after_git_dir).resolve()
     ):
         return True
-    before_origin = _repository_origin(before_target)
+    before_origin = repository_origin(before_target)
     return before_origin is not None and before_origin == (
-        _repository_origin(after_target) if after_identity is None else after_identity[1]
+        repository_origin(after_target) if after_identity is None else after_identity[1]
     )
-
-
-def _repository_origin(target: Path) -> tuple[str, str] | None:
-    remote = git_output(target, "remote", "get-url", "origin")
-    if remote is None:
-        return None
-    if "://" in remote:
-        try:
-            parsed = urlsplit(remote)
-            port = parsed.port
-        except ValueError:
-            return None
-        if parsed.scheme not in {"https", "ssh"} or parsed.hostname is None:
-            return None
-        if parsed.query or parsed.fragment:
-            return None
-        host = parsed.hostname
-        if port is not None and port != {"https": 443, "ssh": 22}[parsed.scheme]:
-            host = f"{host}:{port}"
-        path = parsed.path
-    else:
-        authority, separator, path = remote.partition(":")
-        if not separator or "?" in path or "#" in path:
-            return None
-        host = authority.rsplit("@", 1)[-1]
-    path = path.strip("/").removesuffix(".git")
-    return (host.lower(), path) if host and path else None
 
 
 SCAN_SUMMARY_QUERY = """
@@ -284,7 +269,7 @@ def list_scans(
         ).fetchone()
         requested_identity = (
             git_output(repository, "rev-parse", "--path-format=absolute", "--git-common-dir"),
-            _repository_origin(repository),
+            repository_origin(repository),
         )
         related_target_ids = [
             target["target_id"]
@@ -513,8 +498,12 @@ def _same_reviewed_content(before: sqlite3.Row, after: sqlite3.Row) -> bool:
     if before["target_revision"] == "unversioned":
         if before["target_path"] != after["target_path"]:
             return False
-    elif any("target_git_prefix" not in scan.keys() for scan in (before, after)) or (
-        before["target_git_prefix"] is None
+    elif (
+        any(
+            field not in scan.keys() or scan[field] is None
+            for scan in (before, after)
+            for field in ("target_git_prefix", "target_git_identity_json")
+        )
         or before["target_git_prefix"] != after["target_git_prefix"]
     ):
         return False

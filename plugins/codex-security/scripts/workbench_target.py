@@ -16,6 +16,7 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, Callable
+from urllib.parse import urlsplit
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -65,6 +66,33 @@ def git_output(
     else:
         output = output.removesuffix("\n")
     return output if completed.returncode == 0 and output else None
+
+
+def repository_origin(target: Path) -> tuple[str, str] | None:
+    remote = git_output(target, "remote", "get-url", "origin")
+    if remote is None:
+        return None
+    if "://" in remote:
+        try:
+            parsed = urlsplit(remote)
+            port = parsed.port
+        except ValueError:
+            return None
+        if parsed.scheme not in {"https", "ssh"} or parsed.hostname is None:
+            return None
+        if parsed.query or parsed.fragment:
+            return None
+        host = parsed.hostname
+        if port is not None and port != {"https": 443, "ssh": 22}[parsed.scheme]:
+            host = f"{host}:{port}"
+        path = parsed.path
+    else:
+        authority, separator, path = remote.partition(":")
+        if not separator or "?" in path or "#" in path:
+            return None
+        host = authority.rsplit("@", 1)[-1]
+    path = path.strip("/").removesuffix(".git")
+    return (host.lower(), path) if host and path else None
 
 
 def git_bytes(
