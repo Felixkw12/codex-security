@@ -1,7 +1,7 @@
 import { expect } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve, win32 } from "node:path";
 import type { Finding, JsonObject, SeverityLevel } from "../src/index.js";
 import { main } from "../src/cli.js";
 import { dependencies, fakeResult } from "./cli-fixtures.js";
@@ -110,6 +110,7 @@ export async function runWorkflow(
   options: {
     interactive?: boolean;
     review?: boolean;
+    localHosting?: boolean;
     configure?: (value: ReturnType<typeof dependencies>) => void;
   } = {},
 ) {
@@ -144,6 +145,60 @@ export async function runWorkflow(
       (async (scanId) =>
         fixtures.result?.findings.findings ?? savedFindings.get(scanId) ?? []),
   });
+  // Publication fixtures use real local bare repositories behind a synthetic
+  // hosting transport. Hosting tests disable this adapter to inspect real URLs.
+  if (options.localHosting !== false) {
+    const run = current.runRepositoryCommand;
+    const localRemotes = new Map<string, string>();
+    let hostedRemote = "https://github.example.test/example/repository.git";
+    current.runRepositoryCommand = async (
+      command,
+      args,
+      cwd,
+      commandOptions,
+    ) => {
+      if (command === "gh" && args[0] === "repo" && args[1] === "view") {
+        if (localRemotes.size && args.at(-1) === ".id")
+          return "synthetic-origin-id";
+        if (args.at(-1) === ".url") return hostedRemote.replace(/\.git$/u, "");
+        if (args.at(-1) === ".nameWithOwner")
+          return args[2]!.slice(args[2]!.indexOf("/") + 1);
+      }
+      const translated = args.map((arg) => {
+        for (const [hosted, local] of localRemotes) {
+          if (
+            arg ===
+            `--config-env=url.${hosted}.insteadOf=CODEX_SECURITY_PREFLIGHT_ALIAS`
+          )
+            return `--config-env=url.${local}.insteadOf=CODEX_SECURITY_PREFLIGHT_ALIAS`;
+        }
+        return arg;
+      });
+      const output = await run(command, translated, cwd, commandOptions);
+      if (command !== "git" || args[0] !== "remote" || args[1] !== "get-url")
+        return output;
+      if (!output.trim()) return hostedRemote;
+      const remotes = output.split("\n").map((remote) => {
+        if (
+          !isAbsolute(remote) &&
+          !win32.isAbsolute(remote) &&
+          !remote.startsWith("file://")
+        )
+          return remote;
+        let hosted = [...localRemotes].find(
+          ([, local]) => local === remote,
+        )?.[0];
+        if (!hosted) {
+          hosted = `https://github.example.test/example/repository-${localRemotes.size}.git`;
+          localRemotes.set(hosted, remote);
+        }
+        return hosted;
+      });
+      if (args.includes("--push") && remotes[0]?.includes("://"))
+        hostedRemote = remotes[0];
+      return remotes.join("\n");
+    };
+  }
   if (options.interactive) {
     current.confirmPatchReview = async (question) => {
       stderr.stream.write(`\n${question} (y/N)\n`);
