@@ -582,13 +582,15 @@ print(json.dumps({'uncertain': uncertain, 'excluded': excluded, 'resolved': reso
 
 test("loads displayed relations in bulk and follows current confirmed identities", async () => {
   const probe = `
-import json, sqlite3, sys
+import json, os, sqlite3, sys, tempfile
 sys.path.insert(0, sys.argv[1])
 import workbench_scan_history as history
+from filesystem_identity import serialize_filesystem_identity
 connection = sqlite3.connect(':memory:')
 connection.row_factory = sqlite3.Row
 connection.executescript('''
-CREATE TABLE scans (id TEXT PRIMARY KEY, target_id TEXT);
+CREATE TABLE scans (id TEXT PRIMARY KEY, target_id TEXT, target_device INTEGER, target_inode INTEGER);
+CREATE TABLE security_targets (id TEXT PRIMARY KEY, current_path TEXT);
 CREATE INDEX scans_by_target ON scans(target_id, id);
 CREATE TABLE finding_occurrences (
     id TEXT PRIMARY KEY, finding_id TEXT, scan_id TEXT, title TEXT,
@@ -602,11 +604,18 @@ CREATE TABLE scan_comparison_matches (
 CREATE INDEX matches_before ON scan_comparison_matches(before_occurrence_id);
 CREATE INDEX matches_after ON scan_comparison_matches(after_occurrence_id);
 ''')
-connection.executemany('INSERT INTO scans VALUES (?, ?)', [
+connection.executemany('INSERT INTO scans (id, target_id) VALUES (?, ?)', [
     ('one', 'target'), ('two', 'target'), ('three', 'clone'),
     ('four', 'clone'), ('foreign-one', 'unrelated-target'),
     ('foreign-two', 'unrelated-target')
 ])
+checkout = tempfile.TemporaryDirectory()
+metadata = os.stat(checkout.name)
+connection.executemany('INSERT INTO security_targets VALUES (?, ?)', [
+    (target, checkout.name) for target in ('target', 'clone', 'unrelated-target')
+])
+connection.execute('UPDATE scans SET target_device = ?, target_inode = ?',
+                   (serialize_filesystem_identity(metadata.st_dev), serialize_filesystem_identity(metadata.st_ino)))
 connection.executemany('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?)', (
     (f'{side}-{index}', f'{side}-identity-{index}', scan, f'Synthetic {side} {index}')
     for index in range(10_000)
@@ -672,7 +681,7 @@ print(json.dumps({
     scoped: {
       "left-0": [{ occurrenceId: "right-0", scanId: "two" }],
     },
-    scopedQueries: 3,
+    scopedQueries: 7,
     empty: {},
     emptyQueries: 0,
     aliases: ["bridge-identity", "left-identity-0", "right-identity-0"],
@@ -682,7 +691,7 @@ print(json.dumps({
     unchanged: true,
     restoredAfterUnlink: true,
     batchedCount: 10,
-    batchedQueries: 3,
+    batchedQueries: 7,
     legacyCount: 1001,
     legacyQueries: 1,
   });

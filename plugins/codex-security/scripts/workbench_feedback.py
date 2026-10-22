@@ -19,7 +19,7 @@ from workbench_constants import (
 )
 from workbench_finding_results import finding_triage_result
 from workbench_native_indexes import _indexed_findings
-from workbench_scan_history import saved_repository_target_ids
+from workbench_scan_history import _same_registered_repository, saved_repository_target_ids
 from workbench_validation import bounded_output_text
 
 
@@ -30,13 +30,17 @@ def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict
         lambda occurrence_id, finding_id: f"finding:{finding_id}",
         deterministic=True,
     )
+    checkout_relationships: dict[tuple[str, ...], bool] = {}
     source_ids = {
         row["id"]
         for row in connection.execute(
-            "SELECT id FROM scans WHERE (status = 'complete' "
+            "SELECT * FROM scans WHERE (status = 'complete' "
             "OR (status = 'failed' AND seal_manifest_digest IS NOT NULL)) AND id != ? "
             "AND target_id IN (SELECT value FROM json_each(?))",
             (scan["id"], json.dumps(sorted(saved_repository_target_ids(connection, scan)))),
+        )
+        if _same_registered_repository(
+            connection, scan, row, checkout_relationships=checkout_relationships
         )
     }
     closed_decisions = {}

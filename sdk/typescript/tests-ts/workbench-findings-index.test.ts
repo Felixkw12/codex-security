@@ -198,7 +198,7 @@ const findingsIndexProbe = [
   "        connection.execute('CREATE TABLE scan_artifacts (scan_id TEXT, kind TEXT, path TEXT)')",
   "        connection.execute('CREATE TABLE workspaces (id TEXT, thread_id TEXT)')",
   "        workbench.remediation_availability = lambda _scan: (False, None)",
-  "        workbench.finding_management_updated_at = lambda *_arguments: None",
+  "        workbench.finding_results.finding_management_updated_at = lambda *_arguments: None",
   "        overview_scan = defaultdict(lambda: None, dict(scan))",
   "        overview_scan['completion_warnings_json'] = '[]'",
   "        overview_finding = workbench.scan_result(connection, overview_scan)['findings'][0]",

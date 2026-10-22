@@ -248,6 +248,7 @@ def _repository_origin(target: Path) -> tuple[str, str] | None:
     remote = git_output(target, "remote", "get-url", "origin")
     if remote is None:
         return None
+    account = None
     if "://" in remote:
         try:
             parsed = urlsplit(remote)
@@ -258,6 +259,8 @@ def _repository_origin(target: Path) -> tuple[str, str] | None:
             return None
         if parsed.query or parsed.fragment:
             return None
+        if parsed.scheme == "ssh" and (parsed.path == "/~" or parsed.path.startswith("/~/")):
+            account = parsed.username
         host = parsed.hostname
         if port is not None and port != {"https": 443, "ssh": 22}[parsed.scheme]:
             host = f"{host}:{port}"
@@ -266,9 +269,18 @@ def _repository_origin(target: Path) -> tuple[str, str] | None:
         authority, separator, path = remote.partition(":")
         if not separator or "?" in path or "#" in path:
             return None
-        host = authority.rsplit("@", 1)[-1]
+        account, at, host = authority.rpartition("@")
+        if not at:
+            account, host = None, authority
+        elif path.startswith("/") or (
+            path.startswith("~") and path != "~" and not path.startswith("~/")
+        ):
+            account = None
     path = path.strip("/").removesuffix(".git")
-    return (host.lower(), path) if host and path else None
+    host = host.lower()
+    if account and not (account == "git" and host == "github.com"):
+        host = f"{account}@{host}"
+    return (host, path) if host and path else None
 
 
 SCAN_SUMMARY_QUERY = """
@@ -1000,6 +1012,18 @@ def _same_registered_repository(
     *,
     checkout_relationships: dict[tuple[str, ...], bool] | None = None,
 ) -> bool:
+    if before["target_id"] is None and after["target_id"] is None:
+        for scan in (before, after):
+            path = Path(scan["target_path"]).expanduser().resolve()
+            if any(
+                connection.execute(
+                    "SELECT 1 FROM security_targets WHERE current_path = ?", (str(candidate),)
+                ).fetchone()
+                is not None
+                for candidate in (path, *path.parents)
+            ):
+                return False
+        return _same_repository(before, after)
     paths = []
     verified_scans = []
     missing_checkout = False
@@ -1608,12 +1632,21 @@ def finding_relations(
     if not selected:
         return {}
     pairs = []
+    checkout_relationships: dict[tuple[str, ...], bool] = {}
     for comparison in connection.execute(
         "SELECT before_scan_id, after_scan_id, result_json FROM scan_comparisons "
         "WHERE before_scan_id = ? OR after_scan_id = ? "
         "ORDER BY before_scan_id, after_scan_id",
         (scan_id, scan_id),
     ):
+        compared_scans = [
+            connection.execute("SELECT * FROM scans WHERE id = ?", (comparison[key],)).fetchone()
+            for key in ("before_scan_id", "after_scan_id")
+        ]
+        if not _same_registered_repository(
+            connection, *compared_scans, checkout_relationships=checkout_relationships
+        ):
+            continue
         side = "before" if comparison["before_scan_id"] == scan_id else "after"
         other = "after" if side == "before" else "before"
         for pair in json.loads(comparison["result_json"]).get("related", []):

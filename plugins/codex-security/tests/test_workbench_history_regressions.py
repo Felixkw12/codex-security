@@ -475,7 +475,9 @@ def test_legacy_decision_migration_preserves_chronology_and_appends(history, leg
     migration15 = next(sql for version, _, sql in namespace["MIGRATIONS"] if version == 15)
     backfill = next(
         statement
-        for statement in namespace["sql_statements"](migration15)
+        for statement in runpy.run_path(str(SCRIPT.with_name("workbench_schema.py")))[
+            "sql_statements"
+        ](migration15)
         if statement.startswith("INSERT INTO finding_decisions")
     )
     with sqlite3.connect(database) as connection:

@@ -284,6 +284,7 @@ def _indexed_findings(
                 "matched_finding_ids": sorted({row["finding_id"] for row in occurrences}),
                 "occurrence_count": len(occurrences),
                 "occurrence_ids": {row["occurrence_id"] for row in occurrences},
+                "occurrences": occurrences,
                 "status": status,
                 "updated_at": (
                     max(
@@ -553,8 +554,11 @@ def _indexed_active_findings(
         )
         active_occurrence_ids = {
             finding["occurrence_id"]
-            for matched, _ in representatives
-            for finding in matched
+            for finding in (
+                row["occurrences"]
+                if verification_occurrence_id in row["occurrence_ids"]
+                else (finding for matched, _ in representatives for finding in matched)
+            )
             # Retained history is verified unless a later matched scan covers its location.
             if verification_occurrence_id not in row["occurrence_ids"]
             or not any(

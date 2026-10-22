@@ -30,8 +30,6 @@ from workbench_source_scopes import requested_scan_paths, safe_source_path
 from workbench_target import require_scan_target_identity
 from workbench_validation import bounded_output_text
 
-FINDING_ARTIFACT_DIRECTORIES_LIMIT = 80
-FINDING_ARTIFACTS_LIMIT = 40
 FINDING_WRITEUP_REPORT_PATH = re.compile(r"^findings/([a-z0-9][a-z0-9._-]*)/\1\.md$")
 
 
@@ -222,14 +220,9 @@ def finding_artifact_paths(scan_dir: Path, details: dict[str, Any]) -> list[str]
     except OSError:
         return artifacts
 
-    directories_seen = 0
     for current_directory, directory_names, file_names in os.walk(
         poc_root, topdown=True, followlinks=False
     ):
-        directories_seen += 1
-        if directories_seen > FINDING_ARTIFACT_DIRECTORIES_LIMIT:
-            directory_names[:] = []
-            break
         current_path = Path(current_directory)
         directory_names[:] = [
             name for name in sorted(directory_names) if not (current_path / name).is_symlink()
@@ -243,8 +236,6 @@ def finding_artifact_paths(scan_dir: Path, details: dict[str, Any]) -> list[str]
             if not scan_local_regular_file(scan_dir, relative_path):
                 continue
             artifacts.append(relative_path)
-            if len(artifacts) >= FINDING_ARTIFACTS_LIMIT:
-                return artifacts
     return artifacts
 
 

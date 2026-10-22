@@ -70,7 +70,6 @@ from workbench_constants import (
 )
 from workbench_feedback import get_scan_feedback
 from workbench_finding_index import index_findings
-from workbench_finding_results import finding_management_updated_at
 from workbench_finding_workflows import finding_workflow, register_workflow_scan
 from workbench_local_dedupe import local_dedupe
 from workbench_scan_start import (
@@ -86,9 +85,6 @@ from workbench_schema import (
 )
 from workbench_schema import (
     apply_migrations as apply_schema_migrations,
-)
-from workbench_schema import (
-    sql_statements as sql_statements,
 )
 from workbench_source_scopes import (
     capture_source_scopes,
@@ -1988,6 +1984,7 @@ def set_finding_triage(connection: sqlite3.Connection, args: argparse.Namespace)
         timestamp = now()
         occurrence = require_occurrence(connection, args.occurrence_id)
         scan = require_scan(connection, occurrence["scan_id"])
+        _require_finding_checkout_owner(connection, scan)
         indexed_finding = _indexed_scan_findings(connection, scan).get(occurrence["id"])
         triaged_occurrences = [occurrence]
         verification_ids = {occurrence["id"]}
@@ -2113,6 +2110,7 @@ def set_finding_triage(connection: sqlite3.Connection, args: argparse.Namespace)
 def require_finding_open(connection: sqlite3.Connection, occurrence_id: str) -> None:
     occurrence = require_occurrence(connection, occurrence_id)
     scan = require_scan(connection, occurrence["scan_id"])
+    _require_finding_checkout_owner(connection, scan)
     triage = _indexed_scan_findings(connection, scan).get(occurrence_id)
     if triage is None:
         triage = connection.execute(
@@ -3077,7 +3075,7 @@ def scan_result(
             scan["updated_at"],
             progress["updated_at"],
             review_updated_at,
-            finding_management_updated_at(connection, scan["id"]) or "",
+            finding_results.finding_management_updated_at(connection, scan["id"]) or "",
         ),
         "userContext": scan["user_context"],
         "warnings": json.loads(scan["completion_warnings_json"]),
@@ -3526,20 +3524,6 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
                     connection, scan, through_scan=through_scan
                 ),
             )
-        elif args.command == "list-global-findings":
-            result = native_indexes.list_global_findings(
-                connection, args, read_coverage=coverage_for_comparison
-            )
-        elif args.command == "list-repositories":
-            result = native_indexes.list_repositories(
-                connection, args, read_coverage=coverage_for_comparison
-            )
-        elif args.command == "list-findings":
-            result = list_findings(connection, args)
-        elif args.command == "update-progress":
-            result = progress.update_progress(command_context, connection, args)
-        elif args.command == "update-scan-context":
-            result = progress.update_context(command_context, connection, args)
         elif args.command in {"prepare-scan-completion", "complete-scan"}:
             result = complete_scan(
                 connection, args, prepare_only=args.command == "prepare-scan-completion"

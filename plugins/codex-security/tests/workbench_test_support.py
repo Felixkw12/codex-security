@@ -941,14 +941,17 @@ def create_cli_scan(
     *,
     complete: bool = True,
     completeness: str = "complete",
+    follow_up: bool = False,
     extra_anchors: tuple[str, ...] = (),
     finding: bool = True,
     identity_anchor: str = "archive-entry-write-without-containment",
     mode: str = "standard",
     parent_scan_id: str | None = None,
     paths: list[str] | None = None,
+    relative_path: str = "src/extract.py",
     cost: dict[str, Any] | None = None,
     target: dict[str, Any] | None = None,
+    target_kind: str | None = None,
     target_revision: str | None = None,
 ) -> dict[str, Any]:
     scan_dir = root / str(uuid.uuid4())
@@ -974,14 +977,7 @@ def create_cli_scan(
     if not complete:
         return launched
     if mode == "deep":
-        run_workbench(
-            state_dir,
-            "begin-deep-scan",
-            "--scan-id",
-            launched["scanId"],
-            "--thread-id",
-            "thread-scan-history",
-        )
+        resume_deep_scan(state_dir, launched["scanId"], "thread-scan-history")
         mark_deep_coordinator_succeeded(state_dir, launched["scanId"], scan_dir)
 
     coverage_mode = (
@@ -998,10 +994,12 @@ def create_cli_scan(
         launched["scanId"],
         repository,
         identity_anchor=identity_anchor,
+        relative_path=relative_path,
         include_paths=paths,
         coverage_mode=coverage_mode,
         inventory_strategy="scoped_path" if paths else "repository",
-        target_kind="git_revision" if target_revision is not None else "directory_snapshot",
+        target_kind=target_kind
+        or ("git_revision" if target_revision is not None else "directory_snapshot"),
         target_revision=target_revision,
         snapshot_digest=snapshot_digest,
     )
@@ -1017,10 +1015,11 @@ def create_cli_scan(
                 additional["title"] += f" ({index})"
                 findings["findings"].append(additional)
         findings_path.write_text(json.dumps(findings))
-    if completeness != "complete":
+    if follow_up or completeness != "complete":
         coverage_path = scan_dir / "coverage.json"
         coverage = json.loads(coverage_path.read_text())
-        coverage["completeness"] = completeness
+        if completeness != "complete":
+            coverage["completeness"] = completeness
         coverage["surfaces"][0]["disposition"] = "needs_follow_up"
         coverage["deferred"] = [
             {"id": "unreviewed-path", "reason": "Review incomplete", "paths": ["src/extract.py"]}

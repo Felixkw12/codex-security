@@ -94,8 +94,9 @@ EXPECTED_MIGRATIONS = [
     (50, "persist authorized source excerpt scopes"),
     (51, "preserve deep scan worker thread history"),
     (52, "record severity classification review counts"),
-    (53, "preserve finding decision append chronology"),
-    (54, "bind new finding decisions to admitted scans"),
+    (53, "store external source findings without assessments"),
+    (54, "preserve finding decision append chronology"),
+    (55, "bind new finding decisions to admitted scans"),
 ]
 
 
@@ -2926,7 +2927,7 @@ def test_workbench_reconciles_profile_and_public_warning_histories(
         ) is supported
 
 
-@pytest.mark.parametrize("installed_version", [42, 43, 48, 50])
+@pytest.mark.parametrize("installed_version", [42, 43, 48, 50, 53, 54])
 @pytest.mark.parametrize("with_scan_boundary", [False, True])
 def test_decision_history_upgrade_preserves_published_sequences(
     installed_version: int, with_scan_boundary: bool
@@ -2939,9 +2940,9 @@ def test_decision_history_upgrade_preserves_published_sequences(
         if version < installed_version
     ]
     historical.extend(
-        (version - (53 - installed_version), name, sql)
+        (version - (54 - installed_version), name, sql)
         for version, name, sql in namespace["MIGRATIONS"]
-        if version == 53 or (version == 54 and with_scan_boundary)
+        if version == 54 or (version == 55 and with_scan_boundary)
     )
     with sqlite3.connect(":memory:") as connection:
         connection.row_factory = sqlite3.Row
@@ -2981,6 +2982,21 @@ def test_decision_history_upgrade_preserves_published_sequences(
             f"INSERT INTO finding_decisions ({decision_columns}) VALUES ({','.join('?' for _ in values)})",
             values,
         )
+        if installed_version == 54:
+            connection.execute(
+                "INSERT INTO external_source_reports VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "external-report",
+                    "/synthetic/repository",
+                    "snyk",
+                    "synthetic-source",
+                    "synthetic-finding",
+                    '{"title":"Synthetic external finding"}',
+                    1,
+                    timestamp,
+                    timestamp,
+                ),
+            )
         before = tuple(
             connection.execute(f"SELECT {decision_columns} FROM finding_decisions").fetchone()
         )
@@ -3003,6 +3019,9 @@ def test_decision_history_upgrade_preserves_published_sequences(
         }
         assert all(current[name] == applied_at for name, applied_at in receipts.items())
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert connection.execute("SELECT COUNT(*) FROM external_source_reports").fetchone()[0] == (
+            1 if installed_version == 54 else 0
+        )
         assert {row[0] for row in connection.execute("SELECT version FROM schema_migrations")} == {
             version for version, _, _ in namespace["MIGRATIONS"]
         }
