@@ -229,7 +229,23 @@ export type {
   ExternalPublicationResult,
   PreparedExternalPublication,
 } from "./external-findings-publish.js";
-export type { ExternalFinding, ExternalFindings } from "./external-findings.js";
+export {
+  prepareNormalizedLocalImport,
+  listLocalExternalFindings,
+} from "./external-findings-local.js";
+export type {
+  StoredExternalFinding,
+  NormalizedLocalImportOptions,
+  LocalExternalImportDependencies,
+  LocalExternalImportPreview,
+  LocalExternalImportResult,
+  PreparedLocalExternalImport,
+} from "./external-findings-local.js";
+export type {
+  ExternalFinding,
+  ExternalFindings,
+  ExternalSourceRepository,
+} from "./external-findings.js";
 export type {
   ExternalFindingEvidence,
   FindingImportRequest,
@@ -237,6 +253,16 @@ export type {
   ImportRepository,
   SourceReport,
 } from "./external-import-models.js";
+export {
+  normalizeGitHubCodeScanningAlerts,
+  normalizeGitHubAdvisories,
+  readGitHubFindings,
+} from "./github-findings.js";
+export { importGitHubAdvisories } from "./github-advisories.js";
+export type {
+  GitHubAdvisoryImportOptions,
+  ImportedGitHubAdvisory,
+} from "./github-advisories.js";
 export { importGitHubCodeScanningAlerts } from "./github.js";
 export type {
   GitHubCodeScanningImportOptions,
@@ -317,3 +343,22 @@ export type {
   OperationOutcome,
   OperationFailureCategory,
 } from "./operation-telemetry.js";
+
+export { prepareLocalExternalImport } from "./external-findings-import.js";
+export {
+  normalizeSnykFindingsExport,
+  normalizeSnykJson,
+  normalizeSnykSarif,
+  readSnykFindings,
+} from "./snyk-findings.js";
+export {
+  normalizeSemgrepFindings,
+  normalizeSemgrepSarif,
+  readSemgrepFindings,
+  type SemgrepImportOptions,
+} from "./semgrep-findings.js";
+export {
+  normalizeEndorFindings,
+  normalizeEndorSarif,
+  readEndorFindings,
+} from "./endor-findings.js";
