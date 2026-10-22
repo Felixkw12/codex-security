@@ -258,14 +258,18 @@ def insert_running_scan(
         if revision != "unversioned"
         else None
     )
-    git_identity = (
-        {
-            "commonDirectory": str(Path(git_common_directory).resolve()),
+    git_identity = None
+    if git_common_directory is not None:
+        common_directory = Path(git_common_directory).resolve()
+        git_directory_metadata = common_directory.stat()
+        git_identity = {
+            "commonDirectory": str(common_directory),
+            "commonDirectoryIdentity": [
+                serialize_filesystem_identity(git_directory_metadata.st_dev),
+                serialize_filesystem_identity(git_directory_metadata.st_ino),
+            ],
             "origin": repository_origin(target),
         }
-        if git_common_directory is not None
-        else None
-    )
     connection.execute(
         """
         INSERT INTO scans (

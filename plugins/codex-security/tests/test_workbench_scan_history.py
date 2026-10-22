@@ -1901,6 +1901,117 @@ def test_semantic_scan_comparison_accepts_linked_git_worktrees(tmp_path: Path) -
     assert saved["summary"]["persisting"] == 1
 
 
+@pytest.mark.parametrize(
+    "change",
+    [
+        "different-origin",
+        "retained-directory",
+        "same-origin",
+        "remote-edit",
+        "recreated-subdirectory",
+    ],
+)
+def test_scan_comparison_checks_saved_identity_when_target_path_is_reused(
+    tmp_path: Path, change: str
+) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    revision = initialize_git_repository(repository)
+    target = repository
+    if change == "recreated-subdirectory":
+        target = repository / "selected"
+        (target / "src").mkdir(parents=True)
+        (target / "src" / "extract.py").write_text("destination.write_bytes(entry.read())\n")
+        subprocess.run(["git", "-C", str(repository), "add", "."], check=True)
+        subprocess.run(
+            ["git", "-C", str(repository), "commit", "-qm", "Add nested target fixture"],
+            check=True,
+        )
+        revision = subprocess.check_output(
+            ["git", "-C", str(repository), "rev-parse", "HEAD"], text=True
+        ).strip()
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/example/first.git",
+        ],
+        check=True,
+    )
+    before = create_cli_scan(
+        state_dir, tmp_path / "before-results", target, target_revision=revision
+    )
+    git_inode = (repository / ".git").stat().st_ino
+    if change == "recreated-subdirectory":
+        saved_target = tmp_path / "saved-target"
+        target.rename(saved_target)
+        shutil.copytree(saved_target, target)
+    elif change != "remote-edit":
+        saved_repository = tmp_path / "saved-repository"
+        if change == "retained-directory":
+            saved_repository.mkdir()
+            for child in repository.iterdir():
+                child.rename(saved_repository / child.name)
+        else:
+            repository.rename(saved_repository)
+        subprocess.run(["git", "clone", "-q", str(saved_repository), str(repository)], check=True)
+    origin = "first" if change == "same-origin" else "second"
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "remote",
+            "set-url",
+            "origin",
+            f"git@github.com:example/{origin}",
+        ],
+        check=True,
+    )
+    after = create_cli_scan(
+        state_dir,
+        tmp_path / "after-results",
+        target,
+        target_revision=revision,
+        identity_anchor="replacement-repository-control",
+    )
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.row_factory = sqlite3.Row
+        saved = [
+            connection.execute("SELECT * FROM scans WHERE id = ?", (scan["scanId"],)).fetchone()
+            for scan in (before, after)
+        ]
+    for field in (
+        "target_id",
+        "target_path",
+        "target_revision",
+        "target_snapshot_digest",
+        "target_git_prefix",
+    ):
+        assert saved[0][field] == saved[1][field]
+    identities = [json.loads(scan["target_git_identity_json"]) for scan in saved]
+    assert identities[0]["commonDirectory"] == identities[1]["commonDirectory"]
+    assert (identities[0]["origin"] == identities[1]["origin"]) == (change == "same-origin")
+    assert (saved[0]["target_inode"] == saved[1]["target_inode"]) == (
+        change in {"remote-edit", "retained-directory"}
+    )
+    assert ((repository / ".git").stat().st_ino == git_inode) == (
+        change in {"remote-edit", "recreated-subdirectory"}
+    )
+
+    if change in {"different-origin", "retained-directory"}:
+        compared = compare_scan_pair(state_dir, before, after, check=False)
+        assert compared["returncode"] != 0, compared
+        assert "same repository target" in compared["stderr"]
+    else:
+        compared = compare_scan_pair(state_dir, before, after)
+        assert compared["summary"]["persisting"] == 1
+
+
 def test_scan_comparison_keeps_distinct_repositories_after_target_replacement(
     tmp_path: Path,
 ) -> None:
@@ -2016,7 +2127,10 @@ def test_scan_comparison_keeps_saved_repository_identity(
     assert compared["summary"]["new"] == compared["summary"]["not_observed"] == 0
 
 
-def test_legacy_git_identity_preserves_saved_matches_without_inference(tmp_path: Path) -> None:
+@pytest.mark.parametrize("legacy_identity", ["missing-snapshot", "missing-directory-identity"])
+def test_legacy_git_identity_preserves_saved_matches_without_inference(
+    tmp_path: Path, legacy_identity: str
+) -> None:
     state_dir = tmp_path / "state"
     repository = tmp_path / "repository"
     revision = initialize_git_repository(repository)
@@ -2024,8 +2138,20 @@ def test_legacy_git_identity_preserves_saved_matches_without_inference(tmp_path:
         state_dir, tmp_path / "before-results", repository, target_revision=revision
     )
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        connection.execute("ALTER TABLE scans DROP COLUMN target_git_identity_json")
-        connection.execute("DELETE FROM schema_migrations WHERE version = 55")
+        if legacy_identity == "missing-snapshot":
+            connection.execute("ALTER TABLE scans DROP COLUMN target_git_identity_json")
+            connection.execute("DELETE FROM schema_migrations WHERE version = 55")
+        else:
+            identity = json.loads(
+                connection.execute(
+                    "SELECT target_git_identity_json FROM scans WHERE id = ?", (before["scanId"],)
+                ).fetchone()[0]
+            )
+            identity.pop("commonDirectoryIdentity")
+            connection.execute(
+                "UPDATE scans SET target_git_identity_json = ? WHERE id = ?",
+                (json.dumps(identity), before["scanId"]),
+            )
     after = create_cli_scan(
         state_dir,
         tmp_path / "after-results",
@@ -2034,13 +2160,18 @@ def test_legacy_git_identity_preserves_saved_matches_without_inference(tmp_path:
         identity_anchor="legacy-repository-control",
     )
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        assert connection.execute(
+        old_identity = connection.execute(
             "SELECT target_git_identity_json FROM scans WHERE id = ?", (before["scanId"],)
-        ).fetchone() == (None,)
+        ).fetchone()[0]
+        if legacy_identity == "missing-snapshot":
+            assert old_identity is None
+        else:
+            assert "commonDirectoryIdentity" not in json.loads(old_identity)
         saved_identity = connection.execute(
             "SELECT target_git_identity_json FROM scans WHERE id = ?", (after["scanId"],)
         ).fetchone()[0]
         assert json.loads(saved_identity)["commonDirectory"] == str(repository / ".git")
+        assert json.loads(saved_identity)["commonDirectoryIdentity"] is not None
     compared = compare_scan_pair(state_dir, before, after, "--include-matching-inputs")
     assert compared["summary"]["persisting"] == 0
     assert compared["summary"]["new"] == compared["summary"]["not_observed"] == 1

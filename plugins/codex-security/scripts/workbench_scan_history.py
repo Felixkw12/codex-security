@@ -148,21 +148,31 @@ def _same_repository(
     *,
     after_identity: tuple[str | None, tuple[str, str] | None] | None = None,
 ) -> bool:
-    if before["target_id"] is not None and before["target_id"] == after["target_id"]:
-        return True
+    same_target = before["target_id"] is not None and before["target_id"] == after["target_id"]
     if all(
         "target_git_identity_json" in scan.keys() and scan["target_git_identity_json"] is not None
         for scan in (before, after)
     ):
         before_identity = json.loads(before["target_git_identity_json"])
         saved_after_identity = json.loads(after["target_git_identity_json"])
-        return (
-            Path(before_identity["commonDirectory"])
-            == Path(saved_after_identity["commonDirectory"])
-        ) or (
+        before_directory = before_identity.get("commonDirectoryIdentity")
+        after_directory = saved_after_identity.get("commonDirectoryIdentity")
+        same_origin = (
             before_identity["origin"] is not None
             and before_identity["origin"] == saved_after_identity["origin"]
         )
+        if before_directory is not None and after_directory is not None:
+            return before_directory == after_directory or same_origin
+        return (
+            same_target
+            or (
+                Path(before_identity["commonDirectory"])
+                == Path(saved_after_identity["commonDirectory"])
+            )
+            or same_origin
+        )
+    if same_target:
+        return True
     before_target = Path(before["target_path"])
     after_target = Path(after["target_path"])
     if before_target.resolve() == after_target.resolve():
@@ -505,6 +515,10 @@ def _same_reviewed_content(before: sqlite3.Row, after: sqlite3.Row) -> bool:
             for field in ("target_git_prefix", "target_git_identity_json")
         )
         or before["target_git_prefix"] != after["target_git_prefix"]
+        or any(
+            json.loads(scan["target_git_identity_json"]).get("commonDirectoryIdentity") is None
+            for scan in (before, after)
+        )
     ):
         return False
     return (
