@@ -187,7 +187,7 @@ async function fixture(
     changeSourceAt?: "scanner" | "model";
     changeRevision?: boolean;
     changeRefs?: boolean;
-    snapshotErrorAt?: 1 | 2;
+    snapshotErrorAt?: 1 | 2 | 3;
     workbenchSnapshot?: boolean;
     mcpConfig?: string;
     mcpOverrides?: JsonObject;
@@ -2020,6 +2020,88 @@ test.each(["source_changed", "cancelled"] as const)(
   },
 );
 
+test.each(["unchanged", "changed", "snapshot unavailable"] as const)(
+  "final cost collection preserves source integrity: %s",
+  async (source) => {
+    const { client, repository, outputDir, codexHome, turns } = await fixture({
+      ...(source === "snapshot unavailable" ? { snapshotErrorAt: 3 } : {}),
+    });
+    await using security = client;
+    const sessions = join(codexHome, "sessions");
+    await mkdir(sessions);
+    const reading = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    let stopping = false;
+    const originalStop = ScanCostTracker.prototype.stop;
+    const stop = spyOn(ScanCostTracker.prototype, "stop").mockImplementation(
+      async function (this: ScanCostTracker, usage?: unknown) {
+        stopping = true;
+        try {
+          return await originalStop.call(this, usage);
+        } finally {
+          stopping = false;
+        }
+      },
+    );
+    const originalReaddir = filesystem.readdir;
+    const readdir = spyOn(filesystem, "readdir").mockImplementation((async (
+      ...args: Parameters<typeof filesystem.readdir>
+    ) => {
+      if (stopping && args[0] === sessions) {
+        reading.resolve();
+        await release.promise;
+      }
+      return await originalReaddir(...args);
+    }) as typeof filesystem.readdir);
+    const operation = security.scanDependencies({
+      repositoryPath: repository,
+      outputDir,
+    });
+    try {
+      await Promise.race([
+        reading.promise,
+        operation.then(() => {
+          throw new Error("Scan finished before final cost collection.");
+        }),
+      ]);
+      const checkpoint = JSON.parse(
+        await readFile(join(outputDir, "sca-result.json"), "utf8"),
+      ) as ScaResult;
+      expect(checkpoint.assessments[0]!.status).toBe("completed");
+      if (source === "changed")
+        await writeFile(
+          join(repository, "usage.txt"),
+          "synthetic source changed during final cost collection",
+        );
+      release.resolve();
+      const result = await operation;
+      expect(result.status).toBe(
+        source === "unchanged" ? "completed" : "partial",
+      );
+      expect(result.repository).toEqual(checkpoint.repository);
+      expect(result.coverage).toEqual(checkpoint.coverage);
+      expect(result.matches).toEqual(checkpoint.matches);
+      expect(result.assessments).toEqual(checkpoint.assessments);
+      expect(result.model.costUsd).toBeGreaterThan(0);
+      expect(turns).toHaveLength(1);
+      if (source !== "unchanged")
+        expect(result.diagnostics.join("\n")).toContain(
+          source === "changed"
+            ? "earlier assessments describe the original source"
+            : "synthetic source snapshot unavailable",
+        );
+      expect(
+        JSON.parse(await readFile(join(outputDir, "sca-result.json"), "utf8")),
+      ).toEqual(result);
+    } finally {
+      release.resolve();
+      await operation.catch(() => {});
+      readdir.mockRestore();
+      stop.mockRestore();
+    }
+  },
+);
+
 test.each([
   { failure: "throw", requested: true },
   { failure: "null", requested: true },
@@ -2131,7 +2213,7 @@ test("unrelated Git reference changes retain all dependency assessments", async 
     repositoryPath: repository,
     outputDir,
   });
-  expect(sourceCalls).toHaveLength(3);
+  expect(sourceCalls).toHaveLength(4);
   expect(result.status).toBe("completed");
   expect(result.assessments.map(({ status }) => status)).toEqual([
     "completed",
@@ -2236,7 +2318,7 @@ test("dependency source snapshots preserve per-scan process environment, protect
       signal: controller.signal,
     });
     expect(result.status).toBe("completed");
-    expect(sourceCalls).toHaveLength(2);
+    expect(sourceCalls).toHaveLength(3);
     expect(pythonResolutions[0]).toMatchObject({
       environment,
       protectedRoot: repository,
