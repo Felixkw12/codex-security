@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   publicationRepository,
@@ -41,6 +41,9 @@ describe("deinitialized patch submodule availability", () => {
     git("submodule", "absorbgitdirs", "--", "nested");
     const retained = inner("rev-parse", "--absolute-git-dir");
     const pushes: string[][] = [];
+    const nativePushes: { exitCode: number; stderr: string }[] = [];
+    let interruptPush = false;
+    let initializedChild = false;
     let creations = 0;
     let modelRuns = 0;
     const run = (
@@ -51,7 +54,42 @@ describe("deinitialized patch submodule availability", () => {
         currentDirectory: directory,
         onRepositoryCommand: (command, arguments_, cwd, options) => {
           if (command === "git") {
-            if (arguments_[0] === "push") pushes.push([...arguments_]);
+            if (arguments_[0] === "push") {
+              pushes.push([...arguments_]);
+              if (interruptPush) {
+                interruptPush = false;
+                throw new Error("Synthetic publication interruption");
+              }
+              if (initializedChild) {
+                // Native recursive push uses the parent's branch refspec for the child.
+                const branch = arguments_.at(-1)!;
+                if (
+                  !inner(
+                    "for-each-ref",
+                    "--format=%(refname)",
+                    `refs/heads/${branch}`,
+                  )
+                )
+                  inner("branch", branch);
+              }
+              try {
+                const result = runGitRepositoryCommand(
+                  command,
+                  arguments_,
+                  cwd,
+                  options,
+                );
+                nativePushes.push({ exitCode: 0, stderr: "" });
+                return result;
+              } catch (error) {
+                const failure = error as { status: number; stderr: Buffer };
+                nativePushes.push({
+                  exitCode: failure.status,
+                  stderr: failure.stderr.toString().trim(),
+                });
+                throw error;
+              }
+            }
             return runGitRepositoryCommand(command, arguments_, cwd, options);
           }
           if (arguments_[1] === "list") return "[]";
@@ -65,13 +103,16 @@ describe("deinitialized patch submodule availability", () => {
           return onCodex(arguments_, output);
         },
       });
-    const update = async (published = false) => {
+    const update = async (published = false, initialized = false) => {
       await writeFile(join(nested, "app.ts"), "fixed\n");
       inner("commit", "-am", "Synthetic nested update");
       const commit = inner("rev-parse", "HEAD");
       if (published) inner("push", "origin", "HEAD:main");
       git("add", "nested");
-      git("submodule", "deinit", "--force", "--", "nested");
+      initializedChild = initialized;
+      if (initialized)
+        inner("branch", "--set-upstream-to", "origin/main", "main");
+      else git("submodule", "deinit", "--force", "--", "nested");
       return commit;
     };
     return {
@@ -81,6 +122,10 @@ describe("deinitialized patch submodule availability", () => {
       run,
       update,
       pushes,
+      nativePushes,
+      interruptPublication: () => {
+        interruptPush = true;
+      },
       counts: () => ({ creations, modelRuns }),
       branch: () =>
         git(
@@ -205,25 +250,229 @@ describe("deinitialized patch submodule availability", () => {
     },
   );
 
-  test.each([
-    ["push.recurseSubmodules", "no"],
-    ["submodule.recurse", "false"],
-  ])("preserves explicit %s=%s", async (key, value) => {
-    const current = await fixture();
-    current.git("config", key, value);
-    const result = await current.run(
-      ["patch", "Synthetic issue", "--create-pr", "--json"],
-      async (_args, output) => {
-        const commit = "1".repeat((await current.update()).length);
-        current.git("update-index", "--cacheinfo", `160000,${commit},nested`);
-        output?.stdout.write("Synthetic patch complete.");
-        return 0;
-      },
-    );
-    expect(result.exitCode).toBe(0);
-    expect(current.pushes).toHaveLength(1);
-    expect(current.pushes[0]).not.toContain("--recurse-submodules=check");
-    expect(current.git("config", "--get", key)).toBe(value);
-    expect(current.counts()).toEqual({ creations: 1, modelRuns: 1 });
-  });
+  type Setting = readonly [string, string | undefined];
+  type ConfigurationCase = {
+    name: string;
+    settings: readonly Setting[];
+    expected: "blocked" | "success" | "opt-out" | "native";
+    published?: boolean;
+    initialized?: boolean;
+  };
+  const configurations: ConfigurationCase[] = [
+    ...["check", "on-demand", "only"].map((value): ConfigurationCase => ({
+      name: `unpublished child with push recursion ${value}`,
+      settings: [["push.recurseSubmodules", value]],
+      expected: "blocked",
+    })),
+    {
+      name: "unpublished child with submodule recursion true",
+      settings: [["submodule.recurse", "true"]],
+      expected: "blocked",
+    },
+    {
+      name: "unpublished child with valueless submodule recursion",
+      settings: [["submodule.recurse", undefined]],
+      expected: "blocked",
+    },
+    {
+      name: "published child with push recursion check",
+      settings: [["push.recurseSubmodules", "check"]],
+      expected: "success",
+      published: true,
+    },
+    {
+      name: "published child with submodule recursion true",
+      settings: [["submodule.recurse", "true"]],
+      expected: "success",
+      published: true,
+    },
+    {
+      name: "initialized child with push recursion on-demand",
+      settings: [["push.recurseSubmodules", "on-demand"]],
+      expected: "success",
+      initialized: true,
+    },
+    {
+      name: "initialized child with submodule recursion true",
+      settings: [["submodule.recurse", "true"]],
+      expected: "success",
+      initialized: true,
+    },
+    ...[
+      ["push.recurseSubmodules", "no"],
+      ["push.recurseSubmodules", "off"],
+      ["push.recurseSubmodules", ""],
+      ["submodule.recurse", "false"],
+      ["submodule.recurse", ""],
+    ].map(([key, value]): ConfigurationCase => ({
+      name: `explicit opt-out ${key}=${JSON.stringify(value)}`,
+      settings: [[key!, value!]],
+      expected: "opt-out",
+    })),
+    {
+      name: "later submodule false overrides push check",
+      settings: [
+        ["push.recurseSubmodules", "check"],
+        ["submodule.recurse", "false"],
+      ],
+      expected: "opt-out",
+    },
+    {
+      name: "later push check overrides submodule false",
+      settings: [
+        ["submodule.recurse", "false"],
+        ["push.recurseSubmodules", "check"],
+      ],
+      expected: "blocked",
+    },
+    {
+      name: "last repeated push value disables recursion",
+      settings: [
+        ["push.recurseSubmodules", "on-demand"],
+        ["push.recurseSubmodules", "false"],
+      ],
+      expected: "opt-out",
+    },
+    ...["invalid-mode", "true", undefined].map((value): ConfigurationCase => ({
+      name: `native invalid push recursion ${value ?? "valueless"}`,
+      settings: [["push.recurseSubmodules", value]],
+      expected: "native",
+    })),
+    {
+      name: "native handling of invalid push recursion followed by check",
+      settings: [
+        ["push.recurseSubmodules", "invalid-mode"],
+        ["push.recurseSubmodules", "check"],
+      ],
+      expected: "native",
+    },
+  ];
+
+  test.each(configurations.map((value) => [value.name, value] as const))(
+    "%s on initial publication and resume",
+    async (_name, configuration) => {
+      for (const phase of ["initial", "resume"]) {
+        const current = await fixture();
+        for (const [key, value] of configuration.settings) {
+          if (value === undefined) {
+            const [section, name] = key.split(".");
+            await appendFile(
+              join(current.git("rev-parse", "--absolute-git-dir"), "config"),
+              `\n[${section}]\n\t${name}\n`,
+            );
+          } else current.git("config", "--add", key, value);
+        }
+        const configured = () =>
+          current.git(
+            "config",
+            "--null",
+            "--get-regexp",
+            "^(push\\.recursesubmodules|submodule\\.recurse)$",
+          );
+        const originalConfiguration = configured();
+        const interrupted =
+          phase === "resume" && configuration.expected !== "blocked";
+        if (interrupted) current.interruptPublication();
+        let commit = "";
+        const initial = await current.run(
+          ["patch", "Synthetic issue", "--create-pr", "--json"],
+          async (_args, output) => {
+            commit = await current.update(
+              configuration.published,
+              configuration.initialized,
+            );
+            output?.stdout.write("Synthetic patch complete.");
+            return 0;
+          },
+        );
+        const branch = current.branch();
+        expect(branch).not.toBe("");
+        const saved = current.git("rev-parse", `refs/heads/${branch}`);
+        if (interrupted) {
+          expect(initial.exitCode).toBe(2);
+          expect(initial.stderr).toContain(
+            "Synthetic publication interruption",
+          );
+          expect(current.nativePushes).toEqual([]);
+        }
+        const result =
+          phase === "resume"
+            ? await current.run(["patch", "--resume-pr", branch, "--json"])
+            : initial;
+        expect(current.git("rev-parse", `refs/heads/${branch}`)).toBe(saved);
+        expect(configured()).toBe(originalConfiguration);
+        expect(current.counts().modelRuns).toBe(1);
+
+        if (configuration.expected === "blocked") {
+          expect(initial.exitCode).toBe(2);
+          expect(result.exitCode).toBe(2);
+          expect(result.stderr).toContain(
+            "not available in its remote-tracking refs",
+          );
+          expect(current.git("ls-remote", "origin")).toBe("");
+          expect(repositoryGit(current.childRemote)("show-ref")).not.toContain(
+            commit,
+          );
+          expect(current.pushes).toEqual([]);
+          expect(current.nativePushes).toEqual([]);
+          expect(current.counts().creations).toBe(0);
+          continue;
+        }
+
+        expect(current.pushes).toEqual(
+          Array.from({ length: interrupted ? 2 : 1 }, () => [
+            "push",
+            "--set-upstream",
+            `--force-with-lease=refs/heads/${branch}:`,
+            "origin",
+            branch,
+          ]),
+        );
+        expect(current.nativePushes).toHaveLength(1);
+        const native = current.nativePushes[0]!;
+        if (configuration.expected === "native") {
+          // Git versions differ on an invalid value overwritten by a later valid one.
+          // Preserve the native push result and diagnostic in either case.
+          expect(result.exitCode).toBe(native.exitCode === 0 ? 0 : 2);
+          if (native.exitCode !== 0) {
+            expect(native.stderr).not.toBe("");
+            expect(result.stderr).toContain(native.stderr);
+            expect(current.git("ls-remote", "origin")).toBe("");
+          }
+          expect(current.counts().creations).toBe(
+            native.exitCode === 0 ? 1 : 0,
+          );
+          continue;
+        }
+
+        expect(native.exitCode).toBe(0);
+        expect(result.exitCode).toBe(0);
+        expect(current.counts().creations).toBe(1);
+        expect(
+          repositoryGit(current.remote)("ls-tree", branch, "nested"),
+        ).toContain(`160000 commit ${commit}\tnested`);
+        if (configuration.expected === "opt-out") {
+          expect(repositoryGit(current.childRemote)("show-ref")).not.toContain(
+            commit,
+          );
+          continue;
+        }
+        expect(repositoryGit(current.childRemote)("show-ref")).toContain(
+          commit,
+        );
+        const clone = await fixtures.create("patch-submodule-configured-");
+        current.git("clone", "--branch", branch, current.remote, clone);
+        repositoryGit(clone)(
+          "-c",
+          "protocol.file.allow=always",
+          "submodule",
+          "update",
+          "--init",
+        );
+        expect(await readAppliedText(join(clone, "nested", "app.ts"))).toBe(
+          "fixed\n",
+        );
+      }
+    },
+  );
 });

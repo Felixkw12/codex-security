@@ -9414,15 +9414,41 @@ async function publishPatchBranch(
           head = `${headRepository.pathname.split("/")[1]}:${branch}`;
       }
 
-      const configuredRecursion = (
-        await run("git", ["config", "--list", "--name-only"])
+      const recursionSettings = (
+        await patchGitRecords(
+          repository,
+          [
+            "config",
+            "--null",
+            "--type=bool-or-str",
+            "--get-regexp",
+            "^(push\\.recursesubmodules|submodule\\.recurse)$",
+          ],
+          dependencies,
+        ).catch((error: unknown) => {
+          if (isJsonObject(error) && (error["code"] ?? error["status"]) === 1)
+            return [];
+          throw error;
+        })
+      ).filter(Boolean);
+      const enabledRecursion = new Set([
+        "push.recursesubmodules\ncheck",
+        "push.recursesubmodules\non-demand",
+        "push.recursesubmodules\nonly",
+        "submodule.recurse\ntrue",
+      ]);
+      // Git parses Boolean values and applies these settings in configuration order.
+      // Leave unrecognized values, including overridden invalid settings, to Git.
+      if (
+        !recursionSettings.length ||
+        (enabledRecursion.has(recursionSettings.at(-1)!) &&
+          recursionSettings.every(
+            (setting) =>
+              enabledRecursion.has(setting) ||
+              setting === "push.recursesubmodules\nfalse" ||
+              setting === "submodule.recurse\nfalse",
+          ))
       )
-        .split("\n")
-        .some(
-          (key) =>
-            key === "push.recursesubmodules" || key === "submodule.recurse",
-        );
-      if (!configuredRecursion)
         await checkDeinitializedPatchSubmodules(
           repository,
           branch,
@@ -9430,7 +9456,7 @@ async function publishPatchBranch(
         );
       await run("git", [
         "push",
-        ...(configuredRecursion ? [] : ["--recurse-submodules=check"]),
+        ...(recursionSettings.length ? [] : ["--recurse-submodules=check"]),
         "--set-upstream",
         `--force-with-lease=refs/heads/${branch}:`,
         "origin",
@@ -11627,6 +11653,24 @@ async function runSkill(
             ? selectedGitDirectory
             : `${resolve(directory, parse(selectedGitDirectory).root)}${sep}${selectedGitDirectory.slice(parse(selectedGitDirectory).root.length)}`,
         options.patchGitContext?.administrationReferences,
+        {
+          global: environmentEntry(
+            dependencies.environment,
+            "GIT_CONFIG_GLOBAL",
+          ),
+          system: environmentEntry(
+            dependencies.environment,
+            "GIT_CONFIG_SYSTEM",
+          ),
+          noSystem: environmentEntry(
+            dependencies.environment,
+            "GIT_CONFIG_NOSYSTEM",
+          ),
+          xdgConfigHome: environmentEntry(
+            dependencies.environment,
+            "XDG_CONFIG_HOME",
+          ),
+        },
       )
     : undefined;
   const patchPermissions =
