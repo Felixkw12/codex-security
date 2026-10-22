@@ -2145,7 +2145,12 @@ function preserveScanCoverage(
     const values = [...current];
     for (const value of (previous[field] as unknown[] | undefined) ?? []) {
       const present =
-        field === "deferred" ? deferredEntryPresent : coverageEntryPresent;
+        field === "deferred"
+          ? deferredEntryPresent
+          : field === "explicitExclusions"
+            ? (entries: unknown[], previous: unknown) =>
+                entries.some((entry) => containsSavedValue(entry, previous))
+            : coverageEntryPresent;
       if (
         !present(
           values,

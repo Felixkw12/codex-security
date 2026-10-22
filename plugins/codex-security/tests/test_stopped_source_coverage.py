@@ -836,7 +836,13 @@ def test_deep_recovery_reconciles_recognized_projected_candidates(
 )
 @pytest.mark.parametrize("projection_source", ["parent", "reducer"])
 def test_generic_closeout_preserves_projected_surface_receipts(
-    workbench_api, workbench_db, publication_scan, projection_source, prior_receipt, merge_state
+    workbench_api,
+    workbench_db,
+    publication_scan,
+    projection_source,
+    prior_receipt,
+    merge_state,
+    historical_surfaces="absent",
 ):
     scan = publication_scan()
     (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
@@ -880,6 +886,17 @@ def test_generic_closeout_preserves_projected_surface_receipts(
             workbench_db.execute(
                 "UPDATE deep_scan_workers SET attempt = 2 WHERE id = ?", (worker_id,)
             )
+    if historical_surfaces != "absent":
+        historical = write_checkpoint(
+            checkpoint_root,
+            {
+                "scanId": scan.scan_id,
+                "complete": False,
+                "findings": [],
+                "coverage": {"surfaces": historical_surfaces, "deferred": []},
+            },
+        )
+        os.utime(historical, ns=(50, 50))
     pending_checkpoint = write_checkpoint(
         checkpoint_root,
         {
@@ -1878,4 +1895,19 @@ def test_archived_projected_worker_candidates_keep_independent_pending_evidence(
         retry_publication,
         monkeypatch,
         archived=archived,
+    )
+
+
+@pytest.mark.parametrize("historical_surfaces", [None, []], ids=["null", "empty"])
+def test_generic_closeout_skips_non_list_historical_surfaces(
+    workbench_api, workbench_db, publication_scan, historical_surfaces
+):
+    test_generic_closeout_preserves_projected_surface_receipts(
+        workbench_api,
+        workbench_db,
+        publication_scan,
+        "parent",
+        False,
+        "merged",
+        historical_surfaces=historical_surfaces,
     )

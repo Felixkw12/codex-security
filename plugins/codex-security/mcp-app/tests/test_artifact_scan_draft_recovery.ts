@@ -1821,3 +1821,38 @@ for (const layout of ["standard", "diff", "worker"] as const) {
     }
   }
 }
+
+for (const id of ["shared", ["shared"]]) {
+  test(`deep: independent exclusions retain opaque ${typeof id} IDs`, async (t) => {
+    const f = await fixture(t, "deep");
+    const exclusions = [
+      {
+        id,
+        workerId: "worker-a",
+        pattern: "vendor/**",
+        reason: "Separate dependency review.",
+      },
+      {
+        id,
+        workerId: "worker-b",
+        pattern: "generated/**",
+        reason: "Separate generated code review.",
+      },
+      {
+        id,
+        workerId: "worker-a",
+        pattern: "fixtures/**",
+        reason: "Separate fixture review.",
+      },
+    ];
+    await saveScanDraftCheckpoint(
+      f.context,
+      f.draft({ explicitExclusions: exclusions }),
+      false,
+    );
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await f.write(f.draft());
+      assert.deepEqual((await f.read()).explicitExclusions, exclusions);
+    }
+  });
+}

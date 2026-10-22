@@ -1954,7 +1954,7 @@ def merge_saved_results(
         "surfaces": replaced_surfaces,
         "deferred": replaced_deferred,
     }
-    # A newer worker observation replaces its retained host projection as well.
+    # Refresh retained host projections.
     for relative, draft, owner in all_sources:
         worker = workers_by_id.get(owner)
         if worker is None:
@@ -1985,17 +1985,18 @@ def merge_saved_results(
                 coverage[field] = [row for row in coverage[field] if row not in removed_parent]
     if isinstance(coverage.get("surfaces"), list):
         for owner, surface, replaced_sources in surface_updates:
-            matching_sources = [
+            matches = [
                 (relative, draft["coverage"], index, row)
                 for relative, draft, source_owner in all_sources
                 if source_owner == owner
-                for index, row in enumerate(draft["coverage"].get("surfaces", []), 1)
+                if isinstance(rows := draft["coverage"].get("surfaces"), list)
+                for index, row in enumerate(rows, 1)
                 if id(row) in replaced_sources
             ]
             worker = workers_by_id.get(owner)
-            if owner in reviewed_worker_ids and matching_sources:
+            if owner in reviewed_worker_ids and matches:
                 relative, source, index, row = max(
-                    matching_sources,
+                    matches,
                     key=lambda entry: (entry[3] == surface, source_order[entry[0]]),
                 )
                 retained = retained_coverage_record("surfaces", row, worker, relative, index)

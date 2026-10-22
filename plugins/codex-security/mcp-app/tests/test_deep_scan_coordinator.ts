@@ -11,12 +11,15 @@ import type {
 import { mock } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import {
+  lstat,
   mkdir,
   readFile,
   readdir,
   realpath,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
@@ -1259,6 +1262,7 @@ async function testGenericDiagnosticsPreserveMissingResultRetries() {
 async function testMissingDiscoveryResultResumesExistingThread(
   withToolFailure = false,
 ) {
+  const specialFiles = withToolFailure && process.platform !== "win32";
   const { fixture, store } = await coordinatorFixture();
   const executor = new FakeExecutor({
     invalidDiscoveryAttempts: 1,
@@ -1286,6 +1290,15 @@ async function testMissingDiscoveryResultResumesExistingThread(
         );
       } else {
         await writeFile(note, "Synthetic saved analysis.\n");
+        if (specialFiles) {
+          execFileSync("mkfifo", [
+            path.join(request.workingDirectory, "worker.pipe"),
+          ]);
+          await symlink(
+            note,
+            path.join(request.workingDirectory, "analysis-link"),
+          );
+        }
       }
     }
     return execute(request);
@@ -1321,6 +1334,19 @@ async function testMissingDiscoveryResultResumesExistingThread(
   const attempt = path.join(path.dirname(workspace), "attempts", "attempt-01");
   assert.equal(await realpath(workspace), workspace);
   assert.equal(await realpath(attempt), attempt);
+  if (specialFiles) {
+    assert.ok((await lstat(path.join(workspace, "worker.pipe"))).isFIFO());
+    await assert.rejects(lstat(path.join(attempt, "worker.pipe")), {
+      code: "ENOENT",
+    });
+    assert.ok(
+      (await lstat(path.join(attempt, "analysis-link"))).isSymbolicLink(),
+    );
+    assert.equal(
+      await readFile(path.join(attempt, "analysis-link"), "utf8"),
+      "Synthetic saved analysis.\n",
+    );
+  }
   assert.equal(
     await readFile(path.join(workspace, "saved-analysis.txt"), "utf8"),
     "Synthetic saved analysis.\n",

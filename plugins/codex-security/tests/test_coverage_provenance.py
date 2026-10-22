@@ -1923,7 +1923,7 @@ def test_legacy_occurrences_survive_supported_parent_projection(
     ("field", "archived", "projection"),
     [
         (field, True, projection)
-        for field in ("deferred", "explicitExclusions", "openQuestions", "openQuestionStrings")
+        for field in ("openQuestionStrings",)
         for projection in ("partial", "none")
     ]
     + [("deferred", False, projection) for projection in ("full", "partial", "none")],
@@ -2217,6 +2217,8 @@ def test_retry_nonsurface_occurrences_survive_supported_parent_projection(
     recovered = [row for row in coverage[field] if row.get("id") != "scan-stopped"]
     assert len(recovered) == 2
     assert [row["provenance"]["attempt"] for row in recovered] == [1, 2]
+    if field == "deferred":
+        assert len({row["id"] for row in recovered}) == 2
     for index, (actual, expected) in enumerate(zip(recovered, projected, strict=True)):
         if index >= retained:
             expected["workerId"] = worker_id

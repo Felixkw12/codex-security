@@ -581,6 +581,12 @@ export class DeepScanWorkerRunner {
       await fs.cp(artifactDir, attemptRoot, {
         recursive: true,
         preserveTimestamps: true,
+        filter: async (source) => {
+          const entry = await fs.lstat(source);
+          return (
+            entry.isFile() || entry.isDirectory() || entry.isSymbolicLink()
+          );
+        },
       });
     } else {
       await archiveDirectory(artifactDir, attemptRoot);
