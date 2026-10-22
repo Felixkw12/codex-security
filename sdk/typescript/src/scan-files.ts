@@ -12,13 +12,13 @@ import { isWindowsUnsafePathComponent } from "./windows-path.js";
 
 interface CheckedScanFile {
   path: string;
-  metadata: Stats;
-  parents: Array<{ path: string; metadata: Stats }>;
+  metadata: BigIntStats;
+  parents: Array<{ path: string; metadata: BigIntStats }>;
 }
 
 export interface ScanRoot {
   path: string;
-  metadata: Stats;
+  metadata: BigIntStats;
 }
 
 export async function requireScanFile(
@@ -78,7 +78,7 @@ async function requireCheckedScanFile(
     throwIfAborted(signal);
     for (const part of parts.slice(0, -1)) {
       current = join(current, part);
-      const metadata = await lstat(current);
+      const metadata = await lstat(current, { bigint: true });
       throwIfAborted(signal);
       if (!metadata.isDirectory()) {
         throw new Error("unsafe parent");
@@ -86,7 +86,7 @@ async function requireCheckedScanFile(
       parents.push({ path: current, metadata });
     }
     const path = join(scanDir, ...parts);
-    const metadata = await lstat(path);
+    const metadata = await lstat(path, { bigint: true });
     throwIfAborted(signal);
     if (!metadata.isFile()) {
       throw new ContractValidationError(
@@ -120,13 +120,13 @@ export async function requireScanRoot(
   throwIfAborted(signal);
   const absolute = resolve(scanDirectory);
   try {
-    const metadata = await lstat(absolute);
+    const metadata = await lstat(absolute, { bigint: true });
     throwIfAborted(signal);
     const canonical = await realpath(absolute);
     throwIfAborted(signal);
-    const current = await lstat(absolute);
+    const current = await lstat(absolute, { bigint: true });
     throwIfAborted(signal);
-    const returned = await lstat(canonical);
+    const returned = await lstat(canonical, { bigint: true });
     throwIfAborted(signal);
     if (
       !metadata.isDirectory() ||
@@ -140,7 +140,10 @@ export async function requireScanRoot(
       throw new Error("not a directory");
     }
     try {
-      requirePrivateOutputDirectory(returned, canonical);
+      requirePrivateOutputDirectory(
+        { mode: Number(returned.mode), uid: Number(returned.uid) },
+        canonical,
+      );
       await requireSecureOutputAncestry(canonical);
     } catch (error) {
       throw new ContractValidationError(
@@ -166,7 +169,7 @@ export async function verifyScanRoot(
   signal?: AbortSignal,
 ): Promise<void> {
   try {
-    const current = await lstat(root.path);
+    const current = await lstat(root.path, { bigint: true });
     throwIfAborted(signal);
     if (
       !current.isDirectory() ||
@@ -175,7 +178,10 @@ export async function verifyScanRoot(
     ) {
       throw new Error("scan directory changed while reading");
     }
-    requirePrivateOutputDirectory(current, root.path);
+    requirePrivateOutputDirectory(
+      { mode: Number(current.mode), uid: Number(current.uid) },
+      root.path,
+    );
     await requireSecureOutputAncestry(root.path);
   } catch (error) {
     throwIfAborted(signal);
@@ -252,7 +258,7 @@ export async function openCheckedScanFile(
       checked.path,
       constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
     );
-    const opened = await file.stat();
+    const opened = await file.stat({ bigint: true });
     throwIfAborted(signal);
     if (
       !opened.isFile() ||
@@ -264,7 +270,7 @@ export async function openCheckedScanFile(
       );
     }
     for (const parent of checked.parents) {
-      const current = await lstat(parent.path);
+      const current = await lstat(parent.path, { bigint: true });
       throwIfAborted(signal);
       if (
         !current.isDirectory() ||
@@ -276,7 +282,7 @@ export async function openCheckedScanFile(
         );
       }
     }
-    const current = await lstat(checked.path);
+    const current = await lstat(checked.path, { bigint: true });
     throwIfAborted(signal);
     if (
       !current.isFile() ||
