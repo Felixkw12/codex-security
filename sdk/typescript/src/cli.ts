@@ -8802,7 +8802,24 @@ async function patchCommandContext(
   }
 
   for (const name of ["GH_CONFIG_DIR", "GLAB_CONFIG_DIR"]) {
-    const value = dependencies.environment[name];
+    let value = environmentValue(dependencies.environment, name);
+    if (name === "GH_CONFIG_DIR" && !value) {
+      // Preserve gh's fallback selection when publication changes cwd.
+      const xdg = environmentValue(dependencies.environment, "XDG_CONFIG_HOME");
+      const appData =
+        process.platform === "win32"
+          ? environmentValue(dependencies.environment, "AppData")
+          : undefined;
+      const home = environmentValue(
+        dependencies.environment,
+        process.platform === "win32" ? "USERPROFILE" : "HOME",
+      );
+      value = xdg
+        ? join(xdg, "gh")
+        : appData
+          ? join(appData, "GitHub CLI")
+          : join(home ?? "", ".config", "gh");
+    }
     if (value === undefined) continue;
     environment[name] =
       value === ""
