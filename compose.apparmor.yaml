@@ -1,4 +1,0 @@
-services:
-  codex-security:
-    security_opt:
-      - apparmor=codex-security-container

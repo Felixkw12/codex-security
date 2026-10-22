@@ -1,0 +1,2 @@
+CSC_FIXTURE_PRIVATE_CANARY_20261022
+Internal service note; never expose through the public download route.

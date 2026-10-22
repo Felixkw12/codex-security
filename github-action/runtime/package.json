@@ -1,7 +1,0 @@
-{
-  "name": "codex-security-action-runtime",
-  "private": true,
-  "dependencies": {
-    "@openai/codex-security": "0.2.0"
-  }
-}
