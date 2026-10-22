@@ -11,7 +11,15 @@ import {
   CodexSecurity,
   type ScanOptions,
 } from "../../../../sdk/typescript/src/api.js";
-import type { JsonObject } from "../../../../sdk/typescript/src/config.js";
+import {
+  mergedCodexConfig,
+  scanModelConfiguration,
+  type JsonObject,
+} from "../../../../sdk/typescript/src/config.js";
+import {
+  readKnowledgeBaseSnapshot,
+  type KnowledgeBaseSnapshot,
+} from "../../../../sdk/typescript/src/knowledge-base.js";
 import {
   ScanSettingsSchema,
   type DeepScanOptions,
@@ -41,10 +49,19 @@ import {
 export { nativeScanConfiguration } from "../../../../sdk/typescript/src/execution-preparation.js";
 import type { ScanResults } from "./types.js";
 
+export interface NativeScanSemanticInputs {
+  knowledgeBasePaths?: string[];
+  knowledgeBaseSnapshot?: KnowledgeBaseSnapshot;
+  deepScanSettings: Required<DeepScanOptions>;
+  config: JsonObject;
+  modelSettings: ReturnType<typeof scanModelConfiguration>;
+}
+
 export interface NativeScanInput {
   scan: ScanResults;
   recipe?: SavedScanRecipe;
   savedDeepScanSettings?: DeepScanOptions;
+  semanticInputs?: NativeScanSemanticInputs;
   threadId: string;
   pluginRoot: string;
   pythonPath: string;
@@ -147,6 +164,52 @@ export class NativeScanHost {
   }
 }
 
+function nativeDeepScanConfigPath(environment: NodeJS.ProcessEnv): string {
+  return (
+    environment.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH?.trim() ||
+    join(
+      environment.CODEX_HOME || configuredCodexHome(environment),
+      "codex-security",
+      "config.toml",
+    )
+  );
+}
+
+/** Capture completed-result identity and the inputs for any replacement scan together. */
+export async function readNativeScanSemanticInputs(
+  modelSettings: Pick<NativeScanInput, "model" | "reasoningEffort"> = {},
+  signal?: AbortSignal,
+): Promise<NativeScanSemanticInputs> {
+  const environment = await snapshotNativeEnvironment();
+  const knowledgeBasePaths = environment.CODEX_SECURITY_KNOWLEDGE_BASE
+    ? [environment.CODEX_SECURITY_KNOWLEDGE_BASE]
+    : undefined;
+  const knowledgeBaseSnapshot = knowledgeBasePaths
+    ? await readKnowledgeBaseSnapshot(knowledgeBasePaths, signal)
+    : undefined;
+  const deepScanSettings = (
+    await resolveDeepScanConfig(
+      {},
+      nativeDeepScanConfigPath(environment),
+      signal,
+    )
+  ).settings;
+  const config = await nativeScanConfiguration(
+    environment,
+    modelSettings,
+    deepScanSettings.subagents,
+  );
+  return {
+    knowledgeBasePaths,
+    knowledgeBaseSnapshot,
+    deepScanSettings,
+    config,
+    modelSettings: scanModelConfiguration(
+      await mergedCodexConfig({ codexOverrides: config }),
+    ),
+  };
+}
+
 async function prepareOwnedNativeScan(
   input: NativeScanInput,
   signal?: AbortSignal,
@@ -201,16 +264,21 @@ export async function prepareNativeScan(
   const inheritedEnvironment =
     ownership?.environment ?? (await snapshotNativeEnvironment());
   const recipe = input.recipe;
+  const semanticInputs =
+    recipe === undefined ? input.semanticInputs : undefined;
   const options = ScanSettingsSchema.parse({
     ...input.savedDeepScanSettings,
+    ...semanticInputs?.deepScanSettings,
     ...recipe?.deepScan,
     auth: recipe?.auth,
     knowledgeBasePaths:
       recipe !== undefined
         ? recipe.knowledgeBasePaths
-        : inheritedEnvironment.CODEX_SECURITY_KNOWLEDGE_BASE
-          ? [inheritedEnvironment.CODEX_SECURITY_KNOWLEDGE_BASE]
-          : undefined,
+        : semanticInputs
+          ? semanticInputs.knowledgeBasePaths
+          : inheritedEnvironment.CODEX_SECURITY_KNOWLEDGE_BASE
+            ? [inheritedEnvironment.CODEX_SECURITY_KNOWLEDGE_BASE]
+            : undefined,
     maxCostUsd: recipe?.maxCostUsd,
     cyberAccessProgram: recipe?.cyberAccessProgram,
     postScanPrompt: recipe?.postScanPrompt,
@@ -311,21 +379,17 @@ export async function prepareNativeScan(
     delete inheritedPermissions.filesystem["glob_scan_max_depth"];
   const deep = await resolveDeepScanConfig(
     options,
-    environment.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH?.trim() ||
-      join(
-        environment.CODEX_HOME || configuredCodexHome(environment),
-        "codex-security",
-        "config.toml",
-      ),
+    nativeDeepScanConfigPath(environment),
   );
   // The SDK still validates the seal, owner and claim before publication.
   const config = publicationOnly
     ? (recipe.config ?? {})
-    : await nativeScanConfiguration(
+    : (semanticInputs?.config ??
+      (await nativeScanConfiguration(
         environment,
         input,
         deep.settings.subagents,
-      );
+      )));
   const security = config["codex_security"];
   if (
     recipe === undefined &&
@@ -371,7 +435,7 @@ export async function prepareNativeScan(
       ...options,
       ...deep.settings,
       ...(input.recipe === undefined
-        ? {}
+        ? { knowledgeBaseSnapshot: semanticInputs?.knowledgeBaseSnapshot }
         : {
             resumeScanId: input.scan.scanId,
             ...(options.knowledgeBasePaths?.length

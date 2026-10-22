@@ -1012,6 +1012,15 @@ def _start_prompt_driven_scan(
                     thread_id,
                 ),
             ).fetchone()
+            if (
+                existing is not None
+                and existing["status"] == "complete"
+                and getattr(args, "completed_inputs_json", None) is not None
+                and not scan_history.completed_scan_inputs_match(
+                    existing, json.loads(args.completed_inputs_json)
+                )
+            ):
+                existing = None
             if existing is not None:
                 connection.commit()
                 if args.mode == "deep":
