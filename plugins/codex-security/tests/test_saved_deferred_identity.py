@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 import sys
@@ -71,6 +72,68 @@ def recover(root: Path, module, workers, frozen=None):
     )
     assert result is not None
     return result
+
+
+@pytest.mark.parametrize("reserved", [False, True])
+def test_repeated_colliding_variant_keeps_its_assigned_identity(
+    tmp_path: Path, saved_results, reserved: bool
+):
+    from finalize_scan_contract import _recover_unsealed_findings
+
+    first = {
+        "ruleId": "fixture.review",
+        "identity": {"anchor": "shared-review"},
+        "title": "First independent review",
+        "summary": "Synthetic evidence at the first location.",
+        "severity": {"level": "low"},
+        "confidence": {"level": "high", "rationale": "Synthetic evidence."},
+        "taxonomy": {"category": "other", "cwe": []},
+        "locations": [{"path": "src/example.py", "startLine": 1}],
+        "remediation": "Complete the review.",
+        "provenance": {"source": "local_plugin"},
+    }
+    second = {
+        **copy.deepcopy(first),
+        "title": "Second independent review",
+        "locations": [{"path": "src/example.py", "startLine": 2}],
+    }
+    revision = {
+        **copy.deepcopy(second),
+        "title": "Revised second review",
+        "severity": {"level": "high"},
+    }
+    findings = [first, second, revision]
+    if reserved:
+        findings.append(
+            {
+                **copy.deepcopy(first),
+                "title": "Reserved independent review",
+                "identity": {"anchor": "shared-review", "instance": "saved-2"},
+                "locations": [{"path": "src/example.py", "startLine": 3}],
+            }
+        )
+    write_saved_parent(tmp_path, saved_draft("identity-scan", findings=findings), 100)
+    documents = recover(tmp_path, saved_results, [])
+    recovered = documents[1]["findings"]
+    assert recovered[0]["identity"] != recovered[1]["identity"]
+    assert recovered[1]["identity"] == recovered[2]["identity"]
+    warnings = []
+    documents[1]["scanId"] = "identity-scan"
+    _recover_unsealed_findings(
+        {"scan": {"id": "identity-scan", "target": {"targetId": "synthetic"}}},
+        documents[1],
+        Path(__file__).resolve().parents[1] / "schemas",
+        tmp_path,
+        warnings,
+    )
+    assert [row["title"] for row in documents[1]["findings"]] == [
+        "First independent review",
+        "Revised second review",
+        *(["Reserved independent review"] if reserved else []),
+    ]
+    assert documents[1]["findings"][1]["provenance"]["previousFindings"][0]["title"] == (
+        "Second independent review"
+    )
 
 
 @pytest.mark.parametrize("retain_roles", [False, True])

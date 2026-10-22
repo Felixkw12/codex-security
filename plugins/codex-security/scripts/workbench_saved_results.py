@@ -68,9 +68,6 @@ from workbench.saved_reconciliation import (
     _finding_key as _finding_key,
 )
 from workbench.saved_reconciliation import (
-    _finding_locations as _finding_locations,
-)
-from workbench.saved_reconciliation import (
     _generic_surface_updates as _generic_surface_updates,
 )
 from workbench.saved_reconciliation import (
@@ -84,9 +81,6 @@ from workbench.saved_reconciliation import (
 )
 from workbench.saved_reconciliation import (
     _retained_findings as _retained_findings,
-)
-from workbench.saved_reconciliation import (
-    _semantic_identifier as _semantic_identifier,
 )
 from workbench.saved_reconciliation import (
     _semantic_identity_key as _semantic_identity_key,
@@ -892,6 +886,7 @@ def merge_saved_results(
 
     # A damaged canonical row must not replace a checkpoint's established identity.
     legacy_identities: dict[str, dict[str, Any] | None] = {}
+    legacy_identity_sources: set[str] = set()
 
     def legacy_identity_key(finding: dict[str, Any], owner: str | None) -> str:
         content = _finding_content(finding)
@@ -908,13 +903,19 @@ def merge_saved_results(
             )
         return _digest([owner, _identity_candidate(finding), content])
 
-    def restore_legacy_identity(finding: Any, normalized: Any = None) -> None:
+    def restore_legacy_identity(
+        finding: Any, normalized: Any = None, *, allow_synthesis: bool = True
+    ) -> None:
         if isinstance(finding, dict) and "identity" not in finding:
             provenance = finding.get("provenance")
             owner = provenance.get("workerId") if isinstance(provenance, dict) else None
-            identity = legacy_identities.get(legacy_identity_key(finding, owner))
+            key = legacy_identity_key(finding, owner)
+            identity = legacy_identities.get(key)
             if identity is not None:
                 finding["identity"] = copy.deepcopy(identity)
+            allow_synthesis = allow_synthesis or key in legacy_identity_sources
+        if not allow_synthesis:
+            return
         if isinstance(finding, dict) and isinstance(normalized, dict):
             finding.setdefault("identity", normalized["identity"])
         else:
@@ -965,13 +966,15 @@ def merge_saved_results(
                 continue
             for saved in _retained_findings(value):
                 identity = saved.get("identity")
-                if not isinstance(identity, dict) or not valid_finding(saved):
-                    continue
                 provenance = saved.get("provenance")
                 saved_owner = (
                     provenance.get("workerId", owner) if isinstance(provenance, dict) else owner
                 )
                 key = legacy_identity_key(saved, saved_owner)
+                if "identity" in saved:
+                    legacy_identity_sources.add(key)
+                if not isinstance(identity, dict) or not valid_finding(saved):
+                    continue
                 if key not in legacy_identities:
                     legacy_identities[key] = identity
                 elif legacy_identities[key] != identity:
@@ -2075,7 +2078,13 @@ def merge_saved_results(
             if relative == "parent" and parent_is_canonical:
                 finding = copy.deepcopy(value)
                 group = row_groups.get((relative, index))
-                restore_legacy_identity(finding, group or normalized)
+                restore_legacy_identity(
+                    finding,
+                    group or normalized,
+                    allow_synthesis=stopped
+                    or (isinstance(finding, dict) and _identity_candidate(finding) is not None)
+                    or (group is not None and any("identity" in row for row in group["rows"])),
+                )
                 provenance = finding.get("provenance") if isinstance(finding, dict) else None
                 owner = provenance.get("workerId") if isinstance(provenance, dict) else None
                 candidate_id = finding_candidate_id(finding) if isinstance(finding, dict) else None
@@ -2333,6 +2342,7 @@ def merge_saved_results(
 
     # Generate new worker identities from the retained collection, as a normal
     # Deep parent does. Authored, restored and canonical identities stay stable.
+    generated_worker_ids = {id(finding) for finding in generated_worker_findings}
     for finding in generated_worker_findings:
         finding.pop("identity", None)
 
@@ -2354,10 +2364,14 @@ def merge_saved_results(
             positions, sorted(positions, key=publication_order, reverse=True), strict=True
         ):
             identity_order[position] = findings[published_position]
-    identity_order = [finding for finding in identity_order if valid_finding(finding)]
+    identity_order = [
+        finding
+        for finding in identity_order
+        if valid_finding(finding) and ("identity" in finding or id(finding) in generated_worker_ids)
+    ]
     _ensure_finding_identities(identity_order)
 
-    identities: dict[bytes, tuple[str, dict[str, Any] | None]] = {}
+    identities: dict[bytes, list[tuple[str, dict[str, Any] | None, str | None]]] = {}
     retained_groups = {
         position: group for position, group in finding_positions.values() if group is not None
     }
@@ -2371,10 +2385,21 @@ def merge_saved_results(
         key = _semantic_identity_key(finding)
         variant = _finding_key(finding)
         group = retained_groups.get(position)
-        previous_variant, previous_group = identities.get(key, (None, None))
-        if key in identities and (
-            previous_variant != variant or distinct_reports(group, previous_group)
-        ):
+        previous = next(
+            (
+                entry
+                for entry in identities.get(key, [])
+                if entry[0] == variant and not distinct_reports(group, entry[1])
+            ),
+            None,
+        )
+        if previous is not None and previous[2] is not None:
+            if identity.get("instance") != previous[2]:
+                finding.setdefault("provenance", {}).setdefault(
+                    "preservedIdentity", copy.deepcopy(identity)
+                )
+                identity["instance"] = previous[2]
+        elif previous is None and key in identities:
             finding.setdefault("provenance", {}).setdefault(
                 "preservedIdentity", copy.deepcopy(identity)
             )
@@ -2387,7 +2412,7 @@ def merge_saved_results(
                     reserved_identities.add(distinct)
                     break
                 suffix += 1
-        identities[key] = (variant, group)
+        identities.setdefault(key, []).append((variant, group, identity.get("instance")))
     # Bind links to retained output objects before their IDs become unique.
     # Candidate metadata can give an anonymous row the same preliminary ID as
     # another surface, so only the final surface ID can be used for its links.

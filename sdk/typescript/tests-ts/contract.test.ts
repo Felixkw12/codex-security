@@ -655,18 +655,32 @@ describe("canonical scan contract", () => {
     },
   );
 
-  test("rejects noncanonical remote backslashes in both readers", async () => {
-    const scanDir = await copyExample();
-    const manifestPath = join(scanDir, "scan-manifest.json");
-    const manifest = await readJson(manifestPath);
-    manifest["scan"]["target"]["remote"] =
-      "https://example.test/synthetic/repo\\name";
-    await writeJson(manifestPath, manifest);
-    expect(pythonExport(scanDir).exitCode).not.toBe(0);
-    await expect(
-      loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
-    ).rejects.toThrow("canonical absolute URL");
-  });
+  test.each([
+    "\\",
+    "\t",
+    "\n",
+    "\r",
+    "\u0000",
+    "\u001b",
+    "\u007f",
+    "\u0085",
+    "\u2028",
+    "\u2029",
+  ])(
+    "rejects noncanonical remote character %j in both readers",
+    async (character) => {
+      const scanDir = await copyExample();
+      const manifestPath = join(scanDir, "scan-manifest.json");
+      const manifest = await readJson(manifestPath);
+      manifest["scan"]["target"]["remote"] =
+        `https://example.test/synthetic/repo${character}name`;
+      await writeJson(manifestPath, manifest);
+      expect(pythonExport(scanDir).exitCode).not.toBe(0);
+      await expect(
+        loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+      ).rejects.toThrow("canonical absolute URL");
+    },
+  );
 
   test("loads an empty legacy root cause without changing the artifact", async () => {
     const scanDir = await copyExample();
