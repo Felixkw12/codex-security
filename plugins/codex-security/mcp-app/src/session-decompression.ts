@@ -1,7 +1,7 @@
 import { Transform, type TransformCallback } from "node:stream";
 import { Decompress } from "fzstd";
 
-/** Streaming fallback for supported Node versions without native Zstandard. */
+/** Streaming decoder for concatenated Zstandard rollouts on supported Node versions. */
 export function createZstdDecompress(): Transform {
   let decoder: Decompress;
   const stream = new Transform({

@@ -1568,7 +1568,7 @@ data even though scan recipes do not store credentials.
 Codex may compress saved session logs to `.jsonl.zst`. Plain and compressed logs
 work on all supported Node.js versions, including logs, feedback attachments,
 usage accounting, and saved-session discovery for resume. A bundled decoder
-handles runtimes without native Zstandard support.
+reads concatenated frames and reports truncated streams as collection errors.
 
 ### Resuming an interrupted Deep Scan
 

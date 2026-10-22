@@ -28,7 +28,8 @@ Supported runtimes:
   findings. Python 3.10 also needs `tomli`.
 
 Compressed Codex session logs (`.jsonl.zst`) are readable on all supported Node.js
-versions. A bundled decoder handles runtimes without native Zstandard support.
+versions. The bundled streaming decoder reads concatenated frames and reports
+truncated streams as collection errors.
 
 `LocalPluginBootstrapError` identifies local plugin setup failures and extends
 `PluginBootstrapError`, so existing catches keep working. Knowledge-base

@@ -3,7 +3,6 @@ import { createInterface } from "node:readline";
 import { pipeline, type Transform } from "node:stream";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import zlib from "node:zlib";
 import { bundledPluginRoot } from "./runtime.js";
 
 /** Plain and cold compressed rollouts have the same newline-delimited format. */
@@ -24,12 +23,12 @@ export async function* sessionLines(path: string): AsyncGenerator<string> {
 }
 
 async function sessionDecompressor(): Promise<Transform> {
-  if (typeof zlib.createZstdDecompress === "function")
-    return zlib.createZstdDecompress();
-  const fallback = (await import(
+  // Decode every concatenated frame and reject truncated tails. Native Node
+  // Zstandard streams can finish successfully after only the first frame.
+  const decoder = (await import(
     pathToFileURL(
       join(await bundledPluginRoot(), "mcp", "session-decompression.mjs"),
     ).href
   )) as { createZstdDecompress: () => Transform };
-  return fallback.createZstdDecompress();
+  return decoder.createZstdDecompress();
 }

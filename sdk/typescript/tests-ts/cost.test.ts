@@ -2988,7 +2988,7 @@ describe("live scan cost tracking", () => {
   });
 
   test.skipIf(typeof zlib.zstdCompressSync !== "function").each([true, false])(
-    "counts compressed independent workers in active and archived sessions once (native=%s)",
+    "counts compressed independent workers in active and archived sessions once (native=%p)",
     async (native) => {
       const home = await codexHome();
       const scanDirectory = join(home, "scans", "compressed");
@@ -3127,7 +3127,7 @@ describe("live scan cost tracking", () => {
   }
 
   test.each([false, true])(
-    "retains SDK usage after a collection error with prior native usage=%s",
+    "retains SDK usage after a collection error with prior native usage=%p",
     async (previouslyMeasured) => {
       const home = await codexHome();
       if (previouslyMeasured) {

@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import runpy
 import sqlite3
-import subprocess
 import sys
 import tempfile
 import uuid
@@ -177,7 +176,6 @@ def _rollout(
     session_started_at: datetime | None = None,
     copied_events: list[dict[str, Any]] | None = None,
     originator: str | None = None,
-    compressed: bool = False,
 ) -> Path:
     directory = root / "rollouts"
     directory.mkdir(exist_ok=True)
@@ -221,32 +219,7 @@ def _rollout(
         "".join(f"{json.dumps(item, separators=(',', ':'))}\n" for item in records),
         encoding="utf-8",
     )
-    return _compress_rollout(rollout) if compressed else rollout.resolve()
-
-
-def _compress_rollout(rollout: Path) -> Path:
-    result = subprocess.run(
-        [
-            "node",
-            "--input-type=module",
-            "-e",
-            (
-                "import fs from 'node:fs'; import zlib from 'node:zlib';"
-                "if (!zlib.zstdCompressSync) process.exit(77);"
-                "process.stdout.write(zlib.zstdCompressSync(fs.readFileSync(process.argv[1])));"
-            ),
-            str(rollout),
-        ],
-        check=False,
-        capture_output=True,
-    )
-    if result.returncode == 77:
-        pytest.skip("This Node runtime does not support Zstandard compression.")
-    result.check_returncode()
-    compressed = rollout.with_suffix(".jsonl.zst")
-    compressed.write_bytes(result.stdout)
-    rollout.unlink()
-    return compressed.resolve()
+    return rollout.resolve()
 
 
 def _allowance_event(timestamp: datetime, percent: int, limit: str = "codex") -> dict[str, Any]:
@@ -1017,16 +990,6 @@ def test_completion_distinguishes_missing_cache_writes_from_zero(
         assert measurement["byRole"]["parent"]["cacheWriteInputTokensReported"] is False
     else:
         assert "cacheWriteInputTokensReported" not in measurement
-
-
-def test_completion_reads_compressed_rollout_usage(tmp_path: Path) -> None:
-    fixture = _start_scan(tmp_path)
-    counted = fixture.started_at + timedelta(microseconds=1)
-    parent = _rollout(tmp_path, "scan-parent", [_token_event(counted, 21, 8)], compressed=True)
-    _state_graph(fixture.environment, {"scan-parent": parent}, [])
-    measurement = _complete_scan(fixture)["scan"]["usage"]
-    assert measurement["totalTokens"] == 29
-    assert measurement["coverage"] == "complete"
 
 
 def test_completion_excludes_separately_inherited_worker_snapshots(tmp_path: Path) -> None:
@@ -2879,10 +2842,9 @@ def test_cancel_scan_retains_runtime_usage_on_repeated_cancellation(tmp_path: Pa
 
 
 @pytest.mark.parametrize("worker_kind", ["discovery", "dedup"])
-@pytest.mark.parametrize("compressed", [False, True])
-def test_completion_recovers_replaced_deep_worker_threads(
-    tmp_path: Path, worker_kind: str, compressed: bool
-) -> None:
+def test_completion_recovers_replaced_deep_worker_threads(tmp_path: Path, worker_kind: str) -> None:
+    # Compressed variants exercise the real Node decoder in the SDK runtime lane
+    # (workbench-compressed-usage.test.ts); source-only tests need no built assets.
     fixture = _start_scan(tmp_path, mode="deep")
     fixture = replace(
         fixture,
@@ -2943,14 +2905,12 @@ def test_completion_recovers_replaced_deep_worker_threads(
                 "sdk-first-attempt",
                 [_token_event(counted, 20, 5)],
                 session_started_at=fixture.started_at.replace(microsecond=500000),
-                compressed=compressed,
             ),
             "sdk-first-child": _rollout(
                 tmp_path,
                 "sdk-first-child",
                 [_token_event(counted, 7, 2)],
                 parent_thread_id="sdk-first-attempt",
-                compressed=compressed,
             ),
             "sdk-current-attempt": _rollout(
                 tmp_path,
@@ -2970,7 +2930,6 @@ def test_completion_recovers_replaced_deep_worker_threads(
                 "boundary-archived-worker",
                 [_token_event(boundary_predecessor, 100, 10)],
                 session_started_at=boundary_predecessor,
-                compressed=compressed,
             ),
             "boundary-archived-child": tmp_path / "boundary-archived-child.jsonl",
             "later-worker": _rollout(tmp_path, "later-worker", [_token_event(after_scan, 100, 10)]),

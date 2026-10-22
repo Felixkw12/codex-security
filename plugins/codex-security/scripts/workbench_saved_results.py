@@ -3159,6 +3159,7 @@ def record_stopped_scan_usage(
         try:
             print(f"Could not save stopped scan token usage: {exc}", file=sys.stderr)
         except OSError:
+            # A closed diagnostic stream must not alter the persisted scan outcome.
             pass
 
 

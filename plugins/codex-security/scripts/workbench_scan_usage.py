@@ -211,6 +211,7 @@ def collect_scan_usage_safely(
         try:
             print(f"Could not collect scan token usage: {exc}", file=sys.stderr)
         except OSError:
+            # A closed diagnostic stream must not replace the unavailable-usage result.
             pass
         return _unavailable_usage("usage_collection_failed")
 
@@ -469,6 +470,7 @@ def _worker_usage_receipts(
             try:
                 print(f"Could not read worker token usage: {exc}", file=sys.stderr)
             except OSError:
+                # The receipt warning and missing-attempt scope are already retained.
                 pass
     return receipts, missing, scope
 
