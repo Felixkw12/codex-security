@@ -22,11 +22,7 @@ import { stripVTControlCharacters } from "node:util";
 import type { Finding, JsonObject } from "../src/index.js";
 import { main } from "../src/cli.js";
 import type { LinearClientFactory } from "../src/linear.js";
-import {
-  capture,
-  dependencies,
-  type OnCodex,
-} from "./cli-fixtures.js";
+import { capture, dependencies, type OnCodex } from "./cli-fixtures.js";
 import {
   temporaryDirectory,
   createTemporaryDirectories,
@@ -1667,18 +1663,19 @@ describe("scan and patch workflow", () => {
                 return origin;
               }
               if (gitlab && args.includes("ls-remote")) {
-                const mapping = `--config-env=url.${origin}.insteadOf=CODEX_SECURITY_PREFLIGHT_ALIAS`;
-                expect(args).toContain(mapping);
-                return runGitRepositoryCommand(
-                  command,
-                  args.map((value) =>
-                    value === mapping
-                      ? `--config-env=url.${remote}.insteadOf=CODEX_SECURITY_PREFLIGHT_ALIAS`
-                      : value,
-                  ),
-                  cwd,
-                  options,
+                const mapping = Object.entries(options?.environment ?? {}).find(
+                  ([key, value]) =>
+                    key.startsWith("GIT_CONFIG_KEY_") &&
+                    value === `url.${origin}.insteadOf`,
                 );
+                expect(mapping).toBeDefined();
+                return runGitRepositoryCommand(command, args, cwd, {
+                  ...options,
+                  environment: {
+                    ...options?.environment,
+                    [mapping![0]]: `url.${remote}.insteadOf`,
+                  },
+                });
               }
               if (args[0] === "push") {
                 pushCalls += 1;

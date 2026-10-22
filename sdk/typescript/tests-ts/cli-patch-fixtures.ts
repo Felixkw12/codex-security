@@ -164,17 +164,17 @@ export async function runWorkflow(
         if (args.at(-1) === ".nameWithOwner")
           return args[2]!.slice(args[2]!.indexOf("/") + 1);
       }
-      const translated = args.map((arg) => {
-        for (const [hosted, local] of localRemotes) {
-          if (
-            arg ===
-            `--config-env=url.${hosted}.insteadOf=CODEX_SECURITY_PREFLIGHT_ALIAS`
-          )
-            return `--config-env=url.${local}.insteadOf=CODEX_SECURITY_PREFLIGHT_ALIAS`;
-        }
-        return arg;
+      const environment = { ...commandOptions?.environment };
+      for (const [key, value] of Object.entries(environment)) {
+        if (!key.startsWith("GIT_CONFIG_KEY_")) continue;
+        for (const [hosted, local] of localRemotes)
+          if (value === `url.${hosted}.insteadOf`)
+            environment[key] = `url.${local}.insteadOf`;
+      }
+      const output = await run(command, args, cwd, {
+        ...commandOptions,
+        environment,
       });
-      const output = await run(command, translated, cwd, commandOptions);
       if (command !== "git" || args[0] !== "remote" || args[1] !== "get-url")
         return output;
       if (!output.trim()) return hostedRemote;

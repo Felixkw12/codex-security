@@ -8535,12 +8535,14 @@ async function preparePatchPublication(
             ? []
             : ["-c", `remote.${name}.${key}=${entry.slice(separator + 1)}`];
         });
+      const configurationCount = Number(
+        environmentEntry(dependencies.environment, "GIT_CONFIG_COUNT") ?? 0,
+      );
       for (const remote of destination.pushRemotes) {
         const refs = await dependencies.runRepositoryCommand(
           "git",
           [
             ...settings,
-            `--config-env=url.${remote}.insteadOf=CODEX_SECURITY_PREFLIGHT_ALIAS`,
             "-c",
             `remote.${name}.url=${name}`,
             "ls-remote",
@@ -8551,7 +8553,11 @@ async function preparePatchPublication(
           repository,
           {
             maxBuffer: Infinity,
-            environment: { CODEX_SECURITY_PREFLIGHT_ALIAS: name },
+            environment: {
+              GIT_CONFIG_COUNT: String(configurationCount + 1),
+              [`GIT_CONFIG_KEY_${configurationCount}`]: `url.${remote}.insteadOf`,
+              [`GIT_CONFIG_VALUE_${configurationCount}`]: name,
+            },
           },
         );
         if (
@@ -8903,7 +8909,9 @@ function patchScpRemote(remote: string) {
 }
 
 function gitlabPatchRepository(remote: string): string {
-  if (remote.includes("://")) return remote;
+  // The hosting project selector does not carry HTTP transport credentials.
+  if (remote.includes("://"))
+    return remote.replace(/^(https?:\/\/)[^/?#\\]*@/iu, "$1");
   const scp = patchScpRemote(remote)!;
   return `ssh://${scp.username ? `${scp.username}@` : ""}${scp.hostname}/${scp.pathname}`;
 }
