@@ -203,6 +203,46 @@ def test_finding_artifacts_include_all_safe_files_and_directories(tmp_path):
             "ssh://git@gitlab.com/~/group/project.git",
             False,
         ),
+        (
+            "https://bitbucket.org/workspace/project.git",
+            "git@bitbucket.org:workspace/project.git",
+            True,
+        ),
+        (
+            "https://alice@bitbucket.org/workspace/project.git",
+            "git@BITBUCKET.org:workspace/project.git",
+            True,
+        ),
+        (
+            "git@bitbucket.org:workspace/project.git",
+            "ssh://git@bitbucket.org:22/workspace/project.git",
+            True,
+        ),
+        (
+            "https://bitbucket.org/workspace/project.git",
+            "ssh://git@bitbucket.org:2222/workspace/project.git",
+            False,
+        ),
+        (
+            "git@bitbucket.org:workspace/project.git",
+            "alice@bitbucket.org:workspace/project.git",
+            False,
+        ),
+        (
+            "git@bitbucket.org:workspace/project.git",
+            "git@bitbucket.org:~/workspace/project.git",
+            False,
+        ),
+        (
+            "git@bitbucket.org:workspace/project.git",
+            "ssh://git@bitbucket.org/~/workspace/project.git",
+            False,
+        ),
+        (
+            "https://bitbucket.org.example/workspace/project.git",
+            "git@bitbucket.org.example:workspace/project.git",
+            False,
+        ),
         ("https://git.example/group/project.git", "git@git.example:group/project.git", False),
     ],
 )

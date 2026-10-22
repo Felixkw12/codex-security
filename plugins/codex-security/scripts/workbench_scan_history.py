@@ -278,7 +278,7 @@ def _repository_origin(target: Path) -> tuple[str, str] | None:
             account = None
     path = path.strip("/").removesuffix(".git")
     host = host.lower()
-    if account and not (account == "git" and host in {"github.com", "gitlab.com"}):
+    if account and not (account == "git" and host in {"github.com", "gitlab.com", "bitbucket.org"}):
         host = f"{account}@{host}"
     return (host, path) if host and path else None
 
