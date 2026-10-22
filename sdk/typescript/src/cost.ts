@@ -247,6 +247,15 @@ function createSessionUsage() {
       string,
       { native: number; event: number; response: number }
     >(),
+    messageProgressOrder: 0,
+    messageProgressFrontiers: { native: 0, event: 0, response: 0 },
+    messageProgressProjections: new Map<
+      string,
+      {
+        occurrences: number[];
+        next: { native: number; event: number; response: number };
+      }
+    >(),
     filesCompleted: 0,
     filesTotal: null as number | null,
     prose: new Set<string>(),
@@ -353,6 +362,15 @@ export class ScanCostTracker {
     this.#parentReviewBefore = null;
     // Historical logs may omit projection kinds emitted by the new turn.
     this.#parentSession?.messageProjections.clear();
+    if (this.#parentSession !== null) {
+      this.#parentSession.messageProgressProjections.clear();
+      this.#parentSession.messageProgressOrder = 0;
+      this.#parentSession.messageProgressFrontiers = {
+        native: 0,
+        event: 0,
+        response: 0,
+      };
+    }
     // A new turn retires unresolved hypotheses from the previous turn; admitted
     // coverage and source summaries remain available for resumed scans.
     if (this.#parentSession !== null) this.#parentSession.progress.length = 0;
@@ -2939,7 +2957,8 @@ function readSessionEvent(
   if (event["type"] === "response_item") {
     const receipt =
       payload["type"] === "function_call_output" ||
-      payload["type"] === "custom_tool_call_output";
+      payload["type"] === "custom_tool_call_output" ||
+      payload["type"] === "local_shell_call_output";
     const message =
       payload["type"] === "message" &&
       payload["role"] === "assistant" &&
@@ -3329,6 +3348,27 @@ function repeatedMessageProjection(
     updates === undefined
       ? textDigest
       : `${textDigest}:${digest(JSON.stringify(updates))}`;
+  if (updates !== undefined) {
+    let queue = session.messageProgressProjections.get(key);
+    if (queue === undefined) {
+      queue = { occurrences: [], next: { native: 0, event: 0, response: 0 } };
+      session.messageProgressProjections.set(key, queue);
+    }
+    // Copies retain their order within each projection. A missing earlier copy
+    // cannot consume an identical message after that projection has advanced.
+    // These ordinals identify progress copies only, never completion positions.
+    while (queue.next[projection] < queue.occurrences.length) {
+      const order = queue.occurrences[queue.next[projection]++]!;
+      if (order <= session.messageProgressFrontiers[projection]) continue;
+      session.messageProgressFrontiers[projection] = order;
+      return true;
+    }
+    const order = ++session.messageProgressOrder;
+    queue.occurrences.push(order);
+    queue.next[projection] = queue.occurrences.length;
+    session.messageProgressFrontiers[projection] = order;
+    return false;
+  }
   let counts = session.messageProjections.get(key);
   if (counts === undefined) {
     counts = { native: 0, event: 0, response: 0 };

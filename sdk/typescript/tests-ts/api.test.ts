@@ -11015,6 +11015,266 @@ describe("CodexSecurity orchestration", () => {
     );
   });
 
+  type ProgressScenarioValue = string | ScanProgress | readonly ScanProgress[];
+  type ProgressScenarioStep =
+    | readonly [
+        (
+          | "save"
+          | "save-quiet"
+          | "live"
+          | "save-message"
+          | "live-message"
+          | "save-response"
+          | "live-changed"
+        ),
+        string,
+        ProgressScenarioValue,
+      ]
+    | readonly [
+        "worker" | "additional-worker" | "check" | "scope" | "receipt",
+        ScanProgress,
+      ]
+    | readonly ["poll"]
+    | readonly ["boundary"]
+    | readonly ["resolve"]
+    | readonly ["begin"];
+  async function runProgressScenario(
+    {
+      steps,
+      expected,
+      initialScope = 8,
+      workerFirst,
+      stopBeforeResolution,
+      split,
+      partition = split ? "each" : "batch",
+    }: {
+      steps: readonly ProgressScenarioStep[];
+      expected: ScanProgress;
+      initialScope?: number | null;
+      workerFirst: boolean;
+      stopBeforeResolution: boolean;
+      split?: boolean;
+      partition?: "batch" | "staged" | "each";
+    },
+    {
+      resolveAtLastAnchor = false,
+      pollReceipts = true,
+    }: {
+      resolveAtLastAnchor?: boolean;
+      pollReceipts?: boolean;
+    } = {},
+  ): Promise<void> {
+    const text = (value: ProgressScenarioValue) =>
+      typeof value === "string"
+        ? value
+        : [value]
+            .flat()
+            .map((p) => progressMarker(p.phase, p.filesCompleted, p.filesTotal))
+            .join("\n");
+    const { root, repository, codexHome, scanDir } = await scanDirectories();
+    const updates: ScanProgress[] = [];
+    const checkpoints: {
+      actual: ScanProgress | undefined;
+      expected: ScanProgress;
+      scopeOnly?: boolean;
+    }[] = [];
+    let tracker: ScanCostTracker | undefined;
+    const originalStart = ScanCostTracker.prototype.start;
+    const starting = spyOn(
+      ScanCostTracker.prototype,
+      "start",
+    ).mockImplementation(function (this: ScanCostTracker, threadId: string) {
+      originalStart.call(this, threadId);
+      if (threadId === "thread-1") tracker = this;
+    });
+    let parentPath = "",
+      workerPath = "";
+    const originalReaddir = fsPromises.readdir;
+    const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
+      ...args: Parameters<typeof originalReaddir>
+    ) => {
+      const entries = await originalReaddir(...args);
+      if (String(args[0]) !== dirname(parentPath)) return entries;
+      const first = basename(workerFirst ? workerPath : parentPath);
+      return entries.toSorted(
+        (left, right) =>
+          Number(String(right.name) === first) -
+          Number(String(left.name) === first),
+      );
+    }) as typeof originalReaddir);
+    const client = TestClient.withDependencies({
+      ...scanRuntimeDependencies(codexHome, scanDir),
+      runWorkbench: async (
+        _options: unknown,
+        args: readonly string[],
+        input?: string,
+      ): Promise<JsonObject> =>
+        args[0] === "register-cli-scan"
+          ? {
+              ...mockScanRegistration(args, input),
+              scopeFileCount: initialScope,
+            }
+          : mockWorkbench(args, input),
+      createCodex: codexFactory(async () => {
+        await copyCompletedScan(root);
+        parentPath = await writeUsageSession(codexHome, "thread-1", {});
+        workerPath = await writeUsageSession(
+          codexHome,
+          "worker-thread",
+          {},
+          { parent: "thread-1" },
+        );
+        async function* events(): AsyncGenerator<ThreadEvent> {
+          expect(tracker).toBeDefined();
+          await tracker!.stop();
+          const resolution = resolveAtLastAnchor
+            ? steps.findLastIndex(
+                (step) =>
+                  (step[0] === "live" || step[0] === "live-message") &&
+                  step[1] === "anchor",
+              )
+            : -1;
+          for (const [index, step] of steps.entries()) {
+            if (stopBeforeResolution && index === resolution) {
+              await tracker!.stop();
+              await tracker!.refresh();
+            }
+            if (step[0] === "begin") {
+              tracker!.beginParentTurn(true);
+              continue;
+            }
+            if (step[0] === "resolve") {
+              if (stopBeforeResolution) {
+                await tracker!.stop();
+                await tracker!.refresh();
+              }
+              continue;
+            }
+            if (step[0] === "boundary") {
+              if (partition !== "batch") await tracker!.refresh();
+            } else if (step[0] === "poll") await tracker!.refresh();
+            else if (step[0] === "check" || step[0] === "scope")
+              checkpoints.push({
+                actual: updates.at(-1),
+                expected: step[1],
+                scopeOnly: step[0] === "scope",
+              });
+            else if (step[0] === "live-changed")
+              yield completedCommand(
+                `${step[1]} displayed`,
+                text(step[2]),
+                `item-${index}`,
+              );
+            else if (step[0] === "save-response")
+              await appendFile(
+                parentPath,
+                jsonLines([
+                  {
+                    type: "response_item",
+                    payload: {
+                      type: "message",
+                      role: "assistant",
+                      content: [{ type: "output_text", text: text(step[2]) }],
+                    },
+                  },
+                ]) + "\n",
+              );
+            else if (step[0] === "live-message")
+              yield {
+                type: "item.completed",
+                item: {
+                  id: `item-${index}`,
+                  type: "agent_message",
+                  text: text(step[2]),
+                },
+              };
+            else if (step[0] === "save-message")
+              await appendFile(
+                parentPath,
+                jsonLines([
+                  {
+                    type: "event_msg",
+                    payload: {
+                      type: "item_completed",
+                      item: {
+                        type: "AgentMessage",
+                        id: `native-${index}`,
+                        content: [{ type: "Text", text: text(step[2]) }],
+                      },
+                    },
+                  },
+                ]) + "\n",
+              );
+            else if (step[0] === "live")
+              yield completedCommand(step[1], text(step[2]), `item-${index}`);
+            else if (step[0] === "save" || step[0] === "save-quiet")
+              await appendFile(
+                parentPath,
+                jsonLines([
+                  nativeCommand(step[1], text(step[2]), `native-${index}`),
+                ]) + "\n",
+              );
+            else
+              await appendFile(
+                step[0] === "additional-worker"
+                  ? await writeUsageSession(
+                      codexHome,
+                      "followup-worker-thread",
+                      {},
+                      { parent: "thread-1" },
+                    )
+                  : step[0] === "receipt"
+                    ? parentPath
+                    : workerPath,
+                jsonLines([
+                  {
+                    type: "response_item",
+                    payload: {
+                      type: "custom_tool_call_output",
+                      call_id: `worker-${index}`,
+                      output: text(step[1]),
+                    },
+                  },
+                ]) + "\n",
+              );
+            if (
+              partition === "each" &&
+              step[0] !== "save-quiet" &&
+              (step[0].startsWith("save") ||
+                (pollReceipts && step[0] === "receipt"))
+            )
+              await tracker!.refresh();
+          }
+          await tracker!.refresh();
+          await tracker!.refresh();
+          await tracker!.stop();
+        }
+        return { events: completedEvents("thread-1", events()) };
+      }),
+    });
+    try {
+      await client.run(repository, {
+        onProgress: (update) => updates.push(update),
+      });
+      expect(updates.at(-1)).toEqual(expected);
+      for (const checkpoint of checkpoints)
+        if (checkpoint.scopeOnly)
+          expect(checkpoint.actual).toMatchObject({
+            filesCompleted: checkpoint.expected.filesCompleted,
+            filesTotal: checkpoint.expected.filesTotal,
+          });
+        else expect(checkpoint.actual).toEqual(checkpoint.expected);
+      const settled = [...updates];
+      await tracker!.refresh();
+      await tracker!.stop();
+      expect(updates).toEqual(settled);
+    } finally {
+      await client.close();
+      starting.mockRestore();
+      listing.mockRestore();
+    }
+  }
+
   describe("displayed receipt eligibility after inventory recovery", () => {
     const progress = (
       phase: ScanProgress["phase"],
@@ -11138,215 +11398,7 @@ describe("CodexSecurity orchestration", () => {
       ),
     )(
       "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, partition=$partition)",
-      async ({
-        steps,
-        expected,
-        initialScope,
-        workerFirst,
-        stopBeforeResolution,
-        partition,
-      }) => {
-        const { root, repository, codexHome, scanDir } =
-          await scanDirectories();
-        const updates: ScanProgress[] = [];
-        const checkpoints: {
-          actual: ScanProgress | undefined;
-          expected: ScanProgress;
-          scopeOnly?: boolean;
-        }[] = [];
-        let tracker: ScanCostTracker | undefined;
-        const originalStart = ScanCostTracker.prototype.start;
-        const starting = spyOn(
-          ScanCostTracker.prototype,
-          "start",
-        ).mockImplementation(function (
-          this: ScanCostTracker,
-          threadId: string,
-        ) {
-          originalStart.call(this, threadId);
-          if (threadId === "thread-1") tracker = this;
-        });
-        let parentPath = "",
-          workerPath = "";
-        const originalReaddir = fsPromises.readdir;
-        const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
-          ...args: Parameters<typeof originalReaddir>
-        ) => {
-          const entries = await originalReaddir(...args);
-          if (String(args[0]) !== dirname(parentPath)) return entries;
-          const first = basename(workerFirst ? workerPath : parentPath);
-          return entries.toSorted(
-            (left, right) =>
-              Number(String(right.name) === first) -
-              Number(String(left.name) === first),
-          );
-        }) as typeof originalReaddir);
-        const client = TestClient.withDependencies({
-          ...scanRuntimeDependencies(codexHome, scanDir),
-          runWorkbench: async (
-            _options: unknown,
-            args: readonly string[],
-            input?: string,
-          ): Promise<JsonObject> =>
-            args[0] === "register-cli-scan"
-              ? {
-                  ...mockScanRegistration(args, input),
-                  scopeFileCount: initialScope,
-                }
-              : mockWorkbench(args, input),
-          createCodex: codexFactory(async () => {
-            await copyCompletedScan(root);
-            parentPath = await writeUsageSession(codexHome, "thread-1", {});
-            workerPath = await writeUsageSession(
-              codexHome,
-              "worker-thread",
-              {},
-              { parent: "thread-1" },
-            );
-            async function* events(): AsyncGenerator<ThreadEvent> {
-              expect(tracker).toBeDefined();
-              await tracker!.stop();
-              for (const [index, step] of steps.entries()) {
-                if (step[0] === "begin") {
-                  tracker!.beginParentTurn(true);
-                  continue;
-                }
-                if (step[0] === "resolve") {
-                  if (stopBeforeResolution) {
-                    await tracker!.stop();
-                    await tracker!.refresh();
-                  }
-                  continue;
-                }
-                if (step[0] === "boundary") {
-                  if (partition !== "batch") await tracker!.refresh();
-                } else if (step[0] === "poll") await tracker!.refresh();
-                else if (step[0] === "check" || step[0] === "scope")
-                  checkpoints.push({
-                    actual: updates.at(-1),
-                    expected: step[1],
-                    scopeOnly: step[0] === "scope",
-                  });
-                else if (step[0] === "live-changed")
-                  yield completedCommand(
-                    `${step[1]} displayed`,
-                    text(step[2]),
-                    `item-${index}`,
-                  );
-                else if (step[0] === "save-response")
-                  await appendFile(
-                    parentPath,
-                    jsonLines([
-                      {
-                        type: "response_item",
-                        payload: {
-                          type: "message",
-                          role: "assistant",
-                          content: [
-                            { type: "output_text", text: text(step[2]) },
-                          ],
-                        },
-                      },
-                    ]) + "\n",
-                  );
-                else if (step[0] === "live-message")
-                  yield {
-                    type: "item.completed",
-                    item: {
-                      id: `item-${index}`,
-                      type: "agent_message",
-                      text: text(step[2]),
-                    },
-                  };
-                else if (step[0] === "save-message")
-                  await appendFile(
-                    parentPath,
-                    jsonLines([
-                      {
-                        type: "event_msg",
-                        payload: {
-                          type: "item_completed",
-                          item: {
-                            type: "AgentMessage",
-                            id: `native-${index}`,
-                            content: [{ type: "Text", text: text(step[2]) }],
-                          },
-                        },
-                      },
-                    ]) + "\n",
-                  );
-                else if (step[0] === "live")
-                  yield completedCommand(
-                    step[1],
-                    text(step[2]),
-                    `item-${index}`,
-                  );
-                else if (step[0] === "save" || step[0] === "save-quiet")
-                  await appendFile(
-                    parentPath,
-                    jsonLines([
-                      nativeCommand(step[1], text(step[2]), `native-${index}`),
-                    ]) + "\n",
-                  );
-                else
-                  await appendFile(
-                    step[0] === "additional-worker"
-                      ? await writeUsageSession(
-                          codexHome,
-                          "followup-worker-thread",
-                          {},
-                          { parent: "thread-1" },
-                        )
-                      : step[0] === "receipt"
-                        ? parentPath
-                        : workerPath,
-                    jsonLines([
-                      {
-                        type: "response_item",
-                        payload: {
-                          type: "custom_tool_call_output",
-                          call_id: `worker-${index}`,
-                          output: text(step[1]),
-                        },
-                      },
-                    ]) + "\n",
-                  );
-                if (
-                  partition === "each" &&
-                  step[0] !== "save-quiet" &&
-                  (step[0].startsWith("save") || step[0] === "receipt")
-                )
-                  await tracker!.refresh();
-              }
-              await tracker!.refresh();
-              await tracker!.refresh();
-              await tracker!.stop();
-            }
-            return { events: completedEvents("thread-1", events()) };
-          }),
-        });
-        try {
-          await client.run(repository, {
-            onProgress: (update) => updates.push(update),
-          });
-          expect(updates.at(-1)).toEqual(expected);
-          for (const checkpoint of checkpoints)
-            if (checkpoint.scopeOnly)
-              expect(checkpoint.actual).toMatchObject({
-                filesCompleted: checkpoint.expected.filesCompleted,
-                filesTotal: checkpoint.expected.filesTotal,
-              });
-            else expect(checkpoint.actual).toEqual(checkpoint.expected);
-          const settled = [...updates];
-          await tracker!.refresh();
-          await tracker!.stop();
-          expect(updates).toEqual(settled);
-        } finally {
-          await client.close();
-          starting.mockRestore();
-          listing.mockRestore();
-        }
-      },
+      (scenario) => runProgressScenario(scenario),
     );
   });
 
@@ -11547,215 +11599,7 @@ describe("CodexSecurity orchestration", () => {
       ),
     )(
       "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, partition=$partition)",
-      async ({
-        steps,
-        expected,
-        initialScope,
-        workerFirst,
-        stopBeforeResolution,
-        partition,
-      }) => {
-        const { root, repository, codexHome, scanDir } =
-          await scanDirectories();
-        const updates: ScanProgress[] = [];
-        const checkpoints: {
-          actual: ScanProgress | undefined;
-          expected: ScanProgress;
-          scopeOnly?: boolean;
-        }[] = [];
-        let tracker: ScanCostTracker | undefined;
-        const originalStart = ScanCostTracker.prototype.start;
-        const starting = spyOn(
-          ScanCostTracker.prototype,
-          "start",
-        ).mockImplementation(function (
-          this: ScanCostTracker,
-          threadId: string,
-        ) {
-          originalStart.call(this, threadId);
-          if (threadId === "thread-1") tracker = this;
-        });
-        let parentPath = "",
-          workerPath = "";
-        const originalReaddir = fsPromises.readdir;
-        const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
-          ...args: Parameters<typeof originalReaddir>
-        ) => {
-          const entries = await originalReaddir(...args);
-          if (String(args[0]) !== dirname(parentPath)) return entries;
-          const first = basename(workerFirst ? workerPath : parentPath);
-          return entries.toSorted(
-            (left, right) =>
-              Number(String(right.name) === first) -
-              Number(String(left.name) === first),
-          );
-        }) as typeof originalReaddir);
-        const client = TestClient.withDependencies({
-          ...scanRuntimeDependencies(codexHome, scanDir),
-          runWorkbench: async (
-            _options: unknown,
-            args: readonly string[],
-            input?: string,
-          ): Promise<JsonObject> =>
-            args[0] === "register-cli-scan"
-              ? {
-                  ...mockScanRegistration(args, input),
-                  scopeFileCount: initialScope,
-                }
-              : mockWorkbench(args, input),
-          createCodex: codexFactory(async () => {
-            await copyCompletedScan(root);
-            parentPath = await writeUsageSession(codexHome, "thread-1", {});
-            workerPath = await writeUsageSession(
-              codexHome,
-              "worker-thread",
-              {},
-              { parent: "thread-1" },
-            );
-            async function* events(): AsyncGenerator<ThreadEvent> {
-              expect(tracker).toBeDefined();
-              await tracker!.stop();
-              for (const [index, step] of steps.entries()) {
-                if (step[0] === "begin") {
-                  tracker!.beginParentTurn(true);
-                  continue;
-                }
-                if (step[0] === "resolve") {
-                  if (stopBeforeResolution) {
-                    await tracker!.stop();
-                    await tracker!.refresh();
-                  }
-                  continue;
-                }
-                if (step[0] === "boundary") {
-                  if (partition !== "batch") await tracker!.refresh();
-                } else if (step[0] === "poll") await tracker!.refresh();
-                else if (step[0] === "check" || step[0] === "scope")
-                  checkpoints.push({
-                    actual: updates.at(-1),
-                    expected: step[1],
-                    scopeOnly: step[0] === "scope",
-                  });
-                else if (step[0] === "live-changed")
-                  yield completedCommand(
-                    `${step[1]} displayed`,
-                    text(step[2]),
-                    `item-${index}`,
-                  );
-                else if (step[0] === "save-response")
-                  await appendFile(
-                    parentPath,
-                    jsonLines([
-                      {
-                        type: "response_item",
-                        payload: {
-                          type: "message",
-                          role: "assistant",
-                          content: [
-                            { type: "output_text", text: text(step[2]) },
-                          ],
-                        },
-                      },
-                    ]) + "\n",
-                  );
-                else if (step[0] === "live-message")
-                  yield {
-                    type: "item.completed",
-                    item: {
-                      id: `item-${index}`,
-                      type: "agent_message",
-                      text: text(step[2]),
-                    },
-                  };
-                else if (step[0] === "save-message")
-                  await appendFile(
-                    parentPath,
-                    jsonLines([
-                      {
-                        type: "event_msg",
-                        payload: {
-                          type: "item_completed",
-                          item: {
-                            type: "AgentMessage",
-                            id: `native-${index}`,
-                            content: [{ type: "Text", text: text(step[2]) }],
-                          },
-                        },
-                      },
-                    ]) + "\n",
-                  );
-                else if (step[0] === "live")
-                  yield completedCommand(
-                    step[1],
-                    text(step[2]),
-                    `item-${index}`,
-                  );
-                else if (step[0] === "save" || step[0] === "save-quiet")
-                  await appendFile(
-                    parentPath,
-                    jsonLines([
-                      nativeCommand(step[1], text(step[2]), `native-${index}`),
-                    ]) + "\n",
-                  );
-                else
-                  await appendFile(
-                    step[0] === "additional-worker"
-                      ? await writeUsageSession(
-                          codexHome,
-                          "followup-worker-thread",
-                          {},
-                          { parent: "thread-1" },
-                        )
-                      : step[0] === "receipt"
-                        ? parentPath
-                        : workerPath,
-                    jsonLines([
-                      {
-                        type: "response_item",
-                        payload: {
-                          type: "custom_tool_call_output",
-                          call_id: `worker-${index}`,
-                          output: text(step[1]),
-                        },
-                      },
-                    ]) + "\n",
-                  );
-                if (
-                  partition === "each" &&
-                  step[0] !== "save-quiet" &&
-                  (step[0].startsWith("save") || step[0] === "receipt")
-                )
-                  await tracker!.refresh();
-              }
-              await tracker!.refresh();
-              await tracker!.refresh();
-              await tracker!.stop();
-            }
-            return { events: completedEvents("thread-1", events()) };
-          }),
-        });
-        try {
-          await client.run(repository, {
-            onProgress: (update) => updates.push(update),
-          });
-          expect(updates.at(-1)).toEqual(expected);
-          for (const checkpoint of checkpoints)
-            if (checkpoint.scopeOnly)
-              expect(checkpoint.actual).toMatchObject({
-                filesCompleted: checkpoint.expected.filesCompleted,
-                filesTotal: checkpoint.expected.filesTotal,
-              });
-            else expect(checkpoint.actual).toEqual(checkpoint.expected);
-          const settled = [...updates];
-          await tracker!.refresh();
-          await tracker!.stop();
-          expect(updates).toEqual(settled);
-        } finally {
-          await client.close();
-          starting.mockRestore();
-          listing.mockRestore();
-        }
-      },
+      (scenario) => runProgressScenario(scenario),
     );
   });
 
@@ -11924,215 +11768,7 @@ describe("CodexSecurity orchestration", () => {
       ),
     )(
       "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, partition=$partition)",
-      async ({
-        steps,
-        expected,
-        initialScope,
-        workerFirst,
-        stopBeforeResolution,
-        partition,
-      }) => {
-        const { root, repository, codexHome, scanDir } =
-          await scanDirectories();
-        const updates: ScanProgress[] = [];
-        const checkpoints: {
-          actual: ScanProgress | undefined;
-          expected: ScanProgress;
-          scopeOnly?: boolean;
-        }[] = [];
-        let tracker: ScanCostTracker | undefined;
-        const originalStart = ScanCostTracker.prototype.start;
-        const starting = spyOn(
-          ScanCostTracker.prototype,
-          "start",
-        ).mockImplementation(function (
-          this: ScanCostTracker,
-          threadId: string,
-        ) {
-          originalStart.call(this, threadId);
-          if (threadId === "thread-1") tracker = this;
-        });
-        let parentPath = "",
-          workerPath = "";
-        const originalReaddir = fsPromises.readdir;
-        const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
-          ...args: Parameters<typeof originalReaddir>
-        ) => {
-          const entries = await originalReaddir(...args);
-          if (String(args[0]) !== dirname(parentPath)) return entries;
-          const first = basename(workerFirst ? workerPath : parentPath);
-          return entries.toSorted(
-            (left, right) =>
-              Number(String(right.name) === first) -
-              Number(String(left.name) === first),
-          );
-        }) as typeof originalReaddir);
-        const client = TestClient.withDependencies({
-          ...scanRuntimeDependencies(codexHome, scanDir),
-          runWorkbench: async (
-            _options: unknown,
-            args: readonly string[],
-            input?: string,
-          ): Promise<JsonObject> =>
-            args[0] === "register-cli-scan"
-              ? {
-                  ...mockScanRegistration(args, input),
-                  scopeFileCount: initialScope,
-                }
-              : mockWorkbench(args, input),
-          createCodex: codexFactory(async () => {
-            await copyCompletedScan(root);
-            parentPath = await writeUsageSession(codexHome, "thread-1", {});
-            workerPath = await writeUsageSession(
-              codexHome,
-              "worker-thread",
-              {},
-              { parent: "thread-1" },
-            );
-            async function* events(): AsyncGenerator<ThreadEvent> {
-              expect(tracker).toBeDefined();
-              await tracker!.stop();
-              for (const [index, step] of steps.entries()) {
-                if (step[0] === "begin") {
-                  tracker!.beginParentTurn(true);
-                  continue;
-                }
-                if (step[0] === "resolve") {
-                  if (stopBeforeResolution) {
-                    await tracker!.stop();
-                    await tracker!.refresh();
-                  }
-                  continue;
-                }
-                if (step[0] === "boundary") {
-                  if (partition !== "batch") await tracker!.refresh();
-                } else if (step[0] === "poll") await tracker!.refresh();
-                else if (step[0] === "check" || step[0] === "scope")
-                  checkpoints.push({
-                    actual: updates.at(-1),
-                    expected: step[1],
-                    scopeOnly: step[0] === "scope",
-                  });
-                else if (step[0] === "live-changed")
-                  yield completedCommand(
-                    `${step[1]} displayed`,
-                    text(step[2]),
-                    `item-${index}`,
-                  );
-                else if (step[0] === "save-response")
-                  await appendFile(
-                    parentPath,
-                    jsonLines([
-                      {
-                        type: "response_item",
-                        payload: {
-                          type: "message",
-                          role: "assistant",
-                          content: [
-                            { type: "output_text", text: text(step[2]) },
-                          ],
-                        },
-                      },
-                    ]) + "\n",
-                  );
-                else if (step[0] === "live-message")
-                  yield {
-                    type: "item.completed",
-                    item: {
-                      id: `item-${index}`,
-                      type: "agent_message",
-                      text: text(step[2]),
-                    },
-                  };
-                else if (step[0] === "save-message")
-                  await appendFile(
-                    parentPath,
-                    jsonLines([
-                      {
-                        type: "event_msg",
-                        payload: {
-                          type: "item_completed",
-                          item: {
-                            type: "AgentMessage",
-                            id: `native-${index}`,
-                            content: [{ type: "Text", text: text(step[2]) }],
-                          },
-                        },
-                      },
-                    ]) + "\n",
-                  );
-                else if (step[0] === "live")
-                  yield completedCommand(
-                    step[1],
-                    text(step[2]),
-                    `item-${index}`,
-                  );
-                else if (step[0] === "save" || step[0] === "save-quiet")
-                  await appendFile(
-                    parentPath,
-                    jsonLines([
-                      nativeCommand(step[1], text(step[2]), `native-${index}`),
-                    ]) + "\n",
-                  );
-                else
-                  await appendFile(
-                    step[0] === "additional-worker"
-                      ? await writeUsageSession(
-                          codexHome,
-                          "followup-worker-thread",
-                          {},
-                          { parent: "thread-1" },
-                        )
-                      : step[0] === "receipt"
-                        ? parentPath
-                        : workerPath,
-                    jsonLines([
-                      {
-                        type: "response_item",
-                        payload: {
-                          type: "custom_tool_call_output",
-                          call_id: `worker-${index}`,
-                          output: text(step[1]),
-                        },
-                      },
-                    ]) + "\n",
-                  );
-                if (
-                  partition === "each" &&
-                  step[0] !== "save-quiet" &&
-                  (step[0].startsWith("save") || step[0] === "receipt")
-                )
-                  await tracker!.refresh();
-              }
-              await tracker!.refresh();
-              await tracker!.refresh();
-              await tracker!.stop();
-            }
-            return { events: completedEvents("thread-1", events()) };
-          }),
-        });
-        try {
-          await client.run(repository, {
-            onProgress: (update) => updates.push(update),
-          });
-          expect(updates.at(-1)).toEqual(expected);
-          for (const checkpoint of checkpoints)
-            if (checkpoint.scopeOnly)
-              expect(checkpoint.actual).toMatchObject({
-                filesCompleted: checkpoint.expected.filesCompleted,
-                filesTotal: checkpoint.expected.filesTotal,
-              });
-            else expect(checkpoint.actual).toEqual(checkpoint.expected);
-          const settled = [...updates];
-          await tracker!.refresh();
-          await tracker!.stop();
-          expect(updates).toEqual(settled);
-        } finally {
-          await client.close();
-          starting.mockRestore();
-          listing.mockRestore();
-        }
-      },
+      (scenario) => runProgressScenario(scenario),
     );
   });
 
@@ -12328,206 +11964,7 @@ describe("CodexSecurity orchestration", () => {
       ),
     )(
       "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, partition=$partition)",
-      async ({
-        steps,
-        expected,
-        workerFirst,
-        stopBeforeResolution,
-        partition,
-      }) => {
-        const { root, repository, codexHome, scanDir } =
-          await scanDirectories();
-        const updates: ScanProgress[] = [];
-        const checkpoints: {
-          actual: ScanProgress | undefined;
-          expected: ScanProgress;
-          scopeOnly?: boolean;
-        }[] = [];
-        let tracker: ScanCostTracker | undefined;
-        const originalStart = ScanCostTracker.prototype.start;
-        const starting = spyOn(
-          ScanCostTracker.prototype,
-          "start",
-        ).mockImplementation(function (
-          this: ScanCostTracker,
-          threadId: string,
-        ) {
-          originalStart.call(this, threadId);
-          if (threadId === "thread-1") tracker = this;
-        });
-        let parentPath = "",
-          workerPath = "";
-        const originalReaddir = fsPromises.readdir;
-        const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
-          ...args: Parameters<typeof originalReaddir>
-        ) => {
-          const entries = await originalReaddir(...args);
-          if (String(args[0]) !== dirname(parentPath)) return entries;
-          const first = basename(workerFirst ? workerPath : parentPath);
-          return entries.toSorted(
-            (left, right) =>
-              Number(String(right.name) === first) -
-              Number(String(left.name) === first),
-          );
-        }) as typeof originalReaddir);
-        const client = TestClient.withDependencies({
-          ...scanRuntimeDependencies(codexHome, scanDir),
-          runWorkbench: async (
-            _options: unknown,
-            args: readonly string[],
-            input?: string,
-          ): Promise<JsonObject> =>
-            args[0] === "register-cli-scan"
-              ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-              : mockWorkbench(args, input),
-          createCodex: codexFactory(async () => {
-            await copyCompletedScan(root);
-            parentPath = await writeUsageSession(codexHome, "thread-1", {});
-            workerPath = await writeUsageSession(
-              codexHome,
-              "worker-thread",
-              {},
-              { parent: "thread-1" },
-            );
-            async function* events(): AsyncGenerator<ThreadEvent> {
-              expect(tracker).toBeDefined();
-              await tracker!.stop();
-              for (const [index, step] of steps.entries()) {
-                if (step[0] === "resolve") {
-                  if (stopBeforeResolution) {
-                    await tracker!.stop();
-                    await tracker!.refresh();
-                  }
-                  continue;
-                }
-                if (step[0] === "boundary") {
-                  if (partition !== "batch") await tracker!.refresh();
-                } else if (step[0] === "poll") await tracker!.refresh();
-                else if (step[0] === "check" || step[0] === "scope")
-                  checkpoints.push({
-                    actual: updates.at(-1),
-                    expected: step[1],
-                    scopeOnly: step[0] === "scope",
-                  });
-                else if (step[0] === "live-changed")
-                  yield completedCommand(
-                    `${step[1]} displayed`,
-                    text(step[2]),
-                    `item-${index}`,
-                  );
-                else if (step[0] === "save-response")
-                  await appendFile(
-                    parentPath,
-                    jsonLines([
-                      {
-                        type: "response_item",
-                        payload: {
-                          type: "message",
-                          role: "assistant",
-                          content: [
-                            { type: "output_text", text: text(step[2]) },
-                          ],
-                        },
-                      },
-                    ]) + "\n",
-                  );
-                else if (step[0] === "live-message")
-                  yield {
-                    type: "item.completed",
-                    item: {
-                      id: `item-${index}`,
-                      type: "agent_message",
-                      text: text(step[2]),
-                    },
-                  };
-                else if (step[0] === "save-message")
-                  await appendFile(
-                    parentPath,
-                    jsonLines([
-                      {
-                        type: "event_msg",
-                        payload: {
-                          type: "item_completed",
-                          item: {
-                            type: "AgentMessage",
-                            id: `native-${index}`,
-                            content: [{ type: "Text", text: text(step[2]) }],
-                          },
-                        },
-                      },
-                    ]) + "\n",
-                  );
-                else if (step[0] === "live")
-                  yield completedCommand(
-                    step[1],
-                    text(step[2]),
-                    `item-${index}`,
-                  );
-                else if (step[0] === "save")
-                  await appendFile(
-                    parentPath,
-                    jsonLines([
-                      nativeCommand(step[1], text(step[2]), `native-${index}`),
-                    ]) + "\n",
-                  );
-                else
-                  await appendFile(
-                    step[0] === "additional-worker"
-                      ? await writeUsageSession(
-                          codexHome,
-                          "followup-worker-thread",
-                          {},
-                          { parent: "thread-1" },
-                        )
-                      : step[0] === "receipt"
-                        ? parentPath
-                        : workerPath,
-                    jsonLines([
-                      {
-                        type: "response_item",
-                        payload: {
-                          type: "custom_tool_call_output",
-                          call_id: `worker-${index}`,
-                          output: text(step[1]),
-                        },
-                      },
-                    ]) + "\n",
-                  );
-                if (
-                  partition === "each" &&
-                  (step[0].startsWith("save") || step[0] === "receipt")
-                )
-                  await tracker!.refresh();
-              }
-              await tracker!.refresh();
-              await tracker!.refresh();
-              await tracker!.stop();
-            }
-            return { events: completedEvents("thread-1", events()) };
-          }),
-        });
-        try {
-          await client.run(repository, {
-            onProgress: (update) => updates.push(update),
-          });
-          expect(updates.at(-1)).toEqual(expected);
-          for (const checkpoint of checkpoints)
-            if (checkpoint.scopeOnly)
-              expect(checkpoint.actual).toMatchObject({
-                filesCompleted: checkpoint.expected.filesCompleted,
-                filesTotal: checkpoint.expected.filesTotal,
-              });
-            else expect(checkpoint.actual).toEqual(checkpoint.expected);
-          const settled = [...updates];
-          await tracker!.refresh();
-          await tracker!.stop();
-          expect(updates).toEqual(settled);
-        } finally {
-          await client.close();
-          starting.mockRestore();
-          listing.mockRestore();
-        }
-      },
+      (scenario) => runProgressScenario(scenario),
     );
   });
 
@@ -12565,13 +12002,6 @@ describe("CodexSecurity orchestration", () => {
       steps: readonly Step[];
       stopBeforeResolution?: boolean;
     };
-    const text = (value: Value) =>
-      typeof value === "string"
-        ? value
-        : [value]
-            .flat()
-            .map((p) => progressMarker(p.phase, p.filesCompleted, p.filesTotal))
-            .join("\n");
     const scenarios: Scenario[] = [];
     const add = (name: string, state: ScanProgress, steps: Step[]) => {
       const next = progress(
@@ -12694,206 +12124,7 @@ describe("CodexSecurity orchestration", () => {
       ),
     )(
       "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, partition=$partition)",
-      async ({
-        steps,
-        expected,
-        workerFirst,
-        stopBeforeResolution,
-        partition,
-      }) => {
-        const { root, repository, codexHome, scanDir } =
-          await scanDirectories();
-        const updates: ScanProgress[] = [];
-        const checkpoints: {
-          actual: ScanProgress | undefined;
-          expected: ScanProgress;
-          scopeOnly?: boolean;
-        }[] = [];
-        let tracker: ScanCostTracker | undefined;
-        const originalStart = ScanCostTracker.prototype.start;
-        const starting = spyOn(
-          ScanCostTracker.prototype,
-          "start",
-        ).mockImplementation(function (
-          this: ScanCostTracker,
-          threadId: string,
-        ) {
-          originalStart.call(this, threadId);
-          if (threadId === "thread-1") tracker = this;
-        });
-        let parentPath = "",
-          workerPath = "";
-        const originalReaddir = fsPromises.readdir;
-        const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
-          ...args: Parameters<typeof originalReaddir>
-        ) => {
-          const entries = await originalReaddir(...args);
-          if (String(args[0]) !== dirname(parentPath)) return entries;
-          const first = basename(workerFirst ? workerPath : parentPath);
-          return entries.toSorted(
-            (left, right) =>
-              Number(String(right.name) === first) -
-              Number(String(left.name) === first),
-          );
-        }) as typeof originalReaddir);
-        const client = TestClient.withDependencies({
-          ...scanRuntimeDependencies(codexHome, scanDir),
-          runWorkbench: async (
-            _options: unknown,
-            args: readonly string[],
-            input?: string,
-          ): Promise<JsonObject> =>
-            args[0] === "register-cli-scan"
-              ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-              : mockWorkbench(args, input),
-          createCodex: codexFactory(async () => {
-            await copyCompletedScan(root);
-            parentPath = await writeUsageSession(codexHome, "thread-1", {});
-            workerPath = await writeUsageSession(
-              codexHome,
-              "worker-thread",
-              {},
-              { parent: "thread-1" },
-            );
-            async function* events(): AsyncGenerator<ThreadEvent> {
-              expect(tracker).toBeDefined();
-              await tracker!.stop();
-              for (const [index, step] of steps.entries()) {
-                if (step[0] === "resolve") {
-                  if (stopBeforeResolution) {
-                    await tracker!.stop();
-                    await tracker!.refresh();
-                  }
-                  continue;
-                }
-                if (step[0] === "boundary") {
-                  if (partition !== "batch") await tracker!.refresh();
-                } else if (step[0] === "poll") await tracker!.refresh();
-                else if (step[0] === "check" || step[0] === "scope")
-                  checkpoints.push({
-                    actual: updates.at(-1),
-                    expected: step[1],
-                    scopeOnly: step[0] === "scope",
-                  });
-                else if (step[0] === "live-changed")
-                  yield completedCommand(
-                    `${step[1]} displayed`,
-                    text(step[2]),
-                    `item-${index}`,
-                  );
-                else if (step[0] === "save-response")
-                  await appendFile(
-                    parentPath,
-                    jsonLines([
-                      {
-                        type: "response_item",
-                        payload: {
-                          type: "message",
-                          role: "assistant",
-                          content: [
-                            { type: "output_text", text: text(step[2]) },
-                          ],
-                        },
-                      },
-                    ]) + "\n",
-                  );
-                else if (step[0] === "live-message")
-                  yield {
-                    type: "item.completed",
-                    item: {
-                      id: `item-${index}`,
-                      type: "agent_message",
-                      text: text(step[2]),
-                    },
-                  };
-                else if (step[0] === "save-message")
-                  await appendFile(
-                    parentPath,
-                    jsonLines([
-                      {
-                        type: "event_msg",
-                        payload: {
-                          type: "item_completed",
-                          item: {
-                            type: "AgentMessage",
-                            id: `native-${index}`,
-                            content: [{ type: "Text", text: text(step[2]) }],
-                          },
-                        },
-                      },
-                    ]) + "\n",
-                  );
-                else if (step[0] === "live")
-                  yield completedCommand(
-                    step[1],
-                    text(step[2]),
-                    `item-${index}`,
-                  );
-                else if (step[0] === "save")
-                  await appendFile(
-                    parentPath,
-                    jsonLines([
-                      nativeCommand(step[1], text(step[2]), `native-${index}`),
-                    ]) + "\n",
-                  );
-                else
-                  await appendFile(
-                    step[0] === "additional-worker"
-                      ? await writeUsageSession(
-                          codexHome,
-                          "followup-worker-thread",
-                          {},
-                          { parent: "thread-1" },
-                        )
-                      : step[0] === "receipt"
-                        ? parentPath
-                        : workerPath,
-                    jsonLines([
-                      {
-                        type: "response_item",
-                        payload: {
-                          type: "custom_tool_call_output",
-                          call_id: `worker-${index}`,
-                          output: text(step[1]),
-                        },
-                      },
-                    ]) + "\n",
-                  );
-                if (
-                  partition === "each" &&
-                  (step[0].startsWith("save") || step[0] === "receipt")
-                )
-                  await tracker!.refresh();
-              }
-              await tracker!.refresh();
-              await tracker!.refresh();
-              await tracker!.stop();
-            }
-            return { events: completedEvents("thread-1", events()) };
-          }),
-        });
-        try {
-          await client.run(repository, {
-            onProgress: (update) => updates.push(update),
-          });
-          expect(updates.at(-1)).toEqual(expected);
-          for (const checkpoint of checkpoints)
-            if (checkpoint.scopeOnly)
-              expect(checkpoint.actual).toMatchObject({
-                filesCompleted: checkpoint.expected.filesCompleted,
-                filesTotal: checkpoint.expected.filesTotal,
-              });
-            else expect(checkpoint.actual).toEqual(checkpoint.expected);
-          const settled = [...updates];
-          await tracker!.refresh();
-          await tracker!.stop();
-          expect(updates).toEqual(settled);
-        } finally {
-          await client.close();
-          starting.mockRestore();
-          listing.mockRestore();
-        }
-      },
+      (scenario) => runProgressScenario(scenario),
     );
   });
 
@@ -12931,13 +12162,6 @@ describe("CodexSecurity orchestration", () => {
       stopBeforeResolution?: boolean;
       partitions?: readonly boolean[];
     };
-    const text = (value: Value) =>
-      typeof value === "string"
-        ? value
-        : [value]
-            .flat()
-            .map((p) => progressMarker(p.phase, p.filesCompleted, p.filesTotal))
-            .join("\n");
     const scenarios: Scenario[] = [];
     const add = (
       name: string,
@@ -13063,191 +12287,7 @@ describe("CodexSecurity orchestration", () => {
       ),
     )(
       "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, split=$split)",
-      async ({ steps, expected, workerFirst, stopBeforeResolution, split }) => {
-        const { root, repository, codexHome, scanDir } =
-          await scanDirectories();
-        const updates: ScanProgress[] = [];
-        const checkpoints: {
-          actual: ScanProgress | undefined;
-          expected: ScanProgress;
-        }[] = [];
-        let tracker: ScanCostTracker | undefined;
-        const originalStart = ScanCostTracker.prototype.start;
-        const starting = spyOn(
-          ScanCostTracker.prototype,
-          "start",
-        ).mockImplementation(function (
-          this: ScanCostTracker,
-          threadId: string,
-        ) {
-          originalStart.call(this, threadId);
-          if (threadId === "thread-1") tracker = this;
-        });
-        let parentPath = "",
-          workerPath = "";
-        const originalReaddir = fsPromises.readdir;
-        const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
-          ...args: Parameters<typeof originalReaddir>
-        ) => {
-          const entries = await originalReaddir(...args);
-          if (String(args[0]) !== dirname(parentPath)) return entries;
-          const first = basename(workerFirst ? workerPath : parentPath);
-          return entries.toSorted(
-            (left, right) =>
-              Number(String(right.name) === first) -
-              Number(String(left.name) === first),
-          );
-        }) as typeof originalReaddir);
-        const client = TestClient.withDependencies({
-          ...scanRuntimeDependencies(codexHome, scanDir),
-          runWorkbench: async (
-            _options: unknown,
-            args: readonly string[],
-            input?: string,
-          ): Promise<JsonObject> =>
-            args[0] === "register-cli-scan"
-              ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-              : mockWorkbench(args, input),
-          createCodex: codexFactory(async () => {
-            await copyCompletedScan(root);
-            parentPath = await writeUsageSession(codexHome, "thread-1", {});
-            workerPath = await writeUsageSession(
-              codexHome,
-              "worker-thread",
-              {},
-              { parent: "thread-1" },
-            );
-            async function* events(): AsyncGenerator<ThreadEvent> {
-              expect(tracker).toBeDefined();
-              await tracker!.stop();
-              for (const [index, step] of steps.entries()) {
-                if (step[0] === "resolve") {
-                  if (stopBeforeResolution) {
-                    await tracker!.stop();
-                    await tracker!.refresh();
-                  }
-                  continue;
-                }
-                if (step[0] === "poll") await tracker!.refresh();
-                else if (step[0] === "check")
-                  checkpoints.push({
-                    actual: updates.at(-1),
-                    expected: step[1],
-                  });
-                else if (step[0] === "live-changed")
-                  yield completedCommand(
-                    `${step[1]} displayed`,
-                    text(step[2]),
-                    `item-${index}`,
-                  );
-                else if (step[0] === "save-response")
-                  await appendFile(
-                    parentPath,
-                    jsonLines([
-                      {
-                        type: "response_item",
-                        payload: {
-                          type: "message",
-                          role: "assistant",
-                          content: [
-                            { type: "output_text", text: text(step[2]) },
-                          ],
-                        },
-                      },
-                    ]) + "\n",
-                  );
-                else if (step[0] === "live-message")
-                  yield {
-                    type: "item.completed",
-                    item: {
-                      id: `item-${index}`,
-                      type: "agent_message",
-                      text: text(step[2]),
-                    },
-                  };
-                else if (step[0] === "save-message")
-                  await appendFile(
-                    parentPath,
-                    jsonLines([
-                      {
-                        type: "event_msg",
-                        payload: {
-                          type: "item_completed",
-                          item: {
-                            type: "AgentMessage",
-                            id: `native-${index}`,
-                            content: [{ type: "Text", text: text(step[2]) }],
-                          },
-                        },
-                      },
-                    ]) + "\n",
-                  );
-                else if (step[0] === "live")
-                  yield completedCommand(
-                    step[1],
-                    text(step[2]),
-                    `item-${index}`,
-                  );
-                else if (step[0] === "save")
-                  await appendFile(
-                    parentPath,
-                    jsonLines([
-                      nativeCommand(step[1], text(step[2]), `native-${index}`),
-                    ]) + "\n",
-                  );
-                else
-                  await appendFile(
-                    step[0] === "additional-worker"
-                      ? await writeUsageSession(
-                          codexHome,
-                          "followup-worker-thread",
-                          {},
-                          { parent: "thread-1" },
-                        )
-                      : step[0] === "receipt"
-                        ? parentPath
-                        : workerPath,
-                    jsonLines([
-                      {
-                        type: "response_item",
-                        payload: {
-                          type: "custom_tool_call_output",
-                          call_id: `worker-${index}`,
-                          output: text(step[1]),
-                        },
-                      },
-                    ]) + "\n",
-                  );
-                if (
-                  split &&
-                  (step[0].startsWith("save") || step[0] === "receipt")
-                )
-                  await tracker!.refresh();
-              }
-              await tracker!.refresh();
-              await tracker!.refresh();
-              await tracker!.stop();
-            }
-            return { events: completedEvents("thread-1", events()) };
-          }),
-        });
-        try {
-          await client.run(repository, {
-            onProgress: (update) => updates.push(update),
-          });
-          expect(updates.at(-1)).toEqual(expected);
-          for (const checkpoint of checkpoints)
-            expect(checkpoint.actual).toEqual(checkpoint.expected);
-          const settled = [...updates];
-          await tracker!.refresh();
-          await tracker!.stop();
-          expect(updates).toEqual(settled);
-        } finally {
-          await client.close();
-          starting.mockRestore();
-          listing.mockRestore();
-        }
-      },
+      (scenario) => runProgressScenario(scenario),
     );
   });
 
@@ -13285,13 +12325,6 @@ describe("CodexSecurity orchestration", () => {
       stopBeforeResolution?: boolean;
       partitions?: readonly boolean[];
     };
-    const text = (value: Value) =>
-      typeof value === "string"
-        ? value
-        : [value]
-            .flat()
-            .map((p) => progressMarker(p.phase, p.filesCompleted, p.filesTotal))
-            .join("\n");
     const scenarios: Scenario[] = [];
     const add = (
       name: string,
@@ -13410,191 +12443,7 @@ describe("CodexSecurity orchestration", () => {
       ),
     )(
       "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, split=$split)",
-      async ({ steps, expected, workerFirst, stopBeforeResolution, split }) => {
-        const { root, repository, codexHome, scanDir } =
-          await scanDirectories();
-        const updates: ScanProgress[] = [];
-        const checkpoints: {
-          actual: ScanProgress | undefined;
-          expected: ScanProgress;
-        }[] = [];
-        let tracker: ScanCostTracker | undefined;
-        const originalStart = ScanCostTracker.prototype.start;
-        const starting = spyOn(
-          ScanCostTracker.prototype,
-          "start",
-        ).mockImplementation(function (
-          this: ScanCostTracker,
-          threadId: string,
-        ) {
-          originalStart.call(this, threadId);
-          if (threadId === "thread-1") tracker = this;
-        });
-        let parentPath = "",
-          workerPath = "";
-        const originalReaddir = fsPromises.readdir;
-        const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
-          ...args: Parameters<typeof originalReaddir>
-        ) => {
-          const entries = await originalReaddir(...args);
-          if (String(args[0]) !== dirname(parentPath)) return entries;
-          const first = basename(workerFirst ? workerPath : parentPath);
-          return entries.toSorted(
-            (left, right) =>
-              Number(String(right.name) === first) -
-              Number(String(left.name) === first),
-          );
-        }) as typeof originalReaddir);
-        const client = TestClient.withDependencies({
-          ...scanRuntimeDependencies(codexHome, scanDir),
-          runWorkbench: async (
-            _options: unknown,
-            args: readonly string[],
-            input?: string,
-          ): Promise<JsonObject> =>
-            args[0] === "register-cli-scan"
-              ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-              : mockWorkbench(args, input),
-          createCodex: codexFactory(async () => {
-            await copyCompletedScan(root);
-            parentPath = await writeUsageSession(codexHome, "thread-1", {});
-            workerPath = await writeUsageSession(
-              codexHome,
-              "worker-thread",
-              {},
-              { parent: "thread-1" },
-            );
-            async function* events(): AsyncGenerator<ThreadEvent> {
-              expect(tracker).toBeDefined();
-              await tracker!.stop();
-              for (const [index, step] of steps.entries()) {
-                if (step[0] === "resolve") {
-                  if (stopBeforeResolution) {
-                    await tracker!.stop();
-                    await tracker!.refresh();
-                  }
-                  continue;
-                }
-                if (step[0] === "poll") await tracker!.refresh();
-                else if (step[0] === "check")
-                  checkpoints.push({
-                    actual: updates.at(-1),
-                    expected: step[1],
-                  });
-                else if (step[0] === "live-changed")
-                  yield completedCommand(
-                    `${step[1]} displayed`,
-                    text(step[2]),
-                    `item-${index}`,
-                  );
-                else if (step[0] === "save-response")
-                  await appendFile(
-                    parentPath,
-                    jsonLines([
-                      {
-                        type: "response_item",
-                        payload: {
-                          type: "message",
-                          role: "assistant",
-                          content: [
-                            { type: "output_text", text: text(step[2]) },
-                          ],
-                        },
-                      },
-                    ]) + "\n",
-                  );
-                else if (step[0] === "live-message")
-                  yield {
-                    type: "item.completed",
-                    item: {
-                      id: `item-${index}`,
-                      type: "agent_message",
-                      text: text(step[2]),
-                    },
-                  };
-                else if (step[0] === "save-message")
-                  await appendFile(
-                    parentPath,
-                    jsonLines([
-                      {
-                        type: "event_msg",
-                        payload: {
-                          type: "item_completed",
-                          item: {
-                            type: "AgentMessage",
-                            id: `native-${index}`,
-                            content: [{ type: "Text", text: text(step[2]) }],
-                          },
-                        },
-                      },
-                    ]) + "\n",
-                  );
-                else if (step[0] === "live")
-                  yield completedCommand(
-                    step[1],
-                    text(step[2]),
-                    `item-${index}`,
-                  );
-                else if (step[0] === "save")
-                  await appendFile(
-                    parentPath,
-                    jsonLines([
-                      nativeCommand(step[1], text(step[2]), `native-${index}`),
-                    ]) + "\n",
-                  );
-                else
-                  await appendFile(
-                    step[0] === "additional-worker"
-                      ? await writeUsageSession(
-                          codexHome,
-                          "followup-worker-thread",
-                          {},
-                          { parent: "thread-1" },
-                        )
-                      : step[0] === "receipt"
-                        ? parentPath
-                        : workerPath,
-                    jsonLines([
-                      {
-                        type: "response_item",
-                        payload: {
-                          type: "custom_tool_call_output",
-                          call_id: `worker-${index}`,
-                          output: text(step[1]),
-                        },
-                      },
-                    ]) + "\n",
-                  );
-                if (
-                  split &&
-                  (step[0].startsWith("save") || step[0] === "receipt")
-                )
-                  await tracker!.refresh();
-              }
-              await tracker!.refresh();
-              await tracker!.refresh();
-              await tracker!.stop();
-            }
-            return { events: completedEvents("thread-1", events()) };
-          }),
-        });
-        try {
-          await client.run(repository, {
-            onProgress: (update) => updates.push(update),
-          });
-          expect(updates.at(-1)).toEqual(expected);
-          for (const checkpoint of checkpoints)
-            expect(checkpoint.actual).toEqual(checkpoint.expected);
-          const settled = [...updates];
-          await tracker!.refresh();
-          await tracker!.stop();
-          expect(updates).toEqual(settled);
-        } finally {
-          await client.close();
-          starting.mockRestore();
-          listing.mockRestore();
-        }
-      },
+      (scenario) => runProgressScenario(scenario),
     );
   });
 
@@ -13786,191 +12635,7 @@ describe("CodexSecurity orchestration", () => {
       ),
     )(
       "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, split=$split)",
-      async ({ steps, expected, workerFirst, stopBeforeResolution, split }) => {
-        const { root, repository, codexHome, scanDir } =
-          await scanDirectories();
-        const updates: ScanProgress[] = [];
-        const checkpoints: {
-          actual: ScanProgress | undefined;
-          expected: ScanProgress;
-        }[] = [];
-        let tracker: ScanCostTracker | undefined;
-        const originalStart = ScanCostTracker.prototype.start;
-        const starting = spyOn(
-          ScanCostTracker.prototype,
-          "start",
-        ).mockImplementation(function (
-          this: ScanCostTracker,
-          threadId: string,
-        ) {
-          originalStart.call(this, threadId);
-          if (threadId === "thread-1") tracker = this;
-        });
-        let parentPath = "",
-          workerPath = "";
-        const originalReaddir = fsPromises.readdir;
-        const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
-          ...args: Parameters<typeof originalReaddir>
-        ) => {
-          const entries = await originalReaddir(...args);
-          if (String(args[0]) !== dirname(parentPath)) return entries;
-          const first = basename(workerFirst ? workerPath : parentPath);
-          return entries.toSorted(
-            (left, right) =>
-              Number(String(right.name) === first) -
-              Number(String(left.name) === first),
-          );
-        }) as typeof originalReaddir);
-        const client = TestClient.withDependencies({
-          ...scanRuntimeDependencies(codexHome, scanDir),
-          runWorkbench: async (
-            _options: unknown,
-            args: readonly string[],
-            input?: string,
-          ): Promise<JsonObject> =>
-            args[0] === "register-cli-scan"
-              ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-              : mockWorkbench(args, input),
-          createCodex: codexFactory(async () => {
-            await copyCompletedScan(root);
-            parentPath = await writeUsageSession(codexHome, "thread-1", {});
-            workerPath = await writeUsageSession(
-              codexHome,
-              "worker-thread",
-              {},
-              { parent: "thread-1" },
-            );
-            async function* events(): AsyncGenerator<ThreadEvent> {
-              expect(tracker).toBeDefined();
-              await tracker!.stop();
-              for (const [index, step] of steps.entries()) {
-                if (step[0] === "resolve") {
-                  if (stopBeforeResolution) {
-                    await tracker!.stop();
-                    await tracker!.refresh();
-                  }
-                  continue;
-                }
-                if (step[0] === "poll") await tracker!.refresh();
-                else if (step[0] === "check")
-                  checkpoints.push({
-                    actual: updates.at(-1),
-                    expected: step[1],
-                  });
-                else if (step[0] === "live-changed")
-                  yield completedCommand(
-                    `${step[1]} displayed`,
-                    text(step[2]),
-                    `item-${index}`,
-                  );
-                else if (step[0] === "save-response")
-                  await appendFile(
-                    parentPath,
-                    jsonLines([
-                      {
-                        type: "response_item",
-                        payload: {
-                          type: "message",
-                          role: "assistant",
-                          content: [
-                            { type: "output_text", text: text(step[2]) },
-                          ],
-                        },
-                      },
-                    ]) + "\n",
-                  );
-                else if (step[0] === "live-message")
-                  yield {
-                    type: "item.completed",
-                    item: {
-                      id: `item-${index}`,
-                      type: "agent_message",
-                      text: text(step[2]),
-                    },
-                  };
-                else if (step[0] === "save-message")
-                  await appendFile(
-                    parentPath,
-                    jsonLines([
-                      {
-                        type: "event_msg",
-                        payload: {
-                          type: "item_completed",
-                          item: {
-                            type: "AgentMessage",
-                            id: `native-${index}`,
-                            content: [{ type: "Text", text: text(step[2]) }],
-                          },
-                        },
-                      },
-                    ]) + "\n",
-                  );
-                else if (step[0] === "live")
-                  yield completedCommand(
-                    step[1],
-                    text(step[2]),
-                    `item-${index}`,
-                  );
-                else if (step[0] === "save")
-                  await appendFile(
-                    parentPath,
-                    jsonLines([
-                      nativeCommand(step[1], text(step[2]), `native-${index}`),
-                    ]) + "\n",
-                  );
-                else
-                  await appendFile(
-                    step[0] === "additional-worker"
-                      ? await writeUsageSession(
-                          codexHome,
-                          "followup-worker-thread",
-                          {},
-                          { parent: "thread-1" },
-                        )
-                      : step[0] === "receipt"
-                        ? parentPath
-                        : workerPath,
-                    jsonLines([
-                      {
-                        type: "response_item",
-                        payload: {
-                          type: "custom_tool_call_output",
-                          call_id: `worker-${index}`,
-                          output: text(step[1]),
-                        },
-                      },
-                    ]) + "\n",
-                  );
-                if (
-                  split &&
-                  (step[0].startsWith("save") || step[0] === "receipt")
-                )
-                  await tracker!.refresh();
-              }
-              await tracker!.refresh();
-              await tracker!.refresh();
-              await tracker!.stop();
-            }
-            return { events: completedEvents("thread-1", events()) };
-          }),
-        });
-        try {
-          await client.run(repository, {
-            onProgress: (update) => updates.push(update),
-          });
-          expect(updates.at(-1)).toEqual(expected);
-          for (const checkpoint of checkpoints)
-            expect(checkpoint.actual).toEqual(checkpoint.expected);
-          const settled = [...updates];
-          await tracker!.refresh();
-          await tracker!.stop();
-          expect(updates).toEqual(settled);
-        } finally {
-          await client.close();
-          starting.mockRestore();
-          listing.mockRestore();
-        }
-      },
+      (scenario) => runProgressScenario(scenario),
     );
   });
 
@@ -14200,191 +12865,7 @@ describe("CodexSecurity orchestration", () => {
       ),
     )(
       "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, split=$split)",
-      async ({ steps, expected, workerFirst, stopBeforeResolution, split }) => {
-        const { root, repository, codexHome, scanDir } =
-          await scanDirectories();
-        const updates: ScanProgress[] = [];
-        const checkpoints: {
-          actual: ScanProgress | undefined;
-          expected: ScanProgress;
-        }[] = [];
-        let tracker: ScanCostTracker | undefined;
-        const originalStart = ScanCostTracker.prototype.start;
-        const starting = spyOn(
-          ScanCostTracker.prototype,
-          "start",
-        ).mockImplementation(function (
-          this: ScanCostTracker,
-          threadId: string,
-        ) {
-          originalStart.call(this, threadId);
-          if (threadId === "thread-1") tracker = this;
-        });
-        let parentPath = "",
-          workerPath = "";
-        const originalReaddir = fsPromises.readdir;
-        const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
-          ...args: Parameters<typeof originalReaddir>
-        ) => {
-          const entries = await originalReaddir(...args);
-          if (String(args[0]) !== dirname(parentPath)) return entries;
-          const first = basename(workerFirst ? workerPath : parentPath);
-          return entries.toSorted(
-            (left, right) =>
-              Number(String(right.name) === first) -
-              Number(String(left.name) === first),
-          );
-        }) as typeof originalReaddir);
-        const client = TestClient.withDependencies({
-          ...scanRuntimeDependencies(codexHome, scanDir),
-          runWorkbench: async (
-            _options: unknown,
-            args: readonly string[],
-            input?: string,
-          ): Promise<JsonObject> =>
-            args[0] === "register-cli-scan"
-              ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-              : mockWorkbench(args, input),
-          createCodex: codexFactory(async () => {
-            await copyCompletedScan(root);
-            parentPath = await writeUsageSession(codexHome, "thread-1", {});
-            workerPath = await writeUsageSession(
-              codexHome,
-              "worker-thread",
-              {},
-              { parent: "thread-1" },
-            );
-            async function* events(): AsyncGenerator<ThreadEvent> {
-              expect(tracker).toBeDefined();
-              await tracker!.stop();
-              for (const [index, step] of steps.entries()) {
-                if (step[0] === "resolve") {
-                  if (stopBeforeResolution) {
-                    await tracker!.stop();
-                    await tracker!.refresh();
-                  }
-                  continue;
-                }
-                if (step[0] === "poll") await tracker!.refresh();
-                else if (step[0] === "check")
-                  checkpoints.push({
-                    actual: updates.at(-1),
-                    expected: step[1],
-                  });
-                else if (step[0] === "live-changed")
-                  yield completedCommand(
-                    `${step[1]} displayed`,
-                    text(step[2]),
-                    `item-${index}`,
-                  );
-                else if (step[0] === "save-response")
-                  await appendFile(
-                    parentPath,
-                    jsonLines([
-                      {
-                        type: "response_item",
-                        payload: {
-                          type: "message",
-                          role: "assistant",
-                          content: [
-                            { type: "output_text", text: text(step[2]) },
-                          ],
-                        },
-                      },
-                    ]) + "\n",
-                  );
-                else if (step[0] === "live-message")
-                  yield {
-                    type: "item.completed",
-                    item: {
-                      id: `item-${index}`,
-                      type: "agent_message",
-                      text: text(step[2]),
-                    },
-                  };
-                else if (step[0] === "save-message")
-                  await appendFile(
-                    parentPath,
-                    jsonLines([
-                      {
-                        type: "event_msg",
-                        payload: {
-                          type: "item_completed",
-                          item: {
-                            type: "AgentMessage",
-                            id: `native-${index}`,
-                            content: [{ type: "Text", text: text(step[2]) }],
-                          },
-                        },
-                      },
-                    ]) + "\n",
-                  );
-                else if (step[0] === "live")
-                  yield completedCommand(
-                    step[1],
-                    text(step[2]),
-                    `item-${index}`,
-                  );
-                else if (step[0] === "save")
-                  await appendFile(
-                    parentPath,
-                    jsonLines([
-                      nativeCommand(step[1], text(step[2]), `native-${index}`),
-                    ]) + "\n",
-                  );
-                else
-                  await appendFile(
-                    step[0] === "additional-worker"
-                      ? await writeUsageSession(
-                          codexHome,
-                          "followup-worker-thread",
-                          {},
-                          { parent: "thread-1" },
-                        )
-                      : step[0] === "receipt"
-                        ? parentPath
-                        : workerPath,
-                    jsonLines([
-                      {
-                        type: "response_item",
-                        payload: {
-                          type: "custom_tool_call_output",
-                          call_id: `worker-${index}`,
-                          output: text(step[1]),
-                        },
-                      },
-                    ]) + "\n",
-                  );
-                if (
-                  split &&
-                  (step[0].startsWith("save") || step[0] === "receipt")
-                )
-                  await tracker!.refresh();
-              }
-              await tracker!.refresh();
-              await tracker!.refresh();
-              await tracker!.stop();
-            }
-            return { events: completedEvents("thread-1", events()) };
-          }),
-        });
-        try {
-          await client.run(repository, {
-            onProgress: (update) => updates.push(update),
-          });
-          expect(updates.at(-1)).toEqual(expected);
-          for (const checkpoint of checkpoints)
-            expect(checkpoint.actual).toEqual(checkpoint.expected);
-          const settled = [...updates];
-          await tracker!.refresh();
-          await tracker!.stop();
-          expect(updates).toEqual(settled);
-        } finally {
-          await client.close();
-          starting.mockRestore();
-          listing.mockRestore();
-        }
-      },
+      (scenario) => runProgressScenario(scenario),
     );
   });
 
@@ -14564,191 +13045,7 @@ describe("CodexSecurity orchestration", () => {
       ),
     )(
       "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, split=$split)",
-      async ({ steps, expected, workerFirst, stopBeforeResolution, split }) => {
-        const { root, repository, codexHome, scanDir } =
-          await scanDirectories();
-        const updates: ScanProgress[] = [];
-        const checkpoints: {
-          actual: ScanProgress | undefined;
-          expected: ScanProgress;
-        }[] = [];
-        let tracker: ScanCostTracker | undefined;
-        const originalStart = ScanCostTracker.prototype.start;
-        const starting = spyOn(
-          ScanCostTracker.prototype,
-          "start",
-        ).mockImplementation(function (
-          this: ScanCostTracker,
-          threadId: string,
-        ) {
-          originalStart.call(this, threadId);
-          if (threadId === "thread-1") tracker = this;
-        });
-        let parentPath = "",
-          workerPath = "";
-        const originalReaddir = fsPromises.readdir;
-        const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
-          ...args: Parameters<typeof originalReaddir>
-        ) => {
-          const entries = await originalReaddir(...args);
-          if (String(args[0]) !== dirname(parentPath)) return entries;
-          const first = basename(workerFirst ? workerPath : parentPath);
-          return entries.toSorted(
-            (left, right) =>
-              Number(String(right.name) === first) -
-              Number(String(left.name) === first),
-          );
-        }) as typeof originalReaddir);
-        const client = TestClient.withDependencies({
-          ...scanRuntimeDependencies(codexHome, scanDir),
-          runWorkbench: async (
-            _options: unknown,
-            args: readonly string[],
-            input?: string,
-          ): Promise<JsonObject> =>
-            args[0] === "register-cli-scan"
-              ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-              : mockWorkbench(args, input),
-          createCodex: codexFactory(async () => {
-            await copyCompletedScan(root);
-            parentPath = await writeUsageSession(codexHome, "thread-1", {});
-            workerPath = await writeUsageSession(
-              codexHome,
-              "worker-thread",
-              {},
-              { parent: "thread-1" },
-            );
-            async function* events(): AsyncGenerator<ThreadEvent> {
-              expect(tracker).toBeDefined();
-              await tracker!.stop();
-              for (const [index, step] of steps.entries()) {
-                if (step[0] === "resolve") {
-                  if (stopBeforeResolution) {
-                    await tracker!.stop();
-                    await tracker!.refresh();
-                  }
-                  continue;
-                }
-                if (step[0] === "poll") await tracker!.refresh();
-                else if (step[0] === "check")
-                  checkpoints.push({
-                    actual: updates.at(-1),
-                    expected: step[1],
-                  });
-                else if (step[0] === "live-changed")
-                  yield completedCommand(
-                    `${step[1]} displayed`,
-                    text(step[2]),
-                    `item-${index}`,
-                  );
-                else if (step[0] === "save-response")
-                  await appendFile(
-                    parentPath,
-                    jsonLines([
-                      {
-                        type: "response_item",
-                        payload: {
-                          type: "message",
-                          role: "assistant",
-                          content: [
-                            { type: "output_text", text: text(step[2]) },
-                          ],
-                        },
-                      },
-                    ]) + "\n",
-                  );
-                else if (step[0] === "live-message")
-                  yield {
-                    type: "item.completed",
-                    item: {
-                      id: `item-${index}`,
-                      type: "agent_message",
-                      text: text(step[2]),
-                    },
-                  };
-                else if (step[0] === "save-message")
-                  await appendFile(
-                    parentPath,
-                    jsonLines([
-                      {
-                        type: "event_msg",
-                        payload: {
-                          type: "item_completed",
-                          item: {
-                            type: "AgentMessage",
-                            id: `native-${index}`,
-                            content: [{ type: "Text", text: text(step[2]) }],
-                          },
-                        },
-                      },
-                    ]) + "\n",
-                  );
-                else if (step[0] === "live")
-                  yield completedCommand(
-                    step[1],
-                    text(step[2]),
-                    `item-${index}`,
-                  );
-                else if (step[0] === "save")
-                  await appendFile(
-                    parentPath,
-                    jsonLines([
-                      nativeCommand(step[1], text(step[2]), `native-${index}`),
-                    ]) + "\n",
-                  );
-                else
-                  await appendFile(
-                    step[0] === "additional-worker"
-                      ? await writeUsageSession(
-                          codexHome,
-                          "followup-worker-thread",
-                          {},
-                          { parent: "thread-1" },
-                        )
-                      : step[0] === "receipt"
-                        ? parentPath
-                        : workerPath,
-                    jsonLines([
-                      {
-                        type: "response_item",
-                        payload: {
-                          type: "custom_tool_call_output",
-                          call_id: `worker-${index}`,
-                          output: text(step[1]),
-                        },
-                      },
-                    ]) + "\n",
-                  );
-                if (
-                  split &&
-                  (step[0].startsWith("save") || step[0] === "receipt")
-                )
-                  await tracker!.refresh();
-              }
-              await tracker!.refresh();
-              await tracker!.refresh();
-              await tracker!.stop();
-            }
-            return { events: completedEvents("thread-1", events()) };
-          }),
-        });
-        try {
-          await client.run(repository, {
-            onProgress: (update) => updates.push(update),
-          });
-          expect(updates.at(-1)).toEqual(expected);
-          for (const checkpoint of checkpoints)
-            expect(checkpoint.actual).toEqual(checkpoint.expected);
-          const settled = [...updates];
-          await tracker!.refresh();
-          await tracker!.stop();
-          expect(updates).toEqual(settled);
-        } finally {
-          await client.close();
-          starting.mockRestore();
-          listing.mockRestore();
-        }
-      },
+      (scenario) => runProgressScenario(scenario),
     );
   });
 
@@ -14984,191 +13281,7 @@ describe("CodexSecurity orchestration", () => {
       ),
     )(
       "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, split=$split)",
-      async ({ steps, expected, workerFirst, stopBeforeResolution, split }) => {
-        const { root, repository, codexHome, scanDir } =
-          await scanDirectories();
-        const updates: ScanProgress[] = [];
-        const checkpoints: {
-          actual: ScanProgress | undefined;
-          expected: ScanProgress;
-        }[] = [];
-        let tracker: ScanCostTracker | undefined;
-        const originalStart = ScanCostTracker.prototype.start;
-        const starting = spyOn(
-          ScanCostTracker.prototype,
-          "start",
-        ).mockImplementation(function (
-          this: ScanCostTracker,
-          threadId: string,
-        ) {
-          originalStart.call(this, threadId);
-          if (threadId === "thread-1") tracker = this;
-        });
-        let parentPath = "",
-          workerPath = "";
-        const originalReaddir = fsPromises.readdir;
-        const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
-          ...args: Parameters<typeof originalReaddir>
-        ) => {
-          const entries = await originalReaddir(...args);
-          if (String(args[0]) !== dirname(parentPath)) return entries;
-          const first = basename(workerFirst ? workerPath : parentPath);
-          return entries.toSorted(
-            (left, right) =>
-              Number(String(right.name) === first) -
-              Number(String(left.name) === first),
-          );
-        }) as typeof originalReaddir);
-        const client = TestClient.withDependencies({
-          ...scanRuntimeDependencies(codexHome, scanDir),
-          runWorkbench: async (
-            _options: unknown,
-            args: readonly string[],
-            input?: string,
-          ): Promise<JsonObject> =>
-            args[0] === "register-cli-scan"
-              ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-              : mockWorkbench(args, input),
-          createCodex: codexFactory(async () => {
-            await copyCompletedScan(root);
-            parentPath = await writeUsageSession(codexHome, "thread-1", {});
-            workerPath = await writeUsageSession(
-              codexHome,
-              "worker-thread",
-              {},
-              { parent: "thread-1" },
-            );
-            async function* events(): AsyncGenerator<ThreadEvent> {
-              expect(tracker).toBeDefined();
-              await tracker!.stop();
-              for (const [index, step] of steps.entries()) {
-                if (step[0] === "resolve") {
-                  if (stopBeforeResolution) {
-                    await tracker!.stop();
-                    await tracker!.refresh();
-                  }
-                  continue;
-                }
-                if (step[0] === "poll") await tracker!.refresh();
-                else if (step[0] === "check")
-                  checkpoints.push({
-                    actual: updates.at(-1),
-                    expected: step[1],
-                  });
-                else if (step[0] === "live-changed")
-                  yield completedCommand(
-                    `${step[1]} displayed`,
-                    text(step[2]),
-                    `item-${index}`,
-                  );
-                else if (step[0] === "save-response")
-                  await appendFile(
-                    parentPath,
-                    jsonLines([
-                      {
-                        type: "response_item",
-                        payload: {
-                          type: "message",
-                          role: "assistant",
-                          content: [
-                            { type: "output_text", text: text(step[2]) },
-                          ],
-                        },
-                      },
-                    ]) + "\n",
-                  );
-                else if (step[0] === "live-message")
-                  yield {
-                    type: "item.completed",
-                    item: {
-                      id: `item-${index}`,
-                      type: "agent_message",
-                      text: text(step[2]),
-                    },
-                  };
-                else if (step[0] === "save-message")
-                  await appendFile(
-                    parentPath,
-                    jsonLines([
-                      {
-                        type: "event_msg",
-                        payload: {
-                          type: "item_completed",
-                          item: {
-                            type: "AgentMessage",
-                            id: `native-${index}`,
-                            content: [{ type: "Text", text: text(step[2]) }],
-                          },
-                        },
-                      },
-                    ]) + "\n",
-                  );
-                else if (step[0] === "live")
-                  yield completedCommand(
-                    step[1],
-                    text(step[2]),
-                    `item-${index}`,
-                  );
-                else if (step[0] === "save")
-                  await appendFile(
-                    parentPath,
-                    jsonLines([
-                      nativeCommand(step[1], text(step[2]), `native-${index}`),
-                    ]) + "\n",
-                  );
-                else
-                  await appendFile(
-                    step[0] === "additional-worker"
-                      ? await writeUsageSession(
-                          codexHome,
-                          "followup-worker-thread",
-                          {},
-                          { parent: "thread-1" },
-                        )
-                      : step[0] === "receipt"
-                        ? parentPath
-                        : workerPath,
-                    jsonLines([
-                      {
-                        type: "response_item",
-                        payload: {
-                          type: "custom_tool_call_output",
-                          call_id: `worker-${index}`,
-                          output: text(step[1]),
-                        },
-                      },
-                    ]) + "\n",
-                  );
-                if (
-                  split &&
-                  (step[0].startsWith("save") || step[0] === "receipt")
-                )
-                  await tracker!.refresh();
-              }
-              await tracker!.refresh();
-              await tracker!.refresh();
-              await tracker!.stop();
-            }
-            return { events: completedEvents("thread-1", events()) };
-          }),
-        });
-        try {
-          await client.run(repository, {
-            onProgress: (update) => updates.push(update),
-          });
-          expect(updates.at(-1)).toEqual(expected);
-          for (const checkpoint of checkpoints)
-            expect(checkpoint.actual).toEqual(checkpoint.expected);
-          const settled = [...updates];
-          await tracker!.refresh();
-          await tracker!.stop();
-          expect(updates).toEqual(settled);
-        } finally {
-          await client.close();
-          starting.mockRestore();
-          listing.mockRestore();
-        }
-      },
+      (scenario) => runProgressScenario(scenario),
     );
   });
 
@@ -15429,190 +13542,11 @@ describe("CodexSecurity orchestration", () => {
       ),
     )(
       "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, split=$split)",
-      async ({ steps, expected, workerFirst, stopBeforeResolution, split }) => {
-        const { root, repository, codexHome, scanDir } =
-          await scanDirectories();
-        const updates: ScanProgress[] = [];
-        const checkpoints: {
-          actual: ScanProgress | undefined;
-          expected: ScanProgress;
-        }[] = [];
-        let tracker: ScanCostTracker | undefined;
-        const originalStart = ScanCostTracker.prototype.start;
-        const starting = spyOn(
-          ScanCostTracker.prototype,
-          "start",
-        ).mockImplementation(function (
-          this: ScanCostTracker,
-          threadId: string,
-        ) {
-          originalStart.call(this, threadId);
-          if (threadId === "thread-1") tracker = this;
-        });
-        let parentPath = "",
-          workerPath = "";
-        const originalReaddir = fsPromises.readdir;
-        const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
-          ...args: Parameters<typeof originalReaddir>
-        ) => {
-          const entries = await originalReaddir(...args);
-          if (String(args[0]) !== dirname(parentPath)) return entries;
-          const first = basename(workerFirst ? workerPath : parentPath);
-          return entries.toSorted(
-            (left, right) =>
-              Number(String(right.name) === first) -
-              Number(String(left.name) === first),
-          );
-        }) as typeof originalReaddir);
-        const client = TestClient.withDependencies({
-          ...scanRuntimeDependencies(codexHome, scanDir),
-          runWorkbench: async (
-            _options: unknown,
-            args: readonly string[],
-            input?: string,
-          ): Promise<JsonObject> =>
-            args[0] === "register-cli-scan"
-              ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-              : mockWorkbench(args, input),
-          createCodex: codexFactory(async () => {
-            await copyCompletedScan(root);
-            parentPath = await writeUsageSession(codexHome, "thread-1", {});
-            workerPath = await writeUsageSession(
-              codexHome,
-              "worker-thread",
-              {},
-              { parent: "thread-1" },
-            );
-            async function* events(): AsyncGenerator<ThreadEvent> {
-              expect(tracker).toBeDefined();
-              await tracker!.stop();
-              const resolution = steps.findLastIndex(
-                (step) =>
-                  (step[0] === "live" || step[0] === "live-message") &&
-                  step[1] === "anchor",
-              );
-              for (const [index, step] of steps.entries()) {
-                if (stopBeforeResolution && index === resolution) {
-                  await tracker!.stop();
-                  await tracker!.refresh();
-                }
-                if (step[0] === "poll") await tracker!.refresh();
-                else if (step[0] === "check")
-                  checkpoints.push({
-                    actual: updates.at(-1),
-                    expected: step[1],
-                  });
-                else if (step[0] === "live-changed")
-                  yield completedCommand(
-                    `${step[1]} displayed`,
-                    text(step[2]),
-                    `item-${index}`,
-                  );
-                else if (step[0] === "save-response")
-                  await appendFile(
-                    parentPath,
-                    jsonLines([
-                      {
-                        type: "response_item",
-                        payload: {
-                          type: "message",
-                          role: "assistant",
-                          content: [
-                            { type: "output_text", text: text(step[2]) },
-                          ],
-                        },
-                      },
-                    ]) + "\n",
-                  );
-                else if (step[0] === "live-message")
-                  yield {
-                    type: "item.completed",
-                    item: {
-                      id: `item-${index}`,
-                      type: "agent_message",
-                      text: text(step[2]),
-                    },
-                  };
-                else if (step[0] === "save-message")
-                  await appendFile(
-                    parentPath,
-                    jsonLines([
-                      {
-                        type: "event_msg",
-                        payload: {
-                          type: "item_completed",
-                          item: {
-                            type: "AgentMessage",
-                            id: `native-${index}`,
-                            content: [{ type: "Text", text: text(step[2]) }],
-                          },
-                        },
-                      },
-                    ]) + "\n",
-                  );
-                else if (step[0] === "live")
-                  yield completedCommand(
-                    step[1],
-                    text(step[2]),
-                    `item-${index}`,
-                  );
-                else if (step[0] === "save")
-                  await appendFile(
-                    parentPath,
-                    jsonLines([
-                      nativeCommand(step[1], text(step[2]), `native-${index}`),
-                    ]) + "\n",
-                  );
-                else
-                  await appendFile(
-                    step[0] === "additional-worker"
-                      ? await writeUsageSession(
-                          codexHome,
-                          "followup-worker-thread",
-                          {},
-                          { parent: "thread-1" },
-                        )
-                      : step[0] === "receipt"
-                        ? parentPath
-                        : workerPath,
-                    jsonLines([
-                      {
-                        type: "response_item",
-                        payload: {
-                          type: "custom_tool_call_output",
-                          call_id: `worker-${index}`,
-                          output: text(step[1]),
-                        },
-                      },
-                    ]) + "\n",
-                  );
-                if (split && step[0].startsWith("save"))
-                  await tracker!.refresh();
-              }
-              await tracker!.refresh();
-              await tracker!.refresh();
-              await tracker!.stop();
-            }
-            return { events: completedEvents("thread-1", events()) };
-          }),
-        });
-        try {
-          await client.run(repository, {
-            onProgress: (update) => updates.push(update),
-          });
-          expect(updates.at(-1)).toEqual(expected);
-          for (const checkpoint of checkpoints)
-            expect(checkpoint.actual).toEqual(checkpoint.expected);
-          const settled = [...updates];
-          await tracker!.refresh();
-          await tracker!.stop();
-          expect(updates).toEqual(settled);
-        } finally {
-          await client.close();
-          starting.mockRestore();
-          listing.mockRestore();
-        }
-      },
+      (scenario) =>
+        runProgressScenario(scenario, {
+          resolveAtLastAnchor: true,
+          pollReceipts: false,
+        }),
     );
   });
 
@@ -15794,181 +13728,11 @@ describe("CodexSecurity orchestration", () => {
       ),
     )(
       "retains $name (workers first=$workerFirst, stop=$stopBeforeResolution, split=$split)",
-      async ({ steps, expected, workerFirst, stopBeforeResolution, split }) => {
-        const { root, repository, codexHome, scanDir } =
-          await scanDirectories();
-        const updates: ScanProgress[] = [];
-        const checkpoints: {
-          actual: ScanProgress | undefined;
-          expected: ScanProgress;
-        }[] = [];
-        let tracker: ScanCostTracker | undefined;
-        const originalStart = ScanCostTracker.prototype.start;
-        const starting = spyOn(
-          ScanCostTracker.prototype,
-          "start",
-        ).mockImplementation(function (
-          this: ScanCostTracker,
-          threadId: string,
-        ) {
-          originalStart.call(this, threadId);
-          if (threadId === "thread-1") tracker = this;
-        });
-        let parentPath = "",
-          workerPath = "";
-        const originalReaddir = fsPromises.readdir;
-        const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
-          ...args: Parameters<typeof originalReaddir>
-        ) => {
-          const entries = await originalReaddir(...args);
-          if (String(args[0]) !== dirname(parentPath)) return entries;
-          const first = basename(workerFirst ? workerPath : parentPath);
-          return entries.toSorted(
-            (left, right) =>
-              Number(String(right.name) === first) -
-              Number(String(left.name) === first),
-          );
-        }) as typeof originalReaddir);
-        const client = TestClient.withDependencies({
-          ...scanRuntimeDependencies(codexHome, scanDir),
-          runWorkbench: async (
-            _options: unknown,
-            args: readonly string[],
-            input?: string,
-          ): Promise<JsonObject> =>
-            args[0] === "register-cli-scan"
-              ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-              : mockWorkbench(args, input),
-          createCodex: codexFactory(async () => {
-            await copyCompletedScan(root);
-            parentPath = await writeUsageSession(codexHome, "thread-1", {});
-            workerPath = await writeUsageSession(
-              codexHome,
-              "worker-thread",
-              {},
-              { parent: "thread-1" },
-            );
-            async function* events(): AsyncGenerator<ThreadEvent> {
-              expect(tracker).toBeDefined();
-              await tracker!.stop();
-              const resolution = steps.findLastIndex(
-                (step) =>
-                  (step[0] === "live" || step[0] === "live-message") &&
-                  step[1] === "anchor",
-              );
-              for (const [index, step] of steps.entries()) {
-                if (stopBeforeResolution && index === resolution) {
-                  await tracker!.stop();
-                  await tracker!.refresh();
-                }
-                if (step[0] === "poll") await tracker!.refresh();
-                else if (step[0] === "check")
-                  checkpoints.push({
-                    actual: updates.at(-1),
-                    expected: step[1],
-                  });
-                else if (step[0] === "live-changed")
-                  yield completedCommand(
-                    `${step[1]} displayed`,
-                    text(step[2]),
-                    `item-${index}`,
-                  );
-                else if (step[0] === "save-response")
-                  await appendFile(
-                    parentPath,
-                    jsonLines([
-                      {
-                        type: "response_item",
-                        payload: {
-                          type: "message",
-                          role: "assistant",
-                          content: [
-                            { type: "output_text", text: text(step[2]) },
-                          ],
-                        },
-                      },
-                    ]) + "\n",
-                  );
-                else if (step[0] === "live-message")
-                  yield {
-                    type: "item.completed",
-                    item: {
-                      id: `item-${index}`,
-                      type: "agent_message",
-                      text: text(step[2]),
-                    },
-                  };
-                else if (step[0] === "save-message")
-                  await appendFile(
-                    parentPath,
-                    jsonLines([
-                      {
-                        type: "event_msg",
-                        payload: {
-                          type: "item_completed",
-                          item: {
-                            type: "AgentMessage",
-                            id: `native-${index}`,
-                            content: [{ type: "Text", text: text(step[2]) }],
-                          },
-                        },
-                      },
-                    ]) + "\n",
-                  );
-                else if (step[0] === "live")
-                  yield completedCommand(
-                    step[1],
-                    text(step[2]),
-                    `item-${index}`,
-                  );
-                else if (step[0] === "save")
-                  await appendFile(
-                    parentPath,
-                    jsonLines([
-                      nativeCommand(step[1], text(step[2]), `native-${index}`),
-                    ]) + "\n",
-                  );
-                else
-                  await appendFile(
-                    step[0] === "receipt" ? parentPath : workerPath,
-                    jsonLines([
-                      {
-                        type: "response_item",
-                        payload: {
-                          type: "custom_tool_call_output",
-                          call_id: `worker-${index}`,
-                          output: text(step[1]),
-                        },
-                      },
-                    ]) + "\n",
-                  );
-                if (split && step[0].startsWith("save"))
-                  await tracker!.refresh();
-              }
-              await tracker!.refresh();
-              await tracker!.refresh();
-              await tracker!.stop();
-            }
-            return { events: completedEvents("thread-1", events()) };
-          }),
-        });
-        try {
-          await client.run(repository, {
-            onProgress: (update) => updates.push(update),
-          });
-          expect(updates.at(-1)).toEqual(expected);
-          for (const checkpoint of checkpoints)
-            expect(checkpoint.actual).toEqual(checkpoint.expected);
-          const settled = [...updates];
-          await tracker!.refresh();
-          await tracker!.stop();
-          expect(updates).toEqual(settled);
-        } finally {
-          await client.close();
-          starting.mockRestore();
-          listing.mockRestore();
-        }
-      },
+      (scenario) =>
+        runProgressScenario(scenario, {
+          resolveAtLastAnchor: true,
+          pollReceipts: false,
+        }),
     );
   });
 

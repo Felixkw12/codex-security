@@ -4431,6 +4431,234 @@ describe("live scan cost tracking", () => {
     },
   );
 
+  test.each([
+    ["function_call_output", "text", "completed"],
+    ["custom_tool_call_output", "text", "completed"],
+    ["local_shell_call_output", "text", "completed"],
+    ["local_shell_call_output", "parts", "completed"],
+    ["local_shell_call_output", "text", "failed"],
+    ["message", "text", "completed"],
+  ] as const)(
+    "keeps distinct saved progress receipts after live output (%s, %s, %s)",
+    async (type, shape, status) => {
+      const { home, parent } = await workerSessionFixture();
+      const updates: ScanProgress[] = [];
+      const tracker = costTracker(home, {
+        expectedFilesTotal: 8,
+        onProgress: (update) => updates.push(update),
+      });
+      const discovery: ScanProgress = {
+        phase: "discovery",
+        filesCompleted: 8,
+        filesTotal: 8,
+      };
+      const marker = (phase: ScanProgress["phase"]) =>
+        "CODEX_SECURITY_SCAN_PROGRESS " +
+        JSON.stringify({ ...discovery, phase });
+      tracker.start("scan-thread");
+      try {
+        await tracker.stop();
+        tracker.beginParentTurn(true);
+        const event = completedCommand("inspect-source", marker("discovery"));
+        expect(tracker.recordParentProgress(discovery, event)).toBe(true);
+        tracker.acceptParentProgress(discovery, event);
+        updates.push(discovery);
+        await appendSessionItem(parent, {
+          type: "function_call_output",
+          call_id: "intervening-validation",
+          output: marker("validation"),
+        });
+        await tracker.refresh();
+        expect(updates.at(-1)?.phase).toBe("validation");
+        await appendSessionItem(
+          parent,
+          type === "message"
+            ? {
+                type,
+                role: "assistant",
+                content: [{ type: "output_text", text: marker("discovery") }],
+              }
+            : {
+                type,
+                call_id: "distinct-completion",
+                status,
+                output:
+                  shape === "parts"
+                    ? [{ type: "output_text", text: marker("discovery") }]
+                    : marker("discovery"),
+              },
+        );
+        await tracker.refresh();
+        await tracker.refresh();
+        await tracker.stop();
+        expect(updates.map((update) => update.phase)).toEqual(
+          status === "failed" || type === "message"
+            ? ["discovery", "validation"]
+            : ["discovery", "validation", "discovery"],
+        );
+      } finally {
+        await tracker.stop();
+      }
+    },
+  );
+
+  const messageProjectionCases = [
+    [
+      "missing native copy",
+      [
+        ["native", "discovery"],
+        ["response", "validation"],
+        ["response", "discovery"],
+      ],
+      "discovery/validation/discovery",
+    ],
+    [
+      "missing legacy copy",
+      [
+        ["event", "discovery"],
+        ["response", "validation"],
+        ["response", "discovery"],
+      ],
+      "discovery/validation/discovery",
+    ],
+    [
+      "missing response copy",
+      [
+        ["response", "discovery"],
+        ["native", "validation"],
+        ["native", "discovery"],
+      ],
+      "discovery/validation/discovery",
+    ],
+    [
+      "same projection",
+      [
+        ["response", "discovery"],
+        ["response", "validation"],
+        ["response", "discovery"],
+      ],
+      "discovery/validation/discovery",
+    ],
+    [
+      "adjacent copies",
+      [
+        ["native", "discovery"],
+        ["event", "discovery"],
+        ["response", "discovery"],
+        ["native", "validation"],
+        ["event", "validation"],
+        ["response", "validation"],
+      ],
+      "discovery/validation",
+    ],
+    [
+      "delayed copies",
+      [
+        ["native", "discovery"],
+        ["native", "validation"],
+        ["response", "discovery"],
+        ["response", "validation"],
+      ],
+      "discovery/validation",
+    ],
+    [
+      "repeated delayed copies",
+      [
+        ["native", "discovery"],
+        ["native", "validation"],
+        ["native", "discovery"],
+        ["response", "discovery"],
+        ["response", "validation"],
+        ["response", "discovery"],
+      ],
+      "discovery/validation/discovery",
+    ],
+    [
+      "follow-on native counterpart",
+      [
+        ["native", "discovery/validation"],
+        ["response", "attack_path"],
+        ["response", "discovery/validation"],
+        ["native", "discovery/validation"],
+      ],
+      "discovery/validation/attack_path/discovery/validation",
+    ],
+  ] as const;
+
+  test.each(
+    messageProjectionCases.flatMap(([name, rows, expected]) =>
+      [false, true].map((staged) => [name, staged, rows, expected] as const),
+    ),
+  )(
+    "preserves message progress with %s (staged: %p)",
+    async (name, staged, rows, expected) => {
+      const { home, parent } = await workerSessionFixture();
+      const phases: string[] = [];
+      const tracker = costTracker(home, {
+        expectedFilesTotal: 8,
+        onProgress: (update) => phases.push(update.phase),
+      });
+      tracker.start("scan-thread");
+      try {
+        await tracker.stop();
+        tracker.beginParentTurn(true);
+        for (const [index, [projection, sourcePhases]] of rows.entries()) {
+          const text = sourcePhases
+            .split("/")
+            .map(
+              (phase) =>
+                "CODEX_SECURITY_SCAN_PROGRESS " +
+                JSON.stringify({
+                  phase,
+                  filesCompleted: 8,
+                  filesTotal: 8,
+                }),
+            )
+            .join("\n");
+          const record =
+            projection === "native"
+              ? {
+                  type: "event_msg",
+                  payload: {
+                    type: "item_completed",
+                    item: {
+                      type: "AgentMessage",
+                      content: [{ type: "Text", text }],
+                    },
+                  },
+                }
+              : projection === "event"
+                ? {
+                    type: "event_msg",
+                    payload: { type: "agent_message", message: text },
+                  }
+                : {
+                    type: "response_item",
+                    payload: {
+                      type: "message",
+                      role: "assistant",
+                      content: [{ type: "output_text", text }],
+                    },
+                  };
+          await appendFile(parent, JSON.stringify(record) + "\n");
+          if (staged) {
+            await tracker.refresh();
+            // The response must advance immediately; its later native copy
+            // must not compensate for an incorrectly suppressed response.
+            if (name === "follow-on native counterpart" && index >= 2)
+              expect(phases).toEqual(expected.split("/"));
+          }
+        }
+        await tracker.refresh();
+        await tracker.refresh();
+        await tracker.stop();
+        expect(phases).toEqual(expected.split("/"));
+      } finally {
+        await tracker.stop();
+      }
+    },
+  );
+
   test.each([false, true])(
     "rebases message projections after legacy history (history: %p)",
     async (history) => {
