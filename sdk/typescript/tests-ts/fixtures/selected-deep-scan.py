@@ -21,6 +21,23 @@ with sqlite3.connect(payload["database"]) as connection:
         "consecutive_no_new = 2, stop_after_no_new = 2, max_discovery_runs = 2 "
         "WHERE scan_id = ?", (scan_id,),
     )
+    if "worker" in payload:
+        settings = {
+            "codexPath": payload["worker"]["codexPath"],
+            "codexHome": payload["worker"]["codexHome"],
+        }
+        # A newer writer saved both the original owner and worker execution home.
+        owner = {
+            "threadId": payload["ownerThreadId"],
+            "turnId": "synthetic-scan-turn",
+            "startedAt": timestamp,
+            "dedicated": True,
+        }
+        connection.execute(
+            "UPDATE deep_scan_runs SET usage_owner_json = ?, execution_settings_json = ? "
+            "WHERE scan_id = ?",
+            (json.dumps(owner), json.dumps({"version": 1, "settings": settings}), scan_id),
+        )
     discoveries = []
     for kind, label in [("discovery", "review-1"), ("discovery", "review-2"), ("dedup", "merge-1")]:
         draft = dict(payload["draft"])
@@ -53,6 +70,17 @@ with sqlite3.connect(payload["database"]) as connection:
             "VALUES (?, ?, 1, 'succeeded', ?, ?, ?, ?)",
             (scan_id, worker_id, timestamp, timestamp, str(accepted), digest),
         )
+        if label == "review-1" and "worker" in payload:
+            connection.execute(
+                "UPDATE deep_scan_workers SET sdk_thread_id = ? WHERE id = ?",
+                (payload["worker"]["threadId"], worker_id),
+            )
+            connection.execute(
+                "INSERT INTO deep_scan_attempt_sessions "
+                "(scan_id, worker_id, attempt, sdk_thread_id, observed_at) "
+                "VALUES (?, ?, 1, ?, ?)",
+                (scan_id, worker_id, payload["worker"]["threadId"], timestamp),
+            )
         if kind == "discovery":
             discoveries.append(worker_id)
         else:

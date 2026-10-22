@@ -36,8 +36,8 @@ export async function readOriginalParentEvents(
       ) {
         selected = records;
         startedAt =
-          typeof first["timestamp"] === "string"
-            ? Date.parse(first["timestamp"])
+          typeof metadata["timestamp"] === "string"
+            ? Date.parse(metadata["timestamp"])
             : Number.NaN;
       }
     }

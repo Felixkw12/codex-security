@@ -10,6 +10,7 @@ import {
 } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import zlib, { zstdCompressSync } from "node:zlib";
 import { afterEach, expect, test, spyOn } from "bun:test";
 import type { ThreadEvent } from "@openai/codex-sdk";
 import {
@@ -22,6 +23,7 @@ import { completedEvents, preparedRuntime } from "./support/api-events.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
 import { ScanCostTracker } from "../src/cost.js";
+import { runTestInSubprocess } from "./support/test-subprocess.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
@@ -138,10 +140,18 @@ const outcomes = [
   "followup-canceled",
 ] as const;
 type BudgetCompletionFault = "lost" | "before-commit" | "lost-and-canceled";
+const compressionRuntimes = [
+  "decoder-enabled",
+  "without-decoder-budgeted",
+  "without-decoder-optional",
+  "without-decoder-unrelated",
+] as const;
 const cases: {
   outcome: (typeof outcomes)[number];
   budgetCompletionFault?: BudgetCompletionFault;
   initialResumeUsage?: boolean;
+  archivedWorkerUsage?: boolean;
+  compressionRuntime?: (typeof compressionRuntimes)[number];
   unpricedUsage?: boolean;
   cancellationFault?: "status-read" | "deep-state-read" | "cancel-response";
 }[] = [
@@ -195,12 +205,24 @@ const cases: {
     outcome: "canceled-during-resumed-publication",
     initialResumeUsage: true,
   },
+  {
+    outcome: "canceled-during-resumed-publication",
+    initialResumeUsage: true,
+    archivedWorkerUsage: true,
+  },
+  ...compressionRuntimes.map((compressionRuntime) => ({
+    outcome: "restart" as const,
+    archivedWorkerUsage: true,
+    compressionRuntime,
+  })),
 ];
 for (const {
   outcome,
   budgetCompletionFault,
   cancellationFault,
   initialResumeUsage,
+  archivedWorkerUsage,
+  compressionRuntime,
   unpricedUsage,
 } of cases) {
   const resumedStop = outcome.includes("-resumed-");
@@ -215,13 +237,15 @@ for (const {
   const name =
     outcome === "followup-canceled"
       ? "SDK preserves a selected aggregate when its follow-up is canceled"
-      : `SDK handles selected aggregate: ${outcome}${budgetCompletionFault ? ` (budget completion ${budgetCompletionFault})` : ""}${cancellationFault ? ` (cancellation ${cancellationFault})` : ""}${initialResumeUsage ? " (initial resume cost)" : ""}${unpricedUsage ? " (unpriced remainder)" : ""}`;
+      : `SDK handles selected aggregate: ${outcome}${budgetCompletionFault ? ` (budget completion ${budgetCompletionFault})` : ""}${cancellationFault ? ` (cancellation ${cancellationFault})` : ""}${initialResumeUsage ? " (initial resume cost)" : ""}${archivedWorkerUsage ? " (compressed archived worker)" : ""}${compressionRuntime ? ` (${compressionRuntime})` : ""}${unpricedUsage ? " (unpriced remainder)" : ""}`;
   const runCase = async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
     const scanDir = join(root, "scan");
     const codexHome = join(root, "codex-home");
     const stateDir = join(root, "state");
+    const workerHome = join(root, "recorded-worker-home");
+    const workerThreadId = "0fb9f0de-939e-422d-9d75-1ddcaa066d81";
     await Promise.all([
       mkdir(repository),
       mkdir(scanDir, { mode: 0o700 }),
@@ -578,6 +602,16 @@ for (const {
                           terminalReason: loseCompletionResponse
                             ? "capped"
                             : "saturated",
+                          ...(archivedWorkerUsage
+                            ? {
+                                ownerThreadId: threadId,
+                                worker: {
+                                  threadId: workerThreadId,
+                                  codexHome: workerHome,
+                                  codexPath: process.execPath,
+                                },
+                              }
+                            : {}),
                         }),
                         encoding: "utf8",
                         env: environment,
@@ -671,7 +705,8 @@ for (const {
         await expect(
           client.run(repository, {
             mode: "deep",
-            postScanPrompt: resumedStop ? undefined : followUp,
+            postScanPrompt:
+              resumedStop || compressionRuntime ? undefined : followUp,
             ...(budgeted ? { maxCostUsd: 0.004 } : {}),
           }),
         ).rejects.toThrow("Synthetic publication write failure");
@@ -689,7 +724,76 @@ for (const {
         expect(commands).not.toContain("fail-scan");
         await client.close();
         client = makeClient();
-        if (initialResumeUsage) await recordBudgetUsage();
+        if (archivedWorkerUsage) {
+          const archive = join(workerHome, "archived_sessions");
+          await mkdir(archive, { recursive: true });
+          const timestamp = new Date().toISOString();
+          const archivedThreadId =
+            compressionRuntime === "without-decoder-unrelated"
+              ? "01fb9839-ef7a-4cff-965b-4477cc64ee90"
+              : workerThreadId;
+          await writeFile(
+            join(archive, `rollout-${archivedThreadId}.jsonl.zst`),
+            zstdCompressSync(
+              [
+                {
+                  type: "session_meta",
+                  payload: {
+                    id: archivedThreadId,
+                    timestamp,
+                    cwd: join(
+                      scanDir,
+                      "artifacts",
+                      "deep_discovery",
+                      "review-1",
+                      "output",
+                    ),
+                  },
+                },
+                {
+                  type: "token_usage_record",
+                  timestamp,
+                  payload: {
+                    thread_id: archivedThreadId,
+                    turn_id: "synthetic-worker-turn",
+                    response_id: "synthetic-worker-response",
+                    model: "gpt-5.6-sol",
+                    usage: {
+                      input_tokens: 1_250,
+                      cached_input_tokens: 200,
+                      output_tokens: 30,
+                    },
+                  },
+                },
+              ]
+                .map((event) => JSON.stringify(event))
+                .join("\n") + "\n",
+            ),
+          );
+          const saved = await runWorkbench(
+            {
+              ...workbenchOptions!,
+              signal: undefined,
+              withExecutionSettings: true,
+            },
+            ["get-scan", "--scan-id", scanId],
+          );
+          expect(saved["scan"]).toMatchObject({
+            executionAttribution: {
+              codexHome: workerHome,
+              executionThreadIds: expect.arrayContaining([workerThreadId]),
+              owner: {
+                threadId,
+                turnId: "synthetic-scan-turn",
+                dedicated: true,
+              },
+            },
+          });
+          expect(
+            (saved["scan"] as { executionAttribution: object })
+              .executionAttribution,
+          ).not.toHaveProperty("legacy");
+        } else if (initialResumeUsage) await recordBudgetUsage();
         if (outcome === "restart-without-session") await rm(usagePath);
         if (outcome === "restart-archived-session") {
           await mkdir(join(codexHome, "archived_sessions"));
@@ -698,6 +802,85 @@ for (const {
             join(codexHome, "archived_sessions", "owner.jsonl"),
           );
         }
+      }
+      if (compressionRuntime) {
+        expect(modelInputs).toHaveLength(1);
+        const commandsBeforeResume = commands.length;
+        const resumed = client.run(repository, {
+          mode: "deep",
+          resumeScanId: scanId,
+          outputDir: scanDir,
+          postScanPrompt: followUp,
+          ...(compressionRuntime === "without-decoder-optional"
+            ? {}
+            : { maxCostUsd: 0.004 }),
+          onCost: (cost) => reportedCosts.push(cost.estimatedUsd),
+        });
+        if (compressionRuntime === "without-decoder-budgeted") {
+          const error = await resumed.catch((error: unknown) => error);
+          expect(error).toBeInstanceOf(ScanInterruptedError);
+          expect((error as ScanInterruptedError).cause).toBe(
+            originalResumeSignal?.reason,
+          );
+          expect(String(originalResumeSignal?.reason)).toContain(
+            "cannot decode compressed usage",
+          );
+          expect(String(originalResumeSignal?.reason)).toContain(
+            workerThreadId,
+          );
+          expect(modelInputs).toHaveLength(1);
+          expect(commands.slice(commandsBeforeResume)).not.toContain(
+            "write-scan-draft",
+          );
+          for (const command of [
+            "fail-scan",
+            "cancel-scan",
+            "complete-scan",
+            "complete-budget-exhausted-scan",
+          ])
+            expect(commands.slice(commandsBeforeResume)).not.toContain(command);
+          const saved = await runWorkbench(
+            { ...workbenchOptions!, signal: undefined },
+            ["get-scan", "--scan-id", scanId],
+          );
+          expect(saved["scan"]).toMatchObject({
+            progress: { status: "running" },
+          });
+          const deep = await runWorkbench(
+            { ...workbenchOptions!, signal: undefined },
+            ["get-deep-scan", "--scan-id", scanId, "--thread-id", threadId],
+          );
+          expect(deep["deepScan"]).toMatchObject({
+            status: "running",
+          });
+          expect(
+            (deep["deepScan"] as { finalizationInput: unknown })
+              .finalizationInput,
+          ).toEqual(originalFinalizationInput);
+        } else if (compressionRuntime === "decoder-enabled") {
+          const error = await resumed.catch((error: unknown) => error);
+          expect(error).toBeInstanceOf(ScanCostLimitExceededError);
+          expect(error).toBe(originalResumeSignal?.reason);
+          expect((error as ScanCostLimitExceededError).maxCostUsd).toBe(0.004);
+          expect(
+            (error as ScanCostLimitExceededError).cost.estimatedUsd,
+          ).toBeGreaterThan(0.004);
+          expect(modelInputs).toHaveLength(1);
+        } else {
+          const result = await resumed;
+          expect(result.findings.findings[0]?.remediation).toBe(
+            "Validate the resolved destination before writing.",
+          );
+          expect(originalResumeSignal?.aborted).toBe(false);
+          expect(modelInputs).toHaveLength(2);
+          expect(modelInputs[1]).toBe(followUp);
+          expect(result.cost).toBeNull();
+          expect(commands.slice(commandsBeforeResume)).toContain(
+            "complete-scan",
+          );
+        }
+        expect(await readFile(selectedPath)).toEqual(selectedBytes!);
+        return;
       }
       if (budgeted || closed) {
         const running = client.run(repository, {
@@ -859,6 +1042,10 @@ for (const {
         if (initialResumeUsage) {
           expect(error).toBeInstanceOf(ScanCostLimitExceededError);
           expect(error).toBe(originalResumeSignal?.reason);
+          expect((error as ScanCostLimitExceededError).maxCostUsd).toBe(0.004);
+          expect(
+            (error as ScanCostLimitExceededError).cost.estimatedUsd,
+          ).toBeGreaterThan(0.004);
         } else {
           expect(error).toBeInstanceOf(ScanInterruptedError);
           expect((error as ScanInterruptedError).cause).toBe(
@@ -989,8 +1176,16 @@ for (const {
           commands.filter((command) => command === "complete-scan"),
         ).toHaveLength(2);
       }
-      // The synthetic accepted workers have no native usage receipts.
-      expect(result.cost).toBeNull();
+      if (outcome === "completed") {
+        // This transport emits an explicit zero-usage completion receipt.
+        expect(result.cost).toMatchObject({
+          inputTokens: 0,
+          cachedInputTokens: 0,
+          cacheWriteInputTokens: 0,
+          outputTokens: 0,
+          estimatedUsd: 0,
+        });
+      } else expect(result.cost).toBeNull();
       expect(result.coverage).not.toHaveProperty("completeness");
       expect(result.findings.findings[0]?.remediation).toBe(
         "Validate the resolved destination before writing.",
@@ -1023,5 +1218,26 @@ for (const {
       stopSpy?.mockRestore();
     }
   };
-  test(name, runCase, 30_000);
+  test(
+    name,
+    async () => {
+      if (compressionRuntime) {
+        const preload = join(
+          await temporaryDirectory(),
+          "zstd-capabilities.mjs",
+        );
+        await writeFile(
+          preload,
+          `import zlib from "node:zlib";\n${compressionRuntime === "decoder-enabled" ? "" : "delete zlib.createZstdDecompress;\n"}`,
+        );
+        if (runTestInSubprocess(fileURLToPath(import.meta.url), name, preload))
+          return;
+        expect(typeof zlib.createZstdDecompress === "function").toBe(
+          compressionRuntime === "decoder-enabled",
+        );
+      }
+      await runCase();
+    },
+    30_000,
+  );
 }

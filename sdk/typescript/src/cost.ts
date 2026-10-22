@@ -1,8 +1,12 @@
 import { parseJson } from "./value.js";
 import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
 import { open, readdir, realpath, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
+import { pipeline } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
+import zlib from "node:zlib";
+import { CodexSecurityError } from "./errors.js";
 import { isRecord } from "./record.js";
 import {
   estimateScanCost,
@@ -54,6 +58,7 @@ function createSessionReasoning(id: string, text = "") {
 
 interface SessionUsage {
   offset: number;
+  compressedSize: number | null;
   decoder: StringDecoder;
   pendingLine: string[];
   unreadable: boolean;
@@ -130,6 +135,7 @@ const SESSION_READ_SIZE = 64 * 1_024;
 function createSessionUsage(): SessionUsage {
   return {
     offset: 0,
+    compressedSize: null,
     decoder: new StringDecoder("utf8"),
     pendingLine: [] as string[],
     unreadable: false,
@@ -311,6 +317,7 @@ export class ScanCostTracker {
         ? undefined
         : this.#options.repository;
     const unreadable: Array<{ session: SessionUsage; error: unknown }> = [];
+    const compressedWithoutDecoder: string[] = [];
     const homes = new Set([this.#options.codexHome]);
     if (this.#workerCodexHome) homes.add(this.#workerCodexHome);
     // Recovery restores workers to their recorded home; the SDK parent can
@@ -327,7 +334,14 @@ export class ScanCostTracker {
         }
         if (directories.has(directory)) continue;
         directories.add(directory);
-        for await (const path of sessionFiles(directory)) {
+        for await (const path of sessionFiles(directory, true)) {
+          if (
+            path.endsWith(".zst") &&
+            typeof zlib.createZstdDecompress !== "function"
+          ) {
+            compressedWithoutDecoder.push(path);
+            continue;
+          }
           let session = this.#sessions.get(path);
           if (session === undefined) {
             session = createSessionUsage();
@@ -393,6 +407,21 @@ export class ScanCostTracker {
     }
     for (const { session, error } of unreadable) {
       if (included.has(session.threadId!)) throw error;
+    }
+    if (this.#options.maxCostUsd !== undefined) {
+      for (const path of compressedWithoutDecoder) {
+        const name = basename(path);
+        for (const threadId of included) {
+          if (
+            name !== `${threadId}.jsonl.zst` &&
+            !name.endsWith(`-${threadId}.jsonl.zst`)
+          )
+            continue;
+          throw new CodexSecurityError(
+            `Cannot enforce the scan cost limit because this runtime cannot decode compressed usage for thread ${threadId}: ${path}. Use a runtime with Zstandard support to resume this budgeted scan.`,
+          );
+        }
+      }
     }
 
     let incomplete = false;
@@ -768,6 +797,10 @@ async function readSessionUsage(
   attribution: ScanExecutionAttribution | null = null,
 ): Promise<void> {
   if (session.unreadable) return;
+  if (path.endsWith(".zst")) {
+    await readCompressedSessionUsage(path, session, repository, attribution);
+    return;
+  }
   let file;
   try {
     if ((await stat(path)).size === session.offset) return;
@@ -791,28 +824,79 @@ async function readSessionUsage(
         return;
       }
       session.offset += bytesRead;
-      try {
-        const lines = session.decoder
-          .write(buffer.subarray(0, bytesRead))
-          .split("\n");
-        session.pendingLine.push(lines[0]!);
-        for (const line of lines.slice(1)) {
-          readSessionEvent(
-            session.pendingLine.join(""),
-            session,
-            repository,
-            attribution,
-          );
-          session.pendingLine = line.length === 0 ? [] : [line];
-        }
-      } catch (error) {
-        session.unreadable = true;
-        session.pendingLine = [];
-        throw error;
-      }
+      readSessionBytes(
+        buffer.subarray(0, bytesRead),
+        session,
+        repository,
+        attribution,
+      );
     }
   } finally {
     await file.close();
+  }
+}
+
+async function readCompressedSessionUsage(
+  path: string,
+  session: SessionUsage,
+  repository: string | undefined,
+  attribution: ScanExecutionAttribution | null,
+): Promise<void> {
+  let size: number;
+  try {
+    size = (await stat(path)).size;
+  } catch (error) {
+    if (isMissingFile(error)) return;
+    throw error;
+  }
+  if (size === session.compressedSize) return;
+  const stream = pipeline(
+    createReadStream(path),
+    zlib.createZstdDecompress(),
+    () => {},
+  );
+  let decodedOffset = 0;
+  const initialOffset = session.offset;
+  try {
+    for await (const chunk of stream) {
+      const start = decodedOffset;
+      decodedOffset += chunk.length;
+      if (decodedOffset <= session.offset) continue;
+      const bytes = chunk.subarray(Math.max(0, session.offset - start));
+      session.offset += bytes.length;
+      readSessionBytes(bytes, session, repository, attribution);
+    }
+    if (session.offset !== initialOffset) reconcileReceiptCounters(session);
+    session.compressedSize = size;
+  } catch (error) {
+    if (!isMissingFile(error)) throw error;
+  } finally {
+    stream.destroy();
+  }
+}
+
+function readSessionBytes(
+  bytes: Buffer,
+  session: SessionUsage,
+  repository: string | undefined,
+  attribution: ScanExecutionAttribution | null,
+): void {
+  try {
+    const lines = session.decoder.write(bytes).split("\n");
+    session.pendingLine.push(lines[0]!);
+    for (const line of lines.slice(1)) {
+      readSessionEvent(
+        session.pendingLine.join(""),
+        session,
+        repository,
+        attribution,
+      );
+      session.pendingLine = line.length === 0 ? [] : [line];
+    }
+  } catch (error) {
+    session.unreadable = true;
+    session.pendingLine = [];
+    throw error;
   }
 }
 

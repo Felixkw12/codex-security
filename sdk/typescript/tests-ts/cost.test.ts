@@ -12,6 +12,7 @@ import { runNodePython } from "./support/python-probe.js";
 import * as filesystem from "node:fs/promises";
 import * as fs from "node:fs/promises";
 import { join, parse, sep } from "node:path";
+import { zstdCompressSync } from "node:zlib";
 import { Codex } from "@openai/codex-sdk";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import {
@@ -2761,9 +2762,14 @@ describe("live scan cost tracking", () => {
 });
 
 describe("recorded Deep worker homes", () => {
-  test.each(["current", "recorded"])(
-    "counts archived worker spend before enforcing the budget: %s home",
-    async (location) => {
+  test.each([
+    ["current", "plain"],
+    ["current", "compressed"],
+    ["recorded", "plain"],
+    ["recorded", "compressed"],
+  ] as const)(
+    "counts archived worker spend before enforcing the budget: %s home, %s rollout",
+    async (location, format) => {
       const home = await codexHome();
       const workerHome = location === "current" ? home : await codexHome();
       const worker = await writeSession(workerHome, "worker", {});
@@ -2784,7 +2790,15 @@ describe("recorded Deep worker homes", () => {
       );
       const archive = join(workerHome, "archived_sessions");
       await mkdir(archive);
-      await fs.rename(worker, join(archive, "worker.jsonl"));
+      const archived = join(
+        archive,
+        format === "compressed" ? "worker.jsonl.zst" : "worker.jsonl",
+      );
+      const initialRollout = await readFile(worker);
+      if (format === "compressed") {
+        await writeFile(archived, zstdCompressSync(initialRollout));
+        await fs.unlink(worker);
+      } else await fs.rename(worker, archived);
       const tracker = new ScanCostTracker({
         codexHome: home,
         model: "gpt-5.6-sol",
@@ -2808,8 +2822,30 @@ describe("recorded Deep worker homes", () => {
         expect(tokenUsage(snapshot.usage)?.input_tokens).toBe(1_000);
         expect(snapshot.cost?.estimatedUsd).toBeGreaterThan(0.003);
         await tracker.refresh();
-        expect(tokenUsage((await tracker.stop()).usage)?.input_tokens).toBe(
+        expect(tokenUsage((await tracker.refresh()).usage)?.input_tokens).toBe(
           1_000,
+        );
+        const nextResponse = `${JSON.stringify({
+          type: "token_usage_record",
+          timestamp: at,
+          payload: {
+            thread_id: "worker",
+            turn_id: "turn",
+            response_id: "later-archive-response",
+            model: "gpt-5.6-sol",
+            usage: { input_tokens: 500, output_tokens: 0 },
+          },
+        })}\n`;
+        if (format === "compressed")
+          await writeFile(
+            archived,
+            zstdCompressSync(
+              Buffer.concat([initialRollout, Buffer.from(nextResponse)]),
+            ),
+          );
+        else await appendFile(archived, nextResponse);
+        expect(tokenUsage((await tracker.stop()).usage)?.input_tokens).toBe(
+          1_500,
         );
       } finally {
         await tracker.stop();

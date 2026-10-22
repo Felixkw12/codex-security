@@ -2930,26 +2930,29 @@ def test_workbench_reconciles_profile_and_public_warning_histories(
         ) is supported
 
 
-@pytest.mark.parametrize("legacy_version", [48, 51, "published", "branch"])
+@pytest.mark.parametrize("legacy_version", [48, 51, "published", "branch", "pre-merge"])
 def test_local_cache_upgrade_preserves_deep_scan_migration_history(
     legacy_version: int | str,
 ) -> None:
     current = SCHEMA.MIGRATIONS
     published = isinstance(legacy_version, str)
     branch = legacy_version == "branch"
+    pre_merge = legacy_version == "pre-merge"
     historical = tuple(
         migration
         for migration in current
-        if migration[0] <= (47 if branch else 46 if published else 43)
+        if migration[0] <= (52 if pre_merge else 47 if branch else 46 if published else 43)
     )
 
     def historical_version(version: int) -> int:
-        return version - (5 if branch else 6 if published or version == 57 else 8)
+        if pre_merge:
+            return version - 1
+        return version - (6 if branch else 7 if published or version == 58 else 9)
 
     historical += tuple(
         (historical_version(version), name, sql)
         for version, name, sql in current
-        if 53 <= version <= 57 and (published or historical_version(version) <= legacy_version)
+        if 54 <= version <= 58 and (published or historical_version(version) <= legacy_version)
     )
     connection, apply_migrations = create_historical_database(1, historical)
     connection.execute(
@@ -2986,7 +2989,7 @@ def test_local_cache_upgrade_preserves_deep_scan_migration_history(
             if row["name"].startswith("deep_scan_")
         }
         assert upgraded_tables["deep_scan_runs"].count(", discovery_user_context_json TEXT") == 1
-        if not branch:
+        if not (branch or pre_merge):
             upgraded_tables["deep_scan_runs"] = upgraded_tables["deep_scan_runs"].replace(
                 ", discovery_user_context_json TEXT", "", 1
             )
