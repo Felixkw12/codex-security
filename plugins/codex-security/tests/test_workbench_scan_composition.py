@@ -1592,7 +1592,7 @@ def test_stopped_composition_retains_sealed_child_closures(
             completed_at = connection.execute(
                 "SELECT completed_at FROM scans WHERE id = ?", (children[0][0]["scanId"],)
             ).fetchone()[0]
-        completed = datetime.fromisoformat(completed_at)
+        completed = datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
         observed = int(completed.timestamp()) * 1_000_000_000 + completed.microsecond * 1000
         if closure_state == "older-selected-pending":
             observed -= 1_000_000_000
