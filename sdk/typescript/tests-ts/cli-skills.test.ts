@@ -1695,6 +1695,8 @@ process.stdout.write(JSON.stringify({
         `HTTPError:${status}`,
         `HTTP error code: ${status}`,
         `HTTP response code ${status}`,
+        `response code: ${status}`,
+        `response code: "${status}"`,
         `status code ${status}`,
         `status_code=${status}`,
         `{"status":${status}}`,
@@ -1745,6 +1747,27 @@ process.stdout.write(JSON.stringify({
       expect(message).toContain(advice);
     }
     expect(message).toContain(detail);
+  });
+
+  test.each([
+    "model.access",
+    "model.access.denied",
+    "model.not.found",
+    "invalid.api.key",
+    "token.expired",
+  ])("keeps endpoint components separate from diagnostic code %s", (code) => {
+    for (const url of [
+      `https://${code}.example/v1`,
+      `https://example.test/${code}/v1`,
+      `https://example.test/${code}`,
+    ]) {
+      const detail = `error sending request for url (${url})`;
+      const message = skillCommandFailure("validate", 7, detail);
+      expect(message).toContain(detail);
+      expect(message).toContain("could not connect");
+      expect(message).not.toContain("Authentication failed");
+      expect(message).not.toContain("selected model is unavailable");
+    }
   });
 
   test("retains raw diagnostic lines until the terminal boundary", () => {

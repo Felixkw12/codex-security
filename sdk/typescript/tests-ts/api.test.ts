@@ -1045,6 +1045,37 @@ describe("CodexSecurity orchestration", () => {
   });
 
   test.each([
+    ["invalid.api.key", "unauthorized"],
+    ["token.expired", "unauthorized"],
+    ["expired.token", "unauthorized"],
+    ["model.access", "forbidden"],
+    ["model.not.found", "forbidden"],
+  ] as const)(
+    "bounds diagnostic code %s without matching endpoint components",
+    (code, classification) => {
+      for (const detail of [
+        code,
+        `${code}: synthetic provider detail`,
+        `error: '${code}'`,
+        `${code}.`,
+      ])
+        expect(classifyConnectionFailure(new Error(detail))).toBe(
+          classification,
+        );
+      for (const url of [
+        `https://${code}.example/v1`,
+        `https://example.test/${code}/v1`,
+        `https://example.test/${code}`,
+      ])
+        expect(
+          classifyConnectionFailure(
+            new Error(`error sending request for url (${url})`),
+          ),
+        ).toBe("network_error");
+    },
+  );
+
+  test.each([
     ["HTTP 403 ExpiredTokenException", "unauthorized"],
     ["HTTP 403 UnrecognizedClientException", "unauthorized"],
     ["HTTP 400 IncompleteSignature", "unauthorized"],

@@ -6,7 +6,11 @@ const [scenario, transcript, checkout, stage = "pair-review"] =
   process.argv.slice(2);
 const refusalMessages = {
   "refusal-text": "I'm sorry, but I can't assist with that request.",
+  "policy-colon-refusal-text": "Request refused: safety policy.",
+  "policy-colon-explanation-text":
+    "Safety policy: request refused due to disallowed content.",
   "policy-prefix-text": "Safety policy: request refused.",
+  "policy-review-text": "Review refused: safety policy.",
   "policy-intro-text":
     "Review cannot proceed. Safety policy: this request is refused.",
   "policy-prefix-due-text":
@@ -24,6 +28,15 @@ const refusalMessages = {
     "Cybersecurity policy: this request is refused because it would facilitate unauthorized access.",
 };
 const turnFailures = {
+  "determiner-service-error": {
+    message:
+      "Safety policy: this request is refused because the upstream service is unavailable.",
+    codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
+  },
+  "sentence-service-error": {
+    message: "Safety policy: request refused. Service unavailable.",
+    codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
+  },
   "policy-turn-code": {
     message: "Request blocked.",
     codexErrorInfo: "cyberPolicy",
@@ -143,6 +156,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     if (
       [
         "request-error",
+        "sentence-service-request-error",
         "credential-error",
         "policy-request",
         "policy-request-code",
@@ -153,17 +167,25 @@ for await (const line of createInterface({ input: process.stdin })) {
         error: {
           code: -32000,
           message:
-            scenario === "policy-request-code"
-              ? "Request blocked."
-              : scenario === "policy-request"
-                ? "Request rejected: cyber_policy."
-                : scenario === "credential-error"
-                  ? "Authentication failed: Bearer synthetic-review-key"
-                  : "Authentication required",
+            scenario === "sentence-service-request-error"
+              ? "Safety policy: request refused. Service unavailable."
+              : scenario === "policy-request-code"
+                ? "Request blocked."
+                : scenario === "policy-request"
+                  ? "Request rejected: cyber_policy."
+                  : scenario === "credential-error"
+                    ? "Authentication failed: Bearer synthetic-review-key"
+                    : "Authentication required",
           data:
-            scenario === "policy-request-code"
-              ? { codexErrorInfo: "cyberPolicy" }
-              : "Synthetic private response data",
+            scenario === "sentence-service-request-error"
+              ? {
+                  codexErrorInfo: {
+                    httpConnectionFailed: { httpStatusCode: 503 },
+                  },
+                }
+              : scenario === "policy-request-code"
+                ? { codexErrorInfo: "cyberPolicy" }
+                : "Synthetic private response data",
         },
       });
       continue;

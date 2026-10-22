@@ -347,3 +347,35 @@ test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
     }
   },
 );
+
+test.each([
+  ["invalid.api.key", "Authentication failed"],
+  ["token.expired", "Authentication failed"],
+  ["model.access", "cannot access the configured model"],
+  ["429 Too Many Requests", "reached its rate limit"],
+])(
+  "preserves ordinary scan error detail when adding %s advice",
+  async (code, advice) => {
+    const diagnostic = `${code}: synthetic provider detail abc-123`;
+    for (const json of [false, true]) {
+      const { stdout, stderr, runCli } = createCliTest(main);
+      expect(
+        await runCli(
+          ["scan", ".", ...(json ? ["--json"] : [])],
+          dependencies({
+            onRun: () => {
+              throw new Error(diagnostic);
+            },
+          }),
+        ),
+      ).toBe(2);
+      expect(stderr.text()).toContain(diagnostic);
+      expect(stderr.text()).toContain(advice);
+      if (json) {
+        const message = JSON.parse(stdout.text()).message;
+        expect(message).toContain(diagnostic);
+        expect(message).toContain(advice);
+      }
+    }
+  },
+);

@@ -128,7 +128,11 @@ const failureReasons: Record<string, string> = {
   "policy-terse-turn": "Refused due to the safety policy",
   "policy-request": "Request rejected: cyber_policy.",
   "refusal-text": "I'm sorry, but I can't assist with that request.",
+  "policy-colon-refusal-text": "Request refused: safety policy.",
+  "policy-colon-explanation-text":
+    "Safety policy: request refused due to disallowed content.",
   "policy-prefix-text": "Safety policy: request refused.",
+  "policy-review-text": "Review refused: safety policy.",
   "policy-intro-text":
     "Review cannot proceed. Safety policy: this request is refused.",
   "policy-prefix-due-text":
@@ -159,6 +163,12 @@ const failureReasons: Record<string, string> = {
   "prefix-network-error":
     "Failed to contact safety policy: request refused by upstream with 503",
   "prefix-service-error": "Safety policy: request refused: service unavailable",
+  "sentence-service-error":
+    "Safety policy: request refused. Service unavailable.",
+  "determiner-service-error":
+    "Safety policy: this request is refused because the upstream service is unavailable.",
+  "sentence-service-request-error":
+    "Safety policy: request refused. Service unavailable.",
   "prefix-because-error":
     "Safety policy: request refused because the upstream service is unavailable.",
   "prefix-as-error":
@@ -205,6 +215,9 @@ const retriedFailures = new Set([
   "http-request-error",
   "prefix-network-error",
   "prefix-service-error",
+  "sentence-service-error",
+  "determiner-service-error",
+  "sentence-service-request-error",
   "prefix-upstream-error",
   "prefix-because-error",
   "prefix-as-error",
@@ -223,6 +236,9 @@ const recoveredScenarios: Record<string, string> = {
   "recover-http-request-error": "http-request-error",
   "recover-prefix-network-error": "prefix-network-error",
   "recover-prefix-service-error": "prefix-service-error",
+  "recover-sentence-service-error": "sentence-service-error",
+  "recover-determiner-service-error": "determiner-service-error",
+  "recover-sentence-service-request-error": "sentence-service-request-error",
   "recover-prefix-upstream-error": "prefix-upstream-error",
   "recover-prefix-because-error": "prefix-because-error",
   "recover-prefix-as-error": "prefix-as-error",
@@ -245,6 +261,8 @@ const modelFailures = new Set([
   "http-request-error",
   "prefix-network-error",
   "prefix-service-error",
+  "sentence-service-error",
+  "determiner-service-error",
   "prefix-upstream-error",
   "prefix-because-error",
   "prefix-as-error",
@@ -592,7 +610,11 @@ for (const {
                   ? "Codex review turn failed."
                   : reportsBlocker
                     ? "A required review check could not be completed."
-                    : ["request-error", "credential-error"].includes(scenario)
+                    : [
+                          "request-error",
+                          "credential-error",
+                          "sentence-service-request-error",
+                        ].includes(scenario)
                       ? "Codex rejected the review request."
                       : "Codex review transport failed.",
         });
@@ -684,9 +706,11 @@ for (const {
           messages.filter((message) => message.method === "turn/start"),
         ).toHaveLength(
           recovery
-            ? ["invalid-submission", "text-only"].includes(recovery)
-              ? 3
-              : 2
+            ? recovery === "sentence-service-request-error"
+              ? 1
+              : ["invalid-submission", "text-only"].includes(recovery)
+                ? 3
+                : 2
             : ([
                 "invalid-submission",
                 "text-only",
@@ -698,6 +722,7 @@ for (const {
                 ? 2
                 : [
                       "request-error",
+                      "sentence-service-request-error",
                       "credential-error",
                       "policy-request",
                       "policy-request-code",
@@ -952,6 +977,8 @@ test.each([
   "Request refusal due to the safety policy.",
   "Request was refused because of the safety policy.",
   "Request was refused: safety policy.",
+  "Review refused: safety policy.",
+  "Safety policy: review refused.",
   "Request refused: safety policy. I can offer a defensive alternative.",
   "Request refused: safety policy! Please ask for defensive guidance instead.",
   "Safety policy: request was refused.",
@@ -977,6 +1004,9 @@ test.each([
   "Cybersecurity policy: this request is refused. Please ask for defensive guidance instead.",
   "Content policy: your request has been blocked.",
   "Safety policy: the request was refused.",
+  "Request refused: safety policy.",
+  "Safety policy: request refused under the applicable restrictions.",
+  "Safety policy: request refused because it would facilitate harm.",
   "This request was refused for violating the content policy.",
   "I can't help analyze or merge these vulnerability reports.",
   "I'm unable to assist with this comparison.",
@@ -1004,6 +1034,9 @@ test.each([
   "HTTP request blocked: safety policy service unavailable",
   "Request refused: safety policy service unavailable",
   "Safety policy: request refused: service unavailable",
+  "Safety policy: request refused. Service unavailable.",
+  "Safety policy: this request is refused because the upstream service is unavailable.",
+  "Safety policy: this request is refused. Service unavailable.",
   "Safety policy: request refused because the upstream service is unavailable.",
   "Safety policy: request refused as the upstream service is unavailable.",
   "Safety policy: request refused by upstream with 503",
