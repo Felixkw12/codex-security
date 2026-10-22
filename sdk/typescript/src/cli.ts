@@ -9226,7 +9226,6 @@ async function checkDeinitializedPatchSubmodules(
     ref,
     dependencies,
   );
-  if (!after.has(".gitmodules")) return;
   const run = (
     args: string[],
     options?: Parameters<CliDependencies["runRepositoryCommand"]>[3],
@@ -9242,6 +9241,11 @@ async function checkDeinitializedPatchSubmodules(
       { trim: false },
     )
   ).replace(/\n$/u, "");
+  const unavailable = (key: string): never => {
+    throw new CodexSecurityError(
+      `Submodule ${safePatchText(patchPathText(key))} contains a commit that is not available in its remote-tracking refs. Publish that commit before retrying this patch pull request.`,
+    );
+  };
   submodules: for (const [key, entry] of after) {
     if (
       !entry.startsWith("160000 ") ||
@@ -9250,12 +9254,14 @@ async function checkDeinitializedPatchSubmodules(
     )
       continue;
     // Deinitialization retains the original registration's object database.
-    const registrations =
-      parent &&
+    const registrations = [
+      ...(parent &&
       before.has(".gitmodules") &&
       before.get(key)?.startsWith("160000 ")
-        ? [parent, ref]
-        : [ref];
+        ? [parent]
+        : []),
+      ...(after.has(".gitmodules") ? [ref] : []),
+    ];
     for (const registration of registrations) {
       const records = await patchGitRecords(
         repository,
@@ -9331,17 +9337,16 @@ async function checkDeinitializedPatchSubmodules(
             "refs/remotes",
           ]))
         )
-          continue submodules;
+          continue;
         if (
           await nested(["rev-list", commit, "--not", "--remotes", "-n", "1"])
         ) {
-          throw new CodexSecurityError(
-            `Submodule ${safePatchText(patchPathText(key))} contains a commit that is not available in its remote-tracking refs. Publish that commit before retrying this patch pull request.`,
-          );
+          unavailable(key);
         }
         continue submodules;
       }
     }
+    unavailable(key);
   }
 }
 
