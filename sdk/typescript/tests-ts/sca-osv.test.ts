@@ -274,13 +274,19 @@ describe("SCA input selection", () => {
       const installed = [
         ".venv/lib/python3.12/site-packages/synthetic/requirements.txt",
         "venv/Lib/site-packages/synthetic/requirements.txt",
+        ".tox/py312/lib/python3.12/site-packages/synthetic/requirements.txt",
+        ".nox/tests/Lib/site-packages/synthetic/requirements.txt",
         "vendor/bundle/ruby/3.3.0/gems/synthetic/Gemfile.lock",
         "packages/app/.venv/lib/python3.12/site-packages/synthetic/requirements.txt",
+        "packages/app/.tox/py312/Lib/site-packages/synthetic/requirements.txt",
+        "packages/app/.nox/tests/lib/python3.12/site-packages/synthetic/requirements.txt",
         "packages/app/vendor/bundle/ruby/3.3.0/gems/synthetic/Gemfile.lock",
       ];
       const selected = [
         "package-lock.json",
         "packages/app/package-lock.json",
+        "packages/nox/requirements.txt",
+        "packages/tox/requirements.txt",
         "vendor/source-project/package-lock.json",
       ];
       for (const path of [...installed, ...selected]) {

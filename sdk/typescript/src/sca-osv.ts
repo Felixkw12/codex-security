@@ -410,6 +410,8 @@ function installedDependencyDirectory(name: string, parent?: string): boolean {
     name === "node_modules" ||
     name === ".venv" ||
     name === "venv" ||
+    name === ".tox" ||
+    name === ".nox" ||
     (parent === "vendor" && name === "bundle")
   );
 }
