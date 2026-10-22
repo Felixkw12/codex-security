@@ -94,11 +94,12 @@ EXPECTED_MIGRATIONS = [
     (50, "persist authorized source excerpt scopes"),
     (51, "preserve deep scan worker thread history"),
     (52, "record severity classification review counts"),
-    (53, "retain deep scan attempts and exact merge inputs"),
-    (54, "persist selected deep scan finalization input"),
-    (55, "freeze stopped scan checkpoint selections"),
-    (56, "bind original deep scan parent usage turn"),
-    (57, "bind original deep scan execution settings"),
+    (53, "store external source findings without assessments"),
+    (54, "retain deep scan attempts and exact merge inputs"),
+    (55, "persist selected deep scan finalization input"),
+    (56, "freeze stopped scan checkpoint selections"),
+    (57, "bind original deep scan parent usage turn"),
+    (58, "bind original deep scan execution settings"),
 ]
 
 
