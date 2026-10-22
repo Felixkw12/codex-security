@@ -135,7 +135,7 @@ test("does not attribute a different installed version to a scanner match", asyn
   ).toBeNull();
 });
 
-test.each(["npm", "pnpm"] as const)(
+test.each(["npm", "pnpm", "pnpm-multidoc"] as const)(
   "%s workspace importer supplies the manifest, installed source, and introduction chain",
   async (manager) => {
     const { repository, result, leaf } = await fixture();
@@ -168,7 +168,10 @@ test.each(["npm", "pnpm"] as const)(
               "node_modules/synthetic-parent": { version: "2.0.0" },
             },
           })
-        : "lockfileVersion: '9.0'\nimporters:\n  .: {}\n  packages/app:\n    devDependencies:\n      synthetic-parent:\n        specifier: 2.0.0\n        version: 2.0.0\n",
+        : (manager === "pnpm-multidoc"
+            ? "lockfileVersion: '9.0'\npackages: {}\n---\n"
+            : "") +
+            "lockfileVersion: '9.0'\nimporters:\n  .: {}\n  packages/app:\n    devDependencies:\n      synthetic-parent:\n        specifier: 2.0.0\n        version: 2.0.0\n",
     );
     const [context] = await dependencyPackageContexts(result);
     expect(context).toMatchObject({
@@ -181,6 +184,42 @@ test.each(["npm", "pnpm"] as const)(
     expect(context!.dependencyChain.map((item) => item.name)).toEqual([
       "synthetic-app",
       "synthetic-parent",
+      "@synthetic/leaf",
+    ]);
+  },
+);
+
+test.each(["root", "workspace"] as const)(
+  "%s peer-only seed supplies installed source and an introduction chain",
+  async (kind) => {
+    const { repository, result } = await fixture();
+    await packageAt(repository, "synthetic-project", "1.0.0");
+    const project =
+      kind === "root" ? repository : join(repository, "packages/library");
+    await packageAt(project, "synthetic-library", "1.0.0");
+    await writeFile(
+      join(project, "package.json"),
+      JSON.stringify({
+        name: "synthetic-library",
+        version: "1.0.0",
+        peerDependencies: { "@synthetic/leaf": "3.0.0" },
+      }),
+    );
+    const peer = join(repository, "node_modules/@synthetic/leaf");
+    await packageAt(peer, "@synthetic/leaf", "3.0.0");
+    await writeFile(
+      join(repository, "pnpm-lock.yaml"),
+      `lockfileVersion: '9.0'\nimporters:\n  ${kind === "root" ? "." : "packages/library"}: {}\n`,
+    );
+    const [context] = await dependencyPackageContexts(result);
+    expect(context).toMatchObject({
+      manifestPath: relative(repository, join(project, "package.json")),
+      projectName: "synthetic-library",
+      installedPath: relative(repository, peer),
+      dependencyGroups: ["runtime"],
+    });
+    expect(context!.dependencyChain.map((item) => item.name)).toEqual([
+      "synthetic-library",
       "@synthetic/leaf",
     ]);
   },
@@ -217,7 +256,7 @@ test("unresolved workspace matches do not inherit an unrelated importer manifest
   });
 });
 
-test("workspace seeds preserve incoming dependency and peer chains", async () => {
+test("workspace peer seeds and incoming dependency chains remain available", async () => {
   const { repository, result } = await fixture();
   const workspace = join(repository, "packages/bridge");
   await packageAt(repository, "synthetic-project", "1.0.0", {
@@ -267,16 +306,22 @@ test("workspace seeds preserve incoming dependency and peer chains", async () =>
     componentId: "bridge",
   });
   const contexts = await dependencyPackageContexts(result);
-  for (const [id, path, names] of [
+  for (const [id, path, manifest, names] of [
     [
       "leaf",
       peer,
-      ["synthetic-project", "synthetic-bridge", "@synthetic/leaf"],
+      relative(repository, join(workspace, "package.json")),
+      ["synthetic-bridge", "@synthetic/leaf"],
     ],
-    ["bridge", workspace, ["synthetic-project", "synthetic-bridge"]],
+    [
+      "bridge",
+      workspace,
+      "package.json",
+      ["synthetic-project", "synthetic-bridge"],
+    ],
   ] as const) {
     const context = contexts.find((item) => item.componentId === id)!;
-    expect(context.manifestPath).toBe("package.json");
+    expect(context.manifestPath).toBe(manifest);
     expect(context.installedPath).toBe(relative(repository, path));
     expect(context.dependencyChain.map((item) => item.name)).toEqual([
       ...names,

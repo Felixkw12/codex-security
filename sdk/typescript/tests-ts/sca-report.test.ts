@@ -2,6 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { discoverScaInputs, normalizeOsvOutput } from "../src/sca-osv.js";
+import { dependencyInventorySummary } from "../src/sca-summary.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import {
   compareScaResults,
@@ -298,6 +299,53 @@ describe("SCA report", () => {
     result.components[0]!.name = "synthetic`package";
     expect(renderScaReport(result)).toContain("`` synthetic`package ``");
   });
+
+  test.each(["\n", "\r\n", "\r"])(
+    "renders affected-package values as literal inline text with %p line breaks",
+    (newline) => {
+      const result = fixture();
+      const value = `synthetic\`one\`\`two${newline}${newline}# Fabricated summary${newline}${newline}[synthetic](https://example.test/package) <img src="https://example.test/image.png">`;
+      Object.assign(result.components[0]!, {
+        name: value,
+        version: value,
+        sourcePath: value,
+      });
+      Object.assign(result.matches[0]!, {
+        advisoryIds: [value],
+        severity: value,
+        fixedVersions: [value],
+      });
+      result.packageContexts = [
+        {
+          componentId: "component-1",
+          manifestPath: "package.json",
+          projectName: value,
+          private: true,
+          installedPath: null,
+          dependencyGroups: [],
+          dependencyChain: [{ name: value, version: value, path: "synthetic" }],
+          limitations: [],
+        },
+      ];
+      const evidence = structuredClone(result);
+      expect(dependencyInventorySummary(result)).toEqual([
+        "Matching: 1 dependency files checked; 1 advisory matches across 1 package occurrences.",
+        `${value}@${value} — ${value} (project: ${value}, private)`,
+        `  Local chain: ${value}@${value}`,
+        `  ${value} · severity ${value} · candidate fixes: ${value}`,
+      ]);
+      const summary = renderScaReport(result)
+        .split("## Affected packages\n\n")[1]!
+        .split("\n\n## ")[0]!;
+      const rendered = Bun.markdown.html(summary);
+      expect(rendered).not.toMatch(/<(?:a|img|h[1-6])\b/u);
+      expect(rendered).toContain("<code>");
+      expect(rendered).toContain("synthetic`one``two");
+      expect(rendered).toContain("[synthetic](https://example.test/package)");
+      expect(rendered).toContain("&lt;img");
+      expect(result).toEqual(evidence);
+    },
+  );
 });
 
 describe("SCA comparison", () => {

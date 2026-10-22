@@ -67,6 +67,7 @@ function componentFor(result: ScaResult, match: ScaMatch): ScaComponent {
 }
 
 function code(value: string): string {
+  value = value.replace(/\r\n?|\n/g, " ");
   const longest = Math.max(
     0,
     ...(value.match(/`+/g) ?? []).map((run) => run.length),
@@ -102,7 +103,7 @@ export function renderScaReport(result: ScaResult): string {
     `Assessment outcomes: **${dependencyAssessmentSummary(result)}**.`,
     `Estimated model cost: **${dependencyCostSummary(result)}**. This is a token-cost estimate, not a billing total.`,
     "## Affected packages",
-    bullets(dependencyInventorySummary(result), "No advisory matches."),
+    bullets(dependencyInventorySummary(result, code), "No advisory matches."),
   ];
   const coverageSections = [
     `Repository: ${code(result.repository.path)}. Revision: ${code(result.repository.revision ?? "unknown")}. Working tree: ${result.repository.dirty === null ? "unknown" : result.repository.dirty ? "modified" : "clean"}.`,

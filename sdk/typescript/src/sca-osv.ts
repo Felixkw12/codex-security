@@ -700,7 +700,8 @@ export async function discoverScaInputs(
                 );
               }
               const pkg = manifest?.["package"];
-              if (record(pkg))
+              if (record(pkg)) {
+                const packages = parseToml(content.toString("utf8"))["package"];
                 for (
                   let index = inspected.references.length - 1;
                   index >= 0;
@@ -713,18 +714,39 @@ export async function discoverScaInputs(
                     reference.version !== null &&
                     reference.version === pkg["version"]
                   ) {
-                    firstPartyPackages.push({
-                      name: reference.name,
-                      version: reference.version,
-                      sourcePath: input.path,
-                      manifestPath: slash(relative(repository, manifestPath)),
-                    });
-                    inspected.references.splice(index, 1);
+                    const sources = Array.isArray(packages)
+                      ? packages.flatMap((candidate) =>
+                          record(candidate) &&
+                          candidate["name"] === reference.name &&
+                          candidate["version"] === reference.version &&
+                          typeof candidate["source"] === "string" &&
+                          candidate["source"] !== ""
+                            ? [candidate["source"]]
+                            : [],
+                        )
+                      : [];
+                    const unresolvedSource = sources.find(
+                      (source) =>
+                        source !==
+                        "registry+https://github.com/rust-lang/crates.io-index",
+                    );
+                    if (unresolvedSource === undefined)
+                      inspected.references.splice(index, 1);
+                    else reference.resolution = unresolvedSource;
+                    const sourceBearingTwin = sources.length > 0;
+                    if (!sourceBearingTwin)
+                      firstPartyPackages.push({
+                        name: reference.name,
+                        version: reference.version,
+                        sourcePath: input.path,
+                        manifestPath: slash(relative(repository, manifestPath)),
+                      });
                     limitations.push(
-                      `${input.path}: ${reference.name}@${reference.version} is the local first-party package declared in ${slash(relative(repository, manifestPath))}; registry advisory coverage does not apply to that local package.`,
+                      `${input.path}: ${reference.name}@${reference.version} is the local first-party package declared in ${slash(relative(repository, manifestPath))}; ${sourceBearingTwin ? "a source-bearing package shares its name and version, so scanner components and advisory matches are retained." : "registry advisory coverage does not apply to that local package."}`,
                     );
                   }
                 }
+              }
             }
           }
           localReferences.push(...inspected.references);
@@ -1235,13 +1257,37 @@ export async function runOsvScan(
   const stderrOutputs: string[] = [];
   const emptyOutputPaths = new Set<string>();
   let unresolvedPackages = 0;
+  let normalizedMatchCount = 0;
   const consumeOutput = (raw: unknown, stderr: string, input: ScaInput) => {
     const normalized = normalizeOsvOutput(raw, {
       repositoryPath: repository,
       inputs: [input],
     });
-    result.components.push(...normalized.components);
-    result.matches.push(...normalized.matches);
+    normalizedMatchCount += normalized.matches.length;
+    const firstPartyComponents = new Set(
+      normalized.components
+        .filter(
+          (component) =>
+            component.ecosystem === "crates.io" &&
+            result.coverage.firstPartyPackages?.some(
+              (pkg) =>
+                pkg.sourcePath === component.sourcePath &&
+                pkg.name === component.name &&
+                pkg.version === component.version,
+            ),
+        )
+        .map((component) => component.id),
+    );
+    result.components.push(
+      ...normalized.components.filter(
+        (component) => !firstPartyComponents.has(component.id),
+      ),
+    );
+    result.matches.push(
+      ...normalized.matches.filter(
+        (match) => !firstPartyComponents.has(match.componentId),
+      ),
+    );
     result.diagnostics.push(...normalized.diagnostics);
     unresolvedPackages +=
       normalized.unresolvedPackages +
@@ -1404,7 +1450,7 @@ export async function runOsvScan(
       stderrOutputs.push(output.stderr);
       const diagnosticStart = result.diagnostics.length;
       result.diagnostics.push(...osvErrorDiagnostics(output.stderr));
-      const matchCount = result.matches.length;
+      const matchCount = normalizedMatchCount;
       if (output.stdout.trim() !== "") {
         let sources: Set<string> | undefined;
         try {
@@ -1443,7 +1489,7 @@ export async function runOsvScan(
         result.diagnostics.push(
           `${input.path}: OSV exited with code ${output.exitCode}. See ${invocation.stderrPath}.`,
         );
-      if (output.exitCode === 1 && result.matches.length === matchCount)
+      if (output.exitCode === 1 && normalizedMatchCount === matchCount)
         result.diagnostics.push(
           `${input.path}: OSV reported findings but no advisory matches could be normalized.`,
         );

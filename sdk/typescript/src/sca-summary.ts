@@ -59,7 +59,10 @@ export function dependencyAssessmentSummary(result: ScaResult): string {
   return `${counts.confirmed} confirmed, ${counts.notActionable} not actionable, ${counts.inconclusive} inconclusive, ${counts.failed} failed, ${counts.unfinished} unfinished`;
 }
 
-export function dependencyInventorySummary(result: ScaResult): string[] {
+export function dependencyInventorySummary(
+  result: ScaResult,
+  format: (value: string) => string = (value) => value,
+): string[] {
   const matches = prioritizedDependencyMatches(result);
   const componentIds = [...new Set(matches.map((match) => match.componentId))];
   const lines = [
@@ -72,15 +75,15 @@ export function dependencyInventorySummary(result: ScaResult): string[] {
     );
     const selected = matches.filter((match) => match.componentId === id);
     lines.push(
-      `${component.name}@${component.version ?? "unknown"} — ${component.sourcePath}${context?.projectName ? ` (project: ${context.projectName}${context.private ? ", private" : ""})` : ""}`,
+      `${format(component.name)}@${format(component.version ?? "unknown")} — ${format(component.sourcePath)}${context?.projectName ? ` (project: ${format(context.projectName)}${context.private ? ", private" : ""})` : ""}`,
     );
     if (context?.dependencyChain.length)
       lines.push(
-        `  Local chain: ${context.dependencyChain.map((entry) => `${entry.name}@${entry.version}`).join(" → ")}`,
+        `  Local chain: ${context.dependencyChain.map((entry) => `${format(entry.name)}@${format(entry.version)}`).join(" → ")}`,
       );
     for (const match of selected)
       lines.push(
-        `  ${match.advisoryIds.join(", ")} · severity ${match.severity ?? "unknown"} · candidate fixes: ${match.fixedVersions.join(", ") || "none supplied"}`,
+        `  ${match.advisoryIds.map(format).join(", ")} · severity ${format(match.severity ?? "unknown")} · candidate fixes: ${match.fixedVersions.map(format).join(", ") || "none supplied"}`,
       );
   }
   return lines;
