@@ -32,21 +32,21 @@ describe("patch change tracking", () => {
   test.each([
     "published",
     "missing",
-    "published-deinit",
-    "missing-deinit",
-    "published-deinit-dangling",
-    "missing-deinit-dangling",
-    "published-deinit-renamed",
-    "missing-deinit-renamed",
-    "published-deinit-renamed-other-store",
-    "missing-deinit-renamed-other-store",
+    "published-removed-worktree",
+    "missing-removed-worktree",
+    "published-removed-worktree-dangling",
+    "missing-removed-worktree-dangling",
+    "published-removed-worktree-renamed",
+    "missing-removed-worktree-renamed",
+    "published-removed-worktree-renamed-other-store",
+    "missing-removed-worktree-renamed-other-store",
     "push-no",
     "submodule-false",
   ])(
     "publishes assessed nested updates with %s commits/settings",
     async (mode) => {
       const missing = mode.startsWith("missing");
-      const deinitialized = mode.includes("deinit");
+      const worktreeRemoved = mode.includes("removed-worktree");
       const dangling = mode.endsWith("-dangling");
       const renamed = mode.includes("-renamed");
       const otherStore = mode.endsWith("-other-store");
@@ -127,13 +127,14 @@ describe("patch change tracking", () => {
             if (mode.startsWith("published"))
               nestedGit("push", "origin", `${after}:refs/heads/main`);
             nestedIndex = await readFile(nestedIndexPath);
-            if (deinitialized) {
+            if (worktreeRemoved) {
               git("add", "nested");
               if (dangling) {
                 nestedGit("checkout", "--detach", before);
                 nestedIndex = await readFile(nestedIndexPath);
               }
-              git("submodule", "deinit", "--force", "--", "nested");
+              await rm(nested, { recursive: true });
+              await mkdir(nested);
               if (renamed) {
                 git(
                   "config",
@@ -166,13 +167,13 @@ describe("patch change tracking", () => {
       if (missing) {
         expect(outcome.stderr).toContain("--resume-pr");
         expect(outcome.stderr).toContain(
-          deinitialized
+          worktreeRemoved
             ? "not available in its remote-tracking refs"
             : "not be found on any remote",
         );
         expect(creations).toBe(0);
         expect(git("ls-remote", "origin")).toBe("");
-        if (deinitialized) {
+        if (worktreeRemoved) {
           const refused = await runWorkflow(
             ["patch", "--resume-pr", git("branch", "--show-current"), "--json"],
             {
@@ -243,7 +244,7 @@ describe("patch change tracking", () => {
       expect(git("ls-remote", "origin")).toContain(git("rev-parse", "HEAD"));
       expect(git("status", "--porcelain")).toBe("");
       expect(await readFile(nestedIndexPath)).toEqual(nestedIndex);
-      if (deinitialized)
+      if (worktreeRemoved)
         await expect(readFile(join(nested, "app.ts"))).rejects.toMatchObject({
           code: "ENOENT",
         });
