@@ -2423,7 +2423,16 @@ def test_recovered_generic_closure_cannot_close_another_workers_same_id(
         row["reason"] for row in coverage["deferred"] if row["id"] != "scan-stopped"
     } == expected
 
-    assert not coverage.get("resolvedDeferred")
+    assert coverage.get("resolvedDeferred", []) == (
+        [
+            {
+                "id": "worker-one-attempt-1-resolved-shared-review",
+                "reason": "Review completed.",
+            }
+        ]
+        if closure_time == 200
+        else []
+    )
 
 
 @pytest.mark.parametrize("canonical_time", [100, 200, 300])
