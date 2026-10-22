@@ -42,7 +42,13 @@ interface PatchProfileContext {
 
 async function resolvePatchProfile(
   configured: boolean,
-  optionalStorage: false | "inside" | "outside" | "administration" = false,
+  optionalStorage:
+    | false
+    | "inside"
+    | "outside"
+    | "administration"
+    | "selected"
+    | "direct-administration" = false,
   existingStorage = false,
   exercise?: (
     context: PatchProfileContext,
@@ -66,21 +72,37 @@ async function resolvePatchProfile(
   const storage =
     optionalStorage === "inside"
       ? join(repository, "cache-data")
-      : optionalStorage === "administration"
+      : optionalStorage === "administration" ||
+          optionalStorage === "direct-administration"
         ? administration
         : extra;
   if (optionalStorage) {
     await mkdir(storage, { recursive: true });
     if (existingStorage)
       for (const part of ["objects", "tmp"]) await mkdir(join(storage, part));
-    await symlink(
-      storage,
-      join(repository, "cache"),
-      process.platform === "win32" ? "junction" : "dir",
+    if (
+      optionalStorage !== "selected" &&
+      optionalStorage !== "direct-administration"
+    )
+      await symlink(
+        storage,
+        join(repository, "cache"),
+        process.platform === "win32" ? "junction" : "dir",
+      );
+    execFileSync(
+      "git",
+      [
+        "config",
+        "lfs.storage",
+        optionalStorage === "selected" ||
+        optionalStorage === "direct-administration"
+          ? storage
+          : "../cache",
+      ],
+      {
+        cwd: repository,
+      },
     );
-    execFileSync("git", ["config", "lfs.storage", "../cache"], {
-      cwd: repository,
-    });
     controls = await capturePatchGitControls(
       repository,
       async (_root, checkout, args, options) =>
@@ -88,10 +110,16 @@ async function resolvePatchProfile(
       true,
     );
     expect(controls).toBeDefined();
-    expect(controls!.snapshotStoragePaths).toEqual([]);
+    expect(controls!.snapshotStoragePaths).toEqual(
+      optionalStorage === "selected" ? [storage] : [],
+    );
     readOnlyPaths = controls!.readOnlyPaths;
     modelOnlyReadOnlyPaths = controls!.modelOnlyReadOnlyPaths;
-    if (optionalStorage === "administration")
+    if (
+      optionalStorage === "administration" ||
+      optionalStorage === "selected" ||
+      optionalStorage === "direct-administration"
+    )
       expect(readOnlyPaths).toContain(await realpath(storage));
     else expect(readOnlyPaths).not.toContain(await realpath(storage));
     expect(modelOnlyReadOnlyPaths).toEqual([
@@ -394,38 +422,42 @@ test("native patch profiles omit unavailable optional storage permissions", asyn
   await resolvePatchProfile(false, "outside");
 }, 30_000);
 
-test("optional storage keeps overlapping Git administration protected in snapshots", async () => {
-  const context = await resolvePatchProfile(false, "administration");
-  const environment = patchSnapshotEnvironment(
-    await fixtures.create("patch-cache-overlap-"),
-    { ...process.env, CODEX_HOME: context.home },
-  );
-  const source = `const fs=require("node:fs");try{fs.writeFileSync(${JSON.stringify(join(context.storage, "objects", "synthetic"))},"changed");fs.writeSync(1,"allowed");}catch(error){fs.writeSync(1,error.code);}`;
-  const output = await runRepositoryCommand(
-    "git",
-    [
-      "-c",
-      `alias.inspect=!node -e '${source.replaceAll("'", "'\\''")}'`,
-      "inspect",
-    ],
-    context.repository,
-    {
-      sandbox: {
-        directory: context.repository,
-        environment,
-        profile: context.snapshotProfile,
+test.each(["administration", "direct-administration"] as const)(
+  "storage keeps overlapping Git administration protected in snapshots: %s",
+  async (storage) => {
+    const context = await resolvePatchProfile(false, storage);
+    const environment = patchSnapshotEnvironment(
+      await fixtures.create("patch-cache-overlap-"),
+      { ...process.env, CODEX_HOME: context.home },
+    );
+    const source = `const fs=require("node:fs");try{fs.writeFileSync(${JSON.stringify(join(context.storage, "objects", "synthetic"))},"changed");fs.writeSync(1,"allowed");}catch(error){fs.writeSync(1,error.code);}`;
+    const output = await runRepositoryCommand(
+      "git",
+      [
+        "-c",
+        `alias.inspect=!node -e '${source.replaceAll("'", "'\\''")}'`,
+        "inspect",
+      ],
+      context.repository,
+      {
+        sandbox: {
+          directory: context.repository,
+          environment,
+          profile: context.snapshotProfile,
+        },
       },
-    },
-  );
-  expect(["EROFS", "EACCES", "EPERM"]).toContain(output);
-  await context.controls!.validate();
-}, 30_000);
+    );
+    expect(["EROFS", "EACCES", "EPERM"]).toContain(output);
+    await context.controls!.validate();
+  },
+  30_000,
+);
 
-for (const location of ["inside", "outside"] as const) {
-  for (const existing of [false, true]) {
+for (const location of ["inside", "outside", "selected"] as const) {
+  for (const existing of location === "selected" ? [true] : [false, true]) {
     test(`optional cache keeps model protection and inherited snapshot access: ${location}, existing ${existing}`, async () => {
       await resolvePatchProfile(
-        location === "outside",
+        location !== "inside",
         location,
         existing,
         async (context, inspectModel) => {
@@ -493,7 +525,15 @@ for (const location of ["inside", "outside"] as const) {
           }
           const snapshot = await inspect(
             `const fs=require("node:fs");for(const path of ${JSON.stringify(paths)})fs.mkdirSync(path,{recursive:true});fs.writeFileSync(${JSON.stringify(file)},"unchanged");fs.writeSync(1,"prepared");`,
-            context.snapshotProfile,
+            location === "selected"
+              ? {
+                  ...context.snapshotProfile,
+                  filesystem: {
+                    ...context.snapshotProfile["filesystem"],
+                    [context.storage]: { ".": "write" },
+                  },
+                }
+              : context.snapshotProfile,
           );
           expect(snapshot).toBe("prepared");
           await context.controls!.validate();

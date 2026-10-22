@@ -419,13 +419,9 @@ test
         }),
     });
     expect(outcome.exitCode, outcome.stdout + outcome.stderr).toBe(0);
-    expect(storagePaths).toContain(await realpath(join(storage, "objects")));
-    expect(storagePaths).toContain(await realpath(join(storage, "tmp")));
+    expect(storagePaths).toContain(await realpath(storage));
     if (mode === "malformed-selector") {
-      expect(storagePaths).toEqual([
-        await realpath(join(storage, "objects")),
-        await realpath(join(storage, "tmp")),
-      ]);
+      expect(storagePaths).toEqual([await realpath(storage)]);
       await expect(
         lstat(join(root, "discarded-storage")),
       ).rejects.toMatchObject({ code: "ENOENT" });
@@ -950,7 +946,18 @@ if(process.argv.includes("fail")){fs.writeSync(2, "Synthetic Git failure detail.
   ).rejects.toThrow("Model provider `missing-synthetic-provider` not found");
 }, 30_000);
 
-test.each(["standard", "nested", "worktree", "configured"] as const)(
+test.each([
+  "standard",
+  "nested",
+  "worktree",
+  "configured",
+  "absent",
+  "symlink",
+  "directory-symlink",
+  "missing-include",
+  "include-symlink",
+  "include-loop",
+] as const)(
   "snapshot filters can write LFS data while overlapping hooks stay protected: %s",
   async (mode) => {
     const root = await fixtures.create("patch-snapshot-storage-");
@@ -979,15 +986,58 @@ test.each(["standard", "nested", "worktree", "configured"] as const)(
         ? join(root, "data-cache")
         : join(checkout, ".git", "lfs");
     if (mode === "configured") initial("config", "lfs.storage", storage);
-    const temporary = join(storage, "tmp"),
+    const temporary =
+        mode === "absent" || mode === "symlink"
+          ? storage
+          : join(
+              storage,
+              mode === "directory-symlink" ? "selected-hooks" : "tmp",
+            ),
       objects = join(storage, "objects");
+    if (mode === "directory-symlink") {
+      const original = join(root, "selected-hooks");
+      await Promise.all([mkdir(original), mkdir(storage, { recursive: true })]);
+      await symlink(
+        original,
+        temporary,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+    }
     await Promise.all([
       mkdir(temporary, { recursive: true }),
       mkdir(objects, { recursive: true }),
     ]);
     const hook = join(temporary, "post-index-change");
+    const selectedConfig = join(storage, "snapshot.gitconfig");
+    const configContents = "# Synthetic selected configuration.\n";
+    if (mode === "include-symlink") {
+      const original = join(root, "selected-config");
+      await writeFile(original, configContents);
+      await symlink(original, selectedConfig);
+    }
+    if (mode === "include-loop") {
+      await symlink(selectedConfig, selectedConfig);
+      initial(
+        "config",
+        "includeIf.onbranch:future-branch.path",
+        selectedConfig,
+      );
+    }
+    if (mode === "missing-include" || mode === "include-symlink")
+      initial("config", "include.path", selectedConfig);
+    const protectedPath =
+      mode === "missing-include" ||
+      mode === "include-symlink" ||
+      mode === "include-loop"
+        ? selectedConfig
+        : hook;
     const hookContents = "#!/bin/sh\nexit 0\n";
-    await writeFile(hook, hookContents, { mode: 0o755 });
+    if (mode === "symlink") {
+      const original = join(root, "original-hook");
+      await writeFile(original, hookContents, { mode: 0o755 });
+      await symlink(original, hook);
+    } else if (mode !== "absent")
+      await writeFile(hook, hookContents, { mode: 0o755 });
     initial("config", "core.hooksPath", temporary);
     const clean = join(root, "clean.cjs");
     await writeFile(
@@ -995,7 +1045,7 @@ test.each(["standard", "nested", "worktree", "configured"] as const)(
       `const fs=require("node:fs"),path=require("node:path");const input=fs.readFileSync(0);
 fs.writeFileSync(${JSON.stringify(join(temporary, "payload"))},input);
 fs.writeFileSync(${JSON.stringify(join(objects, "payload"))},input);
-if(fs.readFileSync("app.ts","utf8").startsWith("after")){try{fs.writeFileSync(${JSON.stringify(hook)},"changed");}catch(error){if(!["EACCES","EPERM","EROFS"].includes(error.code))throw error;}}
+if(fs.readFileSync("app.ts","utf8").startsWith("after")){try{${mode === "symlink" || mode === "include-symlink" || mode === "include-loop" ? `fs.unlinkSync(${JSON.stringify(protectedPath)});` : mode === "directory-symlink" ? `fs.rmSync(${JSON.stringify(temporary)},{recursive:true,force:true});fs.mkdirSync(${JSON.stringify(temporary)});` : ""}fs.writeFileSync(${JSON.stringify(protectedPath)},${JSON.stringify(mode === "missing-include" || mode === "include-symlink" || mode === "include-loop" ? "[core]\n fsmonitor = false\n" : mode === "absent" || mode === "symlink" || mode === "directory-symlink" ? "#!/bin/sh\nprintf activated > HOOK_ACTIVATED\n" : "changed")});fs.chmodSync(${JSON.stringify(protectedPath)},0o755);}catch(error){if(!["EACCES","EPERM","EROFS"].includes(error.code))throw error;}}
 process.stdout.write(input);
 `,
     );
@@ -1066,11 +1116,53 @@ process.stdout.write(input);
           environment: { ...environment, ...options?.environment },
         }),
     });
-    expect(result.exitCode, result.stderr).toBe(0);
-    expect(JSON.parse(result.stdout).files).toContain(
-      mode === "nested" ? "child/app.ts" : "app.ts",
+    if (mode === "include-loop")
+      expect((await lstat(selectedConfig)).isSymbolicLink()).toBe(true);
+    if (process.platform === "win32") {
+      expect(result.exitCode).toBe(2);
+      expect(result.stdout + result.stderr).toContain(
+        "Windows sandbox cannot protect Git control",
+      );
+      expect(await readFile(join(checkout, "app.ts"), "utf8")).toBe("before\n");
+    } else if (
+      (mode === "symlink" ||
+        mode === "directory-symlink" ||
+        mode === "include-symlink" ||
+        mode === "include-loop") &&
+      result.exitCode !== 0
+    ) {
+      expect(result.exitCode).toBe(2);
+      if (process.platform === "linux")
+        expect(result.stdout + result.stderr).toContain(
+          "cannot enforce sandbox read-only path",
+        );
+      expect(await readFile(join(checkout, "app.ts"), "utf8")).toBe("before\n");
+    } else {
+      expect(result.exitCode, result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout).files).toContain(
+        mode === "nested" ? "child/app.ts" : "app.ts",
+      );
+    }
+    if (mode === "absent")
+      await expect(lstat(hook)).rejects.toMatchObject({ code: "ENOENT" });
+    else {
+      expect(await readFile(hook, "utf8")).toBe(hookContents);
+      if (mode === "symlink")
+        expect((await lstat(hook)).isSymbolicLink()).toBe(true);
+      if (mode === "directory-symlink")
+        expect((await lstat(temporary)).isSymbolicLink()).toBe(true);
+    }
+    if (mode === "missing-include")
+      await expect(lstat(selectedConfig)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    if (mode === "include-symlink") {
+      expect((await lstat(selectedConfig)).isSymbolicLink()).toBe(true);
+      expect(await readFile(selectedConfig, "utf8")).toBe(configContents);
+    }
+    await expect(lstat(join(checkout, "HOOK_ACTIVATED"))).rejects.toMatchObject(
+      { code: "ENOENT" },
     );
-    expect(await readFile(hook, "utf8")).toBe(hookContents);
     expect(await readFile(join(objects, "payload"), "utf8")).toBe(
       "Synthetic LFS payload\n",
     );

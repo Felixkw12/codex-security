@@ -594,6 +594,7 @@ export async function capturePatchGitControls(
   const modelOnlyReadOnlyPaths = new Set<string>();
   const inaccessibleIncludes = new Set<string>();
   const inaccessibleHooks = new Set<string>();
+  const hookDirectories = new Set<string>();
   const hookIsAvailable = async (path: string): Promise<boolean> => {
     const executable = await access(path, constants.X_OK).then(
       () => true,
@@ -752,6 +753,7 @@ export async function capturePatchGitControls(
         ).replace(/\n$/u, ""),
       ),
     );
+    hookDirectories.add(hooks);
     // A non-directory hooks parent is ordinary data. Bind its absent entries
     // so validation detects hooks added after it becomes a directory.
     for (const hook of GIT_HOOKS) await rememberHook(relativeFile(hooks, hook));
@@ -1013,7 +1015,7 @@ export async function capturePatchGitControls(
         const lfs = absolute
           ? configured
           : join(common.replace(/\n$/u, ""), configured);
-        pendingStoragePaths.push(join(lfs, "objects"), join(lfs, "tmp"));
+        pendingStoragePaths.push(lfs);
       }
       let tracked: Buffer;
       let untracked: Buffer;
@@ -1151,15 +1153,38 @@ export async function capturePatchGitControls(
     await visit(root);
     for (const path of pendingStoragePaths) {
       try {
-        if (!(await canPrepareStorage(path))) {
+        const children = [join(path, "objects"), join(path, "tmp")];
+        const canonical = await canonicalPath(path);
+        const protectsAdministration = [...administrationRoots.keys()].some(
+          (administration) => inside(canonical, administration),
+        );
+        let prepare = !protectsAdministration;
+        for (const candidate of [path, ...children])
+          if (!(await canPrepareStorage(candidate))) prepare = false;
+        if (!prepare) {
           // Bind checkout links without preparing or granting their targets.
-          await rememberControl(path, true, false, true);
-          modelOnlyReadOnlyPaths.add(controlPaths.get(path)!.canonical);
+          for (const child of children) {
+            await rememberControl(child, true, false, true);
+            modelOnlyReadOnlyPaths.add(controlPaths.get(child)!.canonical);
+          }
           continue;
         }
-        await mkdir(path, { recursive: true });
+        // Git LFS renames from tmp into objects. Separate writable bindings
+        // create distinct mounts on Linux and make that rename fail with EXDEV.
+        // Keep both directories on the same binding, preserving narrower Git
+        // control exclusions already captured within the cache.
+        for (const child of children) {
+          await mkdir(child, { recursive: true });
+          await rememberControl(child, true, false);
+          const target = controlPaths.get(child)!.canonical;
+          modelOnlyReadOnlyPaths.add(target);
+          if (!inside(canonical, target)) {
+            await rememberControl(child);
+            snapshotStoragePaths.add(target);
+          }
+        }
         await rememberControl(path);
-        snapshotStoragePaths.add(controlPaths.get(path)!.canonical);
+        snapshotStoragePaths.add(canonical);
       } catch (error) {
         // Unavailable optional storage gets no extra snapshot permission.
         // Git/LFS reports the failure if a snapshot actually uses it.
@@ -1173,13 +1198,63 @@ export async function capturePatchGitControls(
     }
   };
   await discover(true);
+  const snapshotControlPaths: string[] = [];
+  for (const [path, control] of controlPaths) {
+    if (!control.readOnly) continue;
+    for (const link of await directoryLinks(path))
+      if ([...snapshotStoragePaths].some((storage) => inside(storage, link)))
+        snapshotControlPaths.push(link);
+  }
+  const snapshotControlLocation = async (path: string): Promise<string> => {
+    let ancestor = path;
+    for (;;) {
+      try {
+        const canonical = `${await canonicalPath(ancestor)}${path.slice(ancestor.length)}`;
+        for (const link of await directoryLinks(ancestor))
+          if (
+            [...snapshotStoragePaths].some((storage) => inside(storage, link))
+          )
+            snapshotControlPaths.push(link);
+        return canonical;
+      } catch (error) {
+        // Locate opaque control paths without resolving their entries. The
+        // native sandbox must enforce the literal exclusions or reject them.
+        if (
+          !["EACCES", "ELOOP"].includes(
+            (error as NodeJS.ErrnoException).code ?? "",
+          )
+        )
+          throw error;
+        const parent = dirname(ancestor);
+        if (parent === ancestor) throw error;
+        ancestor = parent;
+      }
+    }
+  };
+  for (const path of inaccessibleIncludes) {
+    const canonical = await snapshotControlLocation(path);
+    if ([...snapshotStoragePaths].some((storage) => inside(storage, canonical)))
+      snapshotControlPaths.push(canonical);
+  }
+  for (const directory of hookDirectories) {
+    const canonical = await snapshotControlLocation(directory);
+    if ([...snapshotStoragePaths].some((storage) => inside(storage, canonical)))
+      for (const hook of GIT_HOOKS)
+        snapshotControlPaths.push(relativeFile(canonical, hook));
+  }
   return {
     readOnlyPaths: [
       ...new Set([
         ...administrationRoots.keys(),
+        ...snapshotControlPaths,
         ...[...controlPaths.values()]
           .filter(
-            ({ identity, readOnly }) => identity !== undefined && readOnly,
+            ({ canonical, identity, readOnly }) =>
+              readOnly &&
+              (identity !== undefined ||
+                [...snapshotStoragePaths].some((storage) =>
+                  inside(storage, canonical),
+                )),
           )
           .map(({ canonical }) => canonical),
       ]),
