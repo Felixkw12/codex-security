@@ -24,6 +24,7 @@ const bundle = await build({
   bundle: true,
   stdin: {
     contents: `export * from ${JSON.stringify(fileURLToPath(new URL("../src/native-scan.ts", import.meta.url)))};
+      export { resolveNativeParentSandbox } from ${JSON.stringify(fileURLToPath(new URL("../src/native-permissions.ts", import.meta.url)))};
       export { saveScanKnowledge, scanInputIdentity } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/scan-inputs.ts", import.meta.url)))};
       export { readKnowledgeBaseSnapshot, prepareKnowledgeBase } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/knowledge-base.ts", import.meta.url)))};
       export { acquireScanExecution } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/scan-execution.ts", import.meta.url)))};
@@ -94,6 +95,7 @@ new Function(
 );
 const {
   NativeScanHost,
+  resolveNativeParentSandbox,
   saveScanKnowledge,
   scanInputIdentity,
   readKnowledgeBaseSnapshot,
@@ -339,7 +341,14 @@ test("native waiters join one ordinary scan and detaching leaves it running", as
   });
   const waiter = new AbortController();
   const first = host.run(input(), waiter.signal);
-  const joined = host.run(input());
+  let joinedPolicyReads = 0;
+  const joined = host.run({
+    ...input(),
+    parentSandbox: () => {
+      joinedPolicyReads++;
+      return resolveNativeParentSandbox({});
+    },
+  });
   await started.promise;
   const rejected = assert.rejects(first, /detached/);
   waiter.abort(new Error("detached"));
@@ -348,6 +357,7 @@ test("native waiters join one ordinary scan and detaching leaves it running", as
   completed.resolve({ scanDir: "sealed-parent" });
   assert.deepEqual(await joined, { scanDir: "sealed-parent" });
   assert.equal(preparations, 1);
+  assert.equal(joinedPolicyReads, 0);
   assert.equal(closes, 1);
 });
 
@@ -2638,6 +2648,10 @@ test(
           decoyLaunch: join(root, `decoy-${id}.jsonl`),
           selectedConfigPath: join(root, `selected-${id}.toml`),
           developerInstructions: `Selected synthetic guidance ${id}.`,
+          parentAccess: id === "a" || id === "c" ? "read" : "write",
+          parentDeniedPath: join(root, `parent-private-${id}`),
+          savedWritePath: join(root, `saved-write-${id}`),
+          parentPolicyReads: 0,
           model: capturedInputs
             ? `${id === "c" ? "selected" : "ambient"}-model-${id}`
             : `synthetic-model-${id}`,
@@ -2844,6 +2858,41 @@ test(
         }
         return prepareNativeScan({
           ...input(`synthetic-${fixture.id}`),
+          parentSandbox: () => {
+            fixture.parentPolicyReads++;
+            return resolveNativeParentSandbox({
+              _meta: {
+                "codex/sandbox-state-meta": {
+                  permissionProfile: {
+                    type: "managed",
+                    file_system: {
+                      type: "restricted",
+                      entries: [
+                        {
+                          access: "read",
+                          path: { type: "special", value: { kind: "root" } },
+                        },
+                        {
+                          access: fixture.parentAccess,
+                          path: {
+                            type: "special",
+                            value: { kind: "project_roots" },
+                          },
+                        },
+                        {
+                          access: "deny",
+                          path: {
+                            type: "path",
+                            path: fixture.parentDeniedPath,
+                          },
+                        },
+                      ],
+                    },
+                  },
+                },
+              },
+            });
+          },
           pluginRoot,
           stateDirectory: fixture.stateDirectory,
           ...(fixture.semanticInputs
@@ -2865,6 +2914,10 @@ test(
             : {
                 recipe: {
                   auth: "api-key",
+                  inheritedPermissions: {
+                    filesystem: { [fixture.savedWritePath]: "write" },
+                    network: { enabled: false },
+                  },
                   deepScan: fixture.savedDeepScanSettings,
                   ...(fixture.safetyIdentifier === undefined
                     ? {}
@@ -2876,6 +2929,7 @@ test(
       const prepared = await Promise.all(pending);
       await Promise.all(
         fixtures.map(async (fixture, index) => {
+          assert.equal(fixture.parentPolicyReads, 1);
           for (const [name, value] of Object.entries(
             fixture.semanticInputs?.deepScanSettings ??
               fixture.savedDeepScanSettings,
@@ -2968,6 +3022,27 @@ test(
                   if (["-c", "--config"].includes(observed.argv[i]))
                     fragments.push(parseToml(observed.argv[++i]));
                 const config = Object.assign({}, ...fragments);
+                const permission =
+                  config.permissions[config.default_permissions];
+                assert.equal(permission.network.enabled, false);
+                assert.equal(
+                  permission.filesystem[":workspace_roots"],
+                  fixture.parentAccess,
+                );
+                assert.equal(
+                  permission.filesystem[fixture.parentDeniedPath],
+                  "deny",
+                );
+                assert.equal(
+                  permission.filesystem[fixture.savedWritePath],
+                  fixture.semanticInputs ? undefined : fixture.parentAccess,
+                );
+                for (const other of fixtures)
+                  if (other !== fixture)
+                    assert.equal(
+                      permission.filesystem[other.parentDeniedPath],
+                      undefined,
+                    );
                 assert.equal(
                   config.developer_instructions,
                   fixture.developerInstructions,
@@ -3022,6 +3097,7 @@ test(
               assert.equal(observed.marker, fixture.id);
               assert.equal(observed.openai, `synthetic-key-${fixture.id}`);
             }
+            assert.equal(fixture.parentPolicyReads, 1);
           } finally {
             await knowledge?.cleanup();
             await runtime.providerProfile.cleanup();
@@ -3440,6 +3516,8 @@ for (const scenario of [
   "missing-home",
   "missing-home-traversal",
   "denial-collision",
+  "missing-parent-sandbox",
+  "invalid-parent-sandbox",
 ]) {
   test(
     `sealed native publication skips execution preparation: ${scenario}`,
@@ -3495,22 +3573,40 @@ for (const scenario of [
           filesystem: { [denied]: "deny" },
           network: { enabled: false },
         };
+        const deferredPolicy = scenario.endsWith("parent-sandbox");
+        let parentPolicyReads = 0;
         const request = {
           ...input(),
           scan: { ...input().scan, scanDir },
-          parentSandbox: {
-            workspaceAccess: "read",
-            filesystemDenies: [],
-            ...(scenario === "denial-collision"
-              ? { literalFilesystemDenies: [denied] }
-              : {}),
-          },
+          parentSandbox: deferredPolicy
+            ? () => {
+                parentPolicyReads++;
+                return resolveNativeParentSandbox(
+                  scenario === "missing-parent-sandbox"
+                    ? {}
+                    : {
+                        _meta: {
+                          "codex/sandbox-state-meta": {
+                            permissionProfile: { type: "external" },
+                          },
+                        },
+                      },
+                );
+              }
+            : {
+                workspaceAccess: "read",
+                filesystemDenies: [],
+                ...(scenario === "denial-collision"
+                  ? { literalFilesystemDenies: [denied] }
+                  : {}),
+              },
           recipe: {
             config: { model: "synthetic-saved" },
             inheritedPermissions: savedPermissions,
           },
         };
         const prepared = await prepareNativeScan(request);
+        assert.equal(parentPolicyReads, 0);
         assert.equal(
           prepared.client.dependencies.ambientExecution.environment.CODEX_HOME,
           expectedHome,
@@ -3529,8 +3625,11 @@ for (const scenario of [
           }),
           scenario.startsWith("missing-home")
             ? { code: "ENOENT" }
-            : /glob.*literal/u,
+            : deferredPolicy
+              ? /cannot preserve the parent sandbox/u
+              : /glob.*literal/u,
         );
+        if (deferredPolicy) assert.equal(parentPolicyReads, 1);
         await rm(join(scanDir, "scan-manifest.json"));
         await assert.rejects(
           prepared.client.dependencies.resolveCodexCommand(),
@@ -3540,8 +3639,18 @@ for (const scenario of [
           prepareNativeScan(request),
           scenario.startsWith("missing-home")
             ? { code: "ENOENT" }
-            : /glob.*literal/u,
+            : deferredPolicy
+              ? /cannot preserve the parent sandbox/u
+              : /glob.*literal/u,
         );
+        if (deferredPolicy) {
+          assert.equal(parentPolicyReads, 2);
+          await assert.rejects(
+            prepareNativeScan({ ...request, recipe: undefined }),
+            /cannot preserve the parent sandbox/u,
+          );
+          assert.equal(parentPolicyReads, 3);
+        }
       } finally {
         restore();
         await rm(root, { recursive: true, force: true });

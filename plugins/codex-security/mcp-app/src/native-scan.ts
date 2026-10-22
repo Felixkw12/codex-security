@@ -75,7 +75,7 @@ export interface NativeScanInput {
   pythonPath: string;
   model?: string;
   reasoningEffort?: string;
-  parentSandbox: NativeParentSandbox;
+  parentSandbox: NativeParentSandbox | (() => NativeParentSandbox);
   parentTurn?: DeepScanParentTurn;
   stateDirectory?: string;
 }
@@ -279,15 +279,19 @@ export async function prepareNativeScan(
     recipe.inheritedPermissions as ScanOptions["inheritedPermissions"];
   let inheritedPermissions = savedPermissions;
   if (!publicationOnly) {
+    const parentSandbox =
+      typeof input.parentSandbox === "function"
+        ? input.parentSandbox()
+        : input.parentSandbox;
     const savedGlobDepth = savedPermissions?.filesystem.glob_scan_max_depth;
-    for (const path of input.parentSandbox.literalFilesystemDenies ?? []) {
+    for (const path of parentSandbox.literalFilesystemDenies ?? []) {
       const saved = savedPermissions?.filesystem[path];
       if (/[?*\[]/u.test(path) && (saved === "deny" || saved === "none"))
         throw new CodexSecurityError(
           "Saved glob and current literal filesystem denials with the same key cannot be preserved.",
         );
     }
-    for (const path of input.parentSandbox.filesystemDenies) {
+    for (const path of parentSandbox.filesystemDenies) {
       const saved = savedPermissions?.filesystem[path];
       if (
         /[?*\[]/u.test(path) &&
@@ -300,28 +304,25 @@ export async function prepareNativeScan(
     }
     inheritedPermissions = {
       filesystem: Object.fromEntries([
-        [":workspace_roots", input.parentSandbox.workspaceAccess],
+        [":workspace_roots", parentSandbox.workspaceAccess],
         ...Object.entries(
-          input.parentSandbox.workspaceAccess === "read"
+          parentSandbox.workspaceAccess === "read"
             ? readOnlyFilesystem(savedPermissions?.filesystem ?? {})
             : (savedPermissions?.filesystem ?? {}),
         ),
-        ...input.parentSandbox.filesystemDenies.map((path) => [path, "deny"]),
-        ...(input.parentSandbox.literalFilesystemDenies ?? []).map((path) => [
+        ...parentSandbox.filesystemDenies.map((path) => [path, "deny"]),
+        ...(parentSandbox.literalFilesystemDenies ?? []).map((path) => [
           path,
           { ".": "deny" },
         ]),
-        ...(input.parentSandbox.globScanMaxDepth === undefined
+        ...(parentSandbox.globScanMaxDepth === undefined
           ? []
           : [
               [
                 "glob_scan_max_depth",
                 typeof savedGlobDepth === "number"
-                  ? Math.max(
-                      savedGlobDepth,
-                      input.parentSandbox.globScanMaxDepth,
-                    )
-                  : input.parentSandbox.globScanMaxDepth,
+                  ? Math.max(savedGlobDepth, parentSandbox.globScanMaxDepth)
+                  : parentSandbox.globScanMaxDepth,
               ],
             ]),
       ]) as JsonObject,
@@ -333,10 +334,8 @@ export async function prepareNativeScan(
           ([path, access]) =>
             (access === "deny" || access === "none") && /[*?\[\]]/.test(path),
         )) ||
-      (input.parentSandbox.globScanMaxDepth === undefined &&
-        input.parentSandbox.filesystemDenies.some((path) =>
-          /[*?\[\]]/.test(path),
-        ));
+      (parentSandbox.globScanMaxDepth === undefined &&
+        parentSandbox.filesystemDenies.some((path) => /[*?\[\]]/.test(path)));
     if (hasUncappedDenials)
       delete inheritedPermissions.filesystem["glob_scan_max_depth"];
   }

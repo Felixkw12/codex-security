@@ -33,7 +33,8 @@ try {
   await testParentToolList();
   await testClaimedParentArtifactOperations();
   await testPromptDrivenPrivateRecipe();
-  await testNativeDeepTerminalResults();
+  for (const sandboxMetadata of ["valid", "missing", "unsupported"])
+    await testNativeDeepTerminalResults(sandboxMetadata);
   await testSemanticScanDraftCompletion();
   await testCompactDiffScanCompletion();
 } finally {
@@ -1309,8 +1310,11 @@ async function testPromptDrivenPrivateRecipe() {
   }
 }
 
-async function testNativeDeepTerminalResults() {
-  const fixtureRoot = path.join(temporaryRoot, "completed-native");
+async function testNativeDeepTerminalResults(sandboxMetadata: string) {
+  const fixtureRoot = path.join(
+    temporaryRoot,
+    `completed-native-${sandboxMetadata}`,
+  );
   const repoRoot = path.join(fixtureRoot, "repository");
   const invocationPath = path.join(fixtureRoot, "unexpected-codex-invocation");
   const environment = {
@@ -1403,22 +1407,29 @@ process.exit(1);
       arguments: arguments_,
       _meta: {
         "openai/threadId": ownerThread,
-        "codex/sandbox-state-meta": {
-          permissionProfile: {
-            type: "managed",
-            file_system: {
-              type: "restricted",
-              entries: [
-                {
-                  path: { type: "special", value: { kind: "root" } },
-                  access: "read",
+        ...(sandboxMetadata === "missing"
+          ? {}
+          : {
+              "codex/sandbox-state-meta": {
+                permissionProfile: {
+                  type:
+                    sandboxMetadata === "unsupported"
+                      ? "synthetic-unsupported-profile"
+                      : "managed",
+                  file_system: {
+                    type: "restricted",
+                    entries: [
+                      {
+                        path: { type: "special", value: { kind: "root" } },
+                        access: "read",
+                      },
+                    ],
+                  },
+                  network: "restricted",
                 },
-              ],
-            },
-            network: "restricted",
-          },
-          sandboxCwd: pathToFileURL(repoRoot).href,
-        },
+                sandboxCwd: pathToFileURL(repoRoot).href,
+              },
+            }),
       },
     });
   const rejoin = () =>
@@ -1446,6 +1457,21 @@ process.exit(1);
   };
 
   try {
+    if (sandboxMetadata !== "valid") {
+      const rejected = await rejoin();
+      assert.equal(rejected.isError, true);
+      assert.match(
+        rejected.content[0].text,
+        /cannot preserve the parent sandbox/,
+      );
+      assert.equal(rejected.structuredContent, undefined);
+      assert.equal(
+        runWorkbenchFixture(environment, ["get-scan", "--scan-id", scanId]).scan
+          .progress.status,
+        "running",
+      );
+      await assert.rejects(readFile(invocationPath), { code: "ENOENT" });
+    }
     requireSuccessfulTool(
       await call("record_codex_security_scan_draft", {
         scanId,
@@ -1643,6 +1669,44 @@ process.exit(1);
         .scan.progress.status,
       "failed",
       "terminal rejoin finishes the deferred child stop",
+    );
+    const failedRepo = path.join(fixtureRoot, "failed-repository");
+    await mkdir(failedRepo);
+    await writeFile(path.join(failedRepo, "fixture.py"), "print('fixture')\n");
+    const { scan: failedScan } = runWorkbenchFixture(environment, [
+      "begin-deep-scan",
+      "--target-path",
+      failedRepo,
+      "--scope",
+      ".",
+      "--thread-id",
+      ownerThread,
+    ]);
+    runWorkbenchFixture(environment, [
+      "fail-scan",
+      "--scan-id",
+      failedScan.scanId,
+      "--claim-token",
+      failedScan.handoffClaimToken,
+      "--message",
+      "Synthetic retained failure.",
+      "--defer-publication",
+    ]);
+    const failedResponse = await call("start_codex_security_deep_scan", {
+      scanId: failedScan.scanId,
+      handoffClaimToken: failedScan.handoffClaimToken,
+    });
+    assert.equal(failedResponse.isError, true);
+    assert.equal(failedResponse.structuredContent?.scanId, failedScan.scanId);
+    assert.equal(failedResponse.structuredContent?.status, "failed");
+    assert.equal(failedResponse.content[0].text, "Synthetic retained failure.");
+    assert.equal(
+      runWorkbenchFixture(environment, [
+        "get-scan",
+        "--scan-id",
+        failedScan.scanId,
+      ]).scan.progress.status,
+      "failed",
     );
     await assert.rejects(readFile(invocationPath), { code: "ENOENT" });
   } finally {
