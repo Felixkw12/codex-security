@@ -51,6 +51,22 @@ function identifiers(match: ScaMatch): string[] {
   return [...new Set([...match.advisoryIds, ...match.aliases])];
 }
 
+function hasSeparateAdvisoryGroups(matches: ScaMatch[]): boolean {
+  const groups: Set<string>[] = [];
+  for (const match of matches) {
+    const ids = new Set(identifiers(match));
+    const joined = groups.filter((group) =>
+      [...group].some((id) => ids.has(id)),
+    );
+    for (const group of joined) {
+      for (const id of group) ids.add(id);
+      groups.splice(groups.indexOf(group), 1);
+    }
+    groups.push(ids);
+  }
+  return groups.length > 1;
+}
+
 function componentFor(result: ScaResult, match: ScaMatch): ScaComponent {
   const component = result.components.find(
     (item) => item.id === match.componentId,
@@ -301,8 +317,54 @@ export function compareScaResults(
     for (const id of candidates)
       reverse.set(id, [...(reverse.get(id) ?? []), before.id]);
   }
+  function correlationFor(beforeId: string): ScaMatchCorrelation {
+    const baseGroup = new Set<string>();
+    const headGroup = new Set<string>();
+    const queue = [beforeId];
+    for (let index = 0; index < queue.length; index++) {
+      const current = queue[index]!;
+      if (baseGroup.has(current)) continue;
+      baseGroup.add(current);
+      for (const candidate of neighbors.get(current) ?? []) {
+        if (!remainingHead.has(candidate)) continue;
+        headGroup.add(candidate);
+        for (const parent of reverse.get(candidate) ?? []) {
+          if (remainingBase.has(parent) && !baseGroup.has(parent))
+            queue.push(parent);
+        }
+      }
+    }
+    return {
+      baseMatchIds: [...baseGroup],
+      headMatchIds: [...headGroup],
+    };
+  }
+  // Preserve merged or split advisory groups before exact versions consume edges.
+  const visitedBase = new Set<string>();
+  for (const before of base.matches) {
+    if (visitedBase.has(before.id)) continue;
+    const correlation = correlationFor(before.id);
+    for (const id of correlation.baseMatchIds) visitedBase.add(id);
+    if (
+      !hasSeparateAdvisoryGroups(
+        base.matches.filter((match) =>
+          correlation.baseMatchIds.includes(match.id),
+        ),
+      ) &&
+      !hasSeparateAdvisoryGroups(
+        head.matches.filter((match) =>
+          correlation.headMatchIds.includes(match.id),
+        ),
+      )
+    )
+      continue;
+    result.ambiguous.push(correlation);
+    for (const id of correlation.baseMatchIds) remainingBase.delete(id);
+    for (const id of correlation.headMatchIds) remainingHead.delete(id);
+  }
   // Match unambiguous same-version occurrences before considering upgrades.
   for (const before of base.matches) {
+    if (!remainingBase.has(before.id)) continue;
     const version = baseComponents.get(before.id)!.version;
     const candidates = (neighbors.get(before.id) ?? []).filter(
       (id) => headComponents.get(id)!.version === version,
@@ -322,36 +384,20 @@ export function compareScaResults(
   }
   for (const beforeId of [...remainingBase]) {
     if (!remainingBase.has(beforeId)) continue;
-    const baseGroup = new Set<string>();
-    const headGroup = new Set<string>();
-    const queue = [beforeId];
-    for (let index = 0; index < queue.length; index++) {
-      const current = queue[index]!;
-      if (baseGroup.has(current)) continue;
-      baseGroup.add(current);
-      for (const candidate of neighbors.get(current) ?? []) {
-        if (!remainingHead.has(candidate)) continue;
-        headGroup.add(candidate);
-        for (const parent of reverse.get(candidate) ?? []) {
-          if (remainingBase.has(parent) && !baseGroup.has(parent))
-            queue.push(parent);
-        }
-      }
-    }
-    const correlation = {
-      baseMatchIds: [...baseGroup],
-      headMatchIds: [...headGroup],
-    };
-    if (headGroup.size === 0)
+    const correlation = correlationFor(beforeId);
+    if (correlation.headMatchIds.length === 0)
       result.noLongerObserved.push({
         matchId: beforeId,
         resolved: result.comparable,
       });
-    else if (baseGroup.size === 1 && headGroup.size === 1)
+    else if (
+      correlation.baseMatchIds.length === 1 &&
+      correlation.headMatchIds.length === 1
+    )
       result.changedVersion.push(correlation);
     else result.ambiguous.push(correlation);
-    for (const id of baseGroup) remainingBase.delete(id);
-    for (const id of headGroup) remainingHead.delete(id);
+    for (const id of correlation.baseMatchIds) remainingBase.delete(id);
+    for (const id of correlation.headMatchIds) remainingHead.delete(id);
   }
   result.newlyObserved = [...remainingHead];
   if (result.comparable) result.introduced = [...result.newlyObserved];

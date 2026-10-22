@@ -301,6 +301,217 @@ async function initializedSubmodule(
 }
 
 describe("SCA input selection", () => {
+  test.skipIf(process.platform !== "linux").each([
+    ...[false, true].flatMap((tracked) =>
+      [".", "selected"].map((scope) => ({
+        tracked,
+        scope,
+        unreadable: false,
+      })),
+    ),
+    { tracked: true, scope: ".", unreadable: true },
+  ])(
+    "retains incomplete Git coverage for byte paths: %p",
+    async ({ tracked, scope, unreadable }) => {
+      const { repository, output } = await setup();
+      await execFile("git", ["init", "--quiet", repository]);
+      const selected = join(repository, scope);
+      await mkdir(selected, { recursive: true });
+      const rawDirectory = Buffer.concat([
+        Buffer.from(`${selected}/project-`),
+        Buffer.from([0xff]),
+      ]);
+      const rawPath = Buffer.concat([
+        rawDirectory,
+        Buffer.from("/package-lock.json"),
+      ]);
+      await mkdir(rawDirectory);
+      await writeFile(rawPath, npmLock());
+      await writeFile(join(selected, "package-lock.json"), npmLock());
+      if (tracked) await execFile("git", ["-C", repository, "add", "--all"]);
+      if (unreadable) await filesystem.chmod(rawDirectory, 0);
+      const result = await runOsvScan(
+        { repositoryPath: selected, outputDir: output },
+        {
+          executable: process.execPath,
+          runProcess: async (_executable, argv) =>
+            argv[0] === "--version"
+              ? { stdout: "2.6.0", stderr: "", exitCode: 0 }
+              : {
+                  stdout: JSON.stringify(rawOutput("package-lock.json")),
+                  stderr: "",
+                  exitCode: 0,
+                },
+        },
+      ).finally(async () => {
+        if (unreadable) await filesystem.chmod(rawDirectory, 0o700);
+      });
+      expect(result.status).toBe("partial");
+      expect(result.coverage.status).toBe("partial");
+      expect(result.coverage.inputs.map((input) => input.path)).toEqual([
+        "package-lock.json",
+      ]);
+      expect(result.components).toHaveLength(1);
+      expect(result.scanner.invocations).toHaveLength(1);
+      const pathBytes = Buffer.concat([
+        Buffer.from("project-"),
+        Buffer.from([0xff]),
+        Buffer.from("/package-lock.json"),
+      ]).toString("hex");
+      expect(result.diagnostics).toHaveLength(1);
+      expect(result.diagnostics[0]).toContain(pathBytes);
+      if (unreadable && process.getuid?.() !== 0)
+        expect(result.diagnostics[0]).toContain("EACCES");
+      expect(result.coverage.limitations).toContain(result.diagnostics[0]!);
+      expect(await readFile(rawPath, "utf8")).toBe(npmLock());
+      expect(
+        JSON.parse(await readFile(result.scanner.rawOutputPath, "utf8")),
+      ).toEqual(rawOutput("package-lock.json"));
+    },
+  );
+
+  test
+    .skipIf(process.platform !== "linux")
+    .each(["sparse", "nested", "gitlink"])(
+    "retains incomplete Git coverage for byte-path %s boundaries",
+    async (kind) => {
+      const { root, repository } = await setup();
+      const git = (cwd: string, ...args: string[]) =>
+        execFile("git", [
+          "-c",
+          "core.hooksPath=",
+          "-c",
+          "commit.gpgSign=false",
+          "-c",
+          "user.name=Synthetic",
+          "-c",
+          "user.email=synthetic@example.test",
+          "-C",
+          cwd,
+          ...args,
+        ]);
+      await git(repository, "init", "--quiet");
+      await writeFile(join(repository, "package-lock.json"), npmLock());
+      const directoryBytes = Buffer.concat([
+        Buffer.from("project-"),
+        Buffer.from([0xff]),
+      ]);
+      const rawDirectory = Buffer.concat([
+        Buffer.from(`${repository}/`),
+        directoryBytes,
+      ]);
+      const rawPath = Buffer.concat([
+        rawDirectory,
+        Buffer.from("/package-lock.json"),
+      ]);
+      await mkdir(rawDirectory);
+      await writeFile(rawPath, npmLock());
+      if (kind === "sparse") {
+        await mkdir(join(repository, "included"));
+        await writeFile(
+          join(repository, "included", "README.md"),
+          "Synthetic sparse fixture\n",
+        );
+        await git(repository, "add", "--all");
+        await git(
+          repository,
+          "commit",
+          "--quiet",
+          "-m",
+          "Synthetic sparse inventory",
+        );
+        await git(repository, "sparse-checkout", "init", "--cone");
+        await git(repository, "sparse-checkout", "set", "included");
+        expect(
+          await filesystem
+            .lstat(rawPath)
+            .catch((error: NodeJS.ErrnoException) => error.code),
+        ).toBe("ENOENT");
+      } else {
+        const alias = join(root, "nested-checkout");
+        await symlink(rawDirectory, alias);
+        await git(alias, "init", "--quiet");
+        if (kind === "gitlink") {
+          await git(alias, "add", "--all");
+          await git(
+            alias,
+            "commit",
+            "--quiet",
+            "-m",
+            "Synthetic nested inventory",
+          );
+          await git(repository, "add", "--all");
+          expect(
+            (await git(repository, "ls-files", "--stage")).stdout,
+          ).toContain("160000 ");
+        }
+      }
+      const result = await discoverScaInputs(repository);
+      expect(result.inputs.map((input) => input.path)).toEqual([
+        "package-lock.json",
+      ]);
+      expect(result.diagnostics).toHaveLength(1);
+      const pathBytes =
+        kind === "sparse"
+          ? Buffer.concat([directoryBytes, Buffer.from("/package-lock.json")])
+          : directoryBytes;
+      expect(result.diagnostics[0]).toContain(pathBytes.toString("hex"));
+      expect(result.limitations).toContain(result.diagnostics[0]!);
+    },
+  );
+
+  test("Git inventory preserves UTF-8 replacement characters and leading BOMs", async () => {
+    const { repository } = await setup();
+    await execFile("git", ["init", "--quiet", repository]);
+    const paths = [
+      "project-\uFFFD/package-lock.json",
+      "\uFEFFproject/package-lock.json",
+    ];
+    for (const path of paths) {
+      await mkdir(join(repository, path, ".."), { recursive: true });
+      await writeFile(join(repository, path), npmLock());
+    }
+    await execFile("git", ["-C", repository, "add", "--all"]);
+    const result = await discoverScaInputs(repository);
+    expect(result.inputs.map((input) => input.path)).toEqual(paths.sort());
+    expect(result.inputs.every((input) => input.sha256 !== "")).toBe(true);
+    expect(result.diagnostics).toEqual([]);
+  });
+
+  test.skipIf(process.platform !== "linux")(
+    "Git byte paths preserve excluded, unrelated, deleted and sibling scope",
+    async () => {
+      const { repository } = await setup();
+      await execFile("git", ["init", "--quiet", repository]);
+      const selected = join(repository, "selected");
+      await mkdir(selected);
+      await writeFile(join(selected, "package-lock.json"), npmLock());
+      let deleted: Buffer | undefined;
+      for (const [directory, filename] of [
+        ["sibling", "package-lock.json"],
+        ["selected/node_modules", "package-lock.json"],
+        ["selected/unrelated", "README.md"],
+        ["selected/deleted", "package-lock.json"],
+      ]) {
+        const rawDirectory = Buffer.concat([
+          Buffer.from(`${repository}/${directory}/project-`),
+          Buffer.from([0xff]),
+        ]);
+        await mkdir(rawDirectory, { recursive: true });
+        const path = Buffer.concat([rawDirectory, Buffer.from(`/${filename}`)]);
+        await writeFile(path, npmLock());
+        if (directory === "selected/deleted") deleted = path;
+      }
+      await execFile("git", ["-C", repository, "add", "--all"]);
+      await rm(deleted!);
+      const result = await discoverScaInputs(selected);
+      expect(result.inputs.map((input) => input.path)).toEqual([
+        "package-lock.json",
+      ]);
+      expect(result.diagnostics).toEqual([]);
+    },
+  );
+
   test("retains absent sparse-checkout lockfiles without counting ordinary deletions or unselected paths", async () => {
     const { repository, output } = await setup();
     const git = (...args: string[]) =>
@@ -399,9 +610,13 @@ describe("SCA input selection", () => {
       discovered.inputs.every((item) => /^[a-f0-9]{64}$/u.test(item.sha256)),
     ).toBe(true);
   });
-  test.each(["non-Git", "Git untracked", "Git tracked", "Git subdirectory"])(
-    "excludes installed dependency trees from %s discovery",
-    async (mode) => {
+  test.each(
+    ["non-Git", "Git untracked", "Git tracked", "Git subdirectory"].flatMap(
+      (mode) => [false, true].map((mixedCase) => [mode, mixedCase] as const),
+    ),
+  )(
+    "excludes installed dependency trees with native casing (%s, mixed case: %p)",
+    async (mode, mixedCase) => {
       const { repository: checkout } = await setup();
       const repository =
         mode === "Git subdirectory"
@@ -409,7 +624,26 @@ describe("SCA input selection", () => {
           : checkout;
       await mkdir(repository, { recursive: true });
       if (mode !== "non-Git") await execFile("git", ["init", checkout]);
+      const caseVariants: Record<string, string> = {
+        node_modules: "Node_Modules",
+        ".venv": ".VENV",
+        venv: "Venv",
+        ".tox": ".Tox",
+        ".nox": ".Nox",
+        ".m2": ".M2",
+        repository: "Repository",
+        vendor: "Vendor",
+        bundle: "Bundle",
+      };
+      const spelling = (path: string) =>
+        mixedCase
+          ? path
+              .split("/")
+              .map((name) => caseVariants[name] ?? name)
+              .join("/")
+          : path;
       const installed = [
+        "node_modules/library/package-lock.json",
         ".venv/lib/python3.12/site-packages/synthetic/requirements.txt",
         "venv/Lib/site-packages/synthetic/requirements.txt",
         ".tox/py312/lib/python3.12/site-packages/synthetic/requirements.txt",
@@ -421,7 +655,7 @@ describe("SCA input selection", () => {
         "packages/app/.nox/tests/lib/python3.12/site-packages/synthetic/requirements.txt",
         "packages/app/.m2/repository/example/synthetic/1.2.3/synthetic-1.2.3.pom",
         "packages/app/vendor/bundle/ruby/3.3.0/gems/synthetic/Gemfile.lock",
-      ];
+      ].map(spelling);
       const selected = [
         ".m2/source-project/pom.xml",
         "package-lock.json",
@@ -430,7 +664,7 @@ describe("SCA input selection", () => {
         "packages/tox/requirements.txt",
         "repository/pom.xml",
         "vendor/source-project/package-lock.json",
-      ];
+      ].map(spelling);
       for (const path of [...installed, ...selected]) {
         await mkdir(join(repository, path, ".."), { recursive: true });
         await writeFile(
@@ -448,7 +682,12 @@ describe("SCA input selection", () => {
         await execFile("git", ["-C", checkout, "add", "."]);
       expect(
         (await discoverScaInputs(repository)).inputs.map((item) => item.path),
-      ).toEqual(selected);
+      ).toEqual(
+        (mixedCase && process.platform !== "win32"
+          ? [...installed, ...selected]
+          : selected
+        ).sort(),
+      );
     },
   );
   test("scans every pnpm lockfile document", async () => {
