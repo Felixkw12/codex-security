@@ -427,7 +427,7 @@ test("model staging uses the checkout skill and label-free cases without the gol
   }
 });
 
-test("disables literal inherited integration names while retaining the persistent Codex home", async () => {
+test("isolates case read roots and disables inherited integrations while retaining the Codex home", async () => {
   const previousNodeOptions = process.env.NODE_OPTIONS;
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "sca-provider-"));
   const runtime = path.join(root, "runtime");
@@ -499,7 +499,7 @@ test("disables literal inherited integration names while retaining the persisten
     );
     assert.equal(provider.config.working_dir, "{{triage_runtime_root}}");
     assert.deepEqual(provider.config.additional_directories, [
-      "{{env.SCA_EVAL_RUNTIME_ROOT}}",
+      "{{target_repo}}",
       "{{env.SCA_EVAL_CODEX_RUNTIME_ROOT}}",
       "{{triage_node_root}}",
     ]);
@@ -525,7 +525,7 @@ test("disables literal inherited integration names while retaining the persisten
         ),
       ).href
     );
-    const turn = await new Codex({
+    const codex = new Codex({
       codexPathOverride: provider.config.codex_path_override,
       config: provider.config.cli_config,
       env: {
@@ -534,14 +534,41 @@ test("disables literal inherited integration names while retaining the persisten
         CODEX_MCP_NODE_PATH: provider.config.cli_env.CODEX_MCP_NODE_PATH,
         NODE_OPTIONS: provider.config.cli_env.NODE_OPTIONS,
       },
-    })
-      .startThread({
-        workingDirectory: runtimeVars({}).triage_runtime_root,
-        skipGitRepoCheck: true,
-      })
-      .run("synthetic configuration probe");
-    assert.equal(turn.finalResponse, "synthetic response");
-    const child = JSON.parse(fs.readFileSync(childReceipt, "utf8"));
+    });
+    const nativePackageRoot = path.join(root, "native package");
+    fs.mkdirSync(nativePackageRoot);
+    let child;
+    for (const testCase of CORPUS.cases.slice(0, 2)) {
+      const target = path.join(runtime, "cases", testCase.case_id);
+      fs.cpSync(path.join(FIXTURE_ROOT, testCase.case_id), target, {
+        recursive: true,
+      });
+      const vars = runtimeVars({ target_repo: target });
+      const bindings = {
+        "{{target_repo}}": vars.target_repo,
+        "{{env.SCA_EVAL_RUNTIME_ROOT}}": runtime,
+        "{{env.SCA_EVAL_CODEX_RUNTIME_ROOT}}": nativePackageRoot,
+        "{{triage_node_root}}": vars.triage_node_root,
+      };
+      const turn = await codex
+        .startThread({
+          workingDirectory: vars.triage_runtime_root,
+          additionalDirectories: provider.config.additional_directories.map(
+            (directory) => bindings[directory],
+          ),
+          skipGitRepoCheck: true,
+        })
+        .run("synthetic configuration probe");
+      assert.equal(turn.finalResponse, "synthetic response");
+      child = JSON.parse(fs.readFileSync(childReceipt, "utf8"));
+      assert.deepEqual(
+        child.args.flatMap((argument, index) =>
+          argument === "--add-dir" ? [child.args[index + 1]] : [],
+        ),
+        [target, nativePackageRoot, vars.triage_node_root],
+        "each turn grants its selected case without granting the shared runtime or sibling cases",
+      );
+    }
     assert.equal(child.nodeOptions, "--no-warnings");
     assert.equal(child.codexHome, codexHome);
     assert.equal(child.mcpNodePath, runtimeVars({}).triage_node_path);
