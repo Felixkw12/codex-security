@@ -7,6 +7,7 @@ import os
 import sys
 import uuid
 from argparse import Namespace
+from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -254,12 +255,12 @@ def test_failed_publication_does_not_acknowledge_staged_input(
         if filename == failure:
             raise OSError("Synthetic canonical write failure")
         if failure == f"windows-emulated:{filename}":
-            with monkeypatch.context() as patch:
+            with monkeypatch.context() as patch, ExitStack() as files:
                 finalizer = sys.modules[original_write.__module__]
-                backend = emulate_windows_atomic_write(patch, finalizer)
+                backend = emulate_windows_atomic_write(patch, finalizer, files)
                 patch.setattr(backend, "_rename_handle", fail_validation)
                 return original_write(scan_dir, filename, contents)
-        original_write(scan_dir, filename, contents)
+        return original_write(scan_dir, filename, contents)
 
     if failure == "validation":
         monkeypatch.setattr(saved_results, "_validate_completion_binding", fail_validation)
@@ -277,10 +278,11 @@ def test_failed_publication_does_not_acknowledge_staged_input(
     assert {path: path.read_bytes() for path in (scan.scan_dir / "drafts").iterdir()} == staged
 
 
-def emulate_windows_atomic_write(monkeypatch, finalizer, *, reparse_point=False):
+def emulate_windows_atomic_write(monkeypatch, finalizer, files, *, reparse_point=False):
     """Run the real Windows atomic writer with emulated handles, not native Win32 I/O."""
     backend = finalizer._windows_scan_local_files()
     paths = {}
+    streams = {}
     pending_deletions = set()
     next_directory_handle = -1
 
@@ -293,6 +295,7 @@ def emulate_windows_atomic_write(monkeypatch, finalizer, *, reparse_point=False)
             next_directory_handle -= 1
         else:
             descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            streams[descriptor] = files.enter_context(os.fdopen(descriptor, "wb"))
         paths[descriptor] = path
         return backend._OwnedHandle(descriptor)
 
@@ -302,7 +305,7 @@ def emulate_windows_atomic_write(monkeypatch, finalizer, *, reparse_point=False)
 
     def close_handle(handle):
         if handle >= 0:
-            os.close(handle)
+            streams[handle].close()
         if handle in pending_deletions:
             paths[handle].unlink()
 
@@ -391,7 +394,7 @@ def test_receipt_io_failure_preserves_successful_publication(
     def write_file(scan_dir, filename, contents):
         if not filename.endswith(".accepted.json"):
             return original_write(scan_dir, filename, contents)
-        with monkeypatch.context() as patch:
+        with monkeypatch.context() as patch, ExitStack() as files:
             finalizer = sys.modules[original_write.__module__]
             if backend_kind == "posix":
                 original_open = os.open
@@ -424,7 +427,7 @@ def test_receipt_io_failure_preserves_successful_publication(
                     patch.setattr(os, "supports_dir_fd", {*os.supports_dir_fd, open_directory})
                 return original_write(scan_dir, filename, contents)
             if backend_kind == "windows-emulated":
-                backend = emulate_windows_atomic_write(patch, finalizer)
+                backend = emulate_windows_atomic_write(patch, finalizer, files)
             elif os.name == "nt":
                 backend = finalizer._windows_scan_local_files()
             else:
@@ -526,8 +529,8 @@ def test_windows_receipt_root_probe_classifies_storage_and_path_failures(
         assert json.loads(published[scan_dir / "findings.json"])["findings"][0]["title"] == (
             "Accepted aggregate"
         )
-        with monkeypatch.context() as patch:
-            backend = emulate_windows_atomic_write(patch, finalizer)
+        with monkeypatch.context() as patch, ExitStack() as files:
+            backend = emulate_windows_atomic_write(patch, finalizer, files)
             original_probe = backend._canonical_scan_directory
             path_operation = "lstat" if operation == "locked-lstat" else operation
             original_operation = getattr(Path, path_operation, None)
@@ -641,8 +644,8 @@ def test_receipt_contract_errors_still_reject_publication(
             raise finalizer.ContractError("Synthetic receipt validation failure")
         if failure == "unsafe-path":
             return original_write(scan_dir, "../outside.accepted.json", contents)
-        with monkeypatch.context() as patch:
-            emulate_windows_atomic_write(patch, finalizer, reparse_point=True)
+        with monkeypatch.context() as patch, ExitStack() as files:
+            emulate_windows_atomic_write(patch, finalizer, files, reparse_point=True)
             return original_write(scan_dir, filename, contents)
 
     monkeypatch.setattr(saved_results, "write_scan_local_bytes", write_file)
