@@ -8497,6 +8497,7 @@ describe("patch change tracking", () => {
     if (state === "staged") git("add", "old.ts");
     if (state === "assume-unchanged")
       git("update-index", "--assume-unchanged", "old.ts");
+    if (state === "clean") git("update-index", "--refresh");
     const head = git("rev-parse", "HEAD");
     const index = git("write-tree");
     const indexBytes = await readFile(join(directory, ".git", "index"));
