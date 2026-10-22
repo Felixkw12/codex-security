@@ -8456,6 +8456,28 @@ async function patchPublicationDestination(
           gitlabHost.includes("://") ? gitlabHost : `https://${gitlabHost}`,
         ));
   const command: "glab" | "gh" = gitlab ? "glab" : "gh";
+  const fetchRemote = gitlab
+    ? (
+        await run("git", ["remote", "get-url", "origin"], { trim: false })
+      ).replace(/\n$/u, "")
+    : remote;
+  const target =
+    gitlab &&
+    isNetworkPatchRemote(fetchRemote) &&
+    patchRemoteHost(fetchRemote) === host
+      ? fetchRemote
+      : remote;
+  let gitlabSource = ".target_project_id";
+  if (gitlab && gitlabPatchRepository(remote) !== gitlabPatchRepository(target))
+    gitlabSource = await run("glab", [
+      "repo",
+      "view",
+      gitlabPatchRepository(remote),
+      "--output",
+      "json",
+      "--jq",
+      ".id",
+    ]);
   const requestArguments = gitlab
     ? [
         "mr",
@@ -8466,9 +8488,9 @@ async function patchPublicationDestination(
         "--output",
         "json",
         "--jq",
-        "map(select(.source_project_id == .target_project_id))[0] | select(. != null) | {url: .web_url, head: .sha, state}",
+        `map(select(.source_project_id == ${gitlabSource}))[0] | select(. != null) | {url: .web_url, head: .sha, state}`,
         "--repo",
-        gitlabPatchRepository(remote),
+        gitlabPatchRepository(target),
       ]
     : [
         "pr",
@@ -8531,6 +8553,7 @@ async function patchPublicationDestination(
   }
   return {
     remote,
+    target,
     remotes,
     settings,
     gitlab,
@@ -9408,7 +9431,7 @@ async function publishPatchBranch(
     dependencies.runRepositoryCommand(command, args, repository);
   let retryable = true;
   try {
-    const { remote, remotes, gitlab, command, existing } =
+    const { remote, target, remotes, gitlab, command, existing } =
       await patchPublicationDestination(repository, branch, dependencies);
     const gitlabRepository = gitlab ? gitlabPatchRepository(remote) : remote;
     let url = existing?.url;
@@ -9526,7 +9549,7 @@ async function publishPatchBranch(
               gitlabPatchDescription(body),
               "--yes",
               "--repo",
-              gitlabRepository,
+              gitlabPatchRepository(target),
             ]
           : [
               "pr",
