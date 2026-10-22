@@ -1479,6 +1479,73 @@ def test_completion_persists_direct_control_zero_without_hiding_missing_workers(
     assert json.loads(stored) == {"usage": usage}
 
 
+@pytest.mark.parametrize(
+    ("persisted_owner", "token_receipt"),
+    [(False, False), (True, False), (True, True)],
+    ids=["legacy-metadata-only", "dedicated-metadata-only", "dedicated-explicit-zero"],
+)
+def test_completion_persists_zero_usage_for_dedicated_owner(
+    tmp_path: Path, persisted_owner: bool, token_receipt: bool
+) -> None:
+    fixture = _start_scan(tmp_path, mode="deep")
+    if persisted_owner:
+        with sqlite3.connect(fixture.state_dir / "workbench.sqlite3") as connection:
+            connection.execute(
+                "UPDATE deep_scan_runs SET usage_owner_json = ? WHERE scan_id = ?",
+                (
+                    json.dumps(
+                        {
+                            "threadId": "scan-parent",
+                            "turnId": None,
+                            "startedAt": fixture.started_at.isoformat(),
+                            "dedicated": True,
+                        }
+                    ),
+                    fixture.scan_id,
+                ),
+            )
+    counted = fixture.started_at + timedelta(microseconds=1)
+    _state_graph(
+        fixture.environment,
+        {
+            "scan-parent": _rollout(
+                tmp_path,
+                "scan-parent",
+                [_token_event(counted, 0, 0)] if token_receipt else [],
+                originator="codex_security_deep_scan",
+            ),
+        },
+        [],
+    )
+
+    completed = _complete_scan(fixture)["scan"]
+
+    usage = completed["usage"]
+    assert (
+        usage.items()
+        >= {
+            "coverage": "complete",
+            "source": "codex_rollout",
+            **_counts(0, 0, 0),
+            "threadCount": 1,
+        }.items()
+    )
+    if token_receipt:
+        assert usage["modelUsage"] == [{"model": None, **_counts(0, 0, 0)}]
+    else:
+        assert "modelUsage" not in usage
+    with sqlite3.connect(fixture.state_dir / "workbench.sqlite3") as connection:
+        status, stored = connection.execute(
+            "SELECT status, cost_json FROM scans WHERE id = ?", (fixture.scan_id,)
+        ).fetchone()
+    assert status == "complete"
+    assert json.loads(stored) == {"usage": usage}
+    repeated = scan_command(
+        fixture.state_dir, "complete-scan", fixture.scan_id, environment=fixture.environment
+    )["scan"]
+    assert repeated["usage"] == usage
+
+
 @pytest.mark.parametrize("turn_start", ["before_scan", "during_scan", "untimestamped", "post_scan"])
 def test_direct_control_resumed_model_turn_requires_a_usage_receipt(
     tmp_path: Path, turn_start: str

@@ -330,7 +330,7 @@ def collect_scan_usage(
         result["missingThreadCount"] = len(missing_thread_ids)
     if warnings:
         result["warnings"] = sorted(warnings)
-    if attribution or any(model is not None for model in model_usage):
+    if model_usage and (attribution or any(model is not None for model in model_usage)):
         result["modelUsage"] = [{"model": model, **usage} for model, usage in model_usage.items()]
     return result
 
