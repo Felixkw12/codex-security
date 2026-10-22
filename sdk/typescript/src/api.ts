@@ -1234,11 +1234,6 @@ export class CodexSecurity {
             verifyCost(snapshot.cost);
             throwIfAborted(signal, outputDir);
           }
-          if (
-            result.coverage.status === "complete" &&
-            result.assessments.every((item) => item.status === "completed")
-          )
-            result.status = "completed";
         } finally {
           const snapshot = await tracker.stop().catch((error: unknown) => {
             reportTrackingError(error);
@@ -1248,6 +1243,16 @@ export class CodexSecurity {
           verifyCost(snapshot.cost);
         }
         throwIfAborted(signal, outputDir);
+        if ((await sourceDigest()) !== source.digest)
+          throw new CodexSecurityError(
+            "Source changed during dependency assessment; earlier assessments describe the original source. Rerun the dependency scan.",
+          );
+        throwIfAborted(signal, outputDir);
+        if (
+          result.coverage.status === "complete" &&
+          result.assessments.every((item) => item.status === "completed")
+        )
+          result.status = "completed";
       } catch (error) {
         const message = errorMessage(error);
         result.diagnostics.push(`Static assessment: ${message}`);
