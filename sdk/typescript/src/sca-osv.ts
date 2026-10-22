@@ -547,12 +547,19 @@ async function repositoryFiles(
   while (pending.length) {
     signal?.throwIfAborted();
     const directory = pending.pop()!;
-    if (
-      directory !== repository &&
-      (await gitMarkerRoot(directory, signal, "nearest")) === directory
-    ) {
-      nestedRepositories.push(slash(relative(repository, directory)));
-      continue;
+    if (directory !== repository) {
+      const marker = await lstat(join(directory, ".git")).catch(
+        (error: NodeJS.ErrnoException) => {
+          signal?.throwIfAborted();
+          if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
+          throw error;
+        },
+      );
+      signal?.throwIfAborted();
+      if (marker !== null) {
+        nestedRepositories.push(slash(relative(repository, directory)));
+        continue;
+      }
     }
     for (const entry of await readdir(directory, { withFileTypes: true })) {
       if (entry.name === ".git" || entry.name === "node_modules") continue;
