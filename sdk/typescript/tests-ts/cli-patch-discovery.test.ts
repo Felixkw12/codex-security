@@ -8,10 +8,12 @@ import {
   readdir,
   lstat,
   rename,
+  rm,
   symlink,
   writeFile,
 } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import { capturePatchGitControls } from "../src/patch-git-controls.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import {
   repositoryGit,
@@ -506,3 +508,77 @@ process.stdout.write(JSON.stringify({ launches, ...outcome }));
     15_000,
   );
 }
+
+async function captureControls(directory: string) {
+  return capturePatchGitControls(
+    directory,
+    async (_root, checkout, args, options) =>
+      runGitRepositoryCommand("git", args, checkout, {
+        ...options,
+        environment: {
+          ...options?.environment,
+          ...(options?.indexFile === undefined
+            ? {}
+            : { GIT_INDEX_FILE: options.indexFile }),
+        },
+      }),
+    true,
+  );
+}
+
+test("rejects replacement of tracked directories with new Git administration", async () => {
+  const selected = await repository("patch-tracked-replacement-");
+  const controls = await captureControls(selected.root);
+  const nested = join(selected.root, "source");
+  await rm(join(nested, "deep"), { recursive: true });
+  const git = repositoryGit(nested);
+  git("init", "--initial-branch=main");
+  git("config", "user.name", "Synthetic User");
+  git("config", "user.email", "synthetic@example.test");
+  await writeFile(join(nested, "replacement.ts"), "replacement\n");
+  git("add", ".");
+  git("commit", "-m", "Synthetic replacement baseline");
+  const index = await readFile(join(nested, ".git", "index"));
+  await expect(controls!.validate()).rejects.toThrow(
+    "Git metadata outside the pre-patch administration directories",
+  );
+  expect(await readFile(join(nested, ".git", "index"))).toEqual(index);
+});
+
+test.each(["parent", "sibling"])(
+  "rejects retargeting a captured nested marker to %s administration",
+  async (target) => {
+    const selected = await repository("patch-nested-marker-binding-");
+    for (const name of ["first", "second"]) {
+      const checkout = join(selected.root, name);
+      const metadata = join(selected.root, ".git", "modules", name);
+      await mkdir(metadata, { recursive: true });
+      selected.git(
+        "init",
+        "--initial-branch=main",
+        `--separate-git-dir=${metadata}`,
+        checkout,
+      );
+      const git = repositoryGit(checkout);
+      git("config", "user.name", "Synthetic User");
+      git("config", "user.email", "synthetic@example.test");
+      await writeFile(join(checkout, "app.ts"), "before\n");
+      git("add", ".");
+      git("commit", "-m", "Synthetic nested baseline");
+      selected.git("add", name);
+    }
+    selected.git("commit", "-m", "Synthetic nested registrations");
+    const controls = await captureControls(selected.root);
+    const replacement =
+      target === "parent"
+        ? join(selected.root, ".git")
+        : join(selected.root, ".git", "modules", "second");
+    await writeFile(
+      join(selected.root, "first", ".git"),
+      `gitdir: ${replacement}\n`,
+    );
+    await expect(controls!.validate()).rejects.toThrow(
+      "Nested Git administration changed during the patch",
+    );
+  },
+);

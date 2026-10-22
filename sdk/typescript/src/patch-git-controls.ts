@@ -568,6 +568,7 @@ export async function capturePatchGitControls(
   };
   const administrationRoots = new Map<string, { dev: bigint; ino: bigint }>();
   const administrationLinks = new Set<string>();
+  const nestedDirectories = new Map<string, readonly string[]>();
   const rememberAdministrationReference = async (
     path: string,
   ): Promise<void> => {
@@ -924,7 +925,18 @@ export async function capturePatchGitControls(
           capture ? rememberAdministrationReference : undefined,
         );
         if (directories === undefined) return;
+        const previous = nestedDirectories.get(canonical);
+        if (
+          !capture &&
+          previous !== undefined &&
+          (directories.length !== previous.length ||
+            directories.some((path, index) => path !== previous[index]))
+        )
+          throw new Error(
+            `Nested Git administration changed during the patch: ${checkout}`,
+          );
         if (capture) {
+          nestedDirectories.set(canonical, directories);
           for (const path of directories) await remember(path);
           for (const link of await directoryLinks(join(checkout, ".git")))
             administrationLinks.add(link);
@@ -1005,8 +1017,9 @@ export async function capturePatchGitControls(
       }
       let tracked: Buffer;
       let untracked: Buffer;
+      let deleted: Buffer;
       try {
-        [tracked, untracked] = await withPatchGitIndex(
+        [tracked, untracked, deleted] = await withPatchGitIndex(
           (args, options) =>
             run(
               root,
@@ -1040,8 +1053,12 @@ export async function capturePatchGitControls(
                   encoding: "base64",
                 },
               ),
+              indexed(["ls-files", "--deleted", "--full-name", "-z"], {
+                encoding: "base64",
+              }),
             ]);
             return outputs.map((output) => Buffer.from(output, "base64")) as [
+              Buffer,
               Buffer,
               Buffer,
             ];
@@ -1060,6 +1077,7 @@ export async function capturePatchGitControls(
         path: string,
         directory: boolean,
         gitlink: boolean,
+        inspectAncestors = false,
       ): Promise<void> => {
         const readable = await readableGitParent(
           checkout,
@@ -1075,7 +1093,10 @@ export async function capturePatchGitControls(
           const previous = candidates.get(candidate);
           candidates.set(candidate, {
             gitlink: (previous?.gitlink ?? false) || gitlink,
-            selected: (previous?.selected ?? false) || readable.exact,
+            selected:
+              (previous?.selected ?? false) ||
+              readable.exact ||
+              inspectAncestors,
           });
           gitlink = false;
           readable.exact = false;
@@ -1089,6 +1110,9 @@ export async function capturePatchGitControls(
         if (entry.startsWith("160000 "))
           await add(entry.slice(entry.indexOf("\t") + 1), true, true);
       }
+      // Git can replace a directory's deleted tracked files with a gitlink.
+      for (const path of deleted.toString("latin1").split("\0").filter(Boolean))
+        await add(path, false, false, true);
       for (const path of untracked
         .toString("latin1")
         .split("\0")
