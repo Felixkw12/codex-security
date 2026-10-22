@@ -14,7 +14,11 @@ import { loadContract } from "../src/contract.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { TestClient, mockWorkbench } from "./support/api-client.js";
 import { ScanInterruptedError } from "../src/errors.js";
-import { completedEvents, preparedRuntime } from "./support/api-events.js";
+import {
+  completedEvents,
+  effectiveCodexConfiguration,
+  preparedRuntime,
+} from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
@@ -83,7 +87,7 @@ describe("completed scan follow-up instructions", () => {
                 return { events: completedEvents() };
               }
               followUpDirectory = threadOptions!.workingDirectory!;
-              expect(options.config).toMatchObject({
+              expect(effectiveCodexConfiguration(options)).toMatchObject({
                 permissions: {
                   codex_security_scan: {
                     filesystem: {

@@ -147,7 +147,9 @@ process.stdin.on("end", () => {
     expect(profile).toEqual({
       extends: ":read-only",
       filesystem: {
+        ":root": "read",
         ":workspace_roots": "read",
+        [codexHome]: { ".": "deny" },
         [join(repository, "scoped")]: { ".": "read", private: "deny" },
       },
       network: { enabled: false },

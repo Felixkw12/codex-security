@@ -1331,6 +1331,13 @@ for (const storage of ["legacy", "indexed", "pending payload"]) {
         name: createHash("sha256").update(contents).digest("hex") + ".json",
       };
     });
+    // Vary only JSON whitespace to keep filename order opposite to recovery order.
+    while (checkpoints[0].name >= checkpoints[1].name) {
+      checkpoints[1].contents += "\n";
+      checkpoints[1].name =
+        createHash("sha256").update(checkpoints[1].contents).digest("hex") +
+        ".json";
+    }
     assert.ok(
       checkpoints[0].name < checkpoints[1].name,
       "fixture hash order puts the older final first",

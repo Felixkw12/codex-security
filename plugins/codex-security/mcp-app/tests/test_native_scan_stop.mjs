@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { build } from "esbuild";
+import { z } from "zod";
 
 const entrypoint = fileURLToPath(new URL("../server.ts", import.meta.url));
 const bundle = await build({
@@ -22,7 +23,8 @@ const bundle = await build({
           export class McpServer {
             server = {};
             tools = new Map();
-            registerTool(name, _config, handler) { this.tools.set(name, handler); }
+            toolConfigs = new Map();
+            registerTool(name, config, handler) { this.tools.set(name, handler); this.toolConfigs.set(name, config); }
             async close() {}
           }`,
           "./src/native-scan.js": `
@@ -268,12 +270,13 @@ for (const [operation, owner] of ["cancel", "fail"].flatMap((operation) =>
           recipe: { private: "host-only" },
         };
       },
-      async cancel(id, reason) {
+      async cancel(id, reason, status) {
         assert.equal(id, scanId);
         assert.equal(
           reason,
           operation === "fail" ? "Synthetic terminal failure." : undefined,
         );
+        assert.equal(status, operation === "fail" ? "failed" : undefined);
         events.push("drain");
         if (!active || owner === "external") return;
         draining.resolve();
@@ -405,7 +408,8 @@ for (const status of ["canceled", "failed"]) {
       async run() {
         assert.fail("Terminal scans cannot launch a runner");
       },
-      async cancel(id, reason) {
+      async cancel(id, reason, terminalStatus) {
+        assert.equal(terminalStatus, status);
         assert.equal(id, scan.scanId);
         assert.equal(reason, scan.failureMessage ?? undefined);
         events.push("drain");
@@ -711,3 +715,19 @@ for (const outcome of [
     assert.equal(drains, outcome === "retry-fails" ? 0 : 1);
   });
 }
+
+test("native failure schema retains long diagnostics", () => {
+  const server = serverFor({
+    async workbench() {
+      return {};
+    },
+  });
+  const message = "Synthetic failure detail. ".repeat(150).trim();
+  const parsed = z
+    .object(server.toolConfigs.get("fail_codex_security_scan").inputSchema)
+    .parse({
+      scanId: "12345678-1234-4234-8234-123456789abc",
+      message,
+    });
+  assert.equal(parsed.message, message);
+});

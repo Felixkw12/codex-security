@@ -37,6 +37,9 @@ export class ScanTransportClosedError extends Error {}
 /** A required worker permission cannot be preserved by the selected runtime. */
 export class ScanPermissionError extends Error {}
 
+/** The scan was explicitly failed by its host or saved workbench state. */
+export class ScanFailedError extends Error {}
+
 /** A process-owned lock protects saved scans across SDK and native hosts, including Node 20. */
 export async function acquireScanExecution(
   stateDirectory: string,

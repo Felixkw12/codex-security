@@ -993,7 +993,7 @@ test("retries an upgrade when another process holds the write lock beyond the bu
 });
 
 test("composition upgrades repair stored paths and public findings before Python opens them", async () => {
-  for (const pending of [53, 57, 58]) {
+  for (const pending of [54, 58, 59]) {
     const directory = await temporary.create("workbench-composition-upgrade-");
     const databasePath = join(directory, "workbench.sqlite3");
     const oldParent = join(directory, "deep");
@@ -1147,7 +1147,7 @@ with sqlite3.connect(sys.argv[2]) as db:
 });
 
 test("unindexed severity recovery matches stable occurrences without replacing assessments", (t) => {
-  const database = memory(t, 55);
+  const database = memory(t, 56);
   for (const id of ["recover", "mismatch", "preserve"]) {
     database
       .prepare(
@@ -1175,7 +1175,7 @@ test("unindexed severity recovery matches stable occurrences without replacing a
   assert.throws(() => applyMigrations(database), /fixture storage failure/u);
   assert.equal(
     database
-      .prepare("SELECT 1 FROM schema_migrations WHERE version = 56")
+      .prepare("SELECT 1 FROM schema_migrations WHERE version = 57")
       .get(),
     undefined,
   );
@@ -1199,34 +1199,34 @@ test("pre-release composition history moves without shadowing editable scan name
   const database = memory(t);
   applyMigrations(
     database,
-    migrations.filter((item) => item.version <= 43 || item.version >= 53),
+    migrations.filter((item) => item.version <= 43 || item.version >= 54),
   );
   database.exec(
     "DELETE FROM schema_migrations WHERE version = 42; ALTER TABLE scans DROP COLUMN name;",
   );
   for (const [from, to] of [
     [43, 42],
-    [53, 43],
-    [54, 44],
-    [55, 45],
-    [56, 46],
-    [57, 48],
-    [58, 49],
+    [54, 43],
+    [55, 44],
+    [56, 45],
+    [57, 46],
+    [58, 48],
+    [59, 49],
   ])
     database
       .prepare("UPDATE schema_migrations SET version = ? WHERE version = ?")
       .run(to, from);
   database.exec(
-    "INSERT INTO schema_migrations VALUES (53, 'synthetic conflicting history', 'created')",
+    "INSERT INTO schema_migrations VALUES (54, 'synthetic conflicting history', 'created')",
   );
   const history = () =>
     database.prepare("SELECT * FROM schema_migrations ORDER BY version").all();
   const before = history();
   assert.throws(() => applyMigrations(database));
   assert.deepEqual(history(), before);
-  database.exec("DELETE FROM schema_migrations WHERE version = 53");
+  database.exec("DELETE FROM schema_migrations WHERE version = 54");
   applyMigrations(database);
-  assertMigrationNames(database, 42, 43, 51, 52, 53, 54, 55, 56, 57, 58);
+  assertMigrationNames(database, 42, 43, 51, 52, 53, 54, 55, 56, 57, 58, 59);
   assert.ok(
     database
       .prepare("PRAGMA table_info(scans)")
@@ -1250,7 +1250,7 @@ for (const version of [43, 50])
     applyMigrations(database);
     applyMigrations(database);
     assert.deepEqual(schema(), before);
-    assertMigrationNames(database, 42, 43, 51, 52, 53, 54, 55, 56, 57, 58);
+    assertMigrationNames(database, 42, 43, 51, 52, 53, 54, 55, 56, 57, 58, 59);
     assert.equal(
       database.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()!
         .count,

@@ -77,7 +77,7 @@ test("hosted owner artifact is opt-in and included in the completed receipt", as
 });
 
 test.each([false, true])(
-  "owner failure preserves the completed hosted scan (cancel=%s)",
+  "owner failure preserves the completed hosted scan (cancel=%p)",
   async (cancel) => {
     const controller = new AbortController();
     const suggestion = spyOn(
@@ -1068,7 +1068,7 @@ test("cancellation after registration retains scan identity before executor disp
     {
       scanId: result.scanId,
       scanDir: result.outputDirectory,
-      progress: { status: "failed" },
+      progress: { status: "canceled" },
     },
   ]);
 });
@@ -1257,7 +1257,7 @@ test("ordinary SDK rejects the removed hosted option instead of using local infe
 });
 
 test.each([true, false])(
-  "hosted owner inference uses only the hosted callback (supplied=%s)",
+  "hosted owner inference uses only the hosted callback (supplied=%p)",
   async (supplied) => {
     const input = await fixture();
     const run = mock(async () => ({

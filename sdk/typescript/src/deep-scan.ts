@@ -25,6 +25,7 @@ import {
 import type { ScanArtifactRestorer } from "./runtime.js";
 import type { SemanticScan } from "./scan-semantics.js";
 import {
+  ScanFailedError,
   ScanPermissionError,
   ScanTransportClosedError,
 } from "./scan-execution.js";
@@ -272,7 +273,7 @@ export async function runDeepScans(
       "--scan-id",
       childId,
       "--message",
-      message.slice(0, 2400),
+      message,
       ...(cost ? ["--cost-json", JSON.stringify(cost)] : []),
     ]);
   };
@@ -491,6 +492,7 @@ export async function runDeepScans(
       const outcomes = [
         ...passes.flatMap(({ record }) =>
           record.progress.status === "failed" ||
+          record.progress.status === "canceled" ||
           record.progress.status === "complete"
             ? [
                 {
@@ -519,7 +521,7 @@ export async function runDeepScans(
       });
       state.consecutiveErrors = 0;
       for (const outcome of outcomes) {
-        if (outcome.status === "failed") state.consecutiveErrors += 1;
+        if (outcome.status !== "complete") state.consecutiveErrors += 1;
         if (outcome.status === "complete") state.consecutiveErrors = 0;
       }
     }
@@ -558,6 +560,7 @@ export async function runDeepScans(
         : executionSignal.aborted &&
             !(executionSignal.reason instanceof ScanCostTrackingError) &&
             !(executionSignal.reason instanceof ScanPermissionError) &&
+            !(executionSignal.reason instanceof ScanFailedError) &&
             !isCodexNonRetryableFailure(executionSignal.reason)
           ? "canceled"
           : "failed";
@@ -574,7 +577,11 @@ export async function runDeepScans(
           progress["status"] === "failed"
         ) {
           parentStopped = true;
-          externalStop.abort(new Error("The saved parent scan stopped."));
+          externalStop.abort(
+            progress["status"] === "failed"
+              ? new ScanFailedError("The saved parent scan stopped.")
+              : new Error("The saved parent scan stopped."),
+          );
         }
       })
       .catch(() => undefined)
@@ -651,13 +658,6 @@ export async function runDeepScans(
               state.mergeStarted = true;
               await save();
             }
-            await workbench([
-              "update-progress",
-              "--scan-id",
-              scanId,
-              "--phase",
-              "reporting",
-            ]).catch(() => undefined);
             return input.merge(prompt, signal, outputSchema);
           },
           { contextPath, onInvalidResponse: retryMerge, validationError },
@@ -964,6 +964,13 @@ export async function runDeepScans(
       await save();
       await settlePasses(batch);
     }
+    await workbench([
+      "update-progress",
+      "--scan-id",
+      scanId,
+      "--phase",
+      "reporting",
+    ]).catch(() => undefined);
     await mergePending(true);
     updateAggregateCoverage();
     await save();

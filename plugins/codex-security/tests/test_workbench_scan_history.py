@@ -532,7 +532,7 @@ def test_migration_preserves_historical_worker_thread_associations(tmp_path: Pat
 
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.execute("DROP TABLE scan_execution_threads")
-        connection.execute("DELETE FROM schema_migrations WHERE version = 55")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 56")
     run_workbench(state_dir, "database-info")
     detail = run_workbench(state_dir, "get-scan", "--scan-id", scan["scanId"])["scan"]
     assert detail["continuationThreadId"] is None
@@ -699,7 +699,7 @@ def test_cli_scan_completion_persists_authoritative_cost_after_plugin_completion
     assert get_scan(state_dir, scan["scanId"])["scan"]["cost"] == cost
 
 
-def test_failed_cli_scan_history_persists_measured_cost(tmp_path: Path) -> None:
+def test_failed_cli_scan_history_persists_cost_and_full_diagnostic(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     repository = tmp_path / "repository"
     repository.mkdir()
@@ -712,19 +712,26 @@ def test_failed_cli_scan_history_persists_measured_cost(tmp_path: Path) -> None:
         "estimatedUsd": 0.003125,
     }
     scan = create_cli_scan(state_dir, tmp_path / "results", repository, complete=False)
+    message = (
+        "Synthetic worker failure details.\n" * 100
+        + "Recovery: restore the synthetic worker executable and resume the scan."
+    )
 
     failed = fail_scan(
         state_dir,
         scan["scanId"],
-        "Scan stopped: cost limit exceeded.",
+        message,
         "--cost-json",
         json.dumps(cost),
     )
 
     assert failed["scan"]["cost"] == cost
+    assert failed["scan"]["failureMessage"] == message
     assert failed["scan"]["progress"]["status"] == "failed"
     assert run_workbench(state_dir, "list-scans")["scans"][0]["cost"] == cost
-    assert get_scan(state_dir, scan["scanId"])["scan"]["cost"] == cost
+    saved = get_scan(state_dir, scan["scanId"])["scan"]
+    assert saved["cost"] == cost
+    assert saved["failureMessage"] == message
 
 
 def test_scan_failure_rejects_invalid_cost_without_stopping_the_scan(tmp_path: Path) -> None:

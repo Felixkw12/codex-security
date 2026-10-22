@@ -2560,7 +2560,7 @@ def fail_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
                 )
             connection.commit()
             return db.scan_context(connection, scan["id"])
-        message = db.optional_text(args.message, maximum=2400)
+        message = db.optional_text(args.message)
         updated = connection.execute(
             """
             UPDATE scans

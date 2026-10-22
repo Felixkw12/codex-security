@@ -4,6 +4,8 @@ import { isDeepStrictEqual } from "node:util";
 export const CODEX_SANDBOX_STATE_META_CAPABILITY = "codex/sandbox-state-meta";
 
 export type NativeParentSandbox = {
+  /** Workspace writes are never inferred from the parent's read access. */
+  readonly workspaceAccess: "read" | "write";
   /** Trusted parent denials retained by the ordinary scan permission profile. */
   readonly filesystemDenies: readonly string[];
   /** Literal paths with glob characters retain native point-deny semantics. */
@@ -32,7 +34,7 @@ export function resolveNativeParentSandbox(
   }
 
   if (filesystem.type === "unrestricted") {
-    return { filesystemDenies: [] };
+    return { workspaceAccess: "write", filesystemDenies: [] };
   }
 
   if (filesystem.type !== "restricted" || !Array.isArray(filesystem.entries)) {
@@ -44,6 +46,7 @@ export function resolveNativeParentSandbox(
   const globScanMaxDepth = resolveGlobScanMaxDepth(filesystem);
 
   let hasRootRead = false;
+  let workspaceAccess: "read" | "write" = "read";
   const filesystemDenies: string[] = [];
   const literalFilesystemDenies: string[] = [];
   for (const value of filesystem.entries) {
@@ -79,6 +82,12 @@ export function resolveNativeParentSandbox(
         );
       }
       if (special.kind === "root") hasRootRead = true;
+      if (
+        entry.access === "write" &&
+        (special.kind === "root" ||
+          (special.kind === "project_roots" && special.subpath == null))
+      )
+        workspaceAccess = "write";
     } else if (path.type === "path" || path.type === "generated_default_path") {
       if (!isNonEmptyString(path.path)) {
         throw unsupportedParentSandbox(
@@ -127,6 +136,7 @@ export function resolveNativeParentSandbox(
   }
 
   return {
+    workspaceAccess,
     filesystemDenies,
     ...(literalFilesystemDenies.length ? { literalFilesystemDenies } : {}),
     ...(globScanMaxDepth !== undefined ? { globScanMaxDepth } : {}),

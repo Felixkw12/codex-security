@@ -92,6 +92,10 @@ describe("deep scan completion summary", () => {
       ...fakeResult(["high"], "partial"),
       scanDir: directory,
     });
+    const { completedAt, ...checkpointOverrides } = {
+      completedAt: "2026-01-01T01:00:00Z",
+      ...overrides,
+    };
     await mkdir(join(directory, "artifacts/deep-scan"), { recursive: true });
     await writeFile(
       join(directory, "artifacts/deep-scan/checkpoint.json"),
@@ -99,10 +103,10 @@ describe("deep scan completion summary", () => {
         version: 3,
         aggregate: null,
         ...cappedState,
-        ...overrides,
+        ...checkpointOverrides,
       }),
     );
-    result.manifest.scan.completedAt = "2026-01-01T01:00:00Z";
+    result.manifest.scan.completedAt = completedAt;
     const text = await summary({
       result,
       onWorkbench: (args) => {

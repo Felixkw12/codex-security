@@ -32,6 +32,7 @@ import { loadContract } from "../src/contract.js";
 import { ScanResult } from "../src/result.js";
 import { abortable } from "../src/targets.js";
 import {
+  ScanFailedError,
   ScanPermissionError,
   ScanTransportClosedError,
 } from "../src/scan-execution.js";
@@ -238,8 +239,6 @@ async function harness(
           scan: records.get(args[2]!) ?? { progress: { status: "running" } },
         } as unknown as WorkbenchJsonObject;
       if (args[0] === "fail-scan") {
-        if (args[4]!.length > 2400)
-          throw new Error("Text value must be no longer than 2400 characters.");
         const record = records.get(args[2]!)!;
         if (record.progress.status === "complete")
           throw new Error("A completed scan cannot be marked failed.");
@@ -386,6 +385,33 @@ test.each([
     expect(h.published.at(-1)).toBeDefined();
   },
 );
+
+test("retains the full child failure diagnostic and its cost receipt", async () => {
+  const h = await harness({ maxDiscoveryRuns: 1 });
+  const message = `${"Synthetic diagnostic context. ".repeat(100)}Actionable final cause.`;
+  const failure = new ScanPermissionError(message);
+  const cost = estimateScanCost("gpt-6-astra", {
+    input_tokens: 100,
+    output_tokens: 10,
+  })!;
+  h.setRun(async (options) => {
+    options.onCost?.(cost);
+    throw failure;
+  });
+  const messages: string[] = [];
+  const workbench = h.input.workbench;
+  h.input.workbench = async (args, input) => {
+    if (args[0] === "fail-scan") messages.push(args[4]!);
+    return workbench(args, input);
+  };
+  await expect(runDeepScans(h.input)).rejects.toBe(failure);
+  expect(messages).toEqual([message]);
+  expect([...h.records.values()][0]).toMatchObject({
+    progress: { status: "failed" },
+    cost,
+  });
+  expect((await h.checkpoint()).terminalReason).toBe("failed");
+});
 
 test("does not retry a child after its requested cost limit is exceeded", async () => {
   retryDelay = spyOn(timers, "setTimeout").mockImplementation(
@@ -948,11 +974,19 @@ test.each([
 );
 
 test.each(
-  (["budget", "cancel", "permission", "policy", "accounting"] as const).flatMap(
-    (stop) =>
-      (["storage", "transport"] as const).map(
-        (failure) => [stop, failure] as const,
-      ),
+  (
+    [
+      "budget",
+      "cancel",
+      "failed",
+      "permission",
+      "policy",
+      "accounting",
+    ] as const
+  ).flatMap((stop) =>
+    (["storage", "transport"] as const).map(
+      (failure) => [stop, failure] as const,
+    ),
   ),
 )(
   "retries concurrent retirement after %s abort and %s failure",
@@ -974,7 +1008,9 @@ test.each(
               )
             : stopKind === "policy"
               ? new Error("Request rejected: cyber_policy.")
-              : new Error("Synthetic cancellation.");
+              : stopKind === "failed"
+                ? new ScanFailedError("Synthetic explicit failure.")
+                : new Error("Synthetic cancellation.");
     const terminalReason =
       stopKind === "budget"
         ? "capped"
@@ -994,7 +1030,8 @@ test.each(
       if (++started === 2) release();
       await bothStarted;
       options.onCost?.(cost);
-      if (stopKind === "cancel") h.controller.abort(stop);
+      if (stopKind === "cancel" || stopKind === "failed")
+        h.controller.abort(stop);
       throw stop;
     });
     const workbench = h.input.workbench;
@@ -1385,9 +1422,12 @@ test.each(["canceled", "failed"] as const)(
       );
     });
     try {
-      await expect(runDeepScans(h.input)).rejects.toThrow(
-        "The saved parent scan stopped.",
+      const stopped = await runDeepScans(h.input).catch(
+        (error: unknown) => error,
       );
+      expect(stopped).toBeInstanceOf(Error);
+      expect((stopped as Error).message).toBe("The saved parent scan stopped.");
+      expect(stopped instanceof ScanFailedError).toBe(status === "failed");
       expect(writesAfterStop).toBe(0);
       expect(h.calls).toHaveLength(1);
       expect(h.metrics().closed).toBe(1);

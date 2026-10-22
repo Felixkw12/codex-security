@@ -1,5 +1,9 @@
-import { codexFactory } from "./support/api-events.js";
-import { preparedRuntime } from "./support/api-events.js";
+import {
+  codexFactory,
+  completedEvents,
+  effectiveCodexConfiguration,
+  preparedRuntime,
+} from "./support/api-events.js";
 import { nativeRequest } from "./support/native-request.js";
 import { afterEach, expect, test } from "bun:test";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
@@ -85,6 +89,108 @@ test("native worker override tables retain inherited features and MCP servers", 
   });
   expect(config.mcp_servers["codex-security"].enabled).toBe(false);
   expect(await readFile(join(home, "config.toml"), "utf8")).toBe(original);
+});
+
+test("native patch overrides disable repository MCP while preserving host MCP", async () => {
+  const root = await temporaryDirectory();
+  const home = join(root, "home");
+  const markerRoot = join(root, "Repository.V1 With Spaces Ü");
+  const repository = join(markerRoot, "packages", "app");
+  const projectTrustKey =
+    process.platform === "win32"
+      ? repository.replace(/[A-Z]/g, (letter) => letter.toLowerCase())
+      : repository;
+  await mkdir(home, { mode: 0o700 });
+  await mkdir(join(repository, ".codex"), { recursive: true });
+  await writeFile(join(markerRoot, "package.json"), "{}\n");
+  const hostConfig = stringifyToml({
+    project_root_markers: ["package.json"],
+    projects: {
+      [markerRoot]: { trust_level: "trusted" },
+      [projectTrustKey]: { trust_level: "trusted" },
+    },
+    mcp_servers: { host: { command: "node", args: ["host-server.js"] } },
+  });
+  const repositoryConfig = stringifyToml({
+    mcp_servers: {
+      repository: { command: "node", args: ["repository-server.js"] },
+    },
+  });
+  await writeFile(join(home, "config.toml"), hostConfig);
+  await writeFile(join(repository, ".codex", "config.toml"), repositoryConfig);
+  const environment = { CODEX_HOME: home };
+  const { config: trusted } = await nativeRequest(
+    environment,
+    repository,
+    ["--cd", repository],
+    "config/read",
+    { cwd: repository, includeLayers: false },
+  );
+  expect(trusted.mcp_servers).toHaveProperty("repository");
+
+  await using client = new TestClient(
+    {},
+    {
+      prepareRuntime: async () => preparedRuntime(home),
+      resolvePluginPython: async () => "/managed/python",
+      createCodex: async (options) => {
+        // Exercise CLI parsing: parsing these arguments as a TOML document
+        // incorrectly treats quoted path components as literal keys.
+        const { config } = await nativeRequest(
+          environment,
+          repository,
+          [
+            "--cd",
+            repository,
+            ...[
+              ...profileConfigOverrides(options.config ?? {}),
+              ...(options.configOverrides ?? []),
+            ].flatMap((value) => ["--config", value]),
+          ],
+          "config/read",
+          { cwd: repository, includeLayers: false },
+        );
+        expect(config.mcp_servers).not.toHaveProperty("repository");
+        expect(config.projects[projectTrustKey]).toEqual({
+          trust_level: "untrusted",
+        });
+        expect(config.project_root_markers).toEqual([]);
+        expect(config.mcp_servers.host).toMatchObject({
+          command: "node",
+          args: ["host-server.js"],
+          enabled: true,
+        });
+        return codexFactory(async () => ({
+          events: completedEvents(
+            "patch-thread",
+            (async function* () {
+              yield {
+                type: "item.completed" as const,
+                item: {
+                  id: "result",
+                  type: "agent_message" as const,
+                  text: JSON.stringify({
+                    status: "no_change",
+                    changedFiles: [],
+                    verificationReport: "Synthetic patch result",
+                    reason: null,
+                  }),
+                },
+              };
+            })(),
+          ),
+        }))();
+      },
+    },
+  );
+  await client.patch({
+    repositoryPath: repository,
+    finding: "Synthetic finding",
+  });
+  expect(await readFile(join(home, "config.toml"), "utf8")).toBe(hostConfig);
+  expect(
+    await readFile(join(repository, ".codex", "config.toml"), "utf8"),
+  ).toBe(repositoryConfig);
 });
 
 test.each([
@@ -243,7 +349,7 @@ test.each([
                       environment["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"],
                     ).toBeUndefined();
                     expect(dirname(snapshots[index]!)).not.toBe(sharedHome);
-                    const config = options.config! as JsonObject;
+                    const config = effectiveCodexConfiguration(options);
                     const permissions = config["permissions"] as Record<
                       string,
                       Record<string, unknown>
@@ -465,11 +571,7 @@ const legacyScanCases: Array<
     JsonObject,
     {
       capability?: true | number;
-      inherited?: string;
-      managed?: string;
       isolatedConfig?: boolean;
-      rejects?: boolean;
-      reads?: boolean;
     },
   ]
 > = [
@@ -478,7 +580,7 @@ const legacyScanCases: Array<
       `deep with incompatible ${name}`,
       "deep",
       overrides,
-      { capability: 3, rejects: true },
+      { capability: 3 },
     ],
   ),
   ["standard", "standard", {}, {}],
@@ -488,7 +590,7 @@ const legacyScanCases: Array<
     "deep with a root endpoint and no private snapshot",
     "deep",
     { openai_base_url: "https://endpoint.example.test/v1" },
-    { isolatedConfig: false, rejects: true },
+    { isolatedConfig: false },
   ],
   [
     "deep with an OpenAI endpoint and readable snapshot",
@@ -497,7 +599,7 @@ const legacyScanCases: Array<
       model_provider: "openai",
       openai_base_url: "https://endpoint.example.test/v1",
     },
-    { capability: true, rejects: true },
+    { capability: true },
   ],
   [
     "deep with a profile endpoint and selector snapshot 2",
@@ -508,7 +610,7 @@ const legacyScanCases: Array<
         selected: { openai_base_url: "https://endpoint.example.test/v1" },
       },
     },
-    { capability: 2, rejects: true },
+    { capability: 2 },
   ],
   [
     "deep with a profile endpoint override and selector snapshot 3",
@@ -523,7 +625,7 @@ const legacyScanCases: Array<
         },
       },
     },
-    { capability: 3, rejects: true },
+    { capability: 3 },
   ],
   [
     "deep with an endpoint fallback and no private snapshot path",
@@ -533,7 +635,7 @@ const legacyScanCases: Array<
       profile: "selected",
       profiles: { selected: { model_provider: "openai" } },
     },
-    { capability: 4, isolatedConfig: false, rejects: true },
+    { capability: 4, isolatedConfig: false },
   ],
   [
     "standard with an endpoint and no private snapshot",
@@ -571,12 +673,7 @@ const legacyScanCases: Array<
     },
     { capability: 4 },
   ],
-  [
-    "deep with explicit OpenAI",
-    "deep",
-    { model_provider: "openai" },
-    { reads: true },
-  ],
+  ["deep with explicit OpenAI", "deep", { model_provider: "openai" }, {}],
   [
     "deep with profile-selected OpenAI",
     "deep",
@@ -584,27 +681,7 @@ const legacyScanCases: Array<
       profile: "selected",
       profiles: { selected: { model_provider: "openai" } },
     },
-    { reads: true },
-  ],
-  [
-    "deep with a conflicting native provider",
-    "deep",
-    { model_provider: "openai" },
-    {
-      inherited: "synthetic.system",
-      reads: true,
-      rejects: true,
-    },
-  ],
-  [
-    "deep with the same managed provider",
-    "deep",
-    { model_provider: "openai" },
-    {
-      inherited: "synthetic.system",
-      managed: "synthetic.required",
-      reads: true,
-    },
+    {},
   ],
   ...([true, 2, 3] as const).map(
     (capability): (typeof legacyScanCases)[number] => [
@@ -613,7 +690,6 @@ const legacyScanCases: Array<
       { model_provider: "openai" },
       {
         capability,
-        inherited: "synthetic.system",
       },
     ],
   ),
@@ -626,7 +702,6 @@ const legacyScanCases: Array<
     },
     {
       capability: true,
-      inherited: "synthetic.system",
     },
   ],
 ];

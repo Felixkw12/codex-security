@@ -1693,7 +1693,7 @@ def register_cli_scan(
                 sealed_producer_version=lambda _: sealed_version,
             )
     if not args.archive_existing or args.archived_scan_dir is not None:
-        scan_dir = require_cli_scan_directory(repository, args)
+        require_cli_scan_directory(repository, args)
     recipe = parse_scan_recipe(recipe_json, repository)
     requested_target = recipe["target"]
     paths = requested_target["paths"]

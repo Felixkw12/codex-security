@@ -121,6 +121,8 @@ else { process.stdin.resume(); process.stdin.on("end",()=>{console.log(JSON.stri
               ? inheritedConfiguration["mcp_servers"]!
               : mcpSettings(name),
           model: "synthetic-model",
+          developer_instructions: `Synthetic instructions for ${name}.`,
+          projects: { [root]: { trust_level: "trusted" } },
           shell_environment_policy: {
             inherit: "all",
             ignore_default_excludes: true,
@@ -242,6 +244,14 @@ else { process.stdin.resume(); process.stdin.on("end",()=>{console.log(JSON.stri
       for (const row of rows) {
         expect(row.args.join("\n")).not.toContain("synthetic-first-");
         expect(row.args.join("\n")).not.toContain("synthetic-second-");
+        if (!row.args.includes("mcp"))
+          expect(
+            row.args
+              .flatMap((arg: string, index: number) =>
+                ["-c", "--config"].includes(arg) ? [row.args[index + 1]] : [],
+              )
+              .filter((override: string) => /^projects[.=]/u.test(override)),
+          ).toEqual([]);
       }
       const enumerations = rows.filter((row) => row.args.includes("mcp"));
       expect(enumerations).toHaveLength(2);
@@ -295,6 +305,9 @@ else { process.stdin.resume(); process.stdin.on("end",()=>{console.log(JSON.stri
           expect(row.privateEnvironment).toEqual({});
           expect(row.literalCredentialInEnvironment).toBe(false);
           expect(row.ambientOverride).toBe(`synthetic-${name}-override`);
+          expect(row.config.developer_instructions).toBe(
+            `Synthetic instructions for ${name}.`,
+          );
           expect(row.config.shell_environment_policy).toEqual({
             inherit: "all",
             ignore_default_excludes: true,

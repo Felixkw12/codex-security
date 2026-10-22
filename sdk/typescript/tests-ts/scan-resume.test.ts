@@ -1479,6 +1479,93 @@ with sqlite3.connect(sys.argv[1]) as connection:
   },
 );
 
+test.each(["sealed", "seal-removed", "post-scan"] as const)(
+  "native publication preparation does not require a Codex executable (%s)",
+  async (scenario) => {
+    const f = await interruptedScan("deep", false, {}, true);
+    const expectedCost = estimateScanCost("gpt-5.6-sol", {
+      input_tokens: 100,
+      output_tokens: 10,
+    })!;
+    await sealSavedScan(f, expectedCost);
+    const nativeHome = join(f.root, "native-home");
+    await rename(f.codexHome, nativeHome);
+    const owner = "synthetic-native-owner";
+    const claim = randomUUID();
+    execFileSync(f.python, [
+      "-c",
+      `import sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as connection:
+    connection.execute("UPDATE scans SET deep_scan_owner_thread_id = ?, handoff_claim_token = ? WHERE id = ?", sys.argv[2:])
+`,
+      join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+      owner,
+      claim,
+      f.scanId,
+    ]);
+    const current = await f.command(["get-scan", "--scan-id", f.scanId]);
+    const environment = {
+      ...f.environment,
+      CODEX_HOME: nativeHome,
+      CODEX_CLI_PATH: join(f.repository, "missing-codex"),
+    };
+    // The MCP host has its own TypeScript configuration; load its boundary at runtime.
+    const nativeSource = new URL(
+      "../../../plugins/codex-security/mcp-app/src/native-scan.ts",
+      import.meta.url,
+    );
+    const { prepareNativeScan } = await import(nativeSource.href);
+    const request = {
+      scan: current["scan"],
+      recipe: {
+        ...f.recipe,
+        ...(scenario === "post-scan"
+          ? { postScanPrompt: "Synthetic follow-up." }
+          : {}),
+      },
+      threadId: owner,
+      pluginRoot: PLUGIN_ROOT,
+      pythonPath: f.python,
+      parentSandbox: { workspaceAccess: "read", filesystemDenies: [] },
+      stateDirectory: environment.CODEX_SECURITY_STATE_DIR,
+    };
+    const pending = prepareNativeScan(request, undefined, {
+      environment,
+      stateDirectory: environment.CODEX_SECURITY_STATE_DIR,
+      release() {},
+    });
+    if (scenario === "post-scan") {
+      await expect(pending).rejects.toThrow(
+        "Could not resolve a Codex executable",
+      );
+      return;
+    }
+    const prepared = await pending;
+    try {
+      if (scenario === "seal-removed")
+        await rm(join(f.scanDir, "scan-manifest.json"));
+      const result = prepared.client.run(f.repository, prepared.options);
+      if (scenario === "seal-removed") {
+        await expect(result).rejects.toThrow(
+          "prepared for sealed-result publication only",
+        );
+      } else {
+        const receipt = await result;
+        expect(receipt.cost).toEqual(expectedCost);
+        expect(receipt.threadId).toBe(f.threadId);
+        expect(receipt.repositoryFindings).toEqual([]);
+        expect(
+          (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
+        ).toMatchObject({
+          progress: { status: "complete" },
+        });
+      }
+    } finally {
+      await prepared.client.close();
+    }
+  },
+);
+
 test("a sealed native scan binds an absent recipe before returning its verified receipt", async () => {
   const f = await interruptedScan("deep", false, {}, true);
   const cost = estimateScanCost("gpt-5.6-sol", {

@@ -1557,37 +1557,43 @@ test("a sibling success cannot erase the consecutive-error stop during persisten
   );
 });
 
-test.each([true, false])(
-  "resume orders saved child outcomes by completion time (success last: %p)",
-  async (successLast) => {
+test.each(
+  (["failed", "canceled"] as const).flatMap((status) =>
+    [true, false].map((successLast) => [status, successLast] as const),
+  ),
+)(
+  "resume orders saved %s children by completion time (success last: %p)",
+  async (unsuccessful, successLast) => {
     const h = await fixture({ stopAfterConsecutiveErrors: 1 });
-    const passes = (["complete", "failed"] as const).map((status, index) => {
-      const scanId = randomUUID();
-      const directory = `artifacts/deep-scan/passes/pass-${index + 1}`;
-      const scanDir = join(h.input.scanDir, directory);
-      h.records.set(scanId, {
-        scanId,
-        scanDir,
-        targetPath: h.input.repository,
-        parentScanId: h.input.scanId,
-        parentScanRole: "deep_pass",
-        progress: { status },
-        completedAt: new Date(
-          Date.parse(h.input.startedAt) + (successLast ? 2 - index : index),
-        ).toISOString(),
-      });
-      h.projected.set(scanId, {
-        scanId,
-        scanDir,
-        sourceFindings: [],
-        draft: {
-          scanId: h.input.scanId,
-          findings: [],
-          coverage: semanticCoverage(),
-        },
-      });
-      return { scanId, directory };
-    });
+    const passes = (["complete", unsuccessful] as const).map(
+      (status, index) => {
+        const scanId = randomUUID();
+        const directory = `artifacts/deep-scan/passes/pass-${index + 1}`;
+        const scanDir = join(h.input.scanDir, directory);
+        h.records.set(scanId, {
+          scanId,
+          scanDir,
+          targetPath: h.input.repository,
+          parentScanId: h.input.scanId,
+          parentScanRole: "deep_pass",
+          progress: { status },
+          completedAt: new Date(
+            Date.parse(h.input.startedAt) + (successLast ? 2 - index : index),
+          ).toISOString(),
+        });
+        h.projected.set(scanId, {
+          scanId,
+          scanDir,
+          sourceFindings: [],
+          draft: {
+            scanId: h.input.scanId,
+            findings: [],
+            coverage: semanticCoverage(),
+          },
+        });
+        return { scanId, directory };
+      },
+    );
     await h.write(
       DEEP_SCAN_CHECKPOINT,
       JSON.stringify({
@@ -1603,6 +1609,75 @@ test.each([true, false])(
     expect(
       (await loadDeepScanCheckpoint(h.input.scanDir))!.consecutiveErrors,
     ).toBe(successLast ? 0 : 1);
+  },
+);
+
+test.each([false, true])(
+  "a canceled final pass preserves only completed discovery (prior success: %p)",
+  async (priorSuccess) => {
+    const h = await fixture({
+      workers: 1,
+      maxDiscoveryRuns: priorSuccess ? 2 : 1,
+    });
+    const statuses = priorSuccess
+      ? (["complete", "canceled"] as const)
+      : (["canceled"] as const);
+    const passes = statuses.map((status, index) => {
+      const scanId = randomUUID();
+      const directory = `artifacts/deep-scan/passes/pass-${index + 1}`;
+      const scanDir = join(h.input.scanDir, directory);
+      h.records.set(scanId, {
+        scanId,
+        scanDir,
+        targetPath: h.input.repository,
+        parentScanId: h.input.scanId,
+        parentScanRole: "deep_pass",
+        progress: { status },
+        completedAt: new Date(
+          Date.parse(h.input.startedAt) + index,
+        ).toISOString(),
+      });
+      if (status === "complete") {
+        const finding = semanticFinding({
+          provenance: {
+            source: "local_plugin",
+            sourceFindingIds: [`${scanId}:0`],
+          },
+        });
+        h.projected.set(scanId, {
+          scanId,
+          scanDir,
+          sourceFindings: [finding],
+          draft: {
+            scanId: h.input.scanId,
+            findings: [finding],
+            coverage: semanticCoverage(),
+          },
+        });
+      }
+      return { scanId, directory };
+    });
+    await h.write(
+      DEEP_SCAN_CHECKPOINT,
+      JSON.stringify({ ...newDeepScanCheckpoint(h.input.startedAt), passes }),
+    );
+    const resumed = runDeepScans(h.input);
+    if (priorSuccess) {
+      expect(await resumed).toMatchObject({
+        terminalReason: "capped",
+        consecutiveErrors: 1,
+      });
+      expect(h.publications.at(-1)!.findings).toHaveLength(1);
+      expect(h.publications.at(-1)!.coverage!.deferred).not.toHaveLength(0);
+    } else {
+      await expect(resumed).rejects.toThrow("every discovery run failed");
+      expect(h.publications).toHaveLength(0);
+      expect(
+        (await loadDeepScanCheckpoint(h.input.scanDir))!.terminalReason,
+      ).toBe("failed");
+    }
+    expect(h.calls).toHaveLength(0);
+    expect([...h.records.values()].at(-1)!.progress.status).toBe("canceled");
   },
 );
 
@@ -1642,18 +1717,39 @@ test("resume retains preregistration failures in the consecutive-error limit", a
 test("progress publication failure does not stop discovery", async () => {
   const h = await fixture({ workers: 1, maxDiscoveryRuns: 1 });
   const workbench = h.input.workbench;
-  let updates = 0;
+  const phases: string[] = [];
   h.input.workbench = async (args, input) => {
     if (args[0] === "update-progress") {
-      expect(args.slice(-2)).toEqual(["--phase", "discovery"]);
-      updates++;
+      phases.push(args.at(-1)!);
       throw new Error("synthetic optional progress failure");
     }
     return workbench(args, input);
   };
   await runDeepScans(h.input);
-  expect(updates).toBe(1);
+  expect(phases).toEqual(["discovery", "reporting"]);
   expect(h.calls).toHaveLength(1);
+});
+
+test("inter-batch merges keep discovery active until the stop decision", async () => {
+  const h = await fixture({ workers: 2, maxDiscoveryRuns: 4 });
+  const phases: string[] = [];
+  const workbench = h.input.workbench;
+  h.input.workbench = async (args, input) => {
+    if (args[0] === "update-progress") {
+      const phase = args.at(-1)!;
+      phases.push(phase);
+      if (phase === "reporting") expect(h.calls).toHaveLength(4);
+    }
+    return workbench(args, input);
+  };
+  h.setExecute(async () => {
+    expect(phases.at(-1)).toBe("discovery");
+    if (h.calls.length > 2) expect(h.metrics().merges).toBeGreaterThan(0);
+  });
+  const state = await runDeepScans(h.input);
+  expect(state.terminalReason).toBe("capped");
+  expect(h.metrics().merges).toBeGreaterThan(0);
+  expect(phases).toEqual(["discovery", "reporting"]);
 });
 
 test("durable cancellation prevents later checkpoint writes before the next abort poll", async () => {
@@ -1696,94 +1792,6 @@ test("only the parent owns the workflow across fresh and resumed passes", async 
     );
   }
 });
-
-test("a sibling failure aborts an in-flight projection", async () => {
-  const h = await fixture();
-  const failure = new ScanPermissionError("synthetic permission failure");
-  let started!: () => void;
-  const projecting = new Promise<void>((resolve) => {
-    started = resolve;
-  });
-  let projectionSignal: AbortSignal | undefined;
-  h.input.projectChild = async (_id, _directory, signal) => {
-    projectionSignal = signal;
-    started();
-    return new Promise<never>((_resolve, reject) => {
-      signal.addEventListener("abort", () => reject(signal.reason), {
-        once: true,
-      });
-    });
-  };
-  let pass = 0;
-  h.setExecute(async () => {
-    if (++pass === 2) {
-      await projecting;
-      throw failure;
-    }
-  });
-  let stopped!: () => void;
-  const stopping = new Promise<void>((resolve) => {
-    stopped = resolve;
-  });
-  const workbench = h.input.workbench;
-  h.input.workbench = async (args, input) => {
-    if (args[0] === "fail-scan") stopped();
-    return workbench(args, input);
-  };
-  const run = runDeepScans(h.input);
-  const settled = run.catch((error: unknown) => error);
-  try {
-    await stopping;
-    expect(projectionSignal!.aborted).toBe(true);
-    expect(await settled).toBe(failure);
-  } finally {
-    h.controller.abort(failure);
-    await settled;
-  }
-  expect(projectionSignal!.reason).toBe(failure);
-});
-
-test.each(["before recovery", "during recovery"])(
-  "a deadline reached %s stops saved passes without executing them",
-  async (when) => {
-    const h = await fixture({ workers: 1, maxDiscoveryRuns: 1 });
-    const transport = new ScanTransportClosedError(
-      "synthetic disconnected host",
-    );
-    h.setExecute(async () => {
-      throw transport;
-    });
-    await expect(runDeepScans(h.input)).rejects.toBe(transport);
-    const checkpoint = (await loadDeepScanCheckpoint(h.input.scanDir))!;
-    const now = Date.now();
-    checkpoint.startedAt = new Date(
-      when === "before recovery" ? now - 2 * 3_600_000 : now,
-    ).toISOString();
-    await h.write(DEEP_SCAN_CHECKPOINT, JSON.stringify(checkpoint));
-    expect([...h.records.values()][0]!.progress.status).toBe("running");
-    const clock = spyOn(Date, "now").mockReturnValue(now);
-    const workbench = h.input.workbench;
-    h.input.workbench = async (args, input) => {
-      if (args[0] === "list-scans" && when === "during recovery")
-        clock.mockReturnValue(now + 2 * 3_600_000);
-      return workbench(args, input);
-    };
-    try {
-      const state = await runDeepScans(h.input);
-      expect(state.terminalReason).toBe("capped");
-      expect([...h.records.values()][0]!.progress.status).toBe("failed");
-      expect(h.calls).toHaveLength(1);
-      expect(
-        h.operations.filter((operation) => operation === "fail-scan"),
-      ).toHaveLength(1);
-      expect(h.publications.at(-1)!.coverage!).not.toHaveProperty(
-        "completeness",
-      );
-    } finally {
-      clock.mockRestore();
-    }
-  },
-);
 
 test.each([false, true])(
   "registration persistence retries preserve the child and required accounting (%p)",

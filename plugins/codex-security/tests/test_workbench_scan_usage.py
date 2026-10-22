@@ -2136,7 +2136,7 @@ def test_completed_accounting_survives_migration_without_importing_sidecar_sessi
             "SELECT cost_json FROM scans WHERE id = ?", (fixture.scan_id,)
         ).fetchone()[0]
         connection.execute("DROP TABLE scan_execution_threads")
-        connection.execute("DELETE FROM schema_migrations WHERE version = 55")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 56")
     migrated = run_workbench(
         fixture.state_dir,
         "get-scan",

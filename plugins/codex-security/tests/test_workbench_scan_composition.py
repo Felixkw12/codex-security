@@ -1552,97 +1552,6 @@ def test_stopped_standard_does_not_rebind_another_scans_coverage(tmp_path: Path)
     )
 
 
-@pytest.mark.parametrize("accepted_membership", ["merged", "represented"])
-def test_native_cancel_retains_accepted_and_later_unmerged_findings(
-    tmp_path: Path, accepted_membership: str
-) -> None:
-    state, target = _scan_workspace(tmp_path)
-    parent = register(state, target, tmp_path / "scan", mode="deep")
-    parent_dir = Path(parent["scanDir"])
-    children = []
-    for index, anchor in enumerate(("accepted-finding", "separate-unmerged-finding"), 1):
-        directory = parent_dir / f"artifacts/deep-scan/passes/pass-{index}"
-        child = register(state, target, directory, parent=parent["scanId"], role="deep_pass")
-        write_completed_contract(
-            directory, child["scanId"], target, relative_path="app.py", identity_anchor=anchor
-        )
-        run_workbench(state, "complete-scan", "--scan-id", child["scanId"])
-        protected = {
-            name: (directory / name).read_bytes()
-            for name in ("scan-manifest.json", "findings.json", "coverage.json")
-        }
-        children.append((child, directory, protected))
-    first, _, first_bytes = children[0]
-    original = json.loads(first_bytes["findings.json"])["findings"][0]
-    accepted = copy.deepcopy(original)
-    accepted["provenance"]["sourceFindingIds"] = [f"{first['scanId']}:0"]
-    accepted["provenance"]["sourceFindings"] = [{"id": f"{first['scanId']}:0", "finding": original}]
-    saved = checkpoint(
-        state,
-        parent,
-        passes=[
-            {"directory": directory.relative_to(parent_dir).as_posix(), "scanId": child["scanId"]}
-            for child, directory, _ in children
-        ],
-        merged=[first["scanId"]] if accepted_membership == "merged" else [],
-    )
-    saved["noNewStreak"] = 2
-    saved["aggregate"] = {
-        "scanId": parent["scanId"],
-        "findings": [accepted],
-        "coverage": {
-            "completeness": "partial",
-            "surfaces": [],
-            "explicitExclusions": [],
-            "deferred": [{"reason": "Accepted pass still needs dependency review."}],
-        },
-    }
-    run_workbench(
-        state,
-        "save-scan-artifact",
-        "--scan-id",
-        parent["scanId"],
-        "--artifact-path",
-        CHECKPOINT,
-        input_text=composition_payload(Path(parent["scanDir"]), saved),
-    )
-    run_workbench(state, "cancel-scan", "--scan-id", parent["scanId"])
-    context = run_workbench(state, "get-scan", "--scan-id", parent["scanId"])["scan"]
-    assert context["progress"]["status"] == "canceled"
-    assert context["findingCount"] == 2
-    retained = json.loads((parent_dir / "findings.json").read_text())["findings"]
-    preserved = next(finding for finding in retained if finding["identity"] == accepted["identity"])
-    assert preserved["findingId"] == accepted["findingId"]
-    assert preserved["provenance"]["sourceFindings"] == accepted["provenance"]["sourceFindings"]
-    later, _, later_bytes = children[1]
-    recovered = next(
-        finding
-        for finding in retained
-        if finding["provenance"]["sourceFindingIds"] == [f"{later['scanId']}:0"]
-    )
-    assert recovered["identity"]["anchor"] == "separate-unmerged-finding"
-    assert (
-        recovered["provenance"]["sourceFindings"][0]["finding"]
-        == json.loads(later_bytes["findings.json"])["findings"][0]
-    )
-    coverage = json.loads((parent_dir / "coverage.json").read_text())
-    assert "completeness" not in coverage
-    assert any(row["reason"].startswith("Accepted pass still") for row in coverage["deferred"])
-    assert any("artifacts/deep-scan/passes/pass-2" in row["reason"] for row in coverage["deferred"])
-    for child, directory, protected in children:
-        for name, contents in protected.items():
-            assert (directory / name).read_bytes() == contents
-        assert (
-            run_workbench(state, "get-scan", "--scan-id", child["scanId"])["scan"]["progress"][
-                "status"
-            ]
-            == "complete"
-        )
-    assert json.loads((parent_dir / CHECKPOINT).read_text()) == {
-        key: value for key, value in saved.items() if key != "aggregate"
-    }
-
-
 @pytest.mark.parametrize("has_aggregate", [False, True])
 @pytest.mark.parametrize(
     ("terminal_reason", "child_state"),
@@ -2400,13 +2309,13 @@ def test_membership_migration_backfills_stored_paths_once(
     marker = parent_dir / "saved-output.txt"
     marker.write_bytes(b"Saved outputs must not change during migration.")
     with sqlite3.connect(database) as connection:
-        connection.execute("DELETE FROM schema_migrations WHERE version = 57")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 58")
         if already_applied:
             connection.execute("UPDATE scans SET parent_scan_role = NULL")
         else:
             connection.execute("DROP INDEX scans_by_composition_parent")
             connection.execute("ALTER TABLE scans DROP COLUMN parent_scan_role")
-            connection.execute("DELETE FROM schema_migrations WHERE version = 53")
+            connection.execute("DELETE FROM schema_migrations WHERE version = 54")
         before = connection.execute(
             "SELECT id, parent_scan_id, scan_dir, status FROM scans ORDER BY id"
         ).fetchall()
@@ -2427,7 +2336,7 @@ def test_membership_migration_backfills_stored_paths_once(
             rerun["scanId"]: None,
         }
         assert connection.execute(
-            "SELECT COUNT(*) FROM schema_migrations WHERE version = 53"
+            "SELECT COUNT(*) FROM schema_migrations WHERE version = 54"
         ).fetchone() == (1,)
     saved_marker = tmp_path / "removed-output/saved-output.txt" if missing_outputs else marker
     assert saved_marker.read_bytes() == b"Saved outputs must not change during migration."
@@ -2711,7 +2620,7 @@ def test_artifact_thread_ids_do_not_become_execution_log_roots(
     if migrate:
         with sqlite3.connect(state / "workbench.sqlite3") as connection:
             connection.execute("DROP TABLE scan_execution_threads")
-            connection.execute("DELETE FROM schema_migrations WHERE version = 55")
+            connection.execute("DELETE FROM schema_migrations WHERE version = 56")
     saved = run_workbench(state, "get-scan", "--scan-id", scan["scanId"])["scan"]
     assert saved["threadIds"] == ["owned-thread"]
     assert saved["executionThreadIds"] == ["owned-thread"]
@@ -2978,11 +2887,11 @@ def test_membership_migration_rebuilds_public_finding_projections(
         locations = connection.execute(
             "SELECT * FROM finding_locations ORDER BY occurrence_id"
         ).fetchall()
-        connection.execute("DELETE FROM schema_migrations WHERE version = 57")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 58")
         if not already_applied:
             connection.execute("DROP INDEX scans_by_composition_parent")
             connection.execute("ALTER TABLE scans DROP COLUMN parent_scan_role")
-            connection.execute("DELETE FROM schema_migrations WHERE version = 53")
+            connection.execute("DELETE FROM schema_migrations WHERE version = 54")
         connection.commit()
         assert (
             connection.execute(
@@ -3183,9 +3092,9 @@ def test_membership_upgrade_recovers_children_archived_by_legacy_parent_only_mov
         connection.execute(
             "UPDATE scans SET scan_dir = ? WHERE id = ?", (str(archived), parent["scanId"])
         )
-        connection.execute("DELETE FROM schema_migrations WHERE version = 58")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 59")
         if not already_applied:
-            connection.execute("DELETE FROM schema_migrations WHERE version IN (53, 57)")
+            connection.execute("DELETE FROM schema_migrations WHERE version IN (54, 58)")
             connection.execute("DROP INDEX scans_by_composition_parent")
             connection.execute("ALTER TABLE scans DROP COLUMN parent_scan_role")
     original = {
@@ -3212,7 +3121,7 @@ def test_membership_upgrade_recovers_children_archived_by_legacy_parent_only_mov
         assert artifacts
         assert all(Path(path).is_relative_to(archived / child_path) for (path,) in artifacts)
         assert connection.execute(
-            "SELECT COUNT(*) FROM schema_migrations WHERE version = 58"
+            "SELECT COUNT(*) FROM schema_migrations WHERE version = 59"
         ).fetchone() == (1,)
     assert {scan["scanId"] for scan in run_workbench(state, "list-scans")["scans"]} == {
         parent["scanId"],

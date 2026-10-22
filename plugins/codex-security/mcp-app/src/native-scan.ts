@@ -24,6 +24,7 @@ import { resolveDeepScanConfig } from "../../../../sdk/typescript/src/deep-confi
 import {
   acquireScanExecution,
   ScanTransportClosedError,
+  ScanFailedError,
 } from "../../../../sdk/typescript/src/scan-execution.js";
 import type { ScanResult } from "../../../../sdk/typescript/src/result.js";
 import {
@@ -32,7 +33,10 @@ import {
   snapshotNativeEnvironment,
 } from "./native-executable.js";
 import type { NativeParentSandbox } from "./native-permissions.js";
-import { nativeScanConfiguration } from "../../../../sdk/typescript/src/execution-preparation.js";
+import {
+  nativeScanConfiguration,
+  readOnlyFilesystem,
+} from "../../../../sdk/typescript/src/execution-preparation.js";
 export { nativeScanConfiguration } from "../../../../sdk/typescript/src/execution-preparation.js";
 import type { ScanResults } from "./types.js";
 
@@ -114,10 +118,16 @@ export class NativeScanHost {
     return waitForScan(active.promise, waiterSignal);
   }
 
-  async cancel(scanId: string, reason = "user_canceled_scan"): Promise<void> {
+  async cancel(
+    scanId: string,
+    reason = "user_canceled_scan",
+    status: "canceled" | "failed" = "canceled",
+  ): Promise<void> {
     const active = this.active.get(scanId);
     if (!active) return;
-    active.controller.abort(new Error(reason));
+    active.controller.abort(
+      status === "failed" ? new ScanFailedError(reason) : new Error(reason),
+    );
     await active.promise.catch(() => undefined);
   }
 
@@ -210,6 +220,10 @@ export async function prepareNativeScan(
     scanPrompt: input.scan.userContext ?? undefined,
     outputDir: input.scan.scanDir,
   });
+  const publicationOnly =
+    recipe !== undefined &&
+    !options.postScanPrompt?.trim() &&
+    (await hasSealedScanArtifacts(input.scan.scanDir, signal));
   const protectedRoots = [
     input.scan.scanDir,
     ...(await Promise.all(
@@ -221,21 +235,28 @@ export async function prepareNativeScan(
       ),
     )),
   ];
-  const codex = await resolveTrustedCodex(inheritedEnvironment, protectedRoots);
-  if (codex === null) {
+  const codex = publicationOnly
+    ? null
+    : await resolveTrustedCodex(inheritedEnvironment, protectedRoots);
+  if (!publicationOnly && codex === null) {
     throw new CodexSecurityError(
       `Could not resolve a Codex executable outside the scan target: ${resolveCodexPath(inheritedEnvironment)}`,
     );
   }
   const environment: NodeJS.ProcessEnv = {
-    ...codex.environment,
-    CODEX_CLI_PATH: codex.executable,
+    ...(codex?.environment ?? inheritedEnvironment),
+    ...(codex === null ? {} : { CODEX_CLI_PATH: codex.executable }),
   };
   // The SDK forwards the prepared documents, including a saved empty selection.
   delete environment.CODEX_SECURITY_KNOWLEDGE_BASE;
   if (input.stateDirectory)
     environment.CODEX_SECURITY_STATE_DIR = input.stateDirectory;
   const savedPermissions = recipe?.inheritedPermissions;
+  const workspaceAccess = input.parentSandbox.workspaceAccess;
+  const savedFilesystem =
+    workspaceAccess === "read"
+      ? readOnlyFilesystem(savedPermissions?.filesystem ?? {})
+      : (savedPermissions?.filesystem ?? {});
   const savedGlobDepth = savedPermissions?.filesystem.glob_scan_max_depth;
   for (const path of input.parentSandbox.literalFilesystemDenies ?? []) {
     const saved = savedPermissions?.filesystem[path];
@@ -257,8 +278,8 @@ export async function prepareNativeScan(
   }
   const inheritedPermissions = {
     filesystem: Object.fromEntries([
-      [":workspace_roots", "write"],
-      ...Object.entries(savedPermissions?.filesystem ?? {}),
+      [":workspace_roots", workspaceAccess],
+      ...Object.entries(savedFilesystem),
       ...input.parentSandbox.filesystemDenies.map((path) => [path, "deny"]),
       ...(input.parentSandbox.literalFilesystemDenies ?? []).map((path) => [
         path,
@@ -298,10 +319,6 @@ export async function prepareNativeScan(
         "config.toml",
       ),
   );
-  const publicationOnly =
-    recipe !== undefined &&
-    !options.postScanPrompt?.trim() &&
-    (await hasSealedScanArtifacts(input.scan.scanDir, signal));
   // The SDK still validates the seal, owner and claim before publication.
   const config = publicationOnly
     ? (recipe.config ?? {})
@@ -323,7 +340,7 @@ export async function prepareNativeScan(
     ] as ScanOptions["cyberAccessProgram"];
   const ambientExecution = {
     environment,
-    command: { command: codex.executable },
+    ...(codex === null ? {} : { command: { command: codex.executable } }),
     configuration: config,
     auth: options.auth,
     pluginRoot: input.pluginRoot,

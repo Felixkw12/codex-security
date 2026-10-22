@@ -248,7 +248,7 @@ function input(id = "parent") {
     threadId: "native-owner",
     pluginRoot: tmpdir(),
     pythonPath: process.execPath,
-    parentSandbox: { filesystemDenies: [] },
+    parentSandbox: { workspaceAccess: "write", filesystemDenies: [] },
   };
 }
 
@@ -414,6 +414,7 @@ else {
             ...input(),
             recipe,
             parentSandbox: {
+              workspaceAccess: "write",
               filesystemDenies: ["/current/private"],
               ...(scenario === "nested-settings"
                 ? { literalFilesystemDenies: ["/current/[private]"] }
@@ -661,6 +662,7 @@ test(
           ...input(),
           scan: { ...input().scan, targetPath: target, scanDir: output },
           parentSandbox: {
+            workspaceAccess: "write",
             filesystemDenies: [join(target, "**", "private.txt")],
             globScanMaxDepth: currentDepth,
           },
@@ -1104,6 +1106,12 @@ test("native cancellation drains only its parent; shutdown drains the rest", asy
   }));
   const first = host.run(input("first"));
   const second = host.run(input("second"));
+  const failed = host.run(input("failed"));
+  const failedRejected = assert.rejects(failed, (error) => {
+    assert.equal(error.constructor.name, "ScanFailedError");
+    assert.equal(error.message, "Synthetic explicit failure.");
+    return true;
+  });
   const firstRejected = assert.rejects(first, /user_canceled_scan/);
   const secondRejected = assert.rejects(second, (error) => {
     assert.equal(error.constructor.name, "ScanTransportClosedError");
@@ -1112,22 +1120,24 @@ test("native cancellation drains only its parent; shutdown drains the rest", asy
   });
   await Promise.resolve();
   await Promise.resolve();
+  await host.cancel("failed", "Synthetic explicit failure.", "failed");
+  await failedRejected;
   await host.cancel("first");
   await firstRejected;
   assert.equal(started.get("first").reason.constructor, Error);
   assert.equal(started.get("second").aborted, false);
-  assert.deepEqual(closed, ["first"]);
+  assert.deepEqual(closed, ["failed", "first"]);
   let drained = false;
   const shutdown = host.close().then(() => {
     drained = true;
   });
   await closing.promise;
   assert.equal(drained, false);
-  assert.deepEqual(closed, ["first"]);
+  assert.deepEqual(closed, ["failed", "first"]);
   releaseClose.resolve();
   await shutdown;
   await secondRejected;
-  assert.deepEqual(closed, ["first", "second"]);
+  assert.deepEqual(closed, ["failed", "first", "second"]);
 });
 
 for (const action of ["cancel", "close"]) {
@@ -2562,6 +2572,7 @@ test("native saved scans retain settings, auth environment, permissions and iden
       reasoningEffort: "ultra",
       stateDirectory: join(root, "state"),
       parentSandbox: {
+        workspaceAccess: "write",
         filesystemDenies: ["/fixture/.env"],
         globScanMaxDepth: 3,
       },
@@ -2717,6 +2728,7 @@ test("native saved scans retain settings, auth environment, permissions and iden
       const savedPermissions = await prepareNativeExecution({
         ...request,
         parentSandbox: {
+          workspaceAccess: "write",
           ...request.parentSandbox,
           globScanMaxDepth: currentDepth,
         },
@@ -2832,6 +2844,7 @@ for (const scenario of [
   "saved-glob-current-literal",
   "saved-literal-current-glob",
   "repeated-literal",
+  "read-only-parent",
 ]) {
   test(
     `native merged settings reach every worker: ${scenario}`,
@@ -2970,6 +2983,8 @@ else {
             reasoningEffort: "ultra",
             parentSandbox: permissionsCase
               ? {
+                  workspaceAccess:
+                    scenario === "read-only-parent" ? "read" : "write",
                   filesystemDenies: currentLiteral ? [] : [currentPath],
                   ...(currentLiteral
                     ? { literalFilesystemDenies: [currentPath] }
@@ -2978,7 +2993,7 @@ else {
                     ? {}
                     : { globScanMaxDepth: currentDepth }),
                 }
-              : { filesystemDenies: [] },
+              : { workspaceAccess: "write", filesystemDenies: [] },
             recipe: {
               auth: scenario === "builtin-chatgpt" ? "chatgpt" : "api-key",
               ...(scenario === "saved-profile" && resumed
@@ -2997,6 +3012,14 @@ else {
                 ? {
                     inheritedPermissions: {
                       filesystem: {
+                        ...(scenario === "read-only-parent"
+                          ? {
+                              ":workspace_roots": "write",
+                              [join(repository, "saved-write")]: {
+                                ".": "write",
+                              },
+                            }
+                          : {}),
                         [savedPath]: savedLiteral ? { ".": "deny" } : "deny",
                         ...(savedDepth === undefined
                           ? {}
@@ -3108,6 +3131,16 @@ else {
                   "deny",
                 );
                 assert.equal(filesystem.glob_scan_max_depth, expectedDepth);
+                assert.equal(
+                  filesystem[":workspace_roots"],
+                  scenario === "read-only-parent" ? "read" : "write",
+                );
+                if (scenario === "read-only-parent")
+                  assert.equal(
+                    filesystem[join(repository, "saved-write")]["."],
+                    "read",
+                  );
+                assert.equal(filesystem[repository]["."], "deny");
               }
               assert.equal(
                 await readFile(join(home, "config.toml"), "utf8"),

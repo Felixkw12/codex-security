@@ -78,6 +78,7 @@ test("saved provider profiles keep concurrent replay credentials private and sep
     providers.map((model_providers, index) =>
       createProviderProfile(home, {
         model_providers,
+        developer_instructions: `Synthetic replay instructions ${index}.`,
         analytics: { enabled: index === 0 },
         shell_environment_policy: {
           set: { SYNTHETIC_SETTING: `synthetic-${index}-value` },
@@ -99,6 +100,7 @@ test("saved provider profiles keep concurrent replay credentials private and sep
   for (const [index, profile] of profiles.entries()) {
     expect(restored[index]!).toMatchObject({
       model_providers: providers[index],
+      developer_instructions: `Synthetic replay instructions ${index}.`,
       analytics: { enabled: index === 0 },
       shell_environment_policy: {
         set: { SYNTHETIC_SETTING: `synthetic-${index}-value` },

@@ -463,7 +463,7 @@ export interface AmbientExecution {
 /** Native execution keeps the invoking account and applies the same provider selection as SDK workers. */
 export async function prepareAmbientExecution(
   input: {
-    command: CodexCommand;
+    command?: CodexCommand;
     configuration: JsonObject;
     environment: ProcessEnvironment;
     pluginRoot: string;
@@ -471,6 +471,10 @@ export async function prepareAmbientExecution(
   },
   signal?: AbortSignal,
 ): Promise<AmbientExecution> {
+  if (input.command === undefined)
+    throw new CodexSecurityError(
+      "The native scan was prepared for sealed-result publication only. Rejoin the scan to resume execution.",
+    );
   const config = structuredClone(input.configuration);
   const environment = { ...input.environment };
   let auth = input.auth;

@@ -108,7 +108,7 @@ for (const [credential, auth, saved] of ["bearer", "env-key"].flatMap(
             threadId: "synthetic-owner",
             pluginRoot,
             pythonPath: process.env.PYTHON || "python3",
-            parentSandbox: { filesystemDenies: [] },
+            parentSandbox: { workspaceAccess: "write", filesystemDenies: [] },
             recipe: { auth, ...(saved ? { config } : {}) },
           },
           controller.signal,

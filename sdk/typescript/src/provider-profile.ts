@@ -71,6 +71,7 @@ export function scanReplaySettings(config: JsonObject): JsonObject {
   return Object.fromEntries(
     [
       "analytics",
+      "developer_instructions",
       "shell_environment_policy",
       "model_instructions_file",
       "experimental_compact_prompt_file",

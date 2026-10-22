@@ -358,7 +358,7 @@ const progressSchema = {
 };
 const failSchema = {
   ...continuationMutationClaimSchema,
-  message: requiredText.max(2400),
+  message: requiredText,
   scanId: z.string().uuid(),
 };
 const completeScanSchema = {
@@ -1526,6 +1526,7 @@ export function createCodexSecurityServer(): McpServer {
       ]);
       const failed = await finalizeNativeStoppedScan(scanId, nativeScans, {
         message,
+        status: "failed",
       });
       return scanActionResult(
         failed,
@@ -2113,10 +2114,16 @@ async function finalizeNativeStoppedScan(
     threadId,
     message,
     waitOnly,
-  }: { threadId?: string; message?: string; waitOnly?: boolean } = {},
+    status,
+  }: {
+    threadId?: string;
+    message?: string;
+    waitOnly?: boolean;
+    status?: "canceled" | "failed";
+  } = {},
 ) {
   if (waitOnly) await nativeScans.wait(scanId);
-  else await nativeScans.cancel(scanId, message);
+  else await nativeScans.cancel(scanId, message, status);
   const current = await runWorkbench(["get-scan", "--scan-id", scanId]);
   const scan = isJsonObject(current.scan) ? current.scan : undefined;
   // Ordinary model turns can call this tool while holding their execution lock.
@@ -2163,6 +2170,7 @@ async function nativeScanTerminalResult(
   if (status !== "canceled" && status !== "failed") return undefined;
   const retained = await finalizeNativeStoppedScan(scan.scanId, nativeScans, {
     message: scan.failureMessage ?? undefined,
+    status,
   });
   const instructions =
     status === "canceled"

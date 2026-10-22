@@ -11,7 +11,8 @@
     "scripts/merge-eval/*.ts",
     "scripts/fixtures/findings-service-sqlite.ts",
     "scripts/fixtures/prepare-runner-scan.ts",
-    "scripts/run-ci-tests.mts"
+    "scripts/run-ci-tests.mts",
+    "scripts/update-test-timings.mts"
   ],
   "compilerOptions": {
     "allowJs": true,

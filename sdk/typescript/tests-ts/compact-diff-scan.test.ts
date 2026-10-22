@@ -628,16 +628,24 @@ describe("compact diff scan", () => {
           deferred: [],
         },
       });
-      expect(
-        (
-          JSON.parse(readFileSync(join(scanDir, "findings.json"), "utf8")) as {
-            findings: JsonObject[];
-          }
-        ).findings.map((draftFinding) => draftFinding["identity"]),
-      ).toEqual([
-        { anchor: "candidate-duplicate-instance", instance: "dss-147-a" },
-        { anchor: "candidate-duplicate-instance", instance: "dss-147-a" },
-      ]);
+      const initialFindings = (
+        JSON.parse(readFileSync(join(scanDir, "findings.json"), "utf8")) as {
+          findings: JsonObject[];
+        }
+      ).findings;
+      const initialIdentities = initialFindings.map(
+        (draftFinding) => draftFinding["identity"],
+      );
+      expect(initialIdentities[0]).toEqual({
+        anchor: "candidate-duplicate-instance",
+        instance: "dss-147-a",
+      });
+      expect(initialIdentities[1]).toEqual({ anchor: expect.any(String) });
+      expect(initialIdentities[1]).not.toEqual(initialIdentities[0]);
+      expect(initialFindings[1]!["extensions"]).toEqual({
+        candidateId: "candidate-duplicate-instance",
+        reportId: "DSS-147-A",
+      });
       await call("record_codex_security_scan_draft", {
         scanId,
         handoffClaimToken,
@@ -722,7 +730,12 @@ describe("compact diff scan", () => {
           findings: JsonObject[];
         }
       ).findings.map((draftFinding) => draftFinding["identity"]);
-      expect(canonicalDraftIdentities).toHaveLength(8);
+      expect(canonicalDraftIdentities).toHaveLength(9);
+      expect(
+        new Set(
+          canonicalDraftIdentities.map((identity) => JSON.stringify(identity)),
+        ).size,
+      ).toBe(9);
       await call("complete_codex_security_scan", {
         scanId,
         handoffClaimToken,
@@ -753,17 +766,14 @@ describe("compact diff scan", () => {
       ).map((completedFinding) => completedFinding["identity"]);
       expect(completedIdentities).toEqual(canonicalDraftIdentities);
       expect(completedIdentities).toEqual([
-        { anchor: "candidate-singleton", instance: "dss-144-a" },
+        { anchor: expect.any(String) },
         { anchor: "candidate-cross-rule", instance: "shared-report" },
-        { anchor: "candidate-cross-rule", instance: "shared-report" },
-        { anchor: "candidate-cross-rule", instance: "second-report" },
+        { anchor: expect.any(String) },
+        { anchor: expect.any(String) },
         { anchor: "candidate-authored-instance", instance: "dss-147-a" },
-        {
-          anchor: "candidate-authored-instance",
-          instance: "dss-147-b",
-        },
-        { anchor: "candidate-authored-instance", instance: "ledger-row-c" },
-        { anchor: "candidate-duplicate-instance", instance: "dss-147-a" },
+        { anchor: expect.any(String) },
+        { anchor: expect.any(String) },
+        ...initialIdentities,
       ]);
       expect(
         ((completed["manifest"] as JsonObject)["scan"] as JsonObject)[

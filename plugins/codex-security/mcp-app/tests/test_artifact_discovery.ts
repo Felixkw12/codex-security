@@ -22,7 +22,7 @@ import { mock } from "node:test";
 import { importSource } from "./import-module.ts";
 
 const { candidateSchemaV1 } = await importSource(
-  new URL("../src/artifact-candidate.ts", import.meta.url).pathname,
+  path.join(import.meta.dirname, "../src/artifact-candidate.ts"),
 );
 const {
   compactDiscoveryCandidateSchema,

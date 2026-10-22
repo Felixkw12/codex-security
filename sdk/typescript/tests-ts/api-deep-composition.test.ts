@@ -338,6 +338,7 @@ test.each([
     };
     const replaySettings = {
       analytics: { enabled: false },
+      developer_instructions: "synthetic-private-developer-instructions",
       shell_environment_policy: {
         inherit: "all",
         set: { SYNTHETIC_SETTING: "synthetic-private-shell-value" },
@@ -774,14 +775,15 @@ test("zero-work Deep Scan preserves a zero receipt across interrupted sealing", 
   expect(result.cost).toEqual(zeroCost);
   expect(result.findings.findings).toEqual([]);
   expect(result.coverage).not.toHaveProperty("completeness");
+  const deferredReason =
+    "The configured discovery time limit elapsed before any source review completed.";
   expect(result.coverage.deferred).toEqual([
     expect.objectContaining({
-      reason:
-        "The configured discovery time limit elapsed before any source review completed.",
+      reason: deferredReason,
     }),
   ]);
   expect(await readFile(join(h.outputDir, "report.md"), "utf8")).toContain(
-    "No source review completed before the configured time limit. No vulnerability conclusion can be drawn.",
+    deferredReason,
   );
   expect(h.launches).toHaveLength(0);
 });
@@ -2107,6 +2109,73 @@ test.each(["standard", "deep", "primary"] as const)(
     }
     expect(covered).toEqual(selectedIds);
     expect(covered.size).toBeGreaterThan(0);
+  },
+);
+
+test.each([false, true])(
+  "Deep resume observes completed child workers before merging (observer throws: %p)",
+  async (observerThrows) => {
+    const h = await fixture(undefined, false, true);
+    const options = { ...h.options, knowledgeBasePaths: undefined };
+    h.failChildProjection(true);
+    await using first = h.makeClient();
+    await expect(first.run(h.repository, options)).rejects.toBeInstanceOf(
+      DeepScanRecoveryError,
+    );
+    expect(h.launches).toHaveLength(2);
+    const children = [...h.records].filter(
+      ([, row]) => row.mode === "standard",
+    );
+    expect(children).toHaveLength(2);
+    for (const [scanId, record] of children) {
+      const saved = await runWorkbench(
+        { ...record.options, signal: undefined },
+        ["get-scan", "--scan-id", scanId],
+      );
+      expect((saved["scan"] as JsonObject)["progress"]).toMatchObject({
+        status: "complete",
+      });
+    }
+    expect(
+      h.observedSubagents.filter((row) => row.mode === "standard"),
+    ).toHaveLength(2);
+    const [parentId] = [...h.records].find(([, row]) => row.mode === "deep")!;
+    const observed: Array<{ kind: "observed"; worker: number }> = [];
+    const observerErrors: string[] = [];
+    h.failChildProjection(false);
+    await using resumed = h.makeClient();
+    const result = await resumed.run(h.repository, {
+      ...options,
+      signal: undefined,
+      resumeScanId: parentId,
+      onWorkerEvent(event) {
+        observed.push(event);
+        if (observerThrows)
+          throw new Error("Synthetic optional observer failure");
+      },
+      onObserverError(observer) {
+        observerErrors.push(observer);
+      },
+    });
+    expect(result.manifest.scan.status).toBe("completed");
+    expect(result.findings.findings).toHaveLength(2);
+    expect(h.launches).toHaveLength(3);
+    expect(
+      h.launches
+        .slice(2)
+        .map((launch) => launch.options.env!["CODEX_SECURITY_SCAN_ID"]),
+    ).toEqual([parentId]);
+    // Two completed child roots and their nested workers precede the new reducer worker.
+    // The reducer root itself is the parent tracker, not another observed worker.
+    expect(observed).toEqual(
+      [1, 2, 3, 4, 5].map((worker) => ({ kind: "observed", worker })),
+    );
+    expect(
+      h.observedSubagents.filter((row) => row.mode === "deep"),
+    ).toHaveLength(1);
+    expect(observerErrors).toEqual(
+      observerThrows ? Array(5).fill("onWorkerEvent") : [],
+    );
   },
 );
 
