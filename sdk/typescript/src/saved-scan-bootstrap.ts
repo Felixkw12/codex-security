@@ -14,9 +14,9 @@ import { CodexSecurityError, errorMessage } from "./errors.js";
 import type { SavedScanDependencies } from "./saved-scan.js";
 import {
   codexSecurityStateDirectory,
+  requireModelSafeOutputDir,
   resolvePluginPython,
   runWorkbench,
-  workbenchEnvironment,
   type ProcessEnvironment,
 } from "./runtime.js";
 
@@ -40,6 +40,7 @@ export async function savedScanWorkbench(
   requestedId: string | { workflowId: string },
   options: {
     environment: ProcessEnvironment;
+    stateDirectory?: string;
     pluginRoot: string;
     pythonPath?: string;
     currentDirectory: string;
@@ -53,12 +54,17 @@ export async function savedScanWorkbench(
   }
 > {
   options.signal?.throwIfAborted();
-  const environment: ProcessEnvironment = workbenchEnvironment(
-    options.environment,
-  );
+  const stateDirectory =
+    options.stateDirectory ?? codexSecurityStateDirectory(options.environment);
+  requireModelSafeOutputDir(stateDirectory);
+  const environment: ProcessEnvironment = {
+    ...options.environment,
+    CODEX_SECURITY_STATE_DIR: stateDirectory,
+  };
   const targets = await readTargets(
     requestedId,
     environment,
+    stateDirectory,
     options.currentDirectory,
     options.signal,
   );
@@ -133,6 +139,7 @@ export async function savedScanWorkbench(
     const result = await runWorkbench(
       {
         environment,
+        stateDirectory,
         pluginRoot: options.pluginRoot,
         python,
         signal,
@@ -174,6 +181,7 @@ export async function savedScanWorkbench(
 async function readTargets(
   requestedId: string | { workflowId: string },
   environment: ProcessEnvironment,
+  stateDirectory: string,
   currentDirectory: string,
   signal?: AbortSignal,
 ): Promise<ScanTarget[]> {
@@ -193,7 +201,7 @@ async function readTargets(
   let database: BootstrapDatabase | undefined;
   try {
     database = new Database(
-      join(codexSecurityStateDirectory(environment), "workbench.sqlite3"),
+      join(stateDirectory, "workbench.sqlite3"),
       // Apple's SQLite cannot initialize absent WAL sidecars through a read-only handle.
       // Open only an existing file there; query_only still prevents SQL data/schema writes.
       bun

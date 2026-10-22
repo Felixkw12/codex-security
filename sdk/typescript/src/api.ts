@@ -632,6 +632,7 @@ interface CodexSecurityRuntimeOptions {
 }
 
 interface ClientDependencies {
+  stateDirectory?: string;
   /** Explicit hosted execution; never falls back to createCodex. */
   hostedScan?: {
     executor: ScanExecutor;
@@ -711,6 +712,8 @@ export class CodexSecurity {
   ) {
     this.config = structuredClone(config);
     this.#dependencies = dependencies;
+    if (dependencies.stateDirectory !== undefined)
+      requireModelSafeOutputDir(dependencies.stateDirectory);
     this.#surface = runtimeOptions.surface;
     this.#parentScanRole = runtimeOptions.parentScanRole;
   }
@@ -1825,6 +1828,7 @@ export class CodexSecurity {
             ));
           const savedWorkbench = await savedScanWorkbench(resumeScanId, {
             environment: this.#dependencies.environment,
+            stateDirectory: this.#dependencies.stateDirectory,
             pluginRoot,
             pythonPath: this.config.pythonPath,
             currentDirectory: process.cwd(),
@@ -1839,7 +1843,8 @@ export class CodexSecurity {
           requireOutputOutsideRepositories(
             [requestedProtectedRoot, ...protectedRoots],
             await canonicalConfigPath(
-              codexSecurityStateDirectory(this.#dependencies.environment),
+              this.#dependencies.stateDirectory ??
+                codexSecurityStateDirectory(this.#dependencies.environment),
             ),
           );
           const saved = await savedWorkbench([
@@ -2002,6 +2007,7 @@ export class CodexSecurity {
         const readOptions: WorkbenchCommandOptions = {
           python,
           pluginRoot,
+          stateDirectory,
           signal,
           environment: {
             ...withoutCodexHome(environmentWithGit(git.environment, git)),
@@ -2283,6 +2289,7 @@ export class CodexSecurity {
       const workbenchOptions: WorkbenchCommandOptions = {
         python,
         pluginRoot: runtime.plugin.pluginRoot,
+        stateDirectory,
         environment: {
           ...withoutCodexHome(environmentWithGit(git.environment, git)),
           CODEX_HOME: runtime.codexHome,
@@ -4567,6 +4574,7 @@ export class CodexSecurity {
       const workbenchOptions: WorkbenchCommandOptions = {
         python,
         pluginRoot,
+        stateDirectory: local.stateDirectory,
         environment: {
           ...this.#dependencies.environment,
           CODEX_SECURITY_STATE_DIR: local.stateDirectory,
@@ -4902,9 +4910,9 @@ export class CodexSecurity {
       repo;
     protectedRoots ??= [protectedRoot];
     const requestedOutput = await prepareScanOutputDir(options, protectedRoots);
-    const stateDirectory = codexSecurityStateDirectory(
-      this.#dependencies.environment,
-    );
+    const stateDirectory =
+      this.#dependencies.stateDirectory ??
+      codexSecurityStateDirectory(this.#dependencies.environment);
     const canonicalStateDirectory = await canonicalConfigPath(stateDirectory);
     requireOutputOutsideRepositories(protectedRoots, canonicalStateDirectory);
     return {

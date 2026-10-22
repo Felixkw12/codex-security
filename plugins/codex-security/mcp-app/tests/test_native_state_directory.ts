@@ -13,7 +13,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
@@ -42,6 +42,7 @@ async function startHost({
   home,
   configuredState,
   state,
+  pythonCommand,
 }) {
   const repository = path.join(root, "repository");
   const scanRoot = path.join(root, "scans");
@@ -72,6 +73,10 @@ async function startHost({
   if (configuredState === undefined)
     delete environment.CODEX_SECURITY_STATE_DIR;
   else environment.CODEX_SECURITY_STATE_DIR = configuredState;
+  if (pythonCommand !== undefined) {
+    environment.PYTHON = pythonCommand;
+    delete environment.CODEX_SECURITY_PYTHON_COMMAND;
+  }
   let client;
   const connect = async () => {
     client = new Client({
@@ -95,9 +100,7 @@ async function startHost({
         [path.join(plugin, "scripts/workbench_db.py"), ...args],
         {
           cwd: plugin,
-          // Direct Python preserves raw paths; this fixture selects the same absolute
-          // state location that the native host must select through the SDK.
-          env: { ...environment, CODEX_SECURITY_STATE_DIR: state },
+          env: environment,
           encoding: "utf8",
           ...(input === undefined ? {} : { input: JSON.stringify(input) }),
         },
@@ -164,8 +167,11 @@ function successful(result) {
 for (const variant of [
   "absolute",
   "relative",
-  "surrounding whitespace",
-  "blank fallback",
+  "relative symlink parent",
+  "literal-space state",
+  "whitespace-only state",
+  "named-user state",
+  "empty fallback",
   "literal-space home",
   "symlink parent home",
 ]) {
@@ -173,9 +179,15 @@ for (const variant of [
     `native MCP shares state for fresh, resumed and stopped scans: ${variant}`,
     {
       skip:
-        variant === "literal-space home" && process.platform === "win32"
+        [
+          "literal-space home",
+          "literal-space state",
+          "whitespace-only state",
+        ].includes(variant) && process.platform === "win32"
           ? "Windows does not support a trailing-space directory component."
-          : false,
+          : variant === "named-user state" && process.platform === "win32"
+            ? "Named-user expansion uses the POSIX user database."
+            : false,
     },
     async () => {
       const root = await realpath(
@@ -208,17 +220,39 @@ for (const variant of [
         let configuredState = state;
         if (variant === "relative") {
           configuredState = "selected-state";
-          state = path.join(caller, configuredState);
-        } else if (variant === "surrounding whitespace") {
-          configuredState = `  ${state}  `;
+          state = path.join(plugin, configuredState);
+        } else if (variant === "relative symlink parent") {
+          const physicalParent = path.join(root, "physical-state-parent");
+          const nested = path.join(physicalParent, "nested");
+          await mkdir(nested, { recursive: true, mode: 0o700 });
+          const link = path.join(plugin, "state-link");
+          await symlink(
+            nested,
+            link,
+            process.platform === "win32" ? "junction" : "dir",
+          );
+          configuredState = `state-link${path.sep}..${path.sep}selected-state`;
+          state = path.join(
+            await realpath(`${link}${path.sep}..`),
+            "selected-state",
+          );
+        } else if (variant === "literal-space state") {
+          state = path.join(root, " selected state ");
+          configuredState = state;
+        } else if (variant === "whitespace-only state") {
+          configuredState = "   ";
+          state = path.join(plugin, configuredState);
+        } else if (variant === "named-user state") {
+          const account = userInfo();
+          configuredState = `~${account.username}/${path.relative(await realpath(account.homedir), state)}`;
         } else if (
           [
-            "blank fallback",
+            "empty fallback",
             "literal-space home",
             "symlink parent home",
           ].includes(variant)
         ) {
-          configuredState = variant === "blank fallback" ? "   " : undefined;
+          configuredState = variant === "empty fallback" ? "" : undefined;
           state = path.join(physicalHome, "state", "plugins", "codex-security");
         }
         host = await startHost({
@@ -357,12 +391,12 @@ test("concurrent native MCP hosts isolate the same relative state setting", asyn
   );
   const hosts = [];
   try {
-    const plugin = await copyPlugin(root);
     for (const name of ["first", "second"]) {
       const hostRoot = path.join(root, name);
       const caller = path.join(hostRoot, "caller");
       const home = path.join(hostRoot, "home");
       await mkdir(home, { recursive: true, mode: 0o700 });
+      const plugin = await copyPlugin(hostRoot);
       hosts.push(
         await startHost({
           root: hostRoot,
@@ -370,7 +404,7 @@ test("concurrent native MCP hosts isolate the same relative state setting", asyn
           caller,
           home,
           configuredState: "state",
-          state: path.join(caller, "state"),
+          state: path.join(plugin, "state"),
         }),
       );
     }
@@ -387,10 +421,6 @@ test("concurrent native MCP hosts isolate the same relative state setting", asyn
         host.repository,
       );
     }
-    await assert.rejects(
-      stat(path.join(plugin, "state", "workbench.sqlite3")),
-      { code: "ENOENT" },
-    );
   } finally {
     await Promise.all(hosts.map((host) => host.close()));
     await rm(root, { recursive: true, force: true });
@@ -421,6 +451,58 @@ test("explicit native MCP state does not inspect an unused Codex home", async ()
     });
     const result = successful(await host.call("list_codex_security_scans", {}));
     assert.deepEqual(result.scans, []);
+    assert.equal(
+      (await stat(path.join(state, "workbench.sqlite3"))).isFile(),
+      true,
+    );
+  } finally {
+    await host?.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("native MCP state selection recovers when its Python helper becomes available", async () => {
+  const root = await realpath(
+    await mkdtemp(path.join(tmpdir(), "native-state-late-python-")),
+  );
+  let host;
+  try {
+    const plugin = await copyPlugin(root);
+    const home = path.join(root, "home");
+    await mkdir(home, { mode: 0o700 });
+    const interpreter = execFileSync(
+      process.env.PYTHON ?? "python3",
+      ["-c", "import sys; print(sys.executable)"],
+      { encoding: "utf8" },
+    ).trim();
+    const lateRuntime = path.join(root, "late-python");
+    const pythonCommand = path.join(lateRuntime, path.basename(interpreter));
+    const state = path.join(root, "selected-state");
+    host = await startHost({
+      root,
+      plugin,
+      caller: path.join(root, "caller"),
+      home,
+      configuredState: state,
+      state,
+      pythonCommand,
+    });
+    const missing = await host.call("list_codex_security_scans", {});
+    assert.equal(missing.isError, true);
+    assert.match(
+      missing.content[0].text,
+      /could not start its Python 3 helper/i,
+    );
+    assert.ok(missing.content[0].text.includes(pythonCommand));
+    await symlink(
+      path.dirname(interpreter),
+      lateRuntime,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    const recovered = successful(
+      await host.call("list_codex_security_scans", {}),
+    );
+    assert.deepEqual(recovered.scans, []);
     assert.equal(
       (await stat(path.join(state, "workbench.sqlite3"))).isFile(),
       true,

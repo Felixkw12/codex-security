@@ -927,11 +927,12 @@ Python lookup: `--python` on commands that expose interpreter selection or SDK
 `PYTHON`, the managed runtime, and `python3` or `python` on `PATH` (`py` also
 works on Windows).
 
-`CODEX_SECURITY_STATE_DIR` overrides `CODEX_HOME` for storage. The native MCP host uses the same state-directory selection as the CLI and SDK:
-relative values resolve from the host's working directory, surrounding whitespace
-is ignored, and an empty value uses the default. Existing MCP history created
-relative to the plugin directory can still be selected with its absolute state
-path. The host, scan workers, and execution locks share the selected location.
+`CODEX_SECURITY_STATE_DIR` overrides `CODEX_HOME` for storage. The native MCP
+host preserves the Python workbench's path selection: relative values resolve
+from the plugin directory, whitespace is part of the path, and an empty value
+uses the default. Home prefixes, including `~user` on POSIX, expand before
+physical path resolution. The host, scan workers, and execution locks share
+that selected location.
 
 ### Troubleshooting
 

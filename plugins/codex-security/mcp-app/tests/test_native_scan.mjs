@@ -2352,9 +2352,17 @@ for (const scenario of [
               const { codex } = await createExecutionCodex(
                 { surface: "sdk", command: "scan" },
                 worker,
-                knowledge
-                  ? { CODEX_SECURITY_KNOWLEDGE_BASE: knowledge.path }
-                  : {},
+                {
+                  ...(knowledge
+                    ? { CODEX_SECURITY_KNOWLEDGE_BASE: knowledge.path }
+                    : {}),
+                  ...(prepared.client.dependencies.stateDirectory === undefined
+                    ? {}
+                    : {
+                        CODEX_SECURITY_STATE_DIR:
+                          prepared.client.dependencies.stateDirectory,
+                      }),
+                },
               );
               const options = {
                 workingDirectory: repository,
@@ -2621,7 +2629,10 @@ test(
           home: join(root, `home-${id}`),
           toolBin: join(root, `tools-${id}`),
           scanDir: join(root, `scan-${id}`),
-          stateDirectory: join(root, `selected-state-${id}`),
+          stateDirectory: join(
+            root,
+            `selected-state-${id}${process.platform === "win32" ? "" : " "}`,
+          ),
           capture: join(root, `worker-${id}.json`),
           preflights: join(root, `preflights-${id}.jsonl`),
           decoyLaunch: join(root, `decoy-${id}.jsonl`),
@@ -2910,9 +2921,18 @@ test(
                 const { codex } = await createExecutionCodex(
                   { surface: "sdk", command: "scan" },
                   worker,
-                  knowledge
-                    ? { CODEX_SECURITY_KNOWLEDGE_BASE: knowledge.path }
-                    : {},
+                  {
+                    ...(knowledge
+                      ? { CODEX_SECURITY_KNOWLEDGE_BASE: knowledge.path }
+                      : {}),
+                    ...(prepared[index].client.dependencies.stateDirectory ===
+                    undefined
+                      ? {}
+                      : {
+                          CODEX_SECURITY_STATE_DIR:
+                            prepared[index].client.dependencies.stateDirectory,
+                        }),
+                  },
                 );
                 const options = {
                   workingDirectory: fixture.repository,

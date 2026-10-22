@@ -452,6 +452,7 @@ export async function prepareNativeScan(
     },
     {
       environment: selectedEnvironment,
+      stateDirectory: input.stateDirectory,
       inheritedPermissions,
       ambientExecution,
       resolveCodexCommand: resolveCommand,

@@ -1,7 +1,7 @@
 import { captureEnvironment } from "../../../../sdk/typescript/tests-support/process-environment.mjs";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative } from "node:path";
 import {
   mkdtemp,
   mkdir,
@@ -11,7 +11,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { once } from "node:events";
@@ -32,10 +32,6 @@ const bundle = await build({
       name: "native-stop-boundaries",
       setup(build) {
         const modules = {
-          "../../../../sdk/typescript/src/runtime.js": `
-          export { canonicalizeModelSafePath } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/runtime.ts", import.meta.url)))};
-          import { codexSecurityStateDirectory as stateDirectory } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/runtime.ts", import.meta.url)))};
-          export function codexSecurityStateDirectory(environment) { return fixture.stateDirectory ?? stateDirectory(environment); }`,
           "@modelcontextprotocol/sdk/server/mcp.js": `
           export class McpServer {
             server = {};
@@ -60,18 +56,29 @@ const bundle = await build({
           export async function waitForScanExecution(...args) { return fixture.waitForScanExecution ? fixture.waitForScanExecution(...args) : () => {}; }`,
           "node:child_process": `
           import { PassThrough } from "node:stream";
+          import { join } from "node:path";
           export function spawn() { throw new Error("unexpected runtime child invocation"); }
           export function execFile() {}
           execFile[Symbol.for("nodejs.util.promisify.custom")] = (_command, _args, options) => {
-            fixture.workbenchEnvironment?.(options.env);
             const stdin = new PassThrough();
             let input = "";
             const result = new Promise((resolve, reject) => {
               stdin.on("data", chunk => { input += chunk; });
-              stdin.on("end", () => Promise.resolve().then(() => fixture.workbench(JSON.parse(input.split("\\n")[0]).flatMap(argument => {
+              stdin.on("end", () => Promise.resolve().then(() => {
+                const args = JSON.parse(input.split("\\n")[0]).flatMap(argument => {
                   const split = argument.startsWith("--") ? argument.indexOf("=") : -1;
                   return split < 0 ? [argument] : [argument.slice(0, split), argument.slice(split + 1)];
-                })))
+                });
+                const bootstrap = options.env === process.env;
+                fixture.workbenchEnvironment?.(options.env, { bootstrap, cwd: options.cwd, args });
+                if (bootstrap) {
+                  if (args.length !== 1 || args[0] !== "resolve-scan-root")
+                    throw new Error("Only state selection may use the raw workbench environment");
+                  fixture.stateBootstrapCount++;
+                  return { scanRoot: join(fixture.stateDirectory ?? "/synthetic", "scans") };
+                }
+                return fixture.workbench(args);
+              })
                 .then(value => resolve({ stdout: JSON.stringify(value) }), reject));
             });
             return Object.assign(result, { child: { stdin } });
@@ -95,6 +102,7 @@ const bundle = await build({
 
 function serverFor(fixture) {
   fixture.ScanPermissionError = class ScanPermissionError extends Error {};
+  fixture.stateBootstrapCount = 0;
   const module = { exports: {} };
   new Function(
     "require",
@@ -326,8 +334,12 @@ for (const operation of ["cancel", "fail", "canceled", "failed"]) {
     const restore = captureEnvironment([
       "CODEX_HOME",
       "CODEX_SECURITY_STATE_DIR",
+      "CODEX_SECURITY_PLUGIN_ROOT",
     ]);
     try {
+      const pluginRoot = join(root, "plugin");
+      await mkdir(pluginRoot);
+      process.env.CODEX_SECURITY_PLUGIN_ROOT = pluginRoot;
       await mkdir(join(root, "physical", "nested"), { recursive: true });
       await symlink(
         join(root, "physical", "nested"),
@@ -337,17 +349,41 @@ for (const operation of ["cancel", "fail", "canceled", "failed"]) {
       const configuredHome = `${join(root, "link")}/..`;
       const canonicalHome = await realpath(configuredHome);
       process.env.CODEX_HOME = configuredHome;
-      for (const override of [
-        undefined,
-        join(root, "selected-state"),
-        `  ${join(root, "padded-state")}  `,
-        "relative-state",
-      ]) {
+      const fallbackState = join(
+        canonicalHome,
+        "state",
+        "plugins",
+        "codex-security",
+      );
+      const variants = [
+        { override: undefined, expectedState: fallbackState },
+        { override: "", expectedState: fallbackState },
+        {
+          override: join(root, "selected-state"),
+          expectedState: join(root, "selected-state"),
+        },
+        {
+          override: "relative-state",
+          expectedState: join(pluginRoot, "relative-state"),
+        },
+      ];
+      if (process.platform !== "win32") {
+        const account = userInfo();
+        variants.push(
+          {
+            override: join(root, " selected-state "),
+            expectedState: join(root, " selected-state "),
+          },
+          { override: "   ", expectedState: join(pluginRoot, "   ") },
+          {
+            override: `~${account.username}/${relative(await realpath(account.homedir), join(root, "named-user-state"))}`,
+            expectedState: join(root, "named-user-state"),
+          },
+        );
+      }
+      for (const { override, expectedState } of variants) {
         if (override === undefined) delete process.env.CODEX_SECURITY_STATE_DIR;
         else process.env.CODEX_SECURITY_STATE_DIR = override;
-        const expectedState = override
-          ? resolve(override.trim())
-          : join(canonicalHome, "state", "plugins", "codex-security");
         const rejoin = operation === "canceled" || operation === "failed";
         const scan = {
           scanId: "synthetic-parent",
@@ -358,9 +394,16 @@ for (const operation of ["cancel", "fail", "canceled", "failed"]) {
         };
         let preserved = false;
         let released = false;
-        const server = serverFor({
-          workbenchEnvironment(environment) {
-            assert.equal(environment.CODEX_SECURITY_STATE_DIR, expectedState);
+        const fixture = {
+          stateDirectory: expectedState,
+          workbenchEnvironment(environment, { bootstrap, cwd, args }) {
+            assert.equal(cwd, pluginRoot);
+            assert.equal(environment.CODEX_HOME, configuredHome);
+            assert.equal(
+              environment.CODEX_SECURITY_STATE_DIR,
+              bootstrap ? override : expectedState,
+            );
+            if (bootstrap) assert.deepEqual(args, ["resolve-scan-root"]);
           },
           async cancel() {},
           async waitForScanExecution(state, directory) {
@@ -372,7 +415,8 @@ for (const operation of ["cancel", "fail", "canceled", "failed"]) {
           },
           async workbench([command]) {
             if (command === "list-scans") return {};
-            if (command === "resolve-scan-root") return { scanRoot: root };
+            if (command === "resolve-scan-root")
+              return { scanRoot: join(expectedState, "scans") };
             if (command === "preserve-scan-results") preserved = true;
             else
               assert.ok(
@@ -388,7 +432,8 @@ for (const operation of ["cancel", "fail", "canceled", "failed"]) {
               workspace: { setup: { submitted: true }, results: scan },
             };
           },
-        });
+        };
+        const server = serverFor(fixture);
         const result = await server.tools.get(
           rejoin
             ? "start_codex_security_deep_scan"
@@ -403,6 +448,7 @@ for (const operation of ["cancel", "fail", "canceled", "failed"]) {
         );
         assert.equal(preserved, true, JSON.stringify(result));
         assert.equal(released, true);
+        assert.equal(fixture.stateBootstrapCount, 1);
         assert.equal(process.env.CODEX_HOME, configuredHome);
         assert.equal(process.env.CODEX_SECURITY_STATE_DIR, override);
       }
@@ -415,9 +461,15 @@ for (const operation of ["cancel", "fail", "canceled", "failed"]) {
 
 for (const resumed of [false, true]) {
   test(`native ${resumed ? "resume" : "start"} forwards its workbench state to execution`, async () => {
-    const restore = captureEnvironment(["CODEX_SECURITY_STATE_DIR"]);
-    process.env.CODEX_SECURITY_STATE_DIR = "  relative-native-state  ";
-    const expectedState = resolve("relative-native-state");
+    const restore = captureEnvironment([
+      "CODEX_SECURITY_STATE_DIR",
+      "CODEX_SECURITY_PLUGIN_ROOT",
+    ]);
+    const configuredState = "  relative-native-state  ";
+    const pluginRoot = dirname(dirname(entrypoint));
+    process.env.CODEX_SECURITY_PLUGIN_ROOT = pluginRoot;
+    process.env.CODEX_SECURITY_STATE_DIR = configuredState;
+    const expectedState = join(pluginRoot, configuredState);
     const scan = {
       scanId: "synthetic-parent",
       scanDir: "/synthetic/scan",
@@ -426,9 +478,15 @@ for (const resumed of [false, true]) {
       progress: { status: "running" },
     };
     let launches = 0;
-    const server = serverFor({
-      workbenchEnvironment(environment) {
-        assert.equal(environment.CODEX_SECURITY_STATE_DIR, expectedState);
+    const fixture = {
+      stateDirectory: expectedState,
+      workbenchEnvironment(environment, { bootstrap, cwd, args }) {
+        assert.equal(cwd, pluginRoot);
+        assert.equal(
+          environment.CODEX_SECURITY_STATE_DIR,
+          bootstrap ? configuredState : expectedState,
+        );
+        if (bootstrap) assert.deepEqual(args, ["resolve-scan-root"]);
       },
       async workbench([command]) {
         if (command === "list-scans") return {};
@@ -444,7 +502,8 @@ for (const resumed of [false, true]) {
         process.env.CODEX_SECURITY_STATE_DIR = "different-ambient-state";
         scan.progress.status = "complete";
       },
-    });
+    };
+    const server = serverFor(fixture);
     try {
       const result = await server.tools.get("start_codex_security_deep_scan")(
         resumed
@@ -454,6 +513,7 @@ for (const resumed of [false, true]) {
       );
       assert.notEqual(result.isError, true, JSON.stringify(result));
       assert.equal(launches, 1);
+      assert.equal(fixture.stateBootstrapCount, 1);
     } finally {
       restore();
       await server.close();
