@@ -115,7 +115,7 @@ export function renderScaReport(result: ScaResult): string {
     bullets(
       result.coverage.inputs.map(
         (input) =>
-          `${code(input.path)}: **${input.status}**${input.reason ? ` — ${input.reason}` : ""}.`,
+          `${code(input.path)}: **${input.status}**${input.reason ? ` — ${code(input.reason)}` : ""}.`,
       ),
       "No lockfile inputs were evaluated; this is not a clean-repository result.",
     ),
@@ -132,7 +132,7 @@ export function renderScaReport(result: ScaResult): string {
     );
   }
   if (result.coverage.limitations.length)
-    coverageSections.push(bullets(result.coverage.limitations, ""));
+    coverageSections.push(bullets(result.coverage.limitations.map(code), ""));
   if (result.matches.length === 0) {
     sections.push(
       result.coverage.status === "complete"
@@ -141,7 +141,10 @@ export function renderScaReport(result: ScaResult): string {
     );
   }
   if (result.diagnostics.length)
-    coverageSections.push("## Diagnostics", bullets(result.diagnostics, ""));
+    coverageSections.push(
+      "## Diagnostics",
+      bullets(result.diagnostics.map(code), ""),
+    );
   for (const match of prioritizedDependencyMatches(result)) {
     const component = componentFor(result, match);
     const assessment = assessments.get(match.id);
