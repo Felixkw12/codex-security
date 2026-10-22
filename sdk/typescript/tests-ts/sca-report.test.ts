@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   discoverScaInputs,
@@ -8,6 +9,7 @@ import {
 } from "../src/sca-osv.js";
 import { dependencyScanResult, saveDependencyScan } from "../src/sca.js";
 import { dependencyInventorySummary } from "../src/sca-summary.js";
+import { dependencyTriageContract } from "../src/sca-triage.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import {
   compareScaResults,
@@ -516,6 +518,101 @@ describe("SCA report", () => {
     expect(html).toContain("SYNTHETIC-1");
     expect(report).toContain(JSON.stringify(message));
     expect(JSON.stringify(result)).toBe(original);
+  });
+
+  test.each(
+    [
+      "evidence",
+      "counterevidence",
+      "proof_gaps",
+      "recommended_next_step",
+    ].flatMap((field) =>
+      [
+        "Synthetic detail\n\n# Synthetic assessment heading\n\n<!--",
+        "Synthetic `detail`\r\n\r\n```\r\n# Synthetic assessment heading\r\n<!--",
+        "<span hidden>Synthetic detail</span>",
+      ].map((message) => ({ field, message })),
+    ),
+  )(
+    "keeps schema-valid assessment text literal in saved reports: %j",
+    async ({ field, message }) => {
+      const result = fixture();
+      result.outputDir = await temporaryDirectory("sca-assessment-report-");
+      addMatch(result, "later-match", "2.0.0", "SYNTHETIC-LATER-ADVISORY");
+      const finding = {
+        ...triage("needs_review"),
+        [field]: field === "recommended_next_step" ? message : [message],
+      };
+      const contract = await dependencyTriageContract(
+        fileURLToPath(
+          new URL("../../../plugins/codex-security/", import.meta.url),
+        ),
+      );
+      result.assessments = contract.parse(
+        JSON.stringify({
+          schema_version: "triage-finding/v0",
+          repository: {
+            path: result.repository.path,
+            revision: result.repository.revision,
+          },
+          findings: [
+            finding,
+            {
+              ...triage("needs_review"),
+              input_id: "later-match",
+              triage_item_id: "later-assessment",
+            },
+          ],
+        }),
+        result,
+      );
+      expect(result.assessments.map(({ status }) => status)).toEqual([
+        "completed",
+        "completed",
+      ]);
+      expect(result.assessments[0]?.triage).toEqual(finding);
+      await saveDependencyScan(result);
+      const saved = JSON.parse(
+        await readFile(join(result.outputDir, "sca-result.json"), "utf8"),
+      ) as ScaResult;
+      expect(saved).toEqual(result);
+      expect(saved.assessments[0]?.triage).toEqual(finding);
+      const report = await readFile(
+        join(result.outputDir, "report.md"),
+        "utf8",
+      );
+      const html = Bun.markdown.html(report);
+      expect(html).not.toContain("<h1>Synthetic assessment heading</h1>");
+      expect(html).not.toContain("<!--");
+      expect(html).not.toContain("<span hidden>");
+      expect(html).toContain("<h2>Retained evidence</h2>");
+      expect(html).toContain("SYNTHETIC-LATER-ADVISORY");
+      expect(report).toContain(
+        /[\r\n]/u.test(message) ? JSON.stringify(message) : message,
+      );
+    },
+  );
+
+  test("keeps empty assessment lists and a plain next action readable", () => {
+    const result = fixture();
+    const finding = triage("needs_review");
+    finding.evidence = [];
+    finding.counterevidence = [];
+    finding.proof_gaps = [];
+    result.assessments = [
+      {
+        matchId: "match-1",
+        status: "completed",
+        verdict: finding.verdict,
+        triage: finding,
+        error: null,
+      },
+    ];
+    const html = Bun.markdown.html(renderScaReport(result));
+    expect(html).toContain("No decisive evidence supplied.");
+    expect(html.match(/None supplied\./g)).toHaveLength(2);
+    expect(html).toContain(finding.recommended_next_step);
+    expect(html).toContain("<h2>Retained evidence</h2>");
   });
 });
 
