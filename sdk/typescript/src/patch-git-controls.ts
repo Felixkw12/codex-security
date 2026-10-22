@@ -422,6 +422,12 @@ export async function capturePatchGitControls(
   usesWorktreeMarker: boolean,
   usesCommonDirectoryMarker = true,
   selectedGitDirectory?: string,
+  configuration = {
+    global: process.env["GIT_CONFIG_GLOBAL"],
+    system: process.env["GIT_CONFIG_SYSTEM"],
+    noSystem: process.env["GIT_CONFIG_NOSYSTEM"],
+    xdgConfigHome: process.env["XDG_CONFIG_HOME"],
+  },
 ): Promise<PatchGitControls | undefined> {
   const runBytes = async (
     root: string,
@@ -588,11 +594,13 @@ export async function capturePatchGitControls(
       readOnly: boolean;
       allowDirectoryChanges: boolean;
       allowDirectoryCreation: boolean;
+      contents: Buffer | undefined;
     }
   >();
   const snapshotStoragePaths = new Set<string>();
   const modelOnlyReadOnlyPaths = new Set<string>();
   const inaccessibleIncludes = new Set<string>();
+  const unreadableConfigurations = new Set<string>();
   const inaccessibleHooks = new Set<string>();
   const hookDirectories = new Set<string>();
   const hookIsAvailable = async (path: string): Promise<boolean> => {
@@ -616,6 +624,7 @@ export async function capturePatchGitControls(
     const previous = controlPaths.get(path);
     controlPaths.set(path, {
       canonical,
+      contents: previous?.contents,
       identity: metadata && { dev: metadata.dev, ino: metadata.ino },
       directory,
       readOnly:
@@ -630,6 +639,114 @@ export async function capturePatchGitControls(
           previous.allowDirectoryChanges),
     });
   };
+  const rememberConfiguration = async (
+    path: string,
+    protectDirectory = true,
+    optional = false,
+  ): Promise<void> => {
+    await rememberControl(path, protectDirectory);
+    const control = controlPaths.get(path)!;
+    if (control.contents !== undefined) return;
+    if (!(await stat(control.canonical).catch(missing))?.isFile()) return;
+    try {
+      control.contents = await readFile(control.canonical);
+      unreadableConfigurations.delete(path);
+    } catch (error) {
+      if (
+        optional &&
+        ["EACCES", "EPERM"].includes(
+          (error as NodeJS.ErrnoException).code ?? "",
+        )
+      ) {
+        unreadableConfigurations.add(path);
+        return;
+      }
+      throw error;
+    }
+  };
+  const rememberSelectedConfiguration = async (
+    path: string,
+    optional = false,
+  ): Promise<void> => {
+    try {
+      // Empty regular inputs have no --show-origin records. Devices such as
+      // /dev/null and unavailable optional inputs keep native Git behavior.
+      if ((await stat(path).catch(missing))?.isFile())
+        await rememberConfiguration(path, true, optional);
+    } catch (error) {
+      if (
+        optional &&
+        ["EACCES", "EPERM"].includes(
+          (error as NodeJS.ErrnoException).code ?? "",
+        )
+      )
+        return;
+      throw error;
+    }
+  };
+  const expandConfigurationPath = async (path: string) => {
+    try {
+      return (
+        await runControl(
+          root,
+          root,
+          [
+            "-c",
+            `codexsecurity.patchcontrolpath=${path}`,
+            "config",
+            "--null",
+            "--type=path",
+            "--get",
+            "codexsecurity.patchcontrolpath",
+          ],
+          { environment: configurationEnvironment },
+        )
+      ).replace(/\0$/u, "");
+    } catch (error) {
+      // Git omits the per-user defaults when it cannot expand HOME.
+      if (
+        error instanceof Error &&
+        error.message.includes("failed to expand user dir")
+      )
+        return undefined;
+      throw error;
+    }
+  };
+  const globalConfigurationPaths: string[] = [];
+  if (configuration.global !== undefined) {
+    if (configuration.global !== "")
+      globalConfigurationPaths.push(configuration.global);
+  } else {
+    for (const path of [
+      configuration.xdgConfigHome
+        ? `${configuration.xdgConfigHome}/git/config`
+        : await expandConfigurationPath("~/.config/git/config"),
+      await expandConfigurationPath("~/.gitconfig"),
+    ])
+      if (path !== undefined) globalConfigurationPaths.push(path);
+  }
+  if (configuration.system) {
+    const disabled =
+      configuration.noSystem === undefined
+        ? "false"
+        : (
+            await runControl(
+              root,
+              root,
+              [
+                "-c",
+                `codexsecurity.patchnosystem=${configuration.noSystem}`,
+                "config",
+                "--type=bool",
+                "--get",
+                "codexsecurity.patchnosystem",
+              ],
+              { environment: configurationEnvironment },
+            )
+          ).trim();
+    if (disabled === "false")
+      globalConfigurationPaths.push(configuration.system);
+  }
   const canPrepareStorage = async (path: string): Promise<boolean> => {
     for (const entry of await directoryLinks(path)) {
       if (administrationLinks.has(entry))
@@ -667,7 +784,7 @@ export async function capturePatchGitControls(
     for (let index = 0; index + 1 < origins.length; index += 2) {
       const origin = origins[index]!;
       if (origin.startsWith("file:"))
-        await rememberControl(
+        await rememberConfiguration(
           relativeFile(checkout, configPath(origin.slice(5))),
         );
       if (/^(include|includeif\..*)\.path$/u.test(origins[index + 1]!))
@@ -722,7 +839,11 @@ export async function capturePatchGitControls(
           : checkout;
         const includePath = relativeFile(relativeTo, path);
         try {
-          await rememberControl(includePath, !key.startsWith("includeif."));
+          await rememberConfiguration(
+            includePath,
+            !key.startsWith("includeif."),
+            key.startsWith("includeif."),
+          );
         } catch (error) {
           // Git's successful --includes read above already required access to
           // active includes. An inaccessible conditional path was not selected.
@@ -738,6 +859,50 @@ export async function capturePatchGitControls(
           throw error;
         }
       }
+    }
+    for (const path of globalConfigurationPaths)
+      await rememberSelectedConfiguration(relativeFile(checkout, path), true);
+    const localConfig = (
+      await runControl(root, checkout, [
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-path",
+        "config",
+      ])
+    ).replace(/\n$/u, "");
+    await rememberSelectedConfiguration(localConfig);
+    let worktreeConfig = false;
+    try {
+      worktreeConfig =
+        (
+          await runControl(
+            root,
+            checkout,
+            [
+              "config",
+              "--local",
+              "--no-includes",
+              "--type=bool",
+              "--get",
+              "extensions.worktreeConfig",
+            ],
+            { environment: configurationEnvironment },
+          )
+        ).trim() === "true";
+    } catch (error) {
+      const failure = error as { code?: unknown; status?: unknown };
+      if ((failure.code ?? failure.status) !== 1) throw error;
+    }
+    if (worktreeConfig) {
+      const path = (
+        await runControl(root, checkout, [
+          "rev-parse",
+          "--path-format=absolute",
+          "--git-path",
+          "config.worktree",
+        ])
+      ).replace(/\n$/u, "");
+      await rememberSelectedConfiguration(path);
     }
     // A complete entry preserves Git's empty hooksPath semantics; querying
     // only the hooks directory would turn that setting into the checkout.
@@ -888,6 +1053,30 @@ export async function capturePatchGitControls(
         )
           throw new Error(
             `Git configuration or hooks changed location during the patch: ${path}`,
+          );
+        if (unreadableConfigurations.has(path)) {
+          try {
+            await readFile(canonical);
+          } catch (error) {
+            if (
+              ["EACCES", "EPERM"].includes(
+                (error as NodeJS.ErrnoException).code ?? "",
+              )
+            )
+              continue;
+            throw error;
+          }
+          throw new Error(
+            `Git configuration became readable during the patch: ${path}`,
+          );
+        }
+        if (
+          expected.contents !== undefined &&
+          (!metadata?.isFile() ||
+            !(await readFile(canonical)).equals(expected.contents))
+        )
+          throw new Error(
+            `Git configuration changed during the patch: ${path}`,
           );
       }
       const marker =

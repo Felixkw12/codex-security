@@ -10737,6 +10737,24 @@ async function runSkill(
         selectedGitDirectory === undefined || isAbsolute(selectedGitDirectory)
           ? selectedGitDirectory
           : `${resolve(directory, parse(selectedGitDirectory).root)}${sep}${selectedGitDirectory.slice(parse(selectedGitDirectory).root.length)}`,
+        {
+          global: environmentEntry(
+            dependencies.environment,
+            "GIT_CONFIG_GLOBAL",
+          ),
+          system: environmentEntry(
+            dependencies.environment,
+            "GIT_CONFIG_SYSTEM",
+          ),
+          noSystem: environmentEntry(
+            dependencies.environment,
+            "GIT_CONFIG_NOSYSTEM",
+          ),
+          xdgConfigHome: environmentEntry(
+            dependencies.environment,
+            "XDG_CONFIG_HOME",
+          ),
+        },
       )
     : undefined;
   const patchPermissions =
