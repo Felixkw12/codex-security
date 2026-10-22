@@ -81,6 +81,7 @@ const bundle = await build({
       export { prepareAmbientExecution, prepareAmbientRuntime, prepareExecutionSource, createExecutionCodex, prepareDiscoveryExecution, prepareMergeExecution } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/execution-preparation.ts", import.meta.url)))};
       export { resolveDeepScanConfig } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/deep-config.ts", import.meta.url)))};
       export { createPermissionCheckedCodex } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/permission-profile.ts", import.meta.url)))};
+      export { createProviderProfile } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/provider-profile.ts", import.meta.url)))};
       export { scanRuntimeCodexConfig, scanPreflightCodexConfig } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/api.ts", import.meta.url)))};`,
     resolveDir: fileURLToPath(new URL("../src/", import.meta.url)),
   },
@@ -145,6 +146,7 @@ const {
   prepareMergeExecution,
   scanRuntimeCodexConfig,
   createPermissionCheckedCodex,
+  createProviderProfile,
   prepareAmbientExecution,
   prepareAmbientRuntime,
   prepareExecutionSource,
@@ -2080,6 +2082,7 @@ test(
         subagents: 1,
         effort: "high",
         summary: "detailed",
+        selectedInstructions: "Synthetic first selected instructions.",
       },
       {
         id: "second",
@@ -2098,6 +2101,7 @@ test(
     ].map((fixture) => ({
       ...fixture,
       model: `synthetic-${fixture.id}-model`,
+      ambientInstructions: `Synthetic ${fixture.id} ambient instructions.`,
       documentText: `Synthetic ${fixture.id} architecture.\n`,
       home: join(root, fixture.id, "home"),
       repository: join(root, fixture.id, "repository"),
@@ -2153,12 +2157,20 @@ else {
         await mkdir(fixture.scanDir, { mode: 0o700 });
         await writeFile(
           join(fixture.home, "config.toml"),
-          'model = "synthetic-ambient-model"\n',
+          stringifyToml({
+            model: "synthetic-ambient-model",
+            developer_instructions: fixture.ambientInstructions,
+          }),
         );
         await writeFile(fixture.document, fixture.documentText);
         await writeFile(
           fixture.selectedConfig,
-          stringifyToml({ model_reasoning_summary: fixture.summary }),
+          stringifyToml({
+            model_reasoning_summary: fixture.summary,
+            ...(fixture.selectedInstructions === undefined
+              ? {}
+              : { developer_instructions: fixture.selectedInstructions }),
+          }),
         );
         await writeFile(
           fixture.deepConfig,
@@ -2190,8 +2202,12 @@ else {
             savedDocument,
           ]);
           await saveScanKnowledge(fixture.scanDir, fixture.savedSnapshot);
+          const profile = await createProviderProfile(fixture.home, {
+            developer_instructions: "Synthetic saved recipe instructions.",
+          });
           fixture.recipe = {
             auth: "api-key",
+            providerProfile: { name: profile.name, home: "ambient" },
             config: {
               model: "synthetic-recipe-model",
               model_reasoning_effort: "low",
@@ -2216,11 +2232,11 @@ else {
         await writeFile(fixture.document, "Changed document after capture.\n");
         await writeFile(
           join(fixture.home, "config.toml"),
-          'model = "synthetic-later-ambient"\n',
+          'model = "synthetic-later-ambient"\ndeveloper_instructions = "Synthetic later ambient instructions."\n',
         );
         await writeFile(
           fixture.selectedConfig,
-          'model = "synthetic-later-selected"\nmodel_reasoning_effort = "minimal"\nmodel_reasoning_summary = "auto"\n',
+          'model = "synthetic-later-selected"\nmodel_reasoning_effort = "minimal"\nmodel_reasoning_summary = "auto"\ndeveloper_instructions = "Synthetic later selected instructions."\n',
         );
         await writeFile(
           fixture.deepConfig,
@@ -2350,6 +2366,13 @@ else {
               assert.equal(
                 config.model_reasoning_summary,
                 saved ? "none" : fixture.summary,
+              );
+              assert.equal(
+                config.developer_instructions,
+                saved
+                  ? "Synthetic saved recipe instructions."
+                  : (fixture.selectedInstructions ??
+                      fixture.ambientInstructions),
               );
               assert.equal(
                 config.features.multi_agent_v2

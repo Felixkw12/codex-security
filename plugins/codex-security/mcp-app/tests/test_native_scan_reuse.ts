@@ -22,6 +22,15 @@ const { scanInputIdentity, saveScanKnowledge } = await loadSourceModule<
 const { resolveDeepScanConfig } = await loadSourceModule<
   typeof import("../../../../sdk/typescript/src/deep-config.js")
 >(new URL("../../../../sdk/typescript/src/deep-config.ts", import.meta.url));
+const { createProviderProfile, restoreProviderProfile } =
+  await loadSourceModule<
+    typeof import("../../../../sdk/typescript/src/provider-profile.js")
+  >(
+    new URL(
+      "../../../../sdk/typescript/src/provider-profile.ts",
+      import.meta.url,
+    ),
+  );
 
 type Scan = {
   scanId: string;
@@ -51,6 +60,11 @@ for (const change of [
   "selected config",
   "turn metadata precedence",
   "legacy recipe",
+  "instructions unchanged",
+  "instructions changed",
+  "instructions removed",
+  "instructions absent",
+  "instructions added",
   "running scan ID",
   "running target",
 ]) {
@@ -77,6 +91,19 @@ for (const change of [
       OPENAI_API_KEY: "",
     };
     const owner = "synthetic-reuse-owner";
+    const running = change === "running scan ID" || change === "running target";
+    const instructionCase = change.startsWith("instructions ") || running;
+    const originalInstructions =
+      instructionCase &&
+      change !== "instructions absent" &&
+      change !== "instructions added"
+        ? "Inspect synthetic authentication boundaries."
+        : undefined;
+    const selectedConfig = (instructions: string | undefined) =>
+      selectedConfiguration +
+      (instructions === undefined
+        ? ""
+        : `developer_instructions = ${JSON.stringify(instructions)}\n`);
     let client: Client | undefined;
     const workbench = (
       args: string[],
@@ -153,7 +180,18 @@ for (const change of [
       await writeFile(path.join(repository, "app.py"), "print('fixture')\n");
       await writeFile(knowledgePath, "Original synthetic guidance.\n");
       await writeFile(deepConfigPath, deepConfiguration);
-      await writeFile(selectedConfigPath, selectedConfiguration);
+      await writeFile(selectedConfigPath, selectedConfig(originalInstructions));
+      const profile = instructionCase
+        ? await createProviderProfile(environment.CODEX_HOME, {
+            analytics: { enabled: false },
+            ...(originalInstructions === undefined
+              ? {}
+              : { developer_instructions: originalInstructions }),
+          })
+        : undefined;
+      const originalProfile = profile
+        ? await readFile(profile.path)
+        : undefined;
       const knowledge = environment.CODEX_SECURITY_KNOWLEDGE_BASE
         ? await readKnowledgeBaseSnapshot([knowledgePath])
         : undefined;
@@ -177,6 +215,9 @@ for (const change of [
         mode: "deep",
         target: { kind: "repository", paths: [] },
         config: { model, model_reasoning_effort: reasoningEffort },
+        ...(profile
+          ? { providerProfile: { name: profile.name, home: "ambient" } }
+          : {}),
         ...(knowledge ? { knowledgeBasePaths: [knowledgePath] } : {}),
         ...(change === "legacy recipe"
           ? {}
@@ -185,6 +226,17 @@ for (const change of [
               deepScan: deep,
             }),
       };
+      if (profile)
+        assert.equal(
+          (
+            await restoreProviderProfile(
+              recipe.config,
+              recipe.providerProfile,
+              environment,
+            )
+          ).developer_instructions,
+          originalInstructions,
+        );
       if (knowledge) await saveScanKnowledge(scanDir, knowledge);
       workbench(
         [
@@ -256,8 +308,6 @@ for (const change of [
       const original = await Promise.all(
         artifacts.map((name) => readFile(path.join(scanDir, name))),
       );
-      const running =
-        change === "running scan ID" || change === "running target";
       if (!running)
         successful(
           await call("start_codex_security_deep_scan", {
@@ -290,6 +340,17 @@ for (const change of [
         );
       if (change === "added knowledge")
         environment.CODEX_SECURITY_KNOWLEDGE_BASE = knowledgePath;
+      if (
+        change === "instructions changed" ||
+        change === "instructions added" ||
+        running
+      )
+        await writeFile(
+          selectedConfigPath,
+          selectedConfig("Inspect synthetic storage boundaries."),
+        );
+      if (change === "instructions removed")
+        await writeFile(selectedConfigPath, selectedConfig(undefined));
       if (change === "missing knowledge" || running) await rm(knowledgePath);
       if (running) await writeFile(deepConfigPath, "invalid TOML [");
       if (change === "selected config" || change === "turn metadata precedence")
@@ -330,7 +391,9 @@ for (const change of [
         running ||
         change === "unchanged" ||
         change === "equivalent config" ||
-        change === "turn metadata precedence"
+        change === "turn metadata precedence" ||
+        change === "instructions unchanged" ||
+        change === "instructions absent"
       ) {
         assert.equal(successful(response).scanId, scanId);
         assert.equal(workbench(["list-scans"]).scans.length, 1);
@@ -355,6 +418,8 @@ for (const change of [
         ),
         original,
       );
+      if (profile)
+        assert.deepEqual(await readFile(profile.path), originalProfile);
     } finally {
       await client?.close();
       await rm(root, { recursive: true, force: true });

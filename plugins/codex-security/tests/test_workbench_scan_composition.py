@@ -461,7 +461,7 @@ def test_native_parent_serializes_concurrent_starts_with_different_context(
 
 
 @pytest.fixture
-def native_scan_completion(tmp_path: Path):
+def native_scan_completion(tmp_path: Path, request: pytest.FixtureRequest):
     state, target = _scan_workspace(tmp_path)
     arguments = (
         "begin-deep-scan",
@@ -475,7 +475,13 @@ def native_scan_completion(tmp_path: Path):
         "Original optional context.",
     )
     started = run_workbench(state, *arguments)
-    scan = started["scan"]
+    complete = _prepare_native_scan_completion(
+        state, target, started["scan"], recipe_overrides=getattr(request, "param", None)
+    )
+    return state, target, arguments, started, complete
+
+
+def _prepare_native_scan_completion(state, target, scan, *, recipe_overrides=None):
     token = scan["handoffClaimToken"]
     run_workbench(
         state,
@@ -490,7 +496,7 @@ def native_scan_completion(tmp_path: Path):
                 "scanId": scan["scanId"],
                 "threadId": "native-owner",
                 "claimToken": token,
-                "recipe": recipe(target, "deep"),
+                "recipe": {**recipe(target, "deep"), **(recipe_overrides or {})},
             }
         ),
     )
@@ -546,7 +552,7 @@ def native_scan_completion(tmp_path: Path):
             json.dumps(cost),
         )["scan"]
 
-    return state, target, arguments, started, complete
+    return complete
 
 
 @pytest.mark.parametrize("saved_recipe", [False, True])
@@ -704,6 +710,55 @@ def test_native_target_retry_reuses_completed_result(
         assert connection.execute("SELECT COUNT(*) FROM scans").fetchone() == (1,)
     assert {path: path.read_bytes() for path in artifacts} == artifacts
     assert run_workbench(state, *arguments)["scan"]["scanId"] == scan["scanId"]
+    assert {path: path.read_bytes() for path in artifacts} == artifacts
+
+
+@pytest.mark.parametrize(
+    "native_scan_completion", [{"scanInputs": {"knowledgeBase": None}}], indirect=True
+)
+@pytest.mark.parametrize("candidate", ["same", "mismatch", "different"])
+@pytest.mark.parametrize("status", ["running", "complete"])
+def test_native_completed_reuse_match_is_bound_to_candidate(
+    native_scan_completion, candidate: str, status: str
+) -> None:
+    state, target, arguments, started, complete = native_scan_completion
+    scan = started["scan"]
+    matched_scan_id = scan["scanId"] if candidate != "mismatch" else None
+    if candidate == "different":
+        assert complete()["progress"]["status"] == "complete"
+        arguments = (*arguments[:-1], "Different optional context.")
+        second = run_workbench(state, *arguments)
+        assert second["startDisposition"] == "created"
+        scan = second["scan"]
+        assert scan["scanId"] != matched_scan_id
+        complete = _prepare_native_scan_completion(
+            state, target, scan, recipe_overrides={"scanInputs": {"knowledgeBase": None}}
+        )
+    if status == "complete":
+        assert complete()["progress"]["status"] == "complete"
+    artifacts = {
+        path: path.read_bytes() for path in Path(scan["scanDir"]).rglob("*") if path.is_file()
+    }
+    requested = {
+        "completedScanId": matched_scan_id,
+        "knowledgeBase": None,
+        "deepScan": {"maxDiscoveryRuns": 8},
+        "model": "synthetic-model",
+        "reasoningEffort": "high",
+    }
+    arguments = (*arguments, "--completed-inputs-json", json.dumps(requested))
+    result = run_workbench(state, *arguments)
+    if status == "running" or candidate == "same":
+        assert result["startDisposition"] == "joined"
+        assert result["scan"]["scanId"] == scan["scanId"]
+        assert result["scan"]["progress"]["status"] == status
+    else:
+        assert result["startDisposition"] == "created"
+        assert result["scan"]["scanId"] != scan["scanId"]
+        assert result["scan"]["progress"]["status"] == "running"
+    retry = run_workbench(state, *arguments)
+    assert retry["startDisposition"] == "joined"
+    assert retry["scan"]["scanId"] == result["scan"]["scanId"]
     assert {path: path.read_bytes() for path in artifacts} == artifacts
 
 

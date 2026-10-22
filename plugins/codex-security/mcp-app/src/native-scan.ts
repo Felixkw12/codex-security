@@ -25,6 +25,7 @@ import {
   type DeepScanOptions,
 } from "../../../../sdk/typescript/src/scan-settings.js";
 import type { SavedScanRecipe } from "../../../../sdk/typescript/src/scan-registration.js";
+import { restoreProviderProfile } from "../../../../sdk/typescript/src/provider-profile.js";
 import { configuredCodexHome } from "../../../../sdk/typescript/src/auth.js";
 import { expandHome } from "../../../../sdk/typescript/src/codex-home.js";
 import { gitMarkerRoot } from "../../../../sdk/typescript/src/targets.js";
@@ -55,6 +56,7 @@ export interface NativeScanSemanticInputs {
   deepScanSettings: Required<DeepScanOptions>;
   config: JsonObject;
   modelSettings: ReturnType<typeof scanModelConfiguration>;
+  developerInstructionsMatch: boolean;
 }
 
 export interface NativeScanInput {
@@ -179,6 +181,7 @@ function nativeDeepScanConfigPath(environment: NodeJS.ProcessEnv): string {
 export async function readNativeScanSemanticInputs(
   modelSettings: Pick<NativeScanInput, "model" | "reasoningEffort"> = {},
   signal?: AbortSignal,
+  savedRecipe?: SavedScanRecipe,
 ): Promise<NativeScanSemanticInputs> {
   const environment = await snapshotNativeEnvironment();
   const knowledgeBasePaths = environment.CODEX_SECURITY_KNOWLEDGE_BASE
@@ -199,11 +202,19 @@ export async function readNativeScanSemanticInputs(
     modelSettings,
     deepScanSettings.subagents,
   );
+  const savedConfig = await restoreProviderProfile(
+    savedRecipe?.config ?? {},
+    savedRecipe?.providerProfile,
+    environment,
+  );
   return {
     knowledgeBasePaths,
     knowledgeBaseSnapshot,
     deepScanSettings,
     config,
+    developerInstructionsMatch:
+      config["developer_instructions"] ===
+      savedConfig["developer_instructions"],
     modelSettings: scanModelConfiguration(
       await mergedCodexConfig({ codexOverrides: config }),
     ),

@@ -972,12 +972,18 @@ export function createCodexSecurityServer(): McpServer {
           semanticInputs = await readNativeScanSemanticInputs(
             modelSettings,
             abortSignalFromExtra(extra),
+            isJsonObject(begun.recipe)
+              ? (begun.recipe as unknown as NativeScanInput["recipe"])
+              : undefined,
           );
           begun = await runWorkbench(
             [
               ...beginArguments,
               "--completed-inputs-json",
               JSON.stringify({
+                completedScanId: semanticInputs.developerInstructionsMatch
+                  ? begun.scan.scanId
+                  : null,
                 knowledgeBase: scanInputIdentity(
                   undefined,
                   semanticInputs.knowledgeBaseSnapshot,

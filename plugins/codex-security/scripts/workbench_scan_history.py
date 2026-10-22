@@ -175,7 +175,8 @@ def completed_scan_inputs_match(scan: sqlite3.Row, requested: dict[str, Any]) ->
     inputs = recipe.get("scanInputs") or {}
     config = recipe.get("config") or {}
     return (
-        "knowledgeBase" in inputs
+        scan["id"] == requested.get("completedScanId")
+        and "knowledgeBase" in inputs
         and inputs["knowledgeBase"] == requested["knowledgeBase"]
         and recipe.get("deepScan") == requested["deepScan"]
         and config.get("model") == requested["model"]
