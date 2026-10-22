@@ -277,6 +277,50 @@ def test_deadline_recovery_applies_requested_scope_to_parent_and_worker_findings
     assert all(path.read_bytes() == contents for path, contents in original.items())
 
 
+@pytest.mark.parametrize("with_worker", [False, True])
+@pytest.mark.parametrize("inventory", [None, "", "invalid_strategy", 7, "scoped_path"])
+def test_scoped_deadline_recovers_interrupted_inventory_before_final_publication(
+    tmp_path: Path, with_worker: bool, inventory: object
+):
+    scan = deadline_fixture(tmp_path, "valid" if with_worker else "empty", include_paths=["app.py"])
+    draft = saved_draft(scan.scan_id)
+    draft["coverage"].update(mode="scoped_path", includePaths=["app.py"], excludePaths=[])
+    if inventory is None:
+        draft["coverage"].pop("inventoryStrategy", None)
+    else:
+        draft["coverage"]["inventoryStrategy"] = inventory
+    canonical_parent(scan, draft)
+    worker_sources = {
+        path: path.read_bytes() for path in scan.directory.glob("artifacts/**/checkpoints/*.json")
+    }
+
+    terminal = finish(scan)["deepScan"]
+    assert terminal["status"] == "succeeded"
+    assert terminal["terminalReason"] == "capped"
+    assert terminal["completionSequence"] == 0
+    recovered = json.loads((scan.directory / "coverage.json").read_text())
+    assert recovered["mode"] == "scoped_path"
+    assert recovered["inventoryStrategy"] == "scoped_path"
+    assert recovered["includePaths"] == ["app.py"]
+    assert "sealedAt" not in json.loads((scan.directory / "scan-manifest.json").read_text())["scan"]
+
+    completed = run_workbench(
+        scan.state,
+        "complete-scan",
+        "--scan-id",
+        scan.scan_id,
+        environment=scan.environment,
+    )["scan"]
+    assert completed["progress"]["status"] == "complete"
+    assert completed["findingCount"] == int(with_worker)
+    if with_worker:
+        assert_retained_finding(scan)
+    manifest = json.loads((scan.directory / "scan-manifest.json").read_text())
+    assert manifest["scan"]["status"] == "completed"
+    assert "sealedAt" in manifest["scan"]
+    assert all(path.read_bytes() == contents for path, contents in worker_sources.items())
+
+
 @pytest.mark.parametrize("failure", ["publication", "commit"])
 def test_failed_deadline_without_parent_head_restores_all_recovery_evidence(
     tmp_path: Path, failure: str

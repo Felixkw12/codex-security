@@ -2567,6 +2567,8 @@ def preserve_deep_deadline_draft(
         _populate_unsealed_artifact_envelope(*documents, binding)
         if expected_coverage_mode == "deep_repository":
             documents[2]["inventoryStrategy"] = "repository"
+        elif expected_coverage_mode == "scoped_path":
+            documents[2]["inventoryStrategy"] = "scoped_path"
         schema_dir = Path(__file__).resolve().parent.parent / "schemas"
         discarded_findings = _recover_unsealed_findings(
             documents[0], documents[1], schema_dir, scan_dir, warnings, current_contract=True
