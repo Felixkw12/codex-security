@@ -156,12 +156,12 @@ export function renderScaReport(result: ScaResult): string {
     if (triage) {
       sections.push(
         "Evidence:",
-        bullets(triage.evidence, "No decisive evidence supplied."),
+        bullets(triage.evidence.map(code), "No decisive evidence supplied."),
         "Counterevidence:",
-        bullets(triage.counterevidence, "None supplied."),
+        bullets(triage.counterevidence.map(code), "None supplied."),
         "Proof gaps:",
-        bullets(triage.proof_gaps, "None supplied."),
-        `Next action: ${triage.recommended_next_step}`,
+        bullets(triage.proof_gaps.map(code), "None supplied."),
+        `Next action: ${code(triage.recommended_next_step)}`,
       );
       if (triage.verdict === "not_actionable")
         sections.push(
