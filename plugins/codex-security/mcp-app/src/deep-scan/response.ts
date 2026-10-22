@@ -29,6 +29,7 @@ export const workerSchema = responseObject({
   sdkThreadId: optionalString,
   resultManifestPath: optionalString,
   acceptedResultPath: optionalString,
+  acceptedResultSha256: optionalString,
   completionSequence: optionalValue(positiveInteger),
   error: optionalString,
 }).transform(

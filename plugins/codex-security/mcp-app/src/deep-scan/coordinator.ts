@@ -1271,9 +1271,12 @@ export class DeepScanCoordinator {
         this.state.workflowVersion === "deep-security-scan/v2",
         true,
         worker.artifactDir,
-        resultPath === claimedInput?.resultManifestPath
-          ? claimedInput.resultManifestSha256
-          : undefined,
+        (resultPath === worker.acceptedResultPath
+          ? worker.acceptedResultSha256
+          : undefined) ??
+          (resultPath === claimedInput?.resultManifestPath
+            ? claimedInput.resultManifestSha256
+            : undefined),
       );
       recovered.push({
         id: worker.id,
@@ -1361,9 +1364,12 @@ export class DeepScanCoordinator {
           artifactDir: worker.artifactDir,
           resultPath,
           resultSha256:
-            resultPath === nextClaim?.previousResultPath
+            (resultPath === worker.acceptedResultPath
+              ? worker.acceptedResultSha256
+              : undefined) ??
+            (resultPath === nextClaim?.previousResultPath
               ? nextClaim.previousResultSha256
-              : undefined,
+              : undefined),
           reducerId: worker.id,
           accepted: true,
           previousReducerResultPath: claim

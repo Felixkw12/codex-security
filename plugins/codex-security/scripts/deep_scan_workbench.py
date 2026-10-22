@@ -482,7 +482,7 @@ def _deep_scan_state(connection: sqlite3.Connection, scan_id: str) -> dict[str, 
     scan = dependencies().require_scan(connection, run["scan_id"])
     worker_rows = connection.execute(
         """
-        SELECT workers.*, attempts.accepted_result_path
+        SELECT workers.*, attempts.accepted_result_path, attempts.accepted_result_sha256
         FROM deep_scan_workers AS workers
         LEFT JOIN deep_scan_attempts AS attempts
             ON attempts.worker_id = workers.id AND attempts.attempt = workers.attempt
@@ -667,6 +667,9 @@ def deep_scan_worker_state(row: sqlite3.Row) -> dict[str, Any]:
         "resultManifestPath": row["result_manifest_path"],
         "acceptedResultPath": row["accepted_result_path"]
         if "accepted_result_path" in row.keys()
+        else None,
+        "acceptedResultSha256": row["accepted_result_sha256"]
+        if "accepted_result_sha256" in row.keys()
         else None,
         "attempt": row["attempt"],
         "sdkThreadId": row["sdk_thread_id"],

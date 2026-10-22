@@ -238,6 +238,102 @@ for (const version of [
   });
 }
 
+for (const version of [
+  "deep-security-scan/v1",
+  "deep-scan-mcp/v1",
+  "deep-security-scan/v2",
+]) {
+  for (const changed of [false, true]) {
+    test(`recovered accepted result keeps its digest: ${version} ${changed ? "changed" : "unchanged"}`, async (t) => {
+      const fixture = await createFixture(t, { maxDiscoveryRuns: 4 }, version);
+      const { run, store, call, runWorkbench, instant } = fixture;
+      await store.claimCoordinator({ scanId: run.scanId, threadId: owner });
+      await commitReducers(fixture, [1, 2], [highId, lowId]);
+      const persisted = await store.get(run.scanId, owner);
+      const latest = persisted.persistedWorkers!.find(
+        (worker) => worker.id === lowId,
+      )!;
+      const acceptedPath = latest.acceptedResultPath!;
+      assert.ok(acceptedPath);
+      assert.equal(
+        persisted.persistedMergeClaims?.some(
+          (claim) => claim.previousWorkerId === latest.id,
+        ),
+        false,
+        "the latest accepted reducer has no later claim to supply its digest",
+      );
+      const original = await readFile(acceptedPath, "utf8");
+      if (changed) {
+        const replacement = JSON.parse(original);
+        replacement.findings = [legacyAcceptedFinding()];
+        await writeFile(acceptedPath, JSON.stringify(replacement));
+      }
+      const context = await createScanArtifactContext(
+        run.scanId,
+        runWorkbench,
+        {
+          requireRunning: true,
+        },
+      );
+      const publications: ScanDraftInput[] = [];
+      const coordinator = new DeepScanCoordinator({
+        run: persisted,
+        store,
+        pluginRoot,
+        executor: {
+          run() {
+            throw new Error("Recovery must reuse the accepted workers.");
+          },
+        },
+        clock: { now: () => Date.parse(instant), sleep: async () => {} },
+        onComplete: async (draft, signal, publication) => {
+          publications.push(draft);
+          // A later source check cannot validate bytes already held in memory.
+          if (changed) await writeFile(acceptedPath, original);
+          await recordCodexSecurityScanDraftViaWorkbench(
+            context,
+            draft,
+            runWorkbench,
+            signal,
+            publication,
+          );
+        },
+      });
+      coordinator.start();
+      let recoveryError: unknown;
+      const terminal = await coordinator
+        .wait(undefined, 30_000)
+        .catch((error) => {
+          recoveryError = error;
+          return undefined;
+        });
+      if (terminal?.status === "succeeded") {
+        assertSuccess(
+          await call("complete_codex_security_scan", { scanId: run.scanId }),
+        );
+        const saved = JSON.parse(
+          await readFile(path.join(run.scanDir, "findings.json"), "utf8"),
+        );
+        assert.deepEqual(saved.findings, []);
+      }
+      if (changed) {
+        if (recoveryError) {
+          assert.match(String(recoveryError), /changed|digest|accept/i);
+        } else {
+          assert.equal(terminal?.status, "failed", terminal?.error ?? "");
+          assert.match(terminal?.error ?? "", /changed|digest|accept/i);
+        }
+        assert.deepEqual(publications, []);
+      } else {
+        assert.equal(terminal?.status, "succeeded", terminal?.error ?? "");
+        assert.equal(publications.length, 1);
+        assert.deepEqual(publications[0].findings, []);
+        assert.equal(await readFile(acceptedPath, "utf8"), original);
+      }
+    });
+  }
+}
+
 test("public partial drafts retain checkpoints after coordinator adoption", async (t) => {
   const fixture = await createFixture(t);
   const { run, store, call, runWorkbench } = fixture;
