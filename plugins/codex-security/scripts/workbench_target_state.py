@@ -949,9 +949,13 @@ def backfill_repository_identities(connection: sqlite3.Connection) -> None:
 
 
 def backfill_security_targets(connection: sqlite3.Connection) -> None:
+    workspace_columns = {row["name"] for row in connection.execute("PRAGMA table_info(workspaces)")}
+    validated_workspace = (
+        " AND target_path_unvalidated = 0" if "target_path_unvalidated" in workspace_columns else ""
+    )
     rows = connection.execute(
-        """
-        SELECT target_path FROM workspaces WHERE target_path IS NOT NULL
+        f"""
+        SELECT target_path FROM workspaces WHERE target_path IS NOT NULL{validated_workspace}
         UNION
         SELECT target_path FROM scans
         """
@@ -960,7 +964,8 @@ def backfill_security_targets(connection: sqlite3.Connection) -> None:
         target_path = row["target_path"]
         target_id = ensure_security_target(connection, target_path, verify_ownership=False)
         connection.execute(
-            "UPDATE workspaces SET target_id = ? WHERE target_path = ? AND target_id IS NULL",
+            "UPDATE workspaces SET target_id = ? WHERE target_path = ? AND target_id IS NULL"
+            + validated_workspace,
             (target_id, target_path),
         )
         connection.execute(

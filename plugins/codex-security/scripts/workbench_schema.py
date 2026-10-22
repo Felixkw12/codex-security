@@ -62,6 +62,7 @@ def apply_migrations(
         scoped_git_discovery(
             lambda: [*migration_target_paths(connection), *discovery_roots],
             recorded_git_roots=lambda: recorded_git_target_paths(connection),
+            excluded_roots=lambda: unvalidated_workspace_paths(connection),
         ),
     ):
         connection.execute(
@@ -90,7 +91,7 @@ def apply_migrations(
                     or should_backfill_targets
                 )
             elif version in applied:
-                if version in (2, 12, 13, 26, 28, 31, 32, 42, 47, 50, 54):
+                if version in (2, 12, 13, 26, 28, 31, 32, 42, 47, 50, 54, 56):
                     repair_additive_migration(connection, version)
                 elif version == 11:
                     repair_deep_scan_migration(connection)
@@ -126,13 +127,31 @@ def migration_target_paths(connection: sqlite3.Connection) -> list[Path]:
     ):
         columns = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
         if column in columns:
+            condition = (
+                " AND (target_path_unvalidated = 0 OR target_id IS NOT NULL)"
+                if table == "workspaces" and "target_path_unvalidated" in columns
+                else ""
+            )
             paths.update(
                 Path(row[0])
                 for row in connection.execute(
-                    f"SELECT DISTINCT {column} FROM {table} WHERE {column} IS NOT NULL"
+                    f"SELECT DISTINCT {column} FROM {table} WHERE {column} IS NOT NULL{condition}"
                 )
             )
     return list(paths)
+
+
+def unvalidated_workspace_paths(connection: sqlite3.Connection) -> list[Path]:
+    columns = {row["name"] for row in connection.execute("PRAGMA table_info(workspaces)")}
+    if "target_path_unvalidated" not in columns:
+        return []
+    return [
+        Path(row[0]).expanduser()
+        for row in connection.execute(
+            "SELECT DISTINCT target_path FROM workspaces "
+            "WHERE target_path IS NOT NULL AND target_path_unvalidated = 1 AND target_id IS NULL"
+        )
+    ]
 
 
 def recorded_git_target_paths(connection: sqlite3.Connection) -> set[Path]:
@@ -254,12 +273,18 @@ def repair_stable_targets_migration(connection: sqlite3.Connection) -> bool:
         and "target_id" in scan_columns
         and existing_objects == {"security_targets", "scans_by_target"}
     ):
+        validated_workspace = (
+            "workspace.target_path_unvalidated = 0 AND "
+            if "target_path_unvalidated" in workspace_columns
+            else ""
+        )
         needs_backfill = bool(
             connection.execute(
-                """
+                f"""
                 SELECT EXISTS (
                     SELECT 1 FROM workspaces AS workspace
-                    WHERE (workspace.target_id IS NULL AND workspace.target_path IS NOT NULL)
+                    WHERE ({validated_workspace}workspace.target_id IS NULL
+                           AND workspace.target_path IS NOT NULL)
                         OR (
                             workspace.target_id IS NOT NULL
                             AND NOT EXISTS (

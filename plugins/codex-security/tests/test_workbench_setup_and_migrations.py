@@ -98,6 +98,7 @@ EXPECTED_MIGRATIONS = [
     (53, "store external source findings without assessments"),
     (54, "persist repository identities"),
     (55, "stabilize Linux repository generations"),
+    (56, "distinguish unvalidated workspace targets"),
 ]
 
 
@@ -1076,6 +1077,46 @@ def test_workbench_backfills_repository_targets_only_during_migration() -> None:
     backfill.assert_called_once_with(connection)
 
 
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("binding", ["bound", "unbound", "dangling"])
+def test_unvalidated_target_migration_preserves_legacy_workspace_paths(
+    tmp_path: Path, binding: str
+) -> None:
+    connection, apply_migrations = create_historical_database(56)
+    with closing(connection):
+        target_path = str(tmp_path / "unavailable")
+        target_id = None if binding == "unbound" else "legacy-target"
+        if binding == "bound":
+            connection.execute(
+                "INSERT INTO security_targets(id, current_path, display_name, created_at, updated_at) "
+                "VALUES (?, ?, 'Legacy target', 'created', 'updated')",
+                (target_id, target_path),
+            )
+        connection.execute(
+            "INSERT INTO workspaces(id, target_id, target_path, created_at, updated_at) "
+            "VALUES ('legacy-workspace', ?, ?, 'created', 'updated')",
+            (target_id, target_path),
+        )
+        before = dict(connection.execute("SELECT * FROM workspaces").fetchone())
+        for _ in range(2):
+            apply_migrations(connection)
+            after = dict(connection.execute("SELECT * FROM workspaces").fetchone())
+            assert after == {
+                **before,
+                "target_id": after["target_id"],
+                "target_path_unvalidated": 0,
+            }
+            assert after["target_id"] is not None
+            if binding == "bound":
+                assert after["target_id"] == target_id
+            assert (
+                connection.execute(
+                    "SELECT current_path FROM security_targets WHERE id = ?", (after["target_id"],)
+                ).fetchone()[0]
+                == target_path
+            )
+
+
 def test_scan_model_migration_preserves_existing_scans() -> None:
     connection, apply_migrations = create_historical_database(25)
     timestamp = "2026-07-01T00:00:00Z"
@@ -1451,6 +1492,7 @@ def test_workbench_creates_single_final_schema(tmp_path: Path) -> None:
             "diff_resolution_id",
             "capability_preflight_json",
             "thread_id",
+            "target_path_unvalidated",
         }
 
         assert {row[1] for row in connection.execute("PRAGMA table_info(scans)")} >= {
@@ -3048,7 +3090,7 @@ def test_identity_migrations_skip_unavailable_historical_git(
             (workspace_id, target_id, historical, timestamp, timestamp, timestamp),
         )
     apply_migrations(connection)
-    assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 55
+    assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 56
     assert tuple(
         connection.execute(
             "SELECT id, current_path, repository_identity FROM security_targets"

@@ -2754,7 +2754,7 @@ def test_repository_generation_migration_preserves_null_history(
             == expected
         )
         assert [dict(row) for row in connection.execute("SELECT * FROM scans")] == before
-        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 55
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 56
         # A completed migration, including an unverifiable binding, does not probe
         # local repositories again on a database reopen.
         with monkeypatch.context() as no_probes:
@@ -2902,7 +2902,7 @@ def test_repository_generation_migration_keeps_released_null_history_local(
         assert {name: after[name] for name in before} == before
         assert after["repository_generation"] is None
         assert after["completion_sequence"] == 1
-        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 55
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 56
         scope = target_state.RepositoryIdentityCache(connection).scope_for_path(str(repository))
         assert scope.available and scope.contains(after)
         assert after["id"] == scan["scanId"]
@@ -2964,7 +2964,7 @@ def test_repository_generation_returns_after_offline_migration(
         offline = tmp_path / "offline"
         repository.rename(offline)
         workbench.apply_migrations(connection)
-        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 55
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 56
         assert (
             connection.execute(
                 "SELECT repository_generation FROM scans WHERE id=?", (scan["scanId"],)

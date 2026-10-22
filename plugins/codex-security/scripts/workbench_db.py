@@ -94,6 +94,7 @@ from workbench_schema import (
     MIGRATIONS,
     migration_target_paths,
     recorded_git_target_paths,
+    unvalidated_workspace_paths,
 )
 from workbench_schema import (
     apply_migrations as apply_schema_migrations,
@@ -707,7 +708,12 @@ def create_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -
     diff_content_digest = (
         optional_text(args.diff_content_digest, maximum=128) if args.mode == "diff" else None
     )
+    target_path_unvalidated = False
     if target_path:
+        try:
+            require_target(target_path)
+        except SystemExit:
+            target_path_unvalidated = True
         try:
             inspected = inspect_setup_values(
                 target_path,
@@ -718,6 +724,7 @@ def create_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -
                 diff_head_revision,
                 diff_content_digest,
             )
+            target_path_unvalidated = False
             target_path = inspected["target"]["targetPath"]
             default_scope = inspected["scope"]
             if inspected["diffTarget"]:
@@ -730,7 +737,9 @@ def create_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -
             pass
     with connection:
         target_id = (
-            ensure_security_target(connection, target_path) if target_path is not None else None
+            ensure_security_target(connection, target_path)
+            if target_path is not None and not target_path_unvalidated
+            else None
         )
         connection.execute(
             """
@@ -738,8 +747,8 @@ def create_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -
                 id, thread_id, target_id, target_path, target_title, target_summary,
                 default_scope, default_mode,
                 user_context, diff_target_kind, diff_base_revision, diff_head_revision,
-                diff_content_digest, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                diff_content_digest, created_at, updated_at, target_path_unvalidated
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 workspace_id,
@@ -757,6 +766,7 @@ def create_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -
                 diff_content_digest,
                 timestamp,
                 timestamp,
+                target_path_unvalidated,
             ),
         )
     return workspace_state(connection, workspace_id)
@@ -799,7 +809,7 @@ def save_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -> 
             SET target_id = ?, target_path = ?, target_title = ?, target_summary = ?, default_scope = ?,
                 default_mode = ?, user_context = ?, diff_target_kind = ?,
                 diff_base_revision = ?, diff_head_revision = ?, diff_content_digest = ?,
-                submitted = 1, updated_at = ?
+                submitted = 1, updated_at = ?, target_path_unvalidated = 0
             WHERE id = ? AND active_scan_id IS NULL
             """,
             (
@@ -3448,6 +3458,7 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
         scoped_git_discovery(
             lambda: [*migration_target_paths(connection), *command_targets],
             recorded_git_roots=lambda: recorded_git_target_paths(connection),
+            excluded_roots=lambda: unvalidated_workspace_paths(connection),
         ),
     ):
         remediation_state.require_available(connection, args, require_scan)

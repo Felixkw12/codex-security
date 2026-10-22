@@ -133,9 +133,16 @@ function repairStableTargets(database: DatabaseSync): boolean {
 }
 
 function backfillTargets(database: DatabaseSync): void {
+  const validatedWorkspace = columns(database, "workspaces").has(
+    "target_path_unvalidated",
+  )
+    ? " AND target_path_unvalidated = 0"
+    : "";
   const targets = database
     .prepare(
-      "SELECT target_path FROM workspaces WHERE target_path IS NOT NULL UNION SELECT target_path FROM scans",
+      "SELECT target_path FROM workspaces WHERE target_path IS NOT NULL" +
+        validatedWorkspace +
+        " UNION SELECT target_path FROM scans",
     )
     .all();
   const lookup = database.prepare(
@@ -159,7 +166,8 @@ function backfillTargets(database: DatabaseSync): void {
     for (const table of ["workspaces", "scans"]) {
       database
         .prepare(
-          `UPDATE ${table} SET target_id = ? WHERE target_path = ? AND target_id IS NULL`,
+          `UPDATE ${table} SET target_id = ? WHERE target_path = ? AND target_id IS NULL` +
+            (table === "workspaces" ? validatedWorkspace : ""),
         )
         .run(id, path);
     }

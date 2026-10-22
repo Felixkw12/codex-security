@@ -742,6 +742,57 @@ test("repairs recorded Deep Scan and target migrations and backfills stable iden
   );
 });
 
+test("stable target repairs leave unvalidated setup paths unbound", (t) => {
+  const database = memory(t, 53);
+  insertScan(database);
+  database.exec(`
+    ALTER TABLE workspaces ADD COLUMN target_path_unvalidated INTEGER NOT NULL
+      DEFAULT 0 CHECK (target_path_unvalidated IN (0, 1));
+    INSERT INTO workspaces (
+      id, target_path, target_path_unvalidated, created_at, updated_at
+    ) VALUES
+      ('unvalidated', '/synthetic/missing', 1, 'created', 'updated'),
+      ('unvalidated-shared', '/synthetic/repository', 1, 'created', 'updated');
+  `);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    database.exec("DROP INDEX scans_by_target");
+    applyMigrations(database);
+    const targetId = database
+      .prepare(
+        "SELECT id FROM security_targets WHERE current_path = '/synthetic/repository'",
+      )
+      .get()?.id;
+    assert.equal(typeof targetId, "string");
+    assert.equal(
+      database.prepare("SELECT target_id FROM scans").get()?.target_id,
+      targetId,
+    );
+    assert.deepEqual(
+      database
+        .prepare(
+          "SELECT id, target_id, target_path_unvalidated FROM workspaces ORDER BY id",
+        )
+        .all()
+        .map((row) => ({ ...row })),
+      [
+        { id: "unvalidated", target_id: null, target_path_unvalidated: 1 },
+        {
+          id: "unvalidated-shared",
+          target_id: null,
+          target_path_unvalidated: 1,
+        },
+        { id: "workspace", target_id: targetId, target_path_unvalidated: 0 },
+      ],
+    );
+    assert.equal(
+      database.prepare("SELECT COUNT(*) AS count FROM security_targets").get()
+        ?.count,
+      1,
+    );
+    assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+  }
+});
+
 test("recorded additive migrations restore missing columns and configured error thresholds", (t) => {
   const database = memory(t, 26);
   insertScan(database);
@@ -1019,7 +1070,7 @@ with sqlite3.connect(sys.argv[2]) as database:
 `,
       fileURLToPath(new URL("../../scripts", import.meta.url)),
       databasePath,
-      String(through ?? 55),
+      String(through ?? 56),
     ],
     { encoding: "utf8" },
   );
@@ -1211,7 +1262,7 @@ test("Node initialization leaves repository migration semantics to the Python co
           actual
             .prepare("SELECT MAX(version) AS version FROM schema_migrations")
             .get()?.version,
-          55,
+          56,
         );
         assert.equal(
           actual.prepare("SELECT completion_sequence FROM scans").get()
@@ -1450,7 +1501,7 @@ with sqlite3.connect(sys.argv[2]) as connection:
             mode=None, status=None, query=None, limit=None, offset=0)
         scans = history.list_scans(connection, args)['scans']
         assert [scan['scanId'] for scan in scans] == ['scan'], (repository, scans)
-    assert connection.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 55
+    assert connection.execute('SELECT MAX(version) FROM schema_migrations').fetchone()[0] == 56
 `,
       scripts,
       databasePath,

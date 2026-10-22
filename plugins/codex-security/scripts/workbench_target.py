@@ -232,6 +232,7 @@ def _resolve_git_executable(
     *,
     discovery_roots: Iterable[Path] = (),
     recorded_git_roots: Iterable[Path] = (),
+    excluded_roots: Iterable[Path] = (),
 ) -> str | None:
     windows = sys.platform == "win32"
     if configured is None:
@@ -267,6 +268,10 @@ def _resolve_git_executable(
                         # selecting an executable from unknown historical repository content.
                         return None
                     repositories.append(repository)
+            for root in excluded_roots:
+                # Incomplete workspace input is an exclusion, not evidence that a
+                # checkout once existed at a now-unavailable historical path.
+                repositories.extend(_historical_repository_roots(root))
     except (OSError, RuntimeError):
         return None
 
@@ -306,6 +311,7 @@ def scoped_git_discovery(
     protected_roots: Callable[[], Iterable[Path]],
     *,
     recorded_git_roots: Callable[[], Iterable[Path]] = lambda: (),
+    excluded_roots: Callable[[], Iterable[Path]] = lambda: (),
 ) -> Iterator[None]:
     """Pin ambient Git when an operation first needs to inspect repository targets."""
     if os.environ.get("CODEX_SECURITY_GIT") is not None:
@@ -322,6 +328,7 @@ def scoped_git_discovery(
                     None,
                     discovery_roots=protected_roots(),
                     recorded_git_roots=recorded_git_roots(),
+                    excluded_roots=excluded_roots(),
                 )
                 or ""
             )

@@ -1444,6 +1444,35 @@ def test_scoped_git_discovery_pins_all_target_roots_and_restores_discovery(
 
 @pytest.mark.cross_platform
 @pytest.mark.parametrize("windows", [False, True])
+def test_unvalidated_workspace_paths_exclude_tools_without_blocking_host_git(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, windows: bool
+) -> None:
+    repository, candidate, host = (tmp_path / name for name in ("repository", "candidate", "host"))
+    (repository / ".git").mkdir(parents=True)
+    host.mkdir()
+    name = "git.exe" if windows else "git"
+    (host / name).write_text("synthetic executable fixture\n")
+    (host / name).chmod(0o700)
+    monkeypatch.setitem(
+        trusted_git_executable.__globals__,
+        "sys",
+        SimpleNamespace(platform="win32" if windows else "linux"),
+    )
+    monkeypatch.delenv("CODEX_SECURITY_GIT", raising=False)
+    monkeypatch.setenv("PATH", os.pathsep.join(map(str, (candidate, host))))
+    for exists in (False, True):
+        if exists:
+            candidate.mkdir()
+            (candidate / name).write_text("synthetic repository executable fixture\n")
+            (candidate / name).chmod(0o700)
+        with WORKBENCH_TARGET["scoped_git_discovery"](
+            lambda: (repository,), excluded_roots=lambda: (candidate,)
+        ):
+            assert trusted_git_executable(repository) == str(host / name)
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("windows", [False, True])
 @pytest.mark.parametrize("recorded", [False, True])
 def test_scoped_git_discovery_excludes_unavailable_target_ancestor_tools(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, windows: bool, recorded: bool
