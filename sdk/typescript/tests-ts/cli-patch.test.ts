@@ -2691,7 +2691,9 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
       const remote = join(directory, "remote.git");
       const branch = "codex-security/patch-scan-1";
       const gitlab = provider === "gitlab";
-      const origin = "https://gitlab.com/example/subgroup/repository.git";
+      const origin = gitlab
+        ? "https://gitlab.com/example/subgroup/repository.git"
+        : "https://github.example.test/example/repository.git";
       const url = gitlab
         ? "https://gitlab.com/example/subgroup/repository/-/merge_requests/16"
         : "https://github.example.test/example/repository/pull/16";
@@ -2727,10 +2729,8 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
             completePatches(args, output);
             return 0;
           },
-          onRepositoryCommand: (command, args, cwd, options) => {
+          onRepositoryCommand: async (command, args, cwd, options) => {
             if (command === "git") {
-              if (gitlab && args.join(" ") === "remote get-url origin")
-                return origin;
               if (args[0] === "push") {
                 pushCalls += 1;
                 if (failure === "push" && failOnce) {
@@ -2738,13 +2738,33 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
                   throw new Error("Synthetic push failure");
                 }
               }
-              return runGitRepositoryCommand(command, args, cwd, options);
+              const environment = { ...options?.environment };
+              if (args[0] === "ls-remote")
+                for (const key of Object.keys(environment))
+                  if (
+                    key.startsWith("GIT_CONFIG_KEY_") &&
+                    environment[key] === `url.${origin}.insteadOf`
+                  )
+                    environment[key] = `url.${remote}.insteadOf`;
+              const output = await runGitRepositoryCommand(command, args, cwd, {
+                ...options,
+                environment,
+              });
+              return args[args.indexOf("remote") + 1] === "get-url"
+                ? output
+                    .split("\n")
+                    .map((value) => (value === remote ? origin : value))
+                    .join("\n")
+                : output;
             }
             expect(command).toBe(gitlab ? "glab" : "gh");
-            if (!gitlab && args[0] === "repo")
-              return args[1] === "set-default"
-                ? "example/repository"
-                : JSON.stringify({ id: "R_synthetic", url });
+            if (!gitlab && args[0] === "repo") {
+              if (args[1] === "set-default") return "example/repository";
+              const repositoryUrl = origin.replace(/\.git$/u, "");
+              return args.at(-1) === ".url"
+                ? repositoryUrl
+                : JSON.stringify({ id: "R_synthetic", url: repositoryUrl });
+            }
             if (args[1] === "list") {
               if (!publishedUrl) return "";
               const request = {
@@ -2772,6 +2792,7 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
         const first = await runWorkflow(
           ["patch", "--scan", "scan-1", "--create-pr", "--json"],
           fixtures,
+          { localHosting: false },
         );
         expect(first.exitCode).toBe(2);
         expect(first.stderr).toContain(`patch --resume-pr ${branch}`);
@@ -2787,6 +2808,7 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
         const retry = await runWorkflow(
           ["patch", "--resume-pr", branch, "--json"],
           fixtures,
+          { localHosting: false },
         );
         expect(retry.exitCode).toBe(0);
         expect(JSON.parse(retry.stdout)).toEqual({
@@ -2802,6 +2824,7 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
         const repeated = await runWorkflow(
           ["patch", "--resume-pr", branch],
           fixtures,
+          { localHosting: false },
         );
         expect(repeated.exitCode).toBe(0);
         expect(created).toBe(1);
@@ -3529,6 +3552,7 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
                 return runGitRepositoryCommand(command, args, target, options);
               if (args.includes("--cached")) return "";
               if (args[0] === "remote") {
+                if (args.length === 1) return "origin";
                 expect([
                   ["remote", "get-url", "--push", "--all", "origin"],
                   ["remote", "get-url", "origin"],
@@ -3540,10 +3564,18 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
               );
             }
             expect(command).toBe(client);
+            if (command === "gh" && args[0] === "repo") {
+              if (args[1] === "set-default") return "example/repository";
+              const repositoryUrl = origin.replace(/\.git$/u, "");
+              return args.at(-1) === ".url"
+                ? repositoryUrl
+                : JSON.stringify({ id: "R_synthetic", url: repositoryUrl });
+            }
             publicationCommands.push(args);
             return args[1] === "create" ? url : "";
           },
         },
+        { localHosting: false },
       );
 
       expect(outcome.exitCode, outcome.stderr).toBe(0);
