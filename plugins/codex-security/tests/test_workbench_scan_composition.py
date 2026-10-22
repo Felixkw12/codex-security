@@ -714,6 +714,58 @@ def test_native_target_retry_reuses_completed_result(
     assert {path: path.read_bytes() for path in artifacts} == artifacts
 
 
+@pytest.mark.parametrize("changed", [None, "knowledge", "deep_settings", "missing_saved_inputs"])
+def test_native_completed_reuse_compares_registered_semantic_inputs(
+    native_scan_completion, changed: str | None
+) -> None:
+    state, _, arguments, started, complete = native_scan_completion
+    scan = started["scan"]
+    semantic = {
+        "scanInputs": {"scanPromptSha256": "synthetic-prompt", "knowledgeBase": None},
+        "deepScan": {"workers": 2, "subagents": 1},
+    }
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        saved = json.loads(
+            connection.execute(
+                "SELECT recipe_json FROM scans WHERE id = ?", (scan["scanId"],)
+            ).fetchone()[0]
+        )
+        if changed != "missing_saved_inputs":
+            saved.update(semantic)
+        connection.execute(
+            "UPDATE scans SET recipe_json = ? WHERE id = ?", (json.dumps(saved), scan["scanId"])
+        )
+    complete()
+    artifacts = {
+        path: path.read_bytes() for path in Path(scan["scanDir"]).rglob("*") if path.is_file()
+    }
+    if changed == "knowledge":
+        semantic["scanInputs"]["knowledgeBase"] = {"sha256": "synthetic-changed-knowledge"}
+    elif changed == "deep_settings":
+        semantic["deepScan"]["workers"] = 3
+    selected = run_workbench(
+        state,
+        *arguments,
+        "--completed-inputs-json",
+        json.dumps(
+            {
+                "knowledgeBase": semantic["scanInputs"]["knowledgeBase"],
+                "deepScan": semantic["deepScan"],
+            }
+        ),
+    )
+    assert (selected["scan"]["scanId"] == scan["scanId"]) is (changed is None)
+    assert selected["scan"]["progress"]["status"] == ("complete" if changed is None else "running")
+    assert {path: path.read_bytes() for path in artifacts} == artifacts
+    if changed is not None:
+        # Once started, the owning thread joins its active scan without interpreting
+        # a new request's semantic inputs or creating another execution.
+        joined = run_workbench(state, *arguments, "--completed-inputs-json", "unused invalid JSON")
+        assert joined["scan"]["scanId"] == selected["scan"]["scanId"]
+        with sqlite3.connect(state / "workbench.sqlite3") as connection:
+            assert connection.execute("SELECT COUNT(*) FROM scans").fetchone() == (2,)
+
+
 @pytest.mark.parametrize("native_scan_completion", [False, True], indirect=True)
 @pytest.mark.parametrize(
     "change", ["context", "snapshot", "owner", "explicit_start", "model", "reasoning_effort"]

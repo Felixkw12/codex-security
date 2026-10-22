@@ -100,6 +100,7 @@ const {
   prepareKnowledgeBase,
   acquireScanExecution,
   prepareNativeScan,
+  readNativeScanSemanticInputs,
   nativeScanConfiguration,
   scanRuntimeCodexConfig,
   scanPreflightCodexConfig,
@@ -1846,6 +1847,7 @@ else {
   for (let i = 0; i < argv.length; i++) if (["--config", "-c"].includes(argv[i])) merge(effective, parse(argv[++i]));
   const provider = effective.model_providers?.[effective.model_provider];
   fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify({ argv, path: process.env.PATH, codex: process.env.CODEX_API_KEY, openai: process.env.OPENAI_API_KEY, home: process.env.CODEX_HOME, state: process.env.CODEX_SECURITY_STATE_DIR, executable: process.argv[1], knowledge: process.env.CODEX_SECURITY_KNOWLEDGE_BASE,
+    knowledgeDocuments: process.env.CODEX_SECURITY_KNOWLEDGE_BASE && Object.fromEntries(fs.readdirSync(process.env.CODEX_SECURITY_KNOWLEDGE_BASE).map(name => [name, fs.readFileSync(path.join(process.env.CODEX_SECURITY_KNOWLEDGE_BASE, name), "utf8")])),
     modelProvider: effective.model_provider,
     safetyIdentifier: process.env.CODEX_SAFETY_IDENTIFIER,
     provider,
@@ -2545,7 +2547,7 @@ for (const scenario of [
 }
 
 test(
-  "native target protection and selected configuration stay isolated across concurrent worker launches",
+  "native target protection, selected configuration and captured semantic inputs stay isolated across concurrent worker launches",
   {
     skip:
       process.platform === "win32"
@@ -2578,7 +2580,8 @@ test(
         join(pluginRoot, ".codex-plugin/plugin.json"),
         JSON.stringify({ name: "codex-security", version: "0.0.0" }),
       );
-      for (const id of ["a", "b"]) {
+      for (const id of ["a", "b", "c", "d"]) {
+        const capturedInputs = id === "c" || id === "d";
         const fixture = {
           id,
           repository: join(root, `target-${id}`),
@@ -2590,7 +2593,11 @@ test(
           preflights: join(root, `preflights-${id}.jsonl`),
           decoyLaunch: join(root, `decoy-${id}.jsonl`),
           selectedConfigPath: join(root, `selected-${id}.toml`),
-          safetyIdentifier: id === "a" ? undefined : "synthetic-saved-b",
+          safetyIdentifier: capturedInputs
+            ? `synthetic-later-${id}`
+            : id === "a"
+              ? undefined
+              : "synthetic-saved-b",
         };
         fixture.lexicalBin = join(fixture.lexicalRepository, "bin");
         fixture.executable = join(fixture.toolBin, "codex");
@@ -2649,6 +2656,47 @@ test(
         });
         await writeFile(join(fixture.home, "config.toml"), fixture.configText);
         await writeFile(fixture.selectedConfigPath, fixture.selectedConfigText);
+        if (capturedInputs) {
+          const knowledgeDirectory = join(root, `knowledge-${id}`);
+          await mkdir(knowledgeDirectory);
+          fixture.document = join(knowledgeDirectory, `knowledge-${id}.txt`);
+          fixture.knowledgeText = `Captured synthetic knowledge ${id}.\n`;
+          fixture.deepConfigPath = join(root, `deep-${id}.toml`);
+          fixture.subagents = id === "c" ? 3 : 5;
+          await writeFile(fixture.document, fixture.knowledgeText);
+          await writeFile(
+            fixture.deepConfigPath,
+            `[deep_scan]\nworkers=${id === "c" ? '"auto"' : 4}\nsubagents=${fixture.subagents}\nmax_discovery_runs=7\n`,
+          );
+          Object.assign(process.env, {
+            CODEX_HOME: fixture.home,
+            CODEX_SECURITY_KNOWLEDGE_BASE: fixture.document,
+            CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH: fixture.deepConfigPath,
+          });
+          fixture.semanticInputs = await readNativeScanSemanticInputs();
+          assert.equal(
+            typeof fixture.semanticInputs.deepScanSettings.workers,
+            "number",
+          );
+          if (id === "d")
+            assert.equal(fixture.semanticInputs.deepScanSettings.workers, 4);
+          assert.equal(
+            fixture.semanticInputs.deepScanSettings.subagents,
+            fixture.subagents,
+          );
+          assert.equal(
+            fixture.semanticInputs.deepScanSettings.maxDiscoveryRuns,
+            7,
+          );
+          await writeFile(
+            fixture.document,
+            `Later synthetic knowledge ${id}.\n`,
+          );
+          await writeFile(
+            fixture.deepConfigPath,
+            "[deep_scan]\nworkers=8\nsubagents=9\nmax_discovery_runs=10\n",
+          );
+        }
         await writeNativeWorkerExecutable(fixture.executable, fixture.capture);
         await writeFile(
           join(fixture.lexicalBin, "codex"),
@@ -2670,7 +2718,7 @@ test(
       ])
         delete process.env[key];
       const pending = fixtures.map((fixture, index) => {
-        const other = fixtures[1 - index];
+        const other = fixtures[index ^ 1];
         fixture.path = [
           fixture.lexicalBin,
           fixture.toolBin,
@@ -2691,27 +2739,70 @@ test(
           NATIVE_PROFILE_MARKER: fixture.id,
           CODEX_SAFETY_IDENTIFIER: `synthetic-later-${fixture.id}`,
         });
+        if (fixture.semanticInputs) {
+          process.env.CODEX_SECURITY_KNOWLEDGE_BASE = fixture.document;
+          process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH =
+            fixture.deepConfigPath;
+        } else {
+          fixture.savedDeepScanSettings = {
+            ...fixtures[index + 2].semanticInputs.deepScanSettings,
+            workers: 1,
+            subagents: 2,
+          };
+        }
         return prepareNativeScan({
           ...input(`synthetic-${fixture.id}`),
           pluginRoot,
           model: `synthetic-model-${fixture.id}`,
+          semanticInputs:
+            fixture.semanticInputs ?? fixtures[index + 2].semanticInputs,
           scan: {
             ...input(`synthetic-${fixture.id}`).scan,
             targetPath: fixture.repository,
             targetProtectionRoots: [fixture.lexicalRepository],
             scanDir: fixture.scanDir,
           },
-          recipe: {
-            auth: "api-key",
-            ...(fixture.safetyIdentifier === undefined
-              ? {}
-              : { safetyIdentifier: fixture.safetyIdentifier }),
-          },
+          ...(fixture.semanticInputs
+            ? {}
+            : {
+                recipe: {
+                  auth: "api-key",
+                  deepScan: fixture.savedDeepScanSettings,
+                  ...(fixture.safetyIdentifier === undefined
+                    ? {}
+                    : { safetyIdentifier: fixture.safetyIdentifier }),
+                },
+              }),
         });
       });
       const prepared = await Promise.all(pending);
       await Promise.all(
         fixtures.map(async (fixture, index) => {
+          for (const [name, value] of Object.entries(
+            fixture.semanticInputs?.deepScanSettings ??
+              fixture.savedDeepScanSettings,
+          ))
+            assert.equal(prepared[index].options[name], value);
+          const knowledge = fixture.semanticInputs
+            ? await prepareKnowledgeBase(
+                prepared[index].options.knowledgeBaseSnapshot,
+              )
+            : undefined;
+          if (fixture.semanticInputs) {
+            assert.deepEqual(prepared[index].options.knowledgeBasePaths, [
+              fixture.document,
+            ]);
+            assert.deepEqual(
+              prepared[index].options.knowledgeBaseSnapshot,
+              fixture.semanticInputs.knowledgeBaseSnapshot,
+            );
+          } else {
+            assert.equal(prepared[index].options.knowledgeBasePaths, undefined);
+            assert.equal(
+              prepared[index].options.knowledgeBaseSnapshot,
+              undefined,
+            );
+          }
           const { runtime, session } = await nativeWorkerSession(
             prepared[index],
             fixture.repository,
@@ -2722,10 +2813,18 @@ test(
                 const worker =
                   role === "discovery"
                     ? prepareDiscoveryExecution(session)
-                    : prepareMergeExecution(session, 2);
+                    : prepareMergeExecution(
+                        session,
+                        fixture.semanticInputs
+                          ? prepared[index].options.subagents
+                          : 2,
+                      );
                 const { codex } = await createExecutionCodex(
                   { surface: "sdk", command: "scan" },
                   worker,
+                  knowledge
+                    ? { CODEX_SECURITY_KNOWLEDGE_BASE: knowledge.path }
+                    : {},
                 );
                 const options = {
                   workingDirectory: fixture.repository,
@@ -2759,6 +2858,25 @@ test(
                   if (["-c", "--config"].includes(observed.argv[i]))
                     fragments.push(parseToml(observed.argv[++i]));
                 const config = Object.assign({}, ...fragments);
+                if (knowledge) {
+                  assert.equal(observed.knowledge, knowledge.path);
+                  assert.deepEqual(observed.knowledgeDocuments, {
+                    [`0-knowledge-${fixture.id}.txt.txt`]:
+                      fixture.knowledgeText,
+                  });
+                  assert.equal(
+                    config.features.multi_agent_v2
+                      .max_concurrent_threads_per_session,
+                    fixture.subagents + 1,
+                  );
+                } else {
+                  assert.equal(observed.knowledge, undefined);
+                  assert.equal(
+                    config.features.multi_agent_v2
+                      .max_concurrent_threads_per_session,
+                    3,
+                  );
+                }
                 for (const [key, value] of Object.entries(fixture.features))
                   assert.equal(config.features[key], value);
                 assert.equal(config.model_reasoning_summary, "auto");
@@ -2798,6 +2916,7 @@ test(
               assert.equal(observed.openai, `synthetic-key-${fixture.id}`);
             }
           } finally {
+            await knowledge?.cleanup();
             await runtime.providerProfile.cleanup();
             await rm(runtime.bootstrapWorkspace, {
               recursive: true,
@@ -2806,15 +2925,23 @@ test(
           }
         }),
       );
-      assert.equal(process.env.PATH, fixtures[1].path);
-      assert.equal(process.env.CODEX_HOME, fixtures[1].home);
+      assert.equal(process.env.PATH, fixtures[3].path);
+      assert.equal(process.env.CODEX_HOME, fixtures[3].home);
       assert.equal(
         process.env.CODEX_SECURITY_CONFIG_PATH,
-        fixtures[1].selectedConfigPath,
+        fixtures[3].selectedConfigPath,
       );
-      assert.equal(process.env.OPENAI_API_KEY, "synthetic-key-b");
-      assert.equal(process.env.NATIVE_PROFILE_MARKER, "b");
-      assert.equal(process.env.CODEX_SAFETY_IDENTIFIER, "synthetic-later-b");
+      assert.equal(process.env.OPENAI_API_KEY, "synthetic-key-d");
+      assert.equal(process.env.NATIVE_PROFILE_MARKER, "d");
+      assert.equal(process.env.CODEX_SAFETY_IDENTIFIER, "synthetic-later-d");
+      assert.equal(
+        process.env.CODEX_SECURITY_KNOWLEDGE_BASE,
+        fixtures[3].document,
+      );
+      assert.equal(
+        process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH,
+        fixtures[3].deepConfigPath,
+      );
     } finally {
       restore();
       await rm(root, { recursive: true, force: true });

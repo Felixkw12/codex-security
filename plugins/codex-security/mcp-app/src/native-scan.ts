@@ -1,4 +1,7 @@
-import { readKnowledgeBaseSnapshot } from "../../../../sdk/typescript/src/knowledge-base.js";
+import {
+  readKnowledgeBaseSnapshot,
+  type KnowledgeBaseSnapshot,
+} from "../../../../sdk/typescript/src/knowledge-base.js";
 import { canonicalizeModelSafePath } from "../../../../sdk/typescript/src/runtime.js";
 import { expandHomePath } from "../../../../sdk/typescript/src/codex-home.js";
 import { hasSealedScanArtifacts } from "../../../../sdk/typescript/src/scan-publication.js";
@@ -48,10 +51,17 @@ export { nativeScanConfiguration } from "../../../../sdk/typescript/src/executio
 import type { ScanResults } from "./types.js";
 import { isRecord } from "./record.js";
 
+export interface NativeScanSemanticInputs {
+  knowledgeBasePaths?: string[];
+  knowledgeBaseSnapshot?: KnowledgeBaseSnapshot;
+  deepScanSettings: Required<DeepScanOptions>;
+}
+
 export interface NativeScanInput {
   scan: ScanResults;
   recipe?: JsonObject;
   savedDeepScanSettings?: DeepScanOptions;
+  semanticInputs?: NativeScanSemanticInputs;
   threadId: string;
   pluginRoot: string;
   pythonPath: string;
@@ -133,6 +143,41 @@ export class NativeScanHost {
   }
 }
 
+function nativeDeepScanConfigPath(environment: NodeJS.ProcessEnv): string {
+  return expandHomePath(
+    environment.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH?.trim() ||
+      join(
+        environment.CODEX_HOME || configuredCodexHome(environment),
+        "codex-security",
+        "config.toml",
+      ),
+    environment,
+  );
+}
+
+/** Read once for completed-result comparison and any new execution it requires. */
+export async function readNativeScanSemanticInputs(
+  signal?: AbortSignal,
+): Promise<NativeScanSemanticInputs> {
+  const environment = await snapshotNativeEnvironment();
+  const knowledgeBasePaths = environment.CODEX_SECURITY_KNOWLEDGE_BASE
+    ? [environment.CODEX_SECURITY_KNOWLEDGE_BASE]
+    : undefined;
+  return {
+    knowledgeBasePaths,
+    knowledgeBaseSnapshot: knowledgeBasePaths
+      ? await readKnowledgeBaseSnapshot(knowledgeBasePaths, signal)
+      : undefined,
+    deepScanSettings: (
+      await resolveDeepScanConfig(
+        {},
+        nativeDeepScanConfigPath(environment),
+        signal,
+      )
+    ).settings,
+  };
+}
+
 export async function prepareNativeScan(
   input: NativeScanInput,
   signal?: AbortSignal,
@@ -140,6 +185,8 @@ export async function prepareNativeScan(
   const scanEnvironment = { ...process.env };
   const originalCwd = process.cwd();
   const recipe = input.recipe ?? {};
+  const semanticInputs =
+    input.recipe === undefined ? input.semanticInputs : undefined;
   const postScanPrompt = ScanSettingsSchema.shape.postScanPrompt.parse(
     recipe.postScanPrompt,
   );
@@ -264,15 +311,19 @@ export async function prepareNativeScan(
   }
   const options = ScanSettingsSchema.parse({
     ...input.savedDeepScanSettings,
+    ...semanticInputs?.deepScanSettings,
     ...(recipe.deepScan as JsonObject | undefined),
     auth: recipe.auth,
     cyberAccessProgram: recipe.cyberAccessProgram,
     knowledgeBasePaths: publicationOnly
       ? undefined
       : (recipe.knowledgeBasePaths ??
-        (input.recipe === undefined && environment.CODEX_SECURITY_KNOWLEDGE_BASE
-          ? [environment.CODEX_SECURITY_KNOWLEDGE_BASE]
-          : undefined)),
+        (semanticInputs
+          ? semanticInputs.knowledgeBasePaths
+          : input.recipe === undefined &&
+              environment.CODEX_SECURITY_KNOWLEDGE_BASE
+            ? [environment.CODEX_SECURITY_KNOWLEDGE_BASE]
+            : undefined)),
     maxCostUsd: recipe.maxCostUsd,
     postScanPrompt,
     failureSeverity: recipe.failOnSeverity,
@@ -282,7 +333,9 @@ export async function prepareNativeScan(
   });
   const knowledgeBaseSnapshot = options.knowledgeBasePaths?.length
     ? input.recipe === undefined
-      ? await readKnowledgeBaseSnapshot(options.knowledgeBasePaths, signal)
+      ? semanticInputs
+        ? semanticInputs.knowledgeBaseSnapshot
+        : await readKnowledgeBaseSnapshot(options.knowledgeBasePaths, signal)
       : await restoreScanKnowledge(
           input.scan.scanDir,
           input.scan.targetPath,
@@ -292,15 +345,7 @@ export async function prepareNativeScan(
   const command = publicationOnly ? undefined : await resolveCommand();
   const deep = await resolveDeepScanConfig(
     options,
-    expandHomePath(
-      environment.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH?.trim() ||
-        join(
-          environment.CODEX_HOME || configuredCodexHome(environment),
-          "codex-security",
-          "config.toml",
-        ),
-      environment,
-    ),
+    nativeDeepScanConfigPath(environment),
   );
   // The SDK validates the saved seal, owner and claim before publishing.
   // Read-only publication does not need the model's private configuration.

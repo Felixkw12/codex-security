@@ -20,7 +20,13 @@ import {
   type HandoffWorkspaceState as WorkspaceState,
 } from "./src/server/handoff-tools.js";
 import { registerCompactArtifactTools } from "./src/server/compact-artifact-tools.js";
-import { NativeScanHost, type NativeScanInput } from "./src/native-scan.js";
+import {
+  NativeScanHost,
+  readNativeScanSemanticInputs,
+  type NativeScanInput,
+  type NativeScanSemanticInputs,
+} from "./src/native-scan.js";
+import { scanInputIdentity } from "../../../sdk/typescript/src/scan-inputs.js";
 import { snapshotNativeEnvironment } from "./src/native-executable.js";
 import {
   ScanPermissionError,
@@ -962,23 +968,46 @@ export function createCodexSecurityServer(): McpServer {
       try {
         const modelSettings = codexModelSettingsFromExtra(extra);
         const parentSandbox = resolveNativeParentSandbox(extra);
-        const begun = await runWorkbench(
-          [
-            "begin-deep-scan",
-            ...optionalArg("--scan-id", scanId),
-            ...optionalArg("--target-path", targetPath),
-            ...optionalArg("--scope", hasTarget ? (scope ?? ".") : undefined),
-            ...optionalArg("--claim-token", handoffClaimToken),
-            "--thread-id",
-            threadId,
-            ...optionalArg("--model", modelSettings.model),
-            ...optionalArg("--reasoning-effort", modelSettings.reasoningEffort),
-            ...(normalizedUserContext ? ["--user-context-stdin"] : []),
-            "--scan-root",
-            await scanRoot(),
-          ],
-          normalizedUserContext,
-        );
+        const beginArguments = [
+          "begin-deep-scan",
+          ...optionalArg("--scan-id", scanId),
+          ...optionalArg("--target-path", targetPath),
+          ...optionalArg("--scope", hasTarget ? (scope ?? ".") : undefined),
+          ...optionalArg("--claim-token", handoffClaimToken),
+          "--thread-id",
+          threadId,
+          ...optionalArg("--model", modelSettings.model),
+          ...optionalArg("--reasoning-effort", modelSettings.reasoningEffort),
+          ...(normalizedUserContext ? ["--user-context-stdin"] : []),
+          "--scan-root",
+          await scanRoot(),
+        ];
+        let begun = await runWorkbench(beginArguments, normalizedUserContext);
+        let semanticInputs: NativeScanSemanticInputs | undefined;
+        if (
+          hasTarget &&
+          isJsonObject(begun.scan) &&
+          isJsonObject(begun.scan.progress) &&
+          begun.scan.progress.status === "complete"
+        ) {
+          semanticInputs = await readNativeScanSemanticInputs(
+            abortSignalFromExtra(extra),
+          );
+          begun = await runWorkbench(
+            [
+              ...beginArguments,
+              "--completed-inputs-json",
+              JSON.stringify({
+                knowledgeBase: scanInputIdentity(
+                  undefined,
+                  semanticInputs.knowledgeBaseSnapshot,
+                ).knowledgeBase,
+                deepScan: semanticInputs.deepScanSettings,
+              }),
+            ],
+            normalizedUserContext,
+          );
+        }
         if (!isJsonObject(begun.scan))
           throw new Error("The workbench returned no native scan.");
         const scan = begun.scan as unknown as ScanResults;
@@ -994,6 +1023,7 @@ export function createCodexSecurityServer(): McpServer {
         await nativeScans.run(
           {
             scan,
+            semanticInputs,
             ...(isJsonObject(begun.recipe)
               ? { recipe: begun.recipe as NativeScanInput["recipe"] }
               : {}),

@@ -107,6 +107,7 @@ def parse_args(description: str) -> argparse.Namespace:
     begin_deep_scan.add_argument("--claim-token")
     begin_deep_scan.add_argument("--model")
     begin_deep_scan.add_argument("--reasoning-effort")
+    begin_deep_scan.add_argument("--completed-inputs-json")
     begin_deep_scan.set_defaults(
         mode="deep",
         target_summary=None,
