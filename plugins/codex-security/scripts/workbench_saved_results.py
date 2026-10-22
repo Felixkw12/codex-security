@@ -70,6 +70,7 @@ from workbench.saved_sources import (
     _retained_checkpoint_state,
     _retained_findings,
     _retained_source_state,
+    _saved_result_paths,
     _source_digests,
     _unselected_root_order,
     _worker_candidate_key,
@@ -107,6 +108,7 @@ class _CheckpointSnapshotError(ContractError):
         self.heads: dict[str, str | None] = {}
         self.model_source: list[str] = []
         self.include_parent = False
+        self.documents: tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None = None
 
 
 def threat_model_fields(db: Any, scan: sqlite3.Row) -> dict[str, Any]:
@@ -162,42 +164,6 @@ def refresh_completed_scan(
                 (json.dumps(warnings), scan["id"]),
             )
     return db.scan_context(connection, scan["id"])
-
-
-def _saved_result_paths(scan_dir: Path, workers: list[Any]) -> Iterator[tuple[str, str | None]]:
-    latest_reducer = _latest_successful_reducer(workers)
-    yield "checkpoint-head.json", None
-    for directory in ("checkpoint-heads", "checkpoints"):
-        yield from ((path, None) for path in _checkpoint_paths(scan_dir, directory))
-    for worker in workers:
-        if worker["kind"] not in {"dedup", "discovery"}:
-            continue
-        try:
-            outputs = _worker_outputs(scan_dir, worker)
-        except (TypeError, ValueError):
-            continue
-        for directory, _ in outputs:
-            if worker["kind"] == "discovery":
-                yield f"{directory}/checkpoint-head.json", worker["kind"]
-                yield from (
-                    (path, worker["kind"])
-                    for path in _checkpoint_paths(scan_dir, f"{directory}/checkpoint-heads")
-                )
-            checkpoint_paths = _checkpoint_paths(scan_dir, f"{directory}/checkpoints")
-            if worker["kind"] == "discovery" or checkpoint_paths:
-                yield f"{directory}/result.json", worker["kind"]
-                yield from ((path, worker["kind"]) for path in checkpoint_paths)
-        if worker["result_manifest_path"] and (
-            worker["kind"] == "discovery"
-            or (latest_reducer is not None and worker["id"] == latest_reducer["id"])
-        ):
-            try:
-                yield (
-                    Path(worker["result_manifest_path"]).relative_to(scan_dir).as_posix(),
-                    worker["kind"],
-                )
-            except ValueError:
-                continue
 
 
 def _capture_saved_source(
@@ -2352,6 +2318,7 @@ def merge_saved_results(
                 },
             )
             failure.heads = checkpoint_heads
+            failure.documents = (manifest, {"findings": findings}, coverage)
             if valid_model(manifest["scan"].get("threatModel")):
                 failure.model_source = list(selected_model_source or [])
             raise failure from exc
@@ -2697,6 +2664,16 @@ def preserve_scan_results_locked(
             source_times = {path: value[1] for path, value in captured.items()}
             retained_heads = exc.heads
             if recovery_snapshot_error is not None:
+                _prepare_scan_finalization(
+                    scan_dir,
+                    expected_coverage_mode=db.expected_coverage_mode(scan),
+                    completion_binding=binding,
+                    recover_unsealed=True,
+                    draft_documents=exc.documents,
+                    finding_scope=db.requested_finding_scope(scan)
+                    if scan["mode"] == "deep"
+                    else None,
+                )
                 retained_heads = {
                     "heads": retained_heads,
                     "recoveryBaseDigest": scan["seal_manifest_digest"],

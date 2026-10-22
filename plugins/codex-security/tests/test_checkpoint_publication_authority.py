@@ -1482,9 +1482,12 @@ def test_unreadable_heads_preserve_legacy_accepted_results(
     assert recovered["resultsRecoveryNeeded"] is False
 
 
-@pytest.mark.parametrize("invalid_model", [False, True], ids=["valid", "invalid"])
+@pytest.mark.parametrize(
+    ("invalid_model", "snapshot_failure"),
+    [(False, None), (True, None), (True, "source-order"), (True, "checkpoint-heads")],
+)
 def test_invalid_explicit_recovery_does_not_freeze_unpublishable_selection(
-    workbench_api, workbench_db, publication_scan, invalid_model
+    workbench_api, workbench_db, publication_scan, invalid_model, snapshot_failure, monkeypatch
 ):
     scan = publication_scan()
     result = add_worker(workbench_db, scan, status="canceled")
@@ -1510,10 +1513,20 @@ def test_invalid_explicit_recovery_does_not_freeze_unpublishable_selection(
     head.write_text(json.dumps({"checkpoint": checkpoint.name}))
     args = Namespace(scan_id=scan.scan_id)
     if invalid_model:
-        with pytest.raises(workbench_api["saved_results"].ContractError, match="summary"):
-            workbench_api["saved_results"].recover_scan_results(
-                workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, args
-            )
+        saved = workbench_api["saved_results"]
+        write = saved.write_scan_local_bytes
+
+        def fail_snapshot(root, relative, contents):
+            if Path(relative).parent.name == snapshot_failure:
+                raise OSError("Synthetic snapshot failure")
+            return write(root, relative, contents)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(saved, "write_scan_local_bytes", fail_snapshot)
+            with pytest.raises(saved.ContractError, match="summary"):
+                saved.recover_scan_results(
+                    workbench_api["_WORKBENCH_DB_CONTEXT"], workbench_db, args
+                )
         retained = tuple(
             workbench_db.execute(
                 "SELECT retained_source_digests_json, retained_checkpoint_heads_json FROM scans WHERE id = ?",

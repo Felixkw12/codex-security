@@ -74,6 +74,42 @@ def _worker_outputs(scan_dir: Path, worker: Any) -> list[tuple[str, int]]:
     return [(output.as_posix(), attempt), *archived]
 
 
+def _saved_result_paths(scan_dir: Path, workers: list[Any]) -> Iterator[tuple[str, str | None]]:
+    latest_reducer = _latest_successful_reducer(workers)
+    yield "checkpoint-head.json", None
+    for directory in ("checkpoint-heads", "checkpoints"):
+        yield from ((path, None) for path in _checkpoint_paths(scan_dir, directory))
+    for worker in workers:
+        if worker["kind"] not in {"dedup", "discovery"}:
+            continue
+        try:
+            outputs = _worker_outputs(scan_dir, worker)
+        except (TypeError, ValueError):
+            continue
+        for directory, _ in outputs:
+            if worker["kind"] == "discovery":
+                yield f"{directory}/checkpoint-head.json", worker["kind"]
+                yield from (
+                    (path, worker["kind"])
+                    for path in _checkpoint_paths(scan_dir, f"{directory}/checkpoint-heads")
+                )
+            checkpoint_paths = _checkpoint_paths(scan_dir, f"{directory}/checkpoints")
+            if worker["kind"] == "discovery" or checkpoint_paths:
+                yield f"{directory}/result.json", worker["kind"]
+                yield from ((path, worker["kind"]) for path in checkpoint_paths)
+        if worker["result_manifest_path"] and (
+            worker["kind"] == "discovery"
+            or (latest_reducer is not None and worker["id"] == latest_reducer["id"])
+        ):
+            try:
+                yield (
+                    Path(worker["result_manifest_path"]).relative_to(scan_dir).as_posix(),
+                    worker["kind"],
+                )
+            except ValueError:
+                continue
+
+
 def _children(scan_dir: Path, relative: str) -> list[str]:
     cursor = scan_dir
     for part in Path(relative).parts:
