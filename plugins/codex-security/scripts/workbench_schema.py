@@ -59,7 +59,10 @@ def apply_migrations(
     connection.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
     with (
         connection,
-        scoped_git_discovery(lambda: [*migration_target_paths(connection), *discovery_roots]),
+        scoped_git_discovery(
+            lambda: [*migration_target_paths(connection), *discovery_roots],
+            recorded_git_roots=lambda: recorded_git_target_paths(connection),
+        ),
     ):
         connection.execute(
             """
@@ -130,6 +133,32 @@ def migration_target_paths(connection: sqlite3.Connection) -> list[Path]:
                 )
             )
     return list(paths)
+
+
+def recorded_git_target_paths(connection: sqlite3.Connection) -> set[Path]:
+    """Recover which saved targets have positive Git evidence without executing Git."""
+    paths: set[Path] = set()
+    for table, column, evidence_columns in (
+        ("security_targets", "current_path", {"repository_identity": "IS NOT NULL"}),
+        (
+            "scans",
+            "target_path",
+            {"repository_generation": "IS NOT NULL", "target_revision": "<> 'unversioned'"},
+        ),
+    ):
+        columns = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
+        evidence = [
+            f"{name} {condition}" for name, condition in evidence_columns.items() if name in columns
+        ]
+        if column in columns and evidence:
+            paths.update(
+                Path(row[0])
+                for row in connection.execute(
+                    f"SELECT DISTINCT {column} FROM {table} WHERE {column} IS NOT NULL "
+                    f"AND ({' OR '.join(evidence)})"
+                )
+            )
+    return paths
 
 
 def normalize_pre_release_migrations(connection: sqlite3.Connection, timestamp: str) -> None:

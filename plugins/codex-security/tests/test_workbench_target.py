@@ -1444,8 +1444,9 @@ def test_scoped_git_discovery_pins_all_target_roots_and_restores_discovery(
 
 @pytest.mark.cross_platform
 @pytest.mark.parametrize("windows", [False, True])
+@pytest.mark.parametrize("recorded", [False, True])
 def test_scoped_git_discovery_excludes_unavailable_target_ancestor_tools(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, windows: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, windows: bool, recorded: bool
 ) -> None:
     repository, historical, host = (
         tmp_path / name for name in ("repository", "historical", "host")
@@ -1465,12 +1466,19 @@ def test_scoped_git_discovery_excludes_unavailable_target_ancestor_tools(
     )
     monkeypatch.delenv("CODEX_SECURITY_GIT", raising=False)
     monkeypatch.setenv("PATH", os.pathsep.join(map(str, (historical, host))))
-    with WORKBENCH_TARGET["scoped_git_discovery"](lambda: (repository, surviving / "missing")):
+    saved = surviving if recorded else surviving / "missing"
+    with WORKBENCH_TARGET["scoped_git_discovery"](
+        lambda: (repository, saved),
+        recorded_git_roots=lambda: (saved,) if recorded else (),
+    ):
         assert trusted_git_executable(repository) is None
 
     # The caller can still explicitly select a tool outside the current repository.
     monkeypatch.setenv("CODEX_SECURITY_GIT", str(historical / name))
-    with WORKBENCH_TARGET["scoped_git_discovery"](lambda: (repository, surviving / "missing")):
+    with WORKBENCH_TARGET["scoped_git_discovery"](
+        lambda: (repository, saved),
+        recorded_git_roots=lambda: (saved,) if recorded else (),
+    ):
         assert trusted_git_executable(repository) == str(historical / name)
 
 
@@ -1558,6 +1566,113 @@ def test_workbench_commands_exclude_saved_checkout_git(
             )
             assert (identities["requested"] is not None) is configured
             assert identities["historical"] is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="uses a POSIX executable shim")
+@pytest.mark.parametrize(
+    "evidence", ["identity", "generation", "revision", "legacy-revision", "directory"]
+)
+@pytest.mark.parametrize("configured", [False, True])
+def test_saved_git_boundary_removal_does_not_select_its_parent_tool(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    workbench_api: dict[str, Any],
+    evidence: str,
+    configured: bool,
+) -> None:
+    from workbench_target_state import repository_identity
+
+    host_git = shutil.which("git")
+    assert host_git is not None
+    requested, historical = (tmp_path / name for name in ("requested", "historical"))
+    initialize_git_repository(requested)
+    revision = initialize_git_repository(historical)
+    saved = historical / "surviving" / "component"
+    saved.mkdir(parents=True)
+    identity = repository_identity(saved)
+    if identity is None and evidence in {"identity", "generation"}:
+        pytest.skip("filesystem does not expose repository generation evidence")
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.row_factory = sqlite3.Row
+        apply_migrations = workbench_api["apply_migrations"]
+        with monkeypatch.context() as migration_patch:
+            if evidence == "legacy-revision":
+                migration_patch.setitem(
+                    apply_migrations.__globals__,
+                    "MIGRATIONS",
+                    tuple(item for item in workbench_api["MIGRATIONS"] if item[0] < 53),
+                )
+            apply_migrations(connection)
+        connection.executemany(
+            "INSERT INTO security_targets(id, current_path, display_name, created_at, updated_at) "
+            "VALUES (?, ?, 'Saved target', 'created', 'updated')",
+            [("requested", str(requested)), ("historical", str(saved))],
+        )
+        if evidence == "identity":
+            connection.execute(
+                "UPDATE security_targets SET repository_identity = ? WHERE id = 'historical'",
+                (identity,),
+            )
+        else:
+            connection.execute(
+                "INSERT INTO workspaces(id, target_id, target_path, created_at, updated_at) "
+                "VALUES ('workspace', 'historical', ?, 'created', 'updated')",
+                (str(saved),),
+            )
+            connection.execute(
+                "INSERT INTO scans(id, workspace_id, target_id, target_path, target_revision, "
+                "scope, mode, scan_dir, status, phase, started_at, created_at, updated_at) "
+                "VALUES ('scan', 'workspace', 'historical', ?, ?, '.', 'standard', "
+                "?, 'complete', 'reporting', 'created', 'created', 'updated')",
+                (
+                    str(saved),
+                    "unversioned" if evidence in {"directory", "generation"} else revision,
+                    str(tmp_path / "saved-scan"),
+                ),
+            )
+            if evidence == "generation":
+                connection.execute("UPDATE scans SET repository_generation = ?", (identity,))
+    shutil.rmtree(historical / ".git")
+    marker = tmp_path / "repository-git-ran"
+    host_marker = tmp_path / "host-git-ran"
+    tools = tmp_path / "host-tools" if evidence == "directory" else historical / "bin"
+    tools.mkdir()
+    executable = tools / "git"
+    executable.write_text(
+        '#!/bin/sh\nprintf invoked > "$WORKBENCH_GIT_MARKER"\nexec "$WORKBENCH_HOST_GIT" "$@"\n'
+    )
+    executable.chmod(0o700)
+    environment = {key: value for key, value in os.environ.items() if key != "CODEX_SECURITY_GIT"}
+    environment.update(
+        CODEX_SECURITY_STATE_DIR=str(state),
+        PATH=str(tools) + os.pathsep + os.environ.get("PATH", ""),
+        WORKBENCH_GIT_MARKER=str(host_marker if evidence == "directory" else marker),
+        WORKBENCH_HOST_GIT=host_git,
+    )
+    if configured:
+        environment["CODEX_SECURITY_GIT"] = host_git
+    script = Path(__file__).resolve().parents[1] / "scripts" / "workbench_db.py"
+    completed = subprocess.run(
+        [sys.executable, str(script), "list-scans", "--repository", str(requested)],
+        cwd=requested,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert json.loads(completed.stdout)["scans"] == []
+    assert not marker.exists()
+    if evidence == "directory":
+        assert host_marker.exists() is not configured
+    if evidence == "legacy-revision":
+        with sqlite3.connect(state / "workbench.sqlite3") as connection:
+            identities = dict(
+                connection.execute("SELECT id, repository_identity FROM security_targets")
+            )
+        assert (identities["requested"] is not None) is configured
+        assert identities["historical"] is None
 
 
 @pytest.mark.skipif(os.name == "nt", reason="uses a POSIX executable shim")

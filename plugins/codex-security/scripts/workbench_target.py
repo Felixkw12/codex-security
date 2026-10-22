@@ -227,7 +227,11 @@ def _historical_repository_roots(target: Path) -> Iterator[Path]:
 
 
 def _resolve_git_executable(
-    protected_root: Path, configured: str | None, *, discovery_roots: Iterable[Path] = ()
+    protected_root: Path,
+    configured: str | None,
+    *,
+    discovery_roots: Iterable[Path] = (),
+    recorded_git_roots: Iterable[Path] = (),
 ) -> str | None:
     windows = sys.platform == "win32"
     if configured is None:
@@ -248,8 +252,15 @@ def _resolve_git_executable(
     try:
         repositories = [_protected_repository_root(protected_root)]
         if configured is None:
+            recorded = set(recorded_git_roots)
             for root in discovery_roots:
-                for repository in _historical_repository_roots(root):
+                historical_roots = tuple(_historical_repository_roots(root))
+                if root in recorded and not any(
+                    os.path.lexists(repository / ".git") for repository in historical_roots
+                ):
+                    # A surviving target is not the boundary of its former Git checkout.
+                    return None
+                for repository in historical_roots:
                     if not repository.is_dir():
                         # A missing target without enclosing Git metadata cannot bound its
                         # former checkout. Treat ambient Git as unavailable rather than
@@ -291,7 +302,11 @@ def _resolve_git_executable(
 
 
 @contextmanager
-def scoped_git_discovery(protected_roots: Callable[[], Iterable[Path]]) -> Iterator[None]:
+def scoped_git_discovery(
+    protected_roots: Callable[[], Iterable[Path]],
+    *,
+    recorded_git_roots: Callable[[], Iterable[Path]] = lambda: (),
+) -> Iterator[None]:
     """Pin ambient Git when an operation first needs to inspect repository targets."""
     if os.environ.get("CODEX_SECURITY_GIT") is not None:
         yield
@@ -302,7 +317,13 @@ def scoped_git_discovery(protected_roots: Callable[[], Iterable[Path]]) -> Itera
         nonlocal executable
         if executable is None:
             executable = (
-                _resolve_git_executable(Path.cwd(), None, discovery_roots=protected_roots()) or ""
+                _resolve_git_executable(
+                    Path.cwd(),
+                    None,
+                    discovery_roots=protected_roots(),
+                    recorded_git_roots=recorded_git_roots(),
+                )
+                or ""
             )
         return executable
 

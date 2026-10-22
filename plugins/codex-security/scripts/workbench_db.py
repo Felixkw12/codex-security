@@ -93,6 +93,7 @@ from workbench_scan_start import (
 from workbench_schema import (
     MIGRATIONS,
     migration_target_paths,
+    recorded_git_target_paths,
 )
 from workbench_schema import (
     apply_migrations as apply_schema_migrations,
@@ -3444,7 +3445,10 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
                 discovery_roots=command_targets,
             )
         ) as connection,
-        scoped_git_discovery(lambda: [*migration_target_paths(connection), *command_targets]),
+        scoped_git_discovery(
+            lambda: [*migration_target_paths(connection), *command_targets],
+            recorded_git_roots=lambda: recorded_git_target_paths(connection),
+        ),
     ):
         remediation_state.require_available(connection, args, require_scan)
         handlers = {
