@@ -321,9 +321,9 @@ print(json.dumps(support.run_workbench(state, "complete-scan", "--scan-id", pare
         child.scanId,
         child.scanDir,
       ),
-    ).toEqual(projected[index]);
+    ).toEqual(projected[index]!);
     expect(await readFile(join(child.scanDir, "coverage.json"))).toEqual(
-      originalCoverage[index],
+      originalCoverage[index]!,
     );
   }
 });
