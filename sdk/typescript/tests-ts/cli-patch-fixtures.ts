@@ -142,7 +142,7 @@ export async function runWorkflow(
     readSavedFindings:
       fixtures.readSavedFindings ??
       (async (scanId) =>
-        savedFindings.get(scanId) ?? fixtures.result?.findings.findings ?? []),
+        fixtures.result?.findings.findings ?? savedFindings.get(scanId) ?? []),
   });
   if (options.interactive) {
     current.confirmPatchReview = async (question) => {

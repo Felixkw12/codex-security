@@ -431,9 +431,6 @@ async function runInstalledSdk(pluginRoot, executable) {
   try {
     const result = await client.run(f.target, {
       mode: "deep",
-      onScanRegistered: (scan) => {
-        scanId = scan.scanId;
-      },
       auth: "api-key",
       workers: 1,
       subagents: 0,
