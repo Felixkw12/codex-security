@@ -629,6 +629,10 @@ export async function capturePatchGitControls(
   const inaccessibleIncludes = new Set<string>();
   const unreadableConfigurations = new Set<string>();
   const inaccessibleHooks = new Set<string>();
+  const hookContents = new Map<
+    string,
+    Buffer | { size: bigint; mtimeNs: bigint; ctimeNs: bigint }
+  >();
   const hookDirectories = new Set<string>();
   const hookIsAvailable = async (path: string): Promise<boolean> => {
     const executable = await access(path, constants.X_OK).then(
@@ -814,6 +818,27 @@ export async function capturePatchGitControls(
   const rememberHook = async (path: string): Promise<void> => {
     if (await hookIsAvailable(path)) {
       await rememberControl(path, false);
+      const canonical = controlPaths.get(path)!.canonical;
+      const metadata = await stat(canonical, { bigint: true });
+      if (metadata.isFile()) {
+        try {
+          hookContents.set(path, await readFile(canonical));
+        } catch (error) {
+          if (
+            !["EACCES", "EPERM"].includes(
+              (error as NodeJS.ErrnoException).code ?? "",
+            )
+          )
+            throw error;
+          // Execute-only native hooks remain usable, but writable aliases must
+          // not change them while the model controls the repository.
+          hookContents.set(path, {
+            size: metadata.size,
+            mtimeNs: metadata.mtimeNs,
+            ctimeNs: metadata.ctimeNs,
+          });
+        }
+      }
     } else {
       // Git ignores inactive entries; reject their activation before bookkeeping.
       inaccessibleHooks.add(path);
@@ -1165,6 +1190,17 @@ export async function capturePatchGitControls(
           throw new Error(
             `Git configuration or hooks changed location during the patch: ${path}`,
           );
+        const hook = hookContents.get(path);
+        if (
+          hook !== undefined &&
+          (!metadata?.isFile() ||
+            (Buffer.isBuffer(hook)
+              ? !(await readFile(canonical)).equals(hook)
+              : metadata.size !== hook.size ||
+                metadata.mtimeNs !== hook.mtimeNs ||
+                metadata.ctimeNs !== hook.ctimeNs))
+        )
+          throw new Error(`Git hook changed during the patch: ${path}`);
         if (unreadableConfigurations.has(path)) {
           try {
             await readFile(canonical);
