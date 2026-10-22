@@ -1388,7 +1388,7 @@ export async function capturePatchGitControls(
         // Unavailable optional storage gets no extra snapshot permission.
         // Git/LFS reports the failure if a snapshot actually uses it.
         if (
-          !["EACCES", "EPERM", "EROFS"].includes(
+          !["EACCES", "EPERM", "EROFS", "ENOTDIR"].includes(
             (error as NodeJS.ErrnoException).code ?? "",
           )
         )
