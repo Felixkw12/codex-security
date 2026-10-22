@@ -5273,6 +5273,18 @@ describe("runtime directories and plugin Python boundary", () => {
         CODEX_SECURITY_STATE_DIR: join(root, "explicit-state"),
       }),
     ).toBe(join(root, "explicit-state"));
+    expect(
+      codexSecurityStateDirectory({
+        CODEX_HOME: root,
+        CODEX_SECURITY_STATE_DIR: `  ${join(root, "ambient-state")}  `,
+      }),
+    ).toBe(join(root, "ambient-state"));
+    expect(
+      codexSecurityStateDirectory({
+        CODEX_HOME: root,
+        CODEX_SECURITY_STATE_DIR: "   ",
+      }),
+    ).toBe(join(root, "state", "plugins", "codex-security"));
     if (process.platform === "win32") {
       expect(() =>
         codexSecurityStateDirectory({

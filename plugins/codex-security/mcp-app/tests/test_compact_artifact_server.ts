@@ -1420,7 +1420,10 @@ async function testNativeDeepTerminalResults() {
   const invocationPath = path.join(fixtureRoot, "unexpected-codex-invocation");
   const environment = {
     CODEX_SECURITY_SCAN_ROOT: path.join(fixtureRoot, "scans"),
-    CODEX_SECURITY_STATE_DIR: path.join(fixtureRoot, "state"),
+    CODEX_SECURITY_STATE_DIR: path.join(
+      fixtureRoot,
+      process.platform === "win32" ? "state" : "state ",
+    ),
     CODEX_HOME: path.join(fixtureRoot, "codex-home"),
     CODEX_CLI_PATH: path.join(fixtureRoot, "codex-stub"),
     CODEX_API_KEY: "",
@@ -1564,14 +1567,24 @@ process.exit(1);
       }),
       "write native parent aggregate",
     );
-    const completed = runWorkbenchFixture(environment, [
-      "complete-scan",
+    runWorkbenchFixture(environment, [
+      "prepare-scan-completion",
       "--scan-id",
       scanId,
       "--claim-token",
       handoffClaimToken,
     ]);
-    assert.equal(completed.scan.progress.status, "complete");
+    assert.equal(
+      runWorkbenchFixture(environment, ["get-scan", "--scan-id", scanId]).scan
+        .progress.status,
+      "running",
+    );
+    assertCompleted(await rejoin(), "recover sealed running native parent");
+    assert.equal(
+      runWorkbenchFixture(environment, ["get-scan", "--scan-id", scanId]).scan
+        .progress.status,
+      "complete",
+    );
     const originalDraft = await snapshotScanDraft(scanDir);
 
     for (let repeat = 0; repeat < 2; repeat += 1) {

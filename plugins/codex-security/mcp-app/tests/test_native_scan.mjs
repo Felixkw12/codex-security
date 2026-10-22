@@ -104,7 +104,7 @@ const bundle = await build({
         );
         build.onLoad({ filter: /.*/, namespace: "native-runtime" }, () => ({
           resolveDir: fileURLToPath(new URL("../src/", import.meta.url)),
-          contents: `export { codexSecurityStateDirectory } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/runtime.ts", import.meta.url)))}; export const runWorkbench = (...args) => nativeFixture.workbench(...args);`,
+          contents: `export { codexSecurityStateDirectory, requireModelSafeOutputDir } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/runtime.ts", import.meta.url)))}; export const runWorkbench = (...args) => nativeFixture.workbench(...args);`,
         }));
         build.onResolve({ filter: /sdk\/typescript\/src\/api\.js$/ }, () => ({
           path: "client",
@@ -1816,7 +1816,7 @@ test("native launches snapshot safety identifiers and prefer saved recipes", asy
 });
 
 test(
-  "native safety identifiers stay isolated across concurrent fresh and saved worker launches",
+  "native attribution and selected state stay isolated across concurrent fresh and saved worker launches",
   {
     skip:
       process.platform === "win32"
@@ -1865,6 +1865,7 @@ test(
       repository: join(root, fixture.id, "repository"),
       scanDir: join(root, fixture.id, "scan"),
       capture: join(root, `${fixture.id}.jsonl`),
+      stateDirectory: join(root, fixture.id, "selected state "),
     }));
     try {
       await mkdir(join(pluginRoot, ".codex-plugin"), { recursive: true });
@@ -1883,7 +1884,7 @@ else {
   fs.appendFileSync(process.env.NATIVE_PROFILE_CAPTURE, JSON.stringify({
     kind: "exec", argv: process.argv.slice(2), home: process.env.CODEX_HOME,
     marker: process.env.NATIVE_PROFILE_MARKER, safetyIdentifier: process.env.CODEX_SAFETY_IDENTIFIER,
-    codex: process.env.CODEX_API_KEY,
+    codex: process.env.CODEX_API_KEY, stateDirectory: process.env.CODEX_SECURITY_STATE_DIR,
   }) + "\\n");
   console.log(JSON.stringify({ type: "thread.started", thread_id: "synthetic-safety-worker" }));
   console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0 } }));
@@ -1918,6 +1919,7 @@ else {
           return prepareNativeExecution({
             ...input(fixture.id),
             pluginRoot,
+            stateDirectory: fixture.stateDirectory,
             scan: {
               ...input(fixture.id).scan,
               targetPath: fixture.repository,
@@ -1934,7 +1936,15 @@ else {
       const results = await Promise.allSettled(
         cases.map(async (fixture, index) => {
           const native = prepared[index];
+          assert.equal(
+            native.client.dependencies.stateDirectory,
+            fixture.stateDirectory,
+          );
           const ambient = native.client.dependencies.ambientExecution;
+          assert.equal(
+            ambient.environment.CODEX_SECURITY_STATE_DIR,
+            fixture.stateDirectory,
+          );
           const runtime = await prepareAmbientRuntime(ambient);
           try {
             const source = prepareExecutionSource(ambient);
@@ -1968,6 +1978,8 @@ else {
                 {
                   NATIVE_PROFILE_CAPTURE: fixture.capture,
                   NATIVE_PROFILE_MARKER: fixture.id,
+                  CODEX_SECURITY_STATE_DIR:
+                    native.client.dependencies.stateDirectory,
                 },
               );
               for (const resumed of [false, true]) {
@@ -2006,6 +2018,7 @@ else {
               assert.equal(observed.marker, fixture.id);
               assert.equal(observed.home, runtime.codexHome);
               assert.equal(observed.codex, `synthetic-key-${fixture.id}`);
+              assert.equal(observed.stateDirectory, fixture.stateDirectory);
             }
           } finally {
             await rm(runtime.bootstrapWorkspace, {
@@ -3456,7 +3469,7 @@ test("queued native hosts reload the accepted recipe before preparing execution"
   const home = join(root, "home");
   const repository = join(root, "repository");
   const scanDir = join(root, "scan");
-  const state = join(root, "state");
+  const state = join(root, process.platform === "win32" ? "state" : "state ");
   const pluginRoot = fixturePluginRoot;
   const restore = captureEnvironment([
     "CODEX_HOME",
@@ -3488,8 +3501,10 @@ test("queued native hosts reload the accepted recipe before preparing execution"
       "CODEX_SECURITY_KNOWLEDGE_BASE",
     ])
       delete process.env[key];
-    nativeFixture.workbench = async (_options, [command]) => {
+    nativeFixture.workbench = async (options, [command]) => {
       assert.equal(command, "get-scan");
+      assert.equal(options.stateDirectory, state);
+      assert.equal(options.environment.CODEX_SECURITY_STATE_DIR, state);
       await assert.rejects(
         acquireScanExecution(state, scanDir, join(pluginRoot, "mcp", "native")),
         /already running/,

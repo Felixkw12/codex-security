@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import {
   codexSecurityStateDirectory,
+  requireModelSafeOutputDir,
   runWorkbench,
 } from "../../../../sdk/typescript/src/runtime.js";
 import { hasSealedScanArtifacts } from "../../../../sdk/typescript/src/scan-publication.js";
@@ -151,12 +152,9 @@ async function prepareOwnedNativeScan(
   signal?: AbortSignal,
 ): Promise<PreparedNativeScan> {
   const environment = await snapshotNativeEnvironment();
-  const stateDirectory = codexSecurityStateDirectory({
-    ...environment,
-    ...(input.stateDirectory === undefined
-      ? {}
-      : { CODEX_SECURITY_STATE_DIR: input.stateDirectory }),
-  });
+  const stateDirectory =
+    input.stateDirectory ?? codexSecurityStateDirectory(environment);
+  requireModelSafeOutputDir(stateDirectory);
   environment.CODEX_SECURITY_STATE_DIR = stateDirectory;
   const release = await acquireScanExecution(
     stateDirectory,
@@ -172,6 +170,7 @@ async function prepareOwnedNativeScan(
         python: input.pythonPath,
         pluginRoot: input.pluginRoot,
         environment,
+        stateDirectory,
         signal,
         protectedRoot: [input.scan.targetPath, input.scan.scanDir],
       },
@@ -353,6 +352,7 @@ export async function prepareNativeScan(
     },
     {
       environment,
+      stateDirectory: input.stateDirectory,
       inheritedPermissions,
       ambientExecution,
       acquireScanExecution: (state, directory, nativeRoot) =>
