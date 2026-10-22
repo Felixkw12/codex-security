@@ -1912,6 +1912,8 @@ for (const scenario of [
   "read-only-parent",
   "saved-absent-knowledge",
   "saved-present-knowledge",
+  "saved-developer-instructions",
+  "fresh-whitespace-knowledge",
   "tilde-home-and-selected-config",
   "explicit-state-directory",
   "fresh-safety-identifier",
@@ -2059,7 +2061,14 @@ for (const scenario of [
               : { env_key: "OPENAI_API_KEY", requires_openai_auth: true },
           },
         };
+        if (scenario === "saved-developer-instructions")
+          configuration.developer_instructions = "Saved synthetic guidance.";
         let ambientConfiguration = configuration;
+        if (scenario === "saved-developer-instructions")
+          ambientConfiguration = {
+            ...configuration,
+            developer_instructions: "Later ambient guidance.",
+          };
         let selectedConfigText;
         let selectedConfigPath;
         if (selectedConfiguration) {
@@ -2114,6 +2123,8 @@ for (const scenario of [
         await mkdir(scanDir, { mode: 0o700 });
         const document = join(root, "knowledge.txt");
         let savedKnowledge;
+        if (scenario === "fresh-whitespace-knowledge")
+          process.env.CODEX_SECURITY_KNOWLEDGE_BASE = " \t\n ";
         if (scenario.startsWith("saved-") && scenario.endsWith("-knowledge")) {
           await writeFile(document, "Original synthetic knowledge.\n");
           if (scenario === "saved-present-knowledge") {
@@ -2240,6 +2251,15 @@ for (const scenario of [
             },
             recipe: {
               auth: "api-key",
+              ...(scenario === "saved-developer-instructions"
+                ? {
+                    config: {
+                      ...configuration,
+                      model: "explicit-current-model",
+                      model_reasoning_effort: "ultra",
+                    },
+                  }
+                : {}),
               ...(resumed && replay
                 ? {
                     config: scanPreflightCodexConfig({
@@ -2272,7 +2292,12 @@ for (const scenario of [
               },
             },
           };
-          if (scenario === "fresh-safety-identifier") delete request.recipe;
+          if (
+            ["fresh-safety-identifier", "fresh-whitespace-knowledge"].includes(
+              scenario,
+            )
+          )
+            delete request.recipe;
           else if (scenario === "saved-explicit-safety-identifier")
             request.recipe.safetyIdentifier = expectedSafetyIdentifier;
           if (samePath && savedLiteral !== currentLiteral) {
@@ -2429,6 +2454,11 @@ for (const scenario of [
                   "Original synthetic knowledge.\n",
                 );
               }
+              if (scenario === "saved-developer-instructions")
+                assert.equal(
+                  config.developer_instructions,
+                  "Saved synthetic guidance.",
+                );
               assert.equal(config.model, "explicit-current-model");
               assert.equal(config.model_reasoning_effort, "ultra");
               if (selectedConfiguration) {
@@ -2596,6 +2626,7 @@ test(
           preflights: join(root, `preflights-${id}.jsonl`),
           decoyLaunch: join(root, `decoy-${id}.jsonl`),
           selectedConfigPath: join(root, `selected-${id}.toml`),
+          developerInstructions: `Selected synthetic guidance ${id}.`,
           model: capturedInputs
             ? `${id === "c" ? "selected" : "ambient"}-model-${id}`
             : `synthetic-model-${id}`,
@@ -2653,6 +2684,7 @@ test(
           features: { goals: true, api_key_model_discovery: id !== "a" },
         });
         fixture.selectedConfigText = stringifyToml({
+          developer_instructions: fixture.developerInstructions,
           ...(id === "c"
             ? {
                 model: fixture.model,
@@ -2676,7 +2708,7 @@ test(
         if (capturedInputs) {
           const knowledgeDirectory = join(root, `knowledge-${id}`);
           await mkdir(knowledgeDirectory);
-          fixture.document = join(knowledgeDirectory, `knowledge-${id}.txt`);
+          fixture.document = join(knowledgeDirectory, `knowledge ${id}.txt`);
           fixture.knowledgeText = `Captured synthetic knowledge ${id}.\n`;
           fixture.deepConfigPath = join(root, `deep-${id}.toml`);
           fixture.subagents = id === "c" ? 3 : 5;
@@ -2688,7 +2720,8 @@ test(
           Object.assign(process.env, {
             CODEX_HOME: fixture.home,
             CODEX_SECURITY_CONFIG_PATH: fixture.selectedConfigPath,
-            CODEX_SECURITY_KNOWLEDGE_BASE: fixture.document,
+            CODEX_SECURITY_KNOWLEDGE_BASE:
+              id === "c" ? ` \t${fixture.document}\n ` : " \t\n ",
             CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH: fixture.deepConfigPath,
           });
           fixture.semanticInputs = await readNativeScanSemanticInputs();
@@ -2729,6 +2762,7 @@ test(
           laterConfig.features.goals = false;
           fixture.configText = stringifyToml(laterConfig);
           const laterSelectedConfig = parseToml(fixture.selectedConfigText);
+          laterSelectedConfig.developer_instructions = `Later synthetic guidance ${id}.`;
           laterSelectedConfig.model = `later-selected-model-${id}`;
           laterSelectedConfig.model_reasoning_effort = `later-selected-effort-${id}`;
           laterSelectedConfig.model_providers.openai.name = `Later synthetic provider ${id}`;
@@ -2836,15 +2870,16 @@ test(
               fixture.savedDeepScanSettings,
           ))
             assert.equal(prepared[index].options[name], value);
-          const knowledge = fixture.semanticInputs
+          const knowledge = fixture.semanticInputs?.knowledgeBaseSnapshot
             ? await prepareKnowledgeBase(
                 prepared[index].options.knowledgeBaseSnapshot,
               )
             : undefined;
           if (fixture.semanticInputs) {
-            assert.deepEqual(prepared[index].options.knowledgeBasePaths, [
-              fixture.document,
-            ]);
+            assert.deepEqual(
+              prepared[index].options.knowledgeBasePaths,
+              fixture.id === "c" ? [fixture.document] : undefined,
+            );
             assert.deepEqual(
               prepared[index].options.knowledgeBaseSnapshot,
               fixture.semanticInputs.knowledgeBaseSnapshot,
@@ -2913,10 +2948,14 @@ test(
                   if (["-c", "--config"].includes(observed.argv[i]))
                     fragments.push(parseToml(observed.argv[++i]));
                 const config = Object.assign({}, ...fragments);
+                assert.equal(
+                  config.developer_instructions,
+                  fixture.developerInstructions,
+                );
                 if (knowledge) {
                   assert.equal(observed.knowledge, knowledge.path);
                   assert.deepEqual(observed.knowledgeDocuments, {
-                    [`0-knowledge-${fixture.id}.txt.txt`]:
+                    [`0-knowledge ${fixture.id}.txt.txt`]:
                       fixture.knowledgeText,
                   });
                   assert.equal(
@@ -2929,7 +2968,7 @@ test(
                   assert.equal(
                     config.features.multi_agent_v2
                       .max_concurrent_threads_per_session,
-                    3,
+                    fixture.semanticInputs ? fixture.subagents + 1 : 3,
                   );
                 }
                 for (const [key, value] of Object.entries(fixture.features))

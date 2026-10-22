@@ -59,23 +59,39 @@ for (const change of [
   "unchanged selected profile",
   "equivalent selected profile",
   "turn metadata precedence",
+  "unchanged developer instructions",
+  "changed developer instructions",
+  "removed developer instructions",
+  "equivalent developer instructions",
+  "empty knowledge environment",
+  "whitespace knowledge environment",
+  "plain knowledge environment",
+  "padded knowledge environment",
 ]) {
   test(`completed native target reuse after MCP restart: ${change}`, async () => {
     const root = await mkdtemp(path.join(tmpdir(), "native-completed-reuse-"));
     const repository = path.join(root, "repository");
-    const knowledgePath = path.join(root, "knowledge.md");
+    const knowledgeEnvironment = change.endsWith("knowledge environment");
+    const knowledgePath = path.join(
+      root,
+      knowledgeEnvironment ? "knowledge guidance.md" : "knowledge.md",
+    );
     const configPath = path.join(root, "deep.toml");
     const selectedConfigPath = path.join(root, "selected.toml");
     const selectedProfile =
       change.endsWith("selected profile") ||
       change === "turn metadata precedence";
+    const developerInstructions = change.endsWith("developer instructions");
     const selectedConfig =
+      developerInstructions ||
       selectedProfile ||
       change === "selected model" ||
       change === "selected effort";
-    const initialSelectedConfig = selectedProfile
-      ? 'model = "synthetic-unused-root-model"\nmodel_reasoning_effort = "synthetic-unused-root-effort"\nprofile = "scan"\n[profiles.scan]\nmodel = "synthetic-model-a"\nmodel_reasoning_effort = "synthetic-effort-a"\n'
-      : 'model = "synthetic-model-a"\nmodel_reasoning_effort = "synthetic-effort-a"\n';
+    const initialSelectedConfig = developerInstructions
+      ? 'model = "synthetic-model-a"\nmodel_reasoning_effort = "synthetic-effort-a"\ndeveloper_instructions = "Follow synthetic guidance A."\n'
+      : selectedProfile
+        ? 'model = "synthetic-unused-root-model"\nmodel_reasoning_effort = "synthetic-unused-root-effort"\nprofile = "scan"\n[profiles.scan]\nmodel = "synthetic-model-a"\nmodel_reasoning_effort = "synthetic-effort-a"\n'
+        : 'model = "synthetic-model-a"\nmodel_reasoning_effort = "synthetic-effort-a"\n';
     const turnSettings =
       change === "turn metadata precedence"
         ? {
@@ -88,7 +104,11 @@ for (const change of [
       CODEX_SECURITY_STATE_DIR: path.join(root, "state"),
       CODEX_HOME: path.join(root, "home"),
       CODEX_SECURITY_KNOWLEDGE_BASE:
-        change === "added knowledge" ? "" : knowledgePath,
+        change === "added knowledge" ||
+        change === "empty knowledge environment" ||
+        change === "whitespace knowledge environment"
+          ? ""
+          : knowledgePath,
       CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH: configPath,
       CODEX_SECURITY_CONFIG_PATH: selectedConfig ? selectedConfigPath : "",
       // A replacement scan must reach preparation; no model service is used.
@@ -318,6 +338,10 @@ for (const change of [
       if (change === "added knowledge")
         environment.CODEX_SECURITY_KNOWLEDGE_BASE = knowledgePath;
       if (change === "missing knowledge") await rm(knowledgePath);
+      if (change === "whitespace knowledge environment")
+        environment.CODEX_SECURITY_KNOWLEDGE_BASE = "   ";
+      if (change === "padded knowledge environment")
+        environment.CODEX_SECURITY_KNOWLEDGE_BASE = `  ${knowledgePath}  `;
       if (change === "selected model")
         await writeFile(
           selectedConfigPath,
@@ -338,6 +362,21 @@ for (const change of [
           selectedConfigPath,
           'profile = "scan"\n[profiles.scan]\nmodel = "synthetic-model-b"\nmodel_reasoning_effort = "synthetic-effort-b"\n',
         );
+      if (change === "changed developer instructions")
+        await writeFile(
+          selectedConfigPath,
+          initialSelectedConfig.replace("guidance A.", "guidance B."),
+        );
+      if (change === "removed developer instructions")
+        await writeFile(
+          selectedConfigPath,
+          'model = "synthetic-model-a"\nmodel_reasoning_effort = "synthetic-effort-a"\n',
+        );
+      if (change === "equivalent developer instructions")
+        await writeFile(
+          selectedConfigPath,
+          'profile = "scan"\ndeveloper_instructions = "Inactive root guidance."\n[profiles.scan]\nmodel = "synthetic-model-a"\nmodel_reasoning_effort = "synthetic-effort-a"\ndeveloper_instructions = "Follow synthetic guidance A."\n',
+        );
       client = await connect();
       // The public explicit identity remains authoritative after the restart.
       assert.equal(
@@ -354,12 +393,15 @@ for (const change of [
         userContext,
       });
       if (
+        knowledgeEnvironment ||
         [
           "unchanged",
           "equivalent config",
           "unchanged selected profile",
           "equivalent selected profile",
           "turn metadata precedence",
+          "unchanged developer instructions",
+          "equivalent developer instructions",
         ].includes(change)
       ) {
         assert.equal(successful(response).scanId, scanId);
@@ -378,6 +420,25 @@ for (const change of [
           "changed semantics register a fresh scan before execution",
         );
         assert.ok(scans.some((scan) => scan.scanId !== scanId));
+      }
+      if (knowledgeEnvironment) {
+        const freshRepository = path.join(root, "fresh-repository");
+        await mkdir(freshRepository);
+        await writeFile(
+          path.join(freshRepository, "app.py"),
+          "print('fresh')\n",
+        );
+        const freshResponse = await call("start_codex_security_deep_scan", {
+          targetPath: freshRepository,
+          userContext,
+        });
+        assert.equal(freshResponse.isError, true);
+        assert.match(freshResponse.content[0].text, /Codex executable/i);
+        assert.equal(
+          workbench(["list-scans"]).scans.length,
+          2,
+          "normalized knowledge inputs allow a recipe-less fresh start",
+        );
       }
       assert.equal(
         workbench(["get-scan", "--scan-id", scanId]).scan.progress.status,

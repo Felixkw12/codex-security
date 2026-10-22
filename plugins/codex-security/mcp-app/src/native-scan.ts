@@ -3,7 +3,10 @@ import {
   type KnowledgeBaseSnapshot,
 } from "../../../../sdk/typescript/src/knowledge-base.js";
 import { canonicalizeModelSafePath } from "../../../../sdk/typescript/src/runtime.js";
-import { expandHomePath } from "../../../../sdk/typescript/src/codex-home.js";
+import {
+  environmentValue,
+  expandHomePath,
+} from "../../../../sdk/typescript/src/codex-home.js";
 import { hasSealedScanArtifacts } from "../../../../sdk/typescript/src/scan-publication.js";
 import { join } from "node:path";
 import { restoreScanKnowledge } from "../../../../sdk/typescript/src/scan-inputs.js";
@@ -166,8 +169,12 @@ export async function readNativeScanSemanticInputs(
   modelSettings: Pick<NativeScanInput, "model" | "reasoningEffort"> = {},
 ): Promise<NativeScanSemanticInputs> {
   const environment = await snapshotNativeEnvironment();
-  const knowledgeBasePaths = environment.CODEX_SECURITY_KNOWLEDGE_BASE
-    ? [environment.CODEX_SECURITY_KNOWLEDGE_BASE]
+  const knowledgeBasePath = environmentValue(
+    environment,
+    "CODEX_SECURITY_KNOWLEDGE_BASE",
+  );
+  const knowledgeBasePaths = knowledgeBasePath
+    ? [knowledgeBasePath]
     : undefined;
   const deepScanSettings = (
     await resolveDeepScanConfig(
@@ -215,7 +222,15 @@ export async function prepareNativeScan(
     scanEnvironment,
     originalCwd,
   );
-  if (input.recipe !== undefined)
+  const knowledgeBasePath = environmentValue(
+    environment,
+    "CODEX_SECURITY_KNOWLEDGE_BASE",
+  );
+  if (
+    input.recipe !== undefined ||
+    semanticInputs !== undefined ||
+    knowledgeBasePath === undefined
+  )
     delete environment.CODEX_SECURITY_KNOWLEDGE_BASE;
   const resolveCommand = async () => {
     if (publicationOnly)
@@ -336,9 +351,8 @@ export async function prepareNativeScan(
       : (recipe.knowledgeBasePaths ??
         (semanticInputs
           ? semanticInputs.knowledgeBasePaths
-          : input.recipe === undefined &&
-              environment.CODEX_SECURITY_KNOWLEDGE_BASE
-            ? [environment.CODEX_SECURITY_KNOWLEDGE_BASE]
+          : input.recipe === undefined && knowledgeBasePath
+            ? [knowledgeBasePath]
             : undefined)),
     maxCostUsd: recipe.maxCostUsd,
     postScanPrompt,

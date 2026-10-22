@@ -194,6 +194,7 @@ def completed_scan_inputs_match(scan: sqlite3.Row, requested: dict[str, Any]) ->
         and recipe.get("deepScan") == requested["deepScan"]
         and config.get("model") == requested["model"]
         and config.get("model_reasoning_effort") == requested["reasoningEffort"]
+        and config.get("developer_instructions") == requested.get("developerInstructions")
     )
 
 

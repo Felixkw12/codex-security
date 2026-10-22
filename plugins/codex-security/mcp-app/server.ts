@@ -1008,6 +1008,8 @@ export function createCodexSecurityServer(): McpServer {
                 ).knowledgeBase,
                 deepScan: semanticInputs.deepScanSettings,
                 ...semanticInputs.modelSettings,
+                developerInstructions:
+                  semanticInputs.config["developer_instructions"] ?? null,
               }),
             ],
             normalizedUserContext,
