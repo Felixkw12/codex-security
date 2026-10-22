@@ -108,6 +108,12 @@ import { suggestOwnersInternal } from "./suggest-owners.js";
 import { parseImportedFindings } from "./findings-import.js";
 import { publishScanToCustom } from "./custom-publish.js";
 import {
+  ExternalPublicationError,
+  prepareExternalPublication,
+  type ExternalPublicationProgress,
+  type ExternalPublicationResult,
+} from "./external-findings-publish.js";
+import {
   publishPatchReview,
   resolvePatchReviewPublisher,
 } from "./patch-publication.js";
@@ -121,11 +127,13 @@ import {
   type ClassifySeverityRecordsInput,
 } from "./classify-severity-records.js";
 import { runHostedScanProtocol } from "./hosted-scan-protocol.js";
+import { runHostedRemediationProtocol } from "./hosted-remediation-protocol.js";
 import { runValidationRecordsProtocol } from "./validation-records.js";
 import {
   FindingPatchSchema as findingPatchSchema,
   parseFindingVerifications,
   remediationPrompt,
+  VerificationModeSchema,
   type FindingPatch,
   type FindingVerification,
 } from "./remediation.js";
@@ -408,6 +416,9 @@ const SKILL_AUTH_OPTION = z
   .describe(
     "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication.",
   );
+const VERIFICATION_MODE_OPTION = VerificationModeSchema.optional().describe(
+  "Use static source review or standard verification (default: standard).",
+);
 const PROJECT_CONFIG_OPTION = optionValue("--config")
   .optional()
   .describe(
@@ -605,6 +616,36 @@ function publicationIssueUrl(value: string | undefined): string | undefined {
   }
 
   return value;
+}
+
+function renderExternalPublicationSummary(
+  result: ExternalPublicationResult,
+): string {
+  return [
+    `Import ${result.status}.`,
+    `Submission totals — Created: ${result.counts.created}  Updated: ${result.counts.updated}  Unchanged: ${result.counts.unchanged}  Failed: ${result.counts.error}`,
+    `Excluded: ${result.excluded.length}  Awaiting acknowledgement: ${result.unacknowledged}  Verified: ${result.verified}`,
+    ...result.failures.map(
+      (item) =>
+        `Failed ${diagnosticValue(item.source_finding_id)} (${item.code}): ${diagnosticValue(item.message)}`,
+    ),
+    ...result.excluded.map(
+      (item) =>
+        `Excluded item ${item.position}${item.source_finding_id ? ` (${diagnosticValue(item.source_finding_id)})` : ""}: ${diagnosticValue(item.reason)}`,
+    ),
+    ...(result.savedSubmission
+      ? [`Saved submission: ${diagnosticValue(result.savedSubmission)}`]
+      : []),
+    ...(result.status === "interrupted"
+      ? []
+      : [
+          "Imported evidence remains not assessed by Codex.",
+          result.cloudUrl
+            ? `View Cloud repository: ${diagnosticValue(result.cloudUrl)}`
+            : "Open the repository in Codex Security Cloud.",
+        ]),
+    "",
+  ].join("\n");
 }
 
 function renderPublicationSummary(
@@ -1100,6 +1141,7 @@ interface SkillRunOptions {
   findings?: readonly Finding[];
   findingInstructions?: Readonly<Record<string, string>>;
   validationPrompt?: string;
+  verificationMode?: z.infer<typeof VerificationModeSchema>;
   verificationIds?: readonly string[];
   onEvent?: (event: Readonly<Record<string, unknown>>) => void;
   provider?: string;
@@ -1153,6 +1195,7 @@ interface CliDependencies {
   scanInput?: ConstructorParameters<typeof ScanDashboard>[1]["input"];
   publishPrompt?: Pick<BulkScanPrompt, "isInteractive" | "select"> &
     Partial<Pick<BulkScanPrompt, "checkbox">>;
+  externalPublicationPrompt?: Pick<BulkScanPrompt, "isInteractive" | "confirm">;
   checkScanPublication?: typeof checkScanPublication;
   publishScan?: typeof publishScan;
   deduplicateScan?: typeof deduplicateScanInternal;
@@ -2004,12 +2047,20 @@ export async function main(
   errorOutput: Writable = process.stderr,
   dependencies: CliDependencies = DEFAULT_DEPENDENCIES,
 ): Promise<number> {
+  const remediationOperation =
+    argv[0] === "patch"
+      ? "patch"
+      : argv[0] === "verify-fix"
+        ? "verify"
+        : undefined;
+  const hostedCommand =
+    argv[0] === "scan" || remediationOperation !== undefined;
   if (
     (((argv[0] === "dedupe" ||
       argv[0] === "validate" ||
       argv[0] === "classify-severity") &&
       argv.includes("--records")) ||
-      (argv[0] === "scan" &&
+      (hostedCommand &&
         argv.some((arg) => arg === "--host" || arg.startsWith("--host=")))) &&
     !argv.includes("--help") &&
     !argv.includes("-h") &&
@@ -2034,13 +2085,10 @@ export async function main(
         );
         return 2;
       }
-    } else if (
-      argv.length !== 2 ||
-      (argv[0] === "scan" && argv[1] !== "--host")
-    ) {
+    } else if (argv.length !== 2 || (hostedCommand && argv[1] !== "--host")) {
       errorOutput.write(
-        argv[0] === "scan"
-          ? "codex-security: --host must be used alone with scan.\n"
+        hostedCommand
+          ? `codex-security: --host must be used alone with ${argv[0]}.\n`
           : `codex-security: --records must be used alone with ${argv[0]}.\n`,
       );
       return 2;
@@ -2067,11 +2115,18 @@ export async function main(
                 }),
               controller.signal,
             )
-          : await runProtocol(
-              dependencies.recordsInput ?? process.stdin,
-              output,
-              controller.signal,
-            );
+          : remediationOperation !== undefined
+            ? await runHostedRemediationProtocol(
+                dependencies.recordsInput ?? process.stdin,
+                output,
+                controller.signal,
+                remediationOperation,
+              )
+            : await runProtocol(
+                dependencies.recordsInput ?? process.stdin,
+                output,
+                controller.signal,
+              );
       exitCode =
         controller.signal.reason === "SIGINT"
           ? 130
@@ -2094,7 +2149,7 @@ export async function main(
   let renderedOutput: string | undefined;
   let structuredError = false;
   let failedResultOutput:
-    { format: "json" | "jsonl"; message: string } | undefined;
+    { format: "json" | "jsonl"; code?: string; message: string } | undefined;
   let filteredScanFailure:
     { format: string; data: Record<string, unknown> } | undefined;
   const finishScan = (
@@ -3554,6 +3609,204 @@ export async function main(
           return cloudBatch;
         } finally {
           removeSignalListeners();
+        }
+      });
+    },
+  });
+  publication.command("findings", {
+    description:
+      "Preview and import selected Wiz repository findings to Cloud.",
+    hint: "Supply a package vulnerability JSON report, named SAST/repository-secret/IaC JSON collections with repository metadata, or normalized JSONL. Gzip is supported; CSV, scan events, workload secrets, and cloud configuration exports are not. --full-output requires --format json or --format jsonl.\nExample: codex-security publish findings selected-wiz.json --to cloud --repository https://github.com/example/project --provider wiz --source-key TENANT_ID/vulnerability-finding --dry-run --format json",
+    destructive: true,
+    mcp: false,
+    args: z.object({
+      file: z
+        .string()
+        .describe(
+          "Saved Wiz finding collections, package vulnerability JSON, or normalized JSONL.",
+        ),
+    }),
+    options: z.object({
+      to: z.literal("cloud").describe("Publication destination."),
+      repository: optionValue("--repository").describe(
+        "Authorized Cloud repository ID or repository URL copied from Cloud.",
+      ),
+      provider: z
+        .literal("wiz")
+        .describe("Vendor that produced these findings."),
+      sourceKey: optionValue("--source-key").describe(
+        "Stable vendor tenant and finding namespace; not a project selection filter.",
+      ),
+      dryRun: z
+        .boolean()
+        .default(false)
+        .describe(
+          "Read and preview the destination and findings without uploading.",
+        ),
+      yes: z
+        .boolean()
+        .default(false)
+        .describe(
+          "Confirm publication of the previewed input without a terminal prompt.",
+        ),
+    }),
+    output: z.record(z.string(), z.unknown()).optional(),
+    async run({ args, options, format, formatExplicit, error: incurError }) {
+      return await withTerminalErrorsHandled(errorOutput, async () => {
+        const writeDiagnostic = (message: string): void =>
+          notify(() => errorOutput.write(message));
+        if (
+          argv.includes("--full-output") &&
+          format !== "json" &&
+          format !== "jsonl"
+        ) {
+          structuredError = true;
+          exitCode = 2;
+          return incurError({
+            code: "INVALID_ARGUMENTS",
+            message:
+              "Finding imports support --full-output with --format json or --format jsonl. Choose one of those formats or omit --full-output.",
+            exitCode,
+          });
+        }
+        const controller = new AbortController();
+        const removeSignals = listenForAbort(dependencies, controller);
+        const structured = formatExplicit && format !== "toon";
+        const humanSummary =
+          format === "toon" &&
+          !formatExplicit &&
+          !argv.some((argument) => OUTPUT_OPTION.test(argument));
+        let lastProgress = "";
+        const onProgress = (event: ExternalPublicationProgress) => {
+          if (errorOutput.isTTY !== true) return;
+          const step = event.total
+            ? Math.floor((event.completed * 10) / event.total)
+            : 0;
+          const key = `${event.phase}:${step}`;
+          if (key === lastProgress) return;
+          lastProgress = key;
+          const labels = {
+            reading: "Reading selected findings",
+            discovering: "Checking Cloud account and repository",
+            preparing: "Preparing findings",
+            waiting: "Waiting for publication access",
+            uploading: "Acknowledged findings",
+            verifying: "Verifying source records",
+          };
+          writeDiagnostic(
+            `${labels[event.phase]}${event.total === undefined ? "..." : `: ${event.completed}/${event.total}`}\n`,
+          );
+        };
+        try {
+          const prepared = await prepareExternalPublication(
+            resolveCliPath(dependencies.currentDirectory(), args.file),
+            options,
+            {
+              environment: dependencies.environment,
+              fetch: dependencies.cloudFetch,
+              signal: controller.signal,
+              onProgress,
+            },
+          );
+          const { preview } = prepared;
+          const showPreview = () => {
+            writeDiagnostic(
+              `Cloud API: ${diagnosticValue(preview.cloudApiUrl)}\nAccount: ${diagnosticValue(preview.accountId)}\nDestination: ${diagnosticValue(preview.destination.url)} (${diagnosticValue(preview.destination.id)})\nEnvironment: ${[...new Set(preview.requests.map((request) => request.repository.environment_id))].map(diagnosticValue).join(", ")}\nSource: ${preview.source.provider} / ${diagnosticValue(preview.source.source_key)}\nRead: ${preview.read}  Ready: ${preview.findings.length}  Excluded: ${preview.excluded.length}${preview.resumed ? "\nResuming the saved submission." : ""}\n`,
+            );
+            if (preview.cloudUrl)
+              writeDiagnostic(
+                `Cloud app: ${diagnosticValue(preview.cloudUrl)}\n`,
+              );
+            for (const excluded of preview.excluded)
+              writeDiagnostic(
+                `Excluded item ${excluded.position}: ${diagnosticValue(excluded.reason)}\n`,
+              );
+            writeDiagnostic(
+              `Evidence file: ${diagnosticValue(resolveCliPath(dependencies.currentDirectory(), args.file))}\nImported evidence remains not assessed by Codex.\n`,
+            );
+            const severities = new Map<string, number>();
+            for (const finding of preview.findings)
+              severities.set(
+                finding.evidence.severity,
+                (severities.get(finding.evidence.severity) ?? 0) + 1,
+              );
+            writeDiagnostic(
+              `Severities: ${[...severities].map(([severity, count]) => `${severity}: ${count}`).join("  ")}\n`,
+            );
+            for (const finding of preview.findings.slice(0, 5))
+              writeDiagnostic(
+                `  ${diagnosticValue(finding.source_finding_id)} [${finding.evidence.severity}] ${diagnosticValue(finding.evidence.title)}\n`,
+              );
+            if (preview.findings.length > 5)
+              writeDiagnostic(
+                `Showing 5 of ${preview.findings.length} findings.\n`,
+              );
+            writeDiagnostic(
+              "Use --dry-run --format json to inspect all normalized findings and the complete evidence before uploading.\n",
+            );
+          };
+          if (!structured) showPreview();
+          if (options.dryRun) {
+            if (humanSummary)
+              renderedOutput = "Dry run complete. No findings uploaded.\n";
+            return { ...preview, dryRun: true };
+          }
+          if (!options.yes) {
+            const prompt =
+              dependencies.externalPublicationPrompt ??
+              createTerminalPrompt(errorOutput);
+            if (!prompt.isInteractive())
+              throw new CodexSecurityError(
+                "Publication needs confirmation. Run --dry-run, review the results, then use --yes to approve this input.",
+              );
+            if (structured) showPreview();
+            if (
+              !(await prompt.confirm(
+                `Publish these ${preview.findings.length} findings${preview.excluded.length ? ` and skip ${preview.excluded.length} excluded records` : ""}?`,
+                false,
+                controller.signal,
+              ))
+            ) {
+              if (humanSummary) renderedOutput = "No findings published.\n";
+              return { published: false, preview };
+            }
+          }
+          const result = await prepared.publish();
+          if (result.status === "partial") exitCode = 1;
+          if (humanSummary)
+            renderedOutput = renderExternalPublicationSummary(result);
+          else if (!structured)
+            writeDiagnostic(renderExternalPublicationSummary(result));
+          return { ...result };
+        } catch (error) {
+          if (
+            argv.includes("--full-output") &&
+            (format === "json" || format === "jsonl")
+          )
+            failedResultOutput = {
+              format,
+              code: "IMPORT_FAILED",
+              message: diagnosticValue(error),
+            };
+          reportPublicationError(
+            diagnosticValue(error),
+            controller.signal.aborted ? controller.signal.reason : undefined,
+          );
+          if (error instanceof ExternalPublicationError) {
+            if (humanSummary)
+              renderedOutput = renderExternalPublicationSummary(error.result);
+            return { ...error.result };
+          }
+          const failure = { status: "failed", error: diagnosticValue(error) };
+          if (
+            (format === "json" || format === "jsonl") &&
+            !argv.includes("--full-output") &&
+            argv.some((argument) => /^--filter-output(?:=|$)/u.test(argument))
+          )
+            filteredScanFailure = { format, data: failure };
+          return structured ? failure : undefined;
+        } finally {
+          removeSignals();
         }
       });
     },
@@ -5363,6 +5616,13 @@ export async function main(
           .describe("Finding text, a file, or a saved finding identifier."),
       }),
       options: z.object({
+        host: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Run one hosted fix verification over JSON-RPC stdin/stdout; use alone.",
+          ),
+        verificationMode: VERIFICATION_MODE_OPTION,
         auth: SKILL_AUTH_OPTION,
         ...MODEL_OPTIONS.shape,
         scan: optionValue("--scan")
@@ -5400,6 +5660,8 @@ export async function main(
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ format, options }) {
         try {
+          if (options.host)
+            throw new CodexSecurityError("Use verify-fix --host alone.");
           const linear =
             options.linearIssue.length > 0 || !!options.linearProject;
           if (options.linearIssue.length > 0 && options.linearProject) {
@@ -5499,6 +5761,7 @@ export async function main(
                     : { findings: selected.findings }),
                   auth: options.auth,
                   verificationIds: identifiers,
+                  verificationMode: options.verificationMode,
                   environment,
                   onEvent: progress.observe.bind(progress),
                 },
@@ -5554,6 +5817,13 @@ export async function main(
           .describe("Issue text, a file, or a saved finding identifier."),
       }),
       options: z.object({
+        host: z
+          .boolean()
+          .default(false)
+          .describe(
+            "Run one hosted patch over JSON-RPC stdin/stdout; use alone.",
+          ),
+        verificationMode: VERIFICATION_MODE_OPTION,
         auth: SKILL_AUTH_OPTION,
         ...MODEL_OPTIONS.shape,
         externalSandbox: z
@@ -5618,6 +5888,8 @@ export async function main(
           files: [],
         };
         try {
+          if (options.host)
+            throw new CodexSecurityError("Use patch --host alone.");
           const linear =
             options.linearIssue.length > 0 || !!options.linearProject;
           if (options.resumePr !== undefined) {
@@ -5629,6 +5901,7 @@ export async function main(
               options.assessPatchRisk ||
               options.validationPromptFile !== undefined ||
               options.externalSandbox ||
+              options.verificationMode !== undefined ||
               linear ||
               options.linearFilter !== undefined ||
               options.linearApiKey !== undefined ||
@@ -5707,6 +5980,7 @@ export async function main(
                 auth: options.auth,
                 externalSandbox: options.externalSandbox,
                 validationPrompt,
+                verificationMode: options.verificationMode,
               },
             );
             exitCode = patchExitCode(patches);
@@ -5827,6 +6101,7 @@ export async function main(
               auth: options.auth,
               externalSandbox: options.externalSandbox,
               validationPrompt,
+              verificationMode: options.verificationMode,
             },
           );
           if (!jsonOutput) await writeCliOutput(output, report.text());
@@ -6646,7 +6921,7 @@ export async function main(
             ...envelope,
             ok: false,
             error: {
-              code: "SCAN_FAILED",
+              code: failedResultOutput.code ?? "SCAN_FAILED",
               message: failedResultOutput.message,
             },
           },
@@ -8089,6 +8364,7 @@ async function runSkill(
           verificationIds: options.verificationIds,
           findingInstructions: options.findingInstructions,
           validationInstructions: options.validationPrompt,
+          verificationMode: options.verificationMode,
         })
       : validate
         ? await standaloneValidationPrompt(plugin)
