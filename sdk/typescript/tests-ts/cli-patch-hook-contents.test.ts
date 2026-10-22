@@ -97,8 +97,8 @@ for (const mutate of [false, true])
       expect(outcome.exitCode, outcome.stderr).toBe(mutate ? 2 : 0);
       expect(effect).toBe(mutate ? null : "trusted\n");
       if (mutate) {
-        expect(outcome.stderr).toContain(
-          `Git hook changed during the patch: ${hook}`,
+        expect(outcome.stderr.replaceAll(sep, "/")).toContain(
+          `Git hook changed during the patch: ${hook}`.replaceAll(sep, "/"),
         );
         expect(boundaries).toBe(0);
         expect(git("rev-parse", "HEAD")).toBe(head);
