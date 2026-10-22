@@ -46,6 +46,41 @@ export async function resolveTrustedCodex(
   return null;
 }
 
+export function explicitCodexPath(
+  environment: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = process.platform,
+  originalCwd: string = process.cwd(),
+  architecture: NodeJS.Architecture = process.arch,
+): string | undefined {
+  const requested = environmentVariable(
+    environment,
+    "CODEX_CLI_PATH",
+    platform,
+  )?.trim();
+  const configured =
+    platform === "win32" && requested && isWindowsAppsPath(requested)
+      ? undefined
+      : requested && expandHomePath(requested, environment);
+  if (configured)
+    return isBareCommandName(configured)
+      ? undefined
+      : absoluteCodexPath(configured, platform, originalCwd);
+  const managedRoot =
+    platform === "win32"
+      ? environmentVariable(
+          environment,
+          "CODEX_MANAGED_PACKAGE_ROOT",
+          platform,
+        )?.trim()
+      : undefined;
+  return managedRoot
+    ? resolveWindowsPackageBinary(
+        absoluteCodexPath(managedRoot, platform, originalCwd),
+        architecture,
+      )
+    : undefined;
+}
+
 export async function snapshotNativeEnvironment(
   canonicalizeMissingHome?: (path: string) => Promise<string>,
   source: NodeJS.ProcessEnv = process.env,

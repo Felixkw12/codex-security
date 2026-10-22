@@ -155,7 +155,7 @@ function syntheticPermissionAppServer(parentPath) {
   const capture = (value) => {
     if (process.env.NATIVE_PROFILE_CAPTURE) fs.appendFileSync(process.env.NATIVE_PROFILE_CAPTURE, JSON.stringify(value) + "\\n");
   };
-  capture({ kind: "preflight", argv, modelProvider: config.model_provider, provider: config.model_providers?.[config.model_provider], cwd: process.cwd(), marker: process.env.NATIVE_PROFILE_MARKER,
+  capture({ kind: "preflight", executable: process.argv[1], argv, modelProvider: config.model_provider, provider: config.model_providers?.[config.model_provider], cwd: process.cwd(), marker: process.env.NATIVE_PROFILE_MARKER,
     codex: process.env.CODEX_API_KEY, openai: process.env.OPENAI_API_KEY,
     gitEnvironment: Object.fromEntries(["PATH", "CODEX_SECURITY_GIT", "GIT_SSH_COMMAND", "GIT_CONFIG_GLOBAL"].map(name => [name, process.env[name]])) });
   require("node:readline").createInterface({ input: process.stdin }).on("line", (line) => {
@@ -181,6 +181,7 @@ function input(id = "parent") {
       scanId: id,
       scanDir: join(tmpdir(), id),
       targetPath: fixtureRepository,
+      targetProtectionRoots: [fixtureRepository],
       userContext: "Review the boundary.",
     },
     threadId: "native-owner",
@@ -1826,8 +1827,68 @@ test("native saved scans retain settings, auth environment, permissions and iden
   }
 });
 
+async function writeNativeWorkerExecutable(executable, capture) {
+  await writeFile(
+    executable,
+    `#!${process.execPath}
+const fs = require("node:fs");
+${syntheticPermissionAppServer()}
+if (process.argv.includes("app-server")) servePermissionProfiles();
+else {
+  const { parse } = require(${JSON.stringify(createRequire(import.meta.url).resolve("smol-toml"))});
+  const argv = process.argv.slice(2);
+  const path = require("node:path");
+  const effective = parse(fs.readFileSync(path.join(process.env.CODEX_HOME, "config.toml"), "utf8"));
+  const merge = (target, value) => { for (const [key, child] of Object.entries(value)) target[key] = child && typeof child === "object" && !Array.isArray(child) ? merge(target[key] ?? {}, child) : child; return target; };
+  if (argv.includes("--profile")) merge(effective, parse(fs.readFileSync(path.join(process.env.CODEX_HOME, argv[argv.indexOf("--profile") + 1] + ".config.toml"), "utf8")));
+  for (let i = 0; i < argv.length; i++) if (["--config", "-c"].includes(argv[i])) merge(effective, parse(argv[++i]));
+  const provider = effective.model_providers?.[effective.model_provider];
+  fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify({ argv, path: process.env.PATH, codex: process.env.CODEX_API_KEY, openai: process.env.OPENAI_API_KEY, home: process.env.CODEX_HOME, state: process.env.CODEX_SECURITY_STATE_DIR, executable: process.argv[1], knowledge: process.env.CODEX_SECURITY_KNOWLEDGE_BASE,
+    modelProvider: effective.model_provider,
+    provider,
+    providerToken: provider && (provider.experimental_bearer_token ?? process.env[provider.env_key]),
+    providerHeaders: provider && {...provider.http_headers, ...Object.fromEntries(Object.entries(provider.env_http_headers ?? {}).map(([header, key]) => [header, process.env[key]]))},
+    literalCredentialInEnvironment: ["synthetic-provider-token", "synthetic-provider-header"].some(value => Object.values(process.env).includes(value)),
+  }));
+  console.log(JSON.stringify({ type: "thread.started", thread_id: "synthetic-merged-worker" }));
+  console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0 } }));
+}
+`,
+    { mode: 0o700 },
+  );
+}
+
+async function nativeWorkerSession(prepared, repository) {
+  const ambient = prepared.client.dependencies.ambientExecution;
+  const runtime = await prepareAmbientRuntime(ambient);
+  const source = prepareExecutionSource(ambient);
+  return {
+    runtime,
+    session: {
+      policy: "ordinary",
+      source,
+      runtime,
+      runtimeHome: runtime.codexHome,
+      effectiveConfig: ambient.configuration,
+      preflightConfig: {},
+      sessionConfig: scanRuntimeCodexConfig(
+        prepared.client.config.codexOverrides,
+        repository,
+        prepared.options.inheritedPermissions,
+      ),
+      inheritedPermissions: prepared.options.inheritedPermissions,
+      authentication: source.authentication,
+      approvalPolicy: "never",
+      python: process.execPath,
+      releaseCredentialHome: null,
+    },
+  };
+}
+
 for (const scenario of [
   "saved-uncapped",
+  "lexical-target-protection",
+  "legacy-explicit-executable",
   "current-uncapped",
   "both-finite",
   "saved-literal",
@@ -1867,12 +1928,20 @@ for (const scenario of [
       const executable = join(root, "codex");
       const capture = join(root, "worker.json");
       const preflights = join(root, "preflights.jsonl");
+      const lexicalTarget = [
+        "lexical-target-protection",
+        "legacy-explicit-executable",
+      ].includes(scenario);
+      const lexicalRepository = join(root, "lexical-repository");
+      const lexicalBin = join(lexicalRepository, "bin");
+      const decoyLaunch = join(root, "decoy-launched.jsonl");
       const externalProvider = scenario.startsWith("openrouter-")
         ? "openrouter"
         : scenario.startsWith("fireworks-")
           ? "fireworks"
           : undefined;
       const restore = captureEnvironment([
+        "PATH",
         "HOME",
         "USERPROFILE",
         "CODEX_SECURITY_KNOWLEDGE_BASE",
@@ -1895,34 +1964,21 @@ for (const scenario of [
           join(pluginRoot, ".codex-plugin/plugin.json"),
           JSON.stringify({ name: "codex-security", version: "0.0.0" }),
         );
-        await writeFile(
-          executable,
-          `#!${process.execPath}
-const fs = require("node:fs");
-${syntheticPermissionAppServer()}
-if (process.argv.includes("app-server")) servePermissionProfiles();
-else {
-  const { parse } = require(${JSON.stringify(createRequire(import.meta.url).resolve("smol-toml"))});
-  const argv = process.argv.slice(2);
-  const path = require("node:path");
-  const effective = parse(fs.readFileSync(path.join(process.env.CODEX_HOME, "config.toml"), "utf8"));
-  const merge = (target, value) => { for (const [key, child] of Object.entries(value)) target[key] = child && typeof child === "object" && !Array.isArray(child) ? merge(target[key] ?? {}, child) : child; return target; };
-  if (argv.includes("--profile")) merge(effective, parse(fs.readFileSync(path.join(process.env.CODEX_HOME, argv[argv.indexOf("--profile") + 1] + ".config.toml"), "utf8")));
-  for (let i = 0; i < argv.length; i++) if (["--config", "-c"].includes(argv[i])) merge(effective, parse(argv[++i]));
-  const provider = effective.model_providers?.[effective.model_provider];
-  fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify({ argv, codex: process.env.CODEX_API_KEY, openai: process.env.OPENAI_API_KEY, home: process.env.CODEX_HOME, state: process.env.CODEX_SECURITY_STATE_DIR, executable: process.argv[1], knowledge: process.env.CODEX_SECURITY_KNOWLEDGE_BASE,
-    modelProvider: effective.model_provider,
-    provider,
-    providerToken: provider && (provider.experimental_bearer_token ?? process.env[provider.env_key]),
-    providerHeaders: provider && {...provider.http_headers, ...Object.fromEntries(Object.entries(provider.env_http_headers ?? {}).map(([header, key]) => [header, process.env[key]]))},
-    literalCredentialInEnvironment: ["synthetic-provider-token", "synthetic-provider-header"].some(value => Object.values(process.env).includes(value)),
-  }));
-  console.log(JSON.stringify({ type: "thread.started", thread_id: "synthetic-merged-worker" }));
-  console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0 } }));
-}
-`,
-          { mode: 0o700 },
-        );
+        await writeNativeWorkerExecutable(executable, capture);
+        if (lexicalTarget) {
+          await writeFile(preflights, "");
+          await mkdir(lexicalBin, { recursive: true });
+          await mkdir(join(lexicalRepository, ".git"));
+          await symlink(repository, join(lexicalRepository, "selected"), "dir");
+          await writeFile(
+            join(lexicalBin, "codex"),
+            (await readFile(executable, "utf8")).replace(
+              'const fs = require("node:fs");',
+              `const fs = require("node:fs"); fs.appendFileSync(${JSON.stringify(decoyLaunch)}, JSON.stringify(process.argv.slice(2)) + "\\n");`,
+            ),
+            { mode: 0o700 },
+          );
+        }
         Object.assign(process.env, {
           CODEX_HOME: home,
           CODEX_CLI_PATH: executable,
@@ -1932,6 +1988,12 @@ else {
         delete process.env.OPENROUTER_API_KEY;
         delete process.env.FIREWORKS_API_KEY;
         delete process.env.NATIVE_PROFILE_CAPTURE;
+        if (lexicalTarget) {
+          process.env.PATH = [lexicalBin, root].join(delimiter);
+          process.env.NATIVE_PROFILE_CAPTURE = preflights;
+          if (scenario === "lexical-target-protection")
+            delete process.env.CODEX_CLI_PATH;
+        }
         if (externalProvider) {
           process.env.CODEX_API_KEY = "synthetic-competing-key";
           process.env.NATIVE_PROFILE_CAPTURE = preflights;
@@ -2010,6 +2072,7 @@ else {
         }
         const invokingEnvironment = Object.fromEntries(
           [
+            "PATH",
             "HOME",
             "USERPROFILE",
             "CODEX_HOME",
@@ -2075,6 +2138,12 @@ else {
             scan: {
               ...input().scan,
               targetPath: repository,
+              targetProtectionRoots:
+                scenario === "legacy-explicit-executable"
+                  ? undefined
+                  : lexicalTarget
+                    ? [lexicalRepository]
+                    : [repository],
               scanDir,
             },
             model: "explicit-current-model",
@@ -2132,6 +2201,18 @@ else {
             await assert.rejects(readFile(capture), { code: "ENOENT" });
             continue;
           }
+          if (scenario === "lexical-target-protection") {
+            const priorPreflights = await readFile(preflights, "utf8");
+            await assert.rejects(
+              prepareNativeScan({
+                ...request,
+                scan: { ...request.scan, targetProtectionRoots: undefined },
+              }),
+              /does not record its original target paths/u,
+            );
+            assert.equal(await readFile(preflights, "utf8"), priorPreflights);
+            await assert.rejects(readFile(decoyLaunch), { code: "ENOENT" });
+          }
           const prepared = await prepareNativeScan(request);
           if (scenario.endsWith("-knowledge")) {
             assert.deepEqual(
@@ -2151,29 +2232,11 @@ else {
           const knowledge = prepared.options.knowledgeBaseSnapshot
             ? await prepareKnowledgeBase(prepared.options.knowledgeBaseSnapshot)
             : undefined;
-          const ambient = prepared.client.dependencies.ambientExecution;
-          const runtime = await prepareAmbientRuntime(ambient);
+          const { runtime, session } = await nativeWorkerSession(
+            prepared,
+            repository,
+          );
           try {
-            const source = prepareExecutionSource(ambient);
-            const sessionConfig = scanRuntimeCodexConfig(
-              prepared.client.config.codexOverrides,
-              repository,
-              prepared.options.inheritedPermissions,
-            );
-            const session = {
-              policy: "ordinary",
-              source,
-              runtime,
-              runtimeHome: runtime.codexHome,
-              effectiveConfig: ambient.configuration,
-              preflightConfig: {},
-              sessionConfig,
-              inheritedPermissions: prepared.options.inheritedPermissions,
-              authentication: source.authentication,
-              approvalPolicy: "never",
-              python: process.execPath,
-              releaseCredentialHome: null,
-            };
             for (const role of ["discovery", "merge"]) {
               const worker =
                 role === "discovery"
@@ -2214,6 +2277,15 @@ else {
                   join(home, "state", "plugins", "codex-security"),
               );
               assert.equal(observed.executable, executable);
+              if (lexicalTarget) {
+                assert.equal(
+                  observed.path,
+                  scenario === "lexical-target-protection"
+                    ? root
+                    : [lexicalBin, root].join(delimiter),
+                );
+                await assert.rejects(readFile(decoyLaunch), { code: "ENOENT" });
+              }
               assert.equal(observed.openai, "synthetic-selected-key");
               assert.equal(
                 observed.codex,
@@ -2325,6 +2397,24 @@ else {
           }
         }
         assert.deepEqual(knowledgeMismatches, []);
+        if (lexicalTarget) {
+          const rows = (await readFile(preflights, "utf8"))
+            .trim()
+            .split("\n")
+            .map(JSON.parse)
+            .filter((row) => row.kind === "preflight");
+          assert.equal(rows.length, 4);
+          for (const row of rows) {
+            assert.equal(row.executable, executable);
+            assert.equal(
+              row.gitEnvironment.PATH,
+              scenario === "lexical-target-protection"
+                ? root
+                : [lexicalBin, root].join(delimiter),
+            );
+          }
+          await assert.rejects(readFile(decoyLaunch), { code: "ENOENT" });
+        }
         if (externalProvider) {
           const rows = (await readFile(preflights, "utf8"))
             .trim()
@@ -2357,6 +2447,208 @@ else {
     },
   );
 }
+
+test(
+  "native lexical target protection stays isolated across concurrent worker launches",
+  {
+    skip:
+      process.platform === "win32"
+        ? "Synthetic executable uses a POSIX shebang."
+        : false,
+  },
+  async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "native-concurrent-targets-")),
+    );
+    const restore = captureEnvironment([
+      "PATH",
+      "CODEX_HOME",
+      "CODEX_CLI_PATH",
+      "CODEX_API_KEY",
+      "OPENAI_API_KEY",
+      "NATIVE_PROFILE_CAPTURE",
+      "NATIVE_PROFILE_MARKER",
+      "CODEX_SECURITY_KNOWLEDGE_BASE",
+      "CODEX_SECURITY_CONFIG_PATH",
+      "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+      "CODEX_SECURITY_STATE_DIR",
+    ]);
+    const fixtures = [];
+    try {
+      const pluginRoot = join(root, "plugin");
+      await mkdir(join(pluginRoot, ".codex-plugin"), { recursive: true });
+      await writeFile(
+        join(pluginRoot, ".codex-plugin/plugin.json"),
+        JSON.stringify({ name: "codex-security", version: "0.0.0" }),
+      );
+      for (const id of ["a", "b"]) {
+        const fixture = {
+          id,
+          repository: join(root, `target-${id}`),
+          lexicalRepository: join(root, `repository-${id}`),
+          home: join(root, `home-${id}`),
+          toolBin: join(root, `tools-${id}`),
+          scanDir: join(root, `scan-${id}`),
+          capture: join(root, `worker-${id}.json`),
+          preflights: join(root, `preflights-${id}.jsonl`),
+          decoyLaunch: join(root, `decoy-${id}.jsonl`),
+        };
+        fixture.lexicalBin = join(fixture.lexicalRepository, "bin");
+        fixture.executable = join(fixture.toolBin, "codex");
+        await Promise.all([
+          mkdir(fixture.repository),
+          mkdir(fixture.lexicalBin, { recursive: true }),
+          mkdir(fixture.home, { mode: 0o700 }),
+          mkdir(fixture.toolBin),
+          mkdir(fixture.scanDir, { mode: 0o700 }),
+        ]);
+        await mkdir(join(fixture.lexicalRepository, ".git"));
+        await symlink(
+          fixture.repository,
+          join(fixture.lexicalRepository, "selected"),
+          "dir",
+        );
+        await writeFile(
+          join(fixture.home, "config.toml"),
+          'model_provider="openai"\n[model_providers.openai]\nenv_key="OPENAI_API_KEY"\nrequires_openai_auth=true\n',
+        );
+        await writeNativeWorkerExecutable(fixture.executable, fixture.capture);
+        await writeFile(
+          join(fixture.lexicalBin, "codex"),
+          (await readFile(fixture.executable, "utf8")).replace(
+            'const fs = require("node:fs");',
+            `const fs = require("node:fs"); fs.appendFileSync(${JSON.stringify(fixture.decoyLaunch)}, JSON.stringify(process.argv.slice(2)) + "\\n");`,
+          ),
+          { mode: 0o700 },
+        );
+        fixtures.push(fixture);
+      }
+      for (const key of [
+        "CODEX_CLI_PATH",
+        "CODEX_API_KEY",
+        "CODEX_SECURITY_KNOWLEDGE_BASE",
+        "CODEX_SECURITY_CONFIG_PATH",
+        "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+        "CODEX_SECURITY_STATE_DIR",
+      ])
+        delete process.env[key];
+      const pending = fixtures.map((fixture, index) => {
+        const other = fixtures[1 - index];
+        fixture.path = [
+          fixture.lexicalBin,
+          fixture.toolBin,
+          other.lexicalBin,
+          other.toolBin,
+        ].join(delimiter);
+        fixture.expectedPath = [
+          fixture.toolBin,
+          other.lexicalBin,
+          other.toolBin,
+        ].join(delimiter);
+        Object.assign(process.env, {
+          PATH: fixture.path,
+          CODEX_HOME: fixture.home,
+          OPENAI_API_KEY: `synthetic-key-${fixture.id}`,
+          NATIVE_PROFILE_CAPTURE: fixture.preflights,
+          NATIVE_PROFILE_MARKER: fixture.id,
+        });
+        return prepareNativeScan({
+          ...input(`synthetic-${fixture.id}`),
+          pluginRoot,
+          model: `synthetic-model-${fixture.id}`,
+          scan: {
+            ...input(`synthetic-${fixture.id}`).scan,
+            targetPath: fixture.repository,
+            targetProtectionRoots: [fixture.lexicalRepository],
+            scanDir: fixture.scanDir,
+          },
+          recipe: { auth: "api-key" },
+        });
+      });
+      const prepared = await Promise.all(pending);
+      await Promise.all(
+        fixtures.map(async (fixture, index) => {
+          const { runtime, session } = await nativeWorkerSession(
+            prepared[index],
+            fixture.repository,
+          );
+          try {
+            for (const resumed of [false, true]) {
+              for (const role of ["discovery", "merge"]) {
+                const worker =
+                  role === "discovery"
+                    ? prepareDiscoveryExecution(session)
+                    : prepareMergeExecution(session, 2);
+                const { codex } = await createExecutionCodex(
+                  { surface: "sdk", command: "scan" },
+                  worker,
+                );
+                const options = {
+                  workingDirectory: fixture.repository,
+                  skipGitRepoCheck: true,
+                  approvalPolicy: "never",
+                };
+                const thread = resumed
+                  ? codex.resumeThread("synthetic-merged-worker", options)
+                  : codex.startThread(options);
+                const events = await collectNativeEvents(
+                  thread,
+                  "Synthetic isolated worker settings.",
+                  {},
+                );
+                assert.equal(events.at(-1).type, "turn.completed");
+                const observed = JSON.parse(
+                  await readFile(fixture.capture, "utf8"),
+                );
+                assert.equal(observed.executable, fixture.executable);
+                assert.equal(observed.path, fixture.expectedPath);
+                assert.equal(observed.home, fixture.home);
+                assert.equal(observed.openai, `synthetic-key-${fixture.id}`);
+                assert.equal(observed.argv.includes("resume"), resumed);
+                assert.ok(
+                  observed.argv.includes(
+                    `model="synthetic-model-${fixture.id}"`,
+                  ),
+                );
+                assert.equal(
+                  observed.state,
+                  join(fixture.home, "state", "plugins", "codex-security"),
+                );
+                await assert.rejects(readFile(fixture.decoyLaunch), {
+                  code: "ENOENT",
+                });
+              }
+            }
+            const preflights = (await readFile(fixture.preflights, "utf8"))
+              .trim()
+              .split("\n")
+              .map(JSON.parse)
+              .filter((row) => row.kind === "preflight");
+            assert.equal(preflights.length, 4);
+            for (const observed of preflights) {
+              assert.equal(observed.executable, fixture.executable);
+              assert.equal(observed.gitEnvironment.PATH, fixture.expectedPath);
+              assert.equal(observed.marker, fixture.id);
+              assert.equal(observed.openai, `synthetic-key-${fixture.id}`);
+            }
+          } finally {
+            await rm(runtime.bootstrapWorkspace, {
+              recursive: true,
+              force: true,
+            });
+          }
+        }),
+      );
+      assert.equal(process.env.PATH, fixtures[1].path);
+      assert.equal(process.env.CODEX_HOME, fixtures[1].home);
+      assert.equal(process.env.OPENAI_API_KEY, "synthetic-key-b");
+      assert.equal(process.env.NATIVE_PROFILE_MARKER, "b");
+    } finally {
+      restore();
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
 
 test(
   "native preflight rejects executables from fresh and saved knowledge sources",
@@ -2680,7 +2972,7 @@ test("sealed native publication defers executable selection while retaining ambi
     delete process.env.CODEX_SECURITY_KNOWLEDGE_BASE;
     const request = {
       ...input(),
-      scan: { ...input().scan, scanDir },
+      scan: { ...input().scan, scanDir, targetProtectionRoots: undefined },
       recipe: {
         auth: "api-key",
         config: { model: "synthetic-saved" },

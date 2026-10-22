@@ -21,7 +21,10 @@ import {
   type DeepScanOptions,
 } from "../../../../sdk/typescript/src/scan-settings.js";
 import { configuredCodexHome } from "../../../../sdk/typescript/src/auth.js";
-import { gitMarkerRoot } from "../../../../sdk/typescript/src/targets.js";
+import {
+  gitMarkerRoot,
+  gitProtectionRoots,
+} from "../../../../sdk/typescript/src/targets.js";
 import { CodexSecurityError } from "../../../../sdk/typescript/src/errors.js";
 import { resolveDeepScanConfig } from "../../../../sdk/typescript/src/deep-config.js";
 import {
@@ -32,6 +35,7 @@ import type { ScanResult } from "../../../../sdk/typescript/src/result.js";
 import {
   resolveCodexPath,
   resolveTrustedCodex,
+  explicitCodexPath,
   snapshotNativeEnvironment,
 } from "./native-executable.js";
 import type { NativeParentSandbox } from "./native-permissions.js";
@@ -155,11 +159,21 @@ export async function prepareNativeScan(
       throw new CodexSecurityError(
         "The native scan was prepared for sealed-result publication only. Rejoin the scan to resume execution.",
       );
+    const explicit = input.scan.targetProtectionRoots?.length
+      ? undefined
+      : explicitCodexPath(environment, process.platform, originalCwd);
+    if (!input.scan.targetProtectionRoots?.length && explicit === undefined)
+      throw new CodexSecurityError(
+        "This saved scan does not record its original target paths. Rejoin Deep Scan using the original targetPath before discovering Codex on PATH.",
+      );
     const codex = await resolveTrustedCodex(
-      environment,
+      explicit === undefined
+        ? environment
+        : { ...environment, CODEX_CLI_PATH: explicit },
       [
-        (await gitMarkerRoot(input.scan.targetPath, signal, "outermost")) ??
-          input.scan.targetPath,
+        input.scan.targetPath,
+        ...(input.scan.targetProtectionRoots ?? []),
+        ...(await gitProtectionRoots(input.scan.targetPath, signal)),
         ...(knowledgeBaseSnapshot?.protectedRoots ??
           (await Promise.all(
             (knowledgeBaseSnapshot?.sources ?? []).map(

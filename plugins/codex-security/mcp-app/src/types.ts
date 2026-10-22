@@ -38,6 +38,7 @@ export interface ScanResults {
   scope?: string;
   severityCounts?: Record<string, number>;
   targetPath: string;
+  targetProtectionRoots?: string[];
   targetRevision?: string;
   targetSummary?: string | null;
   updatedAt?: string;

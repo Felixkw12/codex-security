@@ -94,6 +94,7 @@ EXPECTED_MIGRATIONS = [
     (53, "store external source findings without assessments"),
     (54, "persist composition child membership"),
     (55, "reuse scan severity assessments"),
+    (56, "persist scan target executable protection"),
 ]
 
 

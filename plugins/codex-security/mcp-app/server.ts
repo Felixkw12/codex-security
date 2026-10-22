@@ -288,7 +288,7 @@ const startDeepScanSchema = {
   targetPath: pathSchema
     .optional()
     .describe(
-      "Resolved local target path for a first terminal or headless Deep Scan call.",
+      "Original local target path to start or rejoin a Deep Scan in its owning conversation. Preserve the requested path spelling when it includes symlinks.",
     ),
   scope: pathSchema
     .optional()
@@ -917,7 +917,7 @@ export function createCodexSecurityServer(): McpServer {
     {
       title: "Start or Join Codex Security Deep Scan",
       description:
-        "Run or rejoin independent Standard security scans and semantically merge their validated findings. Pass scanId and its handoffClaimToken to resume, or targetPath to start headlessly. The call blocks until the aggregate is complete, fails, or is canceled. On success, use the returned scanId and scanDir; manifestPath identifies the sealed parent scan-manifest.json and reportPath identifies the generated report.md. Follow the returned instructions.",
+        "Run or rejoin independent Standard security scans and semantically merge their validated findings. Pass scanId and its handoffClaimToken to resume, or targetPath to start or rejoin headlessly. If a saved scan lacks its original target paths, rejoin with the original targetPath before discovering Codex on PATH. The call blocks until the aggregate is complete, fails, or is canceled. On success, use the returned scanId and scanDir; manifestPath identifies the sealed parent scan-manifest.json and reportPath identifies the generated report.md. Follow the returned instructions.",
       inputSchema: startDeepScanSchema,
       annotations: writingAnnotations,
       _meta: modelActionMeta,
@@ -931,7 +931,7 @@ export function createCodexSecurityServer(): McpServer {
       const normalizedUserContext = userContext || undefined;
       if (hasScanId === hasTarget) {
         return toolErrorResult(
-          "Pass exactly one Deep Scan identity: either scanId, or targetPath for a first terminal/headless call.",
+          "Pass exactly one Deep Scan identity: either scanId, or targetPath to start or rejoin headlessly.",
         );
       }
       if (

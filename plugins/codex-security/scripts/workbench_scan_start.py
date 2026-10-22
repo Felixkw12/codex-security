@@ -249,6 +249,58 @@ def archive_scan(
         raise
 
 
+def workspace_target_protection_json(
+    workspace: sqlite3.Row, target_path: str, roots: list[str]
+) -> str:
+    if (
+        workspace["target_path"] == target_path
+        and workspace["target_protection_roots_json"] is not None
+    ):
+        roots = list(
+            dict.fromkeys([*json.loads(workspace["target_protection_roots_json"]), *roots])
+        )
+    return json.dumps(roots)
+
+
+def stored_scan_target_fields(scan: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "mode": scan["mode"],
+        "diffTarget": stored_diff_target(scan),
+        "scope": scan["scope"],
+        "targetPath": scan["target_path"],
+        **(
+            {"targetProtectionRoots": json.loads(scan["target_protection_roots_json"])}
+            if scan["target_protection_roots_json"] is not None
+            else {}
+        ),
+        "targetRevision": scan["target_revision"],
+        "targetSummary": scan["target_summary"],
+    }
+
+
+def extend_scan_target_protection(
+    connection: sqlite3.Connection, scan: sqlite3.Row, roots: list[str]
+) -> None:
+    workspace = connection.execute(
+        "SELECT target_protection_roots_json FROM workspaces WHERE id = ?",
+        (scan["workspace_id"],),
+    ).fetchone()
+    scan_roots = list(
+        dict.fromkeys([*json.loads(scan["target_protection_roots_json"] or "[]"), *roots])
+    )
+    workspace_roots = list(
+        dict.fromkeys([*json.loads(workspace["target_protection_roots_json"] or "[]"), *scan_roots])
+    )
+    connection.execute(
+        "UPDATE scans SET target_protection_roots_json = ? WHERE id = ?",
+        (json.dumps(scan_roots), scan["id"]),
+    )
+    connection.execute(
+        "UPDATE workspaces SET target_protection_roots_json = ? WHERE id = ?",
+        (json.dumps(workspace_roots), scan["workspace_id"]),
+    )
+
+
 def insert_running_scan(
     connection: sqlite3.Connection,
     *,
@@ -283,10 +335,11 @@ def insert_running_scan(
         INSERT INTO scans (
             id, workspace_id, target_id, target_path, target_revision, target_snapshot_digest,
             target_device, target_inode, source_scopes_json, scope, mode, user_context,
+            target_protection_roots_json,
             deep_scan_owner_thread_id, diff_target_kind, diff_base_revision,
             diff_head_revision, diff_content_digest, target_summary, scan_dir, model,
             reasoning_effort, status, phase, handoff_status, started_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             'running', 'preflight', ?, ?, ?, ?)
         """,
         (
@@ -299,6 +352,7 @@ def insert_running_scan(
             scope,
             workspace["default_mode"],
             user_context,
+            workspace["target_protection_roots_json"],
             workspace["thread_id"] if workspace["default_mode"] == "deep" else None,
             *scan_diff_identity(diff_target or None),
             target_summary,

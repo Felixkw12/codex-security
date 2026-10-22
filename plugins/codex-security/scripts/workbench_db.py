@@ -81,12 +81,15 @@ from workbench_finding_workflows import finding_workflow, register_workflow_scan
 from workbench_local_dedupe import local_dedupe
 from workbench_scan_start import (
     archive_scan,
+    extend_scan_target_protection,
     insert_running_scan,
     require_deep_pass_target,
     safe_segment,
     scan_diff_identity,
     scan_target_identity,
     stored_diff_target,
+    stored_scan_target_fields,
+    workspace_target_protection_json,
 )
 from workbench_schema import (
     MIGRATIONS,
@@ -122,6 +125,7 @@ from workbench_target import (
     require_scan_target_identity,
     restore_directory_junctions,
     scan_target_warning,
+    target_protection_roots,
     worktree_content_digest,
     worktree_content_digest_for_context,
 )
@@ -617,8 +621,11 @@ def create_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -
     diff_content_digest = (
         optional_text(args.diff_content_digest, maximum=128) if args.mode == "diff" else None
     )
+    roots = None
     if target_path:
         try:
+            roots = target_protection_roots(target_path)
+            target_path = str(require_target(target_path))
             inspected = inspect_setup_values(
                 target_path,
                 default_scope,
@@ -646,10 +653,10 @@ def create_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -
             """
             INSERT INTO workspaces (
                 id, thread_id, target_id, target_path, target_title, target_summary,
-                default_scope, default_mode,
+                target_protection_roots_json, default_scope, default_mode,
                 user_context, diff_target_kind, diff_base_revision, diff_head_revision,
                 diff_content_digest, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 workspace_id,
@@ -658,6 +665,7 @@ def create_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -
                 target_path,
                 optional_text(args.target_title, maximum=200),
                 optional_text(args.target_summary, maximum=2400),
+                json.dumps(roots) if roots is not None else None,
                 default_scope,
                 args.mode,
                 user_context_argument(args),
@@ -676,6 +684,7 @@ def save_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -> 
     workspace = require_workspace(connection, args.workspace_id)
     if workspace["active_scan_id"]:
         raise SystemExit("This workspace already has a scan. Open a new workspace to change setup.")
+    roots = target_protection_roots(args.target_path)
     inspected = inspect_setup_values(
         args.target_path,
         args.scope,
@@ -707,7 +716,7 @@ def save_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -> 
             """
             UPDATE workspaces
             SET target_id = ?, target_path = ?, target_title = ?, target_summary = ?, default_scope = ?,
-                default_mode = ?, user_context = ?, diff_target_kind = ?,
+                target_protection_roots_json = ?, default_mode = ?, user_context = ?, diff_target_kind = ?,
                 diff_base_revision = ?, diff_head_revision = ?, diff_content_digest = ?,
                 submitted = 1, updated_at = ?
             WHERE id = ? AND active_scan_id IS NULL
@@ -718,6 +727,7 @@ def save_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -> 
                 target_title,
                 target_summary,
                 scope,
+                workspace_target_protection_json(workspace, target_path, roots),
                 args.mode,
                 user_context_argument(args),
                 *scan_diff_identity(diff_target or None),
@@ -901,6 +911,7 @@ def _start_prompt_driven_scan(
     thread_id = optional_text(args.thread_id, maximum=512)
     if thread_id is None:
         raise SystemExit("thread-id is required.")
+    roots = target_protection_roots(args.target_path)
     inspected = inspect_setup_values(
         args.target_path,
         args.scope,
@@ -967,6 +978,7 @@ def _start_prompt_driven_scan(
                     connection, thread_id, target_path, scope
                 )
                 if existing is not None:
+                    extend_scan_target_protection(connection, existing, roots)
                     connection.commit()
                     return _join_deep_scan(
                         connection,
@@ -1020,6 +1032,7 @@ def _start_prompt_driven_scan(
                 ),
             ).fetchone()
             if existing is not None:
+                extend_scan_target_protection(connection, existing, roots)
                 connection.commit()
                 if args.mode == "deep":
                     return _join_deep_scan(
@@ -1038,9 +1051,9 @@ def _start_prompt_driven_scan(
                 """
                 INSERT INTO workspaces (
                     id, thread_id, target_id, target_path, target_title, target_summary, default_scope,
-                    default_mode, user_context, diff_target_kind, diff_base_revision,
+                    target_protection_roots_json, default_mode, user_context, diff_target_kind, diff_base_revision,
                     diff_head_revision, diff_content_digest, submitted, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
                 """,
                 (
                     workspace_id,
@@ -1050,6 +1063,7 @@ def _start_prompt_driven_scan(
                     target.name,
                     target_summary,
                     scope,
+                    json.dumps(roots),
                     args.mode,
                     user_context,
                     *diff_identity,
@@ -2849,9 +2863,7 @@ def scan_result(
         "handoffClaimedAt": scan["handoff_claimed_at"],
         "handoffClaimToken": scan["handoff_claim_token"],
         "handoffStatus": scan["handoff_status"],
-        "mode": scan["mode"],
         "model": scan["model"],
-        "diffTarget": stored_diff_target(scan),
         "name": scan["name"],
         "progress": progress_result,
         "reasoningEffort": scan["reasoning_effort"],
@@ -2863,10 +2875,7 @@ def scan_result(
         ),
         "scanDir": scan["scan_dir"],
         "scanId": scan["id"],
-        "scope": scan["scope"],
-        "targetPath": scan["target_path"],
-        "targetRevision": scan["target_revision"],
-        "targetSummary": scan["target_summary"],
+        **stored_scan_target_fields(scan),
         "updatedAt": max(
             scan["updated_at"],
             progress["updated_at"],

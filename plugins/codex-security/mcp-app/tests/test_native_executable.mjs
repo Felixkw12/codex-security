@@ -23,10 +23,14 @@ const bundle = await build({
   platform: "node",
   write: false,
 });
-const { resolveCodexPath, resolveTrustedCodex, snapshotNativeEnvironment } =
-  await import(
-    `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
-  );
+const {
+  explicitCodexPath,
+  resolveCodexPath,
+  resolveTrustedCodex,
+  snapshotNativeEnvironment,
+} = await import(
+  `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
+);
 const temporaryRoots = [];
 try {
   await testCodexHomePathsStayBoundToOriginalDirectory();
@@ -47,6 +51,23 @@ try {
     "C:\\Tools\\codex.exe",
   );
   const originalCwd = path.join(process.cwd(), "fixture-root");
+  assert.equal(explicitCodexPath({ PATH: originalCwd }, "linux"), undefined);
+  assert.equal(
+    explicitCodexPath({ CODEX_CLI_PATH: "codex" }, "linux"),
+    undefined,
+  );
+  assert.equal(
+    explicitCodexPath(
+      { CODEX_CLI_PATH: "fixture/codex" },
+      "linux",
+      originalCwd,
+    ),
+    path.join(originalCwd, "fixture/codex"),
+  );
+  assert.equal(
+    explicitCodexPath({ codex_cli_path: "C:\\Tools\\codex.exe" }, "win32"),
+    "C:\\Tools\\codex.exe",
+  );
   assert.equal(
     resolveCodexPath({ CODEX_CLI_PATH: "fixture/codex" }, "linux", originalCwd),
     path.join(originalCwd, "fixture/codex"),
@@ -86,6 +107,7 @@ async function testExplicitAndPathExecutables() {
       CODEX_CLI_PATH: configured,
     };
     assert.equal(resolveCodexPath(environment), selected);
+    assert.equal(explicitCodexPath(environment), selected);
     const trusted = await resolveTrustedCodex(environment, repository);
     assert.equal(await realpath(trusted.executable), await realpath(selected));
   }
@@ -154,6 +176,15 @@ async function testWindowsPackageExecutables(installation) {
     }
     const windowsApps = path.join(root, "WindowsApps", "codex.exe");
     for (const configured of [undefined, windowsApps]) {
+      assert.equal(
+        explicitCodexPath(
+          { ...environment, codex_cli_path: configured },
+          "win32",
+          root,
+          architecture,
+        ),
+        installation === "managed" ? binary : undefined,
+      );
       const fallback = await resolveTrustedCodex(
         { ...environment, codex_cli_path: configured },
         repository,
