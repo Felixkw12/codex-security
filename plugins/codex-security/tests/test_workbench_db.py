@@ -1415,7 +1415,14 @@ def assert_completed_scan_disables_remediation_after_checkout_path_is_replaced(
         str(uuid.uuid4()),
         check=False,
     )
-    assert "checkout path was replaced" in str(rejected["stderr"])
+    assert rejected["returncode"] != 0
+    assert "checkout owner" in str(rejected["stderr"])
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        attempts = connection.execute(
+            "SELECT COUNT(*) FROM finding_remediation_attempts WHERE occurrence_id = ?",
+            (occurrence_id,),
+        ).fetchone()
+    assert attempts == (0,)
 
 
 def test_completed_scan_disables_remediation_after_checkout_directory_is_replaced(
