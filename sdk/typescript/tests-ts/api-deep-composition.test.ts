@@ -510,6 +510,114 @@ test.each([
   },
 );
 
+test("native ChatGPT resume preserves a saved absent safety identifier", async () => {
+  const h = await fixture(undefined, true);
+  delete h.environment["OPENAI_API_KEY"];
+  delete h.environment["CODEX_API_KEY"];
+  delete h.environment["CODEX_SAFETY_IDENTIFIER"];
+  await writeFile(
+    join(h.home, "auth.json"),
+    JSON.stringify({
+      auth_mode: "chatgpt",
+      tokens: { access_token: "synthetic-stored-access-token" },
+    }),
+  );
+  h.stopAfterSealing("standard");
+  await using first = h.makeClient();
+  await expect(
+    first.run(h.repository, { ...h.options, workers: 1, auth: "chatgpt" }),
+  ).rejects.toBeInstanceOf(ScanTransportClosedError);
+  const [parentId, parent] = [...h.records].find(
+    ([, record]) => record.mode === "deep",
+  )!;
+  const commandOptions = { ...parent.options, signal: undefined };
+  const saved = await runWorkbench(commandOptions, [
+    "get-scan",
+    "--scan-id",
+    parentId,
+  ]);
+  const receipt = await runWorkbench(commandOptions, [
+    "get-scan-recipe",
+    "--scan-id",
+    parentId,
+  ]);
+  const recipe = receipt["recipe"] as JsonObject;
+  expect(recipe).not.toHaveProperty("safetyIdentifier");
+  h.environment["CODEX_SAFETY_IDENTIFIER"] = "later-ambient-identifier";
+  const nativeEnvironment = {
+    CODEX_HOME: h.home,
+    CODEX_CLI_PATH: process.execPath,
+    CODEX_API_KEY: undefined,
+    OPENAI_API_KEY: undefined,
+    CODEX_SAFETY_IDENTIFIER: h.environment["CODEX_SAFETY_IDENTIFIER"],
+    CODEX_SECURITY_CONFIG_PATH: undefined,
+    CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH: undefined,
+  };
+  const original = Object.keys(nativeEnvironment).map(
+    (key) => [key, process.env[key]] as const,
+  );
+  const { prepareNativeScan } = await import(
+    new URL(
+      "../../../plugins/codex-security/mcp-app/src/native-scan.ts",
+      import.meta.url,
+    ).href
+  );
+  const prepared = await (async () => {
+    try {
+      for (const [key, value] of Object.entries(nativeEnvironment)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      return await prepareNativeScan({
+        scan: saved["scan"],
+        recipe,
+        threadId: "native-owner",
+        pluginRoot,
+        pythonPath: Bun.which("python3")!,
+        stateDirectory: join(h.root, "state"),
+        parentSandbox: { filesystemDenies: [] },
+      });
+    } finally {
+      for (const [key, value] of original) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  })();
+  try {
+    const previousLaunches = h.launches.length;
+    const authentications: unknown[] = [];
+    await using resumed = h.makeClient();
+    const result = await resumed.run(h.repository, {
+      ...prepared.options,
+      onAuthentication(authentication) {
+        authentications.push(authentication);
+      },
+    });
+    expect(authentications).not.toHaveLength(0);
+    for (const authentication of authentications)
+      expect(authentication).toMatchObject({
+        method: "stored_credentials",
+        credentialType: "chatgpt",
+      });
+    expect(result.findings.findings).toHaveLength(2);
+    expect(prepared.options.safetyIdentifier).toBeUndefined();
+    const resumedLaunches = h.launches.slice(previousLaunches);
+    expect(
+      new Set(
+        resumedLaunches.map(
+          (launch) =>
+            h.records.get(launch.options.env!["CODEX_SECURITY_SCAN_ID"]!)!.mode,
+        ),
+      ),
+    ).toEqual(new Set(["standard", "deep"]));
+    for (const launch of resumedLaunches)
+      expect(launch.options.env).not.toHaveProperty("CODEX_SAFETY_IDENTIFIER");
+  } finally {
+    await prepared.client.close();
+  }
+});
+
 test("a reused client's sealed read uses its installed plugin after the source is removed", async () => {
   const h = await fixture();
   const source = join(h.root, "plugin-source");

@@ -1773,7 +1773,7 @@ test("native launches snapshot safety identifiers and prefer saved recipes", asy
     );
     const launches = [
       ["synthetic-fresh", undefined, "synthetic-fresh"],
-      ["synthetic-resumed", {}, "synthetic-resumed"],
+      ["synthetic-resumed", {}, undefined],
       [
         "synthetic-current",
         { safetyIdentifier: "synthetic-saved" },
@@ -1814,6 +1814,221 @@ test("native launches snapshot safety identifiers and prefer saved recipes", asy
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test(
+  "native safety identifiers stay isolated across concurrent fresh and saved worker launches",
+  {
+    skip:
+      process.platform === "win32"
+        ? "Synthetic executable uses a POSIX shebang."
+        : false,
+  },
+  async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "native-safety-workers-")),
+    );
+    const executable = join(root, "codex");
+    const pluginRoot = join(root, "plugin");
+    const restore = captureEnvironment([
+      "CODEX_HOME",
+      "CODEX_CLI_PATH",
+      "CODEX_API_KEY",
+      "OPENAI_API_KEY",
+      "CODEX_SECURITY_CONFIG_PATH",
+      "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+      "CODEX_SECURITY_STATE_DIR",
+      "CODEX_SAFETY_IDENTIFIER",
+      "NATIVE_PROFILE_CAPTURE",
+      "NATIVE_PROFILE_MARKER",
+    ]);
+    const cases = [
+      {
+        id: "fresh-identified",
+        ambient: "synthetic-fresh-attribution",
+        expected: "synthetic-fresh-attribution",
+      },
+      { id: "fresh-absent" },
+      {
+        id: "saved-absent",
+        ambient: "synthetic-later-absent",
+        recipe: { auth: "api-key" },
+      },
+      {
+        id: "saved-explicit",
+        ambient: "synthetic-later-explicit",
+        recipe: { auth: "api-key", safetyIdentifier: "synthetic-saved" },
+        expected: "synthetic-saved",
+      },
+    ].map((fixture) => ({
+      ...fixture,
+      home: join(root, fixture.id, "home"),
+      repository: join(root, fixture.id, "repository"),
+      scanDir: join(root, fixture.id, "scan"),
+      capture: join(root, `${fixture.id}.jsonl`),
+    }));
+    try {
+      await mkdir(join(pluginRoot, ".codex-plugin"), { recursive: true });
+      await writeFile(
+        join(pluginRoot, ".codex-plugin/plugin.json"),
+        JSON.stringify({ name: "codex-security", version: pluginVersion }),
+      );
+      await writeFile(
+        executable,
+        `#!${process.execPath}
+const fs = require("node:fs");
+${syntheticPermissionAppServer()}
+if (process.argv.includes("app-server")) servePermissionProfiles();
+else if (process.argv.includes("login")) console.error("Logged in using an API key");
+else {
+  fs.appendFileSync(process.env.NATIVE_PROFILE_CAPTURE, JSON.stringify({
+    kind: "exec", argv: process.argv.slice(2), home: process.env.CODEX_HOME,
+    marker: process.env.NATIVE_PROFILE_MARKER, safetyIdentifier: process.env.CODEX_SAFETY_IDENTIFIER,
+    codex: process.env.CODEX_API_KEY,
+  }) + "\\n");
+  console.log(JSON.stringify({ type: "thread.started", thread_id: "synthetic-safety-worker" }));
+  console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0 } }));
+}
+`,
+        { mode: 0o700 },
+      );
+      for (const fixture of cases) {
+        await mkdir(fixture.home, { recursive: true });
+        await mkdir(fixture.repository);
+        await writeFile(
+          join(fixture.home, "config.toml"),
+          'forced_login_method = "api"\n',
+        );
+      }
+      delete process.env.CODEX_API_KEY;
+      delete process.env.CODEX_SECURITY_CONFIG_PATH;
+      delete process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
+      delete process.env.NATIVE_PROFILE_CAPTURE;
+      delete process.env.NATIVE_PROFILE_MARKER;
+      const preparation = await Promise.allSettled(
+        cases.map((fixture) => {
+          Object.assign(process.env, {
+            CODEX_HOME: fixture.home,
+            CODEX_CLI_PATH: executable,
+            CODEX_SECURITY_STATE_DIR: join(root, fixture.id, "state"),
+            OPENAI_API_KEY: `synthetic-key-${fixture.id}`,
+          });
+          if (fixture.ambient === undefined)
+            delete process.env.CODEX_SAFETY_IDENTIFIER;
+          else process.env.CODEX_SAFETY_IDENTIFIER = fixture.ambient;
+          return prepareNativeExecution({
+            ...input(fixture.id),
+            pluginRoot,
+            scan: {
+              ...input(fixture.id).scan,
+              targetPath: fixture.repository,
+              scanDir: fixture.scanDir,
+            },
+            ...(fixture.recipe === undefined ? {} : { recipe: fixture.recipe }),
+          });
+        }),
+      );
+      const prepared = preparation.map((result) => {
+        if (result.status === "rejected") throw result.reason;
+        return result.value;
+      });
+      const results = await Promise.allSettled(
+        cases.map(async (fixture, index) => {
+          const native = prepared[index];
+          const ambient = native.client.dependencies.ambientExecution;
+          const runtime = await prepareAmbientRuntime(ambient);
+          try {
+            const source = prepareExecutionSource(ambient);
+            const session = {
+              policy: "ordinary",
+              source,
+              runtime,
+              runtimeHome: runtime.codexHome,
+              effectiveConfig: ambient.configuration,
+              preflightConfig: {},
+              sessionConfig: scanRuntimeCodexConfig(
+                native.client.config.codexOverrides,
+                fixture.repository,
+                native.options.inheritedPermissions,
+              ),
+              inheritedPermissions: native.options.inheritedPermissions,
+              safetyIdentifier: native.options.safetyIdentifier,
+              authentication: source.authentication,
+              approvalPolicy: "never",
+              python: process.execPath,
+              releaseCredentialHome: null,
+            };
+            for (const role of ["discovery", "merge"]) {
+              const worker =
+                role === "discovery"
+                  ? prepareDiscoveryExecution(session)
+                  : prepareMergeExecution(session, 2);
+              const { codex } = await createExecutionCodex(
+                { surface: "sdk", command: "scan" },
+                worker,
+                {
+                  NATIVE_PROFILE_CAPTURE: fixture.capture,
+                  NATIVE_PROFILE_MARKER: fixture.id,
+                },
+              );
+              for (const resumed of [false, true]) {
+                const options = {
+                  workingDirectory: fixture.repository,
+                  skipGitRepoCheck: true,
+                  approvalPolicy: "never",
+                };
+                const thread = resumed
+                  ? codex.resumeThread("synthetic-safety-worker", options)
+                  : codex.startThread(options);
+                const events = await collectNativeEvents(
+                  thread,
+                  "Synthetic attribution boundary check.",
+                  {},
+                );
+                assert.equal(events.at(-1).type, "turn.completed");
+              }
+            }
+            const observations = (await readFile(fixture.capture, "utf8"))
+              .trim()
+              .split("\n")
+              .map(JSON.parse)
+              .filter((row) => row.kind === "exec");
+            assert.equal(observations.length, 4);
+            assert.deepEqual(
+              observations.map((row) => row.argv.includes("resume")),
+              [false, true, false, true],
+            );
+            for (const observed of observations) {
+              assert.equal(
+                observed.safetyIdentifier,
+                fixture.expected,
+                fixture.id,
+              );
+              assert.equal(observed.marker, fixture.id);
+              assert.equal(observed.home, runtime.codexHome);
+              assert.equal(observed.codex, `synthetic-key-${fixture.id}`);
+            }
+          } finally {
+            await rm(runtime.bootstrapWorkspace, {
+              recursive: true,
+              force: true,
+            });
+          }
+        }),
+      );
+      for (const result of results)
+        if (result.status === "rejected") throw result.reason;
+      assert.equal(
+        process.env.CODEX_SAFETY_IDENTIFIER,
+        "synthetic-later-explicit",
+      );
+      assert.equal(process.env.CODEX_HOME, cases.at(-1).home);
+      assert.equal(process.env.OPENAI_API_KEY, "synthetic-key-saved-explicit");
+    } finally {
+      restore();
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
 
 test(
   "native discovery and merge workers inherit safe executable paths on fresh and resumed launches",

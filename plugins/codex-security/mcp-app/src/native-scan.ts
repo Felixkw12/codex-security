@@ -392,7 +392,9 @@ export async function prepareNativeScan(
             ? [input.scan.scope]
             : "repository",
       safetyIdentifier:
-        recipe?.safetyIdentifier ?? environment.CODEX_SAFETY_IDENTIFIER,
+        recipe === undefined
+          ? environment.CODEX_SAFETY_IDENTIFIER
+          : recipe.safetyIdentifier,
       registeredScan: {
         scanId: input.scan.scanId,
         scanDir: input.scan.scanDir,
