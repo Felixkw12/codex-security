@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, open, readdir, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, open, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
+import { partitionTests, type TestTimings } from "./test-shards.mts";
 
 const selection = /^([1-9]\d*)\/([1-9]\d*)$/.exec(process.argv[2] ?? "");
 const shard = Number(selection?.[1]);
@@ -18,9 +19,14 @@ const tests = (await readdir(new URL("../tests-ts/", import.meta.url)))
       file.endsWith(".test.ts") && file !== "windows-machine-policy.test.ts",
   )
   .sort();
-// Match Bun 1.3.14's sorted round-robin assignment for startup diagnostics.
-// https://github.com/oven-sh/bun/blob/bun-v1.3.14/src/cli/test_command.zig
-const selected = tests.filter((_, index) => index % count === shard - 1);
+// The checked-in snapshot keeps every job in this run on the same assignment.
+// Discovery remains authoritative, including files without timing history.
+const timings = JSON.parse(
+  await readFile(new URL("./test-timings.json", import.meta.url), "utf8"),
+) as TestTimings;
+const selected = partitionTests(tests, count, timings, process.platform)[
+  shard - 1
+]!;
 if (selected.length === 0) {
   throw new Error(`Test shard ${shard}/${count} is empty.`);
 }
@@ -34,13 +40,12 @@ await mkdir(new URL("../reports/", import.meta.url), { recursive: true }).catch(
 );
 const testArguments = [
   "test",
-  `--shard=${shard}/${count}`,
   "--timeout",
   defaultTestTimeoutMs,
   "--reporter=junit",
   `--reporter-outfile=reports/junit-${shard}.xml`,
   ...process.argv.slice(3),
-  ...tests.map((file) => `./tests-ts/${file}`),
+  ...selected.map((file) => `./tests-ts/${file}`),
 ];
 // Keep arities aligned with the pinned Bun's test_params:
 // https://github.com/oven-sh/bun/blob/bun-v1.3.14/src/cli/Arguments.zig
