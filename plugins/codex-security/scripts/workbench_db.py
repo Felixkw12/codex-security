@@ -3433,7 +3433,7 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
         print(json.dumps(result, allow_nan=False, sort_keys=True))
         return
     command_targets = tuple(
-        Path(value)
+        Path(value).expanduser()
         for field in ("target_path", "repository")
         if (value := getattr(args, field, None))
     )

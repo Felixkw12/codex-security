@@ -1562,8 +1562,13 @@ def test_workbench_commands_exclude_saved_checkout_git(
 
 @pytest.mark.skipif(os.name == "nt", reason="uses a POSIX executable shim")
 @pytest.mark.parametrize("migrate", [False, True])
+@pytest.mark.parametrize("spelling", ["absolute", "tilde"])
 def test_new_workspace_skips_git_in_its_unregistered_checkout(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workbench_api: dict[str, Any], migrate: bool
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    workbench_api: dict[str, Any],
+    migrate: bool,
+    spelling: str,
 ) -> None:
     host_git = shutil.which("git")
     assert host_git is not None
@@ -1607,6 +1612,11 @@ def test_new_workspace_skips_git_in_its_unregistered_checkout(
         WORKBENCH_HOST_GIT=host_git,
     )
     script = Path(__file__).resolve().parents[1] / "scripts" / "workbench_db.py"
+    requested_path = (
+        str(repository)
+        if spelling == "absolute"
+        else "~/" + os.path.relpath(repository, Path.home())
+    )
     completed = subprocess.run(
         [
             sys.executable,
@@ -1615,7 +1625,7 @@ def test_new_workspace_skips_git_in_its_unregistered_checkout(
             "--workspace-id",
             "00000000-0000-4000-8000-000000000001",
             "--target-path",
-            str(repository),
+            requested_path,
         ],
         cwd=caller,
         env=environment,
