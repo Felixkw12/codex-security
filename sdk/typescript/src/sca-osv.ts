@@ -435,6 +435,7 @@ async function repositoryFiles(
   submodules: string[];
   nestedRepositories: string[];
   skipWorktree: string[];
+  diagnostics: string[];
 }> {
   const worktree = await enclosingGitWorktreeRoot(repository, signal, {
     requireIfPresent: true,
@@ -464,7 +465,12 @@ async function repositoryFiles(
           "--",
           ".",
         ],
-        { env: git.environment, signal, maxBuffer: Infinity },
+        {
+          env: git.environment,
+          signal,
+          maxBuffer: Infinity,
+          encoding: "buffer",
+        },
       );
     const [listed, staged] = await Promise.all([
       listing([
@@ -480,6 +486,21 @@ async function repositoryFiles(
     const depth = scope === "" ? 0 : scope.split(sep).length;
     const metadata =
       depth === 0 ? null : await stat(repository, { bigint: true });
+    const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+    const bytePath = (root: string, path: string) =>
+      Buffer.concat([
+        Buffer.from(`${root}${sep}`),
+        Buffer.from(path, "latin1"),
+      ]);
+    const listedEntries = listed.stdout
+      .toString("latin1")
+      .split("\0")
+      .filter(Boolean);
+    const listedPaths = listedEntries.map((entry) => entry.slice(2));
+    const sparsePaths = listedEntries
+      .filter((entry) => entry.startsWith("S "))
+      .map((entry) => entry.slice(2));
+    const diagnostics = new Set<string>();
     const prefixes = new Map<string, boolean>();
     const inScope = async (path: string): Promise<string | null> => {
       const parts = path.split("/");
@@ -494,7 +515,16 @@ async function repositoryFiles(
       if (depth === 0) return path;
       const prefix = parts.slice(0, depth).join("/");
       if (!prefixes.has(prefix)) {
-        const candidate = await stat(join(worktree, prefix), {
+        let prefixPath: string | Buffer;
+        try {
+          prefixPath = join(
+            worktree,
+            utf8.decode(Buffer.from(prefix, "latin1")),
+          );
+        } catch {
+          prefixPath = bytePath(worktree, prefix);
+        }
+        const candidate = await stat(prefixPath, {
           bigint: true,
         }).catch((error: NodeJS.ErrnoException) => {
           if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
@@ -511,24 +541,45 @@ async function repositoryFiles(
       }
       return prefixes.get(prefix) ? parts.slice(depth).join("/") : null;
     };
-    const selected = async (paths: string[]) => {
+    const selected = async (paths: string[], filesOnly = false) => {
       const result: string[] = [];
       for (const path of paths) {
         signal?.throwIfAborted();
         const scoped = await inScope(path);
-        if (scoped !== null) result.push(scoped);
+        if (scoped === null) continue;
+        const bytes = Buffer.from(scoped, "latin1");
+        try {
+          result.push(utf8.decode(bytes));
+        } catch {
+          let diagnostic = `Git dependency path bytes ${bytes.toString("hex")} cannot be decoded as UTF-8; coverage is incomplete.`;
+          if (filesOnly) {
+            if (
+              !lockNames.has(basename(scoped)) &&
+              additionalScaFormat(scoped) === null
+            )
+              continue;
+            const metadata = await lstat(bytePath(repository, scoped)).catch(
+              (error: NodeJS.ErrnoException) => {
+                signal?.throwIfAborted();
+                if (error.code === "ENOENT" || error.code === "ENOTDIR")
+                  return null;
+                diagnostic += ` ${errorMessage(error)}`;
+                return undefined;
+              },
+            );
+            if (metadata === null && !sparsePaths.includes(path)) continue;
+          }
+          diagnostics.add(diagnostic);
+        }
       }
       return unique(result);
     };
-    const listedEntries = listed.stdout.split("\0").filter(Boolean);
-    const listedPaths = listedEntries.map((entry) => entry.slice(2));
     return {
-      files: await selected(listedPaths.filter((path) => !path.endsWith("/"))),
-      skipWorktree: await selected(
-        listedEntries
-          .filter((entry) => entry.startsWith("S "))
-          .map((entry) => entry.slice(2)),
+      files: await selected(
+        listedPaths.filter((path) => !path.endsWith("/")),
+        true,
       ),
+      skipWorktree: await selected(sparsePaths, true),
       // Git lists an untracked nested checkout as a directory, not its contents.
       nestedRepositories: await selected(
         listedPaths
@@ -537,10 +588,12 @@ async function repositoryFiles(
       ),
       submodules: await selected(
         staged.stdout
+          .toString("latin1")
           .split("\0")
           .filter((entry) => entry.startsWith("160000 "))
           .map((entry) => entry.slice(entry.indexOf("\t") + 1)),
       ),
+      diagnostics: [...diagnostics].sort(),
     };
   }
   const files: string[] = [];
@@ -573,7 +626,13 @@ async function repositoryFiles(
       } else files.push(relative(repository, path));
     }
   }
-  return { files, submodules: [], nestedRepositories, skipWorktree: [] };
+  return {
+    files,
+    submodules: [],
+    nestedRepositories,
+    skipWorktree: [],
+    diagnostics: [],
+  };
 }
 
 type ScaInputDiscovery = Pick<
@@ -600,8 +659,13 @@ export async function discoverScaInputs(
   signal?: AbortSignal,
 ): Promise<ScaInputDiscovery> {
   const repository = await normalizeRepository(repositoryPath, signal);
-  const { files, submodules, nestedRepositories, skipWorktree } =
-    await repositoryFiles(repository, environment, signal);
+  const {
+    files,
+    submodules,
+    nestedRepositories,
+    skipWorktree,
+    diagnostics: pathDiagnostics,
+  } = await repositoryFiles(repository, environment, signal);
   const candidates = files
     .filter(
       (path) =>
@@ -613,6 +677,7 @@ export async function discoverScaInputs(
   const configFiles: ScaFile[] = [];
   const localReferences: DependencyLocalReference[] = [];
   const diagnostics = [
+    ...pathDiagnostics,
     ...submodules.map(
       (path) =>
         `Git submodule ${path} is not inspected by dependency inventory; coverage is incomplete.`,
