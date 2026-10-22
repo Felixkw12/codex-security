@@ -150,9 +150,12 @@ test.each(["unused", "abort", "unexpected failure"])(
       },
       onCodex: async (_args, output) => {
         started = true;
-        expect(output!.appServer!.snapshotStoragePaths).toContain(
-          await realpath(join(repository, ".git", "lfs", "objects")),
-        );
+        const storage = await realpath(join(repository, ".git", "lfs"));
+        expect(output!.appServer!.snapshotStoragePaths).toEqual([storage]);
+        expect(output!.appServer!.permissions!.modelOnlyReadOnlyPaths).toEqual([
+          join(storage, "objects"),
+          join(storage, "tmp"),
+        ]);
         await writeFile(join(repository, "app.ts"), "after\n");
         output!.stdout.write("Synthetic patch complete.\n");
         return 0;
