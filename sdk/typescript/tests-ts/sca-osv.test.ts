@@ -399,35 +399,46 @@ describe("SCA input selection", () => {
       discovered.inputs.every((item) => /^[a-f0-9]{64}$/u.test(item.sha256)),
     ).toBe(true);
   });
-  test("excludes installed Python and Bundler trees from non-Git discovery", async () => {
-    const { repository } = await setup();
-    const installed = [
-      ".venv/lib/python3.12/site-packages/synthetic/requirements.txt",
-      "venv/Lib/site-packages/synthetic/requirements.txt",
-      "vendor/bundle/ruby/3.3.0/gems/synthetic/Gemfile.lock",
-      "packages/app/.venv/lib/python3.12/site-packages/synthetic/requirements.txt",
-      "packages/app/vendor/bundle/ruby/3.3.0/gems/synthetic/Gemfile.lock",
-    ];
-    const selected = [
-      "package-lock.json",
-      "packages/app/package-lock.json",
-      "vendor/source-project/package-lock.json",
-    ];
-    for (const path of [...installed, ...selected]) {
-      await mkdir(join(repository, path, ".."), { recursive: true });
-      await writeFile(
-        join(repository, path),
-        path.endsWith("requirements.txt")
-          ? "synthetic==1.2.3\n"
-          : path.endsWith("Gemfile.lock")
-            ? "GEM\n  remote: https://rubygems.org/\n  specs:\n    synthetic (1.2.3)\n"
-            : npmLock(),
-      );
-    }
-    expect(
-      (await discoverScaInputs(repository)).inputs.map((item) => item.path),
-    ).toEqual(selected);
-  });
+  test.each(["non-Git", "Git untracked", "Git tracked", "Git subdirectory"])(
+    "excludes installed Python and Bundler trees from %s discovery",
+    async (mode) => {
+      const { repository: checkout } = await setup();
+      const repository =
+        mode === "Git subdirectory"
+          ? join(checkout, "packages", "selected")
+          : checkout;
+      await mkdir(repository, { recursive: true });
+      if (mode !== "non-Git") await execFile("git", ["init", checkout]);
+      const installed = [
+        ".venv/lib/python3.12/site-packages/synthetic/requirements.txt",
+        "venv/Lib/site-packages/synthetic/requirements.txt",
+        "vendor/bundle/ruby/3.3.0/gems/synthetic/Gemfile.lock",
+        "packages/app/.venv/lib/python3.12/site-packages/synthetic/requirements.txt",
+        "packages/app/vendor/bundle/ruby/3.3.0/gems/synthetic/Gemfile.lock",
+      ];
+      const selected = [
+        "package-lock.json",
+        "packages/app/package-lock.json",
+        "vendor/source-project/package-lock.json",
+      ];
+      for (const path of [...installed, ...selected]) {
+        await mkdir(join(repository, path, ".."), { recursive: true });
+        await writeFile(
+          join(repository, path),
+          path.endsWith("requirements.txt")
+            ? "synthetic==1.2.3\n"
+            : path.endsWith("Gemfile.lock")
+              ? "GEM\n  remote: https://rubygems.org/\n  specs:\n    synthetic (1.2.3)\n"
+              : npmLock(),
+        );
+      }
+      if (mode === "Git tracked")
+        await execFile("git", ["-C", checkout, "add", "."]);
+      expect(
+        (await discoverScaInputs(repository)).inputs.map((item) => item.path),
+      ).toEqual(selected);
+    },
+  );
   test("scans every pnpm lockfile document", async () => {
     const { repository, output } = await setup();
     const content = ["synthetic-tool", "synthetic-lib"]
