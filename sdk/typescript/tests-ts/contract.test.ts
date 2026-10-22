@@ -359,6 +359,53 @@ describe("canonical scan contract", () => {
     }
   });
 
+  test("rejects scan root replacement when numeric directory IDs collide", async () => {
+    const title =
+      "rejects scan root replacement when numeric directory IDs collide";
+    if (runTestInSubprocess(import.meta.path, title)) return;
+    const scanDir = await realpath(await copyExample());
+    const before = 2n ** 60n;
+    const after = before + 1n;
+    expect(Number(before)).toBe(Number(after));
+    const files = await import("node:fs/promises");
+    const original = { lstat: files.lstat, realpath: files.realpath };
+    let replaced = false;
+    const inspecting = spyOn(files, "lstat").mockImplementation((async (
+      ...args: Parameters<typeof original.lstat>
+    ) => {
+      const metadata = await original.lstat(...args);
+      if (args[0] === scanDir) {
+        const identity = replaced ? after : before;
+        Object.defineProperty(metadata, "ino", {
+          value: typeof metadata.ino === "bigint" ? identity : Number(identity),
+        });
+      }
+      return metadata;
+    }) as typeof original.lstat);
+    const resolving = spyOn(files, "realpath").mockImplementation((async (
+      ...args: Parameters<typeof original.realpath>
+    ) => {
+      const canonical = await original.realpath(...args);
+      if (args[0] === scanDir && !replaced) {
+        replaced = true;
+        await rename(scanDir, `${scanDir}.original`);
+        await mkdir(scanDir, { mode: 0o700 });
+      }
+      return canonical;
+    }) as typeof original.realpath);
+    try {
+      await expect(
+        readScanFile(scanDir, "coverage.json", "coverage.json"),
+      ).rejects.toThrow(
+        "Scan directory must be an existing non-symlink directory",
+      );
+      expect(replaced).toBe(true);
+    } finally {
+      resolving.mockRestore();
+      inspecting.mockRestore();
+    }
+  });
+
   test("loads the unchanged plugin example with typed canonical names", async () => {
     const scanDir = await copyExample();
     const contract = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
