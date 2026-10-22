@@ -118,6 +118,9 @@ describe("patch Git administration", () => {
         );
       const controls = await capture();
       expect(controls!.snapshotStoragePaths).toEqual([
+        join(administration, "lfs"),
+      ]);
+      expect(controls!.modelOnlyReadOnlyPaths).toEqual([
         join(administration, "lfs", "objects"),
         join(administration, "lfs", "tmp"),
       ]);
