@@ -194,19 +194,17 @@ export async function runWorkflow(
         args[1] === "set-default"
       )
         return new URL(hostedRemote).pathname.slice(1).replace(/\.git$/u, "");
-      const translated = args.map((arg) => {
-        for (const [hosted, local] of localRemotes) {
-          if (arg === `url.${hosted}.insteadOf`)
-            return `url.${local}.insteadOf`;
-          if (
-            arg ===
-            `--config-env=url.${hosted}.insteadOf=CODEX_SECURITY_PREFLIGHT_ALIAS`
-          )
-            return `--config-env=url.${local}.insteadOf=CODEX_SECURITY_PREFLIGHT_ALIAS`;
-        }
-        return arg;
+      const environment = { ...commandOptions?.environment };
+      for (const key of Object.keys(environment)) {
+        if (!key.startsWith("GIT_CONFIG_KEY_")) continue;
+        for (const [hosted, local] of localRemotes)
+          if (environment[key] === `url.${hosted}.insteadOf`)
+            environment[key] = `url.${local}.insteadOf`;
+      }
+      const output = await run(command, args, cwd, {
+        ...commandOptions,
+        environment,
       });
-      const output = await run(command, translated, cwd, commandOptions);
       if (command !== "git" || args[args.indexOf("remote") + 1] !== "get-url")
         return output;
       if (!output.trim()) return hostedRemote;
