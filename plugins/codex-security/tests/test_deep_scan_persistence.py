@@ -120,6 +120,20 @@ def test_native_usage_keeps_replaced_failed_canceled_attempts_and_descendants(
     # The writer release recorded these prior attempts and observed sessions.
     with sqlite3.connect(state / "workbench.sqlite3") as connection:
         connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute(
+            "UPDATE deep_scan_runs SET usage_owner_json = ? WHERE scan_id = ?",
+            (
+                json.dumps(
+                    {
+                        "threadId": "thread-deep-scan",
+                        "turnId": "fixture-turn",
+                        "startedAt": run["createdAt"],
+                        "dedicated": False,
+                    }
+                ),
+                run["scanId"],
+            ),
+        )
         for attempt, status, thread in (
             (1, "replaced", "old"),
             (2, "failed", "old"),

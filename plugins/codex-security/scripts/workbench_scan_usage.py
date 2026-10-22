@@ -473,14 +473,8 @@ def scan_execution_attribution(
             "completedAt": scan["completed_at"],
         }
     owner_json = run["usage_owner_json"] if "usage_owner_json" in run.keys() else None
-    legacy = False
+    legacy = owner_json is None
     if owner_json is None:
-        legacy = (
-            connection.execute(
-                "SELECT 1 FROM deep_scan_attempts WHERE scan_id = ? LIMIT 1", (scan["id"],)
-            ).fetchone()
-            is None
-        )
         roots = _scan_root_thread_ids(connection, scan, None)
         owner = {
             "threadId": roots[0] if roots else None,

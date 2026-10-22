@@ -24,6 +24,7 @@ from workbench_test_support import (
     scan_command,
     start_delivered_scan,
     upsert_deep_worker,
+    worker_paths,
     write_completed_contract,
 )
 
@@ -3031,6 +3032,62 @@ def test_completion_keeps_owner_and_workers_in_their_recorded_homes(
                     ),
                 }.items()
             )
+
+
+def test_attempt_history_without_owner_binding_preserves_legacy_usage(
+    tmp_path: Path, workbench_api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = _start_scan(tmp_path, mode="deep")
+    counted = fixture.started_at + timedelta(microseconds=1)
+    parent = _rollout(tmp_path, "scan-parent", [_token_event(counted, 12, 3)])
+    worker = _rollout(
+        tmp_path,
+        "worker",
+        [_token_event(counted, 20, 5)],
+        parent_thread_id="scan-parent",
+    )
+    _state_graph(
+        fixture.environment, {"scan-parent": parent, "worker": worker}, [("scan-parent", "worker")]
+    )
+    worker_id = str(uuid.uuid4())
+    prompt, artifacts, _ = worker_paths(fixture.scan_dir, "discovery")
+    upsert_deep_worker(
+        fixture.state_dir,
+        fixture.scan_id,
+        worker_id,
+        "discovery",
+        "running",
+        str(prompt),
+        str(artifacts),
+        "--sdk-thread-id",
+        "worker",
+        environment=fixture.environment,
+    )
+    for name, value in fixture.environment.items():
+        monkeypatch.setenv(name, value)
+    usage_reader = workbench_api["scan_usage"]
+    with sqlite3.connect(fixture.state_dir / "workbench.sqlite3") as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        scan = connection.execute("SELECT * FROM scans WHERE id = ?", (fixture.scan_id,)).fetchone()
+        assert (
+            connection.execute(
+                "SELECT usage_owner_json FROM deep_scan_runs WHERE scan_id = ?", (fixture.scan_id,)
+            ).fetchone()[0]
+            is None
+        )
+        before = usage_reader.collect_scan_usage(connection, scan, completed_at=counted.isoformat())
+        assert before["coverage"] == "complete"
+        assert before["totalTokens"] == 40
+        connection.execute(
+            "INSERT INTO deep_scan_attempts "
+            "(scan_id, worker_id, attempt, status, started_at) VALUES (?, ?, 1, 'running', ?)",
+            (fixture.scan_id, worker_id, fixture.started_at.isoformat()),
+        )
+        after = usage_reader.collect_scan_usage(connection, scan, completed_at=counted.isoformat())
+    assert after["coverage"] == "complete"
+    assert after["totalTokens"] == 40
+    assert after["byRole"] == before["byRole"]
 
 
 def test_rollout_usage_reconciles_stale_cumulative_events_and_models(
