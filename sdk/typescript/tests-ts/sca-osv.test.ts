@@ -516,6 +516,51 @@ describe("SCA input selection", () => {
       { name: "second", resolution: "link:../second" },
     ]);
   });
+  test("filesystem inventory avoids repeated ancestor marker lookups", async () => {
+    const name = "filesystem inventory avoids repeated ancestor marker lookups";
+    if (runTestInSubprocess(import.meta.path, name)) return;
+    const { repository } = await setup();
+    const directories = [
+      "services",
+      "services/api",
+      "services/api/src",
+      "services/web",
+      "services/web/src",
+      "packages",
+      "packages/shared",
+      "packages/shared/src",
+    ];
+    for (const directory of directories)
+      await mkdir(join(repository, directory), { recursive: true });
+    const paths = [
+      "services/api/src/package-lock.json",
+      "services/web/src/package-lock.json",
+      "packages/shared/src/package-lock.json",
+    ];
+    for (const path of paths)
+      await writeFile(join(repository, path), npmLock());
+    const markers = new Set(
+      directories.map((directory) => join(repository, directory, ".git")),
+    );
+    let markerLookups = 0;
+    const original = filesystem.lstat;
+    const checking = spyOn(filesystem, "lstat").mockImplementation((async (
+      ...args: Parameters<typeof original>
+    ) => {
+      if (typeof args[0] === "string" && markers.has(args[0])) markerLookups++;
+      return original(...args);
+    }) as typeof original);
+    try {
+      const discovered = await discoverScaInputs(repository);
+      expect(discovered.inputs.map((input) => input.path)).toEqual(
+        paths.sort(),
+      );
+      expect(discovered.diagnostics).toEqual([]);
+      expect(markerLookups).toBeLessThanOrEqual(directories.length);
+    } finally {
+      checking.mockRestore();
+    }
+  });
   test.each([
     ["", "unsupported", "Unsupported pnpm lockfile version: undefined."],
     [
