@@ -465,6 +465,8 @@ async function preserveScanDraft(
     resolvedSurfaces,
     closedDeferredIds,
   } = reconciled;
+  if (saveCheckpoint && reconciled.acceptProgress && !requiresClosureValidation)
+    await saveScanDraftCheckpoint(context, input, false);
   // Archived attempts move their receipt files with them. Copy only evidence
   // still retained by this draft into its current, independently bound output.
   // Superseded surfaces must not reserve a discarded receipt's spelling.
@@ -647,7 +649,8 @@ async function preserveScanDraft(
     }
   }
   if (saveCheckpoint && reconciled.acceptProgress) {
-    await saveScanDraftCheckpoint(context, input, false);
+    if (requiresClosureValidation)
+      await saveScanDraftCheckpoint(context, input, false);
     await saveScanDraftCheckpoint(context, reconciled.input);
   }
   return {
@@ -777,6 +780,8 @@ function reconcileScanDraft(
   }
 
   const reopenedSurfaces = new Set<JsonObject>();
+  // Reconstruction can append historical receipts that still need repair.
+  const selectedSources = [retainedFinal?.input ?? input];
   let acceptProgress = true;
   if (retainedFinal) {
     const terminalOutcomeIds = completedCandidateIds(result);
@@ -813,6 +818,7 @@ function reconcileScanDraft(
       );
       if (reopenedIds.size > 0) acceptProgress = true;
       if (!acceptProgress) continue;
+      selectedSources.unshift(progress);
       result.complete = false;
       const resolved = reconcileDeferredSurfaces(
         progress.coverage,
@@ -849,7 +855,7 @@ function reconcileScanDraft(
     }
   }
   const selectedReceiptsBySurface = new Map<string, Set<string>>();
-  for (const selected of [result, ...sources]) {
+  for (const selected of [...selectedSources, ...sources]) {
     const rows = (selected.coverage.surfaces as JsonObject[]).filter(
       (row) =>
         typeof row.id === "string" && !selectedReceiptsBySurface.has(row.id),
@@ -2551,13 +2557,7 @@ function strongerFinding(current: JsonObject, previous: JsonObject): boolean {
   const levelDifference = (field: string, levels: string[]) =>
     levels.indexOf((current[field] as JsonObject).level as string) -
     levels.indexOf((previous[field] as JsonObject).level as string);
-  const evidenceCount = (finding: JsonObject) =>
-    new Set(
-      ((finding.codeEvidence as JsonObject[] | undefined) ?? []).map(
-        (evidence) => evidence.id,
-      ),
-    ).size;
-  // Match recovery's preference for severity, confidence, then canonical evidence.
+  // Match the finalizer's severity, confidence, and evidence-strength ordering.
   return (
     (levelDifference("severity", [
       "informational",
@@ -2567,8 +2567,66 @@ function strongerFinding(current: JsonObject, previous: JsonObject): boolean {
       "critical",
     ]) ||
       levelDifference("confidence", ["low", "medium", "high"]) ||
-      evidenceCount(current) - evidenceCount(previous)) > 0
+      findingEvidenceStrength(current) - findingEvidenceStrength(previous)) > 0
   );
+}
+
+function findingEvidenceStrength(finding: JsonObject): number {
+  const catalog = new Map<string, JsonObject>();
+  for (const field of ["codeEvidence", "code_evidence"]) {
+    const evidence = finding[field];
+    if (!Array.isArray(evidence)) continue;
+    for (const item of evidence)
+      if (
+        isObject(item) &&
+        typeof item.id === "string" &&
+        item.id &&
+        !catalog.has(item.id)
+      )
+        catalog.set(item.id, item);
+  }
+  const evidence = [...catalog.values()];
+  const seenIds = new Set(
+    evidence.map((item) => item.id as string).filter((id) => id.trim()),
+  );
+  const seenCodes = new Set(
+    evidence.flatMap((item) =>
+      typeof item.code === "string" && item.code.trim() ? [item.code] : [],
+    ),
+  );
+  let strength = evidence.length;
+  for (const field of ["rootCause", "root_cause"]) {
+    const section = finding[field];
+    if (!isObject(section)) continue;
+    for (const field of ["codeEvidence", "code_evidence"]) {
+      const embedded = section[field];
+      if (!Array.isArray(embedded)) continue;
+      for (const item of embedded) {
+        if (
+          !isObject(item) ||
+          typeof item.code !== "string" ||
+          !item.code.trim() ||
+          seenCodes.has(item.code)
+        )
+          continue;
+        if (typeof item.id === "string" && item.id.trim()) {
+          if (seenIds.has(item.id)) continue;
+          seenIds.add(item.id);
+        }
+        seenCodes.add(item.code);
+        strength++;
+      }
+    }
+    if (
+      typeof section.code === "string" &&
+      section.code.trim() &&
+      !seenCodes.has(section.code)
+    ) {
+      seenCodes.add(section.code);
+      strength++;
+    }
+  }
+  return strength;
 }
 
 function buildFindings(

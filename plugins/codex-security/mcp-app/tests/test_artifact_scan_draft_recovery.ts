@@ -41,6 +41,48 @@ const findingFor = (candidateId: string) => ({
   provenance: { source: "local_plugin", candidateId },
 });
 
+for (const complete of [false, true]) {
+  test(`worker: receipt read failures retain new progress, complete=${complete}`, async (t) => {
+    const f = await fixture(t, "worker");
+    await f.write(
+      f.draft({
+        surfaces: [
+          {
+            id: "review",
+            label: "Prior review",
+            disposition: "no_issue_found",
+            receiptRefs: ["artifacts/review.md"],
+          },
+        ],
+      }),
+    );
+    const archive = path.join(path.dirname(f.root), "attempts/attempt-01");
+    await mkdir(path.dirname(archive));
+    await rename(f.root, archive);
+    await mkdir(f.root);
+    await assert.rejects(
+      f.write({
+        ...f.draft({}, complete),
+        findings: [findingFor("new-candidate")],
+      }),
+      /archived coverage receipt: the requested artifact is unavailable/,
+    );
+    await mkdir(path.join(archive, "artifacts"));
+    await writeFile(
+      path.join(archive, "artifacts/review.md"),
+      "Prior review.\n",
+    );
+    await f.write(f.draft());
+    const result = await readJson(f.root, "result.json");
+    assert.deepEqual(
+      result.findings.map(
+        (row: ReturnType<typeof findingFor>) => row.provenance.candidateId,
+      ),
+      ["new-candidate"],
+    );
+  });
+}
+
 for (const layout of ["standard", "diff"] as const) {
   test(`${layout}: parent writes return receipt repairs and workbench warnings`, async (t) => {
     const f = await fixture(t, layout);
@@ -2367,6 +2409,60 @@ for (const layout of ["standard", "diff"] as const) {
     assert.equal(findings.length, 1);
     assert.equal(findings[0].severity.level, "high");
   });
+  test(`${layout}: repeated embedded evidence does not strengthen an observation`, async (t) => {
+    const f = await fixture(t, layout);
+    const evidence = {
+      id: "source",
+      label: "Synthetic source",
+      path: "src/example.py",
+      startLine: 1,
+      code: "return request.query.example;",
+      explanation: "The synthetic source supplies the evidence.",
+    };
+    const original = { ...findingFor("candidate-a"), codeEvidence: [evidence] };
+    await f.write({
+      ...f.draft({}, true),
+      findings: [
+        original,
+        {
+          ...original,
+          summary: "The same evidence appears again.",
+          rootCause: {
+            summary: "The same source is repeated.",
+            codeEvidence: [evidence, { ...evidence, id: "copy" }],
+          },
+        },
+      ],
+    });
+    for (const stopped of [false, "first", true] as const) {
+      const findings = await recoverPublishedFindings(f, stopped);
+      assert.equal(findings.length, 1);
+      assert.equal(findings[0].summary, original.summary);
+    }
+  });
+  for (const embedded of ["codeEvidence", "code_evidence"] as const) {
+    test(`${layout}: repeated observations retain stronger embedded ${embedded}`, async (t) => {
+      const f = await fixture(t, layout);
+      const code = "return request.query.example;";
+      const stronger = {
+        ...findingFor("candidate-a"),
+        summary: "The observation includes source evidence.",
+        rootCause: {
+          summary: "The source demonstrates the candidate.",
+          [embedded]: [{ id: "source", code }],
+        },
+      };
+      await f.write({
+        ...f.draft({}, true),
+        findings: [findingFor("candidate-a"), stronger],
+      });
+      for (const stopped of [false, "first", true] as const) {
+        const findings = await recoverPublishedFindings(f, stopped);
+        assert.equal(findings.length, 1);
+        assert.equal(findings[0].summary, stronger.summary);
+      }
+    });
+  }
   for (const sibling of [false, true]) {
     test(`${layout}: a stronger successor reuses retained candidate identity, sibling=${sibling}`, async (t) => {
       const f = await fixture(t, layout);
