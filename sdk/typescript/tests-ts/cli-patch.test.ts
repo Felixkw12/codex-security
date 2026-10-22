@@ -877,7 +877,6 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
           "https://forge.example.test/example/repository.git",
         );
       }
-      let selectedIdentityConfig = "";
       const server = Bun.serve({
         hostname: "127.0.0.1",
         port: 0,
@@ -954,13 +953,10 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
             currentDirectory: repository,
             onRepositoryCommand: async (command, args, _directory, options) => {
               if (command === "git") {
-                if (args[0] === "config" && args[1] === "--file") {
-                  selectedIdentityConfig = args[3]!;
-                  return runGitRepositoryCommand(command, args, root, options);
-                }
                 if (
                   args[0] === "remote" ||
                   args[0] === "-c" ||
+                  args[0]?.startsWith("--config-env=") ||
                   (args[0] === "config" && args[1] === "--null") ||
                   args.includes("--sq-quote")
                 )
@@ -1020,8 +1016,12 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
                 endpoint.searchParams.set(
                   "id",
                   multiplePushes &&
-                    selectedIdentityConfig ===
-                      "url.https://forge.example.test/first/repository.git.insteadOf"
+                    (await runGitRepositoryCommand(
+                      "git",
+                      ["ls-remote", "--get-url", "codex-security-push"],
+                      repository,
+                      options,
+                    )) === "https://forge.example.test/first/repository.git"
                     ? "R_first"
                     : "R_synthetic",
                 );
@@ -8871,9 +8871,17 @@ describe("patch change tracking", () => {
             join(container, "unused-fetch"),
           );
         const secondary = join(container, "secondary");
-        if (rewriting === "newline-multiple") {
+        if (
+          rewriting === "newline-multiple" ||
+          rewriting === "newline-relative"
+        ) {
           git("init", "--bare", secondary);
-          git("config", "--add", "remote.origin.pushurl", remote);
+          git(
+            "config",
+            "--add",
+            "remote.origin.pushurl",
+            rewriting === "newline-relative" ? "\nproject" : remote,
+          );
           git("config", "--add", "remote.origin.pushurl", secondary);
         }
         git("push", "origin", "HEAD:refs/heads/native-control");
@@ -8906,7 +8914,10 @@ describe("patch change tracking", () => {
             "refs/heads/codex-security/patch-scan-1",
           ),
         ).toBe(git("rev-parse", "HEAD"));
-        if (rewriting === "newline-multiple")
+        if (
+          rewriting === "newline-multiple" ||
+          rewriting === "newline-relative"
+        )
           expect(
             git(
               "--git-dir",

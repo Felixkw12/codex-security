@@ -1358,6 +1358,31 @@ export async function runRepositoryCommand(
 ): Promise<string> {
   options?.signal?.throwIfAborted();
   const sandbox = options?.sandbox;
+  if (process.platform === "win32" && sandbox !== undefined) {
+    // The native Windows sandbox CLI does not enforce narrower read-only
+    // carveouts within an explicit write grant. Keep hooks and configuration
+    // protected before starting a snapshot filter in an overlapping cache.
+    const filesystem = Object.entries(sandbox.profile["filesystem"] ?? {});
+    for (const [writable, access] of filesystem) {
+      if (
+        !isAbsolute(writable) ||
+        !isJsonObject(access) ||
+        access["."] !== "write"
+      )
+        continue;
+      const protectedControl = filesystem.find(
+        ([path, access]) =>
+          isAbsolute(path) &&
+          isJsonObject(access) &&
+          access["."] === "read" &&
+          !isOutsidePath(relative(writable, path)),
+      );
+      if (protectedControl !== undefined)
+        throw new CodexSecurityError(
+          `Cannot prepare a patch snapshot: the Windows sandbox cannot protect Git control ${protectedControl[0]} inside writable snapshot directory ${writable}.`,
+        );
+    }
+  }
   const executable = await resolveTrustedExecutable(
     command,
     sandbox?.environment ?? process.env,
@@ -8329,34 +8354,26 @@ interface PatchPublication {
 
 async function withResolvedPatchRemote<T>(
   remote: string,
-  repository: string,
   dependencies: CliDependencies,
-  run: (token: string, include: string, name: string) => Promise<T>,
+  run: (
+    token: string,
+    environment: NodeJS.ProcessEnv,
+    name: string,
+  ) => Promise<T>,
 ): Promise<T> {
   const directory = await mkdtemp(join(tmpdir(), "codex-security-remote-"));
-  const config = join(directory, "config");
   const prefix = remote.split("\n", 1)[0]!;
   try {
-    await writeFile(config, "", { mode: 0o600 });
-    await dependencies.runRepositoryCommand(
-      "git",
-      [
-        "config",
-        "--file",
-        config,
-        `url.${prefix || (remote && "./")}.insteadOf`,
-        directory,
-      ],
-      repository,
-    );
-    const include = await dependencies.runRepositoryCommand(
-      "git",
-      ["rev-parse", "--sq-quote", `include.path=${config}`],
-      repository,
+    const count = Number(
+      environmentEntry(dependencies.environment, "GIT_CONFIG_COUNT") ?? 0,
     );
     return await run(
       directory + remote.slice(prefix.length),
-      include,
+      {
+        GIT_CONFIG_COUNT: String(count + 1),
+        [`GIT_CONFIG_KEY_${count}`]: `url.${prefix || (remote && "./")}.insteadOf`,
+        [`GIT_CONFIG_VALUE_${count}`]: directory,
+      },
       basename(directory),
     );
   } finally {
@@ -8403,9 +8420,19 @@ async function patchPublicationDestination(
   // Appending an existing value lets Git delimit its expansion without splitting URL newlines.
   for (const entry of push.length ? push : urls) {
     const appended = (
-      await run("git", ["-c", entry.replace("\n", "="), ...getPushUrls], {
-        trim: false,
-      })
+      await run(
+        "git",
+        [
+          `--config-env=${entry.slice(0, entry.indexOf("\n"))}=CODEX_SECURITY_PATCH_REMOTE`,
+          ...getPushUrls,
+        ],
+        {
+          trim: false,
+          environment: {
+            CODEX_SECURITY_PATCH_REMOTE: entry.slice(entry.indexOf("\n") + 1),
+          },
+        },
+      )
     ).slice(output.length);
     if (appended) remotes.push(appended.replace(/\n$/u, ""));
   }
@@ -8578,9 +8605,8 @@ async function githubPatchRepository(
   }
   return withResolvedPatchRemote(
     identityRemote,
-    repository,
     dependencies,
-    async (token, include) => {
+    async (token, environment) => {
       const config = await run("git", [
         "rev-parse",
         "--sq-quote",
@@ -8591,11 +8617,11 @@ async function githubPatchRepository(
       ]);
       const options = {
         environment: {
+          ...environment,
           GIT_CONFIG: undefined,
           GIT_CONFIG_PARAMETERS: [
             dependencies.environment["GIT_CONFIG_PARAMETERS"],
             config,
-            include,
           ]
             .filter(Boolean)
             .join(" "),
@@ -9021,9 +9047,8 @@ async function preparePatchPublication(
       existing = (
         await withResolvedPatchRemote(
           remote,
-          repository,
           dependencies,
-          async (token, include, name) => {
+          async (token, environment, name) => {
             const config = await dependencies.runRepositoryCommand(
               "git",
               [
@@ -9051,10 +9076,10 @@ async function preparePatchPublication(
               repository,
               {
                 environment: {
+                  ...environment,
                   GIT_CONFIG_PARAMETERS: [
                     dependencies.environment["GIT_CONFIG_PARAMETERS"],
                     config,
-                    include,
                   ]
                     .filter(Boolean)
                     .join(" "),
@@ -9455,7 +9480,8 @@ function patchScpRemote(remote: string) {
 }
 
 function gitlabPatchRepository(remote: string): string {
-  if (remote.includes("://")) return remote;
+  if (remote.includes("://"))
+    return remote.replace(/^(https?:\/\/)[^/?#\\]*@/iu, "$1");
   const scp = patchScpRemote(remote)!;
   return `ssh://${scp.username ? `${scp.username}@` : ""}${scp.hostname}/${scp.pathname}`;
 }

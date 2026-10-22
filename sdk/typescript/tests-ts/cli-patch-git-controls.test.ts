@@ -37,10 +37,12 @@ function patchReadOnlyPaths(args: readonly string[], permissions: unknown) {
       value.startsWith("permissions.codex_security_patch="),
     ),
   ).toEqual([]);
-  expect(permissions).toEqual({
-    name: "codex_security_patch",
-    readOnlyPaths: expect.any(Array),
-  });
+  expect(permissions).toEqual(
+    expect.objectContaining({
+      name: "codex_security_patch",
+      readOnlyPaths: expect.any(Array),
+    }),
+  );
   return (permissions as { readOnlyPaths: readonly string[] }).readOnlyPaths;
 }
 
@@ -273,10 +275,7 @@ console.log(JSON.stringify(controls.snapshotStoragePaths));
           ],
           { encoding: "utf8" },
         );
-        expect(JSON.parse(result)).toEqual([
-          join(metadata, "lfs", "objects"),
-          join(metadata, "lfs", "tmp"),
-        ]);
+        expect(JSON.parse(result)).toEqual([join(metadata, "lfs")]);
       } finally {
         await chmod(parent, 0o700);
       }
@@ -318,12 +317,12 @@ console.log(JSON.stringify(controls.snapshotStoragePaths));
         runGitRepositoryCommand("git", args, checkout, options),
       true,
     );
-    const paths = [
+    const paths = [join(metadata, "lfs")];
+    expect(controls!.snapshotStoragePaths).toEqual(sameEntry ? paths : []);
+    expect(controls!.modelOnlyReadOnlyPaths).toEqual([
       join(metadata, "lfs", "objects"),
       join(metadata, "lfs", "tmp"),
-    ];
-    expect(controls!.snapshotStoragePaths).toEqual(sameEntry ? paths : []);
-    expect(controls!.modelOnlyReadOnlyPaths).toEqual(sameEntry ? [] : paths);
+    ]);
     await controls!.validate();
   });
 
@@ -393,10 +392,7 @@ console.log(JSON.stringify(controls.snapshotStoragePaths));
             }),
           false,
         );
-        const paths = [
-          join(await realpath(metadata), "lfs", "objects"),
-          join(await realpath(metadata), "lfs", "tmp"),
-        ];
+        const paths = [join(await realpath(metadata), "lfs")];
         expect(controls!.snapshotStoragePaths).toEqual(
           sibling === "same identity" ? [] : paths,
         );
@@ -646,11 +642,11 @@ console.log(JSON.stringify(controls.snapshotStoragePaths));
         location !== "selected-common-dir",
       );
       expect(controls).toBeDefined();
-      for (const name of ["objects", "tmp"]) {
-        const path = await realpath(join(storage, name));
-        expect(controls!.snapshotStoragePaths).toContain(path);
-        expect(controls!.readOnlyPaths).toContain(path);
-      }
+      const path = await realpath(storage);
+      expect(controls!.snapshotStoragePaths).toContain(path);
+      expect(controls!.readOnlyPaths).toContain(path);
+      for (const name of ["objects", "tmp"])
+        expect((await lstat(join(storage, name))).isDirectory()).toBe(true);
       await controls!.validate();
     });
   }
