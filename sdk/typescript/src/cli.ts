@@ -8464,7 +8464,7 @@ async function patchPublicationDestination(
   const target =
     gitlab &&
     isNetworkPatchRemote(fetchRemote) &&
-    patchRemoteHost(fetchRemote) === host
+    patchRemoteHost(fetchRemote, true) === patchRemoteHost(remote, true)
       ? fetchRemote
       : remote;
   let gitlabSource = ".target_project_id";
@@ -9084,7 +9084,7 @@ async function publicationContentDigests(
         const entries = await readdir(canonical, { encoding: "buffer" });
         for (const entry of entries) {
           const name = Buffer.from(entry).toString("latin1");
-          if (name === ".git" || name === ".svn") continue;
+          if (name === ".svn") continue;
           pending.push(`${pathKey.replace(/\/$/u, "")}/${name}`);
         }
       } else if (metadata.isFile()) {
@@ -9645,8 +9645,14 @@ function gitlabPatchDescription(body: string): string {
   return `${">".repeat(fenceLength)}\n${body}`;
 }
 
-function patchRemoteHost(remote: string): string | undefined {
-  if (remote.includes("://")) return new URL(remote).hostname.toLowerCase();
+function patchRemoteHost(
+  remote: string,
+  includePort = false,
+): string | undefined {
+  if (remote.includes("://")) {
+    const url = new URL(remote);
+    return (includePort ? url.host : url.hostname).toLowerCase();
+  }
   return patchScpRemote(remote)?.hostname.toLowerCase();
 }
 
@@ -11826,6 +11832,10 @@ async function runSkill(
           xdgConfigHome: environmentEntry(
             dependencies.environment,
             "XDG_CONFIG_HOME",
+          ),
+          alternateObjectDirectories: environmentEntry(
+            dependencies.environment,
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
           ),
         },
       )

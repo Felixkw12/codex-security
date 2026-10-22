@@ -18,6 +18,8 @@ afterEach(fixtures.cleanup);
 for (const kind of [
   "untracked",
   "ignored",
+  "metadata",
+  "ignored metadata",
   "committed",
   "raw",
   "scrubbed",
@@ -32,7 +34,7 @@ for (const kind of [
       async () => {
         const { directory, git, remote } =
           await publicationRepository(fixtures);
-        if (kind === "ignored") {
+        if (kind.startsWith("ignored")) {
           await writeFile(join(directory, ".gitignore"), "nested/\n");
           git("add", ".gitignore");
           git("commit", "-m", "Synthetic ignored baseline");
@@ -47,8 +49,17 @@ for (const kind of [
         await writeFile(join(nested, ".gitignore"), "local.txt\n");
         nestedGit("add", ".gitignore");
         nestedGit("commit", "-m", "Synthetic nested baseline");
-        const content = "SYNTHETIC_LOCAL_ONLY_CONTENT\n";
+        let content = "SYNTHETIC_LOCAL_ONLY_CONTENT\n";
         let source: string | Buffer = join(nested, "local.txt");
+        if (kind.endsWith("metadata")) {
+          nestedGit(
+            "config",
+            "http.extraHeader",
+            "Authorization: Bearer SYNTHETIC_METADATA_CREDENTIAL",
+          );
+          source = join(nested, ".git", "config");
+          content = await readFile(source, "utf8");
+        }
         if (kind === "raw")
           source = Buffer.concat([
             Buffer.from(`${nested}/local-`),
@@ -66,7 +77,7 @@ for (const kind of [
         }
         const blocked = copied && kind !== "directory link";
         expect(git("status", "--porcelain=v1", "--untracked-files=all")).toBe(
-          kind === "ignored" ? "" : "?? nested/",
+          kind.startsWith("ignored") ? "" : "?? nested/",
         );
         const head = git("rev-parse", "HEAD");
         const nestedHead = nestedGit("rev-parse", "HEAD");

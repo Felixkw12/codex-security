@@ -2719,12 +2719,12 @@ The `origin` push URL selects GitLab.com, including SSH and subgroup projects.
 For self-hosted GitLab, set `GITLAB_HOST` to that host and authenticate with
 `glab auth login --hostname HOST`. `GITLAB_URI` and `GL_HOST` are fallback aliases.
 For GitLab, the first network `origin` push URL selects the source project. A
-network `origin` fetch URL on the same hostname selects the target project. If the
-fetch URL is a local path, a `file://` URL, or uses another hostname, the target is
-the push project too. On resume, an existing merge request for the patch branch is
-reused only when its source project is the selected push project and its head
-matches the saved patch commit. A request from another project with the same
-branch name is not reused.
+network `origin` fetch URL on the same hostname and port selects the target
+project. If the fetch URL is a local path, a `file://` URL, or uses another hostname
+or port, the target is the push project too. On resume, an existing merge request
+for the patch branch is reused only when its source project is the selected push
+project and its head matches the saved patch commit. A request from another
+project with the same branch name is not reused.
 
 GitLab descriptions display the report in a blockquote so report text cannot
 execute quick actions. The report contents, including code, HTML, and math,
