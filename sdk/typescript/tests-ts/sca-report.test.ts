@@ -208,6 +208,46 @@ describe("SCA report", () => {
     },
   );
 
+  test.each([
+    "Synthetic failed turn\n\n# Synthetic error heading\n\n<!--",
+    "Synthetic failed `turn`\r\n\r\n```\r\n# Synthetic error heading\r\n<!--",
+    "<span hidden>Synthetic failed turn</span>",
+    "Synthetic failed turn; retry the assessment.",
+  ])(
+    "keeps failed-assessment diagnostics literal in saved reports: %j",
+    async (message) => {
+      const result = fixture();
+      result.outputDir = await temporaryDirectory("sca-assessment-error-");
+      result.status = "partial";
+      addMatch(result, "later-match", "2.0.0", "SYNTHETIC-LATER-ADVISORY");
+      result.assessments = [
+        {
+          matchId: "match-1",
+          status: "failed",
+          verdict: null,
+          triage: null,
+          error: message,
+        },
+      ];
+      await saveDependencyScan(result);
+      const saved = JSON.parse(
+        await readFile(join(result.outputDir, "sca-result.json"), "utf8"),
+      ) as ScaResult;
+      expect(saved).toEqual(result);
+      expect(saved.assessments[0]?.error).toBe(message);
+      const html = Bun.markdown.html(
+        await readFile(join(result.outputDir, "report.md"), "utf8"),
+      );
+      expect(html).not.toContain("<h1>Synthetic error heading</h1>");
+      expect(html).not.toContain("<!--");
+      expect(html).not.toContain("<span hidden>");
+      expect(html).toContain("Synthetic failed");
+      expect(html.match(/<p>Next action:/g)).toHaveLength(2);
+      expect(html).toContain("SYNTHETIC-LATER-ADVISORY");
+      expect(html).toContain("<h2>Retained evidence</h2>");
+    },
+  );
+
   test("shows full observed inventory, coverage exclusions, and diagnostics", () => {
     const result = fixture();
     result.components.push({
