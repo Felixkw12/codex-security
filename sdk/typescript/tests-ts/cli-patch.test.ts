@@ -5125,6 +5125,10 @@ describe("patch publication integrity", () => {
         GIT_CONFIG_PARAMETERS:
           "'remote.origin.gh-resolved=upstream/repository'",
       };
+      const hostedRemote = "https://github.example.test/example/repository.git";
+      const localRemotes = new Map([[hostedRemote, remote]]);
+      if (collisionRemote !== remote)
+        localRemotes.set(`${hostedRemote}-secondary`, collisionRemote);
       let identityCalls = 0;
       const result = resultWithFindings(["high"]);
       const onCodex = mock(() => 0);
@@ -5136,16 +5140,42 @@ describe("patch publication integrity", () => {
           result,
           onWorkbench: () => savedScan(result, "scan-1", directory),
           onCodex,
-          onRepositoryCommand: (command, args, cwd, options) => {
+          onRepositoryCommand: async (command, args, cwd, options) => {
             const selected = {
               ...options,
-              environment: { ...environment, ...options?.environment },
+              environment: {
+                ...environment,
+                ...options?.environment,
+              } as NodeJS.ProcessEnv,
             };
-            if (command === "git")
-              return runGitRepositoryCommand(command, args, cwd, selected);
+            if (command === "git") {
+              for (const key of Object.keys(selected.environment)) {
+                if (!key.startsWith("GIT_CONFIG_KEY_")) continue;
+                for (const [hosted, local] of localRemotes)
+                  if (selected.environment[key] === `url.${hosted}.insteadOf`)
+                    selected.environment[key] = `url.${local}.insteadOf`;
+              }
+              const output = await runGitRepositoryCommand(
+                command,
+                args,
+                cwd,
+                selected,
+              );
+              if (args[args.indexOf("remote") + 1] === "get-url")
+                return output
+                  .split("\n")
+                  .map(
+                    (url) =>
+                      [...localRemotes].find(
+                        ([, local]) => local === url,
+                      )?.[0] ?? url,
+                  )
+                  .join("\n");
+              return output;
+            }
             if (args[0] === "repo") {
               identityCalls++;
-              expect(selected.environment.GH_REPO).toBe("");
+              expect(selected.environment["GH_REPO"]).toBe("");
               expect(
                 runGitRepositoryCommand(
                   "git",
@@ -5161,8 +5191,8 @@ describe("patch publication integrity", () => {
                     url: "https://github.example.test/example/repository",
                   });
             }
-            expect(selected.environment.GH_REPO).toBe(environment.GH_REPO);
-            expect(selected.environment.GIT_CONFIG_PARAMETERS).toBe(
+            expect(selected.environment["GH_REPO"]).toBe(environment.GH_REPO);
+            expect(selected.environment["GIT_CONFIG_PARAMETERS"]).toBe(
               environment.GIT_CONFIG_PARAMETERS,
             );
             const foreign = {
@@ -5194,6 +5224,7 @@ describe("patch publication integrity", () => {
               : "";
           },
         },
+        { localHosting: false },
       );
       expect(outcome.exitCode).toBe(2);
       expect(git("ls-remote", collisionRemote, `refs/heads/${branch}`)).toBe(
@@ -6085,20 +6116,32 @@ describe("patch publication integrity", () => {
     );
     const diagnostics = JSON.stringify({ outcome, modelCalls, gitTrace });
     expect(modelCalls, diagnostics).toBe(1);
-    const applied = changed || shallow || replaced;
+    // Replacing or moving captured administration fails before risk assessment.
+    const administrationChanged = replaced || moved;
+    const applied = !administrationChanged && (changed || shallow);
     expect(assessments, diagnostics).toBe(applied ? 1 : 0);
     expect(outcome.exitCode, diagnostics).toBe(applied ? 0 : 2);
-    expect(JSON.parse(outcome.stdout), diagnostics).toMatchObject({
-      applied,
-      files: [
-        ...(replaced ? [".gitmodules"] : []),
-        ...(shallow || replaced ? ["dependency"] : []),
-        ...(shallow || replaced ? ["dependency/HEAD"] : []),
-        ...(changed || shallow || replaced ? ["dependency/app.ts"] : []),
-        ...(shallow ? ["dependency/upstream.ts"] : []),
-      ],
-      ...(applied ? {} : { error: { code: "NO_PATCH_APPLIED" } }),
-    });
+    expect(JSON.parse(outcome.stdout), diagnostics).toMatchObject(
+      administrationChanged
+        ? {
+            applied: false,
+            files: [],
+            error: {
+              code: "PATCH_FAILED",
+              message: `Nested Git administration changed during the patch: ${child}`,
+            },
+          }
+        : {
+            applied,
+            files: [
+              ...(shallow ? ["dependency"] : []),
+              ...(shallow ? ["dependency/HEAD"] : []),
+              ...(changed || shallow ? ["dependency/app.ts"] : []),
+              ...(shallow ? ["dependency/upstream.ts"] : []),
+            ],
+            ...(applied ? {} : { error: { code: "NO_PATCH_APPLIED" } }),
+          },
+    );
     expect(git("write-tree")).toBe(expectedIndex);
     expect(git("ls-tree", "HEAD", "dependency")).toBe(originalGitlink);
     if (expectedContents === undefined)
