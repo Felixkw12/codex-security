@@ -1163,8 +1163,12 @@ export async function capturePatchGitControls(
         .toString("latin1")
         .split("\0")
         .filter(Boolean)) {
-        if (entry.startsWith("160000 "))
-          await add(entry.slice(entry.indexOf("\t") + 1), true, true);
+        // A tracked file can become a directory without appearing as deleted.
+        await add(
+          entry.slice(entry.indexOf("\t") + 1),
+          true,
+          entry.startsWith("160000 "),
+        );
       }
       // Git can replace a directory's deleted tracked files with a gitlink.
       for (const path of deleted.toString("latin1").split("\0").filter(Boolean))

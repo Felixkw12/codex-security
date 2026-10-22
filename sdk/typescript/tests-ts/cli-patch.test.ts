@@ -5515,6 +5515,10 @@ describe("patch publication integrity", () => {
       const fixed = inner("rev-parse", "HEAD");
       inner("checkout", original);
       if (deinitialized) {
+        const childRemote = join(directory, "dependency.git");
+        git("init", "--bare", childRemote);
+        inner("remote", "add", "origin", childRemote);
+        inner("push", "origin", "main");
         git(
           "config",
           "-f",
@@ -5527,7 +5531,7 @@ describe("patch publication integrity", () => {
           "-f",
           ".gitmodules",
           "submodule.dependency.url",
-          "https://github.example.test/example/dependency.git",
+          childRemote,
         );
       }
       git("add", ".");

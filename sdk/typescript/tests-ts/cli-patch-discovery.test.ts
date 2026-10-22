@@ -16,6 +16,7 @@ import { dirname, join, resolve } from "node:path";
 import { capturePatchGitControls } from "../src/patch-git-controls.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import {
+  patchRiskAssessment,
   repositoryGit,
   runGitRepositoryCommand,
   runWorkflow,
@@ -530,6 +531,101 @@ async function captureControls(directory: string) {
     true,
   );
 }
+
+test.each(
+  [false, true].flatMap((assess) =>
+    [false, true].map((nestedRepository) => ({ assess, nestedRepository })),
+  ),
+)(
+  "publication checks tracked-file directory replacements (nested repository: $nestedRepository, assessment: $assess)",
+  async ({ assess, nestedRepository }) => {
+    const selected = await repository("patch-tracked-file-replacement-");
+    const replacement = join(selected.root, "vendor");
+    await writeFile(replacement, "tracked file\n");
+    selected.git("add", "vendor");
+    selected.git("commit", "-m", "Synthetic tracked file baseline");
+    const remote = await fixtures.create("patch-tracked-file-remote-");
+    selected.git("init", "--bare", remote);
+    selected.git("remote", "add", "origin", remote);
+    const head = selected.git("rev-parse", "HEAD");
+    const index = await readFile(join(selected.root, ".git", "index"));
+    const nestedCommands: string[][] = [];
+    let nestedIndex: Buffer<ArrayBuffer> | undefined;
+    let creates = 0;
+    let modelCalls = 0;
+    const outcome = await runWorkflow(
+      [
+        "patch",
+        "Synthetic issue",
+        "--create-pr",
+        "--json",
+        ...(assess ? ["--assess-patch-risk"] : []),
+      ],
+      {
+        currentDirectory: selected.root,
+        onRepositoryCommand: (command, args, cwd, options) => {
+          if (command !== "git") {
+            if (args[1] === "list") return "[]";
+            if (args[1] === "create") creates++;
+            return "https://github.example.test/example/repository/pull/1";
+          }
+          if (cwd === replacement || args.includes(replacement))
+            nestedCommands.push([...args]);
+          return runGitRepositoryCommand(command, args, cwd, options);
+        },
+        onCodex: async (_args, output) => {
+          if (modelCalls++ > 0) {
+            output?.stdout.write(JSON.stringify(patchRiskAssessment()));
+            return 0;
+          }
+          await rm(replacement);
+          await mkdir(replacement);
+          await writeFile(join(replacement, "input.ts"), "replacement\n");
+          if (nestedRepository) {
+            const git = repositoryGit(replacement);
+            git("init", "--initial-branch=main");
+            git("config", "user.name", "Synthetic User");
+            git("config", "user.email", "synthetic@example.test");
+            git("add", ".");
+            git("commit", "-m", "Synthetic nested baseline");
+            nestedIndex = await readFile(join(replacement, ".git", "index"));
+          }
+          output?.stdout.write("Synthetic patch complete.\n");
+          return 0;
+        },
+      },
+    );
+    expect(outcome.exitCode, JSON.stringify({ outcome, nestedCommands })).toBe(
+      nestedRepository ? 2 : 0,
+    );
+    if (nestedRepository) {
+      expect(outcome.stderr).toContain(
+        "Git metadata outside the pre-patch administration directories",
+      );
+      expect(nestedCommands).toEqual([]);
+      expect(creates).toBe(0);
+      expect(modelCalls).toBe(1);
+      expect(selected.git("rev-parse", "HEAD")).toBe(head);
+      expect(await readFile(join(selected.root, ".git", "index"))).toEqual(
+        index,
+      );
+      expect(await readFile(join(replacement, ".git", "index"))).toEqual(
+        nestedIndex!,
+      );
+    } else {
+      expect(creates).toBe(1);
+      expect(
+        repositoryGit(remote)(
+          "show",
+          `${selected.git("rev-parse", "HEAD")}:vendor/input.ts`,
+        ),
+      ).toBe("replacement");
+    }
+    expect(await readFile(join(replacement, "input.ts"), "utf8")).toBe(
+      "replacement\n",
+    );
+  },
+);
 
 test("rejects replacement of tracked directories with new Git administration", async () => {
   const selected = await repository("patch-tracked-replacement-");
