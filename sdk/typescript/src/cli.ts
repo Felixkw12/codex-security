@@ -9016,9 +9016,10 @@ export function skillCommandFailure(
   authentication: ScanAuthentication | null = null,
 ): string {
   // Numeric statuses need an HTTP/status label; the original diagnostic is retained below.
-  const adviceDetail = isTomlParserError(detail)
+  const diagnosticDetail = detail.replace(/\bhttps?:\/\/[^\s"'<>]+/giu, "");
+  const adviceDetail = isTomlParserError(diagnosticDetail)
     ? ""
-    : detail.replace(/\bhttps?:\/\/[^\s"'<>]+/giu, "");
+    : diagnosticDetail;
   const classificationDetail = adviceDetail.replace(
     /\b(?:(?:http(?:\/\d+(?:\.\d+)?)?(?:[ \t]*(?:response[ \t]+code|error(?:[ \t]+code)?|status(?:[ _-]?code)?|code))?|response[ \t]+code|status(?:[ _-]?code)?)(?:["']?[ \t]*[:=][ \t]*|[ \t]+)["']?(401|403|429)|(401|403|429))\b/giu,
     (match, status: string | undefined) => (status ? match : ""),

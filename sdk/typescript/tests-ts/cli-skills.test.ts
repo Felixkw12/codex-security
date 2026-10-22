@@ -1495,6 +1495,20 @@ process.stdout.write(JSON.stringify({
           "The selected model is unavailable for the current credentials.",
         ] as const,
     ),
+    ...(["validate", "patch", "verify-fix"] as const).flatMap((command) =>
+      (
+        [
+          [
+            "error sending request for url (https://example.test/v1?source=config.toml:1:2:) HTTP 401 Unauthorized",
+            "Authentication failed.",
+          ],
+          [
+            "error sending request for url (https://example.test/v1#config.toml:1:2:) HTTP 403 Forbidden",
+            "The selected model is unavailable for the current credentials.",
+          ],
+        ] as const
+      ).map(([detail, advice]) => [command, detail, advice] as const),
+    ),
     [
       "validate",
       "Provider configured in config.toml returned 401 Unauthorized",
@@ -1720,6 +1734,14 @@ process.stdout.write(JSON.stringify({
     ["ExpiredTokenException", "Authentication failed"],
     ["HTTP 403 ExpiredTokenException", "Authentication failed"],
     ["HTTP 401; parsed 429 bytes", "Authentication failed"],
+    [
+      "error sending request for url (https://example.test/v1?source=config.toml:1:2:)",
+      "could not connect",
+    ],
+    [
+      "error sending request for url (https://example.test/v1) config.toml:401:8: invalid token",
+      null,
+    ],
     ["HTTP request failed while parsing line 429", null],
     ["permission denied opening /synthetic/403/cache", null],
     ["401 sk-proj-SYNTHETIC_SECRET", null],
