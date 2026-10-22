@@ -28,6 +28,7 @@ const bundle = await build({
             async close() {}
           }`,
           "./src/native-scan.js": `
+          export function readNativeScanSemanticInputs() { throw new Error("unexpected target semantic input read"); }
           export class NativeScanHost {
             run(...args) { return fixture.run(...args); }
             cancel(...args) { return fixture.cancel(...args); }
@@ -42,6 +43,8 @@ const bundle = await build({
           "../../../sdk/typescript/src/scan-execution.js": `
           export const ScanPermissionError = fixture.ScanPermissionError;
           export const acquireScanExecution = (...args) => fixture.acquire?.(...args) ?? Promise.resolve(() => {});`,
+          "../../../sdk/typescript/src/scan-inputs.js": `
+          export function scanInputIdentity() { throw new Error("unexpected target semantic identity read"); }`,
           "node:child_process": `
           import { PassThrough } from "node:stream";
           export function execFile() {}
