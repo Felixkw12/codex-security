@@ -16,7 +16,9 @@ test.each([
   "xdg",
   "explicit",
   "empty explicit",
-  ...(process.platform === "win32" ? ["appdata", "mixed case"] : []),
+  ...(process.platform === "win32"
+    ? ["appdata", "mixed case"]
+    : ["lowercase decoy"]),
 ])("preserves gh configuration after caller removal: %s", async (kind) => {
   const { directory, git } = await publicationRepository(fixtures);
   const caller = join(directory, "component");
@@ -27,7 +29,7 @@ test.each([
   const support = await fixtures.create("patch-gh-configuration-");
   const home = join(support, "home");
   const config =
-    kind === "home"
+    kind === "home" || kind === "lowercase decoy"
       ? join(home, ".config", "gh")
       : kind === "appdata"
         ? join(support, "GitHub CLI")
@@ -47,7 +49,9 @@ test.each([
     GIT_CONFIG_NOSYSTEM: "1",
   };
   if (kind === "appdata") environment["AppData"] = relative(caller, support);
-  else if (kind !== "home") {
+  else if (kind === "lowercase decoy") {
+    environment["gh_config_dir"] = join(support, "decoy");
+  } else if (kind !== "home") {
     environment["XDG_CONFIG_HOME"] = relative(caller, support);
     if (kind === "explicit")
       environment["GH_CONFIG_DIR"] = relative(caller, config);
