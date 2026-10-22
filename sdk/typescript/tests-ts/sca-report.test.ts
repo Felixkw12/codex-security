@@ -421,7 +421,9 @@ describe("SCA report", () => {
       result.diagnostics = diagnostics;
       const evidence = structuredClone(result);
       const report = renderScaReport(result);
-      expect(report).toContain(value);
+      expect(report).toContain(
+        /[\r\n]/u.test(value) ? JSON.stringify(value).slice(1, -1) : value,
+      );
       const rendered = Bun.markdown.html(report);
       expect(rendered).not.toMatch(/<(?:a|img)\b/u);
       expect(rendered).not.toMatch(/<h[1-6]\b[^>]*>Fabricated summary/u);
