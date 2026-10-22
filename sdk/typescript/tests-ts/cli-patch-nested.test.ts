@@ -295,12 +295,25 @@ describe("patch change tracking", () => {
       parentGit("submodule", "init");
       parentGit("submodule", "absorbgitdirs", name);
     }
+    if (change === "flatten") {
+      nestedGit(
+        "init",
+        "--separate-git-dir",
+        join(directory, ".git", "retained-nested"),
+      );
+      nestedGit("config", "core.worktree", nested);
+    }
     git("add", "nested");
     git("commit", "-m", "Synthetic gitlink");
     const moving = change === "move" || change === "registered-move";
+    const configurationPath = join(
+      nestedGit("rev-parse", "--absolute-git-dir"),
+      "config",
+    );
     const destination = moving ? `${path}-moved` : path;
     let assessments = 0;
     let afterTurn = false;
+    let movedIndexes: { path: string; contents: Buffer<ArrayBuffer> }[] = [];
     const bookkeeping: string[][] = [];
     const outcome = await runWorkflow(
       ["patch", "Synthetic issue", "--assess-patch-risk", "--json"],
@@ -384,19 +397,36 @@ describe("patch change tracking", () => {
               parentGit("commit", "-m", "Synthetic flatten");
             }
           }
+          if (moving)
+            movedIndexes = await Promise.all(
+              [
+                directory,
+                ...(scope === "recursive" ? [join(directory, "nested")] : []),
+                join(directory, destination),
+              ].map(async (checkout) => {
+                const path = join(
+                  repositoryGit(checkout)("rev-parse", "--absolute-git-dir"),
+                  "index",
+                );
+                return { path, contents: await readFile(path) };
+              }),
+            );
           output?.stdout.write("Fixed.");
           afterTurn = true;
           return 0;
         },
       },
     );
-    if (change === "move") {
+    if (moving) {
       expect(outcome.exitCode, outcome.stderr).toBe(2);
       expect(outcome.stderr).toContain(
-        "Git metadata outside the pre-patch administration directories",
+        `Git configuration changed during the patch: ${configurationPath}`,
       );
       expect(assessments).toBe(0);
       expect(bookkeeping).toEqual([]);
+      for (const { path, contents } of movedIndexes)
+        expect(await readFile(path)).toEqual(contents);
+      expect(git("ls-remote", "origin")).toBe("");
       expect(
         await readFile(join(directory, destination, "app.ts"), "utf8"),
       ).toBe("after\n");
@@ -437,15 +467,28 @@ describe("patch change tracking", () => {
         parentGit("add", "child");
         parentGit("commit", "-m", "Synthetic recursive gitlink");
       }
+      if (change === "remove") {
+        nestedGit(
+          "init",
+          "--separate-git-dir",
+          join(directory, ".git", "retained-nested"),
+        );
+        nestedGit("config", "core.worktree", nested);
+      }
       git("add", "nested");
       git("commit", "-m", "Synthetic gitlink");
       await writeFile(join(nested, "app.ts"), "original\nuser change\n");
+      const nestedIndexPath = join(
+        nestedGit("rev-parse", "--absolute-git-dir"),
+        "index",
+      );
       const indexes = [
         ...new Set([directory, join(directory, "nested"), nested]),
-      ].map((path) => join(path, ".git/index"));
+      ].map((path) =>
+        path === nested ? nestedIndexPath : join(path, ".git/index"),
+      );
       const before = await Promise.all(indexes.map((path) => readFile(path)));
-      const originalChildIndex =
-        before[indexes.indexOf(join(nested, ".git/index"))]!;
+      const originalChildIndex = before[indexes.indexOf(nestedIndexPath)]!;
       const result = resultWithFindings(["high"]);
       const reported = `${nestedPath}/${change === "rename" ? "new.ts" : "app.ts"}`;
       result.findings.findings[0]!.locations[0]!.path = `${nestedPath}/app.ts`;
@@ -560,8 +603,9 @@ describe("patch change tracking", () => {
             if (change === "replace") {
               nestedGit("add", ".");
               nestedGit("commit", "-m", "Synthetic replacement");
-              before[indexes.indexOf(join(nested, ".git/index"))] =
-                await readFile(join(nested, ".git/index"));
+              before[indexes.indexOf(nestedIndexPath)] = await readFile(
+                join(nested, ".git/index"),
+              );
             }
             output?.stdout.write(
               JSON.stringify({
@@ -597,8 +641,6 @@ describe("patch change tracking", () => {
         );
       }
       for (const [index, path] of indexes.entries()) {
-        if (change === "remove" && path === join(nested, ".git/index"))
-          continue;
         expect(await readFile(path)).toEqual(before[index]!);
       }
     },
@@ -702,14 +744,14 @@ describe("patch change tracking", () => {
     [false, true].flatMap((recursive) =>
       ["root", "package"].flatMap((scope) =>
         [
-          "init",
-          "init-edit",
-          "init-commit",
-          "init-new",
-          "init-delete",
-          "deinit",
-          "deinit-dirty",
-          "deinit-commit",
+          "restore",
+          "restore-edit",
+          "restore-commit",
+          "restore-new",
+          "restore-delete",
+          "remove-worktree",
+          "remove-worktree-dirty",
+          "remove-worktree-commit",
         ].map((operation) => ({ recursive, scope, operation })),
       ),
     ),
@@ -772,9 +814,24 @@ describe("patch change tracking", () => {
       initialize();
       const prefix = recursive ? "vendor/inner" : "vendor";
       const nested = join(root, prefix);
-      if (operation.startsWith("init"))
-        git("submodule", "deinit", "-f", "--all");
-      if (operation === "deinit-dirty") {
+      const configurations = [
+        root,
+        join(root, "vendor"),
+        ...(recursive ? [nested] : []),
+      ].map((checkout) =>
+        join(
+          repositoryGit(checkout)("rev-parse", "--absolute-git-dir"),
+          "config",
+        ),
+      );
+      const configurationBytes = await Promise.all(
+        configurations.map((path) => readFile(path)),
+      );
+      if (operation.startsWith("restore")) {
+        await rm(join(root, "vendor"), { recursive: true });
+        await mkdir(join(root, "vendor"));
+      }
+      if (operation === "remove-worktree-dirty") {
         await writeFile(join(nested, "app.ts"), "local dirty content\n");
         await writeFile(join(nested, "new.ts"), "local new content\n");
       }
@@ -803,9 +860,7 @@ describe("patch change tracking", () => {
             );
             expect(artifact.changedFiles).toContain(`${prefix}/gone.ts`);
             expect(artifact.changedFiles).toContain(`${prefix}/added.ts`);
-            const verification = await fixtures.create(
-              "initialized-risk-apply-",
-            );
+            const verification = await fixtures.create("restored-risk-apply-");
             await mkdir(join(verification, prefix), { recursive: true });
             await writeFile(join(verification, prefix, "app.ts"), "baseline\n");
             await writeFile(join(verification, prefix, "gone.ts"), "remove\n");
@@ -845,7 +900,7 @@ describe("patch change tracking", () => {
             output.stdout.write(patchRiskAssessment().report);
             return 0;
           }
-          if (operation.startsWith("init")) initialize();
+          if (operation.startsWith("restore")) initialize();
           if (commitChange) {
             await writeFile(join(nested, "app.ts"), "fixed\n");
             await rm(join(nested, "gone.ts"));
@@ -862,12 +917,12 @@ describe("patch change tracking", () => {
               "Synthetic child change",
             );
           }
-          if (operation === "init-edit")
+          if (operation === "restore-edit")
             await writeFile(join(nested, "app.ts"), "fixed\n");
-          if (operation === "init-new")
+          if (operation === "restore-new")
             await writeFile(join(nested, "new.ts"), "new fix\n");
-          if (operation === "init-delete") await rm(join(nested, "app.ts"));
-          if (operation === "deinit-commit") {
+          if (operation === "restore-delete") await rm(join(nested, "app.ts"));
+          if (operation === "remove-worktree-commit") {
             if (recursive)
               repositoryGit(join(root, "vendor"))(
                 "-c",
@@ -882,8 +937,10 @@ describe("patch change tracking", () => {
             index = await readFile(join(root, ".git/index"));
             staged = git("diff", "--cached");
           }
-          if (operation.startsWith("deinit"))
-            git("submodule", "deinit", "-f", "--all");
+          if (operation.startsWith("remove-worktree")) {
+            await rm(join(root, "vendor"), { recursive: true });
+            await mkdir(join(root, "vendor"));
+          }
           output?.stdout.write("Prepared dependencies and checked the result.");
           return 0;
         },
@@ -901,7 +958,7 @@ describe("patch change tracking", () => {
           onCodex,
         },
       );
-      const clean = operation === "init" || operation === "deinit";
+      const clean = operation === "restore" || operation === "remove-worktree";
       expect(outcome.exitCode, outcome.stderr).toBe(clean ? 2 : 0);
       expect(JSON.parse(outcome.stdout)).toMatchObject({
         applied: !clean,
@@ -909,7 +966,7 @@ describe("patch change tracking", () => {
           ? []
           : commitChange
             ? [
-                ...(operation === "deinit-commit" && recursive
+                ...(operation === "remove-worktree-commit" && recursive
                   ? ["vendor"]
                   : []),
                 prefix,
@@ -917,9 +974,9 @@ describe("patch change tracking", () => {
                 `${prefix}/app.ts`,
                 `${prefix}/gone.ts`,
               ]
-            : operation === "init-new"
+            : operation === "restore-new"
               ? [`${prefix}/new.ts`]
-              : operation === "deinit-dirty"
+              : operation === "remove-worktree-dirty"
                 ? [`${prefix}/app.ts`, `${prefix}/new.ts`]
                 : [`${prefix}/app.ts`],
       });
@@ -927,6 +984,8 @@ describe("patch change tracking", () => {
       expect(await readFile(join(root, ".git/index"))).toEqual(index);
       expect(git("diff", "--cached")).toBe(staged);
       expect(git("rev-parse", "HEAD")).toBe(head);
+      for (const [position, path] of configurations.entries())
+        expect(await readFile(path)).toEqual(configurationBytes[position]!);
     },
   );
 
@@ -1043,6 +1102,18 @@ describe("patch change tracking", () => {
       await writeFile(join(directory, "app.ts"), "unsafe\n");
       git("add", ".");
       git("commit", "-m", "Synthetic outer baseline");
+      if (operation === "remove") {
+        inner(
+          "init",
+          "--separate-git-dir",
+          join(root, ".git", "retained-nested"),
+        );
+        inner("config", "core.worktree", nested);
+      }
+      const childIndexPath = join(
+        inner("rev-parse", "--absolute-git-dir"),
+        "index",
+      );
       if (settings === "custom-objects")
         await rename(
           join(root, ".git", "objects"),
@@ -1086,7 +1157,7 @@ describe("patch change tracking", () => {
         git("add", "local.txt");
       }
       const parentIndex = await readFile(join(root, ".git", "index"));
-      let childIndex = await readFile(join(nested, ".git", "index"));
+      let childIndex = await readFile(childIndexPath);
       const originalChildIndex = childIndex;
       if (settings === "alternate-index") {
         await writeFile(alternateIndex, parentIndex);
@@ -1125,7 +1196,11 @@ describe("patch change tracking", () => {
               const checkout = args[0] === "-C" ? args[1]! : cwd;
               if (args.includes("core.hooksPath=/dev/null")) {
                 expect(args).toContain("core.fsmonitor=false");
-                expect(index).not.toBe(join(checkout, ".git", "index"));
+                expect(index).not.toBe(
+                  checkout === nested
+                    ? childIndexPath
+                    : join(checkout, ".git", "index"),
+                );
                 expect(index).not.toBe(alternateIndex);
               } else {
                 const indices = snapshots.get(checkout) ?? new Set<string>();
@@ -1193,7 +1268,7 @@ describe("patch change tracking", () => {
             if (operation === "new-ignored") {
               await writeFile(join(nested, "generated.txt"), "generated fix\n");
               inner("add", "-f", "generated.txt");
-              childIndex = await readFile(join(nested, ".git", "index"));
+              childIndex = await readFile(childIndexPath);
               output?.stdout.write("Fixed and checked.");
               return 0;
             }
@@ -1222,7 +1297,7 @@ describe("patch change tracking", () => {
                 "staged child content\n",
               );
               inner("add", "staged-child.txt");
-              childIndex = await readFile(join(nested, ".git", "index"));
+              childIndex = await readFile(childIndexPath);
             }
             output?.stdout.write("Fixed and checked.");
             afterTurn = true;
@@ -1243,9 +1318,7 @@ describe("patch change tracking", () => {
         expect(await readFile(join(root, ".git", "index"))).toEqual(
           parentIndex,
         );
-        expect(await readFile(join(nested, ".git", "index"))).toEqual(
-          childIndex,
-        );
+        expect(await readFile(childIndexPath)).toEqual(childIndex);
         expect(await readFile(join(retiredAdministration!, "index"))).toEqual(
           originalChildIndex,
         );
@@ -1290,10 +1363,8 @@ describe("patch change tracking", () => {
       expect(git("diff", "--cached", "--name-only")).toBe(
         operation === "replace" || operation === "remove" ? "local.txt" : "",
       );
+      expect(await readFile(childIndexPath)).toEqual(childIndex);
       if (operation !== "remove") {
-        expect(await readFile(join(nested, ".git", "index"))).toEqual(
-          childIndex,
-        );
         expect(inner("diff", "--cached", "--name-only")).toBe(
           operation === "replace"
             ? "staged-child.txt"
