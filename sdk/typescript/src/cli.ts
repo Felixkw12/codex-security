@@ -10486,6 +10486,14 @@ async function runFindingPatches(
           changedFiles.length === 0
         ) {
           patch = failed("No patch was applied; 0 files changed.");
+        } else if (
+          parsed.data.status === "no_change" &&
+          changedFiles.length > 0
+        ) {
+          patch = failed(
+            "Patch reported no changes, but files changed.",
+            changedFiles,
+          );
         } else {
           patch = parsed.data;
         }
