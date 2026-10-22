@@ -22,6 +22,14 @@ const { scanInputIdentity, saveScanKnowledge } = await loadSourceModule<
 const { resolveDeepScanConfig } = await loadSourceModule<
   typeof import("../../../../sdk/typescript/src/deep-config.js")
 >(new URL("../../../../sdk/typescript/src/deep-config.ts", import.meta.url));
+const { nativeScanConfiguration } = await loadSourceModule<
+  typeof import("../../../../sdk/typescript/src/execution-preparation.js")
+>(
+  new URL(
+    "../../../../sdk/typescript/src/execution-preparation.ts",
+    import.meta.url,
+  ),
+);
 const { createProviderProfile, restoreProviderProfile } =
   await loadSourceModule<
     typeof import("../../../../sdk/typescript/src/provider-profile.js")
@@ -68,6 +76,11 @@ for (const change of [
   "instructions removed",
   "instructions absent",
   "instructions added",
+  "instruction file unchanged",
+  "instruction file changed",
+  "instruction file removed",
+  "instruction file explicit",
+  "instruction file running",
   "running scan ID",
   "running target",
 ]) {
@@ -82,6 +95,8 @@ for (const change of [
     );
     const deepConfigPath = path.join(root, "deep.toml");
     const selectedConfigPath = path.join(root, "selected.toml");
+    const originalInstructionFile = path.join(root, "instructions-a.md");
+    const changedInstructionFile = path.join(root, "instructions-b.md");
     const environment = {
       ...process.env,
       CODEX_SECURITY_SCAN_ROOT: path.join(root, "scans"),
@@ -101,19 +116,30 @@ for (const change of [
       OPENAI_API_KEY: "",
     };
     const owner = "synthetic-reuse-owner";
-    const running = change === "running scan ID" || change === "running target";
-    const instructionCase = change.startsWith("instructions ") || running;
+    const instructionFileCase = change.startsWith("instruction file ");
+    const running =
+      change === "running scan ID" ||
+      change === "running target" ||
+      change === "instruction file running";
+    const instructionCase =
+      change.startsWith("instructions ") || instructionFileCase || running;
     const originalInstructions =
       instructionCase &&
       change !== "instructions absent" &&
       change !== "instructions added"
         ? "Inspect synthetic authentication boundaries."
         : undefined;
-    const selectedConfig = (instructions: string | undefined) =>
+    const selectedConfig = (
+      instructions: string | undefined,
+      instructionFile?: string,
+    ) =>
       selectedConfiguration +
       (instructions === undefined
         ? ""
-        : `developer_instructions = ${JSON.stringify(instructions)}\n`);
+        : `developer_instructions = ${JSON.stringify(instructions)}\n`) +
+      (instructionFile === undefined
+        ? ""
+        : `model_instructions_file = ${JSON.stringify(path.basename(instructionFile))}\n`);
     let client: Client | undefined;
     const workbench = (
       args: string[],
@@ -190,13 +216,42 @@ for (const change of [
       await writeFile(path.join(repository, "app.py"), "print('fixture')\n");
       await writeFile(knowledgePath, "Original synthetic guidance.\n");
       await writeFile(deepConfigPath, deepConfiguration);
-      await writeFile(selectedConfigPath, selectedConfig(originalInstructions));
+      await writeFile(
+        selectedConfigPath,
+        selectedConfig(
+          originalInstructions,
+          instructionFileCase ? originalInstructionFile : undefined,
+        ),
+      );
+      if (instructionFileCase) {
+        await writeFile(
+          originalInstructionFile,
+          "Original synthetic model instructions.\n",
+        );
+        await writeFile(
+          changedInstructionFile,
+          "Different synthetic model instructions.\n",
+        );
+      }
+      const nativeConfig = instructionFileCase
+        ? await nativeScanConfiguration(
+            environment,
+            { model, reasoningEffort },
+            1,
+          )
+        : undefined;
+      if (nativeConfig)
+        assert.equal(
+          nativeConfig.model_instructions_file,
+          originalInstructionFile,
+        );
       const profile = instructionCase
         ? await createProviderProfile(environment.CODEX_HOME, {
             analytics: { enabled: false },
-            ...(originalInstructions === undefined
-              ? {}
-              : { developer_instructions: originalInstructions }),
+            ...(nativeConfig ??
+              (originalInstructions === undefined
+                ? {}
+                : { developer_instructions: originalInstructions })),
           })
         : undefined;
       const originalProfile = profile
@@ -236,17 +291,16 @@ for (const change of [
               deepScan: deep,
             }),
       };
-      if (profile)
-        assert.equal(
-          (
-            await restoreProviderProfile(
-              recipe.config,
-              recipe.providerProfile,
-              environment,
-            )
-          ).developer_instructions,
-          originalInstructions,
+      if (profile) {
+        const saved = await restoreProviderProfile(
+          recipe.config,
+          recipe.providerProfile,
+          environment,
         );
+        assert.equal(saved.developer_instructions, originalInstructions);
+        if (instructionFileCase)
+          assert.equal(saved.model_instructions_file, originalInstructionFile);
+      }
       if (knowledge) await saveScanKnowledge(scanDir, knowledge);
       workbench(
         [
@@ -357,7 +411,7 @@ for (const change of [
       if (
         change === "instructions changed" ||
         change === "instructions added" ||
-        running
+        (running && !instructionFileCase)
       )
         await writeFile(
           selectedConfigPath,
@@ -365,8 +419,29 @@ for (const change of [
         );
       if (change === "instructions removed")
         await writeFile(selectedConfigPath, selectedConfig(undefined));
-      if (change === "missing knowledge" || running) await rm(knowledgePath);
-      if (running) await writeFile(deepConfigPath, "invalid TOML [");
+      if (instructionFileCase) {
+        const currentFile =
+          change === "instruction file unchanged"
+            ? originalInstructionFile
+            : change === "instruction file removed"
+              ? undefined
+              : changedInstructionFile;
+        await writeFile(
+          selectedConfigPath,
+          selectedConfig(originalInstructions, currentFile),
+        );
+        const current = await nativeScanConfiguration(
+          environment,
+          { model, reasoningEffort },
+          1,
+        );
+        assert.equal(current.model_instructions_file, currentFile);
+        assert.equal(current.developer_instructions, originalInstructions);
+      }
+      if (change === "missing knowledge" || (running && !instructionFileCase))
+        await rm(knowledgePath);
+      if (running && !instructionFileCase)
+        await writeFile(deepConfigPath, "invalid TOML [");
       if (change === "selected config" || change === "turn metadata precedence")
         await writeFile(
           selectedConfigPath,
@@ -383,7 +458,7 @@ for (const change of [
                   : reasoningEffort,
             };
       client = await connect();
-      if (!running)
+      if (!running && change !== "instruction file explicit")
         assert.equal(
           successful(
             await call("start_codex_security_deep_scan", {
@@ -396,7 +471,7 @@ for (const change of [
         );
       const response = await call(
         "start_codex_security_deep_scan",
-        change === "running scan ID"
+        change === "running scan ID" || change === "instruction file explicit"
           ? { scanId, handoffClaimToken }
           : { targetPath: repository, userContext },
         turn,
@@ -408,6 +483,8 @@ for (const change of [
         change === "turn metadata precedence" ||
         change === "instructions unchanged" ||
         change === "instructions absent" ||
+        change === "instruction file unchanged" ||
+        change === "instruction file explicit" ||
         change === "whitespace knowledge" ||
         change === "padded knowledge path" ||
         change === "plain knowledge path"

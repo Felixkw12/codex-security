@@ -59,7 +59,7 @@ export interface NativeScanSemanticInputs {
   deepScanSettings: Required<DeepScanOptions>;
   config: JsonObject;
   modelSettings: ReturnType<typeof scanModelConfiguration>;
-  developerInstructionsMatch: boolean;
+  instructionSettingsMatch: boolean;
 }
 
 export interface NativeScanInput {
@@ -219,9 +219,11 @@ export async function readNativeScanSemanticInputs(
     knowledgeBaseSnapshot,
     deepScanSettings,
     config,
-    developerInstructionsMatch:
+    instructionSettingsMatch:
       config["developer_instructions"] ===
-      savedConfig["developer_instructions"],
+        savedConfig["developer_instructions"] &&
+      config["model_instructions_file"] ===
+        savedConfig["model_instructions_file"],
     modelSettings: scanModelConfiguration(
       await mergedCodexConfig({ codexOverrides: config }),
     ),

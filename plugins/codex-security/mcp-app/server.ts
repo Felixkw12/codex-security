@@ -980,7 +980,7 @@ export function createCodexSecurityServer(): McpServer {
               ...beginArguments,
               "--completed-inputs-json",
               JSON.stringify({
-                completedScanId: semanticInputs.developerInstructionsMatch
+                completedScanId: semanticInputs.instructionSettingsMatch
                   ? begun.scan.scanId
                   : null,
                 knowledgeBase: scanInputIdentity(
