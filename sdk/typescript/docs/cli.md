@@ -2040,7 +2040,6 @@ in the workbench, without changing sealed report timestamps.
 | `findings imported [REPOSITORY]`                      | Read locally imported, unassessed vendor evidence.                               |
 | `findings false-positive OCCURRENCE_ID --reason TEXT` | Dismiss a finding while the reason applies.                                      |
 
-
 Without an ID, `scans show` selects the latest completed scan, while `scans logs`
 selects the latest scan of any status. After a successful scan followed by a
 failed or active scan, these defaults refer to different runs. Human output
