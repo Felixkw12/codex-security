@@ -1663,6 +1663,8 @@ process.stdout.write(JSON.stringify({
         `HTTPError:${status}`,
         `HTTP error code: ${status}`,
         `HTTP response code ${status}`,
+        `response code: ${status}`,
+        `response code: "${status}"`,
         `status code ${status}`,
         `status_code=${status}`,
         `{"status":${status}}`,

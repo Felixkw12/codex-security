@@ -440,9 +440,6 @@ async function runInstalledSdk(pluginRoot, executable) {
       maxDiscoveryRuns: 2,
       stopAfterNoNew: 1,
       outputDir: join(f.directory, "output"),
-      onScanRegistered(scan) {
-        scanId = scan.scanId;
-      },
     });
     assert.equal(result.threadId, owner);
     assert.equal(result.manifest.scan.status, "completed");
