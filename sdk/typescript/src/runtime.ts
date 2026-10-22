@@ -1646,6 +1646,8 @@ export async function runWorkbench(
       "database-info",
       "store-findings",
       "list-stored-findings",
+      "store-external-findings",
+      "list-external-findings",
       "find-potential-duplicates",
       "store-dedupe-groups",
       "list-dedupe-groups",
@@ -2108,7 +2110,7 @@ async function prepareOutputDirectory(
   }
 }
 
-async function createWindowsOutputDirectory(
+export async function createWindowsOutputDirectory(
   path: string,
   recursive: boolean,
 ): Promise<string | undefined> {

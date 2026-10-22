@@ -94,12 +94,13 @@ EXPECTED_MIGRATIONS = [
     (50, "persist authorized source excerpt scopes"),
     (51, "preserve deep scan worker thread history"),
     (52, "record severity classification review counts"),
-    (53, "preserve original deep scan discovery context"),
-    (54, "retain deep scan attempts and exact merge inputs"),
-    (55, "persist selected deep scan finalization input"),
-    (56, "freeze stopped scan checkpoint selections"),
-    (57, "bind original deep scan parent usage turn"),
-    (58, "bind original deep scan execution settings"),
+    (53, "store external source findings without assessments"),
+    (54, "preserve original deep scan discovery context"),
+    (55, "retain deep scan attempts and exact merge inputs"),
+    (56, "persist selected deep scan finalization input"),
+    (57, "freeze stopped scan checkpoint selections"),
+    (58, "bind original deep scan parent usage turn"),
+    (59, "bind original deep scan execution settings"),
 ]
 
 
@@ -2930,7 +2931,9 @@ def test_workbench_reconciles_profile_and_public_warning_histories(
         ) is supported
 
 
-@pytest.mark.parametrize("snapshot", ["early", "previous", "current", "before-refresh", "f57"])
+@pytest.mark.parametrize(
+    "snapshot", ["early", "previous", "current", "before-refresh", "f57", "f58"]
+)
 def test_original_deep_scan_history_upgrades_without_skipping_local_embeddings(
     snapshot: str,
 ) -> None:
@@ -2945,9 +2948,10 @@ def test_original_deep_scan_history_upgrades_without_skipping_local_embeddings(
         "bind original deep scan parent usage turn": 48,
         "bind original deep scan execution settings": 51,
     }
-    if snapshot in {"previous", "current", "before-refresh", "f57"}:
+    if snapshot in {"previous", "current", "before-refresh", "f57", "f58"}:
         original_versions = {
-            name: version - {"previous": 6, "current": 5, "before-refresh": 3, "f57": 1}[snapshot]
+            name: version
+            - {"previous": 7, "current": 6, "before-refresh": 4, "f57": 2, "f58": 1}[snapshot]
             for version, name, _ in SCHEMA.MIGRATIONS
             if name in original_versions
         }
@@ -2959,7 +2963,16 @@ def test_original_deep_scan_history_upgrades_without_skipping_local_embeddings(
         (original_versions.get(name, version), name, sql)
         for version, name, sql in SCHEMA.MIGRATIONS
         if version
-        <= ({"early": 43, "previous": 46, "current": 47, "before-refresh": 49, "f57": 51}[snapshot])
+        <= (
+            {
+                "early": 43,
+                "previous": 46,
+                "current": 47,
+                "before-refresh": 49,
+                "f57": 51,
+                "f58": 52,
+            }[snapshot]
+        )
         or name in original_versions
     ]
     apply_historical_migrations(connection, historical, timestamp)

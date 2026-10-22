@@ -115,6 +115,7 @@ const outcomes = [
   "completed-owner-explicit",
   "restart",
   "restart-missing-logs",
+  "restart-missing-knowledge",
   "restart-deleted-target",
   "restart-changed-target",
   "restart-corrupt-selection",
@@ -1245,6 +1246,9 @@ for (const {
       }
       const result = await client.run(repository, {
         mode: "deep",
+        ...(outcome === "restart-missing-knowledge"
+          ? { knowledgeBasePaths: [join(root, "missing-knowledge.md")] }
+          : {}),
         ...(recoveryBudget ? { maxCostUsd: 0.004 } : {}),
         onWarning: (warning) => warnings.push(warning),
         signal: cancellation.signal,

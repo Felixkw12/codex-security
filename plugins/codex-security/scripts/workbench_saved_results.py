@@ -63,9 +63,6 @@ from workbench.saved_sources import (
     _checkpoint_paths as _checkpoint_paths,
 )
 from workbench.saved_sources import (
-    _children as _children,
-)
-from workbench.saved_sources import (
     _digest as _digest,
 )
 from workbench.saved_sources import (
@@ -102,9 +99,6 @@ from workbench.saved_sources import (
     _retained_source_state as _retained_source_state,
 )
 from workbench.saved_sources import (
-    _saved_result_paths as _saved_result_paths,
-)
-from workbench.saved_sources import (
     _saved_results_changed as _saved_results_changed,
 )
 from workbench.saved_sources import (
@@ -112,9 +106,6 @@ from workbench.saved_sources import (
 )
 from workbench.saved_sources import (
     _source_digests as _source_digests,
-)
-from workbench.saved_sources import (
-    _worker_checkpoint_head as _worker_checkpoint_head,
 )
 from workbench.saved_sources import (
     _worker_checkpoint_heads as _worker_checkpoint_heads,

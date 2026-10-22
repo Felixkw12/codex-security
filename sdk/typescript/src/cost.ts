@@ -1,5 +1,8 @@
 import { parseJson } from "./value.js";
 import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
+import { pipeline } from "node:stream";
+import zlib from "node:zlib";
 import { open, readdir, realpath, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { isRecord } from "./record.js";
@@ -54,6 +57,7 @@ function createSessionReasoning(id: string, text = "") {
 
 interface SessionUsage {
   offset: number;
+  compressedSize: number | null;
   pendingLine: Buffer[];
   unreadable: boolean;
   threadId: string | null;
@@ -118,6 +122,7 @@ const SESSION_READ_SIZE = 64 * 1_024;
 function createSessionUsage(): SessionUsage {
   return {
     offset: 0,
+    compressedSize: null,
     pendingLine: [],
     unreadable: false,
     threadId: null as string | null,
@@ -328,7 +333,10 @@ export class ScanCostTracker {
         }
         if (directories.has(directory)) continue;
         directories.add(directory);
-        for await (const path of sessionFiles(directory)) {
+        for await (const path of sessionFiles(
+          directory,
+          typeof zlib.createZstdDecompress === "function",
+        )) {
           let session = this.#sessions.get(path);
           if (session === undefined) {
             session = createSessionUsage();
@@ -757,6 +765,32 @@ async function readSessionUsage(
   attribution: ScanExecutionAttribution | null = null,
 ): Promise<void> {
   if (session.unreadable) return;
+  if (path.endsWith(".zst")) {
+    let size: number;
+    try {
+      size = (await stat(path)).size;
+    } catch (error) {
+      if (isMissingFile(error)) return;
+      throw error;
+    }
+    if (session.compressedSize === size) return;
+    Object.assign(session, createSessionUsage());
+    const file = createReadStream(path);
+    const stream = pipeline(file, zlib.createZstdDecompress(), () => {});
+    try {
+      for await (const chunk of stream) {
+        readSessionChunk(chunk as Buffer, session, repository, attribution);
+      }
+      session.compressedSize = size;
+    } catch (error) {
+      session.unreadable = true;
+      session.pendingLine = [];
+      throw error;
+    } finally {
+      stream.destroy();
+    }
+    return;
+  }
   let file;
   try {
     if ((await stat(path)).size === session.offset) return;

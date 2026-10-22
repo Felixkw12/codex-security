@@ -1,4 +1,5 @@
 import { testRestoredPrivateProfileHomes } from "./deep_scan_private_profile_cases.ts";
+import { testDurableWorkerRuntimeSnapshots } from "./deep_scan_runtime_snapshot_cases.ts";
 import { testWorkerCancellation } from "./deep_scan_cancellation_cases.ts";
 import { testHome } from "./deep_scan_home_case.ts";
 import { testReconstructedWorkers } from "./deep_scan_reconstructed_cases.ts";
@@ -88,6 +89,9 @@ const {
   isCodexCybersecurityPolicyRefusal,
   parseDeepScan,
 } = await importModule({
+  banner: {
+    js: `import { createRequire as executorRequire } from "node:module"; const require = executorRequire(${JSON.stringify(executorSource.href)});`,
+  },
   define: {
     "import.meta.url": JSON.stringify(executorSource.href),
   },
@@ -127,6 +131,13 @@ try {
   testUsageLimitClassification();
   await testWorkerTerminalEvents();
   await testWorkerRuntimeSettings();
+  await testDurableWorkerRuntimeSnapshots({
+    CodexSdkWorkerExecutor,
+    captureDeepScanExecutionSettings,
+    restoredDeepScanWorkerSettings,
+    fakeCodexFixture,
+    parentSandbox: trustedParentSandbox,
+  });
   await testUnsupportedProviderSnapshotFailsBeforeLaunch();
   await testReconstructedWorkers({
     CodexSdkWorkerExecutor,
@@ -1733,6 +1744,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             configuration: {
               ...parsedConfiguration,
               ...inheritedTelemetry,
+              projects: { [fixture.root]: { trust_level: "trusted" } },
               ...Object.fromEntries(
                 Object.entries(nativePaths).map(([key, value]) => [
                   key,
@@ -1823,6 +1835,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                   ...entry.authentication,
                   ...entry.workerTelemetry,
                   ...entry.nativePaths,
+                  projects: { [fixture.root]: { trust_level: "untrusted" } },
                   approval_policy: "on-request",
                   default_permissions: "parent",
                   permissions: { parent: { filesystem: { ":root": "write" } } },
@@ -2138,6 +2151,13 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               web_search: workerConfigurations[index].webSearch,
               "windows.sandbox": workerConfigurations[index].windowsSandbox,
             });
+            assert.deepEqual(
+              nativeConfigOverrides(invocation.argv).filter((override) =>
+                /^projects[.=]/.test(override),
+              ),
+              [],
+              "Patch project trust is not forwarded to discovery, reducer or resumed workers.",
+            );
             assert.deepEqual(
               JSON.parse(
                 JSON.stringify(

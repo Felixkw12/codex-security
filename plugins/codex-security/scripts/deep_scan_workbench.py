@@ -25,12 +25,12 @@ from finalize_scan_contract import (
     write_scan_local_bytes,
 )
 from workbench.handoff import require_current_continuation
+from workbench.saved_sources import _worker_checkpoint_head
 from workbench.storage import create_private_directory
 from workbench_saved_results import (
     _restore_published_outputs,
     _selected_publication_digest,
     _snapshot_published_outputs,
-    _worker_checkpoint_head,
 )
 from workbench_scan_usage import capture_scan_usage_owner
 from workbench_source_scopes import capture_source_scopes

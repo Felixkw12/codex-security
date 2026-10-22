@@ -453,6 +453,13 @@
   },
   {
     "version": 53,
+    "name": "store external source findings without assessments",
+    "statements": [
+      "CREATE TABLE external_source_reports (\n    id TEXT PRIMARY KEY,\n    repository TEXT NOT NULL,\n    provider TEXT NOT NULL,\n    source_key TEXT NOT NULL,\n    source_finding_id TEXT NOT NULL,\n    evidence_json TEXT NOT NULL,\n    version INTEGER NOT NULL,\n    created_at TEXT NOT NULL,\n    updated_at TEXT NOT NULL,\n    UNIQUE (repository, provider, source_key, source_finding_id)\n);"
+    ]
+  },
+  {
+    "version": 54,
     "name": "preserve original deep scan discovery context",
     "statements": [
       "ALTER TABLE deep_scan_runs ADD COLUMN discovery_user_context TEXT;",
@@ -460,7 +467,7 @@
     ]
   },
   {
-    "version": 54,
+    "version": 55,
     "name": "retain deep scan attempts and exact merge inputs",
     "statements": [
       "CREATE TABLE deep_scan_attempts (\n    scan_id TEXT NOT NULL REFERENCES deep_scan_runs(scan_id) ON DELETE CASCADE,\n    worker_id TEXT NOT NULL REFERENCES deep_scan_workers(id) ON DELETE CASCADE,\n    attempt INTEGER NOT NULL,\n    status TEXT NOT NULL,\n    started_at TEXT NOT NULL,\n    completed_at TEXT,\n    end_reason TEXT,\n    error_message TEXT,\n    accepted_result_path TEXT,\n    accepted_result_sha256 TEXT,\n    receipt_json TEXT,\n    PRIMARY KEY (worker_id, attempt)\n);",
@@ -472,28 +479,28 @@
     ]
   },
   {
-    "version": 55,
+    "version": 56,
     "name": "persist selected deep scan finalization input",
     "statements": [
       "ALTER TABLE deep_scan_runs ADD COLUMN finalization_input_json TEXT;"
     ]
   },
   {
-    "version": 56,
+    "version": 57,
     "name": "freeze stopped scan checkpoint selections",
     "statements": [
       "ALTER TABLE scans ADD COLUMN retained_checkpoint_heads_json TEXT;"
     ]
   },
   {
-    "version": 57,
+    "version": 58,
     "name": "bind original deep scan parent usage turn",
     "statements": [
       "ALTER TABLE deep_scan_runs ADD COLUMN usage_owner_json TEXT;"
     ]
   },
   {
-    "version": 58,
+    "version": 59,
     "name": "bind original deep scan execution settings",
     "statements": [
       "ALTER TABLE deep_scan_runs ADD COLUMN execution_settings_json TEXT;"

@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import { zstdCompressSync } from "node:zlib";
 import { jsonLines } from "./support/json.js";
 import { runNodePython } from "./support/python-probe.js";
 import * as filesystem from "node:fs/promises";
@@ -3016,13 +3017,15 @@ describe("live scan cost tracking", () => {
 
 describe("recorded Deep worker homes", () => {
   test.each([
-    ["recorded=false archived=false", false, false],
-    ["recorded=false archived=true", false, true],
-    ["recorded=true archived=false", true, false],
-    ["recorded=true archived=true", true, true],
+    ["recorded=false archived=false", false, false, false],
+    ["recorded=false archived=true", false, true, false],
+    ["recorded=true archived=false", true, false, false],
+    ["recorded=true archived=true", true, true, false],
+    ["recorded=false compressed=true", false, true, true],
+    ["recorded=true compressed=true", true, true, true],
   ] as const)(
     "retains archived worker usage: %s",
-    async (_label, recorded, archived) => {
+    async (_label, recorded, archived, compressed) => {
       const home = await codexHome();
       const workerHome = recorded ? await codexHome() : home;
       const at = "2026-09-01T00:00:02Z";
@@ -3052,7 +3055,15 @@ describe("recorded Deep worker homes", () => {
       if (archived) {
         const directory = join(workerHome, "archived_sessions");
         await mkdir(directory, { recursive: true });
-        await rename(worker, join(directory, "worker.jsonl"));
+        if (compressed) {
+          await writeFile(
+            join(directory, "worker.jsonl.zst"),
+            zstdCompressSync(await readFile(worker)),
+          );
+          await unlink(worker);
+        } else {
+          await rename(worker, join(directory, "worker.jsonl"));
+        }
       }
       const costs: Readonly<ScanCost>[] = [];
       const tracker = new ScanCostTracker({
@@ -3073,6 +3084,7 @@ describe("recorded Deep worker homes", () => {
       }));
       tracker.start("owner");
       try {
+        await tracker.refresh();
         await tracker.refresh();
         expect(costs.at(-1)?.inputTokens).toBe(1_000);
         expect(costs.at(-1)?.estimatedUsd).toBeCloseTo(0.004, 10);

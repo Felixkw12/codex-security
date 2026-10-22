@@ -15,6 +15,7 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures(
 afterEach(cleanup);
 
 let moduleSource: string;
+let costModuleSource: string;
 beforeAll(async () => {
   const { stdout } = await promisify(execFile)(
     process.execPath,
@@ -27,6 +28,18 @@ beforeAll(async () => {
     { encoding: "utf8" },
   );
   moduleSource = stdout;
+  costModuleSource = (
+    await promisify(execFile)(
+      process.execPath,
+      [
+        "build",
+        fileURLToPath(new URL("../src/cost.ts", import.meta.url)),
+        "--target=node",
+        "--format=esm",
+      ],
+      { encoding: "utf8" },
+    )
+  ).stdout;
 });
 
 test.each(["native", "without zstd"])(
@@ -48,13 +61,26 @@ test.each(["native", "without zstd"])(
       join(sessions, "rollout-parent.jsonl"),
       `${JSON.stringify(parent)}\n`,
     );
+    const receipt = {
+      type: "token_usage_record",
+      payload: {
+        response_id: "worker-response",
+        thread_id: "worker",
+        model: "gpt-5.6-sol",
+        usage: { input_tokens: 1000, output_tokens: 0 },
+      },
+    };
     await writeFile(
       join(sessions, "rollout-worker.jsonl.zst"),
-      zstdCompressSync(`${JSON.stringify(worker)}\n`),
+      zstdCompressSync(
+        `${JSON.stringify(worker)}\n${JSON.stringify(receipt)}\n`,
+      ),
     );
 
     const module = join(root, "scan-logs.mjs");
     await writeFile(module, moduleSource);
+    const costModule = join(root, "cost.mjs");
+    await writeFile(costModule, costModuleSource);
     const { stdout } = await promisify(execFile)(
       "node",
       [
@@ -69,7 +95,12 @@ test.each(["native", "without zstd"])(
           }
           const { findScanSession, readScanLogs } = await import(${JSON.stringify(pathToFileURL(module).href)});
           const home = ${JSON.stringify(home)};
+          const { ScanCostTracker } = await import(${JSON.stringify(pathToFileURL(costModule).href)});
+          const tracker = new ScanCostTracker({ codexHome: home, model: "gpt-5.6-sol" });
+          tracker.start("parent");
+          const usage = await tracker.stop({ input_tokens: 0, output_tokens: 0 });
           console.log(JSON.stringify({
+            usage,
             compressed: typeof zlib.createZstdDecompress === "function",
             parent: await findScanSession(home, "parent"),
             worker: await findScanSession(home, "worker"),
@@ -95,9 +126,19 @@ test.each(["native", "without zstd"])(
           })
         : null,
     );
+    expect(result.usage.usage.input_tokens).toBe(result.compressed ? 1000 : 0);
+    expect(result.usage.cost.estimatedUsd).toBeCloseTo(
+      result.compressed ? 0.004 : 0,
+      10,
+    );
     expect(result.logs.events).toEqual([
       { threadId: "parent", event: parent },
-      ...(result.compressed ? [{ threadId: "worker", event: worker }] : []),
+      ...(result.compressed
+        ? [
+            { threadId: "worker", event: worker },
+            { threadId: "worker", event: receipt },
+          ]
+        : []),
     ]);
   },
 );

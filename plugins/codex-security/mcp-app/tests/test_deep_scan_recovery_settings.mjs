@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,6 +17,9 @@ import { build } from "esbuild";
 
 const bundle = await build({
   bundle: true,
+  banner: {
+    js: `import { createRequire as recoveryRequire } from "node:module"; const require = recoveryRequire(${JSON.stringify(import.meta.url)});`,
+  },
   nodePaths: [fileURLToPath(new URL("../node_modules", import.meta.url))],
   define: {
     "import.meta.url": JSON.stringify(
@@ -17,7 +27,9 @@ const bundle = await build({
     ),
   },
   entryPoints: [
-    new URL("../src/deep-scan/recovery-settings.ts", import.meta.url).pathname,
+    fileURLToPath(
+      new URL("../src/deep-scan/recovery-settings.ts", import.meta.url),
+    ),
   ],
   format: "esm",
   platform: "node",
@@ -84,6 +96,84 @@ try {
     );
   }
   const unrelatedFailure = new Error("Synthetic workbench failure.");
+  const blockedRuntimeHome = join(root, "blocked-runtime-home");
+  await mkdir(blockedRuntimeHome);
+  await writeFile(
+    join(blockedRuntimeHome, "codex-security-worker-settings"),
+    "not a directory",
+  );
+  const readableConfig = join(root, "readable-config.toml");
+  await writeFile(readableConfig, 'model = "fixture-model"\n');
+  const isolatedRuntime = join(root, "isolated-runtime.toml");
+  await writeFile(
+    isolatedRuntime,
+    '[worker_runtime]\nweb_search = "disabled"\n',
+  );
+  await assert.rejects(
+    captureSettings(
+      {},
+      { filesystemDenies: [blockedRuntimeHome] },
+      {
+        CODEX_HOME: blockedRuntimeHome,
+        CODEX_CLI_PATH: process.execPath,
+        CODEX_SECURITY_CONFIG_PATH: readableConfig,
+        CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH: isolatedRuntime,
+      },
+    ),
+    /ENOTDIR|EEXIST/,
+    "failure to retain the original private runtime config must fail capture",
+  );
+  const braceHome = join(root, "home-{first,second}");
+  await mkdir(braceHome);
+  const braceEnvironment = {
+    CODEX_HOME: braceHome,
+    CODEX_CLI_PATH: process.execPath,
+    CODEX_SECURITY_CONFIG_PATH: readableConfig,
+    CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH: isolatedRuntime,
+  };
+  const braceGlob = await captureSettings(
+    {},
+    { filesystemDenies: [braceHome] },
+    braceEnvironment,
+  );
+  assert.equal(braceGlob.runtimeConfigPath, undefined);
+  assert.ok(braceGlob.runtimeConfigSource);
+  assert.equal(
+    fs.existsSync(join(braceHome, "codex-security-worker-settings")),
+    false,
+    "a brace glob does not protect a directory whose name contains literal braces",
+  );
+  const braceLiteral = await captureSettings(
+    {},
+    { filesystemDenies: [], literalFilesystemDenies: [braceHome] },
+    braceEnvironment,
+  );
+  assert.ok(braceLiteral.runtimeConfigPath);
+  if (process.platform !== "win32") {
+    const physicalHome = join(root, "physical-home");
+    const physicalChild = join(physicalHome, "child");
+    await mkdir(physicalChild, { recursive: true });
+    await symlink(physicalChild, join(root, "home-alias"));
+    const traversalHome = `${root}/home-alias/..`;
+    const traversal = await captureSettings(
+      {},
+      { filesystemDenies: [physicalHome] },
+      {
+        CODEX_HOME: traversalHome,
+        CODEX_CLI_PATH: process.execPath,
+        CODEX_SECURITY_CONFIG_PATH: readableConfig,
+        CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH: isolatedRuntime,
+      },
+    );
+    assert.equal(traversal.codexHome, traversalHome);
+    assert.equal(
+      traversal.runtimeConfigPath.startsWith(
+        `${physicalHome}/codex-security-worker-settings/`,
+      ),
+      true,
+      "snapshot placement must preserve filesystem traversal through a home symlink",
+    );
+  }
   await assert.rejects(
     beginWithCapturedSettings(
       async () => settings,

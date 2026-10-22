@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   accessSync,
   constants as fsConstants,
@@ -58,6 +58,8 @@ import type {
 
 export interface CodexSdkWorkerModelSettings {
   nativeProfileHome?: string;
+  runtimeConfigPath?: string;
+  runtimeConfigSource?: WorkerRuntimeConfigSource;
   createProviderProfile?: typeof createProviderProfile;
   /** Resolved by the execution owner, including when reconstructing a scan. */
   codexOptions?: CodexOptions;
@@ -79,6 +81,12 @@ export interface CodexSdkWorkerArtifactContext {
   includePaths?: readonly string[];
   filePaths?: readonly string[];
   pythonCommand?: string;
+}
+
+export interface WorkerRuntimeConfigSource {
+  configPath?: string;
+  workerConfigPath: string;
+  digest: string;
 }
 
 export interface CodexSdkWorkerRuntimeSettings {
@@ -126,13 +134,25 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       const resolved = this.modelSettings.codexOptions;
       const originalCwd = process.cwd();
       const childEnv = await snapshotWorkerEnvironment(resolved?.env);
-      const runtimeSettings = await (this.runtimeSettings ??= (async () => ({
-        ...(await workerRuntimeSettings(
+      const runtimeSettings = await (this.runtimeSettings ??= (async () => {
+        const current = await workerRuntimeSettings(
           childEnv,
           this.modelSettings.nativeProfileHome,
-        )),
-        ...this.modelSettings.runtimeSettings,
-      }))());
+        );
+        if (
+          this.modelSettings.runtimeConfigPath === undefined &&
+          this.modelSettings.runtimeConfigSource === undefined
+        ) {
+          return { ...current, ...this.modelSettings.runtimeSettings };
+        }
+        return {
+          environment: current.environment,
+          nativeProfile: current.nativeProfile,
+          preflightProviderOverrides: current.preflightProviderOverrides,
+          ...this.modelSettings.runtimeSettings,
+          config: await restoredWorkerRuntimeConfig(this.modelSettings),
+        };
+      })());
       for (const [name, value] of Object.entries(
         runtimeSettings.environment ?? {},
       )) {
@@ -790,25 +810,6 @@ async function workerRuntimeSettings(
   );
   if (!configPath) return { config: {} };
   const config = parseToml(await fs.readFile(configPath, "utf8"));
-  const profiles = config.profiles;
-  const profile =
-    typeof config.profile === "string" && isRecord(profiles)
-      ? profiles[config.profile]
-      : undefined;
-  const selected: Record<string, unknown> = {
-    ...config,
-    ...(isRecord(profile) ? profile : {}),
-  };
-  for (const key of [
-    "analytics",
-    "otel",
-    "responses_api_metadata",
-    "features",
-  ]) {
-    if (isRecord(config[key]) && isRecord(profile) && isRecord(profile[key])) {
-      selected[key] = mergeConfigTables(config[key], profile[key]);
-    }
-  }
   const settings = workerRuntimeSettingsFromConfig(config);
   const workerConfigPath = environmentVariable(
     environment,
@@ -822,7 +823,6 @@ async function workerRuntimeSettings(
     environment: workerEnvironment,
     native_profile: nativeProfile,
     model_providers: legacyProviders,
-    ...workerConfig
   } = isRecord(snapshot) ? snapshot : {};
   if (isRecord(workerEnvironment)) {
     settings.environment = workerEnvironment as Record<string, string>;
@@ -870,7 +870,43 @@ async function workerRuntimeSettings(
     settings.cyberAccessProgram =
       security.cyber_access_program as CyberAccessProgram;
   }
-  settings.config = {
+  settings.config = workerRuntimeConfiguration(config, snapshot);
+  settings.features = workerRuntimeSettingsFromConfig({
+    features: settings.config.features,
+  }).features;
+  return settings;
+}
+
+export function workerRuntimeConfiguration(
+  config: Record<string, unknown>,
+  snapshot: unknown,
+): Record<string, unknown> {
+  const profiles = config.profiles;
+  const profile =
+    typeof config.profile === "string" && isRecord(profiles)
+      ? profiles[config.profile]
+      : undefined;
+  const selected: Record<string, unknown> = {
+    ...config,
+    ...(isRecord(profile) ? profile : {}),
+  };
+  for (const key of [
+    "analytics",
+    "otel",
+    "responses_api_metadata",
+    "features",
+  ]) {
+    if (isRecord(config[key]) && isRecord(profile) && isRecord(profile[key])) {
+      selected[key] = mergeConfigTables(config[key], profile[key]);
+    }
+  }
+  const {
+    environment: _environment,
+    native_profile: _nativeProfile,
+    model_providers: _providers,
+    ...workerConfig
+  } = isRecord(snapshot) ? snapshot : {};
+  const projected: Record<string, unknown> = {
     ...selected,
     ...workerConfig,
     features: {
@@ -878,9 +914,6 @@ async function workerRuntimeSettings(
       ...(isRecord(workerConfig.features) ? workerConfig.features : {}),
     },
   };
-  settings.features = workerRuntimeSettingsFromConfig({
-    features: settings.config.features,
-  }).features;
   // Profiles are resolved above; providers stay in their private native file.
   // Workers register their own tools and verified read-only permission profile.
   for (const key of [
@@ -897,9 +930,58 @@ async function workerRuntimeSettings(
     "sandbox_workspace_write",
     "approvals_reviewer",
   ]) {
-    delete settings.config[key];
+    delete projected[key];
   }
-  return settings;
+  return projected;
+}
+
+export function workerRuntimeConfigDigest(
+  config: Record<string, unknown>,
+): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify(config, (_key, value) =>
+        isRecord(value)
+          ? Object.fromEntries(
+              Object.keys(value)
+                .sort()
+                .map((key) => [key, value[key]]),
+            )
+          : value,
+      ),
+    )
+    .digest("hex");
+}
+
+async function restoredWorkerRuntimeConfig(
+  settings: Pick<
+    CodexSdkWorkerModelSettings,
+    "runtimeConfigPath" | "runtimeConfigSource"
+  >,
+): Promise<Record<string, unknown>> {
+  try {
+    if (settings.runtimeConfigPath !== undefined) {
+      return parseToml(await fs.readFile(settings.runtimeConfigPath, "utf8"));
+    }
+    const source = settings.runtimeConfigSource!;
+    const config =
+      source.configPath === undefined
+        ? {}
+        : parseToml(await fs.readFile(source.configPath, "utf8"));
+    const snapshot = parseToml(
+      await fs.readFile(source.workerConfigPath, "utf8"),
+    ).worker_runtime;
+    const runtime = workerRuntimeConfiguration(config, snapshot);
+    if (workerRuntimeConfigDigest(runtime) !== source.digest) {
+      throw new Error("The original worker runtime configuration has changed.");
+    }
+    return runtime;
+  } catch (cause) {
+    throw new DeepScanNonRetryableError(
+      `Original Deep Scan worker runtime configuration could not be restored: ${cause instanceof Error ? cause.message : String(cause)}`,
+      { cause },
+    );
+  }
 }
 
 async function snapshotWorkerEnvironment(

@@ -6420,6 +6420,86 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test.each(["cancel", "close"] as const)(
+    "interrupts a pending Deep attribution subprocess on %s",
+    async (action) => {
+      const { repository, codexHome, scanDir } = await scanDirectories();
+      const controller = new AbortController();
+      const ready = Promise.withResolvers<void>();
+      let child: childProcess.ChildProcess | undefined;
+      let childClosed: Promise<void> | undefined;
+      let attributionStarted = false;
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (options, args, input) => {
+          if (args[0] !== "get-scan" || attributionStarted)
+            return mockWorkbench(args, input);
+          attributionStarted = true;
+          return await new Promise<JsonObject>((resolve, reject) => {
+            child = childProcess.spawn(
+              nodeCommand().command,
+              [
+                "-e",
+                "process.stdout.write('ready\\n'); setInterval(() => {}, 1000)",
+              ],
+              { signal: options.signal, stdio: ["ignore", "pipe", "ignore"] },
+            );
+            child.stdout!.once("data", () => ready.resolve());
+            child.once("error", reject);
+            childClosed = new Promise((closed) =>
+              child!.once("close", () => {
+                closed();
+                resolve({ scan: {} });
+              }),
+            );
+          });
+        },
+        createCodex: codexFactory(
+          async (_input: string, options: { signal: AbortSignal }) => ({
+            events: (async function* (): AsyncGenerator<ThreadEvent> {
+              yield { type: "thread.started", thread_id: "scan-thread" };
+              if (!options.signal.aborted) await once(options.signal, "abort");
+              throw new DOMException("aborted", "AbortError");
+            })(),
+          }),
+        ),
+      });
+      const operation = client.run(repository, {
+        mode: "deep",
+        onCost: () => {},
+        signal: controller.signal,
+      });
+      void operation.catch(() => {});
+      let close: Promise<void> | undefined;
+      try {
+        await ready.promise;
+        if (action === "close") close = client.close();
+        else controller.abort();
+        await Promise.race([
+          Promise.all([childClosed, operation.catch(() => {})]),
+          new Promise((_, reject) =>
+            setTimeout(
+              () => reject(new Error("Attribution subprocess did not stop")),
+              5000,
+            ).unref(),
+          ),
+        ]);
+        expect(child!.exitCode !== null || child!.signalCode !== null).toBe(
+          true,
+        );
+        if (action === "close")
+          await expect(operation).rejects.toThrow("CodexSecurity is closed.");
+        else
+          await expect(operation).rejects.toBeInstanceOf(ScanInterruptedError);
+      } finally {
+        controller.abort();
+        child?.kill();
+        await operation.catch(() => {});
+        await (close ?? client.close());
+      }
+    },
+  );
+
   test.each(["completed", "failed", "unavailable"] as const)(
     "recovers exhausted deep-scan budget when completion is %s",
     async (completion) => {

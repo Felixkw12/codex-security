@@ -1305,21 +1305,25 @@ test("bulk Deep resume stages campaign knowledge after its source is removed", a
 });
 
 test.each([
-  [false, "none", "deleted"],
-  [true, "none", "deleted"],
-  [false, "saved", "deleted"],
-  [false, "saved", "moved"],
-  [false, "saved", "available"],
-  [false, "modified", "available"],
-  [false, "missing", "available"],
-  [false, "missing", "deleted"],
+  [false, "none", "deleted", true],
+  [true, "none", "deleted", true],
+  [false, "saved", "deleted", true],
+  [false, "saved", "moved", true],
+  [false, "saved", "available", true],
+  [false, "modified", "available", true],
+  [false, "missing", "available", true],
+  [false, "missing", "deleted", true],
+  [false, "missing", "available", false],
+  [false, "modified", "available", false],
 ] as const)(
-  "CLI restores selected finalization without current inputs or session logs (bulk: %p, knowledge: %s, checkout: %s)",
-  async (bulk, knowledge, checkout) => {
+  "CLI restores selected finalization without current inputs or session logs (bulk: %p, knowledge: %s, checkout: %s, follow-up: %p)",
+  async (bulk, knowledge, checkout, followUp = true) => {
     const document = join(await temporaryDirectory(), "architecture.md");
     await writeFile(document, "Original architecture.");
     const f = await interruptedScan("deep", bulk, {
-      postScanPrompt: "Keep the saved follow-up behavior.",
+      postScanPrompt: followUp
+        ? "Keep the saved follow-up behavior."
+        : undefined,
       ...(knowledge === "none" ? {} : { knowledgeBasePaths: [document] }),
     });
     await writeFile(document, "Edited source context must not be loaded.");
@@ -1365,7 +1369,7 @@ test.each([
             : f.command(args, input),
       },
     );
-    if (knowledge === "modified" || knowledge === "missing") {
+    if (followUp && (knowledge === "modified" || knowledge === "missing")) {
       expect(code, stderr.text()).toBe(2);
       expect(calls).toHaveLength(0);
       expect(stderr.text()).toContain(
@@ -1387,7 +1391,9 @@ test.each([
       options: {
         resumeScanId: f.scanId,
         outputDir: f.scanDir,
-        postScanPrompt: "Keep the saved follow-up behavior.",
+        postScanPrompt: followUp
+          ? "Keep the saved follow-up behavior."
+          : undefined,
       },
     });
     expect(calls[0]!.options.scanPrompt).toBeUndefined();

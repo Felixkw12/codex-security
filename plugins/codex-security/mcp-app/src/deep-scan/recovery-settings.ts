@@ -1,19 +1,24 @@
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join, sep, win32 } from "node:path";
+import { isAbsolute, join, relative, sep, win32 } from "node:path";
 import type { CodexOptions } from "@openai/codex-sdk";
 import { parse as parseToml } from "smol-toml";
 import { scanPreflightCodexConfig } from "../../../../../sdk/typescript/src/preflight-config.js";
 import {
   resolveCodexProfile,
+  writeCodexConfig,
   type JsonObject,
 } from "../../../../../sdk/typescript/src/config.js";
 import { readScanLogs } from "../../../../../sdk/typescript/src/scan-logs.js";
 import {
   resolveCodexPath,
+  workerRuntimeConfiguration,
+  workerRuntimeConfigDigest,
+  type WorkerRuntimeConfigSource,
   workerRuntimeSettingsFromConfig,
   type CodexSdkWorkerRuntimeSettings,
 } from "./executor.js";
+import { isRecord } from "../record.js";
 import type { DeepWorkerParentSandbox } from "./parent-sandbox.js";
 import type { DeepScanRunState } from "./types.js";
 
@@ -31,6 +36,8 @@ export interface DeepScanExecutionSettings {
   providerConfig?: JsonObject;
   parentSandbox?: DeepWorkerParentSandbox;
   runtimeSettings?: CodexSdkWorkerRuntimeSettings;
+  runtimeConfigPath?: string;
+  runtimeConfigSource?: WorkerRuntimeConfigSource;
 }
 
 export interface DeepScanLegacySettingsContext {
@@ -83,6 +90,7 @@ export async function captureDeepScanExecutionSettings(
   const configPath =
     environment.CODEX_SECURITY_CONFIG_PATH ?? `${codexHome}${sep}config.toml`;
   let config: JsonObject;
+  let originalConfigPath: string | undefined = configPath;
   try {
     config = parseToml(await fs.readFile(configPath, "utf8")) as JsonObject;
   } catch (error) {
@@ -92,6 +100,7 @@ export async function captureDeepScanExecutionSettings(
     )
       throw error;
     config = {};
+    originalConfigPath = undefined;
   }
   // Reuse the SDK projection: custom provider credentials belong in the native home.
   const selected = scanPreflightCodexConfig(resolveCodexProfile(config));
@@ -106,6 +115,55 @@ export async function captureDeepScanExecutionSettings(
         threadId: owner.threadId,
         startedAt: parent?.startedAt ?? owner.startedAt,
       });
+  const runtimeSettings = workerRuntimeSettingsFromConfig(config);
+  let runtimeConfigPath: string | undefined;
+  let runtimeConfigSource: WorkerRuntimeConfigSource | undefined;
+  const workerConfigPath = environment.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
+  const workerSnapshot =
+    workerConfigPath === undefined
+      ? undefined
+      : parseToml(await fs.readFile(workerConfigPath, "utf8")).worker_runtime;
+  if (isRecord(workerSnapshot)) {
+    const runtimeConfig = workerRuntimeConfiguration(config, workerSnapshot);
+    runtimeSettings.features = workerRuntimeSettingsFromConfig({
+      features: runtimeConfig.features,
+    }).features;
+    const digest = workerRuntimeConfigDigest(runtimeConfig);
+    const privateHome = await protectedRuntimeHome(codexHome, parentSandbox);
+    if (privateHome === undefined) {
+      // Keep protected source inputs in place when a new copy would be readable
+      // by the parent. Recovery verifies their original effective configuration.
+      runtimeConfigSource = {
+        ...(originalConfigPath === undefined
+          ? {}
+          : { configPath: await fs.realpath(originalConfigPath) }),
+        workerConfigPath: await fs.realpath(workerConfigPath!),
+        digest,
+      };
+    } else {
+      const runtimeDirectory = join(
+        privateHome,
+        "codex-security-worker-settings",
+      );
+      await fs.mkdir(runtimeDirectory, { recursive: true, mode: 0o700 });
+      const canonicalRuntimeDirectory = await fs.realpath(runtimeDirectory);
+      if (!within(privateHome, canonicalRuntimeDirectory)) {
+        throw new Error(
+          "The worker settings directory is outside the protected Codex home.",
+        );
+      }
+      if (process.platform === "win32") {
+        const { requirePrivateCredentialHome } =
+          await import("../../../../../sdk/typescript/src/runtime.js");
+        await requirePrivateCredentialHome(
+          await fs.lstat(canonicalRuntimeDirectory),
+          canonicalRuntimeDirectory,
+        );
+      }
+      runtimeConfigPath = join(canonicalRuntimeDirectory, `${digest}.toml`);
+      await writeCodexConfig(runtimeConfigPath, runtimeConfig as JsonObject);
+    }
+  }
   return executionSettings({
     codexPath: resolveCodexPath(
       environment,
@@ -131,9 +189,45 @@ export async function captureDeepScanExecutionSettings(
       ? { nativeServiceTierAbsent: true as const }
       : {}),
     providerConfig: selected.model_providers as JsonObject | undefined,
-    runtimeSettings: workerRuntimeSettingsFromConfig(config),
+    runtimeSettings,
+    runtimeConfigPath,
+    runtimeConfigSource,
     parentSandbox,
   });
+}
+
+function within(root: string, child: string): boolean {
+  const suffix = relative(root, child);
+  return (
+    suffix === "" ||
+    (!isAbsolute(suffix) && suffix !== ".." && !suffix.startsWith(`..${sep}`))
+  );
+}
+
+async function protectedRuntimeHome(
+  codexHome: string,
+  sandbox: DeepWorkerParentSandbox,
+): Promise<string | undefined> {
+  const home = await fs.realpath(codexHome);
+  const literalDenials = new Set([
+    ...(sandbox.literalFilesystemDenies ?? []),
+    ...sandbox.filesystemDenies.filter((value) => !/[*?\[\]{}]/.test(value)),
+  ]);
+  for (const denied of literalDenials) {
+    try {
+      const canonical = await fs.realpath(denied);
+      if (within(canonical, home) && (await fs.stat(canonical)).isDirectory())
+        return home;
+    } catch (error) {
+      if (
+        !["ENOENT", "ENOTDIR"].includes(
+          (error as NodeJS.ErrnoException).code ?? "",
+        )
+      )
+        throw error;
+    }
+  }
+  return undefined;
 }
 
 async function originalParentSettings(
@@ -362,6 +456,8 @@ export function restoredDeepScanWorkerSettings(
   environment: () => NodeJS.ProcessEnv = () => process.env,
 ): {
   nativeProfileHome: string;
+  runtimeConfigPath?: string;
+  runtimeConfigSource?: WorkerRuntimeConfigSource;
   codexOptions: CodexOptions;
   model?: string;
   reasoningEffort?: string;
@@ -410,6 +506,12 @@ export function restoredDeepScanWorkerSettings(
     },
     model: settings.model,
     reasoningEffort: settings.reasoningEffort,
+    ...(settings.runtimeConfigPath === undefined
+      ? {}
+      : { runtimeConfigPath: settings.runtimeConfigPath }),
+    ...(settings.runtimeConfigSource === undefined
+      ? {}
+      : { runtimeConfigSource: settings.runtimeConfigSource }),
     ...(settings.runtimeSettings === undefined
       ? {}
       : { runtimeSettings: settings.runtimeSettings }),
@@ -490,6 +592,12 @@ function executionSettings(
     ...(value.runtimeSettings === undefined
       ? {}
       : { runtimeSettings: structuredClone(value.runtimeSettings) }),
+    ...(value.runtimeConfigPath === undefined
+      ? {}
+      : { runtimeConfigPath: value.runtimeConfigPath }),
+    ...(value.runtimeConfigSource === undefined
+      ? {}
+      : { runtimeConfigSource: structuredClone(value.runtimeConfigSource) }),
     ...(value.parentSandbox === undefined
       ? {}
       : {
