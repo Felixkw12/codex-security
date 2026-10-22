@@ -615,9 +615,9 @@ test.each([
       git("add", "--renormalize", "data");
       git("commit", "-m", "Synthetic worktree without attributes");
     }
+    const pool = join(root, "object-pool");
     if (selector === "GIT_ALTERNATE_OBJECT_DIRECTORIES") {
       const objects = join(repository, ".git", "objects");
-      const pool = join(root, "object-pool");
       await rename(objects, pool);
       await mkdir(objects);
       environment[selector] = pool;
@@ -632,6 +632,12 @@ test.each([
       manualCodexPreparation: true,
       onCodex: async (_args, output) => {
         expect(trees).toEqual([]);
+        if (selector === "GIT_ALTERNATE_OBJECT_DIRECTORIES")
+          expect(
+            output!.appServer!.permissions!.readOnlyPaths.map((path) =>
+              path.replaceAll("\\", "/"),
+            ),
+          ).toContain((await realpath(pool)).replaceAll("\\", "/"));
         output!.appServer!.onPermissions!({
           directory: repository,
           environment,
@@ -657,6 +663,18 @@ test.each([
         if (options?.sandbox) {
           snapshots++;
           bindings.push(options.sandbox.gitEnvironment!);
+          if (selector === "GIT_ALTERNATE_OBJECT_DIRECTORIES")
+            expect(
+              Object.entries(
+                options.sandbox.profile["filesystem"] as Record<
+                  string,
+                  unknown
+                >,
+              ).find(
+                ([path]) =>
+                  path.replaceAll("\\", "/") === pool.replaceAll("\\", "/"),
+              )?.[1],
+            ).toEqual({ ".": "read" });
         }
         const result = await runRepositoryCommand(command, args, cwd, {
           ...options,
