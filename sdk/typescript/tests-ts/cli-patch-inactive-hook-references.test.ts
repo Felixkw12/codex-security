@@ -305,6 +305,7 @@ for (const mode of [
     let launches = 0;
     const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
       currentDirectory: directory,
+      onRepositoryCommand: runGitRepositoryCommand,
       onCodex: async (_args, output) => {
         launches++;
         await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
