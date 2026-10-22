@@ -15,6 +15,7 @@ import {
 import { tmpdir } from "node:os";
 import {
   basename,
+  delimiter,
   dirname,
   isAbsolute,
   join,
@@ -23,6 +24,7 @@ import {
   resolve,
   sep,
 } from "node:path";
+import { gitAlternatePathBytes } from "./targets.js";
 
 // Git hook entrypoints: https://git-scm.com/docs/githooks
 const GIT_HOOKS = [
@@ -427,6 +429,7 @@ export async function capturePatchGitControls(
     system: process.env["GIT_CONFIG_SYSTEM"],
     noSystem: process.env["GIT_CONFIG_NOSYSTEM"],
     xdgConfigHome: process.env["XDG_CONFIG_HOME"],
+    alternateObjectDirectories: process.env["GIT_ALTERNATE_OBJECT_DIRECTORIES"],
   },
 ): Promise<PatchGitControls | undefined> {
   const runBytes = async (
@@ -1527,9 +1530,58 @@ export async function capturePatchGitControls(
       for (const hook of GIT_HOOKS)
         snapshotControlPaths.push(relativeFile(canonical, hook));
   }
+  const alternateObjectDirectories: string[] = [];
+  for (let bytes of gitAlternatePathBytes(
+    Buffer.from(configuration.alternateObjectDirectories ?? ""),
+    delimiter,
+  )) {
+    const nul = bytes.indexOf(0);
+    if (nul !== -1) bytes = bytes.subarray(0, nul);
+    if (bytes.length === 0) continue;
+    let selected: string;
+    try {
+      selected = new TextDecoder("utf-8", {
+        fatal: true,
+        ignoreBOM: true,
+      }).decode(bytes);
+    } catch {
+      // Permission paths require UTF-8; keep the original Git binding unchanged.
+      continue;
+    }
+    let resolved: Buffer;
+    try {
+      resolved = await runBytes(
+        root,
+        root,
+        ["rev-parse", "--path-format=absolute", "--git-path", "objects"],
+        { environment: { GIT_OBJECT_DIRECTORY: selected } },
+      );
+    } catch (error) {
+      const failure = error as Error & { code?: unknown; status?: unknown };
+      // An unavailable primary object directory fails repository discovery;
+      // the original alternate binding still lets Git report or ignore it.
+      if (
+        (failure.code ?? failure.status) === 128 &&
+        failure.message.includes("fatal: not a git repository")
+      )
+        continue;
+      throw error;
+    }
+    let path: string;
+    try {
+      path = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true })
+        .decode(resolved)
+        .replace(/\n$/u, "");
+    } catch {
+      continue;
+    }
+    if ((await stat(path).catch(missing))?.isDirectory())
+      alternateObjectDirectories.push(path);
+  }
   return {
     readOnlyPaths: [
       ...new Set([
+        ...alternateObjectDirectories,
         ...administrationRoots.keys(),
         ...snapshotControlPaths,
         ...[...controlPaths.values()]

@@ -10893,6 +10893,10 @@ async function runSkill(
             dependencies.environment,
             "XDG_CONFIG_HOME",
           ),
+          alternateObjectDirectories: environmentEntry(
+            dependencies.environment,
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+          ),
         },
       )
     : undefined;
