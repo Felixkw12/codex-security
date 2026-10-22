@@ -8309,7 +8309,7 @@ async function patchPublicationDestination(
   const target =
     gitlab &&
     isNetworkPatchRemote(fetchRemote) &&
-    patchRemoteHost(fetchRemote) === host
+    patchRemoteHost(fetchRemote, true) === patchRemoteHost(remote, true)
       ? fetchRemote
       : remote;
   let gitlabSource = ".target_project_id";
@@ -9074,8 +9074,14 @@ function gitlabPatchDescription(body: string): string {
   return `${">".repeat(fenceLength)}\n${body}`;
 }
 
-function patchRemoteHost(remote: string): string | undefined {
-  if (remote.includes("://")) return new URL(remote).hostname.toLowerCase();
+function patchRemoteHost(
+  remote: string,
+  includePort = false,
+): string | undefined {
+  if (remote.includes("://")) {
+    const url = new URL(remote);
+    return (includePort ? url.host : url.hostname).toLowerCase();
+  }
   return patchScpRemote(remote)?.hostname.toLowerCase();
 }
 

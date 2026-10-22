@@ -18,7 +18,17 @@ describe("GitLab patch destinations", () => {
 
   test.each([
     ...[false, true].flatMap((resume) =>
-      ["fork HTTPS", "fork SSH", "same project", "local fetch"].map((mode) => ({
+      [
+        "fork HTTPS",
+        "fork SSH",
+        "same project",
+        "local fetch",
+        "different port mirror",
+        "default port mirror",
+        "same port fork",
+        "explicit default port fork",
+        "explicit HTTP port fork",
+      ].map((mode) => ({
         mode,
         resume,
       })),
@@ -41,10 +51,28 @@ describe("GitLab patch destinations", () => {
     "uses the selected source and target: $mode, resume=$resume",
     async ({ mode, resume }) => {
       const { directory, git, remote } = await publicationRepository(fixtures);
+      const portCase = mode.includes("port");
       const host =
-        mode === "self-managed fork" ? "gitlab.example.test" : "gitlab.com";
-      const upstream = `https://${host}/example/repository.git`;
-      const fork = `https://${host}/synthetic-user/repository.git`;
+        mode === "self-managed fork" || portCase
+          ? "gitlab.example.test"
+          : "gitlab.com";
+      const explicitDefault = mode.startsWith("explicit");
+      const protocol = mode === "explicit HTTP port fork" ? "http" : "https";
+      const fetchPort = explicitDefault
+        ? protocol === "http"
+          ? ":80"
+          : ":443"
+        : portCase && mode !== "default port mirror"
+          ? ":8443"
+          : "";
+      const pushPort =
+        portCase && !explicitDefault
+          ? mode === "different port mirror"
+            ? ":9443"
+            : ":8443"
+          : "";
+      const upstream = `${protocol}://${host}${fetchPort}/example/repository.git`;
+      const fork = `${protocol}://${host}${pushPort}/synthetic-user/repository.git`;
       const sameProject = mode.startsWith("same project");
       const localFetch = mode === "local fetch" || mode === "file fetch";
       const push =
@@ -75,7 +103,7 @@ describe("GitLab patch destinations", () => {
           ? remote
           : mode === "file fetch"
             ? pathToFileURL(remote).href
-            : mirror
+            : mirror && !portCase
               ? `https://${mode === "GitHub mirror" ? "github.com" : mode === "Bitbucket mirror" ? "bitbucket.org" : "gitlab.example.test"}/example/repository.git`
               : mode === "fork credentials"
                 ? "https://synthetic-user:synthetic-token@gitlab.com/example/repository.git"
@@ -109,7 +137,9 @@ describe("GitLab patch destinations", () => {
         {
           currentDirectory: directory,
           environment:
-            mode === "self-managed fork" ? { GITLAB_HOST: host } : {},
+            mode === "self-managed fork" || portCase
+              ? { GITLAB_HOST: host }
+              : {},
           onWorkbench: () =>
             savedScan(resultWithFindings(["high"]), "scan-1", directory),
           onCodex: async (args, output) => {
