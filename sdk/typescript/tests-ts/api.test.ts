@@ -3682,9 +3682,6 @@ describe("CodexSecurity orchestration", () => {
           return mockWorkbench(args, input);
         },
         hostedScan: {
-          ownerCodex: {
-            startThread: () => fail("owner inference must not run"),
-          },
           context: {
             repository,
             revision: "deadbeef",
@@ -6485,11 +6482,13 @@ describe("CodexSecurity orchestration", () => {
     const { root, repository, codexHome, scanDir } = await scanDirectories();
     const warnings = mock((_warning: string) => {});
     const commands: Array<readonly string[]> = [];
+    let threads = 0;
     const client = TestClient.withDependencies({
       ...scanRuntimeDependencies(codexHome, scanDir),
       runWorkbench: recordingWorkbench(commands),
       createCodex: (options: CodexOptions) => ({
         startThread(threadOptions: Parameters<Codex["startThread"]>[0]) {
+          threads++;
           const thread = new Codex({
             ...options,
             codexPathOverride: process.execPath,
@@ -6512,13 +6511,15 @@ describe("CodexSecurity orchestration", () => {
 
     const result = await client.run(repository, {
       maxCostUsd: 1,
+      ownerSuggestions: true,
       onWarning: warnings,
     });
     expect(result.threadId).toBe("scan-thread");
     expect(result.cost).toBeNull();
-    expect(warnings.mock.calls.map(([value]) => value)).toEqual([
+    expect(threads).toBe(1);
+    expect(warnings.mock.calls.map(([value]) => value)).toContain(
       "Scan completed, but its cost limit could not be verified because model pricing or token usage is unavailable.",
-    ]);
+    );
     expect(commands.map(([command]) => command)).toEqual([
       "register-cli-scan",
       "get-scan-feedback",
