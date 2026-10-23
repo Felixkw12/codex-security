@@ -23,7 +23,7 @@ import { afterEach, expect, spyOn, test } from "bun:test";
 import { stringify as stringifyToml } from "smol-toml";
 import { CodexSecurity } from "../src/api.js";
 import type { JsonObject } from "../src/config.js";
-import { runWorkbench } from "../src/runtime.js";
+import { resolvePluginPython, runWorkbench } from "../src/runtime.js";
 import { CODEX_SECURITY_THREAD_SOURCES } from "../src/thread-source.js";
 import { git } from "./git-fixture.js";
 
@@ -3123,13 +3123,21 @@ test("legacy compact metadata skips only compact validation and preserves the mo
       .digest("hex"),
   });
   delete (recipe["scanInputs"] as JsonObject)["compactPromptFileSha256"];
-  execFileSync(Bun.which("python3")!, [
-    "-c",
-    "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute('UPDATE scans SET recipe_json=? WHERE id=?',(sys.argv[2],sys.argv[3])); c.commit()",
-    join(h.environment["CODEX_SECURITY_STATE_DIR"]!, "workbench.sqlite3"),
-    JSON.stringify(recipe),
-    parentId,
-  ]);
+  const python = await resolvePluginPython({
+    environment: h.environment,
+    protectedRoot: h.repository,
+  });
+  execFileSync(
+    python,
+    [
+      "-c",
+      "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute('UPDATE scans SET recipe_json=? WHERE id=?',(sys.argv[2],sys.argv[3])); c.commit()",
+      join(h.environment["CODEX_SECURITY_STATE_DIR"]!, "workbench.sqlite3"),
+      JSON.stringify(recipe),
+      parentId,
+    ],
+    { env: h.environment },
+  );
   await writeFile(instructionPath, "Changed synthetic model instructions.\n");
   await writeFile(compactPath, editedCompact);
   const launches = h.launches.length;
