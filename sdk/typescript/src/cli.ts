@@ -9080,7 +9080,10 @@ function patchRemoteHost(
 ): string | undefined {
   if (remote.includes("://")) {
     const url = new URL(remote);
-    return (includePort ? url.host : url.hostname).toLowerCase();
+    // glab removes SSH transport ports when resolving project selectors.
+    const apiPort =
+      includePort && url.protocol !== "ssh:" && url.protocol !== "git+ssh:";
+    return (apiPort ? url.host : url.hostname).toLowerCase();
   }
   return patchScpRemote(remote)?.hostname.toLowerCase();
 }
