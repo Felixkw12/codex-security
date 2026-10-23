@@ -402,12 +402,13 @@ def list_unmatched_scan_pairs(
     matching_findings: dict[str, list[dict[str, Any]]] = {}
     known_links: list[sqlite3.Row] | None = None
     for index, (selected_index, after) in enumerate(available):
+        comparable = [before for _, before in available[:index] if _same_repository(before, after)]
         previous = [
             before
-            for _, before in available[:index]
+            for before in comparable
             if args.force or (before["id"], after["id"]) not in saved_pairs
         ]
-        skipped += index - len(previous)
+        skipped += len(comparable) - len(previous)
         if not previous:
             continue
         if known_links is None:

@@ -1340,6 +1340,51 @@ def test_list_unmatched_scan_pairs_groups_pending_pairs_and_skips_saved_results(
     ]
 
 
+def test_list_unmatched_scan_pairs_skips_incompatible_replaced_repositories(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    repository = tmp_path / "repository"
+    revision = initialize_git_repository(repository)
+    subprocess.run(
+        ["git", "-C", str(repository), "remote", "add", "origin", "https://example.test/first.git"],
+        check=True,
+    )
+    results = tmp_path / "results"
+    create_cli_scan(state_dir, results, repository, target_revision=revision)
+    saved_repository = tmp_path / "saved-repository"
+    repository.rename(saved_repository)
+    subprocess.run(["git", "clone", "-q", str(saved_repository), str(repository)], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "remote",
+            "set-url",
+            "origin",
+            "https://example.test/second.git",
+        ],
+        check=True,
+    )
+    before, after = (
+        create_cli_scan(state_dir, results, repository, target_revision=revision) for _ in range(2)
+    )
+
+    pending = run_workbench(state_dir, "list-unmatched-scan-pairs", "--repository", str(repository))
+    assert pending["scanCount"] == 3
+    assert pending["unavailableScans"] == 0
+    assert pending["skippedPairs"] == 0
+    assert [batch["afterScanId"] for batch in pending["batches"]] == [after["scanId"]]
+    assert [scan["scanId"] for scan in pending["batches"][0]["beforeScans"]] == [before["scanId"]]
+
+    save_scan_matches(state_dir, before, after)
+    cached = run_workbench(state_dir, "list-unmatched-scan-pairs", "--repository", str(repository))
+    assert cached == {**pending, "batches": [], "skippedPairs": 1}
+    forced = run_workbench(
+        state_dir, "list-unmatched-scan-pairs", "--repository", str(repository), "--force"
+    )
+    assert forced == pending
+
+
 @pytest.mark.parametrize(
     ("before_started", "after_started"),
     [
