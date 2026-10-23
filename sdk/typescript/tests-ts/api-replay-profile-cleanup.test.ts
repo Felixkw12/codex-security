@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { CodexSecurity } from "../src/api.js";
 import type { JsonObject } from "../src/config.js";
@@ -21,6 +22,7 @@ test.each([
     })),
   ),
   { mode: "deep", stage: "resume", queryFailure: "" },
+  { mode: "deep", stage: "missing-instructions", queryFailure: "" },
   { mode: "standard", stage: "before", queryFailure: "list-scans" },
   { mode: "deep", stage: "after", queryFailure: "get-scan-recipe" },
 ] as const)(
@@ -38,7 +40,11 @@ test.each([
       CODEX_SECURITY_STATE_DIR: join(root, "state"),
       OPENAI_API_KEY: "synthetic-fixture-key",
     };
+    const missingInstructions = join(root, "missing-instructions.md");
     const configuration = {
+      ...(stage === "missing-instructions"
+        ? { model_instructions_file: missingInstructions }
+        : {}),
       model: "gpt-5.6-sol",
       model_provider: "openai",
       mcp_servers: {
@@ -82,6 +88,9 @@ if __name__ == "__main__":
     const warnings: string[] = [];
     const queryError = new Error("Synthetic replay ownership lookup failed");
     let provisionalPath: string | undefined;
+    let registrations = 0;
+    let ownershipChecks = 0;
+    let cleanedBeforeRelease = false;
     await using client = new CodexSecurity(
       { pluginPath: PLUGIN_ROOT, codexOverrides: configuration },
       {
@@ -108,6 +117,9 @@ if __name__ == "__main__":
           const release = await acquireScanExecution(...args);
           locked = true;
           return () => {
+            if (stage === "missing-instructions")
+              cleanedBeforeRelease =
+                provisionalPath !== undefined && !existsSync(provisionalPath);
             locked = false;
             release();
           };
@@ -117,6 +129,7 @@ if __name__ == "__main__":
         },
         runWorkbench: async (options, args, input) => {
           if (args[0] === "register-cli-scan") {
+            registrations++;
             const recipe = JSON.parse(input!).recipe as JsonObject;
             const profile = recipe["replayProfile"] as JsonObject;
             expect(profile).toMatchObject({ home: "ambient" });
@@ -135,6 +148,17 @@ if __name__ == "__main__":
           if (args[0] === "list-scans" || args[0] === "get-scan-recipe") {
             expect(locked).toBe(true);
             expect(options.signal).toBeUndefined();
+            if (stage === "missing-instructions") {
+              ownershipChecks++;
+              const profiles = (await readdir(home)).filter((name) =>
+                /^codex_security_.*\.config\.toml$/u.test(name),
+              );
+              expect(profiles).toHaveLength(1);
+              provisionalPath = join(home, profiles[0]!);
+              expect(await readFile(provisionalPath, "utf8")).toContain(
+                "synthetic-replay-token",
+              );
+            }
             if (args[0] === queryFailure) throw queryError;
           }
           try {
@@ -169,7 +193,15 @@ if __name__ == "__main__":
       })
       .catch((error: unknown) => error);
     expect(provisionalPath, String(failure)).toBeDefined();
-    if (stage === "response") expect(failure).toBe(launchBoundary);
+    if (stage === "missing-instructions") {
+      expect(failure).toMatchObject({
+        code: "ENOENT",
+        path: missingInstructions,
+      });
+      expect(registrations).toBe(0);
+      expect(ownershipChecks).toBe(1);
+      expect(cleanedBeforeRelease).toBe(true);
+    } else if (stage === "response") expect(failure).toBe(launchBoundary);
     else {
       expect(interrupted).toBeInstanceOf(Error);
       expect(failure).toBe(interrupted);
@@ -187,7 +219,9 @@ if __name__ == "__main__":
       ])
     )["scans"] as JsonObject[];
     const saved = rows.filter((row) => row["recipeAvailable"] === true);
-    expect(saved).toHaveLength(stage === "before" ? 0 : 1);
+    const registered = stage !== "before" && stage !== "missing-instructions";
+    expect(saved).toHaveLength(registered ? 1 : 0);
+    if (stage === "missing-instructions") expect(rows).toEqual([]);
     if (stage === "resume") {
       const originalProfile = await readFile(provisionalPath!);
       await expect(
@@ -207,8 +241,8 @@ if __name__ == "__main__":
     const profiles = (await readdir(home)).filter((name) =>
       /^codex_security_.*\.config\.toml$/u.test(name),
     );
-    expect(profiles).toHaveLength(stage === "before" && !queryFailure ? 0 : 1);
-    if (stage !== "before") {
+    expect(profiles).toHaveLength(!registered && !queryFailure ? 0 : 1);
+    if (registered) {
       const recipe = (
         await runWorkbench(workbenchOptions, [
           "get-scan-recipe",
