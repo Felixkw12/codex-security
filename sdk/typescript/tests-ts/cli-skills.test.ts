@@ -1496,6 +1496,40 @@ process.stdout.write(JSON.stringify({
         ] as const,
     ),
     ...(["validate", "patch", "verify-fix"] as const).flatMap((command) =>
+      [
+        "model 'gpt-5' not found",
+        'model "synthetic/provider-v2" not found',
+        "model `synthetic-v2` not found",
+      ].map(
+        (detail) =>
+          [
+            command,
+            detail,
+            "The selected model is unavailable for the current credentials.",
+          ] as const,
+      ),
+    ),
+    ...(["validate", "patch", "verify-fix"] as const).flatMap((command) =>
+      [
+        "model metadata file not found",
+        "model 'synthetic'\nconfiguration entry not found",
+        "Safety policy: request refused.",
+        "Error loading configuration: config.toml:4:2: model 'gpt-5' not found",
+        "/synthetic/model 'gpt-5' not found",
+        "model 'gpt-5' not found.log",
+      ].map((detail) => [command, detail, null] as const),
+    ),
+    ...(["validate", "patch", "verify-fix"] as const).flatMap((command) =>
+      ["model cache not found", "permission denied opening model cache"].map(
+        (detail) =>
+          [
+            command,
+            detail,
+            "Codex could not load its model metadata.",
+          ] as const,
+      ),
+    ),
+    ...(["validate", "patch", "verify-fix"] as const).flatMap((command) =>
       (
         [
           [
@@ -1513,6 +1547,7 @@ process.stdout.write(JSON.stringify({
       (
         [
           ["response_code=401", "Authentication failed."],
+          ["HTTP 401: model 'gpt-5' not found", "Authentication failed."],
           [
             "response-code=403",
             "The selected model is unavailable for the current credentials.",

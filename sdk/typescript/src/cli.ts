@@ -9033,6 +9033,9 @@ export function skillCommandFailure(
     advice = authenticationFailureMessage(authentication);
   } else if (
     /\bpermissions? to use (?:this |the )?model\b/iu.test(adviceDetail) ||
+    /(?<![\w./\\-])model[ \t]+(?:'[^'\r\n]+'|"[^"\r\n]+"|`[^`\r\n]+`)[ \t]+not[ \t]+found(?![\w/\\-]|\.(?=\S))/iu.test(
+      adviceDetail,
+    ) ||
     /(?<![\w./\\-])(?:model[._ -]not[._ -]found|model[._ -]?access[._ -]?denied|access[._ -]?(?:denied[._ -]?to[._ -]?model|to[._ -]?model[._ -]?denied))(?![\w/\\-]|\.(?=\S))/iu.test(
       adviceDetail,
     ) ||
