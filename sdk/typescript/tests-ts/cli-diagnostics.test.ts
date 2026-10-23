@@ -2,6 +2,8 @@ import { stripVTControlCharacters } from "node:util";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
+import { Formatter } from "incur";
+import { parse as parseYaml } from "yaml";
 import { main } from "../src/cli.js";
 import { readCodexHomeConfig } from "../src/auth.js";
 import { matchScanFindings } from "../src/scan-comparison.js";
@@ -639,6 +641,191 @@ test.each(["authentication", "patch review"])(
     if (stage === "patch review") expect(stdout.text()).toContain("manifest:");
   },
 );
+
+test.each(
+  ["scan", "resume", "rerun"].flatMap((command) =>
+    ["confirmation", "selector"].flatMap((stage) =>
+      (
+        [
+          { format: undefined, fullOutput: false },
+          { format: undefined, fullOutput: true },
+          { format: "toon", fullOutput: false },
+          { format: "toon", fullOutput: true },
+          { format: "yaml", fullOutput: false },
+          { format: "yaml", fullOutput: true },
+        ] as const
+      ).map((output) => ({ command, stage, ...output })),
+    ),
+  ),
+)(
+  "retains $command results when patch $stage is canceled, format: $format, full output: $fullOutput",
+  async ({ command, stage, format, fullOutput }) => {
+    const { stdout, stderr, runCli } = createCliTest(main, { stderr: true });
+    const result = fakeResult(["high"]);
+    const cancellation = new Error("User dismissed the prompt");
+    cancellation.name = "ExitPromptError";
+    const message =
+      "Patch review canceled by Ctrl-C. Saved scan results were kept.";
+    let confirmations = 0;
+    let selections = 0;
+    let patches = 0;
+    const deps = dependencies({
+      result,
+      onWorkbench: () => ({
+        scanId: "saved-canonical",
+        scanDir: "/synthetic/scan-output",
+        recipe: {
+          repository: "/synthetic/repository",
+          target: { kind: "repository", paths: [] },
+          mode: "deep",
+          config: {},
+        },
+      }),
+      environment: { OPENAI_API_KEY: "synthetic-key" },
+      onCodex: () => {
+        patches += 1;
+        return 0;
+      },
+    });
+    deps.confirmPatchReview = async () => {
+      confirmations += 1;
+      if (stage === "confirmation") throw cancellation;
+      return true;
+    };
+    deps.patchEditor = async () => {
+      selections += 1;
+      throw cancellation;
+    };
+    const code = await runCli(
+      [
+        ...(command === "scan" ? ["scan"] : ["scans", command, "saved"]),
+        ...(command === "scan" && stage === "selector" ? ["--patch"] : []),
+        ...(format === undefined ? [] : ["--format", format]),
+        ...(fullOutput ? ["--full-output"] : []),
+      ],
+      deps,
+    );
+    expect(code).toBe(130);
+    expect(confirmations).toBe(
+      command === "scan" && stage === "selector" ? 0 : 1,
+    );
+    expect(selections).toBe(stage === "selector" ? 1 : 0);
+    expect(patches).toBe(0);
+    expect(stderr.text()).toContain(`codex-security: ${message}\n`);
+    const output = stdout.text();
+    if (fullOutput) {
+      expect(output).toStartWith("ok: false\n");
+      expect(output).toContain(
+        Formatter.format(
+          { error: { code: "SCAN_FAILED", message } },
+          format,
+        ).trimEnd(),
+      );
+      expect(output).toContain(
+        Formatter.format({ data: result.toJSON() }, format).trimEnd(),
+      );
+      expect(output).toContain(
+        `meta:\n  command: ${command === "scan" ? "scan" : `scans ${command}`}\n`,
+      );
+    } else if (format !== undefined) {
+      expect(output).toBe(
+        `${Formatter.format(result.toJSON(), format).trimEnd()}\n`,
+      );
+    } else {
+      expect(output).toBe("");
+    }
+  },
+);
+
+test.each(
+  ["scan", "resume", "rerun"].flatMap((command) =>
+    ["json", "jsonl"].map((format) => ({ command, format })),
+  ),
+)(
+  "keeps $format $command output noninteractive with full output",
+  async ({ command, format }) => {
+    const { stdout, runCli } = createCliTest(main, { stderr: true });
+    const result = fakeResult(["high"]);
+    let prompts = 0;
+    const deps = dependencies({
+      result,
+      onWorkbench: () => ({
+        scanId: "saved-canonical",
+        scanDir: "/synthetic/scan-output",
+        recipe: {
+          repository: "/synthetic/repository",
+          target: { kind: "repository", paths: [] },
+          mode: "deep",
+          config: {},
+        },
+      }),
+      environment: { OPENAI_API_KEY: "synthetic-key" },
+    });
+    deps.confirmPatchReview = async () => {
+      prompts += 1;
+      throw new Error("Must not prompt");
+    };
+    deps.patchEditor = async () => {
+      prompts += 1;
+      throw new Error("Must not select patches");
+    };
+    expect(
+      await runCli(
+        [
+          ...(command === "scan" ? ["scan"] : ["scans", command, "saved"]),
+          "--format",
+          format,
+          "--full-output",
+        ],
+        deps,
+      ),
+    ).toBe(0);
+    expect(prompts).toBe(0);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      ok: true,
+      data: JSON.parse(JSON.stringify(result.toJSON())),
+    });
+  },
+);
+
+test("preserves complete YAML diagnostics with retained scan results", async () => {
+  const { stdout, stderr, runCli } = createCliTest(main);
+  const result = fakeResult(["high"]);
+  const message = "Synthetic patch preparation failure.\nDetail retained.\n\n";
+  let commands = 0;
+  const deps = dependencies({
+    result,
+    onRepositoryCommand: () => {
+      commands += 1;
+      throw new Error(message);
+    },
+  });
+  expect(
+    await runCli(
+      [
+        "scan",
+        "--patch",
+        "--patch-severity",
+        "high",
+        "--format",
+        "yaml",
+        "--full-output",
+      ],
+      deps,
+    ),
+  ).toBe(2);
+  expect(commands).toBeGreaterThan(0);
+  expect(stderr.text()).toContain(
+    "codex-security: Synthetic patch preparation failure. Detail retained.  \n",
+  );
+  const output = parseYaml(stdout.text());
+  expect(output.ok).toBe(false);
+  expect(output.error).toEqual({ code: "SCAN_FAILED", message });
+  expect(output.data).toEqual({
+    ...JSON.parse(JSON.stringify(result.toJSON())),
+    patches: [],
+  });
+});
 
 test("uses stored API-key advice for a forbidden model request", async () => {
   const { stderr, runCli } = createCliTest(main);

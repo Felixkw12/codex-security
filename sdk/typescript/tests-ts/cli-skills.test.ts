@@ -1591,6 +1591,41 @@ process.stdout.write(JSON.stringify({
     },
   );
 
+  test.each(
+    (["validate", "patch", "verify-fix"] as const).flatMap((command) =>
+      (
+        [
+          ["SQLite database request timed_out waiting for lock", false],
+          ["sqlite3.OperationalError: timeout waiting for lock", false],
+          ["workbench request timed-out waiting for lock", false],
+          ["database network_error reading local state", false],
+          ["request timed_out", true],
+          ["network.error", true],
+          ["ECONNABORTED", true],
+          ["request timed_out https://synthetic.invalid/database", true],
+        ] as const
+      ).map(([detail, network]) => [command, detail, network] as const),
+    ),
+  )(
+    "preserves local and service timeout diagnostics from the %s child: %s",
+    async (command, detail, network) => {
+      const stdout = capture();
+      const stderr = capture();
+      const source = `process.stdout.write(JSON.stringify({type:"turn.failed",error:{message:${JSON.stringify(detail)}}})+"\\n");process.exitCode=7`;
+      expect(
+        await runCodexSkillCommand(
+          ["-e", source],
+          { command, stdout: stdout.stream, stderr: stderr.stream },
+          { command: process.execPath },
+        ),
+      ).toBe(7);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toBe(
+        `codex-security: ${command} failed with exit code 7.${network ? " Codex could not connect to the model service. Check the network and retry." : ""}\n${detail}\n`,
+      );
+    },
+  );
+
   test("preserves skill failure details alongside helpful advice", () => {
     const cases = [
       ["invalid.api.key", "Authentication failed"],

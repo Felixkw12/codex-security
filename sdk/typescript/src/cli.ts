@@ -55,7 +55,7 @@ import {
   promisify,
   stripVTControlCharacters,
 } from "node:util";
-import { Cli, z } from "incur";
+import { Cli, Formatter, z } from "incur";
 import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
 import { formatCliHelp } from "./cli-help.js";
 import { scanLogsJson } from "./cli-scan-logs-json.js";
@@ -2024,7 +2024,12 @@ export async function main(
   let renderedOutput: string | undefined;
   let structuredError = false;
   let failedResultOutput:
-    { format: "json" | "jsonl"; code?: string; message: string } | undefined;
+    | {
+        format: "json" | "jsonl" | "toon" | "yaml";
+        code?: string;
+        message: string;
+      }
+    | undefined;
   let filteredScanFailure:
     { format: string; data: Record<string, unknown> } | undefined;
   const finishScan = (
@@ -2041,7 +2046,10 @@ export async function main(
     if (outcome.error === undefined || outcome.data !== undefined) {
       if (
         outcome.error !== undefined &&
-        (format === "json" || format === "jsonl") &&
+        (format === "json" ||
+          format === "jsonl" ||
+          format === "toon" ||
+          format === "yaml") &&
         argv.includes("--full-output")
       ) {
         failedResultOutput = { format, message: outcome.error };
@@ -2069,7 +2077,8 @@ export async function main(
     code,
   ) => {
     if (
-      outcome.error === undefined &&
+      (outcome.error === undefined ||
+        (outcome.exitCode === 130 && outcome.data !== undefined)) &&
       format === "toon" &&
       !argv.some((argument) => OUTPUT_OPTION.test(argument))
     ) {
@@ -4478,7 +4487,8 @@ export async function main(
         }
 
         if (
-          outcome.error === undefined &&
+          (outcome.error === undefined ||
+            (outcome.exitCode === 130 && outcome.data !== undefined)) &&
           !options.dryRun &&
           format === "toon" &&
           !argv.some((argument) => OUTPUT_OPTION.test(argument))
@@ -7021,7 +7031,27 @@ export async function main(
             streamedLogs,
             frameworkOutput ? JSON.parse(frameworkOutput).cta : undefined,
           );
-    if (failedResultOutput !== undefined) {
+    if (
+      failedResultOutput?.format === "toon" ||
+      failedResultOutput?.format === "yaml"
+    ) {
+      const success = Formatter.format({ ok: true }, failedResultOutput.format);
+      const prefix = success.endsWith("\n") ? success : `${success}\n`;
+      // Keep Incur's rendered data, metadata, and output controls intact.
+      if (frameworkOutput.startsWith(prefix)) {
+        const failure = Formatter.format(
+          {
+            ok: false,
+            error: {
+              code: failedResultOutput.code ?? "SCAN_FAILED",
+              message: failedResultOutput.message,
+            },
+          },
+          failedResultOutput.format,
+        );
+        frameworkOutput = `${failure}${failure.endsWith("\n") ? "" : "\n"}${frameworkOutput.slice(prefix.length)}`;
+      }
+    } else if (failedResultOutput !== undefined) {
       const envelope: JsonValue = JSON.parse(frameworkOutput);
       // Token-count output is a number, not a full-output envelope.
       if (isJsonObject(envelope) && envelope["ok"] === true) {
@@ -9062,9 +9092,10 @@ export function skillCommandFailure(
   } else if (
     classification === "network_error" ||
     classification === "timeout" ||
-    /\b(?:ECONNABORTED|timed[._ -]out|network[._ -]?error|(?:(?:network|request)[._ -]?)?timeout(?:[._ -]?error)?)\b/iu.test(
-      adviceDetail,
-    )
+    (!/\b(?:sqlite3?|database|workbench)\b/iu.test(classificationDetail) &&
+      /\b(?:ECONNABORTED|timed[._ -]out|network[._ -]?error|(?:(?:network|request)[._ -]?)?timeout(?:[._ -]?error)?)\b/iu.test(
+        adviceDetail,
+      ))
   ) {
     advice =
       "Codex could not connect to the model service. Check the network and retry.";
@@ -10088,10 +10119,10 @@ async function executeScan(
   } catch (error) {
     if (!(error instanceof Error && error.name === "ExitPromptError"))
       throw error;
-    errorOutput.write(
-      "codex-security: Patch review canceled by Ctrl-C. Saved scan results were kept.\n",
-    );
-    return finishResult(130);
+    const message =
+      "Patch review canceled by Ctrl-C. Saved scan results were kept.";
+    errorOutput.write(`codex-security: ${message}\n`);
+    return finishResult(130, message);
   }
 
   let patches: FindingPatch[] = [];
