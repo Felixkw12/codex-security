@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createDeepApiFixtures, pluginRoot } from "./support/deep-api.js";
-import { runWorkbench } from "../src/runtime.js";
+import { resolvePluginPython, runWorkbench } from "../src/runtime.js";
 import { loadDeepScanCheckpoint } from "../src/deep-scan-checkpoint.js";
 import type { JsonObject } from "../src/config.js";
 import { CodexSecurity } from "../src/api.js";
@@ -26,6 +26,10 @@ for (const role of ["discovery", "reducer"] as const) {
         ).href
       );
       const h = await fixture(undefined, true);
+      const python = await resolvePluginPython({
+        environment: h.environment,
+        protectedRoot: h.repository,
+      });
       const selectedPath = join(h.root, "selected.toml");
       const deepPath = join(h.root, "deep.toml");
       const instructionPath = join(h.root, "introduced.md");
@@ -77,7 +81,7 @@ for (const role of ["discovery", "reducer"] as const) {
       const command = (args: readonly string[]) =>
         runWorkbench(
           {
-            python: Bun.which("python3")!,
+            python,
             pluginRoot,
             environment: h.environment,
           },
@@ -119,7 +123,7 @@ for (const role of ["discovery", "reducer"] as const) {
             : {}),
           threadId: "native-owner",
           pluginRoot,
-          pythonPath: Bun.which("python3")!,
+          pythonPath: python,
           stateDirectory: h.environment["CODEX_SECURITY_STATE_DIR"],
           parentSandbox: {
             workspaceAccess: "write" as const,
@@ -142,7 +146,7 @@ for (const role of ["discovery", "reducer"] as const) {
           delete (legacy["scanInputs"] as JsonObject)[
             "modelInstructionsFileSha256"
           ];
-          execFileSync(Bun.which("python3")!, [
+          execFileSync(python, [
             "-c",
             "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute('UPDATE scans SET recipe_json=? WHERE id=?',(sys.argv[2],sys.argv[3])); c.commit()",
             join(
