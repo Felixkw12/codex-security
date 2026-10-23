@@ -39,7 +39,10 @@ export function candidateIdentity(
 }
 
 export function coverageCandidateOwner(row: Record<string, unknown>): unknown {
-  return row["sourceWorkerId"] ?? candidateOwner(row["workerId"]);
+  const owner = row["sourceWorkerId"];
+  return owner != null && typeof owner !== "string"
+    ? owner
+    : candidateOwner(owner, row["workerId"]);
 }
 
 /** Saved candidate identities without a finding or terminal disposition. */

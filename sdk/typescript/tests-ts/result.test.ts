@@ -196,9 +196,14 @@ describe("ScanResult", () => {
   test.each([
     { sourceWorkerId: "worker-a", workerId: "worker-b", expected: 1 },
     { sourceWorkerId: {}, workerId: "worker-b", expected: 0 },
-    { sourceWorkerId: " ", workerId: "worker-b", expected: 1 },
+    { sourceWorkerId: " ", workerId: "worker-b", expected: 0 },
+    { sourceWorkerId: "", workerId: "worker-b", expected: 0 },
+    { sourceWorkerId: " worker-b ", workerId: "worker-b", expected: 1 },
+    { sourceWorkerId: [], workerId: "worker-b", expected: 0 },
     { sourceWorkerId: null, workerId: "worker-b", expected: 0 },
-    { sourceWorkerId: undefined, workerId: {}, expected: 1 },
+    ...[" ", null, undefined].flatMap((sourceWorkerId) =>
+      [{}, []].map((workerId) => ({ sourceWorkerId, workerId, expected: 1 })),
+    ),
   ])("preserves canonical coverage-owner precedence: %j", (row) => {
     const result = fakeResult([]);
     result.coverage.surfaces = [
@@ -225,6 +230,33 @@ describe("ScanResult", () => {
     expect(result.unresolvedCandidateCount).toBe(row.expected);
     expect(result.coverage).toEqual(original);
   });
+
+  test.each(["", " "])(
+    "a saved finding resolves a blank canonical owner %j",
+    (sourceWorkerId) => {
+      const result = fakeResult(["high"]);
+      result.findings.findings[0]!.provenance = {
+        source: "local_plugin",
+        candidateId: "shared-candidate",
+        workerId: "worker-one",
+      };
+      result.coverage.deferred = ["worker-one", "worker-two"].map(
+        (workerId) => ({
+          id: `${workerId}/pending`,
+          candidateId: "shared-candidate",
+          sourceWorkerId,
+          workerId,
+          reason: `Evidence retained for ${workerId}.`,
+        }),
+      );
+      const original = structuredClone(result.coverage);
+      expect(result.toJSON()).toMatchObject({
+        unresolvedCandidateCount: 1,
+        unresolvedCandidates: [result.coverage.deferred[1]],
+      });
+      expect(result.coverage).toEqual(original);
+    },
+  );
 
   test.each([
     [{ sourceWorkerId: { imported: "worker" } }, {}, undefined],

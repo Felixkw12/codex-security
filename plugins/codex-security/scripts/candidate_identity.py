@@ -46,7 +46,9 @@ def candidate_owner(*values: Any) -> str | None:
 def coverage_owner(item: dict[str, Any]) -> Any:
     """Read legacy workerId metadata without overriding a canonical owner."""
     owner = item.get("sourceWorkerId")
-    return owner if owner is not None else candidate_owner(item.get("workerId"))
+    if owner is not None and not isinstance(owner, str):
+        return owner
+    return candidate_owner(owner, item.get("workerId"))
 
 
 def candidate_key(candidate_id: Any, owner: Any = None) -> CandidateKey | None:

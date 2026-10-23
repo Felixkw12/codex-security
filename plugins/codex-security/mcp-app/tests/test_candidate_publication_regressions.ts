@@ -78,40 +78,58 @@ test("a resolved legacy candidate preserves a surface shared with pending work",
 });
 
 for (const layout of ["standard", "deep"] as const) {
-  test(`${layout}: a finding resolves only its legacy worker candidate`, async (t) => {
-    const f = await fixture(t, layout);
-    const owners = ["worker-one", "worker-two"];
-    await f.write(
-      f.draft({
-        deferred: owners.map((workerId) => ({
-          candidateId: "shared-candidate",
-          workerId,
-          reason: "Synthetic evidence requires review.",
-        })),
-      }),
-    );
-    await f.write({
-      ...f.draft({}, layout !== "deep"),
-      findings: [
-        {
-          ...finding("confirmed", "src/example.ts"),
-          provenance: {
-            source: "local_plugin",
+  for (const sourceWorkerId of [undefined, "", " "]) {
+    test(`${layout}: a finding resolves only its legacy worker candidate with canonical owner ${JSON.stringify(sourceWorkerId)}`, async (t) => {
+      const f = await fixture(t, layout);
+      const owners = ["worker-one", "worker-two"];
+      await f.write(
+        f.draft({
+          deferred: owners.map((workerId) => ({
             candidateId: "shared-candidate",
-            workerId: owners[0],
-          },
-        },
-      ],
-    });
-    for (let replay = 0; replay < 2; replay++) {
-      const coverage = await f.read();
-      assert.deepEqual(
-        coverage.deferred.map((row: { workerId: string }) => row.workerId),
-        [owners[1]],
+            workerId,
+            ...(sourceWorkerId === undefined ? {} : { sourceWorkerId }),
+            reason: "Synthetic evidence requires review.",
+          })),
+        }),
       );
-      await f.write(f.draft({}, layout !== "deep"));
-    }
-  });
+      const checkpointRoot = path.join(f.root, "checkpoints");
+      const checkpoints = await Promise.all(
+        (await readdir(checkpointRoot)).map(
+          async (name) =>
+            [
+              name,
+              await readFile(path.join(checkpointRoot, name), "utf8"),
+            ] as const,
+        ),
+      );
+      await f.write({
+        ...f.draft({}, layout !== "deep"),
+        findings: [
+          {
+            ...finding("confirmed", "src/example.ts"),
+            provenance: {
+              source: "local_plugin",
+              candidateId: "shared-candidate",
+              workerId: owners[0],
+            },
+          },
+        ],
+      });
+      for (let replay = 0; replay < 2; replay++) {
+        const coverage = await f.read();
+        assert.deepEqual(
+          coverage.deferred.map((row: { workerId: string }) => row.workerId),
+          [owners[1]],
+        );
+        await f.write(f.draft({}, layout !== "deep"));
+      }
+      for (const [name, contents] of checkpoints)
+        assert.equal(
+          await readFile(path.join(checkpointRoot, name), "utf8"),
+          contents,
+        );
+    });
+  }
 }
 
 test("legacy worker surface references survive colliding local IDs", async (t) => {

@@ -49,12 +49,12 @@ export function coverageCandidateKey(
   item: JsonObject,
   owner?: string,
 ): string | undefined {
-  const sourceOwner =
-    candidateOwner(owner) ??
-    item.sourceWorkerId ??
-    candidateOwner(item.workerId);
+  const sourceOwner = candidateOwner(owner) ?? item.sourceWorkerId;
   if (sourceOwner != null && typeof sourceOwner !== "string") return undefined;
-  return candidateKey(item.candidateId, sourceOwner);
+  return candidateKey(
+    item.candidateId,
+    candidateOwner(sourceOwner, item.workerId),
+  );
 }
 
 /** Prefer the matching owner for duplicate raw IDs; unique references may be shared. */

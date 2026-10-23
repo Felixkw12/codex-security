@@ -461,7 +461,18 @@ def test_projection_resolves_candidates_using_string_owner_metadata(
         ({"sourceWorkerId": None, "workerId": "worker-one"}, ["worker-two", None]),
         ({"sourceWorkerId": "worker-two", "workerId": "worker-one"}, ["worker-one", None]),
         ({"sourceWorkerId": {}, "workerId": "worker-one"}, ["worker-one", "worker-two", None]),
-        ({"sourceWorkerId": " ", "workerId": "worker-one"}, ["worker-one", "worker-two"]),
+        ({"sourceWorkerId": " ", "workerId": "worker-one"}, ["worker-two", None]),
+        ({"sourceWorkerId": "", "workerId": "worker-one"}, ["worker-two", None]),
+        (
+            {"sourceWorkerId": " worker-one ", "workerId": "worker-one"},
+            ["worker-one", "worker-two", None],
+        ),
+        ({"sourceWorkerId": [], "workerId": "worker-one"}, ["worker-one", "worker-two", None]),
+        *[
+            ({**canonical, "workerId": legacy}, ["worker-one", "worker-two"])
+            for canonical in ({"sourceWorkerId": " "}, {"sourceWorkerId": None}, {})
+            for legacy in ({}, [])
+        ],
         ({"workerId": []}, ["worker-one", "worker-two"]),
     ],
 )
@@ -491,6 +502,33 @@ def test_projection_preserves_coverage_owner_precedence(
     assert CANDIDATES.coverage_candidate_key(
         {"candidateId": "shared-candidate", **metadata}, "actual-worker"
     ) == ("actual-worker", "shared-candidate")
+
+
+@pytest.mark.parametrize("source_owner", ["", " "])
+def test_projection_finding_resolves_blank_canonical_candidate_owner(source_owner: str) -> None:
+    manifest, findings, coverage = canonical_documents()
+    findings["findings"][0]["provenance"] = {
+        "candidateId": "shared-candidate",
+        "workerId": "worker-one",
+    }
+    coverage["deferred"] = [
+        {
+            "candidateId": "shared-candidate",
+            "sourceWorkerId": source_owner,
+            "workerId": worker,
+            "reason": f"Evidence retained for {worker}.",
+        }
+        for worker in ("worker-one", "worker-two")
+    ]
+    saved = copy.deepcopy((findings, coverage))
+    assert CANDIDATES.unresolved_candidates(coverage, findings["findings"]) == [
+        coverage["deferred"][1]
+    ]
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    assert "| Unresolved candidates | 1 |" in markdown
+    assert "Evidence retained for worker-one." not in markdown
+    assert "Evidence retained for worker-two." in markdown
+    assert (findings, coverage) == saved
 
 
 def test_main_coverage_surface_references_keep_their_worker() -> None:
