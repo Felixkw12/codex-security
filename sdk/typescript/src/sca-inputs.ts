@@ -61,7 +61,7 @@ export function additionalScaFormat(path: string): AdditionalScaFormat | null {
     requirementsName.includes("requirements")
   )
     return "requirements";
-  if (name.endsWith(".pom")) return "maven";
+  if (scaInputBasename(path).endsWith(".pom")) return "maven";
   return null;
 }
 
@@ -537,7 +537,11 @@ function inspectBundler(content: string, sourcePath: string): InputInspection {
     if (
       section === "GEM" &&
       remotes.length > 0 &&
-      remotes.every((remote) => /^https?:\/\/rubygems\.org\/?$/i.test(remote))
+      remotes.every(
+        (remote) =>
+          /^https?:\/\/rubygems\.org(?::\d+)?\/?$/i.test(remote) &&
+          URL.parse(remote)?.port === "",
+      )
     )
       return;
     const resolution = `${section.toLowerCase()}:${remotes.join(",")}${revision ? `#${revision}` : ""}`;

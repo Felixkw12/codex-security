@@ -140,10 +140,10 @@ function triage(): TriageFinding {
       claimed_source: "unknown",
       claimed_sink: "unknown",
       claimed_control: "unknown",
-      affected_version_or_path: "1.0.0",
+      affected_version_or_path: "1.0.0 in package-lock.json",
       preconditions: [],
       impact: "unknown",
-      references: [],
+      references: ["SYNTHETIC-1"],
     },
     verdict: "needs_review",
     confidence: "low",
@@ -180,9 +180,11 @@ async function fixture(
       | "cancelled"
       | "source_changed"
       | "duplicate_id"
+      | "mismatched_identity"
       | "unauthorized"
       | "forbidden"
     )[];
+    distinctMatches?: boolean;
     dependencyInput?: {
       path: string;
       format: ScaResult["coverage"]["inputs"][number]["format"];
@@ -386,6 +388,25 @@ process.exit(child.status ?? 1);
             id: `match-${index + 1}`,
             severity: options.severities?.[index] ?? null,
           }));
+        if (options.distinctMatches) {
+          result.components = result.matches.map((_, index) => ({
+            ...result.components[0]!,
+            id: `component-${index + 1}`,
+            name: `synthetic-package-${index + 1}`,
+            version: `${index + 1}.0.0`,
+            sourcePath: `package-${index + 1}/package-lock.json`,
+          }));
+          result.matches = result.matches.map((match, index) => ({
+            ...match,
+            componentId: result.components[index]!.id,
+            advisoryIds: [`SYNTHETIC-${index + 1}`],
+            sourceAdvisories: [{ id: `SYNTHETIC-${index + 1}` }],
+          }));
+          result.coverage.inputs = result.components.map((component) => ({
+            ...result.coverage.inputs[0]!,
+            path: component.sourcePath,
+          }));
+        }
         if (options.advisoryDetails !== undefined)
           result.matches[0]!.sourceAdvisories[0]!["details"] =
             options.advisoryDetails;
@@ -466,6 +487,20 @@ process.exit(child.status ?? 1);
                   ),
                   triage_item_id: `triage-${behavior === "duplicate_id" ? 1 : turnNumber}`,
                 };
+                const suppliedMatch =
+                  captured.evidence!.matches[
+                    behavior === "mismatched_identity" ? 0 : turnNumber - 1
+                  ]!;
+                const suppliedComponent = captured.evidence!.components.find(
+                  (component) => component.id === suppliedMatch.componentId,
+                )!;
+                Object.assign(finding.normalized_input, {
+                  vulnerable_component: suppliedComponent.name,
+                  affected_version_or_path: `${suppliedComponent.version} in ${suppliedComponent.sourcePath}`,
+                  references: suppliedMatch.advisoryIds,
+                });
+                if (behavior === "mismatched_identity")
+                  finding.verdict = "not_actionable";
                 return {
                   events: (async function* (): AsyncGenerator<ThreadEvent> {
                     yield {
@@ -2123,6 +2158,47 @@ test("requested cost limit interrupts while retaining completed evidence", async
   expect(saved.matches).toHaveLength(1);
   expect(saved.status).toBe("partial");
   expect(saved.model.costUsd).toBeGreaterThan(0.000001);
+});
+
+test("a response describing another selected match fails only its own assessment", async () => {
+  const { client, repository, outputDir, turns } = await fixture({
+    turns: ["completed", "mismatched_identity", "completed"],
+    distinctMatches: true,
+  });
+  await using security = client;
+  const result = await security.scanDependencies({
+    repositoryPath: repository,
+    outputDir,
+  });
+  expect(result.status).toBe("partial");
+  expect(result.assessments.map(({ status }) => status)).toEqual([
+    "completed",
+    "failed",
+    "completed",
+  ]);
+  expect(result.assessments[1]).toMatchObject({
+    matchId: "match-2",
+    verdict: null,
+    triage: null,
+    error:
+      "Dependency triage assessment does not identify the selected package, version, source, and advisory.",
+  });
+  expect(result.matches).toEqual(turns[0]!.evidence.matches);
+  expect(result.components).toEqual(turns[0]!.evidence.components);
+  expect(
+    result.assessments[0]!.triage!.normalized_input.vulnerable_component,
+  ).toBe("synthetic-package-1");
+  expect(
+    result.assessments[2]!.triage!.normalized_input.vulnerable_component,
+  ).toBe("synthetic-package-3");
+  expect(turns[2]!.evidence.assessments.map(({ status }) => status)).toEqual([
+    "completed",
+    "failed",
+    "not_started",
+  ]);
+  expect(
+    JSON.parse(await readFile(join(outputDir, "sca-result.json"), "utf8")),
+  ).toEqual(result);
 });
 
 test.each(["truncated", "malformed", "duplicate_id"] as const)(

@@ -6,10 +6,46 @@ import { jsonForPrompt } from "./codex-prompt.js";
 import { ContractValidationError } from "./errors.js";
 import type {
   ScaAssessment,
+  ScaComponent,
   ScaMatch,
   ScaResult,
   TriageFinding,
 } from "./sca-types.js";
+
+function hasIdentity(text: string, value: string, characters: string): boolean {
+  const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(^|[^${characters}])${escaped}($|[^${characters}])`).test(
+    text,
+  );
+}
+
+function correspondsToMatch(
+  triage: TriageFinding,
+  match: ScaMatch,
+  component: ScaComponent | undefined,
+): boolean {
+  if (component === undefined) return false;
+  const input = triage.normalized_input;
+  return (
+    hasIdentity(input.vulnerable_component, component.name, "A-Za-z0-9_./+-") &&
+    (component.version === null ||
+      hasIdentity(
+        `${input.vulnerable_component} ${input.affected_version_or_path}`,
+        component.version,
+        "A-Za-z0-9_.+-",
+      )) &&
+    hasIdentity(
+      input.affected_version_or_path,
+      component.sourcePath,
+      "A-Za-z0-9_./\\\\-",
+    ) &&
+    [...match.advisoryIds, ...match.aliases].some((id) =>
+      input.references.some((reference) =>
+        hasIdentity(reference, id, "A-Za-z0-9_-"),
+      ),
+    )
+  );
+}
 
 // Codex structured output requires explicit types and every object property in
 // required. The canonical v0 contract remains compatible with optional revision.
@@ -149,6 +185,17 @@ export async function dependencyTriageContract(pluginRoot: string) {
           error = "Dependency triage returned a non-advisory source type.";
         else if ((itemIdCounts.get(triage.triage_item_id) ?? 0) !== 1)
           error = "Dependency triage reused this assessment ID.";
+        else if (
+          !correspondsToMatch(
+            triage,
+            match,
+            result.components.find(
+              (component) => component.id === match.componentId,
+            ),
+          )
+        )
+          error =
+            "Dependency triage assessment does not identify the selected package, version, source, and advisory.";
         else
           return {
             matchId: match.id,
@@ -202,6 +249,7 @@ export function dependencyTriagePrompt(
     `Read the focused scanner and package evidence at ${jsonForPrompt(join(result.outputDir, "sca-assessment-input.json"))}. It contains only the selected match, its package context, and earlier assessments of that package. Use match.id as both input_id and triage_item_id, and source_type "advisory". The full inventory remains at ${jsonForPrompt(join(result.outputDir, "sca-result.json"))} for a specific evidence gap; do not reread unrelated components or advisories.`,
     "Reuse the package context and source already inspected in this thread. Follow the supplied dependency chain and inspect the exact installed dependency source, including node_modules and pnpm symlinks inside the repository. Git-ignored or untracked source is still usable static evidence. Compare package names and versions with the scanner tuple; installed local source does not by itself prove deployment or attacker reachability.",
     "Inspect the smallest evidence set that can change the verdict. Once the specific missing fact cannot be established from available local evidence, return needs_review with that fact and a concrete next action; do not repeat broad searches or require a confirmed exploit before explaining the advisory's maintenance implications. Keep evidence, proof gaps, and the next step concise and specific to this match.",
+    "In normalized_input, include the selected component's exact name in vulnerable_component and its exact sourcePath in affected_version_or_path. Include its resolved version, when non-null, in either of those fields. Include at least one of the selected match's advisoryIds or aliases in references, as an ID or within a reference URL; a URL without a matched ID or alias does not identify the advisory.",
     "Work inline using static source and configuration inspection only. Do not execute application or dependency code, install packages, reproduce vulnerabilities, spawn subagents, start scans, patch files, or contact external services. The host saves your response.",
     "Return only triage-finding/v0 JSON with exactly one finding for the selected match. Preserve the scanner match separately from evidence about application use. Respect coverage limitations: manifest declarations do not establish installed versions or a complete dependency graph.",
     "Assign ranks within this single-match result only; retained ranks do not order matches across the scan.",

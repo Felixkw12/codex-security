@@ -2276,6 +2276,40 @@ packages:
       expect(result.matches).toEqual([]);
     },
   );
+  test.each(
+    ["https://rubygems.org:443/", "http://rubygems.org:80"].flatMap((remote) =>
+      [false, true].map((matched) => ({ remote, matched })),
+    ),
+  )(
+    "keeps RubyGems default-port $remote coverage complete with advisory matches: $matched",
+    async ({ remote, matched }) => {
+      const { repository, output } = await setup();
+      await writeFile(
+        join(repository, "Gemfile.lock"),
+        `GEM\n  remote: ${remote}\n  specs:\n    synthetic-lib (1.2.0)\n`,
+      );
+      const vulnerability = advisory("SYNTHETIC-RUBYGEMS-1");
+      vulnerability.affected[0]!.package.ecosystem = "RubyGems";
+      const raw = rawOutput("Gemfile.lock", matched ? [vulnerability] : []);
+      raw.results[0]!.packages[0]!.package.ecosystem = "RubyGems";
+      const result = await runOsvScan(
+        { repositoryPath: repository, outputDir: output },
+        {
+          executable: process.execPath,
+          runProcess: async (_exe, argv) => ({
+            stdout: argv[0] === "--version" ? "2.6.0" : JSON.stringify(raw),
+            stderr: "",
+            exitCode: argv[0] === "--version" || !matched ? 0 : 1,
+          }),
+        },
+      );
+      expect(result.status).toBe("completed");
+      expect(result.coverage.status).toBe("complete");
+      expect(result.coverage.unresolvedPackages).toBe(0);
+      expect(result.components).toHaveLength(1);
+      expect(result.matches).toHaveLength(matched ? 1 : 0);
+    },
+  );
   test.each([false, true])(
     "keeps relative Composer archive coverage incomplete with advisory matches: %p",
     async (matched) => {
