@@ -10621,6 +10621,7 @@ async function runFindingPatches(
       }
     }
 
+    let validationError: unknown;
     try {
       if (patch.status === "verified") {
         const files = verifiedPatchFiles(selected, [patch]).map((file) =>
@@ -10649,13 +10650,7 @@ async function runFindingPatches(
           );
       }
     } catch (error) {
-      return {
-        patches: [...patches, patch],
-        exitCode: 2,
-        files: [...knownFiles].sort(),
-        preparationCompleted,
-        error,
-      };
+      validationError = error;
     }
 
     const title = safePatchText(finding.title);
@@ -10663,6 +10658,14 @@ async function runFindingPatches(
       `  ${patch.status.toUpperCase()}  ${title}${patch.reason === undefined ? "" : `: ${safePatchText(patch.reason)}`}\n`,
     );
     patches.push(patch);
+    if (validationError !== undefined)
+      return {
+        patches,
+        exitCode: 2,
+        files: [...knownFiles].sort(),
+        preparationCompleted,
+        error: validationError,
+      };
   }
   return {
     patches,
