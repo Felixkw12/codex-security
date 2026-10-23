@@ -4107,17 +4107,22 @@ describe("runtime directories and plugin Python boundary", () => {
     },
   );
 
-  test("preserves Windows credential ACL subprocess failures while streaming", async () => {
+  test("preserves complete Windows credential ACL subprocess failures while streaming", async () => {
+    const prefixLength = 70 * 1024;
+    const failure = "\nsynthetic ACL inspection failure at end";
     await expect(
       streamWindowsCredentialAclDescriptors(
         process.execPath,
         [
           "--eval",
-          'process.stderr.write("synthetic ACL inspection failure"); process.exitCode = 1',
+          `process.stderr.write("x".repeat(${prefixLength}) + ${JSON.stringify(failure)}); process.exitCode = 1`,
         ],
         async () => {},
       ),
-    ).rejects.toMatchObject({ stderr: "synthetic ACL inspection failure" });
+    ).rejects.toMatchObject({
+      code: 1,
+      stderr: "x".repeat(prefixLength) + failure,
+    });
   });
 
   test("accepts managed Windows ACLs with trusted system principals", () => {
