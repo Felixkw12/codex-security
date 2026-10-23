@@ -3525,6 +3525,7 @@ test("OpenGrep publication retains grouped evidence through Cloud readback and r
     assessment: { state: "not_assessed" },
     evidence: {
       details: { kind: "sast", scanner_origin: "OpenGrep" },
+      source_data: { scan_error_count: input.errors.length },
     },
   });
   expect(original.evidence.source_data!["results"]).toHaveLength(2);

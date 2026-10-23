@@ -51,6 +51,7 @@ test("OpenGrep grouped traces survive SQLite import, replay, and evidence update
       evidence: {
         locations: [{ path: "src/example.ts", line: 3 }],
         details: { kind: "sast", scanner_origin: "OpenGrep" },
+        source_data: { scan_error_count: input.errors.length },
       },
     });
     expect(stored!.evidence.source_data!["results"]).toHaveLength(2);

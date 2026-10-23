@@ -102,6 +102,7 @@ export function projectNativeJsonResult(
     repositoryUrl: string;
     severity: (value: unknown) => string;
     reportContext: Record<string, unknown>;
+    scanErrorCount?: number;
     observations?: Record<string, unknown>[];
   },
 ): ExternalFindingEvidence {
@@ -130,6 +131,9 @@ export function projectNativeJsonResult(
     },
     source_data: structuredClone({
       report: options.reportContext,
+      ...(options.scanErrorCount === undefined
+        ? {}
+        : { scan_error_count: options.scanErrorCount }),
       ...(options.observations
         ? { results: options.observations }
         : { result }),

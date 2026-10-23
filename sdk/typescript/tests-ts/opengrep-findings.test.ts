@@ -36,9 +36,9 @@ test("OpenGrep keeps native evidence and incomplete-run metadata without an asse
     source_data: {
       report: {
         version: input.version,
-        errors: input.errors,
         configuration: input.configuration,
       },
+      scan_error_count: input.errors.length,
       results: input.results,
     },
   });
@@ -160,6 +160,21 @@ test("grouped observations still honor the existing Cloud evidence size contract
   expect(output.excluded.every((item) => item.reason.includes("256 KiB"))).toBe(
     true,
   );
+});
+
+test("large run diagnostics do not consume each finding's evidence budget", () => {
+  const input = opengrepJson();
+  input.errors = Array.from({ length: 2000 }, (_, index) => ({
+    ...input.errors[0]!,
+    path: `src/file-${index}.ts`,
+  }));
+  const output = normalize(input, options);
+  expect(output.excluded).toEqual([]);
+  expect(output.findings).toHaveLength(1);
+  expect(output.report!["errors"]).toEqual(input.errors);
+  const sourceData = output.findings[0]!.evidence.source_data!;
+  expect(sourceData["report"]).not.toHaveProperty("errors");
+  expect(sourceData["scan_error_count"]).toBe(2000);
 });
 
 test("ignored matches remain visible as unassessed source evidence", () => {

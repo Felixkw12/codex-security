@@ -43,15 +43,21 @@ export function normalizeOpenGrepFindings(
     "OpenGrep",
   );
   requiredText(document["version"], "OpenGrep version");
-  array(document["errors"] ?? [], "OpenGrep errors");
+  const errors = array(document["errors"] ?? [], "OpenGrep errors");
   const { results, ...report } = document;
   const values = array(results, "OpenGrep results");
-  const { paths: _paths, time: _time, ...reportContext } = report;
+  const {
+    errors: _errors,
+    paths: _paths,
+    time: _time,
+    ...reportContext
+  } = report;
   const projection = {
     origin: "OpenGrep",
     repositoryUrl,
     severity: () => "unknown",
     reportContext,
+    scanErrorCount: errors.length,
   };
   const output: ExternalFindings = {
     read: values.length,
