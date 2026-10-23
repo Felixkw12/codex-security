@@ -216,7 +216,7 @@ export function dependencies(
     importGitHubAdvisories?: MainDependencies["importGitHubAdvisories"];
     onRepositoryCommand?: (
       ...arguments_: Parameters<MainDependencies["runRepositoryCommand"]>
-    ) => string | Promise<string>;
+    ) => string | undefined | Promise<string | undefined>;
     onWorkbench?: (
       args: readonly string[],
       input?: string,
@@ -289,22 +289,34 @@ export function dependencies(
         await args[1]?.appServer?.onBeforeTurn?.();
       return (await options.onCodex?.(...args)) ?? 0;
     },
-    runRepositoryCommand: async (command, args, repository, commandOptions) =>
-      (await options.onRepositoryCommand?.(
+    runRepositoryCommand: async (command, args, repository, commandOptions) => {
+      const overridden = await options.onRepositoryCommand?.(
         command,
         args,
         repository,
         commandOptions,
-      )) ??
-      (command === "gh" && args[0] === "pr" && args[1] === "list"
-        ? "[]"
-        : command === "git" && args.includes("--absolute-git-dir")
-          ? (commandOptions?.environment?.["GIT_DIR"] ??
-            commandOptions?.directory ??
-            repository)
-          : args.includes("--name-only")
-            ? "src/finding-1.ts\0"
-            : ""),
+      );
+      if (overridden !== undefined) return overridden;
+      const output =
+        command === "gh" && args[0] === "pr" && args[1] === "list"
+          ? "[]"
+          : command === "git" && args.includes("--absolute-git-dir")
+            ? (commandOptions?.environment?.["GIT_DIR"] ??
+              commandOptions?.directory ??
+              repository)
+            : args.includes("--show-toplevel")
+              ? repository
+              : args.includes("--name-only")
+                ? (
+                    options.result?.findings.findings.flatMap((finding) =>
+                      finding.locations.map((location) => location.path),
+                    ) ?? ["src/finding-1.ts"]
+                  ).join("\0") + "\0"
+                : "";
+      return commandOptions?.encoding === "base64"
+        ? Buffer.from(output).toString("base64")
+        : output;
+    },
     ...(options.bulkScan === undefined ? {} : { bulkScan: options.bulkScan }),
     ...(options.linearClient === undefined
       ? {}

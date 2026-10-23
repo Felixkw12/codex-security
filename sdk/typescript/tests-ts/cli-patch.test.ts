@@ -1,4 +1,5 @@
 import {
+  setupPatchWorkflowFixtures,
   CURRENT_REPOSITORY,
   SAVED_REPOSITORY,
   STATE_DIRECTORY,
@@ -64,6 +65,8 @@ import { throwing } from "./support/errors.js";
 import { createCliTest } from "./support/cli-run.js";
 import { resolvePluginPython, runWorkbench } from "../src/runtime.js";
 import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
+
+setupPatchWorkflowFixtures();
 
 setupPatchWorkflowFixtures();
 
@@ -1107,7 +1110,7 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
           if (args.includes("add") && modelStarted)
             resultSnapshotHadProgress =
               setInterval.mock.calls.length > clearInterval.mock.calls.length;
-          return args.includes("--name-only") ? "src/finding-1.ts\0" : "";
+          return undefined;
         },
         onCodex: (args, output) => {
           modelStarted = true;
@@ -1371,6 +1374,7 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
     "passes static verification to patching (saved findings: %p)",
     async (saved) => {
       const result = resultWithFindings(["high"]);
+      result.findings.findings[0]!.locations[0]!.path = "guard.ts";
       const report =
         "Source review confirms the guard; runtime checks were not performed.";
       const onCodex = mock<OnCodex>((_args, output) => {
@@ -3015,6 +3019,7 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
               (command !== "git" && args[1] !== "list") ||
               ["checkout", "commit", "push"].includes(args[0]!);
             if (command === "gh" && args[1] === "list") return "[]";
+            if (args.includes("--show-toplevel")) return undefined;
             const output =
               status === "outside" && args.includes("--name-only")
                 ? "src/finding-1.ts\0"
@@ -3052,10 +3057,10 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
         ],
         {
           result: resultWithFindings(["high"]),
-          onRepositoryCommand: (command, args) => {
+          onRepositoryCommand: (command) => {
             if (command === "gh")
               throw new Error("GitHub authentication failed.");
-            return args.includes("--name-only") ? "src/finding-1.ts\0" : "";
+            return undefined;
           },
         },
       );
@@ -3834,11 +3839,13 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
               }
               if (args[0] === "rev-parse" && args.includes("--verify"))
                 return "synthetic-commit";
-              return args[0] === "remote"
-                ? `https://${provider}.com/example/repository.git`
-                : args.includes("--name-only")
-                  ? "src/finding-1.ts\0"
-                  : "";
+              return encoded(
+                args[0] === "remote"
+                  ? `https://${provider}.com/example/repository.git`
+                  : args.includes("--name-only")
+                    ? "src/finding-1.ts\0"
+                    : "",
+              );
             }
             expect(command).toBe(gitlab ? "glab" : "gh");
             if (args[1] === "list") return gitlab ? "" : "[]";
@@ -3943,7 +3950,7 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
                 ]);
                 commands.push("push");
               }
-              return args.includes("--name-only") ? "src/finding-1.ts\0" : "";
+              return undefined;
             }
             expect(command).toBe("glab");
             commands.push(args[1]!);

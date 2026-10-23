@@ -257,9 +257,9 @@ export function repositoryGit(repository: string) {
     }).trim();
 }
 
-export const runGitRepositoryCommand: NonNullable<
-  NonNullable<Parameters<typeof dependencies>[0]>["onRepositoryCommand"]
-> = (command, args, workingDirectory, options) => {
+export const runGitRepositoryCommand: (
+  ...args: Parameters<ReturnType<typeof dependencies>["runRepositoryCommand"]>
+) => string | Promise<string> = (command, args, workingDirectory, options) => {
   expect(command).toBe("git");
   const result = execFileSync("git", args, {
     encoding:
