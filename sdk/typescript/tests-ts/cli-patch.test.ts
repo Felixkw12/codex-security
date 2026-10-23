@@ -1,4 +1,5 @@
 import {
+  patchDependencies,
   CURRENT_REPOSITORY,
   SAVED_REPOSITORY,
   STATE_DIRECTORY,
@@ -1092,7 +1093,7 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
       let modelStarted = false;
       const setInterval = mock(() => ({}) as NodeJS.Timeout);
       const clearInterval = mock();
-      const current = dependencies({
+      const current = patchDependencies({
         currentDirectory: CURRENT_REPOSITORY,
         result,
         onWorkbench: () => savedScan(result),
@@ -1148,7 +1149,7 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
         }),
         { isTTY: true },
       );
-      const current = dependencies({
+      const current = patchDependencies({
         currentDirectory: CURRENT_REPOSITORY,
         result,
         onWorkbench: () => savedScan(result),
@@ -1189,7 +1190,7 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
 
       Object.assign(stderr.stream, { columns: 36 });
       let now = 0;
-      const current = dependencies({
+      const current = patchDependencies({
         currentDirectory: CURRENT_REPOSITORY,
         result,
         onWorkbench: () => savedScan(result),
@@ -1231,7 +1232,7 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
       let now = 0;
       let index = 0;
       const timers = new Map<NodeJS.Timeout, () => void>();
-      const current = dependencies({
+      const current = patchDependencies({
         currentDirectory: CURRENT_REPOSITORY,
         result,
         onWorkbench: () => savedScan(result),
