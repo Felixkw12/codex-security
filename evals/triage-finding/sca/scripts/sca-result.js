@@ -48,8 +48,9 @@ function hasToken(text, token, characters = "A-Za-z0-9_./@-") {
   );
 }
 
-function evidenceFailures(finding, testCase) {
+function inspectEvidence(finding, testCase) {
   const failures = [];
+  const citationFailures = [];
   const component = testCase.input.component;
   const normalized = finding.normalized_input;
   if (!hasToken(normalized.vulnerable_component, component.name))
@@ -107,14 +108,19 @@ function evidenceFailures(finding, testCase) {
         );
       });
     });
-    if (!cited)
-      failures.push(
-        `Missing supported citation: ${required.path}:${required.line}`,
-      );
+    if (!cited) {
+      const failure = `Missing supported citation: ${required.path}:${required.line}`;
+      failures.push(failure);
+      citationFailures.push(failure);
+    }
   }
   if (finding.verdict === "needs_review" && finding.proof_gaps.length === 0)
     failures.push("Unresolved assessment has no proof gap");
-  return failures;
+  return { evidenceFailures: failures, citationFailures };
+}
+
+function evidenceFailures(finding, testCase) {
+  return inspectEvidence(finding, testCase).evidenceFailures;
 }
 
 function parseOutcome(output, testCase) {
@@ -134,7 +140,7 @@ function parseOutcome(output, testCase) {
   const finding = result.findings[0];
   if (finding.source_type !== "advisory")
     throw new Error("Expected advisory source_type");
-  return { finding, evidenceFailures: evidenceFailures(finding, testCase) };
+  return { finding, ...inspectEvidence(finding, testCase) };
 }
 
 function normalizePromptfooResult(row) {
@@ -158,6 +164,7 @@ function normalizePromptfooResult(row) {
       status: "model_error",
       verdict: null,
       evidenceFailures: [],
+      citationFailures: [],
       error: String(
         row.response?.error || row.error || "Model returned no output",
       ),
@@ -170,6 +177,7 @@ function normalizePromptfooResult(row) {
       status: "ok",
       verdict: parsed.finding.verdict,
       evidenceFailures: parsed.evidenceFailures,
+      citationFailures: parsed.citationFailures,
       error: null,
     };
   } catch (error) {
@@ -178,6 +186,7 @@ function normalizePromptfooResult(row) {
       status: "invalid_output",
       verdict: null,
       evidenceFailures: [],
+      citationFailures: [],
       error: error.message,
     };
   }
@@ -256,7 +265,7 @@ function summarize(outcomes) {
       decisive.length,
     ),
     mechanicalCitationPassRate: ratio(
-      valid.filter((item) => item.evidenceFailures.length === 0).length,
+      valid.filter((item) => item.citationFailures.length === 0).length,
       valid.length,
     ),
     // Do not infer expert evidence support from a string-matching assertion.
