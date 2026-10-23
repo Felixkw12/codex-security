@@ -24,7 +24,7 @@ const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 const expectedSourceSha256 =
   mode === "snapshot"
     ? "74ed3a0a570224f07e1c1a379b576a6dfc5da3a8d2d7053c743b43c77e74fbce"
-    : "431ab1f38c90967a9be7e95f8a163068b113396935df6cc14ac4a4044857094c";
+    : "91c7141db20bd2fe310da518e2fb8a3030aa0c731f1dce06462640f10f3aa049";
 assert.equal(sha256(source), expectedSourceSha256);
 await mkdir(output, { recursive: true });
 
@@ -119,9 +119,10 @@ if (mode === "snapshot") {
   insert(
     "  expected.push(pool);\n",
     `  expected.push(pool);
-  if (mode === "physical parent traversal") {
+  if (mode === "directory link parent traversal") {
     const alias = join(support, "alias");
     const raw = alias + sep + ".." + sep + "pool";
+    const physicalPool = join(support, "physical", "pool");
     const observations: Record<string, unknown>[] = [];
     const record = async (operation: string, path: string, action: () => Promise<unknown>) => {
       try { observations.push({ operation, path, result: await action() }); }
@@ -129,7 +130,7 @@ if (mode === "snapshot") {
         code: (error as NodeJS.ErrnoException).code ?? null }); }
     };
     for (const [label, path] of [["alias", alias], ["raw", raw],
-      ["physical", pool], ["lexical", fixture.pool]] as const) {
+      ["physical", physicalPool], ["lexical", fixture.pool]] as const) {
       await record(label + ":lstat", path, async () => {
         const value = await lstat(path, { bigint: true });
         return { dev: String(value.dev), ino: String(value.ino), mode: String(value.mode),
@@ -139,7 +140,7 @@ if (mode === "snapshot") {
       if (label === "alias") await record("alias:readlink", path, () => readlink(path));
     }
     const commands: Record<string, unknown>[] = [];
-    for (const [label, binding] of [["original", value], ["physical", quoted(pool)],
+    for (const [label, binding] of [["original", value], ["physical", quoted(physicalPool)],
       ["lexical", quoted(fixture.pool)]] as const) {
       for (const args of [["-c", "core.quotePath=false", "count-objects", "-v"],
         ["cat-file", "-p", fixture.object]]) {
@@ -181,7 +182,7 @@ const sourceHead = execFileSync("git", ["-C", root, "rev-parse", "HEAD"], {
 const namePattern =
   mode === "snapshot"
     ? "^native no-op snapshots preserve coordinator Git configuration: .*GIT_ALTERNATE_OBJECT_DIRECTORIES"
-    : "^patch grants caller-selected alternate objects: physical parent traversal$";
+    : "^patch grants caller-selected alternate objects: directory link parent traversal$";
 // run-ci-tests.mts gives Windows cases 120 seconds; the snapshot fixture keeps
 // its original explicit 180-second timeout, which overrides this default.
 const args = [
@@ -210,7 +211,7 @@ const receipt = {
           'native no-op snapshots preserve coordinator Git configuration: {"selector":"GIT_ALTERNATE_OBJECT_DIRECTORIES","state":"set","filtered":true}',
         ]
       : [
-          "patch grants caller-selected alternate objects: physical parent traversal",
+          "patch grants caller-selected alternate objects: directory link parent traversal",
         ],
   instrumentation:
     mode === "snapshot"

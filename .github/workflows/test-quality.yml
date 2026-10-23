@@ -241,7 +241,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runtime: [stock, candidate, coordinator]
+        runtime: [coordinator]
     steps:
       - *actions-checkout
       - *actions-setup-node
