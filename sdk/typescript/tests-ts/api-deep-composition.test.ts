@@ -221,15 +221,27 @@ async function nativeScanFactory() {
   ).prepareNativeScan;
 }
 
-function testDeepCompositionCases<T extends { instructionFile?: string }>(
-  cases: T[],
-) {
+function testDeepCompositionCases<
+  T extends {
+    instructionFile?: string;
+    native?: "discovery" | "sealed";
+    queuedNativeKnowledge?: boolean;
+    provider?: JsonObject;
+    missingReplay?: string;
+  },
+>(cases: T[]) {
   return (name: string, run: (scenario: T) => Promise<void>) => {
     for (const scenario of cases) {
       test(
         name.replace("%j", JSON.stringify(scenario)),
         () => run(scenario),
-        scenario.instructionFile === undefined ? undefined : 120_000,
+        scenario.instructionFile !== undefined ||
+          (scenario.native === "discovery" &&
+            (scenario.queuedNativeKnowledge === true ||
+              (scenario.provider !== undefined &&
+                scenario.missingReplay === undefined)))
+          ? 120_000
+          : undefined,
       );
     }
   };
