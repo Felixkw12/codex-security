@@ -255,7 +255,9 @@ use an approved model ID and AWS provisioning as described in
 Use the same API-key secret and Action commit as above. The
 [pull-request workflow](examples/pull-request.yml) checks out the PR head with
 full history and requires a completed scan. Make its **Codex Security** job a
-required status check in your repository rules.
+required status check only for branches that do not use a merge queue. The Action
+does not support `merge_group` events, so this workflow cannot provide the required
+check for a merge queue.
 
 <!-- action-workflow:pull-request:start -->
 
@@ -269,12 +271,14 @@ permissions:
   contents: read
 
 concurrency:
-  group: codex-security-pr-${{ github.event.pull_request.number }}
+  group: codex-security-pr-${{ github.event.pull_request.number }}${{ github.event.action == 'edited' && github.event.changes.base == null && '-metadata' || '' }}
   cancel-in-progress: true
 
 jobs:
   security:
-    if: github.event.pull_request.head.repo.full_name == github.repository
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      (github.event.action != 'edited' || github.event.changes.base != null)
     name: Scan changes
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -301,9 +305,9 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.CODEX_SECURITY_API_KEY }}
 
   required-review:
-    name: Codex Security
+    name: ${{ github.event.action == 'edited' && github.event.changes.base == null && 'metadata / ' || '' }}Codex Security
     needs: security
-    if: always()
+    if: always() && (github.event.action != 'edited' || github.event.changes.base != null)
     runs-on: ubuntu-24.04
     steps:
       - name: Require a completed review or an empty diff
@@ -326,11 +330,12 @@ The scan job fails on high or critical findings, scanner errors, or required
 reporting errors. Usable reports remain available after an execution failure.
 File and line annotations are enabled by default.
 
-The workflow also reruns on PR edits, including base-branch changes, so it
-reviews the diff against the selected base even when the head commit is unchanged.
+The workflow reruns when a PR's base branch changes, even when the head commit is
+unchanged. Title and body edits do not start or cancel scans; their skipped jobs
+use a separate check name and cannot satisfy the required **Codex Security** check.
 
-The separate **Codex Security** job runs even if the scan job is skipped. It
-passes only after a successful scan job that reports a completed scan or a
+For scan-triggering events, the separate **Codex Security** job runs even if the
+scan job is skipped. It passes only after a successful scan job that reports a completed scan or a
 verified empty diff. A dry run, cancellation, or skipped scan job fails this
 required check.
 

@@ -7,12 +7,14 @@ permissions:
   contents: read
 
 concurrency:
-  group: codex-security-pr-${{ github.event.pull_request.number }}
+  group: codex-security-pr-${{ github.event.pull_request.number }}${{ github.event.action == 'edited' && github.event.changes.base == null && '-metadata' || '' }}
   cancel-in-progress: true
 
 jobs:
   security:
-    if: github.event.pull_request.head.repo.full_name == github.repository
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      (github.event.action != 'edited' || github.event.changes.base != null)
     name: Scan changes
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -39,9 +41,9 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.CODEX_SECURITY_API_KEY }}
 
   required-review:
-    name: Codex Security
+    name: ${{ github.event.action == 'edited' && github.event.changes.base == null && 'metadata / ' || '' }}Codex Security
     needs: security
-    if: always()
+    if: always() && (github.event.action != 'edited' || github.event.changes.base != null)
     runs-on: ubuntu-24.04
     steps:
       - name: Require a completed review or an empty diff
