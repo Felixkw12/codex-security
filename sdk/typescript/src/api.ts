@@ -1060,6 +1060,7 @@ export class CodexSecurity {
     ]);
     let repository = "";
     let tracker: ScanCostTracker | null = null;
+    let finalUsage: unknown;
     const reportTrackingError = (error: unknown): void => {
       notifyObserver(
         options,
@@ -1202,6 +1203,7 @@ export class CodexSecurity {
             reconnectDetails(message),
           ),
       });
+      finalUsage = turn.usage;
       throwIfPatchAborted(signal, repository);
       if (turn.status !== "completed") {
         throw new CodexSecurityError("Finding patch did not complete.");
@@ -1235,7 +1237,7 @@ export class CodexSecurity {
       const activeTracker = tracker;
       tracker = null;
       if (activeTracker !== null) {
-        await activeTracker.stop().catch(reportTrackingError);
+        await activeTracker.stop(finalUsage).catch(reportTrackingError);
       }
     }
   }
