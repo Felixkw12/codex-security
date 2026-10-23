@@ -21,6 +21,7 @@ import {
   DEEP_SCAN_CHECKPOINT,
   DeepScanPublicationError,
   DeepScanRecoveryError,
+  DeepScanInputRecoveryError,
   runDeepScans,
   ScanCostTrackingError,
   type DeepScanComposition,
@@ -69,6 +70,7 @@ async function fixture(
   const controller = new AbortController();
   let merges = 0;
   let closes = 0;
+  let registrationThreadId: string | null = "session";
   let execute: (options: ScanOptions) => Promise<void> = async () => {};
   const write = async (path: string, contents: Uint8Array | string) => {
     await mkdir(dirname(join(scanDir, path)), { recursive: true, mode: 0o700 });
@@ -101,12 +103,12 @@ async function fixture(
           targetPath: repository,
           parentScanId: scanId,
           parentScanRole: "deep_pass",
-          continuationThreadId: "session",
+          continuationThreadId: registrationThreadId,
           progress: { status: "running" },
         });
         await options.onRegisteredScan?.({
           scanId: childId,
-          threadId: "session",
+          threadId: registrationThreadId,
           scanDir: options.outputDir!,
         });
         let usage = tokenUsage({ input_tokens: 10, output_tokens: 3 })!;
@@ -199,9 +201,583 @@ async function fixture(
     setExecute(fn: typeof execute) {
       execute = fn;
     },
+    setRegistrationThreadId(id: string | null) {
+      registrationThreadId = id;
+    },
     metrics: () => ({ merges, closes }),
   };
 }
+
+async function unstartedRetirementFixture() {
+  const h = await fixture({ workers: 1, maxDiscoveryRuns: 1 });
+  h.input.scanOptions.requireCost = true;
+  h.input.unstartedCost = estimateScanCost("gpt-6-astra", {
+    input_tokens: 0,
+    output_tokens: 0,
+  });
+  h.setRegistrationThreadId(null);
+  const workbench = h.input.workbench;
+  h.input.workbench = async (args, contents) => {
+    const result = await workbench(args, contents);
+    const costIndex = args.indexOf("--cost-json");
+    if (args[0] === "fail-scan" && costIndex !== -1)
+      h.records.get(args[2]!)!.cost = JSON.parse(args[costIndex + 1]!);
+    return result;
+  };
+  return h;
+}
+
+async function saveUnstartedPass(
+  h: Awaited<ReturnType<typeof unstartedRetirementFixture>>,
+  expired = true,
+) {
+  const directory = "artifacts/deep-scan/passes/pass-1";
+  const childId = randomUUID();
+  h.records.set(childId, {
+    scanId: childId,
+    scanDir: join(h.input.scanDir, directory),
+    targetPath: h.input.repository,
+    parentScanId: h.input.scanId,
+    parentScanRole: "deep_pass",
+    continuationThreadId: null,
+    progress: { status: "running" },
+  });
+  await h.write(
+    DEEP_SCAN_CHECKPOINT,
+    JSON.stringify({
+      ...newDeepScanCheckpoint(
+        expired
+          ? new Date(Date.now() - 2 * 3600000).toISOString()
+          : h.input.startedAt,
+      ),
+      passes: [{ directory, scanId: childId, executionNotStarted: true }],
+    }),
+  );
+  return { directory, childId };
+}
+
+test.each(["deadline", "user abort", "parent stop"] as const)(
+  "unstarted discovery retirement preserves %s and later recovery",
+  async (scenario) => {
+    const h = await unstartedRetirementFixture();
+    h.input.settings.maxTimeHours = 1 / 3600;
+    const now = Date.now();
+    h.input.startedAt = new Date(now).toISOString();
+    const clock = spyOn(Date, "now").mockReturnValue(now);
+    const rejection = new DeepScanInputRecoveryError(
+      "Synthetic changed instructions",
+      h.input.scanDir,
+      true,
+    );
+    h.setExecute(async () => {
+      throw rejection;
+    });
+    const cancellation = new Error("Synthetic explicit caller cancellation");
+    let expire: (() => void) | undefined;
+    let poll: (() => void) | undefined;
+    const setTimeout = globalThis.setTimeout;
+    const setInterval = globalThis.setInterval;
+    const timeout = spyOn(globalThis, "setTimeout").mockImplementation(((
+      ...parameters: Parameters<typeof setTimeout>
+    ) => {
+      const [callback, delay, ...args] = parameters;
+      if (scenario === "deadline" && delay === 1000) {
+        expire = () => callback(...args);
+        return setTimeout(() => {}, 60000);
+      }
+      return setTimeout(...parameters);
+    }) as typeof setTimeout);
+    const interval = spyOn(globalThis, "setInterval").mockImplementation(((
+      ...parameters: Parameters<typeof setInterval>
+    ) => {
+      const [callback, delay, ...args] = parameters;
+      if (scenario === "parent stop" && delay === 1000) {
+        poll = () => callback(...args);
+        return setInterval(() => {}, 60000);
+      }
+      return setInterval(...parameters);
+    }) as typeof setInterval);
+    const workbench = h.input.workbench;
+    let triggered = false;
+    h.input.workbench = async (args, contents) => {
+      if (
+        scenario === "parent stop" &&
+        args[0] === "get-scan" &&
+        args[2] === h.input.scanId
+      )
+        return { scan: { progress: { status: "failed" } } } as never;
+      const result = await workbench(args, contents);
+      if (
+        !triggered &&
+        args[0] === "save-scan-artifact" &&
+        args[4] === DEEP_SCAN_CHECKPOINT &&
+        JSON.parse(contents!).passes[0]?.executionNotStarted === true
+      ) {
+        triggered = true;
+        if (scenario === "deadline") {
+          expect(expire).toBeDefined();
+          clock.mockReturnValue(now + 1001);
+          expire!();
+        } else if (scenario === "user abort") h.controller.abort(cancellation);
+        else {
+          expect(poll).toBeDefined();
+          poll!();
+          await Promise.resolve();
+          await Promise.resolve();
+        }
+      }
+      return result;
+    };
+    try {
+      const error = await runDeepScans(h.input).catch(
+        (error: unknown) => error,
+      );
+      expect(triggered).toBe(true);
+      const state = (await loadDeepScanCheckpoint(h.input.scanDir))!;
+      const child = [...h.records.values()][0]!;
+      expect(state.terminalReason).toBeUndefined();
+      expect(state.costUnavailable).toBeUndefined();
+      expect(h.calls).toHaveLength(1);
+      if (scenario === "parent stop") {
+        expect(error).toBeInstanceOf(Error);
+        expect((error as Error).message).toBe("The saved parent scan stopped.");
+        expect(child.progress.status).toBe("running");
+        expect(child.cost).toBeUndefined();
+        expect(h.operations).not.toContain("fail-scan");
+      } else {
+        expect(error).toBe(rejection);
+        expect(state.pendingStop?.reason).toBe(
+          scenario === "deadline" ? "capped" : "canceled",
+        );
+        expect(child.progress.status).toBe("failed");
+        expect(child.cost).toEqual(h.input.unstartedCost);
+        if (scenario === "deadline") {
+          const resumed = await runDeepScans(h.input);
+          expect(resumed.terminalReason).toBe("capped");
+          expect(resumed.pendingStop).toBeUndefined();
+          expect(resumed.passes[0]!.executionNotStarted).toBeUndefined();
+          expect(resumed.costUnavailable).toBeUndefined();
+        } else {
+          await expect(runDeepScans(h.input)).rejects.toThrow(
+            "saved Deep Scan is canceled",
+          );
+          const resumed = (await loadDeepScanCheckpoint(h.input.scanDir))!;
+          expect(resumed.terminalReason).toBe("canceled");
+          expect(resumed.pendingStop).toBeUndefined();
+        }
+        expect(h.calls).toHaveLength(1);
+      }
+    } finally {
+      timeout.mockRestore();
+      interval.mockRestore();
+      clock.mockRestore();
+    }
+  },
+);
+
+test("expired discovery retires a saved unstarted child without execution", async () => {
+  const h = await unstartedRetirementFixture();
+  const { childId, directory } = await saveUnstartedPass(h);
+  const state = await runDeepScans(h.input);
+  expect(state.terminalReason).toBe("capped");
+  expect(state.costUnavailable).toBeUndefined();
+  expect(state.pendingStop).toBeUndefined();
+  expect(h.calls).toHaveLength(0);
+  expect(h.records.get(childId)!.progress.status).toBe("failed");
+  expect(h.records.get(childId)!.cost).toEqual(h.input.unstartedCost);
+  expect(h.costs.get(directory)).toEqual(h.input.unstartedCost);
+  const resumed = await runDeepScans(h.input);
+  expect(resumed.terminalReason).toBe("capped");
+  expect(resumed.passes[0]!.executionNotStarted).toBeUndefined();
+  expect(resumed.costUnavailable).toBeUndefined();
+  expect(h.calls).toHaveLength(0);
+});
+
+test.each(["before retirement", "after retirement"] as const)(
+  "unstarted retirement recovers transport loss %s",
+  async (phase) => {
+    const h = await unstartedRetirementFixture();
+    const { childId } = await saveUnstartedPass(h);
+    const workbench = h.input.workbench;
+    const loss = new ScanTransportClosedError(
+      "Synthetic retirement response loss",
+    );
+    let lost = false;
+    h.input.workbench = async (args, contents) => {
+      if (!lost && args[0] === "fail-scan") {
+        lost = true;
+        if (phase === "after retirement") await workbench(args, contents);
+        throw loss;
+      }
+      return workbench(args, contents);
+    };
+    await expect(runDeepScans(h.input)).rejects.toBe(loss);
+    const interrupted = (await loadDeepScanCheckpoint(h.input.scanDir))!;
+    expect(interrupted.pendingStop?.reason).toBe("capped");
+    expect(interrupted.terminalReason).toBeUndefined();
+    expect(interrupted.passes[0]!.executionNotStarted).toBe(true);
+    expect(h.records.get(childId)!.progress.status).toBe(
+      phase === "after retirement" ? "failed" : "running",
+    );
+    expect(h.records.get(childId)!.cost).toEqual(
+      phase === "after retirement" ? h.input.unstartedCost : undefined,
+    );
+    const resumed = await runDeepScans(h.input);
+    expect(resumed.terminalReason).toBe("capped");
+    expect(resumed.pendingStop).toBeUndefined();
+    expect(resumed.costUnavailable).toBeUndefined();
+    expect(resumed.passes[0]!.executionNotStarted).toBeUndefined();
+    expect(h.records.get(childId)!.cost).toEqual(h.input.unstartedCost);
+    expect(h.calls).toHaveLength(0);
+  },
+);
+
+test("consumed unstarted proof cannot price a later attempted turn with no receipt", async () => {
+  const h = await unstartedRetirementFixture();
+  const { childId } = await saveUnstartedPass(h, false);
+  let attempted = 0;
+  const loss = new ScanTransportClosedError(
+    "Synthetic attempted turn response loss",
+  );
+  h.setExecute(async () => {
+    attempted++;
+    expect(
+      (await loadDeepScanCheckpoint(h.input.scanDir))!.passes[0]!
+        .executionNotStarted,
+    ).toBeUndefined();
+    throw loss;
+  });
+  await expect(runDeepScans(h.input)).rejects.toBe(loss);
+  expect(attempted).toBe(1);
+  expect(h.records.get(childId)!.cost).toBeUndefined();
+  expect(h.records.get(childId)!.progress.status).toBe("running");
+  expect(h.operations).not.toContain("fail-scan");
+  await expect(runDeepScans(h.input)).rejects.toBeInstanceOf(
+    ScanCostTrackingError,
+  );
+  expect(attempted).toBe(1);
+  expect(h.records.get(childId)!.cost).toBeUndefined();
+  expect((await loadDeepScanCheckpoint(h.input.scanDir))!.costUnavailable).toBe(
+    true,
+  );
+});
+
+test.each(["live", "pending stop"] as const)(
+  "unstarted retirement preserves an existing %s cost receipt",
+  async (source) => {
+    const h = await unstartedRetirementFixture();
+    const { childId, directory } = await saveUnstartedPass(h);
+    const liveCost = estimateScanCost("gpt-6-astra", {
+      input_tokens: 10,
+      output_tokens: 3,
+    })!;
+    const suppliedCost = estimateScanCost("gpt-6-astra", {
+      input_tokens: 20,
+      output_tokens: 6,
+    })!;
+    h.records.get(childId)!.cost = liveCost;
+    if (source === "pending stop") {
+      const checkpoint = (await loadDeepScanCheckpoint(h.input.scanDir))!;
+      checkpoint.pendingStop = {
+        reason: "capped",
+        message: "Synthetic saved deadline",
+        costs: { [directory]: suppliedCost },
+      };
+      await h.write(DEEP_SCAN_CHECKPOINT, JSON.stringify(checkpoint));
+    }
+    const state = await runDeepScans(h.input);
+    const expected = source === "live" ? liveCost : suppliedCost;
+    expect(state.terminalReason).toBe("capped");
+    expect(state.costUnavailable).toBeUndefined();
+    expect(h.records.get(childId)!.cost).toEqual(expected);
+    expect(h.costs.get(directory)).toEqual(expected);
+    expect(h.calls).toHaveLength(0);
+  },
+);
+
+test("unstarted retirement does not invent a price for an unknown model", async () => {
+  const h = await unstartedRetirementFixture();
+  h.input.unstartedCost = null;
+  const { childId, directory } = await saveUnstartedPass(h);
+  await expect(runDeepScans(h.input)).rejects.toBeInstanceOf(
+    ScanCostTrackingError,
+  );
+  expect(h.records.get(childId)!.cost).toBeUndefined();
+  expect(h.calls).toHaveLength(0);
+  expect(h.costs.get(directory)).toBeNull();
+});
+
+test("unstarted discovery rejects repeatedly and restores the same required-cost pass", async () => {
+  const h = await fixture({ workers: 1, maxDiscoveryRuns: 1 });
+  h.input.scanOptions.requireCost = true;
+  h.setRegistrationThreadId(null);
+  const rejection = new DeepScanInputRecoveryError(
+    "Synthetic changed instructions",
+    h.input.scanDir,
+    true,
+  );
+  h.setExecute(async () => {
+    throw rejection;
+  });
+  const createClient = h.input.createClient;
+  h.input.createClient = () => {
+    const client = createClient();
+    return {
+      close: () => client.close(),
+      async run(repository, options) {
+        expect(
+          (await loadDeepScanCheckpoint(h.input.scanDir))!.passes[0]!
+            .executionNotStarted,
+        ).toBeUndefined();
+        return client.run(repository, options);
+      },
+    };
+  };
+  let childId: string | undefined;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await expect(runDeepScans(h.input)).rejects.toBe(rejection);
+    const state = (await loadDeepScanCheckpoint(h.input.scanDir))!;
+    childId ??= state.passes[0]!.scanId;
+    expect(state.passes).toEqual([
+      {
+        directory: "artifacts/deep-scan/passes/pass-1",
+        scanId: childId,
+        executionNotStarted: true,
+      },
+    ]);
+    expect(state.costUnavailable).toBeUndefined();
+    expect(state.terminalReason).toBeUndefined();
+    expect(h.records.get(childId!)!.progress.status).toBe("running");
+  }
+  h.setExecute(async () => {
+    h.records.get(childId!)!.continuationThreadId = "restored-session";
+  });
+  const restored = await runDeepScans(h.input);
+  expect(restored.passes).toEqual([
+    { directory: "artifacts/deep-scan/passes/pass-1", scanId: childId },
+  ]);
+  expect(restored.costUnavailable).toBeUndefined();
+  expect(restored.terminalReason).toBe("capped");
+  expect(h.records.size).toBe(1);
+  expect(h.records.get(childId!)!.progress.status).toBe("complete");
+  expect(h.calls.map((options) => options.resumeScanId)).toEqual([
+    undefined,
+    childId,
+    childId,
+  ]);
+  expect(h.operations).not.toContain("fail-scan");
+});
+
+test.each(["consume", "record"] as const)(
+  "unstarted discovery checkpoint %s failure preserves conservative recovery",
+  async (phase) => {
+    const h = await fixture({ workers: 1, maxDiscoveryRuns: 1 });
+    h.input.scanOptions.requireCost = true;
+    h.setRegistrationThreadId(null);
+    h.setExecute(async () => {
+      throw new DeepScanInputRecoveryError(
+        "Synthetic invalid input",
+        h.input.scanDir,
+        true,
+      );
+    });
+    if (phase === "consume")
+      await expect(runDeepScans(h.input)).rejects.toBeInstanceOf(
+        DeepScanInputRecoveryError,
+      );
+    const beforeCalls = h.calls.length;
+    const workbench = h.input.workbench;
+    const failure = new Error(`Synthetic ${phase} checkpoint write failure`);
+    h.input.workbench = async (args, contents) => {
+      if (
+        args[0] === "save-scan-artifact" &&
+        args[4] === DEEP_SCAN_CHECKPOINT
+      ) {
+        const pass = JSON.parse(contents!).passes[0];
+        if (
+          pass?.scanId &&
+          (pass.executionNotStarted === true) === (phase === "record")
+        )
+          throw failure;
+      }
+      return workbench(args, contents);
+    };
+    const error = await runDeepScans(h.input).catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(DeepScanRecoveryError);
+    expect(error).not.toBeInstanceOf(DeepScanInputRecoveryError);
+    expect((error as Error).message).toContain(failure.message);
+    let cause = error;
+    while (cause instanceof Error && cause.cause !== undefined)
+      cause = cause.cause;
+    expect(cause).toBe(failure);
+    expect(h.calls.length - beforeCalls).toBe(phase === "consume" ? 0 : 1);
+    const state = (await loadDeepScanCheckpoint(h.input.scanDir))!;
+    expect(state.passes[0]!.executionNotStarted).toBe(
+      phase === "consume" ? true : undefined,
+    );
+    expect(state.costUnavailable).toBeUndefined();
+    expect(state.terminalReason).toBeUndefined();
+    expect([...h.records.values()][0]!.progress.status).toBe("running");
+    expect(h.operations).not.toContain("fail-scan");
+    if (phase === "record") {
+      h.input.workbench = workbench;
+      await expect(runDeepScans(h.input)).rejects.toBeInstanceOf(
+        ScanCostTrackingError,
+      );
+      expect(h.calls).toHaveLength(1);
+      expect(
+        (await loadDeepScanCheckpoint(h.input.scanDir))!.costUnavailable,
+      ).toBe(true);
+    }
+  },
+);
+
+test.each(["unmarked", "prior thread", "prior unknown cost"] as const)(
+  "unstarted discovery proof does not excuse %s accounting",
+  async (scenario) => {
+    const h = await fixture({ workers: 1, maxDiscoveryRuns: 1 });
+    h.input.scanOptions.requireCost = true;
+    const childId = randomUUID();
+    const directory = "artifacts/deep-scan/passes/pass-1";
+    h.records.set(childId, {
+      scanId: childId,
+      scanDir: join(h.input.scanDir, directory),
+      targetPath: h.input.repository,
+      parentScanId: h.input.scanId,
+      parentScanRole: "deep_pass",
+      progress: { status: "running" },
+      continuationThreadId:
+        scenario === "prior thread" ? "prior-session" : null,
+    });
+    await h.write(
+      DEEP_SCAN_CHECKPOINT,
+      JSON.stringify({
+        ...newDeepScanCheckpoint(h.input.startedAt),
+        passes: [
+          {
+            directory,
+            scanId: childId,
+            ...(scenario === "unmarked" ? {} : { executionNotStarted: true }),
+          },
+        ],
+        ...(scenario === "prior unknown cost" ? { costUnavailable: true } : {}),
+      }),
+    );
+    h.input.historicalCost = async () => null;
+    await expect(runDeepScans(h.input)).rejects.toBeInstanceOf(
+      ScanCostTrackingError,
+    );
+    expect(h.calls).toHaveLength(0);
+    const state = (await loadDeepScanCheckpoint(h.input.scanDir))!;
+    expect(state.passes[0]!.executionNotStarted).toBe(
+      scenario === "prior unknown cost" ? true : undefined,
+    );
+    if (scenario !== "prior thread") expect(state.costUnavailable).toBe(true);
+  },
+);
+
+test("an attempted discovery never gains unstarted execution proof", async () => {
+  const h = await fixture({ workers: 1, maxDiscoveryRuns: 1 });
+  h.input.scanOptions.requireCost = true;
+  h.setRegistrationThreadId(null);
+  h.setExecute(async () => {
+    throw new DeepScanInputRecoveryError(
+      "Synthetic later input rejection",
+      h.input.scanDir,
+      false,
+    );
+  });
+  await expect(runDeepScans(h.input)).rejects.toBeInstanceOf(
+    DeepScanInputRecoveryError,
+  );
+  expect(
+    (await loadDeepScanCheckpoint(h.input.scanDir))!.passes[0]!
+      .executionNotStarted,
+  ).toBeUndefined();
+  await expect(runDeepScans(h.input)).rejects.toBeInstanceOf(
+    ScanCostTrackingError,
+  );
+  expect(h.calls).toHaveLength(1);
+});
+
+test.each([
+  [undefined, true, undefined],
+  [false, true, false],
+  [true, true, true],
+  [undefined, false, true],
+] as const)(
+  "unstarted reducer restores only new execution state (prior: %p, unstarted: %p)",
+  async (prior, neverStarted, expected) => {
+    const h = await fixture();
+    await h.write(
+      DEEP_SCAN_CHECKPOINT,
+      JSON.stringify({
+        ...newDeepScanCheckpoint(h.input.startedAt),
+        mergeStarted: prior,
+      }),
+    );
+    h.input.merge = async () => {
+      throw new DeepScanInputRecoveryError(
+        "Synthetic reducer input rejection",
+        h.input.scanDir,
+        neverStarted,
+      );
+    };
+    await expect(runDeepScans(h.input)).rejects.toBeInstanceOf(
+      DeepScanInputRecoveryError,
+    );
+    const state = (await loadDeepScanCheckpoint(h.input.scanDir))!;
+    expect<unknown>(state.mergeStarted).toBe(expected);
+    expect(state.mergeFailures).toBeUndefined();
+    expect(state.terminalReason).toBeUndefined();
+    expect(h.calls).toHaveLength(2);
+    expect(
+      [...h.records.values()].every(
+        (record) => record.progress.status === "complete",
+      ),
+    ).toBe(true);
+  },
+);
+
+test("unstarted reducer rollback write failure retains prior execution uncertainty", async () => {
+  const h = await fixture();
+  let rejected = false;
+  h.input.merge = async () => {
+    rejected = true;
+    throw new DeepScanInputRecoveryError(
+      "Synthetic reducer input rejection",
+      h.input.scanDir,
+      true,
+    );
+  };
+  const workbench = h.input.workbench;
+  const failure = new Error(
+    "Synthetic reducer rollback checkpoint write failure",
+  );
+  h.input.workbench = async (args, contents) => {
+    if (
+      rejected &&
+      args[0] === "save-scan-artifact" &&
+      args[4] === DEEP_SCAN_CHECKPOINT &&
+      JSON.parse(contents!).mergeStarted !== true
+    )
+      throw failure;
+    return workbench(args, contents);
+  };
+  const error = await runDeepScans(h.input).catch((error: unknown) => error);
+  expect(error).toBeInstanceOf(DeepScanRecoveryError);
+  expect(error).not.toBeInstanceOf(DeepScanInputRecoveryError);
+  expect((error as Error).message).toContain(failure.message);
+  let cause = error;
+  while (cause instanceof Error && cause.cause !== undefined)
+    cause = cause.cause;
+  expect(cause).toBe(failure);
+  const state = (await loadDeepScanCheckpoint(h.input.scanDir))!;
+  expect(state.mergeStarted).toBe(true);
+  expect(state.terminalReason).toBeUndefined();
+  expect(h.calls).toHaveLength(2);
+  expect(h.operations).not.toContain("fail-scan");
+});
 
 test("discovery usage retains pass keys across saved unpriced receipts", async () => {
   const h = await fixture({ workers: 1, maxDiscoveryRuns: 2 });

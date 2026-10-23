@@ -80,6 +80,7 @@ import {
   ScanCostTrackingError,
   DeepScanPublicationError,
   DeepScanRecoveryError,
+  DeepScanInputRecoveryError,
   terminalDeepScanError,
   isCodexNonRetryableFailure,
 } from "./deep-scan.js";
@@ -232,7 +233,11 @@ import {
   type PreparedKnowledgeBase,
   type KnowledgeBaseSnapshot,
 } from "./knowledge-base.js";
-import { scanInputIdentity, saveScanKnowledge } from "./scan-inputs.js";
+import {
+  modelInstructionsFileDigest,
+  scanInputIdentity,
+  saveScanKnowledge,
+} from "./scan-inputs.js";
 import { FindingWorkflow, workflowDigest } from "./finding-workflow.js";
 import {
   ScanResult,
@@ -2834,10 +2839,55 @@ export class CodexSecurity {
           ? {}
           : { CODEX_SECURITY_TARGET_PATHS_FILE: targetPathsFile }),
       };
+      const savedInputs = isRecord(registration["recipe"])
+        ? registration["recipe"]["scanInputs"]
+        : undefined;
+      const instructionDigest = isRecord(savedInputs)
+        ? savedInputs["modelInstructionsFileSha256"]
+        : undefined;
+      const canonicalSession: PreparedExecution =
+        mode === "deep" &&
+        registered.resumed &&
+        typeof instructionDigest === "string"
+          ? {
+              ...session,
+              validateScanInputs: async (
+                config,
+                signal,
+                hasAttemptedExecution,
+              ) => {
+                signal?.throwIfAborted();
+                let digest: string | null;
+                try {
+                  digest = await modelInstructionsFileDigest(
+                    typeof config["model_instructions_file"] === "string"
+                      ? config["model_instructions_file"]
+                      : undefined,
+                    signal,
+                  );
+                } catch (cause) {
+                  signal?.throwIfAborted();
+                  throw new DeepScanInputRecoveryError(
+                    `Could not read the saved Deep Scan's model instructions: ${errorMessage(cause)}`,
+                    scanDir,
+                    !hasAttemptedExecution,
+                    { cause },
+                  );
+                }
+                signal?.throwIfAborted();
+                if (digest !== instructionDigest)
+                  throw new DeepScanInputRecoveryError(
+                    "The model instructions file has changed since this Deep Scan started. Restore its original contents before resuming, or start a new scan.",
+                    scanDir,
+                    !hasAttemptedExecution,
+                  );
+              },
+            }
+          : session;
       const execution =
         deepScanConfiguration !== undefined
           ? prepareMergeExecution(
-              session,
+              canonicalSession,
               deepScanConfiguration.settings.subagents,
             )
           : options.deepScanPass === true
@@ -3123,7 +3173,7 @@ export class CodexSecurity {
                       surface: this.#surface,
                       parentScanRole: "deep_pass",
                       preparedKnowledgeBase: knowledgeBase ?? undefined,
-                      preparedExecution: session,
+                      preparedExecution: canonicalSession,
                     },
                   ),
                 scanOptions: {
@@ -3152,6 +3202,10 @@ export class CodexSecurity {
                   onObserverError: options.onObserverError,
                 },
                 historicalCost,
+                unstartedCost: estimateScanCost(model, {
+                  input_tokens: 0,
+                  output_tokens: 0,
+                }),
                 onUsage: reportUsage,
                 onCostsRecovered: restoreThreadAccounting,
                 onCost: (key, cost) => {
@@ -3554,6 +3608,7 @@ export class CodexSecurity {
         (!signal.aborted || failure instanceof ScanCostLimitExceededError) &&
         !(failure instanceof ScanPermissionError) &&
         !(failure instanceof ScanTransportClosedError) &&
+        !(failure instanceof DeepScanRecoveryError) &&
         !isCodexNonRetryableFailure(failure)
       )
         failure = new ScanCostTrackingError(

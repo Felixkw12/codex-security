@@ -28,6 +28,7 @@ class _PassDirectory(TypedDict):
 
 class CompositionPass(_PassDirectory, total=False):
     scanId: str
+    executionNotStarted: Literal[True]
 
 
 class _CheckpointState(TypedDict):

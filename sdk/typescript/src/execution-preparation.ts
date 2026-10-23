@@ -189,6 +189,11 @@ export interface PreparedExecution {
   readonly auth?: ScanAuthMode;
   readonly policy: ExecutionPolicy;
   readonly source: ExecutionSource;
+  validateScanInputs?: (
+    config: JsonObject,
+    signal: AbortSignal | undefined,
+    hasAttemptedExecution: boolean,
+  ) => Promise<void>;
   inheritedPermissions?: ScanPermissions;
   safetyIdentifier?: string;
   readonly runtime: PreparedRuntime;
@@ -389,13 +394,21 @@ export async function createExecutionCodex(
   });
   const deepWorker = session.policy !== "ordinary";
   if (!requiresConfigFile && !deepWorker) return { codex, environment };
-  const wrap = (thread: CodexThreadLike): CodexThreadLike => ({
+  const wrap = (
+    thread: CodexThreadLike,
+    hasAttemptedExecution = false,
+  ): CodexThreadLike => ({
     get id() {
       return thread.id;
     },
     async runStreamed(input, options) {
       return {
         events: (async function* () {
+          await session.validateScanInputs?.(
+            launchConfig,
+            options.signal,
+            hasAttemptedExecution,
+          );
           let release =
             requiresConfigFile && !runtime.preserveCodexHomeConfig
               ? await lockExecutionConfiguration(
@@ -416,6 +429,7 @@ export async function createExecutionCodex(
               });
           }
           try {
+            hasAttemptedExecution = true;
             const { events } = await thread.runStreamed(
               input,
               controller ? { ...options, signal: controller.signal } : options,
@@ -445,7 +459,7 @@ export async function createExecutionCodex(
         ? {}
         : {
             resumeThread: (id: string, options: ThreadOptions) =>
-              wrap(codex.resumeThread!(id, options)),
+              wrap(codex.resumeThread!(id, options), true),
           }),
     },
   };

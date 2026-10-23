@@ -10,7 +10,7 @@ import {
   nativeScanConfiguration,
   type CodexClientLike,
 } from "../src/execution-preparation.js";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { stripVTControlCharacters } from "node:util";
 import {
   appendFile,
@@ -92,6 +92,7 @@ async function interruptedScan(
     modelProvider?: string;
     privateProvider?: JsonObject;
     scopedPaths?: string[];
+    scanInputs?: JsonObject;
   } = {},
   resolvedDeep = false,
   startedMerge = true,
@@ -967,6 +968,195 @@ test.each([
       progress: { status: "complete" },
       continuationThreadId: f.threadId,
     });
+  },
+);
+
+test.each(["changed", "missing"] as const)(
+  "bulk recovery preserves a resumable attempt when saved instructions are %s",
+  async (scenario) => {
+    const instructionRoot = await temporaryDirectory();
+    const instructionPath = join(instructionRoot, "instructions.md");
+    const original = "Original synthetic bulk instructions.\n";
+    await writeFile(instructionPath, original);
+    const f = await interruptedScan(
+      "deep",
+      true,
+      {
+        config: { model_instructions_file: instructionPath },
+        scanInputs: {
+          ...scanInputIdentity("Keep the original scan instructions."),
+          modelInstructionsFileSha256: createHash("sha256")
+            .update(original)
+            .digest("hex"),
+        },
+      },
+      true,
+      false,
+      null,
+    );
+    const passes: DeepScanCheckpoint["passes"] = [];
+    for (const index of [1, 2]) {
+      const directory = `artifacts/deep-scan/passes/pass-${index}`;
+      await mkdir(join(f.scanDir, directory), { recursive: true, mode: 0o700 });
+      const child = await f.command(
+        [
+          "register-cli-scan",
+          "--repository",
+          f.repository,
+          "--scan-dir",
+          join(f.scanDir, directory),
+          "--parent-scan-id",
+          f.scanId,
+          "--registration-json-stdin",
+        ],
+        JSON.stringify({
+          recipe: { ...f.recipe, mode: "standard" },
+          parentScanRole: "deep_pass",
+        }),
+      );
+      const scanId = child["scanId"] as string;
+      await writeDraft(f.command, child, "standard", {
+        scanId,
+        findings: [],
+        scope: { summary: `Synthetic scope ${index}` },
+        coverage: semanticCoverage(),
+      });
+      await f.command(["prepare-scan-completion", "--scan-id", scanId]);
+      await f.command(["complete-scan", "--scan-id", scanId]);
+      passes.push({ directory, scanId });
+    }
+    await f.command(
+      [
+        "save-scan-artifact",
+        "--scan-id",
+        f.scanId,
+        "--artifact-path",
+        DEEP_SCAN_CHECKPOINT,
+      ],
+      JSON.stringify({
+        version: 3,
+        startedAt: "2000-01-01T00:00:00Z",
+        passes,
+        mergedScanIds: [],
+        aggregatePath: null,
+        noNewStreak: 0,
+        consecutiveErrors: 0,
+      }),
+    );
+    const savedRecipe = await f.command([
+      "get-scan-recipe",
+      "--scan-id",
+      f.scanId,
+    ]);
+    if (scenario === "changed")
+      await writeFile(instructionPath, "Edited synthetic bulk instructions.\n");
+    else await rm(instructionPath);
+    const requests: Array<string | undefined> = [];
+    const instructions: string[] = [];
+    let reducerTurns = 0;
+    const createClient = resumeClient(f, (options) => {
+      const thread = {
+        id: f.threadId,
+        async runStreamed() {
+          reducerTurns += 1;
+          instructions.push(
+            await readFile(
+              options.config!["model_instructions_file"] as string,
+              "utf8",
+            ),
+          );
+          return {
+            events: completedEvents(
+              f.threadId,
+              (async function* () {
+                yield {
+                  type: "item.completed" as const,
+                  item: {
+                    id: "merged-context",
+                    type: "agent_message" as const,
+                    text: JSON.stringify({
+                      scope: { summary: "Combined synthetic scope" },
+                    }),
+                  },
+                };
+              })(),
+            ),
+          };
+        },
+      };
+      return { startThread: () => thread, resumeThread: () => thread };
+    });
+    const recover = async () => {
+      const { stdout, stderr, runCli } = createCliTest(main);
+      const code = await runCli(
+        ["bulk-scan", f.input, "--output-dir", f.root, "--recover", "--json"],
+        {
+          ...dependencies({
+            environment: f.environment,
+            currentDirectory: f.root,
+          }),
+          runWorkbench: f.command,
+          createSecurity(config) {
+            const client = createClient(config);
+            return {
+              preflight: (options) => client.preflight(options),
+              close: () => client.close(),
+              async run(repository, options = {}) {
+                requests.push(options.resumeScanId);
+                expect(options.outputDir).toBe(f.scanDir);
+                return client.run(repository, options);
+              },
+            };
+          },
+        },
+      );
+      return { code, stdout: stdout.text(), stderr: stderr.text() };
+    };
+    const rejected = await recover();
+    expect(instructions).toEqual([]);
+    expect(reducerTurns).toBe(0);
+    expect(rejected.code, rejected.stderr).toBe(2);
+    expect(requests).toEqual([f.scanId]);
+    expect(
+      (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
+    ).toMatchObject({ progress: { status: "running" } });
+    expect(await f.command(["get-scan-recipe", "--scan-id", f.scanId])).toEqual(
+      savedRecipe,
+    );
+    const rejectedRows = (await readFile(join(f.root, "results.jsonl"), "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(rejectedRows.at(-1)).toMatchObject({
+      attempt: 1,
+      outputDir: f.scanDir,
+      status: "failed",
+    });
+    expect(JSON.stringify(rejectedRows.at(-1))).toContain(
+      scenario === "missing" ? "ENOENT" : "instructions",
+    );
+    expect(await readdir(join(f.root, "artifacts", "repo"))).toEqual([
+      "attempt-1",
+    ]);
+    await writeFile(instructionPath, original);
+    const restored = await recover();
+    expect(restored.code, restored.stderr).toBe(0);
+    expect(reducerTurns).toBe(1);
+    expect(instructions).toEqual([original]);
+    expect(requests).toEqual([f.scanId, f.scanId]);
+    expect(JSON.parse(restored.stdout)).toMatchObject({
+      completed: 1,
+      failed: 0,
+    });
+    expect(
+      (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
+    ).toMatchObject({ progress: { status: "complete" } });
+    expect(await f.command(["get-scan-recipe", "--scan-id", f.scanId])).toEqual(
+      savedRecipe,
+    );
+    expect(await readdir(join(f.root, "artifacts", "repo"))).toEqual([
+      "attempt-1",
+    ]);
   },
 );
 

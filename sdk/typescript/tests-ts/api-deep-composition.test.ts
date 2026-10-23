@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { effectiveCodexConfiguration } from "./support/api-events.js";
 import { main } from "../src/cli.js";
 import { capture, dependencies as cliDependencies } from "./cli-fixtures.js";
@@ -2192,16 +2193,59 @@ test.each(
     })),
   ),
 )(
-  "Deep instruction file digests retain registration identity on resume: %j",
+  "Deep instruction file changes block resumed execution until original bytes are restored: %j",
   async ({ continuation, contents }) => {
     const h = await fixture(undefined, continuation === "native");
     const instructionPath = join(h.root, "instructions.md");
     const original =
       contents === "empty" ? "" : "Original synthetic instructions.\n";
     await writeFile(instructionPath, original);
-    const configuration = { model_instructions_file: instructionPath };
-    const options = { ...h.options, knowledgeBasePaths: undefined };
-    h.stopBeforeSealing();
+    const observations: string[] = [];
+    h.observeLaunch(async (launch) => {
+      observations.push(
+        execFileSync(
+          "node",
+          [
+            "-e",
+            'process.stdout.write(require("node:fs").readFileSync(process.argv[1], "utf8"))',
+            launch.options.config!["model_instructions_file"] as string,
+          ],
+          { cwd: launch.threadOptions.workingDirectory, encoding: "utf8" },
+        ),
+      );
+    });
+    const origin =
+      continuation === "native"
+        ? "absolute"
+        : contents === "changed"
+          ? "relative"
+          : contents === "missing"
+            ? "profile"
+            : "home";
+    if (origin === "home") {
+      h.environment["HOME"] = h.root;
+      h.environment["USERPROFILE"] = h.root;
+    }
+    const selected =
+      origin === "absolute"
+        ? instructionPath
+        : origin === "home"
+          ? "~/instructions.md"
+          : "../instructions.md";
+    const configuration: JsonObject =
+      origin === "profile"
+        ? {
+            profile: "selected",
+            profiles: { selected: { model_instructions_file: selected } },
+          }
+        : { model_instructions_file: selected };
+    const options = {
+      ...h.options,
+      knowledgeBasePaths: undefined,
+      maxCostUsd: 1,
+      workers: 1,
+    };
+    h.stopAfterSealing("standard");
     await using first = h.makeClient(configuration);
     await expect(first.run(h.repository, options)).rejects.toBeInstanceOf(
       ScanTransportClosedError,
@@ -2222,24 +2266,67 @@ test.each(
     expect(saved["scanInputs"]).toMatchObject({
       modelInstructionsFileSha256: digest,
     });
-    if (contents === "changed")
-      await writeFile(instructionPath, "Changed synthetic instructions.\n");
-    else await rm(instructionPath);
+    if (contents === "changed") {
+      const edit = () =>
+        writeFile(instructionPath, "Changed synthetic instructions.\n");
+      if (continuation === "native") h.afterChildRegistration(edit);
+      else await edit();
+    } else await rm(instructionPath);
     const beforeResume = h.launches.length;
     await using resumed = h.makeClient(configuration);
+    const resumeOptions = {
+      ...options,
+      signal: undefined,
+      ...(continuation === "sdk" ? { resumeScanId: parentId } : {}),
+    };
+    const beforeCommands = h.commands.length;
+    const failure = await resumed
+      .run(h.repository, resumeOptions)
+      .catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(DeepScanRecoveryError);
+    expect((failure as Error).message).toContain(
+      contents === "changed" ? "model instructions file has changed" : "ENOENT",
+    );
+    if (contents !== "changed")
+      expect((failure as Error).cause).toMatchObject({ code: "ENOENT" });
+    expect(h.launches).toHaveLength(beforeResume);
+    expect(h.commands.slice(beforeCommands)).not.toContain("fail-scan");
+    expect(h.commands.slice(beforeCommands)).not.toContain("cancel-scan");
+    expect((await readRecipe())["scanInputs"]).toEqual(saved["scanInputs"]);
+    const blocked = await loadDeepScanCheckpoint(h.outputDir);
+    expect(blocked?.terminalReason).not.toBe("failed");
+    expect(blocked?.terminalReason).not.toBe("canceled");
+    expect(
+      blocked?.passes.filter((pass) => pass.executionNotStarted === true),
+    ).toHaveLength(1);
+    const blockedPassIds = blocked?.passes.map((pass) => pass.scanId);
+    await expect(
+      resumed.run(h.repository, resumeOptions),
+    ).rejects.toBeInstanceOf(DeepScanRecoveryError);
+    expect(h.launches).toHaveLength(beforeResume);
+    await writeFile(instructionPath, original);
     const result = await resumed.run(h.repository, {
       ...options,
       signal: undefined,
       ...(continuation === "sdk" ? { resumeScanId: parentId } : {}),
     });
     expect(result.manifest.scan.id).toBe(parentId);
+    const completed = await loadDeepScanCheckpoint(h.outputDir);
+    expect(completed?.passes.map((pass) => pass.scanId)).toEqual(
+      blockedPassIds,
+    );
+    expect(
+      completed?.passes.some((pass) => pass.executionNotStarted === true),
+    ).toBe(false);
     expect((await readRecipe())["scanInputs"]).toEqual(saved["scanInputs"]);
     expect(h.launches.length).toBeGreaterThan(beforeResume);
+    expect(observations.every((text) => text === original)).toBe(true);
     for (const launch of h.launches)
       expect(launch.options.config!["model_instructions_file"]).toBe(
         instructionPath,
       );
   },
+  120_000,
 );
 
 test.each(["standard", "deep", "primary"] as const)(
@@ -2563,3 +2650,450 @@ test.each([undefined, "Write follow-up notes"])(
     }
   },
 );
+
+test.each([
+  { continuation: "sdk", changed: false, sealed: false },
+  { continuation: "sdk", changed: true, sealed: true },
+] as const)(
+  "Deep unchanged instructions and sealed recovery preserve child execution behavior: %j",
+  async ({ continuation, changed, sealed }) => {
+    const h = await fixture();
+    const instructionPath = join(h.root, "instructions.md");
+    const original = "Original synthetic execution instructions.\n";
+    const edited = "Edited synthetic execution instructions.\n";
+    await writeFile(instructionPath, original);
+    const observations: Array<{ mode: string; text: string; scanId: string }> =
+      [];
+    h.observeLaunch(async (launch) => {
+      const file = launch.options.config!["model_instructions_file"] as string;
+      const text = execFileSync(
+        "node",
+        [
+          "-e",
+          'process.stdout.write(require("node:fs").readFileSync(process.argv[1], "utf8"))',
+          file,
+        ],
+        {
+          cwd: launch.threadOptions.workingDirectory,
+          encoding: "utf8",
+        },
+      );
+      const scanId = launch.options.env!["CODEX_SECURITY_SCAN_ID"]!;
+      observations.push({ mode: h.records.get(scanId)!.mode, text, scanId });
+    });
+    const configuration = { model_instructions_file: instructionPath };
+    const options = { ...h.options, knowledgeBasePaths: undefined };
+    if (sealed) h.stopAfterSealing();
+    else h.stopBeforeSealing();
+    await using first = h.makeClient(configuration);
+    await expect(first.run(h.repository, options)).rejects.toBeInstanceOf(
+      ScanTransportClosedError,
+    );
+    const [parentId, parent] = [...h.records].find(
+      ([, row]) => row.mode === "deep",
+    )!;
+    const recipe = async () =>
+      (
+        await runWorkbench({ ...parent.options, signal: undefined }, [
+          "get-scan-recipe",
+          "--scan-id",
+          parentId,
+        ])
+      )["recipe"] as JsonObject;
+    const saved = await recipe();
+    expect(saved["scanInputs"]).toMatchObject({
+      modelInstructionsFileSha256: createHash("sha256")
+        .update(original)
+        .digest("hex"),
+    });
+    expect(observations.length).toBeGreaterThan(0);
+    expect(observations.every((row) => row.text === original)).toBe(true);
+    if (sealed) await rm(instructionPath);
+    else if (changed) await writeFile(instructionPath, edited);
+    const before = observations.length;
+    if (sealed) h.forbidCodex();
+    await using resumed = h.makeClient(configuration);
+    const result = await resumed.run(h.repository, {
+      ...options,
+      signal: undefined,
+      ...(continuation === "sdk" ? { resumeScanId: parentId } : {}),
+    });
+    expect(result.manifest.scan.id).toBe(parentId);
+    expect((await recipe())["scanInputs"]).toEqual(saved["scanInputs"]);
+    const resumedObservations = observations.slice(before);
+    if (sealed) expect(resumedObservations).toEqual([]);
+    else {
+      expect(new Set(resumedObservations.map((row) => row.mode))).toEqual(
+        new Set(["standard", "deep"]),
+      );
+      expect(
+        resumedObservations.every(
+          (row) => row.text === (changed ? edited : original),
+        ),
+      ).toBe(true);
+    }
+    console.log(
+      "instruction-resume-proof",
+      JSON.stringify({
+        continuation,
+        changed,
+        sealed,
+        sameScanId: true,
+        initial: observations
+          .slice(0, before)
+          .map(({ mode, text }) => ({ mode, text })),
+        resumed: resumedObservations.map(({ mode, text }) => ({ mode, text })),
+        savedDigestUnchanged: true,
+      }),
+    );
+  },
+);
+
+test("public scans resume rejects changed instructions and resumes the same scan after restoration", async () => {
+  const h = await fixture();
+  const instructionPath = join(h.root, "instructions.md");
+  const original = "Original synthetic CLI instructions.\n";
+  const edited = "Edited synthetic CLI instructions.\n";
+  await writeFile(instructionPath, original);
+  const observed: Array<{ mode: string; text: string }> = [];
+  h.observeLaunch(async (launch) => {
+    observed.push({
+      mode: h.records.get(launch.options.env!["CODEX_SECURITY_SCAN_ID"]!)!.mode,
+      text: execFileSync(
+        "node",
+        [
+          "-e",
+          'process.stdout.write(require("node:fs").readFileSync(process.argv[1], "utf8"))',
+          launch.options.config!["model_instructions_file"] as string,
+        ],
+        { cwd: launch.threadOptions.workingDirectory, encoding: "utf8" },
+      ),
+    });
+  });
+  h.stopAfterSealing("standard");
+  await using first = h.makeClient({
+    model_instructions_file: instructionPath,
+  });
+  await expect(
+    first.run(h.repository, {
+      ...h.options,
+      workers: 1,
+      knowledgeBasePaths: undefined,
+    }),
+  ).rejects.toBeInstanceOf(ScanTransportClosedError);
+  const [parentId, parent] = [...h.records].find(
+    ([, row]) => row.mode === "deep",
+  )!;
+  const command = (args: readonly string[], input?: string) =>
+    runWorkbench({ ...parent.options, signal: undefined }, args, input);
+  const saved = (await command(["get-scan-recipe", "--scan-id", parentId]))[
+    "recipe"
+  ] as JsonObject;
+  expect(saved["scanInputs"]).toMatchObject({
+    modelInstructionsFileSha256: createHash("sha256")
+      .update(original)
+      .digest("hex"),
+  });
+  const before = observed.length;
+  expect(observed.every((row) => row.text === original)).toBe(true);
+  await writeFile(instructionPath, edited);
+  const stdout = capture(),
+    stderr = capture(true);
+  const resume = () =>
+    main(
+      ["scans", "resume", parentId, "--json"],
+      stdout.stream,
+      stderr.stream,
+      {
+        ...cliDependencies({
+          environment: h.environment,
+          currentDirectory: h.root,
+        }),
+        runWorkbench: command,
+        createSecurity(config) {
+          return h.makeClient(config.codexOverrides);
+        },
+      },
+    );
+  expect(await resume()).not.toBe(0);
+  expect(stderr.text()).toContain("model instructions file has changed");
+  expect(observed).toHaveLength(before);
+  await writeFile(instructionPath, original);
+  expect(await resume(), stderr.text()).toBe(0);
+  expect(
+    (await command(["get-scan", "--scan-id", parentId]))["scan"],
+  ).toMatchObject({ progress: { status: "complete" } });
+  expect(
+    (
+      (await command(["get-scan-recipe", "--scan-id", parentId]))[
+        "recipe"
+      ] as JsonObject
+    )["scanInputs"],
+  ).toEqual(saved["scanInputs"]);
+  const resumed = observed.slice(before);
+  expect(new Set(resumed.map((row) => row.mode))).toEqual(
+    new Set(["standard", "deep"]),
+  );
+  expect(resumed.every((row) => row.text === original)).toBe(true);
+  console.log(
+    "instruction-cli-resume-proof",
+    JSON.stringify({
+      sameScanId: true,
+      initial: observed.slice(0, before),
+      resumed,
+      savedDigestUnchanged: true,
+    }),
+  );
+}, 120_000);
+
+test("unsealed accepted aggregate resumes without reopening instruction files", async () => {
+  const h = await fixture(undefined, true);
+  const instructionPath = join(h.root, "instructions.md");
+  await writeFile(
+    instructionPath,
+    "Synthetic aggregate recovery instructions.\n",
+  );
+  const config = { model_instructions_file: instructionPath };
+  const options = { ...h.options, knowledgeBasePaths: undefined };
+  h.stopBeforeSealing("deep");
+  await using first = h.makeClient(config);
+  await expect(first.run(h.repository, options)).rejects.toBeInstanceOf(
+    ScanTransportClosedError,
+  );
+  const [parentId, parent] = [...h.records].find(
+    ([, row]) => row.mode === "deep",
+  )!;
+  const manifest = JSON.parse(
+    await readFile(join(h.outputDir, "scan-manifest.json"), "utf8"),
+  );
+  expect(manifest.scan.sealedAt).toBeUndefined();
+  const before = h.launches.length;
+  await rm(instructionPath);
+  h.observeLaunch(async () => {
+    throw new Error("Artifact recovery must not execute a model turn");
+  });
+  await using resumed = h.makeClient(config);
+  const result = await resumed.run(h.repository, {
+    ...options,
+    signal: undefined,
+  });
+  expect(result.manifest.scan.id).toBe(parentId);
+  expect(h.launches.length).toBe(before);
+  console.log(
+    "instruction-unsealed-recovery-proof",
+    JSON.stringify({
+      sameScanId: true,
+      wasSealed: false,
+      instructionFileDeleted: true,
+      newExecutionLaunches: 0,
+      savedDigest: (parent.recipe["scanInputs"] as JsonObject)[
+        "modelInstructionsFileSha256"
+      ],
+    }),
+  );
+});
+
+test("first reducer resume rejects changed instructions without consuming the checkpoint or required cost", async () => {
+  const h = await fixture();
+  const instructionPath = join(h.root, "instructions.md");
+  const original = "Original reducer instructions.\n";
+  await writeFile(instructionPath, original);
+  const configuration = { model_instructions_file: instructionPath };
+  const options = {
+    ...h.options,
+    knowledgeBasePaths: undefined,
+    maxCostUsd: 1,
+  };
+  h.failChildProjection(true);
+  await using client = h.makeClient(configuration);
+  await expect(client.run(h.repository, options)).rejects.toBeInstanceOf(
+    DeepScanRecoveryError,
+  );
+  const [parentId, parent] = [...h.records].find(
+    ([, row]) => row.mode === "deep",
+  )!;
+  const before = await loadDeepScanCheckpoint(h.outputDir);
+  expect(before?.mergeStarted).toBeUndefined();
+  expect([...h.threadScans.values()]).not.toContain(parentId);
+  const accepted = before!.passes;
+  const launches = h.launches.length;
+  let editedAfterPreparation = false;
+  h.observeCheckpoint(async (checkpoint) => {
+    if (checkpoint["mergeStarted"] === true && !editedAfterPreparation) {
+      editedAfterPreparation = true;
+      await writeFile(instructionPath, "Changed reducer instructions.\n");
+    }
+  });
+  h.failChildProjection(false);
+  await using resumed = h.makeClient(configuration);
+  const resume = () =>
+    resumed.run(h.repository, {
+      ...options,
+      signal: undefined,
+      resumeScanId: parentId,
+    });
+  await expect(resume()).rejects.toBeInstanceOf(DeepScanRecoveryError);
+  expect(h.launches).toHaveLength(launches);
+  const blocked = await loadDeepScanCheckpoint(h.outputDir);
+  expect(editedAfterPreparation).toBe(true);
+  expect(blocked?.mergeStarted).toBeUndefined();
+  expect(blocked?.passes).toEqual(accepted);
+  expect(blocked?.terminalReason).not.toBe("failed");
+  expect([...h.threadScans.values()]).not.toContain(parentId);
+  await writeFile(instructionPath, original);
+  const result = await resume();
+  expect(result.manifest.scan.id).toBe(parentId);
+  expect(result.cost?.estimatedUsd).toBeGreaterThan(0);
+  expect(
+    (
+      await runWorkbench({ ...parent.options, signal: undefined }, [
+        "get-scan",
+        "--scan-id",
+        parentId,
+      ])
+    )["scan"],
+  ).toMatchObject({ progress: { status: "complete" } });
+});
+
+test("legacy Deep recipes without instruction digests retain resume behavior", async () => {
+  const h = await fixture();
+  const instructionPath = join(h.root, "instructions.md");
+  await writeFile(instructionPath, "Original legacy instructions.\n");
+  const configuration = { model_instructions_file: instructionPath };
+  const options = { ...h.options, knowledgeBasePaths: undefined, workers: 1 };
+  h.stopAfterSealing("standard");
+  await using client = h.makeClient(configuration);
+  await expect(client.run(h.repository, options)).rejects.toBeInstanceOf(
+    ScanTransportClosedError,
+  );
+  const [parentId, parent] = [...h.records].find(
+    ([, row]) => row.mode === "deep",
+  )!;
+  const recipe = structuredClone(parent.recipe);
+  delete (recipe["scanInputs"] as JsonObject)["modelInstructionsFileSha256"];
+  execFileSync(Bun.which("python3")!, [
+    "-c",
+    "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute('UPDATE scans SET recipe_json=? WHERE id=?',(sys.argv[2],sys.argv[3])); c.commit()",
+    join(h.environment["CODEX_SECURITY_STATE_DIR"]!, "workbench.sqlite3"),
+    JSON.stringify(recipe),
+    parentId,
+  ]);
+  await writeFile(instructionPath, "Changed legacy instructions.\n");
+  const texts: string[] = [];
+  h.observeLaunch(async (launch) => {
+    texts.push(
+      await readFile(
+        launch.options.config!["model_instructions_file"] as string,
+        "utf8",
+      ),
+    );
+  });
+  await using resumed = h.makeClient(configuration);
+  const result = await resumed.run(h.repository, {
+    ...options,
+    signal: undefined,
+    resumeScanId: parentId,
+  });
+  expect(result.manifest.scan.id).toBe(parentId);
+  expect(texts.length).toBeGreaterThan(0);
+  expect(texts.every((text) => text === "Changed legacy instructions.\n")).toBe(
+    true,
+  );
+});
+
+test("successful resumed Deep post-scan turns do not inherit canonical instruction validation", async () => {
+  const h = await fixture();
+  const instructionPath = join(h.root, "instructions.md");
+  await writeFile(instructionPath, "Original post-scan instructions.\n");
+  const configuration = { model_instructions_file: instructionPath };
+  const options = {
+    ...h.options,
+    knowledgeBasePaths: undefined,
+    workers: 1,
+    postScanPrompt: "Synthetic follow-up after canonical completion.",
+  };
+  h.stopAfterSealing("standard");
+  await using client = h.makeClient(configuration);
+  await expect(client.run(h.repository, options)).rejects.toBeInstanceOf(
+    ScanTransportClosedError,
+  );
+  const [parentId] = [...h.records].find(([, row]) => row.mode === "deep")!;
+  h.afterCompletion(() =>
+    writeFile(instructionPath, "Changed follow-up instructions.\n"),
+  );
+  const texts: string[] = [];
+  h.observeLaunch(async (launch) => {
+    texts.push(
+      await readFile(
+        launch.options.config!["model_instructions_file"] as string,
+        "utf8",
+      ),
+    );
+  });
+  await using resumed = h.makeClient(configuration);
+  const result = await resumed.run(h.repository, {
+    ...options,
+    signal: undefined,
+    resumeScanId: parentId,
+  });
+  expect(result.manifest.scan.id).toBe(parentId);
+  expect(texts.at(-1)).toBe("Changed follow-up instructions.\n");
+  expect(
+    texts
+      .slice(0, -1)
+      .every((text) => text === "Original post-scan instructions.\n"),
+  ).toBe(true);
+  expect(h.completedPrompts.at(-1)).toContain(options.postScanPrompt);
+});
+
+test("cancellation during a successful instruction digest read retains cancellation classification", async () => {
+  const h = await fixture();
+  const instructionPath = join(h.root, "instructions.md");
+  await writeFile(instructionPath, "Original cancellation instructions.\n");
+  const configuration = { model_instructions_file: instructionPath };
+  const options = { ...h.options, knowledgeBasePaths: undefined, workers: 1 };
+  h.stopAfterSealing("standard");
+  await using client = h.makeClient(configuration);
+  await expect(client.run(h.repository, options)).rejects.toBeInstanceOf(
+    ScanTransportClosedError,
+  );
+  const [parentId] = [...h.records].find(([, row]) => row.mode === "deep")!;
+  const files = await import("node:fs/promises");
+  const read = files.readFile;
+  const controller = new AbortController();
+  const cause = new Error(
+    "Synthetic cancellation during successful digest read",
+  );
+  let checked = false;
+  const reading = spyOn(files, "readFile").mockImplementation((async (
+    ...args: Parameters<typeof read>
+  ) => {
+    const result = await read(...args);
+    if (args[0] === instructionPath) {
+      checked = true;
+      controller.abort(cause);
+      return Buffer.from(
+        "Changed bytes returned as cancellation becomes visible.",
+      );
+    }
+    return result;
+  }) as typeof read);
+  const launches = h.launches.length;
+  try {
+    await using resumed = h.makeClient(configuration);
+    const error = await resumed
+      .run(h.repository, {
+        ...options,
+        signal: controller.signal,
+        resumeScanId: parentId,
+      })
+      .catch((error: unknown) => error);
+    expect(checked).toBe(true);
+    expect(error).toBeInstanceOf(ScanInterruptedError);
+    expect(error).not.toBeInstanceOf(DeepScanRecoveryError);
+    expect((error as Error).cause).toBe(cause);
+    expect(h.launches).toHaveLength(launches);
+  } finally {
+    reading.mockRestore();
+  }
+});

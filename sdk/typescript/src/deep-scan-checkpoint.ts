@@ -10,6 +10,8 @@ export const DEEP_SCAN_CHECKPOINT = "artifacts/deep-scan/checkpoint.json";
 export interface DeepScanPass {
   directory: string;
   scanId?: string;
+  /** A saved-input rejection proved this registered pass never attempted execution. */
+  executionNotStarted?: true;
   /** Completion time for a consumed reservation that never acquired a SQL row. */
   failedBeforeRegistration?: string;
   [extension: string]: unknown;

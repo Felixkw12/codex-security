@@ -72,6 +72,8 @@ export function createDeepApiFixtures() {
       knowledge?: string;
       preflightConfig: JsonObject;
     }> = [];
+    let launchObserver:
+      ((launch: (typeof launches)[number]) => Promise<void>) | undefined;
     const threadScans = new Map<string, string>();
     const observedSubagents: Array<{ id: string; mode: string; path: string }> =
       [];
@@ -86,6 +88,9 @@ export function createDeepApiFixtures() {
     let stopCommand = "complete-scan";
     let publicationFails = false;
     let stopAfterChildRegistration = false;
+    let afterChildRegistration: (() => Promise<void>) | undefined;
+    let checkpointObserver:
+      ((checkpoint: JsonObject) => Promise<void>) | undefined;
     let childRetirementFails = false;
     let finalPublicationFailure:
       "prepare-scan-completion" | "complete-scan" | undefined;
@@ -193,7 +198,7 @@ export function createDeepApiFixtures() {
                   )
                 )
                   await interruptPublication(options);
-                return await writer.restore(path, contents);
+                await writer.restore(path, contents);
               },
             };
           },
@@ -253,6 +258,11 @@ export function createDeepApiFixtures() {
               throw new Error("Synthetic publication failure");
             const result = await runWorkbench(options, args, input);
             if (
+              args[0] === "save-scan-artifact" &&
+              args[4] === "artifacts/deep-scan/checkpoint.json"
+            )
+              await checkpointObserver?.(JSON.parse(input!));
+            if (
               args[0] === "complete-scan" &&
               records.get(args[2]!)?.mode === "deep" &&
               afterParentCompletion
@@ -282,6 +292,9 @@ export function createDeepApiFixtures() {
                 recipe,
               });
               if (mode === "standard") {
+                const afterRegistration = afterChildRegistration;
+                afterChildRegistration = undefined;
+                await afterRegistration?.();
                 const parent = [...records].find(
                   ([, record]) => record.mode === "deep",
                 );
@@ -369,6 +382,7 @@ export function createDeepApiFixtures() {
                     knowledge,
                     preflightConfig,
                   });
+                  await launchObserver?.(launches.at(-1)!);
                   if (knowledge)
                     expect(
                       await readFile(
@@ -628,6 +642,9 @@ export function createDeepApiFixtures() {
       options,
       records,
       launches,
+      observeLaunch(observer: NonNullable<typeof launchObserver>) {
+        launchObserver = observer;
+      },
       threadScans,
       observedSubagents,
       completedPrompts,
@@ -640,6 +657,12 @@ export function createDeepApiFixtures() {
       },
       stopAfterChildRegistration() {
         stopAfterChildRegistration = true;
+      },
+      afterChildRegistration(callback: () => Promise<void>) {
+        afterChildRegistration = callback;
+      },
+      observeCheckpoint(observer: NonNullable<typeof checkpointObserver>) {
+        checkpointObserver = observer;
       },
       failChildRetirement(value: boolean) {
         childRetirementFails = value;
