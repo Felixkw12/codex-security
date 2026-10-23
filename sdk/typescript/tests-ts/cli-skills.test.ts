@@ -1570,6 +1570,40 @@ process.stdout.write(JSON.stringify({
     (["validate", "patch", "verify-fix"] as const).flatMap((command) =>
       (
         [
+          ["database model 'User' not found", false],
+          ['sqlite3 model "User" not found', false],
+          ["workbench model `User` not found", false],
+          [
+            "model 'synthetic' not found https://synthetic.invalid/database",
+            true,
+          ],
+        ] as const
+      ).map(([detail, modelAccess]) => [command, detail, modelAccess] as const),
+    ),
+  )(
+    "distinguishes local and service named-model failures from the %s child: %s",
+    async (command, detail, modelAccess) => {
+      const stdout = capture();
+      const stderr = capture();
+      const source = `process.stdout.write(JSON.stringify({type:"turn.failed",error:{message:${JSON.stringify(detail)}}})+"\\n");process.exitCode=7`;
+      expect(
+        await runCodexSkillCommand(
+          ["-e", source],
+          { command, stdout: stdout.stream, stderr: stderr.stream },
+          { command: process.execPath },
+        ),
+      ).toBe(7);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toBe(
+        `codex-security: ${command} failed with exit code 7.${modelAccess ? " The selected model is unavailable for the current credentials." : ""}\n${detail}\n`,
+      );
+    },
+  );
+
+  test.each(
+    (["validate", "patch", "verify-fix"] as const).flatMap((command) =>
+      (
+        [
           ["SQLite database request timed_out waiting for lock", false],
           ["sqlite3.OperationalError: timeout waiting for lock", false],
           ["workbench request timed-out waiting for lock", false],

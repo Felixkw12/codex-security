@@ -9062,9 +9062,10 @@ export function skillCommandFailure(
     advice = authenticationFailureMessage(authentication);
   } else if (
     /\bpermissions? to use (?:this |the )?model\b/iu.test(detail) ||
-    /\bmodel[ \t]+(?:'[^'\r\n]+'|"[^"\r\n]+"|`[^`\r\n]+`)[ \t]+not[ \t]+found\b/iu.test(
-      detail,
-    ) ||
+    (!/\b(?:sqlite3?|database|workbench)\b/iu.test(classificationDetail) &&
+      /\bmodel[ \t]+(?:'[^'\r\n]+'|"[^"\r\n]+"|`[^`\r\n]+`)[ \t]+not[ \t]+found\b/iu.test(
+        detail,
+      )) ||
     /\b(?:model[._ -]not[._ -]found|model[._ -]?access[._ -]?denied|access[._ -]?(?:denied[._ -]?to[._ -]?model|to[._ -]?model[._ -]?denied))\b/iu.test(
       detail,
     ) ||
