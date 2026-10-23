@@ -1154,6 +1154,7 @@ test.each([
     const result = await runHostedScan(input, { executor });
     expect(executor.run).toHaveBeenCalledTimes(1);
     expect(result.status).toBe("acceptance_unknown");
+    expect(result.execution?.requestId).toBe("other-request");
     expect(result.execution?.sessionId).toBe(sessionId);
     expect(result.execution?.usage).toEqual(usage);
     expect(result.artifacts).toEqual([]);

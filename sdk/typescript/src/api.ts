@@ -3766,7 +3766,6 @@ export class CodexSecurity {
                   throw new ScanExecutionError(
                     {
                       ...result,
-                      requestId: request.requestId,
                       status: "acceptance_unknown",
                       message:
                         "Execution response does not match the active request.",
