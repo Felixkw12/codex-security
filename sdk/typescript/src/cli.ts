@@ -2602,7 +2602,7 @@ export async function main(
     })
     .command("resume", {
       description: "Resume an interrupted Deep Scan in its original session.",
-      hint: "Execution failures in full-output JSON or JSONL use ok: false and keep available scan results under data.",
+      hint: "Execution failures keep available scan results under data in failed full-output JSON, JSONL, YAML, or TOON envelopes.",
       mcp: false,
       args: z.object({
         scanId: z.string().min(1).describe("Interrupted Deep Scan identifier."),
@@ -2676,7 +2676,10 @@ export async function main(
         }
         scanArguments.includeFailureResults =
           argv.includes("--full-output") &&
-          (format === "json" || format === "jsonl");
+          (format === "json" ||
+            format === "jsonl" ||
+            format === "yaml" ||
+            format === "toon");
         const outcome = await runScan(
           scanArguments,
           errorOutput,
@@ -2689,7 +2692,7 @@ export async function main(
     .command("rerun", {
       description:
         "Start a new scan using saved settings and current checkout/context files.",
-      hint: "Execution failures in full-output JSON or JSONL use ok: false and keep available scan results under data.",
+      hint: "Execution failures keep available scan results under data in failed full-output JSON, JSONL, YAML, or TOON envelopes.",
       destructive: true,
       mcp: false,
       args: z.object({
@@ -2830,7 +2833,10 @@ export async function main(
         }
         scanArguments.includeFailureResults =
           argv.includes("--full-output") &&
-          (format === "json" || format === "jsonl");
+          (format === "json" ||
+            format === "jsonl" ||
+            format === "yaml" ||
+            format === "toon");
         const outcome = await runScan(
           scanArguments,
           errorOutput,
@@ -4474,7 +4480,10 @@ export async function main(
               mock: options.mock,
               includeFailureResults:
                 argv.includes("--full-output") &&
-                (format === "json" || format === "jsonl"),
+                (format === "json" ||
+                  format === "jsonl" ||
+                  format === "yaml" ||
+                  format === "toon"),
             },
             errorOutput,
             dependencies,
@@ -9064,9 +9073,10 @@ export function skillCommandFailure(
     advice = authenticationFailureMessage(authentication);
   } else if (
     /\bpermissions? to use (?:this |the )?model\b/iu.test(adviceDetail) ||
-    /(?<![\w./\\-])model[ \t]+(?:'[^'\r\n]+'|"[^"\r\n]+"|`[^`\r\n]+`)[ \t]+not[ \t]+found(?![\w/\\-]|\.(?=\S))/iu.test(
-      adviceDetail,
-    ) ||
+    (!/\b(?:sqlite3?|database|workbench)\b/iu.test(classificationDetail) &&
+      /(?<![\w./\\-])model[ \t]+(?:'[^'\r\n]+'|"[^"\r\n]+"|`[^`\r\n]+`)[ \t]+not[ \t]+found(?![\w/\\-]|\.(?=\S))/iu.test(
+        adviceDetail,
+      )) ||
     /(?<![\w./\\-])(?:model[._ -]not[._ -]found|model[._ -]?access[._ -]?denied|access[._ -]?(?:denied[._ -]?to[._ -]?model|to[._ -]?model[._ -]?denied))(?![\w/\\-]|\.(?=\S))/iu.test(
       adviceDetail,
     ) ||

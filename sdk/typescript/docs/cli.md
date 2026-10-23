@@ -493,7 +493,9 @@ or JSONL output produce:
 { "status": "failed", "code": "SCAN_FAILED", "message": "..." }
 ```
 
-With `--full-output`, the error appears under `error` in an `ok: false` envelope.
+With `--full-output`, JSON and JSONL failures put the error under `error` in an
+`ok: false` envelope. YAML and TOON use the same failed envelope when retained
+sealed scan results are available (including TOON selected by default).
 If the scan target changed, the error explains that the results no longer
 represent the current checkout. Retained sealed results remain available under
 `data`, including their manifest, findings, coverage, scan directory, and report
@@ -505,8 +507,8 @@ selecting an unavailable field can return `null` or omit `data`.
 Saved-scan setup failures use the same output shape with
 `SCAN_REPLAY_UNAVAILABLE` for `scans rerun` (including when no completed scan is
 available) or `SCAN_RESUME_UNAVAILABLE` for `scans resume`. Rerunning an imported
-scan uses `SCAN_IMPORT_FAILED` if the import fails. Other output formats retain
-stderr-only failures, including when `--full-output` is selected.
+scan uses `SCAN_IMPORT_FAILED` if the import fails. YAML and TOON failures remain
+on stderr without `--full-output`, or when retained results are unavailable.
 
 Diagnostics stay on stderr. Each command's `--schema --format json` describes
 its successful output and failure codes.
