@@ -8452,6 +8452,11 @@ async function githubPatchRepository(
     hostname = /^hostname (.+)$/mu.exec(settings)?.[1] ?? hostname;
   }
   if (patchApiHostname(hostname) !== apiHost) return undefined;
+  if (
+    url.protocol === "https:" &&
+    url.port !== new URL(`https://${apiEndpoint}`).port
+  )
+    return undefined;
   return `${apiEndpoint}/${(uri
     ? decodeURIComponent(url.pathname)
     : url.pathname
