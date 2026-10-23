@@ -27,6 +27,8 @@ import { capture } from "./cli-fixtures.js";
 import { executablePathForSpawn } from "../src/executable-path.js";
 
 test.each([
+  ["codex_security_deep_scan", undefined, true, false],
+  ["codex_security_deep_scan", undefined, true, true],
   ["codex-security", "Codex Security", true, false],
   ["codex-security", "Codex Security", true, true],
   ["codex-security", "Codex Security", false, false],
@@ -100,8 +102,8 @@ test.each([
       const [line] = await once(lines, "line");
       expect(line).toBe(JSON.stringify(response));
       if (
-        clientName === "codex-security" &&
-        title === "Codex Security" &&
+        (clientName === "codex_security_deep_scan" ||
+          (clientName === "codex-security" && title === "Codex Security")) &&
         includeLayers
       ) {
         expect(await readFile(exited, "utf8")).toBe("exited");
