@@ -233,7 +233,16 @@ export async function readNativeScanSemanticInputs(
           ? config["model_instructions_file"]
           : undefined,
         signal,
-      )) === (savedRecipe?.scanInputs?.["modelInstructionsFileSha256"] ?? null),
+      )) ===
+        (savedRecipe?.scanInputs?.["modelInstructionsFileSha256"] ?? null) &&
+      config["experimental_compact_prompt_file"] ===
+        savedConfig["experimental_compact_prompt_file"] &&
+      (await promptFileDigest(
+        typeof config["experimental_compact_prompt_file"] === "string"
+          ? config["experimental_compact_prompt_file"]
+          : undefined,
+        signal,
+      )) === (savedRecipe?.scanInputs?.["compactPromptFileSha256"] ?? null),
     modelSettings: scanModelConfiguration(
       await mergedCodexConfig({ codexOverrides: config }),
     ),

@@ -64,7 +64,7 @@ const userContext = "  Inspect synthetic authentication.  ";
 const deepConfiguration = "[deep_scan]\nworkers = 2\nsubagents = 1\n";
 const selectedConfiguration = `model = "${model}"\nmodel_reasoning_effort = "${reasoningEffort}"\n`;
 
-for (const change of [
+for (const scenario of [
   "unchanged",
   "equivalent config",
   "knowledge",
@@ -93,10 +93,26 @@ for (const change of [
   "instruction file removed",
   "instruction file explicit",
   "instruction file running",
+  "compact prompt file unchanged",
+  "compact prompt file content changed",
+  "compact prompt file legacy",
+  "compact prompt file empty",
+  "compact prompt file missing",
+  "compact prompt file changed",
+  "compact prompt file removed",
+  "compact prompt file explicit",
+  "compact prompt file running",
   "running scan ID",
   "running target",
 ]) {
-  test(`native target reuse after MCP restart: ${change}`, async () => {
+  const change = scenario.replace(/^compact prompt file /, "instruction file ");
+  const promptFile = scenario.startsWith("compact prompt file ")
+    ? "experimental_compact_prompt_file"
+    : "model_instructions_file";
+  const promptFileDigestKey = scenario.startsWith("compact prompt file ")
+    ? "compactPromptFileSha256"
+    : "modelInstructionsFileSha256";
+  test(`native target reuse after MCP restart: ${scenario}`, async () => {
     const root = await privateDirectory("native-completed-reuse-");
     const repository = path.join(root, "repository");
     const knowledgePath = path.join(
@@ -151,7 +167,7 @@ for (const change of [
         : `developer_instructions = ${JSON.stringify(instructions)}\n`) +
       (instructionFile === undefined
         ? ""
-        : `model_instructions_file = ${JSON.stringify(path.basename(instructionFile))}\n`);
+        : `${promptFile} = ${JSON.stringify(path.basename(instructionFile))}\n`);
     let client: Client | undefined;
     const workbench = (
       args: string[],
@@ -255,10 +271,7 @@ for (const change of [
           )
         : undefined;
       if (nativeConfig)
-        assert.equal(
-          nativeConfig.model_instructions_file,
-          originalInstructionFile,
-        );
+        assert.equal(nativeConfig[promptFile], originalInstructionFile);
       const profile = instructionCase
         ? await createProviderProfile(environment.CODEX_HOME, {
             analytics: { enabled: false },
@@ -305,7 +318,7 @@ for (const change of [
                 ...scanInputIdentity(userContext.trim(), knowledge),
                 ...(instructionFileCase && change !== "instruction file legacy"
                   ? {
-                      modelInstructionsFileSha256: createHash("sha256")
+                      [promptFileDigestKey]: createHash("sha256")
                         .update(await readFile(originalInstructionFile))
                         .digest("hex"),
                     }
@@ -322,7 +335,7 @@ for (const change of [
         );
         assert.equal(saved.developer_instructions, originalInstructions);
         if (instructionFileCase)
-          assert.equal(saved.model_instructions_file, originalInstructionFile);
+          assert.equal(saved[promptFile], originalInstructionFile);
       }
       if (knowledge) await saveScanKnowledge(scanDir, knowledge);
       workbench(
@@ -478,7 +491,7 @@ for (const change of [
           { model, reasoningEffort },
           1,
         );
-        assert.equal(current.model_instructions_file, currentFile);
+        assert.equal(current[promptFile], currentFile);
         assert.equal(current.developer_instructions, originalInstructions);
       }
       if (change === "missing knowledge" || (running && !instructionFileCase))
