@@ -9702,7 +9702,7 @@ async function resumePatchPullRequest(
 async function verifiedPatchFiles(
   selected: SelectedFindings,
   patches: readonly FindingPatch[],
-  context: GitPatchState["context"],
+  context: Pick<GitPatchState["context"], "directory">,
 ): Promise<string[]> {
   const files = [
     ...new Set(
@@ -11355,6 +11355,7 @@ async function runFindingPatches(
     let base: GitPatchState | Map<string, string> | undefined;
     let repositoryKey = patchPathKey(selected.repository);
     let rootKey = repositoryKey;
+    let patchDirectory = selected.repository;
     let preparationCompleted = false;
     try {
       status = await runSkill(
@@ -11396,6 +11397,10 @@ async function runFindingPatches(
               );
               if (!(base instanceof Map)) gitBase = base;
             }
+            patchDirectory =
+              base instanceof Map
+                ? await realpath(selected.repository)
+                : base.context.directory;
             if (!(base instanceof Map) && base.root !== selected.repository) {
               const [repositoryPath, rootPath] = await Promise.all([
                 realpath(selected.repository, { encoding: "buffer" }),
@@ -11508,7 +11513,11 @@ async function runFindingPatches(
     }
 
     if (patch.status === "verified") {
-      const files = verifiedPatchFiles(selected, [patch]).map((file) =>
+      const files = (
+        await verifiedPatchFiles(selected, [patch], {
+          directory: patchDirectory,
+        })
+      ).map((file) =>
         canonicalPatchPath(selected.repository, patchPathKey(file)),
       );
       const root =
