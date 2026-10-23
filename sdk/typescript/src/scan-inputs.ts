@@ -41,7 +41,7 @@ export function scanInputIdentity(
   };
 }
 
-export async function modelInstructionsFileDigest(
+export async function promptFileDigest(
   path: string | undefined,
   signal?: AbortSignal,
 ): Promise<string | null> {

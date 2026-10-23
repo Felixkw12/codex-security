@@ -234,7 +234,7 @@ import {
   type KnowledgeBaseSnapshot,
 } from "./knowledge-base.js";
 import {
-  modelInstructionsFileDigest,
+  promptFileDigest,
   scanInputIdentity,
   saveScanKnowledge,
 } from "./scan-inputs.js";
@@ -2338,6 +2338,10 @@ export class CodexSecurity {
           typeof workerConfig["model_instructions_file"] === "string"
             ? workerConfig["model_instructions_file"]
             : undefined,
+        compactPromptFile:
+          typeof workerConfig["experimental_compact_prompt_file"] === "string"
+            ? workerConfig["experimental_compact_prompt_file"]
+            : undefined,
         expectation,
         scanDir,
         workbench: (args, input) => workbench(workbenchOptions, args, input),
@@ -2842,13 +2846,31 @@ export class CodexSecurity {
       const savedInputs = isRecord(registration["recipe"])
         ? registration["recipe"]["scanInputs"]
         : undefined;
-      const instructionDigest = isRecord(savedInputs)
-        ? savedInputs["modelInstructionsFileSha256"]
-        : undefined;
+      const savedInstructionFiles = (
+        [
+          [
+            "model_instructions_file",
+            "modelInstructionsFileSha256",
+            "model instructions",
+          ],
+          [
+            "experimental_compact_prompt_file",
+            "compactPromptFileSha256",
+            "compact prompt",
+          ],
+        ] as const
+      ).flatMap(([setting, digestKey, label]) => {
+        const digest = isRecord(savedInputs)
+          ? savedInputs[digestKey]
+          : undefined;
+        return typeof digest === "string" || digest === null
+          ? [{ setting, digest, label }]
+          : [];
+      });
       const canonicalSession: PreparedExecution =
         mode === "deep" &&
         registered.resumed &&
-        (typeof instructionDigest === "string" || instructionDigest === null)
+        savedInstructionFiles.length > 0
           ? {
               ...session,
               validateScanInputs: async (
@@ -2856,33 +2878,39 @@ export class CodexSecurity {
                 signal,
                 hasAttemptedExecution,
               ) => {
-                signal?.throwIfAborted();
-                let digest: string | null;
-                try {
-                  digest = await modelInstructionsFileDigest(
-                    typeof config["model_instructions_file"] === "string"
-                      ? config["model_instructions_file"]
-                      : undefined,
-                    signal,
-                  );
-                } catch (cause) {
+                for (const {
+                  setting,
+                  digest: expectedDigest,
+                  label,
+                } of savedInstructionFiles) {
                   signal?.throwIfAborted();
-                  throw new DeepScanInputRecoveryError(
-                    `Could not read the saved Deep Scan's model instructions: ${errorMessage(cause)}`,
-                    scanDir,
-                    !hasAttemptedExecution,
-                    { cause },
-                  );
+                  let digest: string | null;
+                  try {
+                    digest = await promptFileDigest(
+                      typeof config[setting] === "string"
+                        ? config[setting]
+                        : undefined,
+                      signal,
+                    );
+                  } catch (cause) {
+                    signal?.throwIfAborted();
+                    throw new DeepScanInputRecoveryError(
+                      `Could not read the saved Deep Scan's ${label}: ${errorMessage(cause)}`,
+                      scanDir,
+                      !hasAttemptedExecution,
+                      { cause },
+                    );
+                  }
+                  signal?.throwIfAborted();
+                  if (digest !== expectedDigest)
+                    throw new DeepScanInputRecoveryError(
+                      expectedDigest === null
+                        ? `This Deep Scan started without a ${label} file. Remove that setting before resuming, or start a new scan.`
+                        : `The ${label} file has changed since this Deep Scan started. Restore its original contents before resuming, or start a new scan.`,
+                      scanDir,
+                      !hasAttemptedExecution,
+                    );
                 }
-                signal?.throwIfAborted();
-                if (digest !== instructionDigest)
-                  throw new DeepScanInputRecoveryError(
-                    instructionDigest === null
-                      ? "This Deep Scan started without a model instructions file. Remove that setting before resuming, or start a new scan."
-                      : "The model instructions file has changed since this Deep Scan started. Restore its original contents before resuming, or start a new scan.",
-                    scanDir,
-                    !hasAttemptedExecution,
-                  );
               },
             }
           : session;

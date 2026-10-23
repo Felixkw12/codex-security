@@ -6,7 +6,7 @@ import {
 } from "../../../../sdk/typescript/src/runtime.js";
 import { hasSealedScanArtifacts } from "../../../../sdk/typescript/src/scan-publication.js";
 import {
-  modelInstructionsFileDigest,
+  promptFileDigest,
   restoreScanKnowledge,
 } from "../../../../sdk/typescript/src/scan-inputs.js";
 import { isRecord } from "./record.js";
@@ -228,7 +228,7 @@ export async function readNativeScanSemanticInputs(
         savedConfig["developer_instructions"] &&
       config["model_instructions_file"] ===
         savedConfig["model_instructions_file"] &&
-      (await modelInstructionsFileDigest(
+      (await promptFileDigest(
         typeof config["model_instructions_file"] === "string"
           ? config["model_instructions_file"]
           : undefined,
