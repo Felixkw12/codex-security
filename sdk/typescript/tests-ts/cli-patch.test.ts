@@ -604,9 +604,14 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
         );
         const result = JSON.parse(outcome.stdout);
         expect(result.repository).toBe(subdirectory);
-        expect(result.applied).toBe(!linkedComponent);
+        if (linkedComponent) {
+          expect(result).not.toHaveProperty("applied");
+          expect(result).not.toHaveProperty("filesChanged");
+        } else {
+          expect(result.applied).toBe(true);
+          expect(result.filesChanged).toBe(changedFiles.length);
+        }
         const reportedFiles = linkedComponent ? [] : changedFiles;
-        expect(result.filesChanged).toBe(reportedFiles.length);
         if (kind === "staged component changes")
           expect(git("show", ":sub/shared.ts")).toBe("staged component");
         expect(result.files).toEqual(
@@ -1700,6 +1705,7 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
 
   test("assesses patch risk only when the patch flag is selected", async () => {
     const directory = await repositories.create("saved-patch-risk-");
+    repositoryGit(directory)("init", "--initial-branch=main");
     for (const enabled of [false, true]) {
       const result = resultWithFindings(["high"]);
       let assessments = 0;
@@ -2324,6 +2330,7 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
 
   test("continues with separate patch tasks when one finding fails", async () => {
     const directory = await repositories.create("separate-patch-tasks-");
+    repositoryGit(directory)("init", "--initial-branch=main");
     const result = resultWithFindings(["critical", "high", "medium"]);
     const tasks: string[] = [];
     const outcome = await runWorkflow(["scan", "--patch", "--json"], {
@@ -2988,6 +2995,7 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
 
   test("does not publish blocked, unchanged, or repository-external patches", async () => {
     const directory = await repositories.create("patch-unpublishable-");
+    repositoryGit(directory)("init", "--initial-branch=main");
     for (const status of ["blocked", "no_change", "outside"] as const) {
       let commandStarted = false;
       const outcome = await runWorkflow(
@@ -3013,10 +3021,6 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
             return 0;
           },
           onRepositoryCommand: (command, args, _cwd, options) => {
-            if (command === "git" && args.includes("--absolute-git-dir"))
-              return options?.encoding === "base64"
-                ? Buffer.from(directory).toString("base64")
-                : directory;
             commandStarted ||=
               (command !== "git" && args[1] !== "list") ||
               ["checkout", "commit", "push"].includes(args[0]!);
