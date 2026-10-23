@@ -9895,7 +9895,7 @@ describe("ordinary patch snapshot context", () => {
             ? ["patch", "--scan", "scan-1"]
             : ["scan", directory, "--patch"];
       const selectedDirectoryRemoved =
-        route !== "ordinary" && operation === "remove" && flag !== undefined;
+        route !== "ordinary" && operation === "remove";
       let modelCalls = 0;
       let assessmentCalls = 0;
       let redirectedSnapshotCommands = 0;
