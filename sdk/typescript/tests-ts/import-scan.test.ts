@@ -989,7 +989,7 @@ test.each(["failure", "abort"] as const)(
   async (mode) => {
     const context = await fixture();
     const controller = new AbortController();
-    const failureMessage = `--synthetic-import-completion-failure ${"detail ".repeat(1000)}final cause`;
+    const failureMessage = `--synthetic-import-completion-failure ${"detail ".repeat(20_000)}final cause`;
     const run: typeof runWorkbench = async (options, args, input) => {
       if (args[0] === "prepare-scan-completion" && mode === "failure") {
         throw new Error(failureMessage);

@@ -6582,7 +6582,7 @@ describe("CodexSecurity orchestration", () => {
     ["plain", ""],
     ["NUL", "\0literal"],
     ["Unicode", "\0high\ud800.low\udfff.pair😀"],
-    ["long", `${"detail ".repeat(1000)}final cause`],
+    ["long", `${"detail ".repeat(20_000)}final cause`],
   ])(
     "preserves original failures in saved scan history (%s)",
     async (_label, suffix) => {
