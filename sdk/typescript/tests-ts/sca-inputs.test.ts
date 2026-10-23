@@ -431,9 +431,23 @@ describe("additional SCA input contracts", () => {
   test.each([
     { remotes: ["https://rubygems.org/"], unresolved: false },
     { remotes: ["http://rubygems.org"], unresolved: false },
+    { remotes: ["https://rubygems.org:443/"], unresolved: false },
+    { remotes: ["http://rubygems.org:80"], unresolved: false },
+    { remotes: ["HTTPS://RUBYGEMS.ORG:443"], unresolved: false },
+    { remotes: ["https://rubygems.org:8443/"], unresolved: true },
+    { remotes: ["http://rubygems.org:443/"], unresolved: true },
+    { remotes: ["https://rubygems.org:invalid/"], unresolved: true },
+    { remotes: ["https://rubygems.org:443/private"], unresolved: true },
+    { remotes: ["https://synthetic@rubygems.org:443/"], unresolved: true },
+    { remotes: ["https://rubygems.org:443/?source=private"], unresolved: true },
+    { remotes: ["https://rubygems.org:443/#private"], unresolved: true },
     { remotes: ["https://gems.example.test"], unresolved: true },
     {
       remotes: ["https://rubygems.org/", "https://gems.example.test"],
+      unresolved: true,
+    },
+    {
+      remotes: ["https://rubygems.org:443/", "https://gems.example.test"],
       unresolved: true,
     },
     { remotes: [], unresolved: true },

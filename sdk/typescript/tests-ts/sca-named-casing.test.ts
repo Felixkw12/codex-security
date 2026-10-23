@@ -52,12 +52,19 @@ const fixtures = [
       develop: {},
     }),
   },
+  {
+    name: "dependency.pom",
+    variant: "dependency.POM",
+    format: "maven",
+    content:
+      "<project><modelVersion>4.0.0</modelVersion><dependencies><dependency><groupId>example.test</groupId><artifactId>synthetic-java</artifactId><version>1.2.0</version></dependency></dependencies></project>",
+  },
 ] as const;
 
 test.each(["native", "win32"] as const)(
-  "fixed lockfile names preserve format and coverage (%s)",
+  "dependency filenames preserve format and coverage (%s)",
   async (platform) => {
-    const name = `fixed lockfile names preserve format and coverage (${platform})`;
+    const name = `dependency filenames preserve format and coverage (${platform})`;
     if (runTestInSubprocess(import.meta.path, name)) return;
     const { additionalScaFormat, inspectAdditionalScaInput, scaInputBasename } =
       await import("../src/sca-inputs.js");
@@ -126,7 +133,7 @@ test.each(["native", "win32"] as const)(
         for (const filename of [
           "package-lock.json.backup",
           "other.lock",
-          "synthetic.POM",
+          "synthetic.POM.backup",
         ])
           await writeFile(join(repository, filename), npm);
         if (mode === "subtree") {
