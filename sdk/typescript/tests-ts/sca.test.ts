@@ -3021,8 +3021,191 @@ test("finalizes an interrupted checkpoint with all assessments already saved", a
   expect(result.status).toBe("completed");
   expect(result.assessments).toEqual(checkpoint.assessments);
   expect(result.model.cost).toEqual(checkpoint.model.cost);
+  expect(result.assessmentContext).toEqual(checkpoint.assessmentContext);
   expect(f.turns).toHaveLength(2);
-  expect(f.calls.scanner).toBe(1);
+  expect(f.calls).toEqual({ runtime: 1, model: 1, scanner: 1 });
+});
+
+test.each([
+  "unavailable runtime",
+  "changed settings",
+  "missing assessment",
+  "exact budget",
+  "over budget",
+  "zero budget",
+  "NaN budget",
+  "unverified cost",
+  "unverified cost without limit",
+  "source changed",
+  "source changed before finalization",
+  "cancelled before finalization",
+] as const)("handles a fully assessed checkpoint with %s", async (scenario) => {
+  const f = await fixture({ turns: ["completed", "completed"] });
+  await using initial = f.client;
+  const options = { repositoryPath: f.repository, outputDir: f.outputDir };
+  const perTurn = estimateScanCost("gpt-5.6-sol", {
+    input_tokens: 1000,
+    cache_write_input_tokens: 0,
+    output_tokens: 1000,
+  })!.estimatedUsd;
+  const unverified = scenario.startsWith("unverified cost");
+  const originalStop = ScanCostTracker.prototype.stop;
+  const stop = unverified
+    ? spyOn(ScanCostTracker.prototype, "stop").mockImplementation(
+        async function (this: ScanCostTracker, usage?: unknown) {
+          return { ...(await originalStop.call(this, usage)), cost: null };
+        },
+      )
+    : undefined;
+  try {
+    await expect(
+      initial.scanDependencies({
+        ...options,
+        maxCostUsd: perTurn * (unverified ? 3 : 1.5),
+      }),
+    ).rejects.toBeInstanceOf(
+      unverified ? ScanInterruptedError : ScanCostLimitExceededError,
+    );
+  } finally {
+    stop?.mockRestore();
+  }
+  const path = join(f.outputDir, "sca-result.json");
+  let serialized = await readFile(path, "utf8");
+  const checkpoint: ScaResult = JSON.parse(serialized);
+  expect(checkpoint.status).toBe("partial");
+  expect(checkpoint.coverage.status).toBe("complete");
+  expect(
+    checkpoint.assessments.every((item) => item.status === "completed"),
+  ).toBe(true);
+  expect(checkpoint.model.costPending).toBe(unverified);
+  if (scenario === "missing assessment") {
+    checkpoint.assessments.pop();
+    serialized = `${JSON.stringify(checkpoint, null, 2)}\n`;
+    await writeFile(path, serialized);
+  }
+  if (scenario === "source changed")
+    await writeFile(
+      join(f.repository, "usage.txt"),
+      "synthetic changed source",
+    );
+  const controller = new AbortController();
+  const calls = { runtime: 0, model: 0, scanner: 0 };
+  let snapshots = 0;
+  await using continuation = new TestClient(
+    scenario === "changed settings"
+      ? {
+          codexOverrides: {
+            model: "synthetic-unpriced-model",
+            model_reasoning_effort: "low",
+          },
+        }
+      : initial.config,
+    {
+      environment: f.environment,
+      sourceSnapshot: async () => {
+        if (++snapshots === 2) {
+          if (scenario === "source changed before finalization")
+            await writeFile(
+              join(f.repository, "usage.txt"),
+              "synthetic changed source before finalization",
+            );
+          if (scenario === "cancelled before finalization")
+            controller.abort("synthetic cancellation before finalization");
+        }
+        return {
+          repository: f.repository,
+          revision: checkpoint.repository.revision,
+          content: await readFile(join(f.repository, "usage.txt"), "utf8"),
+        };
+      },
+      prepareRuntime: async () => {
+        calls.runtime++;
+        throw new Error("synthetic authentication unavailable");
+      },
+      createCodex: () => {
+        calls.model++;
+        throw new Error("No model work remains");
+      },
+      runOsvScan: async () => {
+        calls.scanner++;
+        throw new Error("Matching must not repeat");
+      },
+    },
+  );
+  const maxCostUsd =
+    scenario === "unverified cost without limit"
+      ? undefined
+      : scenario === "zero budget"
+        ? 0
+        : scenario === "NaN budget"
+          ? Number.NaN
+          : perTurn *
+            (scenario === "over budget"
+              ? 1.5
+              : scenario === "exact budget"
+                ? 2
+                : 3);
+  const costs: Readonly<ScanCost>[] = [];
+  const operation = continuation.scanDependencies({
+    ...options,
+    maxCostUsd,
+    signal: controller.signal,
+    onCost: (cost) => {
+      costs.push(cost);
+    },
+  });
+  if (scenario === "over budget")
+    await expect(operation).rejects.toBeInstanceOf(ScanCostLimitExceededError);
+  else if (scenario === "zero budget" || scenario === "NaN budget")
+    await expect(operation).rejects.toThrow("positive USD amount");
+  else if (scenario === "unverified cost")
+    await expect(operation).rejects.toThrow(
+      "earlier assessment usage is unavailable",
+    );
+  else if (scenario.startsWith("source changed"))
+    await expect(operation).rejects.toThrow("source changed");
+  else if (scenario === "missing assessment") {
+    const result = await operation;
+    expect(result.status).toBe("partial");
+    expect(result.matches).toEqual(checkpoint.matches);
+    expect(result.assessments).toEqual(checkpoint.assessments);
+    expect(result.diagnostics.at(-1)).toContain(
+      "synthetic authentication unavailable",
+    );
+  } else if (scenario === "cancelled before finalization")
+    await expect(operation).rejects.toBeInstanceOf(ScanInterruptedError);
+  else {
+    const result = await operation;
+    expect(result.status).toBe("completed");
+    expect(result.assessments).toEqual(checkpoint.assessments);
+    expect(result.assessmentContext).toEqual(checkpoint.assessmentContext);
+    expect(result.matches).toEqual(checkpoint.matches);
+    expect(result.components).toEqual(checkpoint.components);
+    expect(result.model).toEqual(checkpoint.model);
+    if (unverified) {
+      expect(result.model.costPending).toBe(true);
+      expect(result.model.costUsd).toBeNull();
+      expect(result.model.cost).toBeUndefined();
+      expect(costs).toEqual([]);
+    } else expect(costs).toEqual([checkpoint.model.cost!]);
+    expect(JSON.parse(await readFile(path, "utf8"))).toEqual(result);
+  }
+  if (
+    ![
+      "unavailable runtime",
+      "changed settings",
+      "exact budget",
+      "unverified cost without limit",
+    ].includes(scenario)
+  )
+    expect(await readFile(path, "utf8")).toBe(serialized);
+  expect(calls).toEqual({
+    runtime: scenario === "missing assessment" ? 1 : 0,
+    model: 0,
+    scanner: 0,
+  });
+  expect(f.calls).toEqual({ runtime: 1, model: 1, scanner: 1 });
+  expect(f.turns).toHaveLength(2);
 });
 
 test("continues unfinished assessments after incomplete matching without repeating matching", async () => {

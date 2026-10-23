@@ -1104,6 +1104,57 @@ export class CodexSecurity {
         notifyObserver(options, "onInventory")(structuredClone(result));
       throwIfAborted(signal, outputDir);
       if (result.matches.length === 0) return result;
+      const { assessments } = result;
+      if (
+        continuing &&
+        result.coverage.status === "complete" &&
+        assessments.every((item) => item.status === "completed") &&
+        result.matches.every((match) =>
+          assessments.some((assessment) => assessment.matchId === match.id),
+        )
+      ) {
+        // No model work remains: finalize the saved evidence with its original
+        // model, skill, and configuration rather than preparing a new session.
+        const cost = result.model.costPending
+          ? null
+          : (result.model.cost ?? null);
+        if (options.maxCostUsd !== undefined) {
+          if (cost === null)
+            throw new CodexSecurityError(
+              "Cannot continue with a cost limit because earlier assessment usage is unavailable.",
+            );
+          if (cost.estimatedUsd > options.maxCostUsd)
+            throw new ScanCostLimitExceededError(
+              options.maxCostUsd,
+              cost,
+              outputDir,
+            );
+        }
+        if (cost !== null) onCost(cost, options.maxCostUsd);
+        notifyObserver(options, "onOutputDirReady")(outputDir);
+        const currentSource = await sourceSnapshot();
+        if (currentSource.digest !== result.assessmentContext!.sourceDigest)
+          throw new CodexSecurityError(
+            `Cannot continue dependency assessment: source changed (saved revision ${result.repository.revision ?? "unversioned"}, current revision ${String(currentSource.revision)}). Restore the original source or start a new run.`,
+          );
+        throwIfAborted(signal, outputDir);
+        canSave = true;
+        result.diagnostics = result.diagnostics.map(
+          (message) => `Previous attempt: ${message}`,
+        );
+        if (cost === null) {
+          result.model.costUsd = null;
+          delete result.model.cost;
+          result.diagnostics.push(
+            "Earlier assessment usage is unavailable; cumulative estimated cost remains unavailable.",
+          );
+        }
+        result.status = "completed";
+        reportProgress({ phase: "saving" });
+        await saveDependencyScan(result);
+        throwIfAborted(signal, outputDir);
+        return result;
+      }
       // Authentication is deliberately deferred until deterministic evidence is durable.
       try {
         reportProgress({ phase: "preparing_assessment" });
