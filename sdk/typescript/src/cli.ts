@@ -2601,7 +2601,7 @@ export async function main(
     })
     .command("resume", {
       description: "Resume an interrupted Deep Scan in its original session.",
-      hint: "Execution failures in full-output JSON or JSONL use ok: false and keep available scan results under data.",
+      hint: "Execution failures keep available scan results under data in failed full-output JSON, JSONL, YAML, or TOON envelopes.",
       mcp: false,
       args: z.object({
         scanId: z.string().min(1).describe("Interrupted Deep Scan identifier."),
@@ -2675,7 +2675,10 @@ export async function main(
         }
         scanArguments.includeFailureResults =
           argv.includes("--full-output") &&
-          (format === "json" || format === "jsonl");
+          (format === "json" ||
+            format === "jsonl" ||
+            format === "yaml" ||
+            format === "toon");
         const outcome = await runScan(
           scanArguments,
           errorOutput,
@@ -2688,7 +2691,7 @@ export async function main(
     .command("rerun", {
       description:
         "Start a new scan using saved settings and current checkout/context files.",
-      hint: "Execution failures in full-output JSON or JSONL use ok: false and keep available scan results under data.",
+      hint: "Execution failures keep available scan results under data in failed full-output JSON, JSONL, YAML, or TOON envelopes.",
       destructive: true,
       mcp: false,
       args: z.object({
@@ -2829,7 +2832,10 @@ export async function main(
         }
         scanArguments.includeFailureResults =
           argv.includes("--full-output") &&
-          (format === "json" || format === "jsonl");
+          (format === "json" ||
+            format === "jsonl" ||
+            format === "yaml" ||
+            format === "toon");
         const outcome = await runScan(
           scanArguments,
           errorOutput,
@@ -4473,7 +4479,10 @@ export async function main(
               mock: options.mock,
               includeFailureResults:
                 argv.includes("--full-output") &&
-                (format === "json" || format === "jsonl"),
+                (format === "json" ||
+                  format === "jsonl" ||
+                  format === "yaml" ||
+                  format === "toon"),
             },
             errorOutput,
             dependencies,
