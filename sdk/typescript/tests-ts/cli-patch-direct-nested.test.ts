@@ -202,7 +202,7 @@ for (const {
     const published = publish && !rejected;
     expect(outcome.exitCode, outcome.stderr).toBe(rejected ? 2 : 0);
     if (rejected) {
-      expect(outcome.stderr).toContain("nested/app.ts");
+      expect(outcome.stderr).toContain(join("nested", "app.ts"));
       expect(outcome.stderr).not.toContain("No patch was applied");
     }
     expect(publications).toBe(published ? 1 : 0);

@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
+import { buildPatchGitControlsForNode } from "./support/node-patch-git-controls.js";
 import {
   repositoryGit,
   runGitRepositoryCommand,
@@ -36,11 +37,12 @@ test.skipIf(process.platform === "win32")(
     const index = await readFile(join(root, ".git", "index"));
     git("config", "core.hooksPath", "");
     const config = await readFile(join(root, ".git", "config"));
+    const bundle = await fixtures.create("patch-empty-hook-node-");
     // Query native paths only: do not execute unknown hooks at the POSIX root.
     const program = `
 import { execFileSync } from "node:child_process";
 import { rename, writeFile } from "node:fs/promises";
-import { capturePatchGitControls } from ${JSON.stringify(new URL("../src/patch-git-controls.ts", import.meta.url).href)};
+import { capturePatchGitControls } from ${JSON.stringify(await buildPatchGitControlsForNode(bundle))};
 const root = ${JSON.stringify(root)};
 const shadow = ${JSON.stringify(shadow)};
 const nativeHook = execFileSync("git", ["rev-parse", "--git-path", "hooks/post-index-change"], {cwd: root}).toString().trim();
@@ -57,11 +59,9 @@ try { await controls.validate(); } catch (failure) { error = failure.message; }
 process.stdout.write(JSON.stringify({nativeHook, paths: controls.readOnlyPaths, error}));
 `;
     const result = JSON.parse(
-      execFileSync(
-        "node",
-        ["--experimental-strip-types", "--input-type=module", "-e", program],
-        { encoding: "utf8" },
-      ),
+      execFileSync("node", ["--input-type=module", "-e", program], {
+        encoding: "utf8",
+      }),
     ) as {
       nativeHook: string;
       paths: string[];
