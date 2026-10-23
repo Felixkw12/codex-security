@@ -11,7 +11,7 @@ test.each(["native", "win32"] as const)(
   async (platform) => {
     const name = `requirements filename casing preserves input coverage (${platform})`;
     if (runTestInSubprocess(import.meta.path, name)) return;
-    const { additionalScaFormat, inspectAdditionalScaInput } =
+    const { additionalScaFormat, inspectAdditionalScaInput, scaInputBasename } =
       await import("../src/sca-inputs.js");
     // Only the filename predicate observes the simulated platform. Filesystem,
     // Git, path handling, and process execution retain their native behavior.
@@ -33,6 +33,7 @@ test.each(["native", "win32"] as const)(
           }
         },
         inspectAdditionalScaInput,
+        scaInputBasename,
       }));
     }
     const { discoverScaInputs, runOsvScan } = await import("../src/sca-osv.js");

@@ -2071,6 +2071,80 @@ packages:
       expect(result.matches).toHaveLength(matched ? 1 : 0);
     },
   );
+  test.each([2, 3, "pnpm9"] as const)(
+    "classifies registry tarball authorities in lockfile %p",
+    async (format) => {
+      for (const [resolved, publicRegistry] of [
+        ["https://registry.npmjs.org/synthetic.tgz", true],
+        ["https://registry.npmjs.org:443/synthetic.tgz", true],
+        ["http://registry.npmjs.org:80/synthetic.tgz", true],
+        ["HTTPS://REGISTRY.NPMJS.ORG:0443/@synthetic/lib/-/lib.tgz", true],
+        ["https://registry.npmjs.org:8443/synthetic.tgz", false],
+        ["https://registry.npmjs.org:80/synthetic.tgz", false],
+        ["http://registry.npmjs.org:443/synthetic.tgz", false],
+        ["https://registry.example.test:443/synthetic.tgz", false],
+        [
+          "https://synthetic:password@registry.npmjs.org:443/synthetic.tgz",
+          false,
+        ],
+        ["https://registry.npmjs.org:443/synthetic.tgz?source=example", true],
+        ["https://registry.npmjs.org:443/synthetic.tgz#example", true],
+        ["https://registry.npmjs.org?source=example", false],
+        ["https://registry.npmjs.org:443?source=example", false],
+        ["https://registry%2enpmjs.org/synthetic.tgz", false],
+      ] as const) {
+        const path =
+          format === "pnpm9" ? "pnpm-lock.yaml" : "package-lock.json";
+        const { repository, output } = await setup();
+        await writeFile(
+          join(repository, path),
+          JSON.stringify(
+            format === "pnpm9"
+              ? {
+                  lockfileVersion: "9.0",
+                  packages: {
+                    "synthetic-lib@1.2.0": {
+                      resolution: { tarball: resolved },
+                    },
+                  },
+                }
+              : {
+                  lockfileVersion: format,
+                  packages: {
+                    "node_modules/synthetic-lib": {
+                      version: "1.2.0",
+                      resolved,
+                    },
+                  },
+                },
+          ),
+        );
+        const result = await runOsvScan(
+          { repositoryPath: repository, outputDir: output },
+          {
+            executable: process.execPath,
+            runProcess: async (_exe, argv) => ({
+              stdout:
+                argv[0] === "--version"
+                  ? "2.6.0"
+                  : JSON.stringify(rawOutput(path, [])),
+              stderr: "",
+              exitCode: 0,
+            }),
+          },
+        );
+        expect(result.status, resolved).toBe(
+          publicRegistry ? "completed" : "partial",
+        );
+        expect(result.coverage.unresolvedPackages, resolved).toBe(
+          publicRegistry ? 0 : 1,
+        );
+        expect(result.components).toHaveLength(1);
+        if (!publicRegistry)
+          expect(result.coverage.limitations.join("\n")).toContain(resolved);
+      }
+    },
+  );
   test.each(
     ["dependencies", "devDependencies", "optionalDependencies"].flatMap(
       (group) =>
@@ -2078,6 +2152,8 @@ packages:
           "https://registry.npmjs.org",
           "HTTPS://REGISTRY.NPMJS.ORG",
           "HtTpS://Registry.Npmjs.Org",
+          "https://registry.npmjs.org:443",
+          "http://registry.npmjs.org:80",
         ].map((origin) => ({ group, origin })),
     ),
   )(
@@ -2183,17 +2259,24 @@ packages:
     },
   );
   test.each(
-    ["https", "HTTPS", "HtTpS", "HTTP"].flatMap((scheme) =>
+    [
+      "https://registry.npmjs.org",
+      "HTTPS://registry.npmjs.org",
+      "HtTpS://registry.npmjs.org",
+      "HTTP://registry.npmjs.org",
+      "https://registry.npmjs.org:443",
+      "http://registry.npmjs.org:80",
+    ].flatMap((origin) =>
       ["bare", "named", "importer", "snapshot", "registry"].map((layout) => ({
-        scheme,
+        origin,
         layout,
       })),
     ),
   )(
-    "preserves pnpm $scheme URL provenance in $layout references",
-    async ({ scheme, layout }) => {
+    "preserves pnpm $origin URL provenance in $layout references",
+    async ({ origin, layout }) => {
       const { repository, output } = await setup();
-      const resolution = `${scheme}://registry.npmjs.org/synthetic-lib/-/synthetic-lib-1.2.0.tgz`;
+      const resolution = `${origin}/synthetic-lib/-/synthetic-lib-1.2.0.tgz`;
       const key =
         layout === "bare"
           ? resolution
