@@ -30,6 +30,7 @@ import {
 import { throwing } from "./support/errors.js";
 import { createCliTest } from "./support/cli-run.js";
 import {
+  setupPatchWorkflowFixtures,
   CURRENT_REPOSITORY,
   SAVED_REPOSITORY,
   STATE_DIRECTORY,
@@ -45,6 +46,8 @@ import {
   runGitRepositoryCommand,
   publicationRepository as createPublicationRepository,
 } from "./cli-patch-fixtures.js";
+
+setupPatchWorkflowFixtures();
 
 describe("scan and patch workflow", () => {
   const fixtures = createTemporaryDirectories(true);
@@ -62,6 +65,7 @@ describe("scan and patch workflow", () => {
       const setInterval = mock(() => ({}) as NodeJS.Timeout);
       const clearInterval = mock();
       const current = dependencies({
+        currentDirectory: CURRENT_REPOSITORY,
         result,
         onWorkbench: () => savedScan(result),
         onRepositoryCommand: (_command, args) => {
@@ -74,7 +78,7 @@ describe("scan and patch workflow", () => {
           if (args.includes("add") && modelStarted)
             resultSnapshotHadProgress =
               setInterval.mock.calls.length > clearInterval.mock.calls.length;
-          return args.includes("--name-only") ? "src/finding-1.ts\0" : "";
+          return undefined;
         },
         onCodex: (args, output) => {
           modelStarted = true;
@@ -117,6 +121,7 @@ describe("scan and patch workflow", () => {
         { isTTY: true },
       );
       const current = dependencies({
+        currentDirectory: CURRENT_REPOSITORY,
         result,
         onWorkbench: () => savedScan(result),
         onCodex: async (_args, output) => {
@@ -157,6 +162,7 @@ describe("scan and patch workflow", () => {
       Object.assign(stderr.stream, { columns: 36 });
       let now = 0;
       const current = dependencies({
+        currentDirectory: CURRENT_REPOSITORY,
         result,
         onWorkbench: () => savedScan(result),
         onCodex: (args, output) => {
@@ -198,6 +204,7 @@ describe("scan and patch workflow", () => {
       let index = 0;
       const timers = new Map<NodeJS.Timeout, () => void>();
       const current = dependencies({
+        currentDirectory: CURRENT_REPOSITORY,
         result,
         onWorkbench: () => savedScan(result),
         onCodex: (args, output) => {
@@ -335,6 +342,7 @@ describe("scan and patch workflow", () => {
     "passes static verification to patching (saved findings: %p)",
     async (saved) => {
       const result = resultWithFindings(["high"]);
+      result.findings.findings[0]!.locations[0]!.path = "guard.ts";
       const report =
         "Source review confirms the guard; runtime checks were not performed.";
       const onCodex = mock<OnCodex>((_args, output) => {
@@ -743,7 +751,7 @@ describe("scan and patch workflow", () => {
             if (args[0] === "remote") {
               return "https://github.example.test/example/repository.git";
             }
-            return args.includes("--name-only") ? "src/finding-1.ts\0" : "";
+            return undefined;
           }
           return args[1] === "create"
             ? "https://github.example.test/example/repository/pull/15"
@@ -1838,6 +1846,7 @@ describe("scan and patch workflow", () => {
                 !(args[0] === "repo" && args[1] === "view")) ||
               ["checkout", "commit", "push"].includes(args[0]!);
             if (command === "gh" && args[1] === "list") return "[]";
+            if (args.includes("--show-toplevel")) return undefined;
             const output =
               status === "outside" && args.includes("--name-only")
                 ? "src/finding-1.ts\0"
@@ -1875,10 +1884,10 @@ describe("scan and patch workflow", () => {
         ],
         {
           result: resultWithFindings(["high"]),
-          onRepositoryCommand: (command, args) => {
+          onRepositoryCommand: (command) => {
             if (command === "gh")
               throw new Error("GitHub authentication failed.");
-            return args.includes("--name-only") ? "src/finding-1.ts\0" : "";
+            return undefined;
           },
         },
       );
@@ -2181,11 +2190,7 @@ describe("scan and patch workflow", () => {
           if (args.includes("--cached")) return "";
           published ||= command === "gh" && args[1] === "create";
           if (command === "gh" && args[1] === "list") return "[]";
-          return command === "gh" && args[1] === "create"
-            ? url
-            : args.includes("--name-only")
-              ? "src/finding-1.ts\0"
-              : "";
+          return command === "gh" && args[1] === "create" ? url : undefined;
         },
       },
       {
@@ -2616,11 +2621,13 @@ describe("scan and patch workflow", () => {
               }
               if (args[0] === "rev-parse" && args.includes("--verify"))
                 return "synthetic-commit";
-              return args[0] === "remote"
-                ? `https://${provider}.com/example/repository.git`
-                : args.includes("--name-only")
-                  ? "src/finding-1.ts\0"
-                  : "";
+              return encoded(
+                args[0] === "remote"
+                  ? `https://${provider}.com/example/repository.git`
+                  : args.includes("--name-only")
+                    ? "src/finding-1.ts\0"
+                    : "",
+              );
             }
             expect(command).toBe(gitlab ? "glab" : "gh");
             if (args[1] === "list") return gitlab ? "" : "[]";
@@ -2724,7 +2731,7 @@ describe("scan and patch workflow", () => {
                 ]);
                 commands.push("push");
               }
-              return args.includes("--name-only") ? "src/finding-1.ts\0" : "";
+              return undefined;
             }
             expect(command).toBe("glab");
             commands.push(args[1]!);

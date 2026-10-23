@@ -9631,11 +9631,13 @@ async function changedPatchFiles(
   repository: string,
   base: string | GitPatchState | Map<string, string>,
   dependencies: CliDependencies,
+  pathKeys = false,
 ): Promise<string[]> {
   if (base instanceof Map) {
     const head = await snapshotPatchDirectory(repository);
     return [...new Set([...base.keys(), ...head.keys()])]
       .filter((path) => base.get(path) !== head.get(path))
+      .map((path) => (pathKeys ? patchPathKey(path) : path))
       .sort();
   }
   const root = typeof base === "string" ? repository : base.root;
@@ -9643,21 +9645,23 @@ async function changedPatchFiles(
     typeof base === "string"
       ? await snapshotPatchTree(root, dependencies)
       : await snapshotGitPatchState(root, dependencies);
-  const output = await dependencies.runRepositoryCommand(
-    "git",
-    [
-      "--literal-pathspecs",
-      "diff",
-      "--name-only",
-      "--no-renames",
-      "-z",
-      typeof base === "string" ? base : base.tree,
-      typeof head === "string" ? head : head.tree,
-    ],
-    root,
-    { trim: false },
-  );
-  const files = new Set(output.split("\0").filter(Boolean));
+  const args = [
+    "--literal-pathspecs",
+    "diff",
+    "--name-only",
+    "--no-renames",
+    "-z",
+    typeof base === "string" ? base : base.tree,
+    typeof head === "string" ? head : head.tree,
+  ];
+  const names = pathKeys
+    ? await patchGitRecords(root, args, dependencies)
+    : (
+        await dependencies.runRepositoryCommand("git", args, root, {
+          trim: false,
+        })
+      ).split("\0");
+  const files = new Set(names.filter(Boolean));
   if (typeof base !== "string" && typeof head !== "string") {
     const before = new Map(base.files);
     const after = new Map(head.files);
@@ -9706,7 +9710,8 @@ async function changedPatchFiles(
         await hydrate(head, base, directory, current.commit, after);
     }
     for (const path of new Set([...before.keys(), ...after.keys()])) {
-      if (before.get(path) !== after.get(path)) files.add(patchPathText(path));
+      if (before.get(path) !== after.get(path))
+        files.add(pathKeys ? path : patchPathText(path));
     }
   }
   return [...files].sort();
@@ -10480,9 +10485,12 @@ async function runFindingPatches(
     });
     let status: number;
     let changedFiles: string[];
+    let changedKeys: string[];
+    let base: GitPatchState | Map<string, string> | undefined;
+    let repositoryKey = patchPathKey(selected.repository);
+    let rootKey = repositoryKey;
     let preparationCompleted = false;
     try {
-      let base: GitPatchState | Map<string, string> | undefined;
       status = await runSkill(
         "fix-finding",
         [],
@@ -10500,6 +10508,14 @@ async function runFindingPatches(
               dependencies,
               signal,
             );
+            if (!(base instanceof Map) && base.root !== selected.repository) {
+              const [repositoryPath, rootPath] = await Promise.all([
+                realpath(selected.repository, { encoding: "buffer" }),
+                realpath(base.root, { encoding: "buffer" }),
+              ]);
+              repositoryKey = repositoryPath.toString("latin1");
+              rootKey = rootPath.toString("latin1");
+            }
             signal?.throwIfAborted();
             preparationCompleted = true;
           },
@@ -10511,13 +10527,19 @@ async function runFindingPatches(
           onEvent: progress.observe.bind(progress),
         },
       );
-      changedFiles =
+      changedKeys =
         base === undefined ||
         status === 130 ||
         status === 143 ||
         !preparationCompleted
           ? []
-          : await changedPatchFiles(selected.repository, base, dependencies);
+          : await changedPatchFiles(
+              selected.repository,
+              base,
+              dependencies,
+              true,
+            );
+      changedFiles = [...new Set(changedKeys.map(patchPathText))].sort();
     } finally {
       progress.stop();
     }
@@ -10595,6 +10617,33 @@ async function runFindingPatches(
         stderr.write("codex-security: Patch results were not valid JSON.\n");
         patch = failed("Patch results were not valid JSON.");
       }
+    }
+
+    if (patch.status === "verified") {
+      const files = verifiedPatchFiles(selected, [patch]).map((file) =>
+        canonicalPatchPath(selected.repository, patchPathKey(file)),
+      );
+      const root =
+        base !== undefined && !(base instanceof Map)
+          ? base.root
+          : selected.repository;
+      const changes = changedKeys.map((file) =>
+        relativePatchPath(
+          repositoryKey,
+          resolve(rootKey, canonicalPatchPath(root, file)),
+        ),
+      );
+      if (
+        !files.some((file) =>
+          changes.some(
+            (changed) => !isOutsidePath(relativePatchPath(file, changed)),
+          ),
+        )
+      )
+        patch = failed(
+          "Patch verification did not identify any changed files.",
+          changedFiles,
+        );
     }
 
     const title = safePatchText(finding.title);
