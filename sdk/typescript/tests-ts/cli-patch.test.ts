@@ -454,6 +454,7 @@ describe("scan and patch workflow", () => {
       const validation =
         "Start the local app. Exercise the fix and a legitimate request. Stop the app.\n";
       try {
+        repositoryGit(repository)("init", "--initial-branch=main");
         await writeFile(join(repository, "validation.md"), validation);
         await writeFile(
           join(repository, "issues.md"),
@@ -525,6 +526,7 @@ describe("scan and patch workflow", () => {
     let calls = 0;
     try {
       await mkdir(repository);
+      repositoryGit(repository)("init", "--initial-branch=main");
       await writeFile(join(directory, "validation.md"), validation);
       const outcome = await runWorkflow(
         [
@@ -588,6 +590,7 @@ describe("scan and patch workflow", () => {
           ),
         );
         execFileSync("git", ["init", "--quiet", checkout]);
+        repositoryGit(repository)("init", "--initial-branch=main");
         if (invocation === "nested-worktree")
           execFileSync("git", ["init", "--quiet", dirname(directory)]);
         await writeFile(
@@ -1945,7 +1948,20 @@ describe("scan and patch workflow", () => {
                 !(args[0] === "repo" && args[1] === "view")) ||
               ["checkout", "commit", "push"].includes(args[0]!);
             if (command === "gh" && args[1] === "list") return "[]";
-            if (args.includes("--show-toplevel")) return undefined;
+            if (
+              args.includes("rev-parse") &&
+              args.some((argument) =>
+                [
+                  "--show-toplevel",
+                  "--absolute-git-dir",
+                  "--git-common-dir",
+                  "--git-dir",
+                  "--git-path",
+                  "--resolve-git-dir",
+                ].includes(argument),
+              )
+            )
+              return undefined;
             const output =
               status === "outside" && args.includes("--name-only")
                 ? "src/finding-1.ts\0"
