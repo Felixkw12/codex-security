@@ -57,6 +57,7 @@ import { preparedRuntime } from "./support/api-events.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { writeSession } from "./support/usage-rollout.js";
+import { runTestInSubprocess } from "./support/test-subprocess.js";
 
 const { create: temporaryDirectory, cleanup } = createTemporaryDirectories();
 afterEach(cleanup);
@@ -3405,6 +3406,226 @@ test("malformed optional package metadata preserves inventory and assessment", a
   );
   expect(result.assessmentContext?.sourceDigest).toBeString();
 });
+
+test.each(
+  (["npm", "pnpm"] as const).flatMap((format) =>
+    (
+      [
+        "single",
+        "unresolved workspace",
+        "missing workspace manifest",
+        "installed workspace",
+        "installed root",
+      ] as const
+    ).map((state) => ({ format, state })),
+  ),
+)(
+  "dependency assessment preserves project attribution (%j)",
+  async ({ format, state }) => {
+    const path = format === "npm" ? "package-lock.json" : "pnpm-lock.yaml";
+    const f = await fixture({
+      dependencyInput: { path, format, ecosystem: "npm" },
+    });
+    await using security = f.client;
+    const dependencies = { "synthetic-package": "1.0.0" };
+    const single = state === "single";
+    const root = state === "installed root" || single;
+    await writeFile(
+      join(f.repository, "package.json"),
+      JSON.stringify({
+        name: "synthetic-root",
+        version: "1.0.0",
+        private: false,
+        dependencies: root ? dependencies : {},
+      }),
+    );
+    if (!single && state !== "missing workspace manifest") {
+      await mkdir(join(f.repository, "packages/app"), { recursive: true });
+      await writeFile(
+        join(f.repository, "packages/app/package.json"),
+        JSON.stringify({
+          name: "synthetic-app",
+          version: "1.0.0",
+          private: true,
+          dependencies: root ? {} : dependencies,
+        }),
+      );
+    }
+    await writeFile(
+      join(f.repository, path),
+      format === "npm"
+        ? JSON.stringify({
+            lockfileVersion: 3,
+            packages: { "": {}, ...(single ? {} : { "packages/app": {} }) },
+          })
+        : `lockfileVersion: '9.0'\nimporters:\n  .: {}\n${single ? "" : "  packages/app: {}\n"}`,
+    );
+    const installed =
+      state === "installed root" || state === "installed workspace";
+    if (installed) {
+      const directory = join(f.repository, "node_modules/synthetic-package");
+      await mkdir(directory, { recursive: true });
+      await writeFile(
+        join(directory, "package.json"),
+        JSON.stringify({ name: "synthetic-package", version: "1.0.0" }),
+      );
+      await writeFile(
+        join(directory, "index.js"),
+        'throw new Error("Package code must not execute");',
+      );
+    }
+    let inventory: ScaResult | undefined;
+    const result = await security.scanDependencies({
+      repositoryPath: f.repository,
+      outputDir: f.outputDir,
+      onInventory: (value) => {
+        inventory = value;
+      },
+    });
+    expect(result.status).toBe("completed");
+    expect(result.assessments[0]!.status).toBe("completed");
+    expect(result.matches).toHaveLength(1);
+    const evidence = JSON.parse(
+      await readFile(join(f.outputDir, "sca-assessment-input.json"), "utf8"),
+    );
+    const context = result.packageContexts![0]!;
+    expect(evidence.packageContext).toEqual(context);
+    expect(f.captured.evidence!.packageContexts).toEqual(
+      result.packageContexts,
+    );
+    expect(inventory!.packageContexts).toEqual(result.packageContexts);
+    expect(f.captured.prompt).toContain("sca-assessment-input.json");
+    expect(context).toMatchObject({
+      manifestPath:
+        single || state === "installed root"
+          ? "package.json"
+          : installed
+            ? join("packages", "app", "package.json")
+            : null,
+      projectName:
+        single || state === "installed root"
+          ? "synthetic-root"
+          : installed
+            ? "synthetic-app"
+            : null,
+      private:
+        single || state === "installed root" ? false : installed ? true : null,
+      installedPath: installed
+        ? join("node_modules", "synthetic-package")
+        : null,
+    });
+    expect(context.dependencyChain.map((item) => item.name)).toEqual(
+      installed
+        ? [root ? "synthetic-root" : "synthetic-app", "synthetic-package"]
+        : [],
+    );
+    expect(evidence.component.sourcePath).toBe(path);
+    const report = await readFile(join(f.outputDir, "report.md"), "utf8");
+    expect(report).toContain(
+      installed
+        ? "Observed local introduction chain:"
+        : "Introduction chain and direct/transitive classification: unknown from scanner evidence.",
+    );
+  },
+);
+
+test.each(["native", "win32"] as const)(
+  "dependency assessment resolves pnpm filename variants (%s)",
+  async (platform) => {
+    const name = `dependency assessment resolves pnpm filename variants (${platform})`;
+    if (runTestInSubprocess(import.meta.path, name)) return;
+    const inputs = await import("../src/sca-inputs.js");
+    const basename = inputs.scaInputBasename;
+    const comparison =
+      platform === "win32"
+        ? spyOn(inputs, "scaInputBasename").mockImplementation((path) => {
+            const descriptor = Object.getOwnPropertyDescriptor(
+              process,
+              "platform",
+            )!;
+            Object.defineProperty(process, "platform", {
+              ...descriptor,
+              value: "win32",
+            });
+            try {
+              return basename(path);
+            } finally {
+              Object.defineProperty(process, "platform", descriptor);
+            }
+          })
+        : undefined;
+    try {
+      for (const path of ["pnpm-lock.yaml", "PNPM-LOCK.YAML"]) {
+        const f = await fixture({
+          dependencyInput: { path, format: "pnpm", ecosystem: "npm" },
+        });
+        await using security = f.client;
+        for (const [directory, manifest] of [
+          [".", { name: "synthetic-root", version: "1.0.0" }],
+          [
+            "packages/app",
+            {
+              name: "synthetic-app",
+              version: "1.0.0",
+              private: true,
+              dependencies: { "synthetic-package": "1.0.0" },
+            },
+          ],
+          [
+            "node_modules/synthetic-package",
+            { name: "synthetic-package", version: "1.0.0" },
+          ],
+        ] as const) {
+          await mkdir(join(f.repository, directory), { recursive: true });
+          await writeFile(
+            join(f.repository, directory, "package.json"),
+            JSON.stringify(manifest),
+          );
+        }
+        await writeFile(
+          join(f.repository, path),
+          "lockfileVersion: '9.0'\nimporters:\n  .: {}\n  packages/app: {}\n",
+        );
+        const result = await security.scanDependencies({
+          repositoryPath: f.repository,
+          outputDir: f.outputDir,
+        });
+        expect(result.status).toBe("completed");
+        expect(result.assessments[0]!.status).toBe("completed");
+        const evidence = JSON.parse(
+          await readFile(
+            join(f.outputDir, "sca-assessment-input.json"),
+            "utf8",
+          ),
+        );
+        const context = result.packageContexts![0]!;
+        expect(evidence.packageContext).toEqual(context);
+        expect(evidence.component.sourcePath).toBe(path);
+        expect(evidence.coverage.inputs[0]).toMatchObject({
+          path,
+          format: "pnpm",
+        });
+        expect(result.scanner.invocations![0]!.argv.at(-1)).toBe(path);
+        const recognized =
+          path === "pnpm-lock.yaml" ||
+          platform === "win32" ||
+          process.platform === "win32";
+        expect(context.installedPath).toBe(
+          recognized ? join("node_modules", "synthetic-package") : null,
+        );
+        expect(context.dependencyChain.map((item) => item.name)).toEqual(
+          recognized ? ["synthetic-app", "synthetic-package"] : [],
+        );
+        if (recognized)
+          expect(context.manifestPath).toBe(
+            join("packages", "app", "package.json"),
+          );
+      }
+    } finally {
+      comparison?.mockRestore();
+    }
+  },
+);
 
 test.each(
   ["developer_instructions", "instructions", "compact_prompt"].flatMap((key) =>

@@ -2,6 +2,7 @@ import { lstat, readFile, realpath, stat } from "node:fs/promises";
 import { basename, dirname, join, relative } from "node:path";
 import { parseAllDocuments } from "yaml";
 import { isRecord } from "./record.js";
+import { scaInputBasename } from "./sca-inputs.js";
 import { relativePathIsOutside } from "./targets.js";
 import type { ScaPackageContext, ScaResult } from "./sca-types.js";
 
@@ -93,7 +94,7 @@ async function workspacePaths(
     if (relativePathIsOutside(relative(repository, path))) return [];
     if (!(await stat(path)).isFile()) return [];
     const content = await readFile(path, "utf8");
-    const pnpm = basename(file) === "pnpm-lock.yaml";
+    const pnpm = scaInputBasename(file) === "pnpm-lock.yaml";
     const locks: unknown[] = pnpm
       ? parseAllDocuments(content).map((document) => {
           for (const warning of document.warnings) process.emitWarning(warning);
@@ -148,10 +149,11 @@ export async function dependencyPackageContexts(
     const projectDirectory = dirname(join(repository, file));
     let project: Package | null = null;
     const projects: Package[] = [];
-    for (const path of new Set([
+    const projectPaths = new Set([
       projectDirectory,
       ...(await workspacePaths(file, repository)),
-    ])) {
+    ]);
+    for (const path of projectPaths) {
       signal?.throwIfAborted();
       const candidate = await readPackage(path, repository, true);
       if (candidate !== null) {
@@ -167,7 +169,7 @@ export async function dependencyPackageContexts(
       const context = contexts.find(
         (item) => item.componentId === component.id,
       )!;
-      if (project !== null) {
+      if (project !== null && projectPaths.size === 1) {
         context.manifestPath = relative(
           repository,
           join(project.path, "package.json"),
