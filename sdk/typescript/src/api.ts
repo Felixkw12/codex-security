@@ -697,6 +697,10 @@ interface ClientDependencies {
   matchFindings?: typeof matchScanFindingsInternal;
   runOsvScan?: typeof runOsvScan;
   sourceSnapshot?: FindingWorkflow["sourceSnapshot"];
+  chooseDependencyAuthentication?: (
+    auth: ScanAuthMode | undefined,
+    signal: AbortSignal,
+  ) => Promise<ScanAuthMode | undefined>;
   runDeepScan?: typeof runDeepScan;
   canRunDirectDeepScan?: () => boolean;
 }
@@ -1116,11 +1120,18 @@ export class CodexSecurity {
           };
           await saveDependencyScan(result);
         }
+        let auth = options.auth;
         let session: PreparedSession;
         try {
+          if (this.#dependencies.chooseDependencyAuthentication !== undefined)
+            auth = await this.#dependencies.chooseDependencyAuthentication(
+              options.auth,
+              signal,
+            );
+          throwIfAborted(signal, outputDir);
           session = await this.#prepareSession(
             inputs,
-            options,
+            { ...options, auth },
             signal,
             temporaryRoot,
           );
@@ -1279,7 +1290,7 @@ export class CodexSecurity {
             CODEX_SECURITY_PLUGIN_ROOT: runtime.plugin.pluginRoot,
             CODEX_SECURITY_SURFACE: this.#surface,
           },
-          options.auth,
+          auth,
           undefined,
           {
             ...assessmentConfig,

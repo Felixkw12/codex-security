@@ -82,6 +82,7 @@ import { parse as parseYaml } from "yaml";
 import {
   classifyConnectionFailure,
   CodexSecurity,
+  DEFAULT_DEPENDENCIES as DEFAULT_CLIENT_DEPENDENCIES,
   environmentValue,
   formatEnvironmentVariableRemovalGuidance,
   initialCredentialsAvailable,
@@ -1230,6 +1231,10 @@ interface CliDependencies {
   ): Pick<CodexSecurity, "run" | "preflight" | "close">;
   createDependencySecurity?: (
     config: CodexSecurityConfig,
+    chooseAuthentication?: (
+      auth: ScanAuthMode | undefined,
+      signal: AbortSignal,
+    ) => Promise<ScanAuthMode | undefined>,
   ) => Pick<CodexSecurity, "scanDependencies" | "close">;
   createPolicySecurity?: (config: CodexSecurityConfig) => PolicySecurity;
   policyPrompt?: PolicyPrompt;
@@ -7068,6 +7073,7 @@ export async function main(
                 options,
                 errorOutput,
                 dependencies,
+                format !== "json" && format !== "jsonl",
               ),
             );
           } catch (error) {
@@ -7279,6 +7285,7 @@ async function runDependencyScan(
   presentation: { verbose: boolean; showCost: boolean },
   errorOutput: Writable,
   dependencies: CliDependencies,
+  interactive: boolean,
 ): Promise<ScanOutcome> {
   const verbose = scanVerbose(presentation.verbose, dependencies.environment);
   const controller = new AbortController();
@@ -7364,9 +7371,41 @@ async function runDependencyScan(
     });
     security = (
       dependencies.createDependencySecurity ??
-      ((configuration) =>
-        new CodexSecurity(configuration, undefined, { surface: "cli" }))
-    )(config);
+      ((configuration, chooseDependencyAuthentication) =>
+        new CodexSecurity(
+          configuration,
+          { ...DEFAULT_CLIENT_DEPENDENCIES, chooseDependencyAuthentication },
+          { surface: "cli" },
+        ))
+    )(
+      config,
+      interactive
+        ? async (auth, signal) => {
+            let paused = false;
+            const selectedAuth = await chooseInteractiveAuthentication(
+              {
+                auth,
+                provider: scanModelProvider({
+                  ...DEFAULT_CODEX_CONFIG,
+                  ...config.codexOverrides,
+                }),
+                command: "scan",
+                signal,
+                beforePrompt: () =>
+                  notify(() => {
+                    progress.stopTimer();
+                    paused = true;
+                  }),
+              },
+              errorOutput,
+              dependencies,
+            );
+            if (paused && progress.interactive && !stopped && !signal.aborted)
+              notify(() => progress.startTimer(timerMessage));
+            return selectedAuth;
+          }
+        : undefined,
+    );
     result = await security.scanDependencies({
       ...options,
       signal: controller.signal,
@@ -9534,6 +9573,7 @@ async function chooseInteractiveAuthentication(
     provider: unknown;
     command: "scan" | "policy";
     signal: AbortSignal;
+    beforePrompt?: () => void;
   },
   errorOutput: Writable,
   dependencies: CliDependencies,
@@ -9560,6 +9600,7 @@ async function chooseInteractiveAuthentication(
     !(await abortable(() => hasStoredSignIn(signal), signal))
   )
     return auth;
+  options.beforePrompt?.();
   const source = authentication.source;
   try {
     errorOutput.write(
