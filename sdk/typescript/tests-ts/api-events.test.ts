@@ -1650,7 +1650,7 @@ describe("Deep worker terminal lifecycle", () => {
         if (selection === "provider-profile") {
           expect(sample.argv).toContain("--profile");
           expect(sample.profile).toEqual({
-            model_providers: configuration["model_providers"],
+            model_providers: configuration["model_providers"]!,
           });
         } else expect(sample.profile).toBeNull();
       }
