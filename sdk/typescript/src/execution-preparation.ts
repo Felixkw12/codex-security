@@ -198,6 +198,11 @@ export interface PreparedExecution {
   approvalPolicy: "never" | "on-request";
   python: string;
   releaseCredentialHome: (() => Promise<void>) | null;
+  validateScanInputs?: (
+    config: JsonObject,
+    signal: AbortSignal | undefined,
+    hasAttemptedExecution: boolean,
+  ) => Promise<void>;
 }
 
 export async function lockExecutionConfiguration(
@@ -349,17 +354,29 @@ export async function createExecutionCodex(
     }
   }
   const deepWorker = session.policy !== "ordinary";
-  if (session.runtimeConfig === undefined && !deepWorker)
+  if (
+    session.runtimeConfig === undefined &&
+    !deepWorker &&
+    session.validateScanInputs === undefined
+  )
     return { codex, environment };
   const lockConfiguration = (signal?: AbortSignal) =>
     lockExecutionConfiguration(session, config ?? sessionConfig, signal);
-  const wrapThread = (thread: CodexThreadLike): CodexThreadLike => ({
+  const wrapThread = (
+    thread: CodexThreadLike,
+    hasAttemptedExecution = false,
+  ): CodexThreadLike => ({
     get id() {
       return thread.id;
     },
     async runStreamed(input, options) {
       return {
         events: (async function* () {
+          await session.validateScanInputs?.(
+            config ?? sessionConfig,
+            options.signal,
+            hasAttemptedExecution,
+          );
           let release: (() => Promise<void>) | undefined =
             await lockConfiguration(options.signal);
           const controller = deepWorker ? new AbortController() : undefined;
@@ -374,6 +391,7 @@ export async function createExecutionCodex(
               });
           }
           try {
+            hasAttemptedExecution = true;
             const { events } = await thread.runStreamed(
               input,
               controller ? { ...options, signal: controller.signal } : options,
@@ -404,7 +422,7 @@ export async function createExecutionCodex(
         ? {}
         : {
             resumeThread: (id: string, options: ThreadOptions) =>
-              wrapThread(codex.resumeThread!(id, options)),
+              wrapThread(codex.resumeThread!(id, options), true),
           }),
     },
     environment,

@@ -1339,6 +1339,7 @@ describe("Deep worker terminal lifecycle", () => {
       environment: Record<string, string>;
       permissions: ScanPermissions;
     },
+    validateScanInputs?: PreparedExecution["validateScanInputs"],
   ): Promise<CodexClientLike> {
     const codexHome = join(root, "codex-home");
     await mkdir(codexHome, { mode: 0o700 });
@@ -1378,6 +1379,7 @@ describe("Deep worker terminal lifecycle", () => {
       ...(overlay ? { runtimeConfig: {} } : {}),
       authentication: source.authentication,
       approvalPolicy: "never",
+      validateScanInputs,
       python: process.execPath,
       releaseCredentialHome: null,
     };
@@ -1395,6 +1397,179 @@ describe("Deep worker terminal lifecycle", () => {
       )
     ).codex;
   }
+
+  test.each(["discovery", "merge"] as const)(
+    "validates Deep inputs before configuration changes and execution: %s",
+    async (policy) => {
+      const root = await temporaryDirectory();
+      const configPath = join(root, "codex-home", "config.toml");
+      const originalConfig = 'model = "synthetic-existing-model"\n';
+      const selectedPath = join(root, "selected-instructions.md");
+      const configuration: JsonObject = {
+        model_instructions_file: join(root, "root-instructions.md"),
+        profile: "selected",
+        profiles: {
+          selected: { model_instructions_file: selectedPath },
+        },
+      };
+      const original = structuredClone(configuration);
+      const controller = new AbortController();
+      const rejectedInput = new Error("Synthetic instruction mismatch.");
+      let underlyingCalls = 0;
+      let validations = 0;
+      const codex = await execution(
+        root,
+        policy,
+        true,
+        () => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              underlyingCalls++;
+              return { events: completedEvents() };
+            },
+          }),
+        }),
+        {
+          configuration,
+          subagents: 0,
+          environment: {},
+          permissions: {
+            filesystem: { ":root": "read" },
+            network: { enabled: false },
+          },
+        },
+        async (config, signal, hasAttemptedExecution) => {
+          validations++;
+          expect(config["model_instructions_file"]).toBe(selectedPath);
+          expect(signal).toBe(controller.signal);
+          expect(hasAttemptedExecution).toBe(false);
+          expect(await readFile(configPath, "utf8")).toBe(originalConfig);
+          throw rejectedInput;
+        },
+      );
+      await writeFile(configPath, originalConfig);
+      const thread = codex.startThread({});
+      const { events } = await thread.runStreamed("Synthetic input guard.", {
+        signal: controller.signal,
+      });
+      expect(validations).toBe(0);
+      await expect(readCodexTurn({ thread, events })).rejects.toBe(
+        rejectedInput,
+      );
+      expect(validations).toBe(1);
+      expect(underlyingCalls).toBe(0);
+      expect(await readFile(configPath, "utf8")).toBe(originalConfig);
+      expect(configuration).toEqual(original);
+    },
+  );
+
+  test.each(
+    (["discovery", "merge"] as const).flatMap((policy) =>
+      (["rejected", "invalid-output"] as const).map((outcome) => ({
+        policy,
+        outcome,
+      })),
+    ),
+  )(
+    "retains Deep execution attempts across retries without a thread ID: %j",
+    async ({ policy, outcome }) => {
+      const root = await temporaryDirectory();
+      const rejectedInput = new Error("Synthetic instruction mismatch.");
+      const rejectedTurn = new Error("Synthetic underlying turn failure.");
+      const attempted: boolean[] = [];
+      let underlyingCalls = 0;
+      const codex = await execution(
+        root,
+        policy,
+        false,
+        () => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              underlyingCalls++;
+              if (outcome === "rejected") throw rejectedTurn;
+              return {
+                events: (async function* () {
+                  yield {
+                    type: "item.completed",
+                    item: {
+                      id: "synthetic-response",
+                      type: "agent_message",
+                      text: "not valid JSON",
+                    },
+                  };
+                  yield { type: "turn.completed", usage: null };
+                })(),
+              };
+            },
+          }),
+        }),
+        undefined,
+        async (_config, _signal, hasAttemptedExecution) => {
+          attempted.push(hasAttemptedExecution);
+          if (attempted.length !== 2) throw rejectedInput;
+        },
+      );
+      const thread = codex.startThread({});
+      const turn = async () => {
+        const { events } = await thread.runStreamed("Synthetic retry.", {});
+        return readCodexTurn({ thread, events });
+      };
+      await expect(turn()).rejects.toBe(rejectedInput);
+      expect(underlyingCalls).toBe(0);
+      if (outcome === "rejected") {
+        await expect(turn()).rejects.toBe(rejectedTurn);
+      } else {
+        const result = await turn();
+        expect(result.status).toBe("completed");
+        expect(() => JSON.parse(result.finalResponse)).toThrow(SyntaxError);
+      }
+      expect(thread.id).toBeNull();
+      expect(underlyingCalls).toBe(1);
+      await expect(turn()).rejects.toBe(rejectedInput);
+      expect(underlyingCalls).toBe(1);
+      expect(attempted).toEqual([false, false, true]);
+    },
+  );
+
+  test.each(["discovery", "merge"] as const)(
+    "treats resumed Deep threads as previously attempted before execution: %s",
+    async (policy) => {
+      const root = await temporaryDirectory();
+      const rejectedInput = new Error("Synthetic instruction mismatch.");
+      const attempted: boolean[] = [];
+      let underlyingCalls = 0;
+      const codex = await execution(
+        root,
+        policy,
+        false,
+        () => {
+          const thread = {
+            id: null,
+            async runStreamed() {
+              underlyingCalls++;
+              return { events: completedEvents() };
+            },
+          };
+          return { startThread: () => thread, resumeThread: () => thread };
+        },
+        undefined,
+        async (_config, _signal, hasAttemptedExecution) => {
+          attempted.push(hasAttemptedExecution);
+          throw rejectedInput;
+        },
+      );
+      const thread = codex.resumeThread!("synthetic-prior-thread", {});
+      const { events } = await thread.runStreamed("Synthetic resume.", {});
+      await expect(readCodexTurn({ thread, events })).rejects.toBe(
+        rejectedInput,
+      );
+      expect(thread.id).toBeNull();
+      expect(underlyingCalls).toBe(0);
+      expect(attempted).toEqual([true]);
+    },
+  );
 
   test.each(
     (["discovery", "merge"] as const).flatMap((policy) =>

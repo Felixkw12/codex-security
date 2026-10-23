@@ -1,4 +1,6 @@
 import { join, relative } from "node:path";
+import { lstat } from "node:fs/promises";
+import { readScanFile } from "./contract.js";
 import { setTimeout as delay } from "node:timers/promises";
 import type { CodexSecurity, ScanOptions } from "./api.js";
 import type { JsonObject } from "./config.js";
@@ -51,6 +53,21 @@ export {
 /** Required usage tracking must stop the entire composition before another pass. */
 export class ScanCostTrackingError extends ScanInterruptedError {}
 
+/** Saved input failures retain accepted work for a corrected continuation. */
+export class DeepScanRecoveryError extends ScanInterruptedError {}
+
+/** The wrapper rejected saved inputs before attempting this thread's execution. */
+export class DeepScanInputRecoveryError extends DeepScanRecoveryError {
+  constructor(
+    message: string,
+    scanDir: string,
+    readonly neverStarted: boolean,
+    options?: ErrorOptions,
+  ) {
+    super(message, scanDir, options);
+  }
+}
+
 /** A terminal checkpoint rejects execution without changing saved results. */
 export class TerminalDeepScanError extends ScanInterruptedError {}
 
@@ -68,7 +85,9 @@ export interface DeepScanComposition {
   merge(prompt: string, signal: AbortSignal): Promise<unknown>;
   onRetry?(message: string): void;
   onCleanupError?(error: unknown): void;
-  writer: ScanArtifactRestorer;
+  writer: ScanArtifactRestorer & {
+    remove(relativePath: string): Promise<void>;
+  };
   projectChild(
     sourceScanId: string,
     sourceDirectory: string,
@@ -240,6 +259,10 @@ export async function runDeepScans(
     const costs = new Map<string, Readonly<ScanCost> | null>();
     for (const { record, pass } of passes) {
       const missingSession = missingRunningSession(record);
+      if (pass.executionNotStarted === true) {
+        if (missingSession) continue;
+        delete pass.executionNotStarted;
+      }
       if (missingSession) state.costUnavailable = true;
       costs.set(pass.directory, missingSession ? null : (record.cost ?? null));
       input.onCost(pass.directory, null);
@@ -367,6 +390,24 @@ export async function runDeepScans(
       return;
     }
     const clean = pending.every((input) => input.draft.findings.length === 0);
+    const previousMergeStarted = state.mergeStarted;
+    const mergeInputsPath = "artifacts/deep-scan/merge-inputs.json";
+    let previousMergeInputs: Buffer | null = null;
+    if (!clean && previousMergeStarted !== true) {
+      const exists = await lstat(join(scanDir, mergeInputsPath)).then(
+        () => true,
+        (error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT") return false;
+          throw error;
+        },
+      );
+      if (exists)
+        previousMergeInputs = await readScanFile(
+          scanDir,
+          mergeInputsPath,
+          "Deep Scan merge inputs",
+        );
+    }
     const prompt = clean
       ? ""
       : await scanMergePrompt(
@@ -378,7 +419,13 @@ export async function runDeepScans(
         );
     if (!clean && state.mergeStarted !== true) {
       state.mergeStarted = true;
-      await save();
+      try {
+        await save();
+      } catch (error) {
+        throw new DeepScanRecoveryError(errorMessage(error), scanDir, {
+          cause: error,
+        });
+      }
     }
     let merged: ReturnType<typeof validateScanMerge>;
     let validationError: unknown;
@@ -401,6 +448,26 @@ export async function runDeepScans(
         }
         break;
       } catch (error) {
+        if (
+          error instanceof DeepScanInputRecoveryError &&
+          error.neverStarted &&
+          previousMergeStarted !== true
+        ) {
+          try {
+            if (previousMergeInputs === null)
+              await input.writer.remove(mergeInputsPath);
+            else
+              await input.writer.restore(mergeInputsPath, previousMergeInputs);
+            if (previousMergeStarted === undefined) delete state.mergeStarted;
+            else state.mergeStarted = previousMergeStarted;
+            await save();
+          } catch (cause) {
+            throw new DeepScanRecoveryError(errorMessage(cause), scanDir, {
+              cause,
+            });
+          }
+        }
+        if (error instanceof DeepScanRecoveryError) throw error;
         if (error instanceof SyntaxError) validationError = error;
         if (
           executionSignal.aborted ||
@@ -426,7 +493,20 @@ export async function runDeepScans(
   const runPass = async (
     pass: DeepScanCheckpoint["passes"][number],
   ): Promise<void> => {
+    const provenUnstarted = pass.executionNotStarted === true;
+    const newPass = pass.scanId === undefined;
+    if (provenUnstarted) {
+      delete pass.executionNotStarted;
+      try {
+        await save();
+      } catch (cause) {
+        throw new DeepScanRecoveryError(errorMessage(cause), scanDir, {
+          cause,
+        });
+      }
+    }
     const client = input.createClient();
+    let clientInvoked = false;
     let latestCost: Readonly<ScanCost> | undefined;
     // Publication retries reuse the child already accepted by its own workbench.
     let acceptedResult: ScanResult | undefined;
@@ -448,6 +528,7 @@ export async function runDeepScans(
         discoverySignal.throwIfAborted();
         try {
           const resuming = pass.scanId !== undefined;
+          if (acceptedResult === undefined) clientInvoked = true;
           acceptedResult ??= await client.run(input.repository, {
             ...input.scanOptions,
             scanPrompt: state.discoveryUserContext ?? undefined,
@@ -461,7 +542,11 @@ export async function runDeepScans(
             onRegisteredScan: async (registration) => {
               registerPass(pass, registration["scanId"] as string);
               input.onCost(pass.directory, null);
-              if (resuming && registration["threadId"] === null)
+              if (
+                resuming &&
+                registration["threadId"] === null &&
+                !(provenUnstarted && attempt === 0)
+              )
                 state.costUnavailable = true;
               await save();
               if (state.costUnavailable) reportPassCost("previous-work", null);
@@ -490,6 +575,23 @@ export async function runDeepScans(
           return;
         } catch (error) {
           if (
+            error instanceof DeepScanInputRecoveryError &&
+            error.neverStarted &&
+            attempt === 0 &&
+            (newPass || provenUnstarted) &&
+            pass.scanId !== undefined
+          ) {
+            pass.executionNotStarted = true;
+            try {
+              await save();
+            } catch (cause) {
+              throw new DeepScanRecoveryError(errorMessage(cause), scanDir, {
+                cause,
+              });
+            }
+          }
+          if (error instanceof DeepScanRecoveryError) throw error;
+          if (
             error instanceof ScanCostTrackingError ||
             error instanceof ScanPermissionError ||
             isCodexNonRetryableFailure(error)
@@ -517,6 +619,18 @@ export async function runDeepScans(
         }
       }
     } catch (error) {
+      if (error instanceof DeepScanRecoveryError) throw error;
+      if (provenUnstarted && !clientInvoked && discoverySignal.aborted) {
+        pass.executionNotStarted = true;
+        try {
+          await save();
+        } catch (cause) {
+          throw new DeepScanRecoveryError(errorMessage(cause), scanDir, {
+            cause,
+          });
+        }
+        throw error;
+      }
       if (
         discoverySignal.aborted &&
         !(discoverySignal.reason instanceof ScanTransportClosedError)
@@ -587,10 +701,14 @@ export async function runDeepScans(
       await save();
       const results = await Promise.allSettled(batch.map(runPass));
       executionSignal.throwIfAborted();
-      if (!deadlineController.signal.aborted) {
-        for (const result of results)
-          if (result.status === "rejected") throw result.reason;
-      }
+      for (const result of results)
+        if (
+          result.status === "rejected" &&
+          (!deadlineController.signal.aborted ||
+            (result.reason instanceof DeepScanRecoveryError &&
+              !(result.reason instanceof DeepScanInputRecoveryError)))
+        )
+          throw result.reason;
       await refreshPasses();
     }
     await workbench([
@@ -606,6 +724,7 @@ export async function runDeepScans(
     await input.publish(state.aggregate!);
     return state;
   } catch (error) {
+    if (error instanceof DeepScanRecoveryError) throw error;
     if (
       (!signal.aborted && error instanceof ScanTransportClosedError) ||
       signal.reason instanceof ScanTransportClosedError

@@ -33,6 +33,7 @@ class CompositionPass(_PassDirectory, total=False):
     scanId: str
     failed: Literal[True]
     completed: Literal[True]
+    executionNotStarted: Literal[True]
 
 
 class _LegacyProgress(TypedDict):

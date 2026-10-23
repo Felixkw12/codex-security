@@ -83,6 +83,8 @@ import {
 import { randomUUID } from "node:crypto";
 import {
   runDeepScans,
+  DeepScanRecoveryError,
+  DeepScanInputRecoveryError,
   ScanCostTrackingError,
   terminalDeepScanError,
 } from "./deep-scan.js";
@@ -233,7 +235,11 @@ import {
   type PreparedKnowledgeBase,
   type KnowledgeBaseSnapshot,
 } from "./knowledge-base.js";
-import { scanInputIdentity, saveScanKnowledge } from "./scan-inputs.js";
+import {
+  modelInstructionsFileDigest,
+  scanInputIdentity,
+  saveScanKnowledge,
+} from "./scan-inputs.js";
 import { FindingWorkflow, workflowDigest } from "./finding-workflow.js";
 import {
   ScanResult,
@@ -629,6 +635,7 @@ export type CodexSecuritySurface = "cli" | "sdk";
 interface CodexSecurityRuntimeOptions {
   surface: CodexSecuritySurface;
   parentScanRole?: "deep_pass";
+  validateScanInputs?: PreparedExecution["validateScanInputs"];
 }
 
 interface ClientDependencies {
@@ -689,6 +696,7 @@ export class CodexSecurity {
   readonly #dependencies: ClientDependencies;
   readonly #surface: CodexSecuritySurface;
   readonly #parentScanRole: "deep_pass" | undefined;
+  readonly #validateScanInputs: PreparedExecution["validateScanInputs"];
   readonly #loginHandles = new Set<CodexLoginHandle>();
   readonly #abortController = new AbortController();
   #activeOperation: Promise<unknown> | null = null;
@@ -716,6 +724,7 @@ export class CodexSecurity {
       requireModelSafeOutputDir(dependencies.stateDirectory);
     this.#surface = runtimeOptions.surface;
     this.#parentScanRole = runtimeOptions.parentScanRole;
+    this.#validateScanInputs = runtimeOptions.validateScanInputs;
   }
 
   public async run(
@@ -2161,13 +2170,17 @@ export class CodexSecurity {
           "The saved scan is no longer sealed. Rejoin the scan with its original execution inputs.",
         );
 
-      const session = await this.#prepareSession(
+      const preparedSession = await this.#prepareSession(
         { protectedRoot },
         options,
         signal,
         temporaryRoot,
         mode !== "deep",
       );
+      const session =
+        options.deepScanPass && this.#validateScanInputs !== undefined
+          ? { ...preparedSession, validateScanInputs: this.#validateScanInputs }
+          : preparedSession;
       const {
         runtime,
         runtimeHome,
@@ -2342,6 +2355,51 @@ export class CodexSecurity {
         sealed,
       } = registered;
       const savedRecipe = registration["recipe"];
+      const savedInputs =
+        isRecord(savedRecipe) && isRecord(savedRecipe["scanInputs"])
+          ? savedRecipe["scanInputs"]
+          : undefined;
+      const savedInstructionDigest =
+        savedInputs?.["modelInstructionsFileSha256"];
+      const canonicalSession: PreparedExecution =
+        mode === "deep" &&
+        registered.resumed &&
+        typeof savedInstructionDigest === "string"
+          ? {
+              ...session,
+              validateScanInputs: async (
+                launchConfig,
+                turnSignal,
+                hasAttemptedExecution,
+              ) => {
+                turnSignal?.throwIfAborted();
+                const path =
+                  resolveCodexProfile(launchConfig)["model_instructions_file"];
+                let digest: string | null;
+                try {
+                  digest = await modelInstructionsFileDigest(
+                    typeof path === "string" ? path : undefined,
+                    turnSignal,
+                  );
+                } catch (error) {
+                  turnSignal?.throwIfAborted();
+                  throw new DeepScanInputRecoveryError(
+                    errorMessage(error),
+                    scanDir,
+                    !hasAttemptedExecution,
+                    { cause: error },
+                  );
+                }
+                turnSignal?.throwIfAborted();
+                if (digest !== savedInstructionDigest)
+                  throw new DeepScanInputRecoveryError(
+                    "The model instructions file changed since this scan started. Restore its original contents before resuming, or start a new scan.",
+                    scanDir,
+                    !hasAttemptedExecution,
+                  );
+              },
+            }
+          : session;
       const savedReplayProfile = isRecord(savedRecipe)
         ? savedRecipe["replayProfile"]
         : undefined;
@@ -2793,11 +2851,11 @@ export class CodexSecurity {
         deepScanConfiguration !== undefined
           ? prepareMergeExecution(
               {
-                ...session,
+                ...canonicalSession,
                 sessionConfig: resolveExecutionPaths(
-                  session.sessionConfig,
+                  canonicalSession.sessionConfig,
                   scanDir,
-                  session.source.environment,
+                  canonicalSession.source.environment,
                 ),
               },
               deepScanConfiguration.settings.subagents,
@@ -2904,10 +2962,22 @@ export class CodexSecurity {
           };
         runPostScan =
           mode === "deep"
-            ? () =>
-                codex
+            ? async () => {
+                const { codex: postScanCodex } =
+                  execution.validateScanInputs === undefined
+                    ? { codex }
+                    : await this.#createSessionCodex(
+                        { ...execution, validateScanInputs: undefined },
+                        { command: "scan", mode },
+                        runtimePaths,
+                        undefined,
+                        [],
+                        git,
+                      );
+                return postScanCodex
                   .startThread({ ...threadOptions, workingDirectory: scanDir })
-                  .runStreamed(postScanPrompt, turnOptions)
+                  .runStreamed(postScanPrompt, turnOptions);
+              }
             : () => thread.runStreamed(postScanPrompt, turnOptions);
       }
       const finalize = async (
@@ -3084,7 +3154,11 @@ export class CodexSecurity {
                         executionCommand(session.source),
                       workerNumber: tracker.workerNumber.bind(tracker),
                     },
-                    { surface: this.#surface, parentScanRole: "deep_pass" },
+                    {
+                      surface: this.#surface,
+                      parentScanRole: "deep_pass",
+                      validateScanInputs: canonicalSession.validateScanInputs,
+                    },
                   ),
                 scanOptions: {
                   cyberAccessProgram: options.cyberAccessProgram,
@@ -3592,6 +3666,7 @@ export class CodexSecurity {
         } catch {}
       }
       const transportClosed = signal.reason instanceof ScanTransportClosedError;
+      const resumableInputFailure = failure instanceof DeepScanRecoveryError;
       const canceled =
         signal.aborted &&
         (!costAbortController.signal.aborted ||
@@ -3609,7 +3684,10 @@ export class CodexSecurity {
           : snapshot?.cost;
       if (
         activeScan !== null &&
-        (options.deepScanPass || transportClosed || canceled)
+        (options.deepScanPass ||
+          transportClosed ||
+          canceled ||
+          resumableInputFailure)
       ) {
         await workbench({ ...activeScan.options, signal: undefined }, [
           "preserve-scan-results",
@@ -3652,7 +3730,12 @@ export class CodexSecurity {
           );
         }
       }
-      if (activeScan !== null && !options.deepScanPass && !transportClosed) {
+      if (
+        activeScan !== null &&
+        !options.deepScanPass &&
+        !transportClosed &&
+        !resumableInputFailure
+      ) {
         if (
           options.validationPrompt !== undefined &&
           !customValidationComplete
@@ -3680,7 +3763,7 @@ export class CodexSecurity {
         } catch {}
       }
       scanProgressTracker?.stop();
-      if (runPostScan !== null && !signal.aborted) {
+      if (runPostScan !== null && !signal.aborted && !resumableInputFailure) {
         try {
           for await (const event of (await runPostScan()).events) {
             if (

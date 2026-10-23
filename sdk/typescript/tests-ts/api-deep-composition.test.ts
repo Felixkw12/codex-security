@@ -13,7 +13,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import type {
@@ -36,7 +36,10 @@ import { createApiTestFixtures } from "./support/api-events.js";
 import { tokenUsageEvent } from "./support/usage-rollout.js";
 import { requestMetadata } from "./support/request-metadata.js";
 import { prepareSemanticScanDraft } from "../src/scan-semantics.js";
-import { DEEP_SCAN_CHECKPOINT } from "../src/deep-scan.js";
+import {
+  DEEP_SCAN_CHECKPOINT,
+  DeepScanRecoveryError,
+} from "../src/deep-scan.js";
 import { ScanTransportClosedError } from "../src/scan-execution.js";
 import {
   ScanCostLimitExceededError,
@@ -218,7 +221,21 @@ async function nativeScanFactory() {
   ).prepareNativeScan;
 }
 
-test.each([
+function testDeepCompositionCases<T extends { instructionFile?: string }>(
+  cases: T[],
+) {
+  return (name: string, run: (scenario: T) => Promise<void>) => {
+    for (const scenario of cases) {
+      test(
+        name.replace("%j", JSON.stringify(scenario)),
+        () => run(scenario),
+        scenario.instructionFile === undefined ? undefined : 120_000,
+      );
+    }
+  };
+}
+
+testDeepCompositionCases([
   { budget: false, partialCheckpoint: true },
   { budget: false, partialCheckpoint: true, completedCleanup: true },
   {
@@ -229,15 +246,55 @@ test.each([
   },
   { budget: false },
   { budget: false, ownerOutcome: "success", ownerResume: true },
+  {
+    budget: false,
+    ownerOutcome: "success",
+    ownerResume: true,
+    instructionFile: "sealed missing",
+  },
   { budget: false, ownerOutcome: "failure" },
   { budget: true },
   { budget: true, firstChildBudget: true },
   { budget: false, native: "discovery" },
-  ...(["changed", "missing", "empty"] as const).map((instructionFile) => ({
+  ...(
+    [
+      "changed",
+      "unchanged",
+      "missing",
+      "empty",
+      "legacy changed",
+      "postscan changed",
+      "later reducer changed",
+    ] as const
+  ).map((instructionFile) => ({
     budget: false,
     native: "discovery",
     instructionFile,
   })),
+  {
+    budget: false,
+    native: "discovery",
+    instructionFile: "reducer changed",
+    requiredCost: true,
+  },
+  {
+    budget: false,
+    native: "discovery",
+    instructionFile: "new child changed",
+    requiredCost: true,
+  },
+  ...(["relative", "profile", "home"] as const).map((instructionPathForm) => ({
+    budget: false,
+    native: "discovery",
+    instructionFile: "changed",
+    instructionPathForm,
+  })),
+  { budget: false, native: "discovery", instructionFile: "aggregate missing" },
+  {
+    budget: false,
+    native: "discovery",
+    instructionFile: "sealed child missing",
+  },
   { budget: false, native: "discovery", queuedNativeKnowledge: true },
   {
     budget: false,
@@ -278,7 +335,20 @@ test.each([
   native?: "discovery" | "sealed";
   queuedNativeKnowledge?: boolean;
   missingReplay?: "publish" | "follow-up" | "wrong-claim" | "unsealed";
-  instructionFile?: "changed" | "missing" | "empty";
+  instructionPathForm?: "relative" | "profile" | "home";
+  instructionFile?:
+    | "changed"
+    | "unchanged"
+    | "missing"
+    | "empty"
+    | "sealed missing"
+    | "legacy changed"
+    | "reducer changed"
+    | "new child changed"
+    | "aggregate missing"
+    | "postscan changed"
+    | "later reducer changed"
+    | "sealed child missing";
 }[])(
   "Deep composes sealed ordinary scans and preserves a budgeted parent: %j",
   async ({
@@ -294,7 +364,11 @@ test.each([
     queuedNativeKnowledge,
     missingReplay,
     instructionFile,
+    instructionPathForm,
   }) => {
+    const instructionCostRecovery =
+      instructionFile === "reducer changed" ||
+      instructionFile === "new child changed";
     const python = Bun.which("python3") ?? Bun.which("python");
     if (python === null) throw new Error("Python is required for this test.");
     const root = await temporaryDirectory();
@@ -319,6 +393,7 @@ test.each([
         "utf8",
       ),
     ).findings.slice(0, 1);
+    if (instructionFile === "sealed child missing") childFindings.length = 0;
     const ownerSuggestion = {
       email: "synthetic-contributor@example.test",
       commit: "1".repeat(40),
@@ -366,6 +441,9 @@ test.each([
     const environment = {
       ...process.env,
       CODEX_HOME: codexHome,
+      ...(instructionPathForm === "home"
+        ? { HOME: root, USERPROFILE: root }
+        : {}),
       CODEX_SECURITY_STATE_DIR: join(root, "state"),
       CODEX_CLI_PATH: process.execPath,
       SYNTHETIC_SCAN_SETTING: "inherited",
@@ -396,6 +474,28 @@ test.each([
     const instructionDigest = createHash("sha256")
       .update(instructionText)
       .digest("hex");
+    let continuedInstructionExecution = false;
+    const instructionExecutions: Array<{
+      scanId: string;
+      mode: string;
+      resumed: boolean;
+      continued: boolean;
+      followUp: boolean;
+      cwd: string;
+      path: string;
+      bytes?: string;
+      error?: { code: string; message: string };
+    }> = [];
+    const instructionProbe = `
+const { readFileSync } = require("node:fs");
+const path = process.argv[1];
+try {
+  process.stdout.write(JSON.stringify({ cwd: process.cwd(), path, bytes: readFileSync(path, "utf8") }));
+} catch (error) {
+  process.stdout.write(JSON.stringify({ cwd: process.cwd(), path, error: { code: error.code, message: error.message } }));
+  process.exitCode = 1;
+}
+`;
     const inheritedSettings = {
       openai_base_url: "https://endpoint.example.test/v1",
       web_search: "cached",
@@ -508,6 +608,29 @@ process.exit(0);
         handoffClaimToken: scan["handoffClaimToken"] as string,
       };
     }
+    if (instructionPathForm !== undefined) {
+      const relativeInstructionPath = relative(scanDir, instructionPath);
+      const decoyPath = join(root, "decoy-instructions.md");
+      await writeFile(decoyPath, "Unselected synthetic instructions.\n");
+      ambientConfig = stringifyToml({
+        ...nativeSettings,
+        model_instructions_file:
+          instructionPathForm === "home"
+            ? "~/instructions.md"
+            : instructionPathForm === "profile"
+              ? decoyPath
+              : relativeInstructionPath,
+        ...(instructionPathForm === "profile"
+          ? {
+              profile: "selected",
+              profiles: {
+                selected: { model_instructions_file: relativeInstructionPath },
+              },
+            }
+          : {}),
+      });
+      await writeFile(join(codexHome, "config.toml"), ambientConfig);
+    }
     let controller = new AbortController();
     let interrupted = false;
     let checkpointSignal: AbortSignal | undefined;
@@ -527,6 +650,7 @@ process.exit(0);
       sessions: ScanSessionEvent[];
     }> = [];
     let workerRun: (typeof workerRuns)[number];
+    const rejectedWorkerRuns = new Set<(typeof workerRuns)[number]>();
     const workbenches = new Map<string, WorkbenchCommandOptions>();
     const commands: Array<{ command: string; id: string | undefined }> = [];
     const turns: Array<{
@@ -577,7 +701,8 @@ process.exit(0);
                 ? undefined
                 : (nativeRecipe ?? {
                     postScanPrompt:
-                      missingReplay && missingReplay !== "follow-up"
+                      (missingReplay && missingReplay !== "follow-up") ||
+                      instructionFile === "sealed child missing"
                         ? ""
                         : "Post-scan instructions once.",
                     cyberAccessProgram: "daybreak_blue",
@@ -610,11 +735,15 @@ process.exit(0);
           }
           nativeOptions = {
             ...prepared.options,
+            ...(instructionCostRecovery
+              ? { maxCostUsd: 1, requireCost: true }
+              : {}),
             ...(queuedNativeKnowledge ||
             (instructionFile !== undefined && nativeRecipe === undefined)
               ? {
                   postScanPrompt:
-                    missingReplay && missingReplay !== "follow-up"
+                    (missingReplay && missingReplay !== "follow-up") ||
+                    instructionFile === "sealed child missing"
                       ? ""
                       : "Post-scan instructions once.",
                   cyberAccessProgram: "daybreak_blue",
@@ -673,6 +802,18 @@ process.exit(0);
           ...prepared?.client.dependencies,
           resolvePluginPython: async () => python,
           runWorkbench: async (options, args, input) => {
+            // Older saved recipes have no instruction digest. Use the real workbench
+            // to persist that historical shape before exercising public resume.
+            if (
+              instructionFile === "legacy changed" &&
+              nativeRecipe === undefined &&
+              args[0] === "register-cli-scan" &&
+              !args.includes("--parent-scan-id")
+            ) {
+              const request = JSON.parse(input!);
+              delete request.recipe.scanInputs.modelInstructionsFileSha256;
+              input = JSON.stringify(request);
+            }
             const result = await runWorkbench(options, args, input);
             const id = args.includes("--scan-id")
               ? args[args.indexOf("--scan-id") + 1]
@@ -698,9 +839,73 @@ process.exit(0);
                 expect(
                   (result["recipe"] as JsonObject)["scanInputs"],
                 ).toMatchObject({
-                  modelInstructionsFileSha256: instructionDigest,
+                  ...(instructionFile === "legacy changed"
+                    ? {}
+                    : { modelInstructionsFileSha256: instructionDigest }),
                 });
+                if (instructionFile === "legacy changed")
+                  expect(
+                    (result["recipe"] as JsonObject)["scanInputs"],
+                  ).not.toHaveProperty("modelInstructionsFileSha256");
               }
+            }
+            if (
+              !interrupted &&
+              (instructionCostRecovery ||
+                instructionFile === "aggregate missing") &&
+              args[0] === "save-scan-artifact" &&
+              args.includes(DEEP_SCAN_CHECKPOINT)
+            ) {
+              const checkpoint = JSON.parse(input!);
+              if (
+                instructionFile === "reducer changed"
+                  ? checkpoint.passes.some(
+                      (pass: { completed?: boolean }) => pass.completed,
+                    ) &&
+                    checkpoint.mergeStarted !== true &&
+                    checkpoint.aggregate === null
+                  : instructionFile === "new child changed"
+                    ? checkpoint.mergedScanIds.length === 1 &&
+                      checkpoint.passes.length === 1
+                    : checkpoint.terminalReason !== undefined &&
+                      checkpoint.aggregate !== null
+              ) {
+                interrupted = true;
+                controller.abort(
+                  new ScanTransportClosedError("mcp_transport_closed"),
+                );
+              }
+            }
+            if (
+              instructionFile === "sealed child missing" &&
+              !interrupted &&
+              args[0] === "prepare-scan-completion" &&
+              registrations.get(id!)?.["mode"] === "standard"
+            ) {
+              interrupted = true;
+              controller.abort(
+                new ScanTransportClosedError("mcp_transport_closed"),
+              );
+            }
+            if (
+              instructionFile === "later reducer changed" &&
+              continuedInstructionExecution &&
+              args[0] === "complete-scan" &&
+              registrations.get(id!)?.["mode"] === "standard"
+            )
+              await writeFile(
+                instructionPath,
+                "Changed synthetic model instructions.\n",
+              );
+            if (
+              instructionFile === "postscan changed" &&
+              args[0] === "complete-scan" &&
+              id === registeredScan!.scanId
+            ) {
+              await writeFile(
+                instructionPath,
+                "Changed synthetic model instructions.\n",
+              );
             }
             if (args[0] === "get-cli-scan-resume")
               workbenches.set(result["scanId"] as string, options);
@@ -801,6 +1006,47 @@ process.exit(0);
                   }
                   const record = registrations.get(id)!;
                   const mode = record["mode"] as string;
+                  if (instructionFile !== undefined) {
+                    if (mode === "standard" && instructionCostRecovery) {
+                      const checkpoint = JSON.parse(
+                        await readFile(
+                          join(scanDir, DEEP_SCAN_CHECKPOINT),
+                          "utf8",
+                        ),
+                      );
+                      expect(
+                        checkpoint.passes.find(
+                          (pass: { scanId: string }) => pass.scanId === id,
+                        ),
+                      ).not.toHaveProperty("executionNotStarted");
+                    }
+                    const child = childProcess.spawnSync(
+                      runtimeNode,
+                      [
+                        "-e",
+                        instructionProbe,
+                        options.config!["model_instructions_file"] as string,
+                      ],
+                      {
+                        cwd: threadOptions.workingDirectory!,
+                        env: options.env,
+                        encoding: "utf8",
+                      },
+                    );
+                    expect(child.error).toBeUndefined();
+                    const observed = JSON.parse(child.stdout);
+                    expect(observed.path).toBe(instructionPath);
+                    instructionExecutions.push({
+                      scanId: id,
+                      mode,
+                      resumed: savedThreadId !== null,
+                      continued: continuedInstructionExecution,
+                      followUp: prompt === "Post-scan instructions once.",
+                      ...observed,
+                    });
+                    if (child.status !== 0)
+                      throw new Error(observed.error.message);
+                  }
                   let groups: Array<{
                     sourceFindingIds: string[];
                     canonicalSourceFindingId: string;
@@ -1043,6 +1289,8 @@ process.exit(0);
                       const directory = record["scanDir"] as string;
                       if (
                         native === "discovery" &&
+                        !instructionCostRecovery &&
+                        instructionFile !== "aggregate missing" &&
                         childTurns === 2 &&
                         !interrupted
                       ) {
@@ -1322,7 +1570,8 @@ process.exit(0);
             ? { maxCostUsd: 1 }
             : {}),
         postScanPrompt:
-          missingReplay && missingReplay !== "follow-up"
+          (missingReplay && missingReplay !== "follow-up") ||
+          instructionFile === "sealed child missing"
             ? ""
             : "Post-scan instructions once.",
         onDeepProgress: (update) => {
@@ -1344,6 +1593,9 @@ process.exit(0);
         return client.run(repo, {
           ...scanOptions,
           ...nativeOptions,
+          ...(instructionCostRecovery
+            ? { maxCostUsd: 1, requireCost: true }
+            : {}),
           signal: AbortSignal.any([
             controller.signal,
             AbortSignal.timeout(
@@ -1453,6 +1705,280 @@ process.exit(0);
         }
         return;
       }
+      if (
+        instructionCostRecovery ||
+        instructionFile === "aggregate missing" ||
+        instructionFile === "sealed child missing"
+      ) {
+        await expect(run()).rejects.toBeInstanceOf(ScanTransportClosedError);
+        const scanId = registeredScan!.scanId;
+        const checkpointPath = join(scanDir, DEEP_SCAN_CHECKPOINT);
+        const interruptedCheckpoint = JSON.parse(
+          await readFile(checkpointPath, "utf8"),
+        );
+        const before = await runWorkbench(commandOptions, [
+          "get-scan",
+          "--scan-id",
+          scanId,
+        ]);
+        expect(before["scan"]).toMatchObject({
+          progress: { status: "running" },
+        });
+        expect(
+          instructionExecutions.every(
+            (sample) => sample.bytes === instructionText,
+          ),
+        ).toBe(true);
+        expect(interruptedCheckpoint.passes.length).toBeGreaterThan(0);
+        const acceptedChildCosts = new Map<string, unknown>();
+        for (const pass of interruptedCheckpoint.passes) {
+          if (pass.scanId === undefined) continue;
+          const child = await runWorkbench(commandOptions, [
+            "get-scan",
+            "--scan-id",
+            pass.scanId,
+          ]);
+          expect(child["scan"]).toMatchObject({
+            progress: {
+              status:
+                instructionFile === "sealed child missing"
+                  ? "running"
+                  : "complete",
+            },
+          });
+          acceptedChildCosts.set(
+            pass.scanId,
+            (child["scan"] as JsonObject)["cost"],
+          );
+          expect(
+            ((child["scan"] as JsonObject)["cost"] as JsonObject)[
+              "estimatedUsd"
+            ],
+          ).toBeGreaterThan(0);
+          if (instructionFile === "sealed child missing") {
+            const manifest = JSON.parse(
+              await readFile(
+                join(
+                  (child["scan"] as JsonObject)["scanDir"] as string,
+                  "scan-manifest.json",
+                ),
+                "utf8",
+              ),
+            );
+            expect(manifest.scan.sealedAt).toBeDefined();
+          }
+        }
+        if (instructionCostRecovery) {
+          if (instructionFile === "reducer changed") {
+            expect(interruptedCheckpoint).toMatchObject({
+              aggregate: null,
+              mergedScanIds: [],
+            });
+            expect(interruptedCheckpoint.mergeStarted).not.toBe(true);
+            expect(
+              existsSync(
+                join(scanDir, "artifacts/deep-scan/merge-inputs.json"),
+              ),
+            ).toBe(false);
+            expect(turns.map(({ mode }) => mode)).toEqual(["standard"]);
+            expect(
+              (before["scan"] as JsonObject)["continuationThreadId"],
+            ).toBeNull();
+          } else {
+            expect(interruptedCheckpoint.passes).toHaveLength(2);
+            expect(interruptedCheckpoint.passes[1].scanId).toBeUndefined();
+            expect(interruptedCheckpoint.mergedScanIds).toEqual([
+              interruptedCheckpoint.passes[0].scanId,
+            ]);
+            expect(interruptedCheckpoint.aggregate).not.toBeNull();
+            expect(turns.map(({ mode }) => mode)).toEqual(["standard", "deep"]);
+          }
+          await writeFile(
+            instructionPath,
+            "Changed synthetic model instructions.\n",
+          );
+        } else {
+          if (instructionFile === "aggregate missing") {
+            expect(interruptedCheckpoint.aggregate).not.toBeNull();
+            expect(interruptedCheckpoint.terminalReason).toBeDefined();
+            const manifest = JSON.parse(
+              await readFile(join(scanDir, "scan-manifest.json"), "utf8"),
+            );
+            expect(manifest.scan.sealedAt).toBeUndefined();
+          }
+          await rm(instructionPath);
+        }
+        controller = new AbortController();
+        await client.close();
+        nativeRecipe = (
+          await runWorkbench(commandOptions, [
+            "get-scan-recipe",
+            "--scan-id",
+            scanId,
+          ])
+        )["recipe"] as JsonObject;
+        if (instructionFile === "aggregate missing")
+          nativeRecipe["postScanPrompt"] = "";
+        continuedInstructionExecution = true;
+        client = await makeClient();
+        const countBefore = instructionExecutions.length;
+        const commandsBefore = commands.length;
+        let rejectedChildId: string | undefined;
+        if (instructionCostRecovery) {
+          await expect(run()).rejects.toBeInstanceOf(DeepScanRecoveryError);
+          expect(instructionExecutions).toHaveLength(countBefore);
+          const rejectedCheckpoint = JSON.parse(
+            await readFile(checkpointPath, "utf8"),
+          );
+          if (instructionFile === "reducer changed") {
+            expect(rejectedCheckpoint).toMatchObject({
+              aggregate: null,
+              mergedScanIds: [],
+            });
+            expect(rejectedCheckpoint.mergeStarted).toBe(
+              interruptedCheckpoint.mergeStarted,
+            );
+            expect(
+              existsSync(
+                join(scanDir, "artifacts/deep-scan/merge-inputs.json"),
+              ),
+            ).toBe(false);
+            await expect(run()).rejects.toBeInstanceOf(DeepScanRecoveryError);
+            expect(instructionExecutions).toHaveLength(countBefore);
+            const repeatedCheckpoint = JSON.parse(
+              await readFile(checkpointPath, "utf8"),
+            );
+            expect(repeatedCheckpoint.mergeStarted).toBe(
+              interruptedCheckpoint.mergeStarted,
+            );
+            expect(repeatedCheckpoint.aggregate).toBeNull();
+            expect(repeatedCheckpoint.mergedScanIds).toEqual([]);
+            expect(
+              existsSync(
+                join(scanDir, "artifacts/deep-scan/merge-inputs.json"),
+              ),
+            ).toBe(false);
+          } else {
+            expect(rejectedCheckpoint.passes).toHaveLength(2);
+            expect(rejectedCheckpoint.aggregate).toEqual(
+              interruptedCheckpoint.aggregate,
+            );
+            expect(rejectedCheckpoint.mergedScanIds).toEqual(
+              interruptedCheckpoint.mergedScanIds,
+            );
+            rejectedChildId = rejectedCheckpoint.passes[1].scanId;
+            expect(rejectedChildId).toBeDefined();
+            expect(rejectedCheckpoint.passes[1].executionNotStarted).toBe(true);
+            const rejectedChild = await runWorkbench(commandOptions, [
+              "get-scan",
+              "--scan-id",
+              rejectedChildId!,
+            ]);
+            expect(rejectedChild["scan"]).toMatchObject({
+              progress: { status: "running" },
+              continuationThreadId: null,
+            });
+            await expect(run()).rejects.toBeInstanceOf(DeepScanRecoveryError);
+            expect(instructionExecutions).toHaveLength(countBefore);
+            const repeatedCheckpoint = JSON.parse(
+              await readFile(checkpointPath, "utf8"),
+            );
+            expect(repeatedCheckpoint.passes[1]).toMatchObject({
+              scanId: rejectedChildId,
+              executionNotStarted: true,
+            });
+            expect(repeatedCheckpoint.aggregate).toEqual(
+              interruptedCheckpoint.aggregate,
+            );
+          }
+          const blocked = await runWorkbench(commandOptions, [
+            "get-scan",
+            "--scan-id",
+            scanId,
+          ]);
+          expect(blocked["scan"]).toMatchObject({
+            progress: { status: "running" },
+          });
+          expect(
+            commands
+              .slice(commandsBefore)
+              .filter(
+                ({ command }) =>
+                  command === "fail-scan" || command === "cancel-scan",
+              ),
+          ).toEqual([]);
+          await writeFile(instructionPath, instructionText);
+        }
+        const result = await run();
+        expect(result.manifest.scan.id).toBe(scanId);
+        if (instructionCostRecovery)
+          expect(result.cost!.estimatedUsd).toBeGreaterThan(0);
+        for (const [childId, cost] of acceptedChildCosts) {
+          const savedChild = await runWorkbench(commandOptions, [
+            "get-scan",
+            "--scan-id",
+            childId,
+          ]);
+          expect(savedChild["scan"]).toMatchObject({
+            progress: { status: "complete" },
+            cost,
+          });
+        }
+        if (rejectedChildId !== undefined) {
+          const restoredChild = await runWorkbench(commandOptions, [
+            "get-scan",
+            "--scan-id",
+            rejectedChildId,
+          ]);
+          expect(restoredChild["scan"]).toMatchObject({
+            progress: { status: "complete" },
+          });
+          const finalCheckpoint = JSON.parse(
+            await readFile(checkpointPath, "utf8"),
+          );
+          expect(
+            finalCheckpoint.passes.find(
+              (pass: { scanId: string }) => pass.scanId === rejectedChildId,
+            ),
+          ).not.toHaveProperty("executionNotStarted");
+        }
+        if (
+          instructionFile === "aggregate missing" ||
+          instructionFile === "sealed child missing"
+        ) {
+          expect(instructionExecutions).toHaveLength(countBefore);
+          expect(existsSync(instructionPath)).toBe(false);
+        } else {
+          expect(instructionExecutions.length).toBeGreaterThan(countBefore);
+          expect(
+            instructionExecutions
+              .slice(countBefore)
+              .every((sample) => sample.bytes === instructionText),
+          ).toBe(true);
+          expect(instructionExecutions[countBefore]!.mode).toBe(
+            instructionFile === "new child changed" ? "standard" : "deep",
+          );
+        }
+        const recipe = (
+          await runWorkbench(commandOptions, [
+            "get-scan-recipe",
+            "--scan-id",
+            scanId,
+          ])
+        )["recipe"] as JsonObject;
+        expect(recipe["scanInputs"]).toMatchObject({
+          modelInstructionsFileSha256: instructionDigest,
+        });
+        const complete = await runWorkbench(commandOptions, [
+          "get-scan",
+          "--scan-id",
+          scanId,
+        ]);
+        expect(complete["scan"]).toMatchObject({
+          progress: { status: "complete" },
+        });
+        return;
+      }
       if (native === "discovery" || native === "sealed") {
         await expect(run()).rejects.toBeInstanceOf(ScanTransportClosedError);
         const saved = await runWorkbench(commandOptions, [
@@ -1515,7 +2041,15 @@ process.exit(0);
               nativeRecipe["replayProfile"],
               environment,
             ),
-          ).toMatchObject(nativeSettings);
+          ).toMatchObject({
+            ...nativeSettings,
+            model_instructions_file:
+              instructionPathForm === "home"
+                ? "~/instructions.md"
+                : instructionPathForm === undefined
+                  ? instructionPath
+                  : relative(scanDir, instructionPath),
+          });
           ambientConfig = stringifyToml({
             model: "competing-ambient-model",
             model_reasoning_effort: "low",
@@ -1649,12 +2183,17 @@ process.exit(0);
               expect(await readFile(join(scanDir, path))).toEqual(bytes);
           return;
         }
-        if (instructionFile === "changed")
+        if (
+          instructionFile === "changed" ||
+          instructionFile === "legacy changed"
+        )
           await writeFile(
             instructionPath,
             "Changed synthetic model instructions.\n",
           );
-        else if (instructionFile !== undefined) await rm(instructionPath);
+        else if (instructionFile === "missing" || instructionFile === "empty")
+          await rm(instructionPath);
+        if (instructionFile !== undefined) continuedInstructionExecution = true;
         client = await makeClient();
         if (native === "discovery") {
           const sessionPath = join(
@@ -1709,8 +2248,166 @@ process.exit(0);
         scanOptions.postScanPrompt = "";
         controller = new AbortController();
         completedTurnsBeforeOwnerResume = turns.length;
+        if (instructionFile === "sealed missing") {
+          await rm(instructionPath);
+          continuedInstructionExecution = true;
+        }
+      }
+      if (
+        instructionFile === "changed" ||
+        instructionFile === "missing" ||
+        instructionFile === "empty" ||
+        instructionFile === "later reducer changed"
+      ) {
+        const scanId = registeredScan!.scanId;
+        const checkpointPath = join(scanDir, DEEP_SCAN_CHECKPOINT);
+        const checkpointBefore = JSON.parse(
+          await readFile(checkpointPath, "utf8"),
+        );
+        const childrenBefore = await Promise.all(
+          checkpointBefore.passes.map(async (pass: { scanId: string }) => {
+            const saved = await runWorkbench(commandOptions, [
+              "get-scan",
+              "--scan-id",
+              pass.scanId,
+            ]);
+            return saved["scan"] as JsonObject;
+          }),
+        );
+        const executionsBefore = instructionExecutions.length;
+        const commandsBefore = commands.length;
+        let rejection: unknown;
+        try {
+          await run();
+        } catch (error) {
+          rejection = error;
+        }
+        expect(rejection).toBeInstanceOf(DeepScanRecoveryError);
+        rejectedWorkerRuns.add(workerRuns.at(-1)!);
+        if (instructionFile === "missing" || instructionFile === "empty") {
+          expect((rejection as Error).message).toContain("ENOENT");
+          expect((rejection as Error).message).toContain(instructionPath);
+          expect((rejection as Error).cause).toMatchObject({
+            code: "ENOENT",
+            path: instructionPath,
+          });
+        }
+        expect(instructionExecutions).toHaveLength(
+          executionsBefore +
+            (instructionFile === "later reducer changed" ? 1 : 0),
+        );
+        if (instructionFile === "later reducer changed")
+          expect(instructionExecutions.at(-1)).toMatchObject({
+            mode: "standard",
+            resumed: true,
+            bytes: instructionText,
+          });
+        expect(
+          commands
+            .slice(commandsBefore)
+            .filter(
+              ({ command }) =>
+                command === "fail-scan" || command === "cancel-scan",
+            ),
+        ).toEqual([]);
+        const parent = await runWorkbench(commandOptions, [
+          "get-scan",
+          "--scan-id",
+          scanId,
+        ]);
+        expect(parent["scan"]).toMatchObject({
+          continuationThreadId: savedExecutionThread,
+          progress: { status: "running" },
+        });
+        const checkpointAfter = JSON.parse(
+          await readFile(checkpointPath, "utf8"),
+        );
+        if (instructionFile === "later reducer changed") {
+          expect(checkpointAfter.passes).toEqual(
+            checkpointBefore.passes.map((pass: JsonObject) => ({
+              ...pass,
+              completed: true,
+            })),
+          );
+        } else expect(checkpointAfter.passes).toEqual(checkpointBefore.passes);
+        expect(checkpointAfter.mergedScanIds).toEqual(
+          checkpointBefore.mergedScanIds,
+        );
+        expect(checkpointAfter.terminalReason).toBeUndefined();
+        expect(checkpointAfter.aggregate).toEqual(checkpointBefore.aggregate);
+        expect(checkpointAfter.mergeFailures).toBe(
+          checkpointBefore.mergeFailures,
+        );
+        expect(checkpointAfter.consecutiveErrors).toBe(
+          checkpointBefore.consecutiveErrors,
+        );
+        for (const child of childrenBefore) {
+          const saved = await runWorkbench(commandOptions, [
+            "get-scan",
+            "--scan-id",
+            child["scanId"] as string,
+          ]);
+          if (instructionFile === "later reducer changed")
+            expect(saved["scan"]).toMatchObject({
+              progress: { status: "complete" },
+            });
+          else
+            expect((saved["scan"] as JsonObject)["progress"]).toEqual(
+              child["progress"],
+            );
+        }
+        const savedRecipe = await runWorkbench(commandOptions, [
+          "get-scan-recipe",
+          "--scan-id",
+          scanId,
+        ]);
+        expect(
+          (savedRecipe["recipe"] as JsonObject)["scanInputs"],
+        ).toMatchObject({
+          modelInstructionsFileSha256: instructionDigest,
+        });
+        await writeFile(instructionPath, instructionText);
       }
       const result = await run();
+      if (instructionFile !== undefined && registeredScan)
+        expect(result.manifest.scan.id).toBe(registeredScan.scanId);
+      if (instructionFile !== undefined) {
+        const initial = instructionExecutions.filter(
+          (sample) => !sample.continued,
+        );
+        const continued = instructionExecutions.filter(
+          (sample) => sample.continued,
+        );
+        expect(initial.length).toBeGreaterThan(0);
+        expect(
+          initial.every((sample) => sample.bytes === instructionText),
+        ).toBe(true);
+        if (instructionFile === "sealed missing")
+          expect(continued).toHaveLength(0);
+        else {
+          expect(
+            continued.some(
+              (sample) => sample.mode === "standard" && sample.resumed,
+            ),
+          ).toBe(true);
+          expect(
+            continued.some(
+              (sample) =>
+                sample.mode === "deep" && sample.resumed && !sample.followUp,
+            ),
+          ).toBe(true);
+          expect(
+            continued.every(
+              (sample) =>
+                sample.bytes ===
+                (instructionFile === "legacy changed" ||
+                (instructionFile === "postscan changed" && sample.followUp)
+                  ? "Changed synthetic model instructions.\n"
+                  : instructionText),
+            ),
+          ).toBe(true);
+        }
+      }
       if (
         !prepareNative ||
         instructionFile !== undefined ||
@@ -1724,8 +2421,14 @@ process.exit(0);
         expect(
           (savedRecipe["recipe"] as JsonObject)["scanInputs"],
         ).toMatchObject({
-          modelInstructionsFileSha256: instructionDigest,
+          ...(instructionFile === "legacy changed"
+            ? {}
+            : { modelInstructionsFileSha256: instructionDigest }),
         });
+        if (instructionFile === "legacy changed")
+          expect(
+            (savedRecipe["recipe"] as JsonObject)["scanInputs"],
+          ).not.toHaveProperty("modelInstructionsFileSha256");
       }
       if (completedTurnsBeforeOwnerResume !== undefined)
         expect(turns).toHaveLength(completedTurnsBeforeOwnerResume);
@@ -1746,11 +2449,22 @@ process.exit(0);
           expect(recipe["ownerSuggestions"]).toBe(true);
         }
       }
+      const knownWorkerThreads = new Set(
+        workerRuns.flatMap(({ threads }) => [...threads]),
+      );
       for (const observed of workerRuns) {
         const labels = new Map<string, number>();
         for (const event of observed.sessions) {
           if (!observed.threads.has(event.threadId)) {
-            expect(event.worker).toBeUndefined();
+            if (
+              rejectedWorkerRuns.has(observed) &&
+              event.worker !== undefined
+            ) {
+              // Recovering a prior child's cost replays its existing session events
+              // even when validation rejects before another child executes.
+              expect(knownWorkerThreads.has(event.threadId)).toBe(true);
+              expect(event.worker).toBeGreaterThan(0);
+            } else expect(event.worker).toBeUndefined();
             continue;
           }
           expect(event.worker).toBeGreaterThan(0);

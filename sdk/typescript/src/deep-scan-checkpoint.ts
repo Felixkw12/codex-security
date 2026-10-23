@@ -12,6 +12,8 @@ export interface DeepScanPass {
   failed?: true;
   /** The success and its effect on the error streak have been observed. */
   completed?: true;
+  /** Saved-input validation stopped this registered pass before any execution. */
+  executionNotStarted?: true;
   [extension: string]: unknown;
 }
 

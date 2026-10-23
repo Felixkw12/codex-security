@@ -34,11 +34,16 @@ import { createPermissionCheckedCodex } from "../src/permission-profile.js";
 import type { JsonObject as WorkbenchJsonObject } from "../src/config.js";
 import {
   runDeepScans,
+  DeepScanInputRecoveryError,
+  DeepScanRecoveryError,
   ScanCostTrackingError,
   DEEP_SCAN_CHECKPOINT,
   type DeepScanCheckpoint,
   type DeepScanComposition,
 } from "../src/deep-scan.js";
+import { newDeepScanCheckpoint } from "../src/deep-scan-checkpoint.js";
+import { ScanAccounting } from "../src/scan-accounting.js";
+import { restorePriorScanCosts } from "../src/scan-publication.js";
 import { loadContract } from "../src/contract.js";
 import { ScanResult } from "../src/result.js";
 import { abortable } from "../src/targets.js";
@@ -304,6 +309,9 @@ async function harness(
       return { scanId, groups: [...byIdentity.values()] };
     },
     writer: {
+      async remove(path) {
+        await rm(join(scanDir, path));
+      },
       async restore(path, contents) {
         await mkdir(dirname(join(scanDir, path)), { recursive: true });
         await writeFile(join(scanDir, path), contents);
@@ -2627,3 +2635,458 @@ for (const boundary of ["projection", "checkpoint"] as const) {
     });
   }
 }
+
+test.each([
+  { previous: undefined, priorInputs: false, neverStarted: true },
+  { previous: false, priorInputs: false, neverStarted: true },
+  { previous: false, priorInputs: true, neverStarted: true },
+  { previous: true, priorInputs: true, neverStarted: true },
+  { previous: false, priorInputs: false, neverStarted: false },
+])(
+  "input rejection preserves prior reducer uncertainty: %j",
+  async (testCase) => {
+    const h = await harness({ maxDiscoveryRuns: 1 });
+    const state = newDeepScanCheckpoint(h.input.startedAt);
+    if (testCase.previous === undefined) delete state.mergeStarted;
+    else state.mergeStarted = testCase.previous;
+    await h.seed(state);
+    const path = join(h.input.scanDir, "artifacts/deep-scan/merge-inputs.json");
+    const prior = Buffer.from("Synthetic prior merge inputs.\n");
+    if (testCase.priorInputs) await writeFile(path, prior);
+    h.setRun(async (options) =>
+      result(options.resumeScanId!, options.outputDir!, "supported-issue"),
+    );
+    const failure = new DeepScanInputRecoveryError(
+      "Synthetic changed inputs.",
+      h.input.scanDir,
+      testCase.neverStarted,
+    );
+    let attempts = 0;
+    h.input.merge = async () => {
+      attempts++;
+      throw failure;
+    };
+    await expect(runDeepScans(h.input)).rejects.toBe(failure);
+    expect(attempts).toBe(1);
+    expect(h.calls).toHaveLength(1);
+    const saved = await h.checkpoint();
+    expect(saved.terminalReason).toBeUndefined();
+    expect(saved.passes[0]!.completed).toBe(true);
+    const rolledBack = testCase.neverStarted && testCase.previous !== true;
+    expect(saved.mergeStarted).toBe(rolledBack ? testCase.previous : true);
+    const { aggregate: _aggregate, ...summary } = saved;
+    if (rolledBack && !testCase.priorInputs) {
+      await expect(readFile(path)).rejects.toMatchObject({ code: "ENOENT" });
+      await restorePriorScanCosts(
+        new ScanAccounting(),
+        summary,
+        null,
+        h.input.scanDir,
+        1,
+      );
+    } else {
+      const current = await readFile(path);
+      if (rolledBack) expect(current).toEqual(prior);
+      else expect(current).not.toEqual(prior);
+      await expect(
+        restorePriorScanCosts(
+          new ScanAccounting(),
+          summary,
+          null,
+          h.input.scanDir,
+          1,
+        ),
+      ).rejects.toBeInstanceOf(ScanCostTrackingError);
+    }
+  },
+);
+
+test.each(["remove", "restore", "rollback-save", "initial-save"] as const)(
+  "failed reducer recovery stays conservative without another attempt: %s",
+  async (phase) => {
+    const h = await harness({ maxDiscoveryRuns: 1 });
+    const path = join(h.input.scanDir, "artifacts/deep-scan/merge-inputs.json");
+    if (phase === "restore") {
+      await mkdir(dirname(path), { recursive: true });
+      await writeFile(path, "Synthetic prior merge inputs.\n");
+    }
+    h.setRun(async (options) =>
+      result(options.resumeScanId!, options.outputDir!, "supported-issue"),
+    );
+    const failure = new Error(`Synthetic ${phase} failure.`);
+    const inputFailure = new DeepScanInputRecoveryError(
+      "Synthetic changed inputs.",
+      h.input.scanDir,
+      true,
+    );
+    let attempts = 0;
+    h.input.merge = async () => {
+      attempts++;
+      throw inputFailure;
+    };
+    if (phase === "remove")
+      h.input.writer.remove = async () => {
+        throw failure;
+      };
+    if (phase === "restore") {
+      const restore = h.input.writer.restore;
+      h.input.writer.restore = async (path, contents) => {
+        if (attempts > 0) throw failure;
+        await restore(path, contents);
+      };
+    }
+    const workbench = h.input.workbench;
+    h.input.workbench = async (args, contents) => {
+      if (args[0] === "save-scan-artifact") {
+        const saved = JSON.parse(contents!);
+        if (
+          (phase === "initial-save" && saved.mergeStarted === true) ||
+          (phase === "rollback-save" &&
+            attempts > 0 &&
+            saved.mergeStarted === false)
+        )
+          throw failure;
+      }
+      return workbench(args, contents);
+    };
+    let rejected: unknown;
+    try {
+      await runDeepScans(h.input);
+    } catch (error) {
+      rejected = error;
+    }
+    expect(rejected).toBeInstanceOf(DeepScanRecoveryError);
+    expect(rejected).not.toBeInstanceOf(DeepScanInputRecoveryError);
+    expect((rejected as Error).cause).toBe(failure);
+    expect(attempts).toBe(phase === "initial-save" ? 0 : 1);
+    const saved = await h.checkpoint();
+    expect(saved.terminalReason).toBeUndefined();
+    expect(saved.passes[0]!.completed).toBe(true);
+    const { aggregate: _aggregate, ...summary } = saved;
+    await expect(
+      restorePriorScanCosts(
+        new ScanAccounting(),
+        summary,
+        null,
+        h.input.scanDir,
+        1,
+      ),
+    ).rejects.toBeInstanceOf(ScanCostTrackingError);
+  },
+);
+
+test("unstarted discovery rejects repeatedly and restores the same required-cost pass", async () => {
+  const h = await harness({ workers: 1, maxDiscoveryRuns: 1 });
+  h.input.scanOptions.requireCost = true;
+  const rejection = new DeepScanInputRecoveryError(
+    "Synthetic changed instructions.",
+    h.input.scanDir,
+    true,
+  );
+  h.setRun(async () => {
+    throw rejection;
+  });
+  const createClient = h.input.createClient;
+  h.input.createClient = () => {
+    const client = createClient();
+    return {
+      ...client,
+      async run(repository, options) {
+        expect(
+          (await h.checkpoint()).passes[0]!.executionNotStarted,
+        ).toBeUndefined();
+        return client.run(repository, options);
+      },
+    };
+  };
+  let childId: string | undefined;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await expect(runDeepScans(h.input)).rejects.toBe(rejection);
+    const state = await h.checkpoint();
+    childId ??= state.passes[0]!.scanId;
+    expect(state.passes).toEqual([
+      {
+        directory: "artifacts/deep-scan/passes/pass-1",
+        scanId: childId,
+        executionNotStarted: true,
+      },
+    ]);
+    expect(state.costUnavailable).toBeUndefined();
+    expect(state.terminalReason).toBeUndefined();
+    expect(h.records.get(childId!)!.progress.status).toBe("running");
+  }
+  h.setRun(async (options) => {
+    const completed = result(
+      options.resumeScanId!,
+      options.outputDir!,
+      undefined,
+      { input_tokens: 1200, output_tokens: 120 },
+    );
+    h.records.get(childId!)!.continuationThreadId = "restored-session";
+    h.records.get(childId!)!.cost = completed.cost;
+    return completed;
+  });
+  const restored = await runDeepScans(h.input);
+  expect(restored.passes).toEqual([
+    {
+      directory: "artifacts/deep-scan/passes/pass-1",
+      scanId: childId,
+      completed: true,
+    },
+  ]);
+  expect(restored.costUnavailable).toBeUndefined();
+  expect(restored.terminalReason).toBe("capped");
+  expect(h.records.size).toBe(1);
+  expect(h.records.get(childId!)!.progress.status).toBe("complete");
+  expect(h.records.get(childId!)!.cost!.estimatedUsd).toBeGreaterThan(0);
+  expect(h.calls.map((options) => options.resumeScanId)).toEqual([
+    undefined,
+    childId,
+    childId,
+  ]);
+});
+
+test.each(["consume", "record"] as const)(
+  "unstarted discovery checkpoint %s failure preserves conservative recovery",
+  async (phase) => {
+    const h = await harness({ workers: 1, maxDiscoveryRuns: 1 });
+    h.input.scanOptions.requireCost = true;
+    h.setRun(async () => {
+      throw new DeepScanInputRecoveryError(
+        "Synthetic invalid input.",
+        h.input.scanDir,
+        true,
+      );
+    });
+    if (phase === "consume")
+      await expect(runDeepScans(h.input)).rejects.toBeInstanceOf(
+        DeepScanInputRecoveryError,
+      );
+    const beforeCalls = h.calls.length;
+    const workbench = h.input.workbench;
+    const failure = new Error(`Synthetic ${phase} checkpoint write failure.`);
+    h.input.workbench = async (args, contents) => {
+      if (
+        args[0] === "save-scan-artifact" &&
+        args[4] === DEEP_SCAN_CHECKPOINT
+      ) {
+        const pass = JSON.parse(contents!).passes[0];
+        if (
+          pass?.scanId &&
+          (pass.executionNotStarted === true) === (phase === "record")
+        )
+          throw failure;
+      }
+      return workbench(args, contents);
+    };
+    const error = await runDeepScans(h.input).catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(DeepScanRecoveryError);
+    expect(error).not.toBeInstanceOf(DeepScanInputRecoveryError);
+    expect((error as Error).message).toContain(failure.message);
+    let cause = error;
+    while (cause instanceof Error && cause.cause !== undefined)
+      cause = cause.cause;
+    expect(cause).toBe(failure);
+    expect(h.calls.length - beforeCalls).toBe(phase === "consume" ? 0 : 1);
+    const state = await h.checkpoint();
+    expect(state.passes[0]!.executionNotStarted).toBe(
+      phase === "consume" ? true : undefined,
+    );
+    expect(state.costUnavailable).toBeUndefined();
+    expect(state.terminalReason).toBeUndefined();
+    expect([...h.records.values()][0]!.progress.status).toBe("running");
+    if (phase === "record") {
+      h.input.workbench = workbench;
+      await expect(runDeepScans(h.input)).rejects.toBeInstanceOf(
+        ScanCostTrackingError,
+      );
+      expect(h.calls).toHaveLength(1);
+      expect((await h.checkpoint()).costUnavailable).toBe(true);
+    }
+  },
+);
+
+test.each(["unmarked", "prior thread", "prior unknown cost"] as const)(
+  "unstarted discovery proof does not excuse %s accounting",
+  async (scenario) => {
+    const h = await harness({ workers: 1, maxDiscoveryRuns: 1 });
+    h.input.scanOptions.requireCost = true;
+    const childId = randomUUID();
+    const directory = "artifacts/deep-scan/passes/pass-1";
+    h.records.set(childId, {
+      scanId: childId,
+      scanDir: join(h.input.scanDir, directory),
+      targetPath: h.input.repository,
+      parentScanId: h.input.scanId,
+      progress: { status: "running" },
+      ...(scenario === "prior thread"
+        ? { continuationThreadId: "prior-session" }
+        : {}),
+    });
+    await h.seed({
+      ...newDeepScanCheckpoint(h.input.startedAt),
+      passes: [
+        {
+          directory,
+          scanId: childId,
+          ...(scenario === "unmarked" ? {} : { executionNotStarted: true }),
+        },
+      ],
+      ...(scenario === "prior unknown cost" ? { costUnavailable: true } : {}),
+    });
+    h.input.historicalCost = async () => null;
+    const receipts: Array<Readonly<ScanCost> | null> = [];
+    h.input.onCost = (_key, cost) => receipts.push(cost);
+    await expect(runDeepScans(h.input)).rejects.toBeInstanceOf(
+      ScanCostTrackingError,
+    );
+    expect(h.calls).toHaveLength(0);
+    const state = await h.checkpoint();
+    expect(state.passes[0]!.executionNotStarted).toBe(
+      scenario === "prior unknown cost" ? true : undefined,
+    );
+    if (scenario !== "prior thread") expect(state.costUnavailable).toBe(true);
+    expect(receipts.every((receipt) => receipt === null)).toBe(true);
+  },
+);
+
+test("an attempted discovery never gains unstarted execution proof", async () => {
+  const h = await harness({ workers: 1, maxDiscoveryRuns: 1 });
+  h.input.scanOptions.requireCost = true;
+  h.setRun(async () => {
+    throw new DeepScanInputRecoveryError(
+      "Synthetic later input rejection.",
+      h.input.scanDir,
+      false,
+    );
+  });
+  await expect(runDeepScans(h.input)).rejects.toBeInstanceOf(
+    DeepScanInputRecoveryError,
+  );
+  expect((await h.checkpoint()).passes[0]!.executionNotStarted).toBeUndefined();
+  await expect(runDeepScans(h.input)).rejects.toBeInstanceOf(
+    ScanCostTrackingError,
+  );
+  expect(h.calls).toHaveLength(1);
+});
+
+test.each(["before client", "restoration failure", "after client"] as const)(
+  "a deadline preserves only unused discovery execution proof: %s",
+  async (boundary) => {
+    const h = await harness({
+      workers: 1,
+      maxDiscoveryRuns: 1,
+      maxTimeHours: 1 / 3600,
+    });
+    const now = Date.now();
+    h.input.startedAt = new Date(now).toISOString();
+    h.input.scanOptions.requireCost = true;
+    const directory = "artifacts/deep-scan/passes/pass-1";
+    const childId = randomUUID();
+    h.records.set(childId, {
+      scanId: childId,
+      scanDir: join(h.input.scanDir, directory),
+      targetPath: h.input.repository,
+      parentScanId: h.input.scanId,
+      progress: { status: "running" },
+    });
+    await h.seed({
+      ...newDeepScanCheckpoint(h.input.startedAt),
+      passes: [{ directory, scanId: childId, executionNotStarted: true }],
+    });
+    const clock = spyOn(Date, "now").mockReturnValue(now);
+    let expire: (() => void) | undefined;
+    const schedule = globalThis.setTimeout;
+    const timer = spyOn(globalThis, "setTimeout").mockImplementation(((
+      ...args: Parameters<typeof schedule>
+    ) => {
+      const [callback, delay, ...params] = args;
+      if (delay === 1000) {
+        expire = () => callback(...params);
+        return schedule(() => {}, 60_000);
+      }
+      return schedule(...args);
+    }) as typeof schedule);
+    const triggerDeadline = () => {
+      expect(expire).toBeDefined();
+      clock.mockReturnValue(now + 1001);
+      expire!();
+    };
+    const failure = new Error("Synthetic unused proof restoration failure.");
+    const ledger = new ScanAccounting();
+    const receipts: Array<Readonly<ScanCost> | null> = [];
+    h.input.onCost = (key, cost) => {
+      ledger.record(key, cost);
+      receipts.push(cost);
+    };
+    const workbench = h.input.workbench;
+    let consumed = false;
+    let failCalls = 0;
+    h.input.workbench = async (args, contents) => {
+      if (args[0] === "fail-scan") failCalls++;
+      const pass =
+        args[0] === "save-scan-artifact" && args[4] === DEEP_SCAN_CHECKPOINT
+          ? (JSON.parse(contents!) as DeepScanCheckpoint).passes[0]
+          : undefined;
+      if (
+        boundary === "restoration failure" &&
+        consumed &&
+        pass?.executionNotStarted === true
+      )
+        throw failure;
+      const value = await workbench(args, contents);
+      if (
+        !consumed &&
+        pass?.scanId === childId &&
+        pass.executionNotStarted === undefined
+      ) {
+        consumed = true;
+        if (boundary !== "after client") triggerDeadline();
+      }
+      return value;
+    };
+    h.setRun(async (options) => {
+      expect(boundary).toBe("after client");
+      expect(consumed).toBe(true);
+      triggerDeadline();
+      options.signal!.throwIfAborted();
+      throw new Error("Synthetic deadline did not abort discovery.");
+    });
+    try {
+      const outcome = await runDeepScans(h.input).catch(
+        (error: unknown) => error,
+      );
+      const state = await h.checkpoint();
+      expect(consumed).toBe(true);
+      expect(h.calls).toHaveLength(boundary === "after client" ? 1 : 0);
+      expect(receipts.every((receipt) => receipt === null)).toBe(true);
+      if (boundary === "after client") {
+        expect(outcome).toBeInstanceOf(ScanCostTrackingError);
+        expect(state.passes[0]!.executionNotStarted).toBeUndefined();
+        expect(h.records.get(childId)!.progress.status).toBe("failed");
+        expect(failCalls).toBe(1);
+        expect(ledger.hasUnknown).toBe(true);
+        expect(ledger.complete).toBeNull();
+      } else if (boundary === "restoration failure") {
+        expect(outcome).toBeInstanceOf(DeepScanRecoveryError);
+        expect(outcome).not.toBeInstanceOf(DeepScanInputRecoveryError);
+        expect((outcome as Error).message).toContain(failure.message);
+        expect((outcome as Error).cause).toBe(failure);
+        expect(state.passes[0]!.executionNotStarted).toBeUndefined();
+        expect(state.terminalReason).toBeUndefined();
+        expect(h.records.get(childId)!.progress.status).toBe("running");
+        expect(failCalls).toBe(0);
+      } else {
+        expect(outcome).not.toBeInstanceOf(Error);
+        expect(state.passes[0]!.executionNotStarted).toBe(true);
+        expect(state.terminalReason).toBe("capped");
+        expect(state.costUnavailable).toBeUndefined();
+        expect(h.records.get(childId)!.progress.status).toBe("running");
+        expect(failCalls).toBe(0);
+      }
+    } finally {
+      timer.mockRestore();
+      clock.mockRestore();
+    }
+  },
+);
