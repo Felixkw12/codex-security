@@ -1,5 +1,4 @@
 import {
-  setupPatchWorkflowFixtures,
   CURRENT_REPOSITORY,
   SAVED_REPOSITORY,
   STATE_DIRECTORY,
@@ -65,8 +64,6 @@ import { throwing } from "./support/errors.js";
 import { createCliTest } from "./support/cli-run.js";
 import { resolvePluginPython, runWorkbench } from "../src/runtime.js";
 import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
-
-setupPatchWorkflowFixtures();
 
 setupPatchWorkflowFixtures();
 
