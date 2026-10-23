@@ -62,6 +62,7 @@ const GIT_HOOKS = [
 
 export interface PatchGitCommandOptions {
   readonly encoding?: "base64";
+  readonly callerContext?: boolean;
   readonly nestedProbe?: boolean;
   readonly indexFile?: string;
   readonly input?: string | Uint8Array;
@@ -1611,7 +1612,10 @@ export async function capturePatchGitControls(
         root,
         root,
         ["rev-parse", "--path-format=absolute", "--git-path", "objects"],
-        { environment: { GIT_OBJECT_DIRECTORY: selected } },
+        {
+          callerContext: true,
+          environment: { GIT_OBJECT_DIRECTORY: selected },
+        },
       );
     } catch (error) {
       const failure = error as Error & { code?: unknown; status?: unknown };
