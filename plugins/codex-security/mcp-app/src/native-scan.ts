@@ -5,7 +5,10 @@ import {
   runWorkbench,
 } from "../../../../sdk/typescript/src/runtime.js";
 import { hasSealedScanArtifacts } from "../../../../sdk/typescript/src/scan-publication.js";
-import { restoreScanKnowledge } from "../../../../sdk/typescript/src/scan-inputs.js";
+import {
+  modelInstructionsFileDigest,
+  restoreScanKnowledge,
+} from "../../../../sdk/typescript/src/scan-inputs.js";
 import { isRecord } from "./record.js";
 import {
   CodexSecurity,
@@ -223,7 +226,13 @@ export async function readNativeScanSemanticInputs(
       config["developer_instructions"] ===
         savedConfig["developer_instructions"] &&
       config["model_instructions_file"] ===
-        savedConfig["model_instructions_file"],
+        savedConfig["model_instructions_file"] &&
+      (await modelInstructionsFileDigest(
+        typeof config["model_instructions_file"] === "string"
+          ? config["model_instructions_file"]
+          : undefined,
+        signal,
+      )) === (savedRecipe?.scanInputs?.["modelInstructionsFileSha256"] ?? null),
     modelSettings: scanModelConfiguration(
       await mergedCodexConfig({ codexOverrides: config }),
     ),

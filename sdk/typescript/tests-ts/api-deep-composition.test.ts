@@ -1,7 +1,7 @@
 import { effectiveCodexConfiguration } from "./support/api-events.js";
 import { main } from "../src/cli.js";
 import { capture, dependencies as cliDependencies } from "./cli-fixtures.js";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import { restoreScanKnowledge } from "../src/scan-inputs.js";
 import { restoreProviderProfile } from "../src/provider-profile.js";
@@ -2142,7 +2142,15 @@ test.each(["relative", "absolute", "profile"] as const)(
     await expect(first.run(h.repository, options)).rejects.toBeInstanceOf(
       ScanTransportClosedError,
     );
-    const [parentId] = [...h.records].find(([, row]) => row.mode === "deep")!;
+    const [parentId, parent] = [...h.records].find(
+      ([, row]) => row.mode === "deep",
+    )!;
+    const expectedDigest = createHash("sha256")
+      .update("Synthetic instructions for this scan.\n")
+      .digest("hex");
+    expect(parent.recipe["scanInputs"]).toMatchObject({
+      modelInstructionsFileSha256: expectedDigest,
+    });
     await using resumed = h.makeClient(configuration);
     await resumed.run(h.repository, {
       ...options,
@@ -2173,6 +2181,64 @@ test.each(["relative", "absolute", "profile"] as const)(
             .mode === "deep",
       ),
     ).toBe(true);
+  },
+);
+
+test.each(
+  (["sdk", "native"] as const).flatMap((continuation) =>
+    (["changed", "missing", "empty"] as const).map((contents) => ({
+      continuation,
+      contents,
+    })),
+  ),
+)(
+  "Deep instruction file digests retain registration identity on resume: %j",
+  async ({ continuation, contents }) => {
+    const h = await fixture(undefined, continuation === "native");
+    const instructionPath = join(h.root, "instructions.md");
+    const original =
+      contents === "empty" ? "" : "Original synthetic instructions.\n";
+    await writeFile(instructionPath, original);
+    const configuration = { model_instructions_file: instructionPath };
+    const options = { ...h.options, knowledgeBasePaths: undefined };
+    h.stopBeforeSealing();
+    await using first = h.makeClient(configuration);
+    await expect(first.run(h.repository, options)).rejects.toBeInstanceOf(
+      ScanTransportClosedError,
+    );
+    const [parentId, parent] = [...h.records].find(
+      ([, row]) => row.mode === "deep",
+    )!;
+    const readRecipe = async () =>
+      (
+        await runWorkbench({ ...parent.options, signal: undefined }, [
+          "get-scan-recipe",
+          "--scan-id",
+          parentId,
+        ])
+      )["recipe"] as JsonObject;
+    const saved = await readRecipe();
+    const digest = createHash("sha256").update(original).digest("hex");
+    expect(saved["scanInputs"]).toMatchObject({
+      modelInstructionsFileSha256: digest,
+    });
+    if (contents === "changed")
+      await writeFile(instructionPath, "Changed synthetic instructions.\n");
+    else await rm(instructionPath);
+    const beforeResume = h.launches.length;
+    await using resumed = h.makeClient(configuration);
+    const result = await resumed.run(h.repository, {
+      ...options,
+      signal: undefined,
+      ...(continuation === "sdk" ? { resumeScanId: parentId } : {}),
+    });
+    expect(result.manifest.scan.id).toBe(parentId);
+    expect((await readRecipe())["scanInputs"]).toEqual(saved["scanInputs"]);
+    expect(h.launches.length).toBeGreaterThan(beforeResume);
+    for (const launch of h.launches)
+      expect(launch.options.config!["model_instructions_file"]).toBe(
+        instructionPath,
+      );
   },
 );
 

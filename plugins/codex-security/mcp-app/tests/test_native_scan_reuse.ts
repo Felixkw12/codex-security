@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -77,6 +78,10 @@ for (const change of [
   "instructions absent",
   "instructions added",
   "instruction file unchanged",
+  "instruction file content changed",
+  "instruction file legacy",
+  "instruction file empty",
+  "instruction file missing",
   "instruction file changed",
   "instruction file removed",
   "instruction file explicit",
@@ -226,7 +231,9 @@ for (const change of [
       if (instructionFileCase) {
         await writeFile(
           originalInstructionFile,
-          "Original synthetic model instructions.\n",
+          change === "instruction file empty"
+            ? ""
+            : "Original synthetic model instructions.\n",
         );
         await writeFile(
           changedInstructionFile,
@@ -287,7 +294,16 @@ for (const change of [
         ...(change === "legacy recipe"
           ? {}
           : {
-              scanInputs: scanInputIdentity(userContext.trim(), knowledge),
+              scanInputs: {
+                ...scanInputIdentity(userContext.trim(), knowledge),
+                ...(instructionFileCase && change !== "instruction file legacy"
+                  ? {
+                      modelInstructionsFileSha256: createHash("sha256")
+                        .update(await readFile(originalInstructionFile))
+                        .digest("hex"),
+                    }
+                  : {}),
+              },
               deepScan: deep,
             }),
       };
@@ -419,13 +435,33 @@ for (const change of [
         );
       if (change === "instructions removed")
         await writeFile(selectedConfigPath, selectedConfig(undefined));
+      if (change === "instruction file content changed")
+        await writeFile(
+          originalInstructionFile,
+          "Changed instructions at the same path.\n",
+        );
+      if (
+        [
+          "instruction file missing",
+          "instruction file explicit",
+          "instruction file running",
+        ].includes(change)
+      ) {
+        await rm(originalInstructionFile);
+        await rm(changedInstructionFile);
+      }
       if (instructionFileCase) {
-        const currentFile =
-          change === "instruction file unchanged"
-            ? originalInstructionFile
-            : change === "instruction file removed"
-              ? undefined
-              : changedInstructionFile;
+        const currentFile = [
+          "instruction file unchanged",
+          "instruction file content changed",
+          "instruction file legacy",
+          "instruction file empty",
+          "instruction file missing",
+        ].includes(change)
+          ? originalInstructionFile
+          : change === "instruction file removed"
+            ? undefined
+            : changedInstructionFile;
         await writeFile(
           selectedConfigPath,
           selectedConfig(originalInstructions, currentFile),
@@ -484,6 +520,7 @@ for (const change of [
         change === "instructions unchanged" ||
         change === "instructions absent" ||
         change === "instruction file unchanged" ||
+        change === "instruction file empty" ||
         change === "instruction file explicit" ||
         change === "whitespace knowledge" ||
         change === "padded knowledge path" ||
@@ -491,7 +528,10 @@ for (const change of [
       ) {
         assert.equal(successful(response).scanId, scanId);
         assert.equal(workbench(["list-scans"]).scans.length, 1);
-      } else if (change === "missing knowledge") {
+      } else if (
+        change === "missing knowledge" ||
+        change === "instruction file missing"
+      ) {
         assert.equal(response.isError, true);
         assert.match(JSON.stringify(response.content), /knowledge|ENOENT/i);
         assert.equal(workbench(["list-scans"]).scans.length, 1);
