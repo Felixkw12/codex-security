@@ -19,7 +19,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: 873c7199b9d20d7d32466fde52f2c2b5899ea96e
+          ref: 89ee67e08d6aec6392fb23182f472006c7f35866
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -68,7 +68,7 @@ jobs:
           set -euo pipefail
           umask 022
           mkdir -p reports/native-stdout
-          test "$(git rev-parse HEAD)" = 873c7199b9d20d7d32466fde52f2c2b5899ea96e
+          test "$(git rev-parse HEAD)" = 89ee67e08d6aec6392fb23182f472006c7f35866
           test "$(node --version)" = v22.13.0
           test "$(bun --revision)" = 1.4.3-canary.1+620b50f6a
           {
