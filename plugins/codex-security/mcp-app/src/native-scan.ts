@@ -52,6 +52,7 @@ import type { NativeParentSandbox } from "./native-permissions.js";
 import {
   nativeScanConfiguration,
   readOnlyFilesystem,
+  resolveExecutionPaths,
 } from "../../../../sdk/typescript/src/execution-preparation.js";
 export { nativeScanConfiguration } from "../../../../sdk/typescript/src/execution-preparation.js";
 import type { ScanResults } from "./types.js";
@@ -388,15 +389,41 @@ export async function prepareNativeScan(
     if (hasUncappedDenials)
       delete inheritedPermissions.filesystem["glob_scan_max_depth"];
   }
+  const configurationEnvironment = {
+    ...inheritedEnvironment,
+    ...(input.stateDirectory
+      ? { CODEX_SECURITY_STATE_DIR: input.stateDirectory }
+      : {}),
+  };
+  const deep = await resolveDeepScanConfig(
+    options,
+    nativeDeepScanConfigPath(configurationEnvironment),
+  );
+  // The SDK still validates the seal, owner and claim before publication.
+  const config = publicationOnly
+    ? (recipe.config ?? {})
+    : (semanticInputs?.config ??
+      (await nativeScanConfiguration(
+        configurationEnvironment,
+        input,
+        deep.settings.subagents,
+      )));
+  const instructionsPath = publicationOnly
+    ? undefined
+    : resolveExecutionPaths(config, input.scan.scanDir, inheritedEnvironment)[
+        "model_instructions_file"
+      ];
   const protectedRoots = [
     input.scan.scanDir,
     ...(await Promise.all(
-      [input.scan.targetPath, ...(options.knowledgeBasePaths ?? [])].map(
-        async (path) => {
-          const source = expandHome(path, inheritedEnvironment);
-          return (await gitMarkerRoot(source, signal, "outermost")) ?? source;
-        },
-      ),
+      [
+        input.scan.targetPath,
+        ...(options.knowledgeBasePaths ?? []),
+        ...(typeof instructionsPath === "string" ? [instructionsPath] : []),
+      ].map(async (path) => {
+        const source = expandHome(path, inheritedEnvironment);
+        return (await gitMarkerRoot(source, signal, "outermost")) ?? source;
+      }),
     )),
   ];
   const codex = publicationOnly
@@ -415,19 +442,6 @@ export async function prepareNativeScan(
   delete environment.CODEX_SECURITY_KNOWLEDGE_BASE;
   if (input.stateDirectory)
     environment.CODEX_SECURITY_STATE_DIR = input.stateDirectory;
-  const deep = await resolveDeepScanConfig(
-    options,
-    nativeDeepScanConfigPath(environment),
-  );
-  // The SDK still validates the seal, owner and claim before publication.
-  const config = publicationOnly
-    ? (recipe.config ?? {})
-    : (semanticInputs?.config ??
-      (await nativeScanConfiguration(
-        environment,
-        input,
-        deep.settings.subagents,
-      )));
   const security = config["codex_security"];
   if (
     recipe === undefined &&

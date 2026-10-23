@@ -953,6 +953,178 @@ test("native preparation excludes scan output and knowledge sources from executa
   }
 });
 
+test("native instruction sources follow selected and saved path semantics before executable selection", async () => {
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "native-instructions-")),
+  );
+  const repository = join(root, "repository");
+  const scanDir = join(root, "scan");
+  const guidance = join(root, "guidance");
+  const documents = join(guidance, "docs");
+  const external = join(root, "external");
+  const home = join(root, "home");
+  const selected = join(root, "selected.toml");
+  const stateDirectory = join(root, "selected-state");
+  const managedHome = join(stateDirectory, "codex-home");
+  const name = process.platform === "win32" ? "codex.exe" : "codex";
+  const instructions = join(documents, "instructions.md");
+  const restore = captureEnvironment([
+    "HOME",
+    "USERPROFILE",
+    "CODEX_HOME",
+    "CODEX_API_KEY",
+    "OPENAI_API_KEY",
+    "CODEX_CLI_PATH",
+    "PATH",
+    "CODEX_SECURITY_KNOWLEDGE_BASE",
+    "CODEX_SECURITY_CONFIG_PATH",
+    "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+    "CODEX_SECURITY_STATE_DIR",
+  ]);
+  try {
+    for (const directory of [
+      repository,
+      scanDir,
+      documents,
+      external,
+      home,
+      managedHome,
+    ])
+      await mkdir(directory, { recursive: true, mode: 0o700 });
+    await mkdir(join(guidance, ".git"));
+    await writeFile(instructions, "Synthetic selected model instructions.");
+    for (const directory of [guidance, external])
+      await writeFile(join(directory, name), "inert executable fixture", {
+        mode: 0o700,
+      });
+    Object.assign(process.env, {
+      HOME: root,
+      USERPROFILE: root,
+      CODEX_HOME: home,
+      CODEX_SECURITY_CONFIG_PATH: selected,
+    });
+    for (const key of [
+      "CODEX_API_KEY",
+      "OPENAI_API_KEY",
+      "CODEX_SECURITY_KNOWLEDGE_BASE",
+      "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+    ])
+      delete process.env[key];
+    process.env.CODEX_SECURITY_STATE_DIR = join(root, "ambient-state");
+    const managedProfile = await createProviderProfile(managedHome, {
+      model_instructions_file: instructions,
+    });
+    const savedProfile = await createProviderProfile(home, {
+      model_instructions_file: instructions,
+    });
+    for (const scenario of [
+      "selected relative",
+      "selected profile",
+      "selected home",
+      "saved relative",
+      "saved profile",
+      "saved managed profile",
+    ]) {
+      const saved = scenario.startsWith("saved");
+      await writeFile(
+        selected,
+        stringifyToml(
+          saved
+            ? { model_instructions_file: join(external, "ignored.md") }
+            : scenario === "selected profile"
+              ? {
+                  model_instructions_file: join(external, "ignored.md"),
+                  profile: "guidance",
+                  profiles: {
+                    guidance: {
+                      model_instructions_file: "guidance/docs/instructions.md",
+                    },
+                    ignored: {
+                      model_instructions_file: join(external, "ignored.md"),
+                    },
+                  },
+                }
+              : {
+                  model_instructions_file:
+                    scenario === "selected home"
+                      ? "~/guidance/docs/instructions.md"
+                      : "guidance/docs/instructions.md",
+                },
+        ),
+      );
+      const request = {
+        ...input(),
+        stateDirectory,
+        scan: { ...input().scan, targetPath: repository, scanDir },
+        ...(saved
+          ? {
+              recipe: {
+                auth: "api-key",
+                config:
+                  scenario === "saved relative"
+                    ? {
+                        model_instructions_file:
+                          "../guidance/docs/instructions.md",
+                      }
+                    : {},
+                ...(scenario.endsWith("profile")
+                  ? {
+                      providerProfile: {
+                        name:
+                          scenario === "saved managed profile"
+                            ? managedProfile.name
+                            : savedProfile.name,
+                        home:
+                          scenario === "saved managed profile"
+                            ? "managed"
+                            : "ambient",
+                      },
+                    }
+                  : {}),
+              },
+            }
+          : {}),
+      };
+      process.env.CODEX_CLI_PATH = join(guidance, name);
+      await assert.rejects(
+        prepareNativeExecution(request),
+        /outside the scan target/,
+        scenario,
+      );
+      delete process.env.CODEX_CLI_PATH;
+      process.env.PATH = [guidance, external].join(delimiter);
+      const prepared = await prepareNativeExecution(request);
+      assert.equal(
+        prepared.client.dependencies.environment.CODEX_CLI_PATH,
+        join(external, name),
+        scenario,
+      );
+      assert.equal(
+        prepared.client.dependencies.environment.PATH,
+        external,
+        scenario,
+      );
+      assert.equal(
+        prepared.client.config.codexOverrides.model_instructions_file,
+        scenario === "saved relative"
+          ? "../guidance/docs/instructions.md"
+          : instructions,
+        scenario,
+      );
+      process.env.CODEX_CLI_PATH = join(external, name);
+      assert.equal(
+        (await prepareNativeExecution(request)).client.dependencies.environment
+          .CODEX_CLI_PATH,
+        join(external, name),
+        scenario,
+      );
+    }
+  } finally {
+    restore();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("pre-aborted native waiters leave the accepted scan running", async () => {
   const started = Promise.withResolvers();
   const completed = Promise.withResolvers();
