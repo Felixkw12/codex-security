@@ -9,6 +9,7 @@ import {
 } from "node:fs/promises";
 import { join } from "node:path";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
+import { buildPatchGitControlsForNode } from "./support/node-patch-git-controls.js";
 import { repositoryGit } from "./cli-patch-fixtures.js";
 
 const fixtures = createTemporaryDirectories(true);
@@ -58,7 +59,7 @@ test
 import { execFileSync } from "node:child_process";
 import { readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { capturePatchGitControls } from ${JSON.stringify(new URL("../src/patch-git-controls.ts", import.meta.url).href)};
+import { capturePatchGitControls } from ${JSON.stringify(await buildPatchGitControlsForNode(support))};
 const root = ${JSON.stringify(root)};
 const controls = await capturePatchGitControls(root, async (repository, checkout, args, options) => {
   return execFileSync("git", repository === checkout ? args : ["-C", checkout, ...args], { cwd: repository, input: options?.input, env: { ...process.env, ...(options?.indexFile === undefined ? {} : { GIT_INDEX_FILE: options.indexFile }), ...options?.environment } }).toString(options?.encoding ?? "utf8");
@@ -86,11 +87,9 @@ try {
 process.stdout.write(JSON.stringify({ paths: controls.readOnlyPaths, error, bookkeeping, beforeTurnEffects, files }));
 `;
     const result = JSON.parse(
-      execFileSync(
-        "node",
-        ["--experimental-strip-types", "--input-type=module", "-e", source],
-        { encoding: "utf8" },
-      ),
+      execFileSync("node", ["--input-type=module", "-e", source], {
+        encoding: "utf8",
+      }),
     ) as {
       paths: string[];
       error?: string;

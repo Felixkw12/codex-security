@@ -21,6 +21,7 @@ import { runCodexSkillCommand } from "../src/cli.js";
 import { capturePatchGitControls } from "../src/patch-git-controls.js";
 import { capture } from "./cli-fixtures.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
+import { buildPatchGitControlsForNode } from "./support/node-patch-git-controls.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import {
   repositoryGit,
@@ -150,7 +151,6 @@ describe("patch Git administration", () => {
         const result = execFileSync(
           "node",
           [
-            "--experimental-strip-types",
             "--input-type=module",
             "-e",
             `
@@ -175,7 +175,7 @@ const controls = await capturePatchGitControls(repository, async (_root, checkou
 await controls.validate();
 console.log(JSON.stringify(controls.snapshotStoragePaths));
 `,
-            new URL("../src/patch-git-controls.ts", import.meta.url).href,
+            await buildPatchGitControlsForNode(external),
             repository,
             alias,
           ],
@@ -1332,10 +1332,11 @@ lines.on("line", (line) => {
       nested("commit", "-m", "Synthetic quoted checkout");
       git("add", ".");
       git("commit", "-m", "Synthetic parent");
+      const bundle = await fixtures.create("patch-quoted-node-");
       const source = `
         import { execFileSync } from "node:child_process";
         import { realpath, writeFile } from "node:fs/promises";
-        import { capturePatchGitControls } from ${JSON.stringify(new URL("../src/patch-git-controls.ts", import.meta.url).href)};
+        import { capturePatchGitControls } from ${JSON.stringify(await buildPatchGitControlsForNode(bundle))};
         const root = ${JSON.stringify(root)};
         const child = ${JSON.stringify(child)};
         const controls = await capturePatchGitControls(root, async (repository, checkout, args, options) => execFileSync("git", repository === checkout ? args : ["-C", checkout, ...args], {cwd: repository, input: options?.input, env: { ...process.env, ...(options?.indexFile === undefined ? {} : {GIT_INDEX_FILE: options.indexFile}) }}).toString(options?.encoding ?? "utf8"), true);
@@ -1344,11 +1345,9 @@ lines.on("line", (line) => {
         process.stdout.write(JSON.stringify({ paths: controls.readOnlyPaths, expected: await realpath(child + "/.git") }));
       `;
       const protectedPaths = JSON.parse(
-        execFileSync(
-          "node",
-          ["--experimental-strip-types", "--input-type=module", "-e", source],
-          { encoding: "utf8" },
-        ),
+        execFileSync("node", ["--input-type=module", "-e", source], {
+          encoding: "utf8",
+        }),
       ) as { paths: string[]; expected: string };
       expect(protectedPaths.paths).toContain(protectedPaths.expected);
       expect(await readFile(join(child, "app.txt"), "utf8")).toBe("after\n");
