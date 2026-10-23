@@ -97,6 +97,7 @@ EXPECTED_MIGRATIONS = [
     (53, "store external source findings without assessments"),
     (54, "preserve finding decision append chronology"),
     (55, "bind new finding decisions to admitted scans"),
+    (56, "record first scan result admission order"),
 ]
 
 

@@ -191,6 +191,7 @@ def _indexed_findings(
             scans.id AS scan_id,
             scans.started_at AS scan_started_at,
             scans.rowid AS scan_sequence,
+            admissions.sequence AS admission_sequence,
             scans.target_id,
             COALESCE(scans.target_id, scans.target_path) AS indexed_target_id,
             COALESCE(targets.current_path, scans.target_path) AS target_path,
@@ -209,6 +210,10 @@ def _indexed_findings(
              FROM finding_decisions AS decisions
              WHERE decisions.occurrence_id = occurrences.id
              ORDER BY decisions.decision_sequence DESC LIMIT 1) AS decision_scan_sequence,
+            (SELECT decisions.admission_sequence
+             FROM finding_decisions AS decisions
+             WHERE decisions.occurrence_id = occurrences.id
+             ORDER BY decisions.decision_sequence DESC LIMIT 1) AS decision_admission_sequence,
             occurrences.title,
             occurrences.summary,
             (
@@ -222,6 +227,7 @@ def _indexed_findings(
             ) AS location_path
         FROM finding_occurrences AS occurrences
         JOIN scans ON scans.id = occurrences.scan_id
+        LEFT JOIN scan_admissions AS admissions ON admissions.scan_id = scans.id
         LEFT JOIN security_targets AS targets ON targets.id = scans.target_id
         LEFT JOIN finding_triage AS triage ON triage.occurrence_id = occurrences.id
         WHERE (targets.id IS NOT NULL OR scans.target_id IS NULL)
@@ -254,12 +260,20 @@ def _indexed_findings(
             status == "closed"
             and decision["close_reason"] in {"already_fixed", "false_positive"}
             and (
-                latest["scan_sequence"] > decision["decision_scan_sequence"]
-                if decision["decision_scan_sequence"] is not None
+                any(
+                    row["admission_sequence"] is not None
+                    and row["admission_sequence"] > decision["decision_admission_sequence"]
+                    for row in occurrences
+                )
+                if decision["decision_admission_sequence"] is not None
                 else (
-                    latest["scan_sequence"] > decision["scan_sequence"]
-                    and timestamp_key(latest["scan_started_at"])
-                    > timestamp_key(decision["decision_updated_at"])
+                    latest["scan_sequence"] > decision["decision_scan_sequence"]
+                    if decision["decision_scan_sequence"] is not None
+                    else (
+                        latest["scan_sequence"] > decision["scan_sequence"]
+                        and timestamp_key(latest["scan_started_at"])
+                        > timestamp_key(decision["decision_updated_at"])
+                    )
                 )
             )
         ):
@@ -277,7 +291,12 @@ def _indexed_findings(
                 else None,
                 **{
                     key: decision[key] if decision is not None else None
-                    for key in ("decision_status", "decision_scan_sequence", "decision_updated_at")
+                    for key in (
+                        "decision_status",
+                        "decision_scan_sequence",
+                        "decision_admission_sequence",
+                        "decision_updated_at",
+                    )
                 },
                 "known_since": scans[0][1],
                 "known_scan_ids": [scan_id for _, _, scan_id in scans],
@@ -448,10 +467,14 @@ def _indexed_active_findings(
         ):
             return False
         if finding_group["decision_status"] == "open" and (
-            later_scan["scan_sequence"] <= finding_group["decision_scan_sequence"]
-            if finding_group["decision_scan_sequence"] is not None
-            else timestamp_key(later_scan["started_at"])
-            <= timestamp_key(finding_group["decision_updated_at"])
+            later_scan["admission_sequence"] <= finding_group["decision_admission_sequence"]
+            if finding_group["decision_admission_sequence"] is not None
+            else (
+                later_scan["scan_sequence"] <= finding_group["decision_scan_sequence"]
+                if finding_group["decision_scan_sequence"] is not None
+                else timestamp_key(later_scan["started_at"])
+                <= timestamp_key(finding_group["decision_updated_at"])
+            )
         ):
             return False
         if uncertain_occurrence_ids is None:
@@ -545,6 +568,7 @@ def _indexed_active_findings(
         verification_scans = (
             connection.execute(
                 "SELECT scans.*, rowid AS scan_sequence, "
+                "(SELECT sequence FROM scan_admissions WHERE scan_id = scans.id) AS admission_sequence, "
                 "COALESCE(target_id, target_path) AS indexed_target_id "
                 "FROM scans WHERE id IN (SELECT value FROM json_each(?)) ORDER BY rowid DESC",
                 (json.dumps(row["known_scan_ids"]),),

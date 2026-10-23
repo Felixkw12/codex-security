@@ -2045,22 +2045,22 @@ def set_finding_triage(connection: sqlite3.Connection, args: argparse.Namespace)
                             remediation,
                             require_applied_content=True,
                         )
-        scan_sequence = connection.execute("SELECT COALESCE(MAX(rowid), 0) FROM scans").fetchone()[
-            0
-        ]
+        admission_sequence = connection.execute(
+            "SELECT COALESCE(MAX(sequence), 0) FROM scan_admissions"
+        ).fetchone()[0]
         for triaged_occurrence in triaged_occurrences:
             previous_triage = connection.execute(
                 "SELECT status, close_reason, note, "
-                "(SELECT scan_sequence FROM finding_decisions "
+                "(SELECT admission_sequence FROM finding_decisions "
                 "WHERE occurrence_id = finding_triage.occurrence_id "
-                "ORDER BY decision_sequence DESC LIMIT 1) AS scan_sequence "
+                "ORDER BY decision_sequence DESC LIMIT 1) AS admission_sequence "
                 "FROM finding_triage WHERE occurrence_id = ?",
                 (triaged_occurrence["id"],),
             ).fetchone()
             changed = (
                 previous_triage is None
                 or (indexed_finding is not None and indexed_finding["status"] != args.status)
-                or previous_triage["scan_sequence"] != scan_sequence
+                or previous_triage["admission_sequence"] != admission_sequence
                 or (
                     previous_triage["status"],
                     previous_triage["close_reason"],
@@ -2072,10 +2072,11 @@ def set_finding_triage(connection: sqlite3.Connection, args: argparse.Namespace)
                 connection.execute(
                     """
                     INSERT INTO finding_decisions (
-                        id, occurrence_id, status, close_reason, note, created_at, decision_sequence, scan_sequence
+                        id, occurrence_id, status, close_reason, note, created_at,
+                        decision_sequence, scan_sequence, admission_sequence
                     ) VALUES (?, ?, ?, ?, ?, ?,
                         (SELECT COALESCE(MAX(decision_sequence), 0) + 1 FROM finding_decisions),
-                        (SELECT COALESCE(MAX(rowid), 0) FROM scans))
+                        (SELECT COALESCE(MAX(rowid), 0) FROM scans), ?)
                     """,
                     (
                         str(uuid.uuid4()),
@@ -2084,6 +2085,7 @@ def set_finding_triage(connection: sqlite3.Connection, args: argparse.Namespace)
                         close_reason,
                         note,
                         timestamp,
+                        admission_sequence,
                     ),
                 )
             connection.execute(

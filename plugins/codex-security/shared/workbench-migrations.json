@@ -456,5 +456,16 @@
     "statements": [
       "ALTER TABLE finding_decisions\n        ADD COLUMN scan_sequence INTEGER;"
     ]
+  },
+  {
+    "version": 56,
+    "name": "record first scan result admission order",
+    "statements": [
+      "CREATE TABLE scan_admissions (\n    sequence INTEGER PRIMARY KEY AUTOINCREMENT,\n    scan_id TEXT NOT NULL UNIQUE REFERENCES scans(id) ON DELETE CASCADE\n);",
+      "ALTER TABLE finding_decisions ADD COLUMN admission_sequence INTEGER;",
+      "INSERT INTO scan_admissions (scan_id)\nSELECT id FROM scans\nWHERE status = 'complete' OR (status = 'failed' AND seal_manifest_digest IS NOT NULL)\nORDER BY rowid;",
+      "CREATE TRIGGER record_scan_admission_insert\nAFTER INSERT ON scans\nWHEN NEW.status = 'complete' OR (NEW.status = 'failed' AND NEW.seal_manifest_digest IS NOT NULL)\nBEGIN\n    INSERT OR IGNORE INTO scan_admissions (scan_id) VALUES (NEW.id);\nEND;",
+      "CREATE TRIGGER record_scan_admission_update\nAFTER UPDATE OF status, seal_manifest_digest ON scans\nWHEN NEW.status = 'complete' OR (NEW.status = 'failed' AND NEW.seal_manifest_digest IS NOT NULL)\nBEGIN\n    INSERT OR IGNORE INTO scan_admissions (scan_id) VALUES (NEW.id);\nEND;"
+    ]
   }
 ]

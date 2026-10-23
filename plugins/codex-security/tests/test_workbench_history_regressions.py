@@ -481,18 +481,22 @@ def test_legacy_decision_migration_preserves_chronology_and_appends(history, leg
         if statement.startswith("INSERT INTO finding_decisions")
     )
     with sqlite3.connect(database) as connection:
-        for column in ("scan_sequence", "decision_sequence"):
+        for column in ("admission_sequence", "scan_sequence", "decision_sequence"):
             if column in {
                 row[1] for row in connection.execute("PRAGMA table_info(finding_decisions)")
             }:
                 connection.execute(f"ALTER TABLE finding_decisions DROP COLUMN {column}")
         connection.execute(
-            "DELETE FROM schema_migrations WHERE name IN (?, ?)",
+            "DELETE FROM schema_migrations WHERE name IN (?, ?, ?)",
             (
                 "preserve finding decision append chronology",
                 "bind new finding decisions to admitted scans",
+                "record first scan result admission order",
             ),
         )
+        connection.execute("DROP TRIGGER record_scan_admission_insert")
+        connection.execute("DROP TRIGGER record_scan_admission_update")
+        connection.execute("DROP TABLE scan_admissions")
         connection.execute("DELETE FROM finding_decisions")
         connection.execute("DELETE FROM finding_triage")
         # A legacy update can be newer than a row inserted later in the triage table.
@@ -750,7 +754,9 @@ def test_historical_latest_decision_does_not_reopen_without_a_later_scan(history
     )
     with sqlite3.connect(state / "workbench.sqlite3") as connection:
         # Rows preserved by the append-only migration have no recorded admission boundary.
-        connection.execute("UPDATE finding_decisions SET scan_sequence = NULL")
+        connection.execute(
+            "UPDATE finding_decisions SET scan_sequence = NULL, admission_sequence = NULL"
+        )
     assert (
         run_workbench(state, "get-finding", "--occurrence-id", occurrence)["scan"]["findings"][0][
             "status"
