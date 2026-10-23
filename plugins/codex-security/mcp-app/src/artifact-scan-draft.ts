@@ -12,6 +12,7 @@ import * as z from "zod/v4";
 import {
   candidateKey,
   coverageCandidateKey,
+  coverageCandidateOwner,
   findingCandidateId,
   findingCandidateKey,
   findingCandidateOwner,
@@ -497,7 +498,7 @@ async function preserveScanDraft(
     return retained;
   };
   const surfaceKey = (id: unknown, item: JsonObject) =>
-    candidateKey(id, owner ?? item.sourceWorkerId ?? item.workerId);
+    candidateKey(id, owner ?? coverageCandidateOwner(item));
   const previousState = await readPreviousScanDraft(context);
   const previous = previousState.input;
   if (previous && previous.scanId !== input.scanId)
@@ -2906,7 +2907,7 @@ function normalizeCoverageEntries(
   for (const [index, surface] of surfaces.entries()) {
     const originalKey = candidateKey(
       surface.id,
-      surface.sourceWorkerId ?? surface.workerId,
+      coverageCandidateOwner(surface),
     );
     if (typeof surface.id === "string" && !renamedSurfaces.has(originalKey!))
       renamedSurfaces.set(

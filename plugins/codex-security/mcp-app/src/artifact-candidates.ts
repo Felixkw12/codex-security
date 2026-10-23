@@ -45,16 +45,20 @@ export function findingCandidateKey(
   );
 }
 
+export function coverageCandidateOwner(item: JsonObject): unknown {
+  const owner = item.sourceWorkerId;
+  return owner != null && typeof owner !== "string"
+    ? owner
+    : candidateOwner(owner, item.workerId);
+}
+
 export function coverageCandidateKey(
   item: JsonObject,
   owner?: string,
 ): string | undefined {
-  const sourceOwner = candidateOwner(owner) ?? item.sourceWorkerId;
+  const sourceOwner = candidateOwner(owner) ?? coverageCandidateOwner(item);
   if (sourceOwner != null && typeof sourceOwner !== "string") return undefined;
-  return candidateKey(
-    item.candidateId,
-    candidateOwner(sourceOwner, item.workerId),
-  );
+  return candidateKey(item.candidateId, sourceOwner);
 }
 
 /** Prefer the matching owner for duplicate raw IDs; unique references may be shared. */
@@ -67,13 +71,13 @@ export function surfaceReferenceKey(
   const matches = surfaces.filter((surface) => surface.id === id);
   const sameOwner = matches.find(
     (surface) =>
-      candidateOwner(owner, surface.sourceWorkerId ?? surface.workerId) ===
-      candidateOwner(owner, source.sourceWorkerId ?? source.workerId),
+      candidateOwner(owner, coverageCandidateOwner(surface)) ===
+      candidateOwner(owner, coverageCandidateOwner(source)),
   );
   const target = sameOwner ?? (matches.length === 1 ? matches[0]! : source);
   return candidateKey(
     id,
-    candidateOwner(owner, target.sourceWorkerId ?? target.workerId),
+    candidateOwner(owner, coverageCandidateOwner(target)),
   );
 }
 

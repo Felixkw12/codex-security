@@ -132,56 +132,64 @@ for (const layout of ["standard", "deep"] as const) {
   }
 }
 
-test("legacy worker surface references survive colliding local IDs", async (t) => {
-  const f = await fixture(t, "standard");
-  const owners = ["worker-one", "worker-two"];
-  await f.write(
-    f.draft({
-      surfaces: owners.map((workerId) => ({
-        id: "shared-surface",
-        workerId,
-        label: "Synthetic worker review",
-        disposition: "needs_follow_up",
-      })),
-      deferred: owners.map((workerId) => ({
-        candidateId: "shared-candidate",
-        workerId,
-        reason: "Synthetic evidence requires review.",
-        surfaceIds: ["shared-surface"],
-      })),
-    }),
-  );
-  const coverage = await f.read();
-  for (const workerId of owners) {
-    const surface = coverage.surfaces.find(
-      (row: { workerId: string }) => row.workerId === workerId,
-    );
-    const candidate = coverage.deferred.find(
-      (row: { workerId: string }) => row.workerId === workerId,
-    );
-    assert.deepEqual(candidate.surfaceIds, [surface.id]);
-  }
-  await f.write({
-    ...f.draft({}, true),
-    findings: [
-      {
-        ...finding("confirmed", "src/example.ts"),
-        provenance: {
-          source: "local_plugin",
+for (const sourceWorkerId of [undefined, "", " "]) {
+  test(`legacy worker surface references survive colliding local IDs with canonical owner ${JSON.stringify(sourceWorkerId)}`, async (t) => {
+    const f = await fixture(t, "standard");
+    const owners = ["worker-one", "worker-two"];
+    await f.write(
+      f.draft({
+        surfaces: owners.map((workerId) => ({
+          id: "shared-surface",
+          workerId,
+          ...(sourceWorkerId === undefined ? {} : { sourceWorkerId }),
+          label: "Synthetic worker review",
+          disposition: "needs_follow_up",
+        })),
+        deferred: owners.map((workerId) => ({
           candidateId: "shared-candidate",
-          workerId: owners[0],
+          workerId,
+          ...(sourceWorkerId === undefined ? {} : { sourceWorkerId }),
+          reason: "Synthetic evidence requires review.",
+          surfaceIds: ["shared-surface"],
+        })),
+      }),
+    );
+    const coverage = await f.read();
+    for (const workerId of owners) {
+      const surface = coverage.surfaces.find(
+        (row: { workerId: string }) => row.workerId === workerId,
+      );
+      const candidate = coverage.deferred.find(
+        (row: { workerId: string }) => row.workerId === workerId,
+      );
+      assert.deepEqual(candidate.surfaceIds, [surface.id]);
+    }
+    await f.write({
+      ...f.draft({}, true),
+      findings: [
+        {
+          ...finding("confirmed", "src/example.ts"),
+          provenance: {
+            source: "local_plugin",
+            candidateId: "shared-candidate",
+            workerId: owners[0],
+          },
         },
-      },
-    ],
+      ],
+    });
+    const updated = await f.read();
+    assert.equal(updated.deferred.length, 1);
+    assert.equal(updated.deferred[0].workerId, owners[1]);
+    assert.deepEqual(
+      updated.surfaces.map((row: { workerId: string }) => row.workerId),
+      [owners[1]],
+    );
+    const retainedSurface = updated.surfaces.find(
+      (row: { workerId: string }) => row.workerId === owners[1],
+    );
+    assert.deepEqual(updated.deferred[0].surfaceIds, [retainedSurface.id]);
   });
-  const updated = await f.read();
-  assert.equal(updated.deferred.length, 1);
-  assert.equal(updated.deferred[0].workerId, owners[1]);
-  const retainedSurface = updated.surfaces.find(
-    (row: { workerId: string }) => row.workerId === owners[1],
-  );
-  assert.deepEqual(updated.deferred[0].surfaceIds, [retainedSurface.id]);
-});
+}
 
 const savedOwners = [
   null,
