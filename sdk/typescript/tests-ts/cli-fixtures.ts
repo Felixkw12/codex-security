@@ -304,7 +304,8 @@ export function dependencies(
             ? (commandOptions?.environment?.["GIT_DIR"] ??
               commandOptions?.directory ??
               repository)
-            : args.includes("--show-toplevel")
+            : args.includes("--show-toplevel") &&
+                options.currentDirectory !== undefined
               ? repository
               : args.includes("--name-only")
                 ? (
