@@ -488,9 +488,11 @@ process.exit(child.status ?? 1);
                   triage_item_id: `triage-${behavior === "duplicate_id" ? 1 : turnNumber}`,
                 };
                 const suppliedMatch =
-                  captured.evidence!.matches[
-                    behavior === "mismatched_identity" ? 0 : turnNumber - 1
-                  ]!;
+                  behavior === "mismatched_identity"
+                    ? captured.evidence!.matches[0]!
+                    : captured.evidence!.matches.find(
+                        (match) => match.id === finding.input_id,
+                      )!;
                 const suppliedComponent = captured.evidence!.components.find(
                   (component) => component.id === suppliedMatch.componentId,
                 )!;
