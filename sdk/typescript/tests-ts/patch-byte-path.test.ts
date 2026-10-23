@@ -21,7 +21,9 @@ const root = mkdtempSync(join(tmpdir(), "patch-path-spelling-"));
 const key = value => Buffer.from(value).toString("latin1");
 try {
   writeFileSync(join(root, "RÉADME.md"), "synthetic");
+  linkSync(join(root, "RÉADME.md"), join(root, "alias"));
   assert.equal(canonicalPatchPath(root, key("RÉADME.md")), key("RÉADME.md"));
+  assert.equal(canonicalPatchPath(root, key("alias")), key("alias"));
   if (!existsSync(join(root, "réadme.md"))) {
     linkSync(join(root, "RÉADME.md"), join(root, "réadme.md"));
     assert.equal(canonicalPatchPath(root, key("réadme.md")), key("réadme.md"));

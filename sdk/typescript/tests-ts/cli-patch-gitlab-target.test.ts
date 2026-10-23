@@ -28,6 +28,10 @@ describe("GitLab patch destinations", () => {
         "same port fork",
         "explicit default port fork",
         "explicit HTTP port fork",
+        "explicit SSH default port fork",
+        "implicit SSH default port fork",
+        "distinct SSH transport ports fork",
+        "git+ssh transport port fork",
       ].map((mode) => ({
         mode,
         resume,
@@ -71,8 +75,25 @@ describe("GitLab patch destinations", () => {
             ? ":9443"
             : ":8443"
           : "";
-      const upstream = `${protocol}://${host}${fetchPort}/example/repository.git`;
-      const fork = `${protocol}://${host}${pushPort}/synthetic-user/repository.git`;
+      const upstream =
+        mode === "explicit SSH default port fork"
+          ? `ssh://git@${host}:22/example/repository.git`
+          : mode === "implicit SSH default port fork"
+            ? `ssh://git@${host}/example/repository.git`
+            : mode === "distinct SSH transport ports fork"
+              ? `ssh://git@${host}:2222/example/repository.git`
+              : mode === "git+ssh transport port fork"
+                ? `git+ssh://git@${host}:2222/example/repository.git`
+                : `${protocol}://${host}${fetchPort}/example/repository.git`;
+      const fork =
+        mode === "explicit SSH default port fork" ||
+        mode === "git+ssh transport port fork"
+          ? `git@${host}:synthetic-user/repository.git`
+          : mode === "implicit SSH default port fork"
+            ? `ssh://git@${host}:22/synthetic-user/repository.git`
+            : mode === "distinct SSH transport ports fork"
+              ? `ssh://git@${host}:2200/synthetic-user/repository.git`
+              : `${protocol}://${host}${pushPort}/synthetic-user/repository.git`;
       const sameProject = mode.startsWith("same project");
       const localFetch = mode === "local fetch" || mode === "file fetch";
       const push =
@@ -86,11 +107,14 @@ describe("GitLab patch destinations", () => {
                 ? upstream
                 : fork;
       const source =
-        mode === "fork credentials"
-          ? fork
-          : mode === "fork SSH"
-            ? "ssh://git@gitlab.com/synthetic-user/repository.git"
-            : push;
+        mode === "explicit SSH default port fork" ||
+        mode === "git+ssh transport port fork"
+          ? `ssh://git@${host}/synthetic-user/repository.git`
+          : mode === "fork credentials"
+            ? fork
+            : mode === "fork SSH"
+              ? "ssh://git@gitlab.com/synthetic-user/repository.git"
+              : push;
       const mirror = mode.endsWith("mirror");
       const target = localFetch || mirror ? source : upstream;
       const sourceId = sameProject ? 11 : 22;
