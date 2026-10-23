@@ -1132,6 +1132,7 @@ const dryRunScanOutputSchema = z.looseObject({
     .record(z.string(), z.unknown())
     .describe("Credential selection; dry runs do not verify credentials."),
   maxCostUsd: ScanSettingsSchema.shape.maxCostUsd,
+  maxTimeMinutes: ScanSettingsSchema.shape.maxTimeMinutes,
   projectConfig: z.record(z.string(), z.unknown()).optional(),
   scanPromptFile: ScanSettingsSchema.shape.scanPromptFile,
   validationPromptFile: ScanSettingsSchema.shape.validationPromptFile,
@@ -6646,6 +6647,10 @@ export async function main(
         );
         const resolved = resolveScanSettings(project, {}, directory);
         deepScanOptions(resolved.options);
+        requireExternalProviderModel(
+          resolved.config.codexOverrides,
+          scanModelProvider(resolved.config.codexOverrides),
+        );
         const codex = await mergedCodexConfig(resolved.config);
         const deep =
           resolved.options.mode === "deep"

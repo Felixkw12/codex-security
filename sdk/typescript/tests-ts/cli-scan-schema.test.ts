@@ -115,6 +115,34 @@ describe("scan output schema", () => {
     },
   );
 
+  test.each([
+    { mode: "standard", maxTimeMinutes: undefined },
+    { mode: "standard", maxTimeMinutes: 2.5 },
+    { mode: "deep", maxTimeMinutes: 5760 },
+  ] as const)(
+    "declares the optional positive time budget for $mode dry-run: $maxTimeMinutes",
+    async ({ mode, maxTimeMinutes }) => {
+      const schema = await scanOutputSchema();
+      const validate = new Ajv2020({ strict: false }).compile(schema);
+      const stdout = capture();
+      expect(
+        await main(
+          ["scan", ".", "--mode", mode, "--dry-run", "--json"],
+          stdout.stream,
+          capture().stream,
+          dependencies({
+            preflight: { ...fakePreflight(), mode, maxTimeMinutes },
+          }),
+        ),
+      ).toBe(0);
+      const output = JSON.parse(stdout.text());
+      expect(validate(output), JSON.stringify(validate.errors)).toBe(true);
+      for (const invalid of ["2.5", 0, -1]) {
+        expect(validate({ ...output, maxTimeMinutes: invalid })).toBe(false);
+      }
+    },
+  );
+
   test.each(["completed", "dry-run", "failed"] as const)(
     "accepts actual %s command output",
     async (outcome) => {

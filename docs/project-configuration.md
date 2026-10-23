@@ -319,8 +319,9 @@ that the selected scan configuration still matches the campaign.
 target, prompt-file reads, credentials checks, or runtime initialization. With no
 file, it shows defaults. Active deep mode also resolves legacy TOML. It reports
 effective model details and native key sources without dumping raw native values.
-This is configuration inspection,
-not a filesystem, target, or model-availability check.
+Configured external providers must include a model, as they do for `scan`.
+This is configuration inspection, not a filesystem, target, or model-availability
+check.
 
 `scan ... --dry-run --json` checks local inputs without starting Codex, verifying
 credentials, or establishing model availability. Removing `--dry-run` starts a

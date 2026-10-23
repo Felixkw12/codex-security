@@ -217,6 +217,62 @@ test("info resolves a config and its sources without a target, prompt reads, or 
   });
 });
 
+test.each(
+  ["openrouter", "fireworks", "cheaperinference", "amazon-bedrock"].flatMap(
+    (provider) =>
+      ["root", "selected profile"].map((location) => ({ provider, location })),
+  ),
+)(
+  "info requires a configured model for $provider in the $location",
+  async ({ provider, location }) => {
+    const providerConfig: JsonObject = { model_provider: provider };
+    const codex: JsonObject =
+      location === "root"
+        ? providerConfig
+        : { profile: "review", profiles: { review: providerConfig } };
+    const input = await fixture({ codex });
+    const deps = dependencies({
+      currentDirectory: input.configDirectory,
+      environment: { CODEX_HOME: join(input.root, "unused-home") },
+      onConfig: throwing("No runtime for info"),
+    });
+    const rejected = createCliTest(main);
+    expect(
+      await rejected.runCli(["info", "-c", input.config, "--json"], deps),
+    ).toBe(2);
+    expect(rejected.stderr.text()).toContain(
+      `--model is required when using --provider ${provider}`,
+    );
+
+    providerConfig["model"] = "synthetic-provider-model";
+    await writeFile(input.config, JSON.stringify({ codex }));
+    const accepted = createCliTest(main);
+    expect(
+      await accepted.runCli(["info", "-c", input.config, "--json"], deps),
+    ).toBe(0);
+    expect(JSON.parse(accepted.stdout.text())).toMatchObject({
+      model: "synthetic-provider-model",
+    });
+  },
+);
+
+test("info ignores an external provider in an unselected profile", async () => {
+  const input = await fixture({
+    codex: { profiles: { unused: { model_provider: "openrouter" } } },
+  });
+  const stdout = captureCli(main, "stdout");
+  expect(
+    await stdout.run(
+      ["info", "-c", input.config, "--json"],
+      dependencies({
+        currentDirectory: input.configDirectory,
+        onConfig: throwing("No runtime for info"),
+      }),
+    ),
+  ).toBe(0);
+  expect(JSON.parse(stdout.text())).toMatchObject({ model: "gpt-5.6-sol" });
+});
+
 test("info without a file reports default sources, including unset settings", async () => {
   const input = await fixture({});
   const stdout = captureCli(main, "stdout");
@@ -1422,6 +1478,7 @@ test("dry-run uses the real SDK without initializing its runtime and reports pro
     stopAfterConsecutiveErrors: 2,
     maxDiscoveryRuns: 40,
     maxTimeHours: 96,
+    maxTimeMinutes: 5760,
     projectConfig: {
       path: input.config,
       sources: {
@@ -1436,6 +1493,47 @@ test("dry-run uses the real SDK without initializing its runtime and reports pro
     failOnSeverity: "high",
   });
 });
+
+test.each([undefined, "2.5"])(
+  "Standard dry-run reports the effective time budget without a runtime: %s",
+  async (minutes) => {
+    const input = await fixture({});
+    const environment = {
+      CODEX_HOME: join(input.root, "ambient"),
+      CODEX_SECURITY_STATE_DIR: join(input.root, "state"),
+    };
+    const createCodex = mock(throwing("No inference in dry-run"));
+    const prepareRuntime = mock(rejecting("No runtime in dry-run"));
+    const deps = dependencies({
+      currentDirectory: input.repository,
+      environment,
+    });
+    deps.createSecurity = cliClientFactory({
+      environment,
+      createCodex,
+      prepareRuntime,
+    });
+    const stdout = captureCli(main, "stdout");
+    expect(
+      await stdout.run(
+        [
+          "scan",
+          "--dry-run",
+          "--json",
+          ...(minutes === undefined ? [] : ["--max-time", minutes]),
+        ],
+        deps,
+      ),
+    ).toBe(0);
+    const output = JSON.parse(stdout.text());
+    expect(output.mode).toBe("standard");
+    expect(output.maxTimeMinutes).toBe(
+      minutes === undefined ? undefined : Number(minutes),
+    );
+    expect(createCodex).not.toHaveBeenCalled();
+    expect(prepareRuntime).not.toHaveBeenCalled();
+  },
+);
 
 test.each([
   [{ output: { directory: "../repository/artifacts" } }, "outside"],
