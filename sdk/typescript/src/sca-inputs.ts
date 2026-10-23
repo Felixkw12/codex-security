@@ -118,7 +118,10 @@ function isPublicPypiIndex(url: string | null): boolean {
   const index = /^([^/]+:\/\/[^/]+)\/simple\/?$/u.exec(url ?? "");
   return (
     index !== null &&
-    /^https?:\/\/pypi\.(?:org|python\.org)$/u.test(index[1]!.toLowerCase())
+    /^https?:\/\/pypi\.(?:org|python\.org)(?::\d+)?$/u.test(
+      index[1]!.toLowerCase(),
+    ) &&
+    URL.parse(index[1]!)?.port === ""
   );
 }
 

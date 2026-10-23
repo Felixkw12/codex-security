@@ -102,14 +102,27 @@ describe("additional SCA input contracts", () => {
   });
 
   test.each(["uv", "poetry", "pipenv"] as const)(
-    "recognizes %s public index scheme and host casing without changing paths",
+    "recognizes %s public index casing and default ports without changing paths",
     (format) => {
       for (const [url, publicIndex] of [
         ["HTTPS://PYPI.ORG/simple", true],
         ["http://PyPi.Python.Org/simple/", true],
         ["https://pypi.org/simple", true],
+        ["HTTPS://PYPI.ORG:443/simple/", true],
+        ["https://pypi.python.org:443/simple", true],
+        ["http://pypi.org:80/simple", true],
+        ["https://pypi.org:0443/simple", true],
+        ["https://pypi.org:8443/simple", false],
+        ["https://pypi.org:80/simple", false],
+        ["http://pypi.org:443/simple", false],
+        ["https://index.example.test:443/simple", false],
+        ["https://synthetic:password@pypi.org:443/simple", false],
+        [" https://pypi.org/simple", false],
+        ["https://pypi.org/simple ", false],
         ["HTTPS://PYPI.ORG/Simple", false],
         ["https://pypi.org/simple?source=synthetic", false],
+        ["https://pypi.org:443/simple?source=synthetic", false],
+        ["https://pypi.org:443/simple#synthetic", false],
         ["https://pypi.org/other/../simple", false],
         ["https://index.example.test/simple", false],
       ] as const) {
@@ -153,46 +166,49 @@ describe("additional SCA input contracts", () => {
     ]);
   });
 
-  test("preserves Pipenv named indexes and the default source", () => {
-    const sources = [
-      { name: "alternate", url: "https://index.example.test/simple" },
-      { name: "public", url: "https://pypi.org/simple/" },
-    ];
-    const result = inspect(
-      JSON.stringify({
-        _meta: { sources },
-        default: {
-          public: { version: "==1.2.3", index: "public" },
-          custom: { version: "==1.2.3", index: "alternate" },
-          implicit: { version: "==1.2.3" },
-          unknown: { version: "==1.2.3", index: "missing" },
-        },
-      }),
-      "pipenv",
-    );
-    expect(
-      result.references.map(({ name, resolution }) => ({ name, resolution })),
-    ).toEqual([
-      {
-        name: "custom",
-        resolution: "index:alternate;url:https://index.example.test/simple",
-      },
-      {
-        name: "implicit",
-        resolution: "index:alternate;url:https://index.example.test/simple",
-      },
-      { name: "unknown", resolution: "index:missing;url:unresolved" },
-    ]);
-    expect(
-      inspect(
+  test.each(["https://pypi.org/simple/", "https://pypi.org:443/simple/"])(
+    "preserves Pipenv named indexes and the default source with %s",
+    (publicIndex) => {
+      const sources = [
+        { name: "alternate", url: "https://index.example.test/simple" },
+        { name: "public", url: publicIndex },
+      ];
+      const result = inspect(
         JSON.stringify({
-          _meta: { sources: [sources[1]] },
-          default: { public: { version: "==1.2.3" } },
+          _meta: { sources },
+          default: {
+            public: { version: "==1.2.3", index: "public" },
+            custom: { version: "==1.2.3", index: "alternate" },
+            implicit: { version: "==1.2.3" },
+            unknown: { version: "==1.2.3", index: "missing" },
+          },
         }),
         "pipenv",
-      ).references,
-    ).toEqual([]);
-  });
+      );
+      expect(
+        result.references.map(({ name, resolution }) => ({ name, resolution })),
+      ).toEqual([
+        {
+          name: "custom",
+          resolution: "index:alternate;url:https://index.example.test/simple",
+        },
+        {
+          name: "implicit",
+          resolution: "index:alternate;url:https://index.example.test/simple",
+        },
+        { name: "unknown", resolution: "index:missing;url:unresolved" },
+      ]);
+      expect(
+        inspect(
+          JSON.stringify({
+            _meta: { sources: [sources[1]] },
+            default: { public: { version: "==1.2.3" } },
+          }),
+          "pipenv",
+        ).references,
+      ).toEqual([]);
+    },
+  );
 
   test("keeps alternate Cargo registries and local origins unresolved", () => {
     const result = inspect(
