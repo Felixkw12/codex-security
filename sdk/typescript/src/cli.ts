@@ -9058,9 +9058,10 @@ export function skillCommandFailure(
   } else if (
     classification === "network_error" ||
     classification === "timeout" ||
-    /\b(?:ECONNABORTED|timed[._ -]out|network[._ -]?error|(?:(?:network|request)[._ -]?)?timeout(?:[._ -]?error)?)\b/iu.test(
-      detail,
-    )
+    (!/\b(?:sqlite3?|database|workbench)\b/iu.test(classificationDetail) &&
+      /\b(?:ECONNABORTED|timed[._ -]out|network[._ -]?error|(?:(?:network|request)[._ -]?)?timeout(?:[._ -]?error)?)\b/iu.test(
+        detail,
+      ))
   ) {
     advice =
       "Codex could not connect to the model service. Check the network and retry.";
