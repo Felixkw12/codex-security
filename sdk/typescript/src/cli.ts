@@ -10255,13 +10255,18 @@ async function changedPatchFiles(
   dependencies: CliDependencies,
   dirtyFiles?: Set<string>,
   retainTrees = false,
-): Promise<{ files: string[]; rootFiles: string[]; state?: GitPatchState }> {
+): Promise<{
+  files: string[];
+  keys: string[];
+  rootFiles: string[];
+  state?: GitPatchState;
+}> {
   if (base instanceof Map) {
     const head = await snapshotPatchDirectory(repository);
     const files = [...new Set([...base.keys(), ...head.keys()])]
       .filter((path) => base.get(path) !== head.get(path))
       .sort();
-    return { files, rootFiles: files };
+    return { files, keys: files.map(patchPathKey), rootFiles: files };
   }
   const root = base.root;
   const bound = await bindPatchCommandContext(
@@ -10397,6 +10402,7 @@ async function changedPatchFiles(
   }
   return {
     files: [...files].map(patchPathText).sort(),
+    keys: [...files],
     rootFiles: [...publicationFiles].map(patchPathText).sort(),
     state: head,
   };
@@ -11345,9 +11351,12 @@ async function runFindingPatches(
     });
     let status: number;
     let changedFiles: string[];
+    let changedKeys: string[];
+    let base: GitPatchState | Map<string, string> | undefined;
+    let repositoryKey = patchPathKey(selected.repository);
+    let rootKey = repositoryKey;
     let preparationCompleted = false;
     try {
-      let base: GitPatchState | Map<string, string> | undefined;
       status = await runSkill(
         "fix-finding",
         [],
@@ -11387,6 +11396,14 @@ async function runFindingPatches(
               );
               if (!(base instanceof Map)) gitBase = base;
             }
+            if (!(base instanceof Map) && base.root !== selected.repository) {
+              const [repositoryPath, rootPath] = await Promise.all([
+                realpath(selected.repository, { encoding: "buffer" }),
+                realpath(base.root, { encoding: "buffer" }),
+              ]);
+              repositoryKey = repositoryPath.toString("latin1");
+              rootKey = rootPath.toString("latin1");
+            }
             signal?.throwIfAborted();
             preparationCompleted = true;
           },
@@ -11397,20 +11414,20 @@ async function runFindingPatches(
           onEvent: progress.observe.bind(progress),
         },
       );
-      changedFiles =
+      const changes =
         base === undefined ||
         status === 130 ||
         status === 143 ||
         !preparationCompleted
-          ? []
-          : (
-              await changedPatchFiles(
-                selected.repository,
-                base,
-                dependencies,
-                dirtyFiles?.(),
-              )
-            ).files;
+          ? { files: [], keys: [] }
+          : await changedPatchFiles(
+              selected.repository,
+              base,
+              dependencies,
+              dirtyFiles?.(),
+            );
+      changedFiles = changes.files;
+      changedKeys = changes.keys;
     } finally {
       progress.stop();
     }
@@ -11488,6 +11505,33 @@ async function runFindingPatches(
         stderr.write("codex-security: Patch results were not valid JSON.\n");
         patch = failed("Patch results were not valid JSON.");
       }
+    }
+
+    if (patch.status === "verified") {
+      const files = verifiedPatchFiles(selected, [patch]).map((file) =>
+        canonicalPatchPath(selected.repository, patchPathKey(file)),
+      );
+      const root =
+        base !== undefined && !(base instanceof Map)
+          ? base.root
+          : selected.repository;
+      const changes = changedKeys.map((file) =>
+        relativePatchPath(
+          repositoryKey,
+          resolve(rootKey, canonicalPatchPath(root, file)),
+        ),
+      );
+      if (
+        !files.some((file) =>
+          changes.some(
+            (changed) => !isOutsidePath(relativePatchPath(file, changed)),
+          ),
+        )
+      )
+        patch = failed(
+          "Patch verification did not identify any changed files.",
+          changedFiles,
+        );
     }
 
     const title = safePatchText(finding.title);
