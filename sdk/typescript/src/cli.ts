@@ -6589,6 +6589,15 @@ export async function main(
             );
             const { patches } = patchRun;
             exitCode = patchRun.exitCode;
+            if (patchRun.filesInspected === false) {
+              patchResult = {
+                scanId: selected.scanId,
+                repository: selected.repository,
+                patches,
+                files: patchRun.files,
+              };
+              throw patchRun.error;
+            }
             if (
               exitCode === 130 ||
               exitCode === 143 ||
@@ -6713,6 +6722,7 @@ export async function main(
           let patchBase: GitPatchState | Map<string, string> | undefined;
           let publication: PatchPublication | undefined;
           let preparationCompleted = false;
+          let preparationEverCompleted = false;
           const identifier = directPatchIdentifier(positionals, imports);
           const preparePatch = async (signal?: AbortSignal) => {
             preparationCompleted = false;
@@ -6744,24 +6754,31 @@ export async function main(
             }
             signal?.throwIfAborted();
             preparationCompleted = true;
+            preparationEverCompleted = true;
           };
           const report = captureOutput();
-          exitCode = await runSkill(
-            "fix-finding",
-            [...positionals, ...imports],
-            options,
-            report.stream,
-            errorOutput,
-            dependencies,
-            {
-              environment,
-              auth: options.auth,
-              externalSandbox: options.externalSandbox,
-              validationPrompt,
-              onBeforeTurn: preparePatch,
-              verificationMode: options.verificationMode,
-            },
-          );
+          try {
+            exitCode = await runSkill(
+              "fix-finding",
+              [...positionals, ...imports],
+              options,
+              report.stream,
+              errorOutput,
+              dependencies,
+              {
+                environment,
+                auth: options.auth,
+                externalSandbox: options.externalSandbox,
+                validationPrompt,
+                onBeforeTurn: preparePatch,
+                verificationMode: options.verificationMode,
+              },
+            );
+          } catch (error) {
+            if (preparationEverCompleted)
+              patchResult = { repository, files: [] };
+            throw error;
+          }
           if (!jsonOutput) await writeCliOutput(output, report.text());
           if (exitCode === 130 || exitCode === 143 || !preparationCompleted) {
             patchResult = { repository, files: [] };
@@ -10456,6 +10473,7 @@ async function runFindingPatches(
   exitCode: number;
   files: string[];
   preparationCompleted: boolean;
+  filesInspected?: false;
   error?: unknown;
 }> {
   if (selected.findings.length === 0) {
@@ -10468,6 +10486,7 @@ async function runFindingPatches(
   );
   const patches: FindingPatch[] = [];
   const knownFiles = new Set<string>();
+  let preparationEverCompleted = false;
   for (const finding of selected.findings) {
     const response = captureOutput();
     const instruction = options.findingInstructions?.[finding.occurrenceId];
@@ -10520,6 +10539,7 @@ async function runFindingPatches(
             }
             signal?.throwIfAborted();
             preparationCompleted = true;
+            preparationEverCompleted = true;
           },
           directory: selected.repository,
           findings: [finding],
@@ -10542,6 +10562,22 @@ async function runFindingPatches(
               true,
             );
       changedFiles = [...new Set(changedKeys.map(patchPathText))].sort();
+    } catch (error) {
+      if (!preparationEverCompleted) throw error;
+      patches.push({
+        occurrenceId: finding.occurrenceId,
+        status: "failed",
+        files: [],
+        reason: `${errorMessage(error)} File changes were not inspected.`,
+      });
+      return {
+        patches,
+        exitCode: 2,
+        files: [...knownFiles].sort(),
+        preparationCompleted,
+        filesInspected: false,
+        error,
+      };
     } finally {
       progress.stop();
     }
