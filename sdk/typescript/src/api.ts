@@ -2848,7 +2848,7 @@ export class CodexSecurity {
       const canonicalSession: PreparedExecution =
         mode === "deep" &&
         registered.resumed &&
-        typeof instructionDigest === "string"
+        (typeof instructionDigest === "string" || instructionDigest === null)
           ? {
               ...session,
               validateScanInputs: async (
@@ -2877,7 +2877,9 @@ export class CodexSecurity {
                 signal?.throwIfAborted();
                 if (digest !== instructionDigest)
                   throw new DeepScanInputRecoveryError(
-                    "The model instructions file has changed since this Deep Scan started. Restore its original contents before resuming, or start a new scan.",
+                    instructionDigest === null
+                      ? "This Deep Scan started without a model instructions file. Remove that setting before resuming, or start a new scan."
+                      : "The model instructions file has changed since this Deep Scan started. Restore its original contents before resuming, or start a new scan.",
                     scanDir,
                     !hasAttemptedExecution,
                   );

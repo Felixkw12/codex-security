@@ -76,11 +76,7 @@ export async function registerScan(options: {
           ])
         )["recipe"],
       ));
-  if (
-    !resumed &&
-    expectation.mode === "deep" &&
-    options.modelInstructionsFile !== undefined
-  ) {
+  if (!resumed && expectation.mode === "deep") {
     recipe["scanInputs"] = {
       ...(recipe["scanInputs"] as JsonObject),
       modelInstructionsFileSha256: await modelInstructionsFileDigest(
