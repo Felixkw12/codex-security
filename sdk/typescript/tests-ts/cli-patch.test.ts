@@ -2888,7 +2888,7 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
   test.each(["--assess-patch-risk", "--create-pr"])(
     "retains actual edits when saved patch scope validation fails for %s",
     async (flag) => {
-      const root = await fixtures.create("patch-invalid-scope-");
+      const root = await repositories.create("patch-invalid-scope-");
       const repository = join(root, "repository");
       const remote = join(root, "remote.git");
       await mkdir(repository);
