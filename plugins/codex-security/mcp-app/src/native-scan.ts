@@ -271,6 +271,12 @@ export async function prepareNativeScan(
         input.scan.targetPath,
         ...(input.scan.targetProtectionRoots ?? []),
         ...(await gitProtectionRoots(input.scan.targetPath, signal)),
+        ...(typeof executionPaths["model_instructions_file"] === "string"
+          ? await gitProtectionRoots(
+              executionPaths["model_instructions_file"],
+              signal,
+            )
+          : []),
         ...(knowledgeBaseSnapshot?.protectedRoots ??
           (await Promise.all(
             (knowledgeBaseSnapshot?.sources ?? []).map(
@@ -390,7 +396,6 @@ export async function prepareNativeScan(
           recipe.scanInputs,
         )
     : undefined;
-  const command = publicationOnly ? undefined : await resolveCommand();
   const deep = await resolveDeepScanConfig(
     options,
     nativeDeepScanConfigPath(environment),
@@ -406,6 +411,10 @@ export async function prepareNativeScan(
           input,
           deep.settings.subagents,
         );
+  const executionPaths = publicationOnly
+    ? {}
+    : resolveExecutionPaths(config, input.scan.scanDir, environment);
+  const command = publicationOnly ? undefined : await resolveCommand();
   const security = config["codex_security"];
   if (
     input.recipe === undefined &&

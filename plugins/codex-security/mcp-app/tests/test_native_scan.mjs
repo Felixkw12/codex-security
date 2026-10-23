@@ -28,7 +28,7 @@ const bundle = await build({
       export { saveScanKnowledge, scanInputIdentity } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/scan-inputs.ts", import.meta.url)))};
       export { readKnowledgeBaseSnapshot, prepareKnowledgeBase } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/knowledge-base.ts", import.meta.url)))};
       export { acquireScanExecution } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/scan-execution.ts", import.meta.url)))};
-      export { prepareAmbientRuntime, prepareExecutionSource, createExecutionCodex, prepareDiscoveryExecution, prepareMergeExecution } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/execution-preparation.ts", import.meta.url)))};
+      export { prepareAmbientRuntime, prepareExecutionSource, createExecutionCodex, prepareDiscoveryExecution, prepareMergeExecution, resolveExecutionPaths } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/execution-preparation.ts", import.meta.url)))};
       export { createPermissionCheckedCodex } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/permission-profile.ts", import.meta.url)))};
       export { createProviderProfile, createReplayProfile } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/provider-profile.ts", import.meta.url)))};
       export { scanRuntimeCodexConfig, scanPreflightCodexConfig } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/api.ts", import.meta.url)))};`,
@@ -114,6 +114,7 @@ const {
   createExecutionCodex,
   prepareDiscoveryExecution,
   prepareMergeExecution,
+  resolveExecutionPaths,
 } = module.exports;
 
 const fixtureRepository = await realpath(
@@ -316,6 +317,248 @@ test("native preparation protects enclosing repositories for fresh and resumed c
     await rm(root, { recursive: true, force: true });
   }
 });
+
+for (const scenario of [
+  { saved: false, form: "absolute" },
+  { saved: true, form: "absolute" },
+  { saved: false, form: "relative" },
+  { saved: true, form: "relative" },
+  { saved: false, form: "home", captured: true },
+  { saved: true, form: "home" },
+  { saved: true, form: "relative", provider: true },
+  { saved: true, form: "absolute", noGit: true },
+]) {
+  test(`native executable selection protects selected instruction Git roots: ${JSON.stringify(scenario)}`, async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "native-instruction-root-")),
+    );
+    const target = join(root, "target");
+    const instructions = join(root, "instructions");
+    const inactive = join(root, "inactive");
+    const home = join(root, "home");
+    const scanDir = join(root, "output", "parent");
+    const filename = process.platform === "win32" ? "codex.exe" : "codex";
+    const instructionExecutable = join(instructions, "bin", filename);
+    const outsideExecutable = join(inactive, "bin", filename);
+    const targetExecutable = join(target, "bin", filename);
+    const instructionFile = join(instructions, "docs", "guide.md");
+    const inactiveFile = join(inactive, "guide.md");
+    const restore = captureEnvironment([
+      "HOME",
+      "USERPROFILE",
+      "CODEX_HOME",
+      "CODEX_CLI_PATH",
+      "CODEX_MANAGED_PACKAGE_ROOT",
+      "LOCALAPPDATA",
+      "CODEX_SECURITY_CONFIG_PATH",
+      "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+      "CODEX_SECURITY_KNOWLEDGE_BASE",
+      "CODEX_SECURITY_STATE_DIR",
+      "CODEX_API_KEY",
+      "OPENAI_API_KEY",
+      "SYNTHETIC_PROVIDER_KEY",
+      ...new Set([
+        "PATH",
+        ...Object.keys(process.env).filter(
+          (key) => key.toUpperCase() === "PATH",
+        ),
+      ]),
+    ]);
+    try {
+      for (const directory of [
+        home,
+        scanDir,
+        dirname(instructionFile),
+        join(target, ".git"),
+        join(inactive, ".git"),
+      ])
+        await mkdir(directory, { recursive: true, mode: 0o700 });
+      if (!scenario.noGit) await mkdir(join(instructions, ".git"));
+      for (const executable of [
+        instructionExecutable,
+        outsideExecutable,
+        targetExecutable,
+      ]) {
+        await mkdir(dirname(executable), { recursive: true });
+        await writeFile(executable, "inert executable fixture", {
+          mode: 0o700,
+        });
+      }
+      await writeFile(instructionFile, "Selected synthetic instructions.\n");
+      await writeFile(inactiveFile, "Inactive synthetic instructions.\n");
+      for (const key of [
+        "CODEX_CLI_PATH",
+        "CODEX_MANAGED_PACKAGE_ROOT",
+        "LOCALAPPDATA",
+        "CODEX_SECURITY_CONFIG_PATH",
+        "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+        "CODEX_SECURITY_KNOWLEDGE_BASE",
+        "CODEX_SECURITY_STATE_DIR",
+        "OPENAI_API_KEY",
+        ...Object.keys(process.env).filter(
+          (key) => key.toUpperCase() === "PATH",
+        ),
+      ])
+        delete process.env[key];
+      Object.assign(process.env, {
+        HOME: root,
+        USERPROFILE: root,
+        CODEX_HOME: home,
+        CODEX_API_KEY: "synthetic-instruction-root-key",
+        SYNTHETIC_PROVIDER_KEY: "synthetic-selected-provider-key",
+      });
+      const selected =
+        scenario.form === "absolute"
+          ? instructionFile
+          : scenario.form === "relative"
+            ? relative(scanDir, instructionFile)
+            : "~/instructions/docs/guide.md";
+      const configuration = {
+        model: "synthetic-instruction-model",
+        ...(scenario.form === "absolute"
+          ? { model_instructions_file: selected }
+          : {
+              profile: "scan",
+              model_instructions_file: inactiveFile,
+              profiles: { scan: { model_instructions_file: selected } },
+            }),
+        ...(scenario.provider
+          ? {
+              model_provider: "custom",
+              model_providers: {
+                custom: {
+                  env_key: "SYNTHETIC_PROVIDER_KEY",
+                  experimental_bearer_token: "synthetic-provider-token",
+                  wire_api: "responses",
+                },
+              },
+            }
+          : {}),
+      };
+      const ambient = { model_instructions_file: inactiveFile };
+      await writeFile(
+        join(home, "config.toml"),
+        stringifyToml(scenario.saved ? ambient : configuration),
+      );
+      const replay = scenario.provider
+        ? await createReplayProfile(home, configuration)
+        : undefined;
+      const savedConfig = structuredClone(configuration);
+      if (replay) delete savedConfig.model_providers;
+      const request = {
+        ...input(),
+        scan: {
+          ...input().scan,
+          targetPath: target,
+          targetProtectionRoots: [target],
+          scanDir,
+        },
+        ...(scenario.provider
+          ? { stateDirectory: join(root, "selected-state") }
+          : {}),
+        ...(scenario.saved
+          ? {
+              recipe: {
+                auth: "api-key",
+                config: savedConfig,
+                ...(replay
+                  ? { replayProfile: { name: replay.name, home: "ambient" } }
+                  : {}),
+              },
+            }
+          : {}),
+      };
+      if (scenario.captured) {
+        request.semanticInputs = await readNativeScanSemanticInputs();
+        await writeFile(join(home, "config.toml"), stringifyToml(ambient));
+      }
+      assert.equal(
+        resolveExecutionPaths(configuration, scanDir, process.env)
+          .model_instructions_file,
+        instructionFile,
+      );
+
+      // An overridden top-level instruction path does not protect its tools.
+      process.env.PATH = [
+        dirname(instructionExecutable),
+        dirname(outsideExecutable),
+      ].join(delimiter);
+      process.env.CODEX_CLI_PATH = outsideExecutable;
+      const prepared = await prepareNativeScan(request);
+      assert.equal(
+        prepared.client.dependencies.environment.CODEX_CLI_PATH,
+        outsideExecutable,
+      );
+      assert.equal(
+        resolveExecutionPaths(
+          prepared.client.config.codexOverrides,
+          scanDir,
+          prepared.client.dependencies.environment,
+        ).model_instructions_file,
+        instructionFile,
+      );
+      if (scenario.provider) {
+        assert.deepEqual(
+          prepared.client.config.codexOverrides.model_providers,
+          configuration.model_providers,
+        );
+        assert.equal(prepared.options.preserveProviderEnvironment, true);
+        assert.equal(
+          prepared.client.dependencies.environment.SYNTHETIC_PROVIDER_KEY,
+          "synthetic-selected-provider-key",
+        );
+        assert.equal(
+          prepared.client.dependencies.environment.CODEX_SECURITY_STATE_DIR,
+          request.stateDirectory,
+        );
+      }
+      process.env.CODEX_CLI_PATH = targetExecutable;
+      await assert.rejects(
+        prepareNativeScan(request),
+        /outside the scan target/,
+      );
+
+      delete process.env.CODEX_CLI_PATH;
+      process.env.PATH = dirname(instructionExecutable);
+      if (scenario.noGit) {
+        const colocated = await prepareNativeScan(request);
+        assert.equal(
+          colocated.client.dependencies.environment.CODEX_CLI_PATH,
+          instructionExecutable,
+        );
+      } else {
+        await assert.rejects(
+          prepareNativeScan(request),
+          /outside the scan target/,
+        );
+        process.env.CODEX_CLI_PATH = instructionExecutable;
+        await assert.rejects(
+          prepareNativeScan(request),
+          /outside the scan target/,
+        );
+        delete process.env.CODEX_CLI_PATH;
+        process.env.PATH = [
+          dirname(instructionExecutable),
+          dirname(outsideExecutable),
+        ].join(delimiter);
+        const originalPath = process.env.PATH;
+        const fallback = await prepareNativeScan(request);
+        assert.equal(
+          fallback.client.dependencies.environment.CODEX_CLI_PATH,
+          outsideExecutable,
+        );
+        assert.equal(
+          fallback.client.dependencies.environment.PATH,
+          dirname(outsideExecutable),
+        );
+        assert.equal(process.env.PATH, originalPath);
+      }
+    } finally {
+      restore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
 
 test("native waiters join one ordinary scan and detaching leaves it running", async () => {
   const started = Promise.withResolvers();
@@ -3502,7 +3745,14 @@ test("sealed native publication defers executable selection while retaining ambi
       scan: { ...input().scan, scanDir, targetProtectionRoots: undefined },
       recipe: {
         auth: "api-key",
-        config: { model: "synthetic-saved" },
+        config: {
+          model: "synthetic-saved",
+          model_instructions_file: join(
+            root,
+            "missing-instructions",
+            "guide.md",
+          ),
+        },
         preserveProviderEnvironment: true,
       },
     };

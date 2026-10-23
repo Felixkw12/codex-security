@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdtemp,
+  mkdir,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -575,4 +583,229 @@ for (const change of [
       await rm(root, { recursive: true, force: true });
     }
   });
+}
+
+for (const scenario of [
+  "instruction-repository-PATH",
+  "saved-instruction-repository-PATH",
+  "target-repository-PATH",
+  "explicit-external",
+] as const) {
+  test(
+    `public MCP instruction executable boundary: ${scenario}`,
+    {
+      skip:
+        process.platform === "win32"
+          ? "Synthetic executable uses a POSIX shebang."
+          : false,
+    },
+    async () => {
+      const root = await mkdtemp(
+        path.join(tmpdir(), "external-instructions-exec-"),
+      );
+      const target = path.join(root, "target");
+      const guidance = path.join(root, "guidance");
+      const trusted = path.join(root, "trusted");
+      const home = path.join(root, "home");
+      const helpers = path.join(root, "helpers");
+      const helperPaths = JSON.parse(
+        execFileSync(
+          process.env.PYTHON ?? "python3",
+          [
+            "-c",
+            'import json, shutil, sys; print(json.dumps(dict(python=sys.executable, git=shutil.which("git"))))',
+          ],
+          { encoding: "utf8" },
+        ),
+      );
+      const marker = path.join(root, "executed.json");
+      const configPath = path.join(root, "selected.toml");
+      const executableRoot =
+        scenario === "target-repository-PATH"
+          ? target
+          : scenario === "explicit-external"
+            ? trusted
+            : guidance;
+      const executable = path.join(executableRoot, "codex");
+      let client: Client | undefined;
+      try {
+        for (const directory of [target, guidance, trusted, home, helpers])
+          await mkdir(directory);
+        await symlink(process.execPath, path.join(helpers, "node"));
+        await symlink(helperPaths.git, path.join(helpers, "git"));
+        execFileSync("git", ["init", "--quiet", guidance], { stdio: "ignore" });
+        execFileSync("git", ["init", "--quiet", target], { stdio: "ignore" });
+        await writeFile(
+          path.join(target, "app.py"),
+          "print('synthetic fixture')\n",
+        );
+        await writeFile(
+          path.join(guidance, "instructions.md"),
+          "Synthetic security guidance.\n",
+        );
+        await writeFile(
+          executable,
+          `#!${process.execPath}\nconst fs = require('node:fs'); fs.writeFileSync(${JSON.stringify(marker)}, JSON.stringify({argv:process.argv.slice(2), syntheticProvider:process.env.SYNTHETIC_PROVIDER_KEY === 'synthetic-provider-proof-value'})); process.stderr.write('synthetic Codex fixture stopped after marker\\n'); process.exit(42);\n`,
+        );
+        await chmod(executable, 0o700);
+        await writeFile(
+          configPath,
+          `model = "synthetic-proof-model"\nmodel_provider = "synthetic"\nmodel_instructions_file = ${JSON.stringify(path.join(guidance, "instructions.md"))}\n[model_providers.synthetic]\nname = "Synthetic"\nbase_url = "https://provider.example.test/v1"\nenv_key = "SYNTHETIC_PROVIDER_KEY"\nrequires_openai_auth = false\nwire_api = "responses"\n`,
+        );
+        const environment: Record<string, string> = Object.fromEntries(
+          Object.entries(process.env).filter(
+            (entry): entry is [string, string] => entry[1] !== undefined,
+          ),
+        );
+        Object.assign(environment, {
+          HOME: root,
+          USERPROFILE: root,
+          CODEX_HOME: home,
+          CODEX_SECURITY_SCAN_ROOT: path.join(root, "scans"),
+          CODEX_SECURITY_STATE_DIR: path.join(root, "state"),
+          CODEX_SECURITY_CONFIG_PATH: configPath,
+          CODEX_API_KEY: "",
+          OPENAI_API_KEY: "",
+          SYNTHETIC_PROVIDER_KEY: "synthetic-provider-proof-value",
+          PYTHON: helperPaths.python,
+          PATH: [executableRoot, helpers].join(path.delimiter),
+        });
+        delete environment.CODEX_CLI_PATH;
+        delete environment.CODEX_SECURITY_KNOWLEDGE_BASE;
+        delete environment.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
+        if (scenario === "explicit-external")
+          environment.CODEX_CLI_PATH = executable;
+        let savedScanId: string | undefined;
+        let savedClaimToken: string | undefined;
+        if (scenario === "saved-instruction-repository-PATH") {
+          const workbench = (args: string[], input?: Record<string, unknown>) =>
+            JSON.parse(
+              execFileSync(
+                helperPaths.python,
+                [path.join(pluginRoot, "scripts/workbench_db.py"), ...args],
+                {
+                  env: environment,
+                  encoding: "utf8",
+                  ...(input === undefined
+                    ? {}
+                    : { input: JSON.stringify(input) }),
+                },
+              ),
+            );
+          const begun = workbench([
+            "begin-deep-scan",
+            "--target-path",
+            target,
+            "--thread-id",
+            "synthetic-executable-proof-owner",
+          ]);
+          const { scanId, scanDir, handoffClaimToken } = begun.scan;
+          savedScanId = scanId;
+          savedClaimToken = handoffClaimToken;
+          workbench(
+            [
+              "register-cli-scan",
+              "--repository",
+              target,
+              "--scan-dir",
+              scanDir,
+              "--registration-json-stdin",
+            ],
+            {
+              scanId,
+              threadId: "synthetic-executable-proof-owner",
+              claimToken: handoffClaimToken,
+              recipe: {
+                repository: target,
+                mode: "deep",
+                target: { kind: "repository", paths: [] },
+                config: {
+                  model: "synthetic-proof-model",
+                  model_instructions_file: path.join(
+                    guidance,
+                    "instructions.md",
+                  ),
+                },
+              },
+            },
+          );
+          // Saved instructions take precedence over a changed ambient selection.
+          await writeFile(
+            configPath,
+            `model_instructions_file = ${JSON.stringify(path.join(trusted, "ignored.md"))}\n`,
+          );
+        }
+        client = new Client({
+          name: "synthetic-executable-boundary-proof",
+          version: "1.0.0",
+        });
+        await client.connect(
+          new StdioClientTransport({
+            command: process.execPath,
+            args: [path.join(pluginRoot, "mcp/server.mjs"), "--stdio"],
+            cwd: target,
+            env: environment,
+          }),
+        );
+        const response = await client
+          .callTool(
+            {
+              name: "start_codex_security_deep_scan",
+              arguments:
+                savedScanId === undefined
+                  ? { targetPath: target }
+                  : { scanId: savedScanId, handoffClaimToken: savedClaimToken },
+              _meta: {
+                "openai/threadId": "synthetic-executable-proof-owner",
+                "x-codex-turn-metadata": {
+                  model: "synthetic-proof-model",
+                  reasoning_effort: "medium",
+                },
+                "codex/sandbox-state-meta": {
+                  permissionProfile: {
+                    type: "managed",
+                    file_system: {
+                      type: "restricted",
+                      entries: [
+                        {
+                          path: { type: "special", value: { kind: "root" } },
+                          access: "read",
+                        },
+                      ],
+                    },
+                    network: "restricted",
+                  },
+                  sandboxCwd: pathToFileURL(target).href,
+                },
+              },
+            },
+            undefined,
+            { timeout: 10000 },
+          )
+          .catch((error) => {
+            if (scenario === "explicit-external" && error.code === -32001)
+              return { isError: true, content: [{ text: error.message }] };
+            throw error;
+          });
+        const observed = await readFile(marker, "utf8").then(
+          (text) => JSON.parse(text),
+          (error) => (error.code === "ENOENT" ? null : Promise.reject(error)),
+        );
+        if (scenario !== "explicit-external") {
+          assert.equal(observed, null);
+          assert.equal(response.isError, true);
+          assert.match(
+            JSON.stringify(response.content),
+            /outside the scan target/,
+          );
+        } else {
+          assert.ok(observed);
+          assert.equal(observed.syntheticProvider, true);
+        }
+      } finally {
+        await client?.close();
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
 }
