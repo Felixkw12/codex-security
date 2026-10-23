@@ -21,7 +21,7 @@ export async function registerScan(options: {
   >;
   parentScanRole?: "deep_pass";
   recipe: JsonObject;
-  modelInstructionsFile?: string;
+  resolveModelInstructionsFile?: () => Promise<string | undefined>;
   expectation: ScanExpectation;
   scanDir: string;
   archivedScanDir: string | null;
@@ -50,15 +50,11 @@ export async function registerScan(options: {
           ])
         )["recipe"],
       ));
-  if (
-    !resumed &&
-    expectation.mode === "deep" &&
-    options.modelInstructionsFile !== undefined
-  ) {
+  if (!resumed && expectation.mode === "deep") {
     recipe["scanInputs"] = {
       ...(recipe["scanInputs"] as JsonObject),
       modelInstructionsFileSha256: await modelInstructionsFileDigest(
-        options.modelInstructionsFile,
+        await options.resolveModelInstructionsFile?.(),
       ),
     };
   }

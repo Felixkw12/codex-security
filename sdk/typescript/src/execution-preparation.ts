@@ -1,7 +1,11 @@
 import { restoreReplayProfile } from "./provider-profile.js";
 import { readFile, realpath } from "node:fs/promises";
 import { parse as parseToml } from "smol-toml";
-import { accountStatus, configuredCodexHome } from "./auth.js";
+import {
+  accountStatus,
+  configuredCodexHome,
+  readCodexHomeConfig,
+} from "./auth.js";
 import { join, resolve } from "node:path";
 import { bundledCodexSdkEnvironment } from "./codex-sdk-environment.js";
 import {
@@ -183,6 +187,12 @@ export interface PreparedRuntime {
 
 export type ScanPermissions = { filesystem: JsonObject; network: JsonObject };
 
+export interface ExecutionInstructionContext {
+  codexHome: string;
+  preserveCodexHomeConfig: boolean;
+  environment: ProcessEnvironment;
+}
+
 export interface PreparedExecution {
   readonly policy: ExecutionPolicy;
   readonly source: ExecutionSource;
@@ -202,6 +212,7 @@ export interface PreparedExecution {
     config: JsonObject,
     signal: AbortSignal | undefined,
     hasAttemptedExecution: boolean,
+    context: ExecutionInstructionContext,
   ) => Promise<void>;
 }
 
@@ -324,6 +335,11 @@ export async function createExecutionCodex(
     env: sdkEnvironment,
     config: sdkCodexConfig as NonNullable<CodexOptions["config"]>,
   };
+  const instructionContext: ExecutionInstructionContext = {
+    codexHome: runtime.codexHome,
+    preserveCodexHomeConfig: runtime.preserveCodexHomeConfig === true,
+    environment: { ...sdkEnvironment },
+  };
   let codex: CodexClientLike;
   if (client.createCodex !== undefined) {
     codex = await client.createCodex({
@@ -373,9 +389,10 @@ export async function createExecutionCodex(
       return {
         events: (async function* () {
           await session.validateScanInputs?.(
-            config ?? sessionConfig,
+            sdkCodexConfig,
             options.signal,
             hasAttemptedExecution,
+            instructionContext,
           );
           let release: (() => Promise<void>) | undefined =
             await lockConfiguration(options.signal);
@@ -609,6 +626,30 @@ export function resolveExecutionPaths(
       resolved[key] = resolve(workingDirectory, expandHome(path, environment));
   }
   return resolved;
+}
+
+export async function executionModelInstructionsFile(
+  launchConfig: JsonObject,
+  context: ExecutionInstructionContext,
+  signal?: AbortSignal,
+): Promise<string | undefined> {
+  const selected =
+    structuredCodexConfig(launchConfig)["model_instructions_file"];
+  if (selected !== undefined || !context.preserveCodexHomeConfig)
+    return typeof selected === "string" ? selected : undefined;
+
+  const home = await readCodexHomeConfig(
+    { ...context.environment, CODEX_HOME: context.codexHome },
+    signal,
+  );
+  const inherited = home["model_instructions_file"];
+  if (typeof inherited !== "string") return undefined;
+  // Native home-relative paths retain their origin when worker directories change.
+  return resolveExecutionPaths(
+    { model_instructions_file: inherited },
+    context.codexHome,
+    context.environment,
+  )["model_instructions_file"] as string;
 }
 
 function deepWorkerConfig(sessionConfig: JsonObject): JsonObject {

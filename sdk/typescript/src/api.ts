@@ -43,10 +43,12 @@ import {
   prepareExecutionSource,
   executionCommand,
   createExecutionCodex,
+  executionModelInstructionsFile,
   lockExecutionConfiguration,
   prepareAmbientRuntime,
   type AmbientExecution,
   type ExecutionSource,
+  type ExecutionInstructionContext,
   prepareDiscoveryExecution,
   prepareMergeExecution,
   resolveExecutionPaths,
@@ -2329,14 +2331,21 @@ export class CodexSecurity {
             await cleanup();
         };
       }
+      const registrationInstructionContext: ExecutionInstructionContext = {
+        codexHome: runtime.codexHome,
+        preserveCodexHomeConfig: runtime.preserveCodexHomeConfig === true,
+        environment: { ...session.source.environment },
+      };
       const registered = await registerScan({
         scan: options,
         parentScanRole: this.#parentScanRole,
         recipe,
-        modelInstructionsFile:
-          typeof workerConfig["model_instructions_file"] === "string"
-            ? workerConfig["model_instructions_file"]
-            : undefined,
+        resolveModelInstructionsFile: () =>
+          executionModelInstructionsFile(
+            workerConfig,
+            registrationInstructionContext,
+            signal,
+          ),
         expectation,
         scanDir,
         archivedScanDir,
@@ -2364,21 +2373,25 @@ export class CodexSecurity {
       const canonicalSession: PreparedExecution =
         mode === "deep" &&
         registered.resumed &&
-        typeof savedInstructionDigest === "string"
+        (typeof savedInstructionDigest === "string" ||
+          savedInstructionDigest === null)
           ? {
               ...session,
               validateScanInputs: async (
                 launchConfig,
                 turnSignal,
                 hasAttemptedExecution,
+                context,
               ) => {
                 turnSignal?.throwIfAborted();
-                const path =
-                  resolveCodexProfile(launchConfig)["model_instructions_file"];
                 let digest: string | null;
                 try {
                   digest = await modelInstructionsFileDigest(
-                    typeof path === "string" ? path : undefined,
+                    await executionModelInstructionsFile(
+                      launchConfig,
+                      context,
+                      turnSignal,
+                    ),
                     turnSignal,
                   );
                 } catch (error) {
@@ -2393,7 +2406,9 @@ export class CodexSecurity {
                 turnSignal?.throwIfAborted();
                 if (digest !== savedInstructionDigest)
                   throw new DeepScanInputRecoveryError(
-                    "The model instructions file changed since this scan started. Restore its original contents before resuming, or start a new scan.",
+                    savedInstructionDigest === null
+                      ? "This Deep Scan started without a model instructions file. Remove that setting before resuming, or start a new scan."
+                      : "The model instructions file changed since this scan started. Restore its original contents before resuming, or start a new scan.",
                     scanDir,
                     !hasAttemptedExecution,
                   );
