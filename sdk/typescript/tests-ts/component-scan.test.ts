@@ -377,6 +377,68 @@ test("retains unpriced partial usage for failed components without a progress ob
   });
 });
 
+test.each([
+  ["caller only", false, "observe", "observe"],
+  ["both observers", true, "observe", "observe"],
+  ["throwing caller", true, "throw", "observe"],
+  ["rejecting caller", true, "reject", "observe"],
+  ["throwing component observer", true, "observe", "throw"],
+  ["rejecting component observer", true, "observe", "reject"],
+] as const)(
+  "preserves the caller measurement observer with %s",
+  async (_label, withEvents, callerBehavior, eventBehavior) => {
+    const paths = await fixture();
+    const measurement = {
+      coverage: "unavailable" as const,
+      cost: null,
+      observedAt: "2026-10-01T00:00:00.000Z",
+      threadCount: 0,
+      missingThreadCount: 1,
+      usage: null,
+    };
+    const callerMeasurements: unknown[] = [];
+    const componentMeasurements: unknown[] = [];
+    const result = await scan(paths, {
+      components: components.slice(0, 1),
+      scanOptions: {
+        onMeasurement: (value) => {
+          callerMeasurements.push(value);
+          if (callerBehavior === "throw")
+            throw new Error("Synthetic caller observer failure.");
+          if (callerBehavior === "reject")
+            return Promise.reject(
+              new Error("Synthetic caller observer rejection."),
+            );
+        },
+      },
+      ...(withEvents
+        ? {
+            onScanEvent: (event: ComponentScanEvent) => {
+              if (event.type !== "measurement") return;
+              componentMeasurements.push(event.value);
+              if (eventBehavior === "throw")
+                throw new Error("Synthetic component observer failure.");
+              if (eventBehavior === "reject")
+                return Promise.reject(
+                  new Error("Synthetic component observer rejection."),
+                );
+            },
+          }
+        : {}),
+      createSecurity: client(async (repository, options) => {
+        options.onMeasurement?.(measurement);
+        return completed(repository, options, []);
+      }),
+    });
+    expect(result).toMatchObject({ completed: 1, failed: 0 });
+    expect(callerMeasurements).toEqual([measurement]);
+    expect(componentMeasurements).toEqual(withEvents ? [measurement] : []);
+    expect(await json(result.summaryPath!)).toMatchObject({
+      components: [{ status: "completed", outcome: "completed", measurement }],
+    });
+  },
+);
+
 test("omits a failed component's stale model link while retaining its model", async () => {
   const paths = await fixture();
   execFileSync("git", ["-C", paths.repository, "init", "--quiet"]);

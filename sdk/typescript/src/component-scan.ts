@@ -53,7 +53,8 @@ export interface ComponentScanOptions {
   planOnly?: boolean;
   workers?: number;
   config?: CodexSecurityConfig;
-  scanOptions?: Omit<ScanSettings, "target" | "outputDir">;
+  scanOptions?: Omit<ScanSettings, "target" | "outputDir"> &
+    Pick<ScanOptions, "onMeasurement">;
   signal?: AbortSignal;
   createSecurity?: (
     config: CodexSecurityConfig,
@@ -252,6 +253,7 @@ export async function runComponentScans(
                 receipt.measurement = measurement;
                 if (measurement.cost !== null) receipt.cost = measurement.cost;
                 else delete receipt.cost;
+                notify(() => options.scanOptions?.onMeasurement?.(measurement));
                 emit({ type: "measurement", value: measurement });
               },
             });
