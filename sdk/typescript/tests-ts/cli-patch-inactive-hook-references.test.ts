@@ -1,4 +1,7 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
+import { ChildProcess } from "node:child_process";
+import { EventEmitter } from "node:events";
+import { statSync } from "node:fs";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { runRepositoryCommand } from "../src/cli.js";
@@ -12,6 +15,92 @@ import {
   runGitRepositoryCommand,
   runWorkflow,
 } from "./cli-patch-fixtures.js";
+
+function observeNativeOutput(alias: string, events: Record<string, unknown>[]) {
+  const restore: (() => void)[] = [];
+  const wrapEmit = (
+    emitter: EventEmitter,
+    observe: (
+      event: string | symbol,
+      args: unknown[],
+      emit: () => boolean,
+    ) => boolean,
+  ) => {
+    const descriptor = Object.getOwnPropertyDescriptor(emitter, "emit");
+    const original = emitter.emit;
+    emitter.emit = function (event, ...args) {
+      return observe(event, args, () => original.call(this, event, ...args));
+    };
+    restore.push(() => {
+      if (descriptor) Object.defineProperty(emitter, "emit", descriptor);
+      else Reflect.deleteProperty(emitter, "emit");
+    });
+  };
+  const target = ChildProcess.prototype as ChildProcess & {
+    spawn(options: unknown): unknown;
+  };
+  const originalSpawn = target.spawn;
+  const spawning = spyOn(target, "spawn").mockImplementation(function (
+    this: ChildProcess,
+    options,
+  ) {
+    const result = originalSpawn.call(this, options);
+    if (!this.spawnargs.includes(alias)) return result;
+    if (process.platform === "linux") {
+      try {
+        const fd = statSync(`/proc/${this.pid}/fd/1`, { bigint: true });
+        events.push({
+          event: "spawn-fd1",
+          mode: String(fd.mode),
+          dev: String(fd.dev),
+          ino: String(fd.ino),
+        });
+      } catch (error) {
+        events.push({
+          event: "spawn-fd1-error",
+          code: (error as NodeJS.ErrnoException).code,
+        });
+      }
+    }
+    if (this.stdout)
+      wrapEmit(this.stdout, (event, args, emit) => {
+        if (event === "data")
+          events.push({
+            event: "stdout-data",
+            bytes: (args[0] as Buffer).length,
+          });
+        else if (event === "end" || event === "close")
+          events.push({ event: `stdout-${event}` });
+        return emit();
+      });
+    wrapEmit(this, (event, args, emit) => {
+      if (event !== "close") return emit();
+      events.push({ event: "child-close", code: args[0], signal: args[1] });
+      const originalConcat = Buffer.concat;
+      const concatenation = spyOn(Buffer, "concat").mockImplementation(
+        (list, length) => {
+          const value = originalConcat(list, length);
+          events.push({
+            event: "concat",
+            chunks: list.map((chunk) => chunk.length),
+            bytes: value.length,
+          });
+          return value;
+        },
+      );
+      try {
+        return emit();
+      } finally {
+        concatenation.mockRestore();
+      }
+    });
+    return result;
+  });
+  return () => {
+    spawning.mockRestore();
+    for (const action of restore) action();
+  };
+}
 
 const fixtures = createTemporaryDirectories(true);
 afterEach(fixtures.cleanup);
@@ -217,7 +306,13 @@ catch (error) { if (!["EACCES", "EPERM", "EROFS"].includes(error.code)) throw er
 fs.writeSync(2, "Native protected write denied: " + denied + "\\n");
 fs.writeFileSync(${JSON.stringify(join(directory, "src/finding-1.ts"))}, "fixed\\n");
 fs.writeSync(2, "Native ordinary write completed.\\n");
-process.stdout.write(JSON.stringify({ denied }), error => fs.writeSync(2, "Native stdout callback: " + String(error) + "\\n"));
+const payload = JSON.stringify({ denied });
+try {
+  const fd = fs.fstatSync(1, { bigint: true });
+  fs.writeSync(2, "Native fd1: " + JSON.stringify({ mode: String(fd.mode), dev: String(fd.dev), ino: String(fd.ino) }) + "\\n");
+} catch (error) { fs.writeSync(2, "Native fd1 error: " + String(error.code) + "\\n"); }
+fs.writeSync(2, "Native stdout bytes: " + Buffer.byteLength(payload) + "\\n");
+process.stdout.write(payload, error => fs.writeSync(2, "Native stdout callback: " + String(error) + "\\n"));
 fs.writeSync(2, "Native probe reached end of script.\\n");
 `,
       );
@@ -226,6 +321,7 @@ fs.writeSync(2, "Native probe reached end of script.\\n");
       let nativeStage = "before model callback";
       let nativeStdout: string | undefined;
       const nativeStderr: Buffer[] = [];
+      const nativeOutputEvents: Record<string, unknown>[] = [];
       const outcome = await runWorkflow(
         ["patch", "Synthetic issue", "--create-pr", "--json"],
         {
@@ -241,13 +337,14 @@ fs.writeSync(2, "Native probe reached end of script.\\n");
             nativeStage = "before native command";
             const paths = output?.appServer?.permissions?.readOnlyPaths ?? [];
             hookProtected = paths.includes(hook);
+            const alias = `alias.attempt=!node ${JSON.stringify(script.replaceAll("\\", "/"))}`;
+            const restoreOutputObserver = observeNativeOutput(
+              alias,
+              nativeOutputEvents,
+            );
             const result = await runRepositoryCommand(
               "git",
-              [
-                "-c",
-                `alias.attempt=!node ${JSON.stringify(script.replaceAll("\\", "/"))}`,
-                "attempt",
-              ],
+              ["-c", alias, "attempt"],
               directory,
               {
                 onStderr: (chunk) => nativeStderr.push(chunk),
@@ -264,7 +361,11 @@ fs.writeSync(2, "Native probe reached end of script.\\n");
                   },
                 },
               },
-            );
+            ).finally(restoreOutputObserver);
+            nativeOutputEvents.push({
+              event: "returned",
+              bytes: Buffer.byteLength(result),
+            });
             nativeStdout = result;
             nativeStage = "parsing native output";
             denied = (JSON.parse(result) as { denied: boolean }).denied;
@@ -280,6 +381,7 @@ fs.writeSync(2, "Native probe reached end of script.\\n");
           outcome.stderr,
           `Native hook probe stage: ${nativeStage}`,
           `Native stdout: ${JSON.stringify(nativeStdout)}`,
+          `Native output events: ${JSON.stringify(nativeOutputEvents)}`,
           `Native stderr: ${JSON.stringify(Buffer.concat(nativeStderr).toString("utf8"))}`,
         ].join("\n"),
       ).toBe(0);
