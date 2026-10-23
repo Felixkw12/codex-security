@@ -304,16 +304,13 @@ export function dependencies(
             ? (commandOptions?.environment?.["GIT_DIR"] ??
               commandOptions?.directory ??
               repository)
-            : args.includes("--show-toplevel") &&
-                options.currentDirectory !== undefined
-              ? repository
-              : args.includes("--name-only")
-                ? (
-                    options.result?.findings.findings.flatMap((finding) =>
-                      finding.locations.map((location) => location.path),
-                    ) ?? ["src/finding-1.ts"]
-                  ).join("\0") + "\0"
-                : "";
+            : args.includes("--name-only")
+              ? (
+                  options.result?.findings.findings.flatMap((finding) =>
+                    finding.locations.map((location) => location.path),
+                  ) ?? ["src/finding-1.ts"]
+                ).join("\0") + "\0"
+              : "";
       return commandOptions?.encoding === "base64"
         ? Buffer.from(output).toString("base64")
         : output;

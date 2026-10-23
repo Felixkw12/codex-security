@@ -122,6 +122,31 @@ export function patchRiskReport() {
   ].join("\n");
 }
 
+export function patchDependencies(
+  options: Parameters<typeof dependencies>[0] = {},
+) {
+  return dependencies({
+    ...options,
+    onRepositoryCommand: async (command, args, repository, commandOptions) => {
+      const output = await options.onRepositoryCommand?.(
+        command,
+        args,
+        repository,
+        commandOptions,
+      );
+      if (
+        output !== undefined ||
+        command !== "git" ||
+        !args.includes("--show-toplevel")
+      )
+        return output;
+      return commandOptions?.encoding === "base64"
+        ? Buffer.from(repository).toString("base64")
+        : repository;
+    },
+  });
+}
+
 export async function runWorkflow(
   arguments_: string[],
   fixtures: Parameters<typeof dependencies>[0] = {},
@@ -137,7 +162,7 @@ export async function runWorkflow(
   });
 
   const savedFindings = new Map<string, readonly Finding[]>();
-  const current = dependencies({
+  const current = patchDependencies({
     currentDirectory: CURRENT_REPOSITORY,
     onCodex: (args, output) => {
       completePatches(args, output);
