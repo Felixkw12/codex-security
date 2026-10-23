@@ -4317,7 +4317,7 @@ test.each([
         : { choices: 0, lookups: 0, prompts: 0 },
     );
     expect(f.calls).toEqual(
-      missing ? { runtime: 2, model: 2, scanner: 1 } : previousCalls,
+      missing ? { runtime: 1, model: 2, scanner: 1 } : previousCalls,
     );
     expect(f.turns).toHaveLength(missing ? 3 : 2);
     if (missing) {
