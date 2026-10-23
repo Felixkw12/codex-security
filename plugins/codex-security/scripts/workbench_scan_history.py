@@ -425,7 +425,11 @@ def list_unmatched_scan_pairs(
                 ]
         known_groups = _known_finding_groups(
             known_links,
-            {scan["id"] for scan in selected[: selected_index + 1]},
+            {
+                scan["id"]
+                for scan in selected[: selected_index + 1]
+                if not _saved_repository_conflict(scan, after)
+            },
         )
         batches.append(
             {
@@ -628,7 +632,8 @@ def compare_scans(
     occurrences = {
         row["id"]: row for row in chain(before_findings.values(), after_findings.values())
     }
-    aliases = _confirmed_finding_aliases(connection, occurrences)
+    excluded_scan_ids = _excluded_finding_history_scans(connection, occurrences, after)
+    aliases = _confirmed_finding_aliases(connection, occurrences, excluded_scan_ids)
     before_identities = {aliases.get(finding_id, finding_id) for finding_id in before_findings}
     after_identities = {aliases.get(finding_id, finding_id) for finding_id in after_findings}
     # Deterministic links must preserve confirmed groups and explicit root-cause distinctions.
@@ -651,6 +656,8 @@ def compare_scans(
             chain(before_findings, after_findings, aliases),
         )
         for scan_id, rows in groupby(linked_occurrences, lambda row: row["scan_id"]):
+            if scan_id in excluded_scan_ids:
+                continue
             finding_ids = {row["id"]: row["finding_id"] for row in rows}
             for occurrence_id, relations in finding_relations(
                 connection, scan_id, finding_ids, aliases=aliases
@@ -664,6 +671,7 @@ def compare_scans(
                         )
                     )
                     for pair in relations
+                    if pair["scanId"] not in excluded_scan_ids
                 )
         equivalent = [
             (previous, current)
@@ -817,9 +825,7 @@ def compare_scans(
         after_key = (timestamp_key(after["started_at"]), after["id"])
         known_scan_ids = {
             scan["id"]
-            for scan in connection.execute(
-                "SELECT id, started_at, target_id, target_path FROM scans WHERE status = 'complete'"
-            )
+            for scan in connection.execute("SELECT * FROM scans WHERE status = 'complete'")
             if (timestamp_key(scan["started_at"]), scan["id"]) <= after_key
             and _same_repository(scan, after)
         }
@@ -987,8 +993,8 @@ def _rows_for_ids(
         yield from connection.execute(query, (json.dumps(values),))
 
 
-# Stable finding IDs already include the target identity. Follow their indexed
-# occurrences instead of resolving repository paths or scanning every saved link.
+# Follow indexed stable IDs, but exclude occurrences whose saved Git identity
+# rejects the selected repository: a replaced checkout can reuse path-derived IDs.
 _FINDING_NEIGHBORS_SQL = """
     FROM linked
     CROSS JOIN finding_occurrences AS source
@@ -998,13 +1004,16 @@ _FINDING_NEIGHBORS_SQL = """
     CROSS JOIN finding_occurrences AS neighbor ON neighbor.id = CASE
         WHEN matches.before_occurrence_id = source.id THEN matches.after_occurrence_id
         ELSE matches.before_occurrence_id END
+    WHERE source.scan_id NOT IN excluded_scans AND neighbor.scan_id NOT IN excluded_scans
 """
 # Traverse only the selected findings' components, including recurring stable IDs.
 _LINKED_FINDINGS_SQL = f"""
-    WITH RECURSIVE linked(finding_id) AS (
+    WITH RECURSIVE excluded_scans(scan_id) AS (SELECT value FROM json_each(?)),
+    linked(finding_id) AS (
         SELECT occurrences.finding_id
         FROM finding_occurrences AS occurrences
         WHERE occurrences.id IN (SELECT value FROM json_each(?))
+            AND occurrences.scan_id NOT IN excluded_scans
         UNION
         SELECT neighbor.finding_id
         {_FINDING_NEIGHBORS_SQL}
@@ -1012,8 +1021,38 @@ _LINKED_FINDINGS_SQL = f"""
 """
 
 
+def _saved_repository_conflict(before: sqlite3.Row, after: sqlite3.Row) -> bool:
+    return (
+        before["target_git_identity_json"] is not None
+        and after["target_git_identity_json"] is not None
+        and not _same_repository(before, after)
+    )
+
+
+def _excluded_finding_history_scans(
+    connection: sqlite3.Connection, occurrence_ids: Iterable[str], reference: sqlite3.Row
+) -> set[str]:
+    # Legacy history has no saved identity to reject. Preserve its indexed traversal
+    # without introducing live Git discovery for old or unavailable checkouts.
+    if reference["target_git_identity_json"] is None:
+        return set()
+    query = f"""
+        {_LINKED_FINDINGS_SQL}
+        SELECT DISTINCT scans.*
+        FROM linked
+        CROSS JOIN finding_occurrences AS occurrences
+            ON occurrences.finding_id = linked.finding_id
+        CROSS JOIN scans ON scans.id = occurrences.scan_id
+    """
+    return {
+        scan["id"]
+        for scan in connection.execute(query, ("[]", json.dumps(tuple(occurrence_ids))))
+        if _saved_repository_conflict(scan, reference)
+    }
+
+
 def _confirmed_finding_aliases(
-    connection: sqlite3.Connection, occurrence_ids: Iterable[str]
+    connection: sqlite3.Connection, occurrence_ids: Iterable[str], excluded_scan_ids: set[str]
 ) -> dict[str, str]:
     query = f"""
         {_LINKED_FINDINGS_SQL}
@@ -1023,7 +1062,9 @@ def _confirmed_finding_aliases(
     """
     return _finding_aliases(
         (row["before_finding_id"], row["after_finding_id"])
-        for row in _rows_for_ids(connection, query, occurrence_ids)
+        for row in connection.execute(
+            query, (json.dumps(sorted(excluded_scan_ids)), json.dumps(tuple(occurrence_ids)))
+        )
     )
 
 
@@ -1090,11 +1131,12 @@ def finding_relations(
         and occurrences[pair["afterOccurrenceId"]]["scan_id"] == pair["afterScanId"]
     ]
     result: dict[str, list[dict[str, Any]]] = {}
-    if aliases is None:
-        aliases = _confirmed_finding_aliases(
-            connection, (pair["beforeOccurrenceId"] for pair in pairs)
-        )
-    for pair in _separate_finding_pairs(pairs, occurrences, aliases):
+    if aliases is None and pairs:
+        scan = connection.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
+        occurrence_ids = [pair["beforeOccurrenceId"] for pair in pairs]
+        excluded_scan_ids = _excluded_finding_history_scans(connection, occurrence_ids, scan)
+        aliases = _confirmed_finding_aliases(connection, occurrence_ids, excluded_scan_ids)
+    for pair in _separate_finding_pairs(pairs, occurrences, aliases or {}):
         finding = occurrences[pair["afterOccurrenceId"]]
         result.setdefault(pair["beforeOccurrenceId"], []).append(
             {
@@ -1111,6 +1153,8 @@ def finding_relations(
 def finding_matches(
     connection: sqlite3.Connection, occurrence_id: str, scan_id: str, started_at: str
 ) -> tuple[list[dict[str, Any]], str, list[str]]:
+    scan = connection.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
+    excluded_scan_ids = _excluded_finding_history_scans(connection, (occurrence_id,), scan)
     rows = connection.execute(
         """
         SELECT matches.after_scan_id AS scan_id, occurrences.id AS occurrence_id, occurrences.finding_id,
@@ -1128,9 +1172,9 @@ def finding_matches(
         """,
         (occurrence_id, occurrence_id),
     ).fetchall()
+    rows = [row for row in rows if row["scan_id"] not in excluded_scan_ids]
     linked_rows = list(
-        _rows_for_ids(
-            connection,
+        connection.execute(
             f"""
             {_LINKED_FINDINGS_SQL}
             SELECT occurrences.id AS occurrence_id, occurrences.finding_id, occurrences.title,
@@ -1139,8 +1183,9 @@ def finding_matches(
             CROSS JOIN finding_occurrences AS occurrences
                 ON occurrences.finding_id = linked.finding_id
             CROSS JOIN scans ON scans.id = occurrences.scan_id
+            WHERE scans.id NOT IN excluded_scans
             """,
-            (occurrence_id,),
+            (json.dumps(sorted(excluded_scan_ids)), json.dumps((occurrence_id,))),
         )
     )
     known_scans = sorted(
