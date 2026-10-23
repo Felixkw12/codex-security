@@ -149,7 +149,7 @@ export function renderScaReport(result: ScaResult): string {
     bullets(
       result.components.map(
         (component) =>
-          `${code(component.name)} ${code(component.version ?? "unresolved version")} (${component.ecosystem ?? "unknown ecosystem"}), ${code(component.sourcePath)}${component.dependencyGroups.length ? `; dependency groups: ${component.dependencyGroups.join(", ")}` : ""}.`,
+          `${code(component.name)} ${code(component.version ?? "unresolved version")} (${component.ecosystem ?? "unknown ecosystem"}), ${code(component.sourcePath)}${component.dependencyGroups.length ? `; dependency groups: ${component.dependencyGroups.map(code).join(", ")}` : ""}.`,
       ),
       "No components were reported.",
     ),
