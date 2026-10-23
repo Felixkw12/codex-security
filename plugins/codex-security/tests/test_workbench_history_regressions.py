@@ -1616,12 +1616,15 @@ def test_identical_decision_refreshes_the_scan_admission_boundary(
     with sqlite3.connect(state / "workbench.sqlite3") as connection:
         assert connection.execute("SELECT COUNT(*) FROM finding_decisions").fetchone()[0] == 1
     pending = create_cli_scan(state, root, repository, complete=False)
-    if reaffirm_after_admission:
-        run_workbench(state, *decision)
+    run_workbench(state, *decision)
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM finding_decisions").fetchone()[0] == 1
     scan_dir = Path(pending["scanDir"])
     write_completed_contract(scan_dir, pending["scanId"], repository)
     subprocess.run([sys.executable, str(FINALIZER), "--scan-dir", str(scan_dir)], check=True)
     run_workbench(state, "complete-scan", "--scan-id", pending["scanId"])
+    if reaffirm_after_admission:
+        run_workbench(state, *decision)
     findings = run_workbench(
         state, "list-global-findings", "--repository", str(repository), "--include-resolved"
     )["findings"]

@@ -843,10 +843,7 @@ test("lists completed scans in insertion order after clock rollback", async () =
   expect(observed["scanIds"]).toEqual(["running", "newer", "older"]);
 });
 
-test("orders finding-detail history by scan insertion after clock rollback", () => {
-  const python = Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
-  if (python === null) throw new Error("A Python interpreter is required.");
-
+test("orders finding-detail history by scan insertion after clock rollback", async () => {
   const probe = [
     "import json, sqlite3, sys",
     "sys.path.insert(0, sys.argv[1])",
@@ -865,14 +862,8 @@ test("orders finding-detail history by scan insertion after clock rollback", () 
     "print(json.dumps({'knownSince': known_since, 'knownScanIds': scan_ids, 'matches': matches}))",
   ].join("\n");
 
-  const result = spawnSync(
-    python,
-    ["-I", "-B", "-c", probe, join(PLUGIN_ROOT, "scripts")],
-    { encoding: "utf8", timeout: 10_000 },
-  );
-
-  expect(result.status, result.stderr).toBe(0);
-  expect(JSON.parse(result.stdout)).toMatchObject({
+  const observed = await runPythonProbe(probe);
+  expect(observed).toMatchObject({
     knownSince: "2026-02-01",
     knownScanIds: ["older-scan", "newer-scan"],
   });
