@@ -94,7 +94,7 @@ import workbench_scan_history as history
 connection = sqlite3.connect(':memory:')
 connection.row_factory = sqlite3.Row
 connection.executescript('''
-CREATE TABLE scans (id TEXT PRIMARY KEY, target_id TEXT, target_path TEXT, status TEXT, started_at TEXT);
+CREATE TABLE scans (id TEXT PRIMARY KEY, target_id TEXT, target_path TEXT, status TEXT, started_at TEXT, target_git_identity_json TEXT);
 CREATE TABLE finding_occurrences (id TEXT PRIMARY KEY, finding_id TEXT, scan_id TEXT);
 CREATE TABLE finding_triage (occurrence_id TEXT, status TEXT, close_reason TEXT);
 CREATE TABLE finding_locations (occurrence_id TEXT, relative_path TEXT, role TEXT, sort_order INTEGER);
@@ -105,7 +105,7 @@ for index, (scan, repository) in enumerate([
     ('unrelated-before', 'unrelated'), ('unrelated-after', 'unrelated'),
     ('before', 'selected'), ('after', 'selected')
 ]):
-    connection.execute('INSERT INTO scans VALUES (?, NULL, ?, ?, ?)',
+    connection.execute('INSERT INTO scans VALUES (?, NULL, ?, ?, ?, NULL)',
                        (scan, str(Path(sys.argv[2]) / repository), 'complete', f'2026-08-01T00:00:0{index}Z'))
 connection.executemany('INSERT INTO finding_occurrences VALUES (?, ?, ?)', [
     ('unrelated-first', 'unrelated-identity-a', 'unrelated-before'),
@@ -133,7 +133,7 @@ connection = sqlite3.connect(':memory:')
 connection.row_factory = sqlite3.Row
 connection.executescript('''
 PRAGMA foreign_keys = ON;
-CREATE TABLE scans (id TEXT PRIMARY KEY, target_path TEXT, target_id TEXT, status TEXT);
+CREATE TABLE scans (id TEXT PRIMARY KEY, target_path TEXT, target_id TEXT, status TEXT, target_git_identity_json TEXT);
 CREATE TABLE finding_occurrences (
     id TEXT PRIMARY KEY, finding_id TEXT, scan_id TEXT, title TEXT, severity TEXT
 );
@@ -153,7 +153,7 @@ CREATE INDEX matches_before ON scan_comparison_matches(before_occurrence_id);
 CREATE INDEX matches_after ON scan_comparison_matches(after_occurrence_id);
 ''')
 for scan, names in [('before', ('a1', 'a2', 'b', 'c')), ('after', ('x1', 'x2', 'y', 'z'))]:
-    connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?)', (scan, sys.argv[2], 'target', 'complete'))
+    connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?, NULL)', (scan, sys.argv[2], 'target', 'complete'))
     for name in names:
         connection.execute('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?, ?)', (name, name, scan, name, 'high'))
         connection.execute('INSERT INTO finding_locations VALUES (?, ?, ?, ?)', (name, 'src/example.py', 'root_control', 0))
@@ -321,7 +321,7 @@ test("loads each scan once and scopes saved links to uncached history", async ()
     "connection.row_factory = sqlite3.Row",
     "connection.executescript('''",
     "CREATE TABLE security_targets (id TEXT, current_path TEXT);",
-    "CREATE TABLE scans (id TEXT, target_path TEXT, target_id TEXT, status TEXT, started_at TEXT);",
+    "CREATE TABLE scans (id TEXT, target_path TEXT, target_id TEXT, status TEXT, started_at TEXT, target_git_identity_json TEXT);",
     "CREATE TABLE scan_comparisons (before_scan_id TEXT, after_scan_id TEXT);",
     "CREATE TABLE scan_comparison_matches (before_scan_id TEXT, after_scan_id TEXT, before_occurrence_id TEXT, after_occurrence_id TEXT);",
     "CREATE TABLE finding_occurrences (id TEXT, finding_id TEXT, scan_id TEXT, details_json TEXT, remediation TEXT, severity TEXT, summary TEXT, title TEXT);",
@@ -330,7 +330,7 @@ test("loads each scan once and scopes saved links to uncached history", async ()
     "''')",
     "for index in range(3):",
     "    scan = f'scan-{index}'",
-    "    connection.execute('INSERT INTO scans VALUES (?, ?, NULL, ?, ?)', (scan, sys.argv[2], 'complete', f'2026-01-01T00:00:0{index}Z'))",
+    "    connection.execute('INSERT INTO scans VALUES (?, ?, NULL, ?, ?, NULL)', (scan, sys.argv[2], 'complete', f'2026-01-01T00:00:0{index}Z'))",
     "    connection.execute('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?, ?, ?, ?, ?)', (scan, scan, scan, '{}', 'fix', 'high', 'summary', 'title'))",
     "queries = []",
     "connection.set_trace_callback(queries.append)",
@@ -349,7 +349,7 @@ test("loads each scan once and scopes saved links to uncached history", async ()
     "link_queries = [query for query in queries if 'FROM scan_comparison_matches' in query]",
     "for index in (3, 4):",
     "    scan = f'scan-{index}'",
-    "    connection.execute('INSERT INTO scans VALUES (?, ?, NULL, ?, ?)', (scan, sys.argv[2], 'complete', f'2026-01-01T00:00:0{index}Z'))",
+    "    connection.execute('INSERT INTO scans VALUES (?, ?, NULL, ?, ?, NULL)', (scan, sys.argv[2], 'complete', f'2026-01-01T00:00:0{index}Z'))",
     "    connection.execute('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?, ?, ?, ?, ?)', (scan, f'scan-{index - 3}', scan, '{}', 'fix', 'high', 'summary', 'title'))",
     "def coverage(scan):",
     "    if scan['id'] in {'scan-0', 'scan-1', 'scan-2'}:",
@@ -433,7 +433,7 @@ import workbench_scan_history as history
 connection = sqlite3.connect(':memory:')
 connection.row_factory = sqlite3.Row
 connection.executescript('''
-CREATE TABLE scans (id TEXT PRIMARY KEY, target_path TEXT, target_id TEXT, status TEXT);
+CREATE TABLE scans (id TEXT PRIMARY KEY, target_path TEXT, target_id TEXT, status TEXT, target_git_identity_json TEXT);
 CREATE TABLE finding_occurrences (
     id TEXT PRIMARY KEY, finding_id TEXT, scan_id TEXT, title TEXT, severity TEXT
 );
@@ -450,7 +450,7 @@ CREATE INDEX matches_before ON scan_comparison_matches(before_occurrence_id);
 CREATE INDEX matches_after ON scan_comparison_matches(after_occurrence_id);
 ''')
 for scan in ('before', 'after', 'later', 'latest'):
-    connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?)', (scan, sys.argv[2], 'target', 'complete'))
+    connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?, NULL)', (scan, sys.argv[2], 'target', 'complete'))
 for scan, names in [('before', ('a1', 'a2')), ('after', ('b1', 'b2')),
                     ('later', ('c1', 'c2')), ('latest', ('d1',))]:
     for name in names:
@@ -546,7 +546,7 @@ import workbench_scan_history as history
 connection = sqlite3.connect(':memory:')
 connection.row_factory = sqlite3.Row
 connection.executescript('''
-CREATE TABLE scans (id TEXT PRIMARY KEY, target_id TEXT);
+CREATE TABLE scans (id TEXT PRIMARY KEY, target_id TEXT, target_git_identity_json TEXT);
 CREATE INDEX scans_by_target ON scans(target_id, id);
 CREATE TABLE finding_occurrences (
     id TEXT PRIMARY KEY, finding_id TEXT, scan_id TEXT, title TEXT,
@@ -560,7 +560,7 @@ CREATE TABLE scan_comparison_matches (
 CREATE INDEX matches_before ON scan_comparison_matches(before_occurrence_id);
 CREATE INDEX matches_after ON scan_comparison_matches(after_occurrence_id);
 ''')
-connection.executemany('INSERT INTO scans VALUES (?, ?)', [
+connection.executemany('INSERT INTO scans VALUES (?, ?, NULL)', [
     ('one', 'target'), ('two', 'target'), ('three', 'clone'),
     ('four', 'clone'), ('foreign-one', 'unrelated-target'),
     ('foreign-two', 'unrelated-target')
@@ -594,7 +594,7 @@ connection.executemany('INSERT INTO scan_comparison_matches VALUES (?, ?, ?, ?)'
     ('two', 'three', 'right-0', 'bridge'),
     ('foreign-one', 'foreign-two', 'foreign-a', 'foreign-b')
 ])
-aliases = history._confirmed_finding_aliases(connection, ['left-0'])
+aliases = history._confirmed_finding_aliases(connection, ['left-0'], set())
 forward = history.finding_relations(connection, 'one', ['left-0'])
 reverse = history.finding_relations(connection, 'two', ['right-0'])
 remaining = history.finding_relations(connection, 'one', ['left-1'])
@@ -630,7 +630,7 @@ print(json.dumps({
     scoped: {
       "left-0": [{ occurrenceId: "right-0", scanId: "two" }],
     },
-    scopedQueries: 3,
+    scopedQueries: 4,
     empty: {},
     emptyQueries: 0,
     aliases: ["bridge-identity", "left-identity-0", "right-identity-0"],
@@ -640,7 +640,7 @@ print(json.dumps({
     unchanged: true,
     restoredAfterUnlink: true,
     batchedCount: 10,
-    batchedQueries: 3,
+    batchedQueries: 4,
     legacyCount: 1001,
     legacyQueries: 1,
   });
@@ -654,7 +654,7 @@ from workbench_scan_history import finding_matches
 connection = sqlite3.connect(':memory:')
 connection.row_factory = sqlite3.Row
 connection.executescript('''
-CREATE TABLE scans (id TEXT PRIMARY KEY, started_at TEXT);
+CREATE TABLE scans (id TEXT PRIMARY KEY, started_at TEXT, target_git_identity_json TEXT);
 CREATE TABLE finding_occurrences (id TEXT PRIMARY KEY, finding_id TEXT, scan_id TEXT, title TEXT);
 CREATE TABLE scan_comparison_matches (
     before_scan_id TEXT, after_scan_id TEXT, before_occurrence_id TEXT, after_occurrence_id TEXT, reason TEXT
@@ -662,7 +662,7 @@ CREATE TABLE scan_comparison_matches (
 ''')
 scans = [('a', 'a'), ('b', 'b'), ('c', 'c'), ('a-repeat', 'a'), ('c-repeat', 'c'), ('unlinked', 'unlinked')]
 for index, (scan, finding) in enumerate(scans):
-    connection.execute('INSERT INTO scans VALUES (?, ?)', (scan, f'2026-08-01T00:00:0{index}Z'))
+    connection.execute('INSERT INTO scans VALUES (?, ?, NULL)', (scan, f'2026-08-01T00:00:0{index}Z'))
     connection.execute('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?)', (scan, finding, scan, scan))
 connection.executemany('INSERT INTO scan_comparison_matches VALUES (?, ?, ?, ?, ?)', [
     ('a', 'b', 'a', 'b', 'First confirmed link.'),
