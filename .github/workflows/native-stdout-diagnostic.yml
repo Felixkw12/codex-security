@@ -84,7 +84,7 @@ jobs:
           ordinary_status=0
           bun test --timeout 30000 --parallel=2 --seed=1 tests-ts/cli-patch-inactive-hook-references.test.ts tests-ts/multiscan.test.ts > reports/native-stdout/ordinary.log 2>&1 || ordinary_status=$?
           observed_status=0
-          strace -f -qq -yy -s 0 -e trace=read,readv,write,writev,recvfrom,recvmsg,sendto,sendmsg,close,dup,dup2,dup3 -o reports/native-stdout/syscalls.log bun test --timeout 30000 --parallel=2 --seed=1 tests-ts/cli-patch-inactive-hook-references.test.ts tests-ts/multiscan.test.ts > reports/native-stdout/observed.log 2>&1 || observed_status=$?
+          strace -f -qq -yy -s 0 -e trace=read,readv,write,writev,recvfrom,recvmsg,sendto,sendmsg,close,dup,dup2,dup3,getsockname,getsockopt,fstat,newfstatat,statx,ioctl,fcntl,clone,clone3,fork,vfork,execve,execveat -o reports/native-stdout/syscalls.log bun test --timeout 30000 --parallel=2 --seed=1 tests-ts/cli-patch-inactive-hook-references.test.ts tests-ts/multiscan.test.ts > reports/native-stdout/observed.log 2>&1 || observed_status=$?
           printf 'ordinary=%s\nobserved=%s\n' "$ordinary_status" "$observed_status" > reports/native-stdout/status.txt
           cat reports/native-stdout/status.txt
           test "$ordinary_status" -eq 0 && test "$observed_status" -eq 0
