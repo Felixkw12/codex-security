@@ -10,11 +10,6 @@ import { CodexSecurity } from "../src/api.js";
 import type { SavedScanRecipe } from "../src/scan-registration.js";
 import { ScanTransportClosedError } from "../src/scan-execution.js";
 import { DeepScanRecoveryError } from "../src/deep-scan.js";
-import {
-  NativeScanHost,
-  prepareNativeScan,
-} from "../../../plugins/codex-security/mcp-app/src/native-scan.ts";
-import type { ScanResults } from "../../../plugins/codex-security/mcp-app/src/types.js";
 import { captureEnvironment } from "../tests-support/process-environment.mjs";
 
 const { fixture, cleanup } = createDeepApiFixtures();
@@ -23,6 +18,13 @@ for (const role of ["discovery", "reducer"] as const) {
   for (const scenario of ["introduced", "unchanged", "legacy"] as const) {
     const changed = scenario !== "unchanged";
     test(`native Deep known instruction absence ${role} ${scenario}`, async () => {
+      // The MCP package has its own TypeScript configuration.
+      const { NativeScanHost, prepareNativeScan } = await import(
+        new URL(
+          "../../../plugins/codex-security/mcp-app/src/native-scan.ts",
+          import.meta.url,
+        ).href
+      );
       const h = await fixture(undefined, true);
       const selectedPath = join(h.root, "selected.toml");
       const deepPath = join(h.root, "deep.toml");
@@ -84,9 +86,7 @@ for (const role of ["discovery", "reducer"] as const) {
       const scanId = h.options.registeredScan!.scanId;
       const readSaved = async () =>
         await command(["get-scan", "--scan-id", scanId]);
-      const prepare = async (
-        input: Parameters<typeof prepareNativeScan>[0],
-      ) => {
+      const prepare = async (input: { recipe?: SavedScanRecipe }) => {
         const restore = captureEnvironment(Object.keys(nativeEnvironment));
         try {
           for (const [key, value] of Object.entries(nativeEnvironment)) {
@@ -111,7 +111,7 @@ for (const role of ["discovery", "reducer"] as const) {
       const input = async () => {
         const saved = await readSaved();
         return {
-          scan: saved["scan"] as unknown as ScanResults,
+          scan: saved["scan"],
           ...(saved["recipe"] !== null &&
           typeof saved["recipe"] === "object" &&
           !Array.isArray(saved["recipe"])
