@@ -1144,6 +1144,68 @@ def test_completion_rejects_malformed_finding_identity(tmp_path: Path, field: st
     assert findings_path.read_bytes() == original
 
 
+@pytest.mark.parametrize("deep", [False, True])
+@pytest.mark.parametrize(
+    "field",
+    [
+        "codeEvidence",
+        "rootCause",
+        "attackPath.dataflow",
+        "validation.method",
+        "validation.summary",
+        "validation.evidenceRefs",
+    ],
+)
+def test_completion_requires_evidence_and_keeps_the_scan_repairable(
+    tmp_path: Path, deep: bool, field: str
+) -> None:
+    start = _start_deep_scan_with_draft_findings if deep else _start_scan_with_draft_findings
+    state_dir, scan_id, scan_dir = start(tmp_path)
+    findings_path = scan_dir / "findings.json"
+    complete = findings_path.read_bytes()
+    document = json.loads(complete)
+    owner = document["findings"][0]
+    *parents, key = field.split(".")
+    for parent in parents:
+        owner = owner[parent]
+    owner.pop(key)
+    if field == "codeEvidence":
+        for section in ("rootCause", "validation", "attackPath"):
+            document["findings"][0][section].pop("evidenceRefs", None)
+    findings_path.write_text(json.dumps(document))
+    names = ("scan-manifest.json", "findings.json", "coverage.json", "report.md")
+    before = {name: (scan_dir / name).read_bytes() for name in names}
+
+    rejected = scan_command(state_dir, "complete-scan", scan_id, check=False)
+
+    assert rejected["returncode"] != 0
+    assert "repair the finding records" in rejected["stderr"]
+    assert field.removesuffix(".evidenceRefs") in rejected["stderr"]
+    assert get_scan(state_dir, scan_id)["scan"]["progress"]["status"] == "running"
+    assert {name: (scan_dir / name).read_bytes() for name in names} == before
+
+    findings_path.write_bytes(complete)
+    result = scan_command(state_dir, "complete-scan", scan_id)
+    assert result["scan"]["progress"]["status"] == "complete"
+    assert result["scan"]["findingCount"] == 1
+
+
+def test_stopped_scan_preserves_findings_with_incomplete_evidence(tmp_path: Path) -> None:
+    state_dir, scan_id, scan_dir = _start_scan_with_draft_findings(tmp_path)
+    path = scan_dir / "findings.json"
+    document = json.loads(path.read_text())
+    finding = document["findings"][0]
+    for key in ("codeEvidence", "rootCause", "validation", "attackPath"):
+        finding.pop(key)
+    path.write_text(json.dumps(document))
+
+    fail_scan(state_dir, scan_id, "Review stopped before source proof was recorded.")
+
+    assert get_scan(state_dir, scan_id)["scan"]["findingCount"] == 1
+    retained = json.loads(path.read_text())["findings"][0]
+    assert all(retained[key] == value for key, value in finding.items())
+
+
 def test_completion_rejects_bad_findings_and_failed_scan_preserves_valid_rows(
     tmp_path: Path,
 ) -> None:
