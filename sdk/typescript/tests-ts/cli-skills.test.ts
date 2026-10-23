@@ -1496,9 +1496,33 @@ process.stdout.write(JSON.stringify({
         ] as const,
     ),
     ...(["validate", "patch", "verify-fix"] as const).flatMap((command) =>
+      [
+        "model 'gpt-5' not found",
+        'model "synthetic/provider-v2" not found',
+        "model `synthetic-v2` not found",
+      ].map(
+        (detail) =>
+          [
+            command,
+            detail,
+            "The selected model is unavailable for the current credentials.",
+          ] as const,
+      ),
+    ),
+    ...(["validate", "patch", "verify-fix"] as const).flatMap((command) =>
+      [
+        "model cache not found",
+        "model metadata file not found",
+        "permission denied opening model cache",
+        "model 'synthetic'\nconfiguration entry not found",
+        "Safety policy: request refused.",
+      ].map((detail) => [command, detail, null] as const),
+    ),
+    ...(["validate", "patch", "verify-fix"] as const).flatMap((command) =>
       (
         [
           ["response_code=401", "Authentication failed."],
+          ["HTTP 401: model 'gpt-5' not found", "Authentication failed."],
           [
             "response-code=403",
             "The selected model is unavailable for the current credentials.",
@@ -1521,7 +1545,9 @@ process.stdout.write(JSON.stringify({
         ),
       ).toBe(7);
       expect(stdout.text()).toBe("");
-      expect(stderr.text()).toContain(advice);
+      if (advice === null)
+        expect(stderr.text()).not.toContain("selected model is unavailable");
+      else expect(stderr.text()).toContain(advice);
       expect(stderr.text()).toContain(detail);
     },
   );
