@@ -1,4 +1,4 @@
-import { lstatSync, readdirSync } from "node:fs";
+import { lstatSync, readdirSync, realpathSync } from "node:fs";
 import { sep, posix, win32 } from "node:path";
 
 // Recover directory-entry spelling only when the filesystem accepts an alias.
@@ -11,6 +11,7 @@ export function canonicalPatchPath(root: string, key: string): string {
   for (let index = 0; index < parts.length; index++) {
     const part = Buffer.from(parts[index]!, "latin1");
     const path = Buffer.concat([directory, Buffer.from(sep), part]);
+    let ambiguous = false;
     try {
       const metadata = lstatSync(path, { bigint: true, throwIfNoEntry: false });
       if (!metadata) break;
@@ -18,7 +19,7 @@ export function canonicalPatchPath(root: string, key: string): string {
         Buffer.from(name),
       );
       if (!names.some((name) => name.equals(part))) {
-        const name = names.find((name) => {
+        const matches = names.filter((name) => {
           const candidate = lstatSync(
             Buffer.concat([directory, Buffer.from(sep), name]),
             { bigint: true, throwIfNoEntry: false },
@@ -27,6 +28,28 @@ export function canonicalPatchPath(root: string, key: string): string {
             candidate?.dev === metadata.dev && candidate.ino === metadata.ino
           );
         });
+        let name = matches[0];
+        if (matches.length > 1) {
+          ambiguous = true;
+          name = undefined;
+          if (!metadata.isSymbolicLink()) {
+            const resolved = realpathSync.native(path, { encoding: "buffer" });
+            const parent = realpathSync.native(directory, {
+              encoding: "buffer",
+            });
+            const prefix =
+              parent.at(-1) === sep.charCodeAt(0)
+                ? parent
+                : Buffer.concat([parent, Buffer.from(sep)]);
+            name = matches.find((candidate) =>
+              resolved.equals(Buffer.concat([prefix, candidate])),
+            );
+          }
+          if (!name)
+            throw new Error(
+              `Cannot determine the filesystem spelling of patch path ${Buffer.from(key, "latin1").toString("utf8")}. Report its exact spelling before publishing.`,
+            );
+        }
         if (name) parts[index] = name.toString("latin1");
       }
       if (!metadata.isDirectory()) break;
@@ -37,6 +60,7 @@ export function canonicalPatchPath(root: string, key: string): string {
       ]);
     } catch (error) {
       if (
+        !ambiguous &&
         ["ENOENT", "ENOTDIR"].includes(
           (error as NodeJS.ErrnoException).code ?? "",
         )
