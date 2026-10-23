@@ -1317,6 +1317,15 @@ export class CodexSecurity {
               assessment.error = null;
               delete assessment.threadId;
             }
+          for (const match of result.matches)
+            if (!result.assessments.some((item) => item.matchId === match.id))
+              result.assessments.push({
+                matchId: match.id,
+                status: "not_started",
+                verdict: null,
+                triage: null,
+                error: null,
+              });
           notifyObserver(options, "onOutputDirReady")(outputDir);
         }
         result.model.model = model;
