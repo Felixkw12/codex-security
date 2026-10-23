@@ -7351,8 +7351,9 @@ async function runDependencyScan(
     )(
       config,
       interactive
-        ? (auth, signal) =>
-            chooseInteractiveAuthentication(
+        ? async (auth, signal) => {
+            let paused = false;
+            const selectedAuth = await chooseInteractiveAuthentication(
               {
                 auth,
                 provider: scanModelProvider({
@@ -7361,10 +7362,19 @@ async function runDependencyScan(
                 }),
                 command: "scan",
                 signal,
+                beforePrompt: () =>
+                  notify(() => {
+                    progress.stopTimer();
+                    paused = true;
+                  }),
               },
               errorOutput,
               dependencies,
-            )
+            );
+            if (paused && progress.interactive && !stopped && !signal.aborted)
+              notify(() => progress.startTimer(timerMessage));
+            return selectedAuth;
+          }
         : undefined,
     );
     result = await security.scanDependencies({
@@ -9496,6 +9506,7 @@ async function chooseInteractiveAuthentication(
     provider: unknown;
     command: "scan" | "policy";
     signal: AbortSignal;
+    beforePrompt?: () => void;
   },
   errorOutput: Writable,
   dependencies: CliDependencies,
@@ -9522,6 +9533,7 @@ async function chooseInteractiveAuthentication(
     !(await abortable(() => hasStoredSignIn(signal), signal))
   )
     return auth;
+  options.beforePrompt?.();
   const source = authentication.source;
   try {
     errorOutput.write(

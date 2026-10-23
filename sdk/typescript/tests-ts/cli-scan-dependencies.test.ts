@@ -16,7 +16,7 @@ import type {
 } from "../src/index.js";
 import type { ProjectConfigInput } from "../src/project-config-schema.js";
 import { dependencies, fakeInterval, FakeSignals } from "./cli-fixtures.js";
-import { createCliTest } from "./support/cli-run.js";
+import { createCliTest, selectionPrompt } from "./support/cli-run.js";
 import { throwing } from "./support/errors.js";
 import { runCommand } from "./support/shell.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
@@ -1298,3 +1298,211 @@ describe("scan dependencies CLI", () => {
     },
   );
 });
+
+test.each([
+  "selection",
+  "rejection",
+  "interruption",
+  "pause write failure",
+] as const)(
+  "dependency authentication prompt pauses live progress: %s",
+  async (ending) => {
+    const signals = new FakeSignals();
+    const result = dependencyResult();
+    addMatch(result);
+    const { stderr, runCli } = createCliTest(main, { stderr: true });
+    Object.assign(stderr.stream, { columns: 240 });
+    const started = Promise.withResolvers<void>();
+    const answer = Promise.withResolvers<"chatgpt" | "api-key">();
+    const activeTimers = new Map<NodeJS.Timeout, () => void>();
+    let now = 0;
+    let timersStarted = 0;
+    let promptStarted = false;
+    let pauseFailures = 0;
+    let promptSignal: AbortSignal | undefined;
+    let closed = 0;
+    let afterSelectionTimers: number | undefined;
+    let afterSelectionOutput: string | undefined;
+    let selectedAuth: DependencyScanOptions["auth"];
+    const write = stderr.stream.write;
+    stderr.stream.write = (chunk) => {
+      if (
+        ending === "pause write failure" &&
+        !promptStarted &&
+        chunk === "\n"
+      ) {
+        pauseFailures++;
+        throw new Error("Synthetic progress write failure");
+      }
+      return write(chunk);
+    };
+    const deps = dependencies({
+      environment: { OPENAI_API_KEY: "synthetic-progress-auth-key" },
+      signals,
+    });
+    deps.now = () => now;
+    deps.setInterval = (callback) => {
+      const handle = fakeInterval(callback);
+      activeTimers.set(handle, callback);
+      timersStarted++;
+      return handle;
+    };
+    deps.clearInterval = (handle) => {
+      activeTimers.delete(handle);
+    };
+    deps.hasStoredChatGPTSignIn = async () => true;
+    deps.scanAuthenticationPrompt = selectionPrompt(
+      async (question, choices, _presentation, signal) => {
+        promptSignal = signal;
+        promptStarted = true;
+        stderr.stream.write(`${question}\n> ChatGPT subscription`);
+        started.resolve();
+        const selected = await answer.promise;
+        return choices.find((choice) => choice.value === selected)!.value;
+      },
+    );
+    // Exercise the real CLI chooser after the SDK's preparing-assessment event.
+    // Scanner checkpoint and auth propagation are covered by the SDK tests.
+    deps.createDependencySecurity = (_config, chooseAuthentication) => ({
+      scanDependencies: async (options) => {
+        options.onProgress?.({ phase: "preparing_assessment" });
+        selectedAuth = await chooseAuthentication!(
+          options.auth,
+          options.signal!,
+        );
+        afterSelectionTimers = activeTimers.size;
+        options.onProgress?.({ phase: "saving" });
+        const before = stderr.text();
+        now = 3_000;
+        for (const tick of activeTimers.values()) tick();
+        afterSelectionOutput = stderr.text().slice(before.length);
+        return result;
+      },
+      close: async () => {
+        closed++;
+      },
+    });
+    const run = runCli(["scan", "dependencies"], deps);
+    await started.promise;
+    const timersDuringPrompt = activeTimers.size;
+    const beforeTick = stderr.text();
+    now = 2_000;
+    for (const tick of activeTimers.values()) tick();
+    const writesDuringPrompt = stderr.text().slice(beforeTick.length);
+    if (ending === "rejection")
+      answer.reject(new Error("Synthetic prompt rejection"));
+    else if (ending === "interruption") signals.emit("SIGINT");
+    else answer.resolve("chatgpt");
+    const status = await run;
+    if (ending === "interruption") answer.resolve("chatgpt");
+    expect(status).toBe(
+      ending === "rejection" ? 2 : ending === "interruption" ? 130 : 0,
+    );
+    expect(closed).toBe(1);
+    expect(activeTimers.size).toBe(0);
+    expect(signals.listeners.get("SIGINT")?.size).toBe(0);
+    expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
+    expect(timersDuringPrompt).toBe(0);
+    expect(writesDuringPrompt).toBe("");
+    expect(timersStarted).toBe(ending === "selection" ? 2 : 1);
+    if (ending === "selection") {
+      expect(beforeTick).toContain("\n\u001b[?25hBoth a ChatGPT sign-in");
+      expect(afterSelectionTimers).toBe(1);
+      expect(afterSelectionOutput).toContain("Saving dependency results");
+      expect(selectedAuth).toBe("chatgpt");
+    } else if (ending === "pause write failure") {
+      expect(pauseFailures).toBe(1);
+      expect(afterSelectionTimers).toBe(0);
+      expect(afterSelectionOutput).toBe("");
+      expect(selectedAuth).toBe("chatgpt");
+    } else {
+      expect(afterSelectionTimers).toBeUndefined();
+      if (ending === "interruption") expect(promptSignal?.aborted).toBe(true);
+      else expect(stderr.text()).toContain("Synthetic prompt rejection");
+    }
+  },
+);
+
+test.each([
+  "explicit ChatGPT",
+  "explicit API key",
+  "no API key",
+  "no stored sign-in",
+  "non-TTY",
+  "noninteractive input",
+  "JSON",
+  "JSONL",
+  "external provider",
+  "zero matches",
+] as const)(
+  "dependency authentication leaves prompt-free progress unchanged: %s",
+  async (mode) => {
+    const terminal = mode !== "non-TTY";
+    const { stderr, runCli } = createCliTest(main, { stderr: terminal });
+    const result = dependencyResult();
+    if (mode !== "zero matches") addMatch(result);
+    const activeTimers = new Set<NodeJS.Timeout>();
+    let timersStarted = 0;
+    let prompts = 0;
+    let probes = 0;
+    const deps = dependencies({
+      environment:
+        mode === "no API key"
+          ? {}
+          : { OPENAI_API_KEY: "synthetic-progress-auth-key" },
+    });
+    deps.setInterval = (callback) => {
+      const handle = fakeInterval(callback);
+      activeTimers.add(handle);
+      timersStarted++;
+      return handle;
+    };
+    deps.clearInterval = (handle) => {
+      activeTimers.delete(handle);
+    };
+    deps.hasStoredChatGPTSignIn = async () => {
+      probes++;
+      return false;
+    };
+    deps.scanAuthenticationPrompt = selectionPrompt(
+      async (_question, choices) => {
+        prompts++;
+        return choices[0]!.value;
+      },
+      () => mode !== "noninteractive input",
+    );
+    deps.createDependencySecurity = (_config, chooseAuthentication) => ({
+      scanDependencies: async (options) => {
+        options.onProgress?.({ phase: "preparing_assessment" });
+        if (result.matches.length > 0)
+          await chooseAuthentication?.(options.auth, options.signal!);
+        return result;
+      },
+      close: async () => {},
+    });
+    const flags =
+      mode === "explicit ChatGPT"
+        ? ["--auth", "chatgpt"]
+        : mode === "explicit API key"
+          ? ["--auth", "api-key"]
+          : mode === "JSON"
+            ? ["--json"]
+            : mode === "JSONL"
+              ? ["--format", "jsonl"]
+              : mode === "external provider"
+                ? ["--provider", "fireworks", "--model", "synthetic-model"]
+                : [];
+    expect(await runCli(["scan", "dependencies", ...flags], deps)).toBe(0);
+    expect(prompts).toBe(0);
+    expect(probes).toBe(mode === "no stored sign-in" ? 1 : 0);
+    expect(timersStarted).toBe(terminal ? 1 : 0);
+    expect(activeTimers.size).toBe(0);
+    expect(stderr.text().split("\u001b[?25l").length - 1).toBe(
+      terminal ? 1 : 0,
+    );
+    expect(stderr.text().split("\u001b[?25h").length - 1).toBe(
+      terminal ? 1 : 0,
+    );
+    expect(stderr.text()).not.toContain("Both a ChatGPT sign-in");
+  },
+);
