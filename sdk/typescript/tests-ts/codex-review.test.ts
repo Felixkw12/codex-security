@@ -222,6 +222,10 @@ const failureReasons: Record<string, string> = {
     "Required review check could not be completed: Connection refused while fetching content-policy.ts",
   "required-source-error-upload-policy":
     "Required review check could not be completed: Artifact upload was blocked by the content policy.",
+  "required-source-error-upload-content-policy-violation":
+    "Required review check could not be completed: Artifact upload failed due to content policy violation",
+  "required-source-error-upload-safety-policy-violation":
+    "Required review check could not be completed: Artifact upload failed due to safety policy violation",
   "required-source-error-publication-policy":
     "Required review check could not be completed: Artifact publication was refused due to the content policy.",
   "required-source-error-publication-refusal":
@@ -1150,6 +1154,8 @@ test.each([
   "Network request failed due to connectivity policy.",
   "Connection refused while fetching content-policy.ts",
   "Artifact upload was blocked by the content policy.",
+  "Artifact upload failed due to content policy violation",
+  "Artifact upload failed due to safety policy violation",
   "Artifact publication was refused due to the content policy.",
   "Artifact publication refusal due to the content policy.",
   "Artifact upload failed because the content policy requires refusal of unsupported media",
