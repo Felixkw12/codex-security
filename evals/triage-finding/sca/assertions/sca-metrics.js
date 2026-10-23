@@ -39,7 +39,7 @@ function afterEach(context) {
     ),
     execution_errors: Number(outcome.status === "model_error"),
     invalid_outputs: Number(outcome.status === "invalid_output"),
-    unsupported_citations: Number(valid && outcome.evidenceFailures.length > 0),
+    unsupported_citations: Number(valid && outcome.citationFailures.length > 0),
   };
   return {
     test: context.test,

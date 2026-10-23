@@ -213,6 +213,159 @@ test("needs_review must identify a proof gap", () => {
   );
 });
 
+for (const [name, caseIndex, expectedFailure, mutate] of [
+  [
+    "package",
+    0,
+    "Wrong or absent package identity",
+    (finding, fixture) => {
+      finding.normalized_input.vulnerable_component = `other-package ${fixture.input.component.version}`;
+    },
+  ],
+  [
+    "version",
+    0,
+    "Wrong or absent resolved version",
+    (finding, fixture) => {
+      finding.normalized_input.vulnerable_component = `${fixture.input.component.name} 99.0.0`;
+      finding.normalized_input.affected_version_or_path = `99.0.0 in ${fixture.input.component.source}`;
+    },
+  ],
+  [
+    "lockfile",
+    0,
+    "Wrong or absent source lockfile",
+    (finding, fixture) => {
+      finding.normalized_input.affected_version_or_path = `${fixture.input.component.version} in other-lock.json`;
+    },
+  ],
+  [
+    "advisory",
+    0,
+    "No matched advisory reference",
+    (finding) => {
+      finding.normalized_input.references = ["SCA-OTHER-001"];
+    },
+  ],
+  [
+    "proof gap",
+    2,
+    "Unresolved assessment has no proof gap",
+    (finding) => {
+      finding.proof_gaps = [];
+    },
+  ],
+]) {
+  test(`supported citations remain supported when the ${name} evidence check fails`, () => {
+    const fixture = CORPUS.cases[caseIndex];
+    const result = resultFor(fixture);
+    mutate(result.findings[0], fixture);
+    const row = {
+      ...rowFor(fixture),
+      response: { output: JSON.stringify(result) },
+    };
+    const updated = afterEach({ test: { vars: row.vars }, result: row });
+    assert.equal(updated.result.namedScores.unsupported_citations, 0);
+    assert.deepEqual(updated.result.metadata.sca.citationFailures, []);
+    assert.deepEqual(updated.result.metadata.sca.evidenceFailures, [
+      expectedFailure,
+    ]);
+    assert.equal(assertion(result, { vars: row.vars }).pass, false);
+    const report = Object.values(summarizeExport({ results: [row] }).arms)[0];
+    assert.equal(report.unsupportedEvidence, 1);
+    assert.equal(report.mechanicalCitationPassRate, 1);
+    assert.equal(report.reviewerSupportedEvidenceRate, null);
+  });
+}
+
+for (const wrongPackage of [false, true]) {
+  test(`unsupported citations fail citation metrics with wrong package: ${wrongPackage}`, () => {
+    const fixture = CORPUS.cases[0];
+    const result = resultFor(fixture);
+    result.findings[0].evidence = [
+      "src/application.mjs:4 selects `not in source`.",
+    ];
+    if (wrongPackage)
+      result.findings[0].normalized_input.vulnerable_component = `other-package ${fixture.input.component.version}`;
+    const row = {
+      ...rowFor(fixture),
+      response: { output: JSON.stringify(result) },
+    };
+    const updated = afterEach({ test: { vars: row.vars }, result: row });
+    const citationFailure = "Missing supported citation: src/application.mjs:4";
+    assert.equal(updated.result.namedScores.unsupported_citations, 1);
+    assert.deepEqual(updated.result.metadata.sca.citationFailures, [
+      citationFailure,
+    ]);
+    assert.deepEqual(updated.result.metadata.sca.evidenceFailures, [
+      ...(wrongPackage ? ["Wrong or absent package identity"] : []),
+      citationFailure,
+    ]);
+    assert.equal(assertion(result, { vars: row.vars }).pass, false);
+    const report = Object.values(summarizeExport({ results: [row] }).arms)[0];
+    assert.equal(report.unsupportedEvidence, 1);
+    assert.equal(report.mechanicalCitationPassRate, 0);
+  });
+}
+
+test("JSON summary separates citation failures and excludes invalid or failed executions from their denominator", () => {
+  const fixture = CORPUS.cases[0];
+  const wrongPackage = resultFor(fixture);
+  wrongPackage.findings[0].normalized_input.vulnerable_component = `other-package ${fixture.input.component.version}`;
+  const wrongCitation = resultFor(fixture);
+  wrongCitation.findings[0].evidence = [];
+  const errors = [
+    {
+      vars: { case_id: fixture.case_id },
+      response: { error: "Synthetic provider failure" },
+    },
+    { vars: { case_id: fixture.case_id }, response: { output: "{}" } },
+  ];
+  for (const row of errors) {
+    const updated = afterEach({ test: { vars: row.vars }, result: row });
+    assert.equal(updated.result.namedScores.unsupported_citations, 0);
+    assert.deepEqual(updated.result.metadata.sca.citationFailures, []);
+  }
+  assert.equal(
+    Object.values(summarizeExport({ results: errors }).arms)[0]
+      .mechanicalCitationPassRate,
+    null,
+  );
+  const rows = [
+    rowFor(fixture),
+    ...[wrongPackage, wrongCitation].map((output) => ({
+      vars: { case_id: fixture.case_id },
+      response: { output: JSON.stringify(output) },
+    })),
+    ...errors,
+  ];
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "sca-citation-summary-"));
+  try {
+    const file = path.join(root, "synthetic-results.json");
+    fs.writeFileSync(file, JSON.stringify({ results: { results: rows } }));
+    const report = JSON.parse(
+      execFileSync(
+        process.execPath,
+        [
+          "--experimental-strip-types",
+          path.join(__dirname, "sca-result.js"),
+          file,
+        ],
+        { encoding: "utf8" },
+      ),
+    );
+    const arm = Object.values(report.arms)[0];
+    assert.equal(arm.attempted, 5);
+    assert.equal(arm.executionErrors, 1);
+    assert.equal(arm.invalidOutputs, 1);
+    assert.equal(arm.unsupportedEvidence, 2);
+    assert.equal(arm.mechanicalCitationPassRate, 2 / 3);
+    assert.equal(arm.reviewerSupportedEvidenceRate, null);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("missing, duplicate, or changed match IDs and malformed schema become invalid output", () => {
   const fixture = CORPUS.cases[0];
   for (const mutate of [
