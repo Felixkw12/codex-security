@@ -8497,8 +8497,8 @@ async function hashPublicationFile(
 ): Promise<string | undefined> {
   signal?.throwIfAborted();
   const path = patchFilePath(root, pathKey);
-  const selected = await lstat(path);
-  if (!selected.isFile() || selected.size === 0) return undefined;
+  const selected = await lstat(path, { bigint: true });
+  if (!selected.isFile() || selected.size === 0n) return undefined;
   const canonical = await realpath(path, { encoding: "buffer" });
   if (
     isOutsidePath(
@@ -8517,7 +8517,7 @@ async function hashPublicationFile(
   );
   try {
     signal?.throwIfAborted();
-    const opened = await file.stat();
+    const opened = await file.stat({ bigint: true });
     if (
       !opened.isFile() ||
       !(await sameCheckedFileDevice(file, { path, metadata: selected }, opened))
