@@ -23,6 +23,15 @@ export async function recoverWorkerCandidateReceipts(
     ...(coverage.surfaces as JsonObject[]),
     ...(coverage.explicitExclusions as JsonObject[]),
   ]) {
+    const candidateId =
+      typeof surface.candidateId === "string" && surface.candidateId.trim()
+        ? surface.candidateId
+        : undefined;
+    if (
+      (coverage.explicitExclusions as JsonObject[]).includes(surface) &&
+      candidateId === undefined
+    )
+      continue;
     if (
       !isTerminalCandidateDecision(surface) &&
       !(
@@ -37,10 +46,6 @@ export async function recoverWorkerCandidateReceipts(
       )
     )
       continue;
-    const candidateId =
-      typeof surface.candidateId === "string" && surface.candidateId.trim()
-        ? surface.candidateId
-        : undefined;
     const retainedRefs: string[] = [];
     const refs = surface.receiptRefs === undefined ? [] : surface.receiptRefs;
     for (const ref of Array.isArray(refs) ? refs : [refs]) {
