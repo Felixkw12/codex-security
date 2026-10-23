@@ -672,7 +672,7 @@ describe("SCA comparison", () => {
   );
 
   test.each([false, true])(
-    "keeps separate versions and correlates an unambiguous version change (reverse order: %s)",
+    "keeps separate versions and correlates an unambiguous version change (reverse order: %p)",
     (reverseOrder) => {
       const base = fixture();
       const head = fixture();
