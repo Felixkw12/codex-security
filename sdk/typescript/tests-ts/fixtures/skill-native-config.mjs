@@ -63,16 +63,6 @@ await Promise.all([
     let preflightResponse;
     for await (const line of createInterface({ input: child.stdout })) {
       const response = JSON.parse(line);
-      if (
-        preflightConfigId !== undefined &&
-        response.id === preflightConfigId
-      ) {
-        // The one-shot origins reader terminates this proxy after the response.
-        // Close its native child first, including on Windows where SIGTERM is forced.
-        preflightResponse = line;
-        child.stdin.end();
-        continue;
-      }
       if (methods.get(response.id) === "thread/start")
         modelProvider = response.result?.modelProvider;
       if (methods.get(response.id) === "config/read") {
@@ -89,6 +79,16 @@ await Promise.all([
             }) + "\n",
           );
         }
+      }
+      if (
+        preflightConfigId !== undefined &&
+        response.id === preflightConfigId
+      ) {
+        // The one-shot origins reader terminates this proxy after the response.
+        // Close its native child first, including on Windows where SIGTERM is forced.
+        preflightResponse = line;
+        child.stdin.end();
+        continue;
       }
       if (response.id !== "inspect-config") {
         process.stdout.write(line + "\n");
