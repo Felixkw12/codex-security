@@ -118,7 +118,7 @@ test.each([
   "quoted multiple pools",
   "relative from discovered subdirectory",
   "relative with explicit Git directory",
-  "physical parent traversal",
+  "directory link parent traversal",
   "absolute native drive spelling",
   "ignored and C-quoted entries",
   "repository-authored indirect pools",
@@ -148,13 +148,19 @@ test.each([
       await writeFile(join(worktree, "app.ts"), "before\n");
     }
     value = relative(explicit ? cwd : root, pool);
-  } else if (mode === "physical parent traversal") {
+  } else if (mode === "directory link parent traversal") {
     const physical = join(support, "physical");
     await mkdir(join(physical, "child"), { recursive: true });
-    pool = join(physical, "pool");
-    await rename(fixture.pool, pool);
-    await mkdir(fixture.pool);
-    excluded.push(fixture.pool);
+    const physicalPool = join(physical, "pool");
+    if (process.platform === "win32") {
+      await mkdir(physicalPool);
+      excluded.push(physicalPool);
+    } else {
+      pool = physicalPool;
+      await rename(fixture.pool, pool);
+      await mkdir(fixture.pool);
+      excluded.push(fixture.pool);
+    }
     const link = join(support, "alias");
     await symlink(
       join(physical, "child"),
