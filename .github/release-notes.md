@@ -8,6 +8,7 @@
 - verify Codex before caching installation ([#1855](https://github.com/openai/codex-security/pull/1855))
 - update incur to 0.7.1 and react to 19.3.1 ([#1862](https://github.com/openai/codex-security/pull/1862))
 - build owner reports without extra model calls ([#1845](https://github.com/openai/codex-security/pull/1845))
+- isolate audits and retain exact file identities ([#1859](https://github.com/openai/codex-security/pull/1859))
 
 <!-- release-section: highlights:end -->
 
