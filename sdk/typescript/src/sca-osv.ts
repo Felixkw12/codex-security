@@ -28,6 +28,7 @@ import { errorMessage } from "./errors.js";
 import {
   additionalScaFormat,
   inspectAdditionalScaInput,
+  scaInputBasename,
   type ScaUnresolvedReference,
 } from "./sca-inputs.js";
 import { executablePathForSpawn } from "./runtime.js";
@@ -55,6 +56,15 @@ const lockNames = new Set([
   "npm-shrinkwrap.json",
   "pnpm-lock.yaml",
 ]);
+
+function primaryScaFormat(path: string): "npm" | "pnpm" | null {
+  const name = scaInputBasename(path);
+  return lockNames.has(name)
+    ? name === "pnpm-lock.yaml"
+      ? "pnpm"
+      : "npm"
+    : null;
+}
 
 export interface OsvScanResult {
   scanner: ScaScanner;
@@ -557,7 +567,7 @@ async function repositoryFiles(
           let diagnostic = `Git dependency path bytes ${bytes.toString("hex")} cannot be decoded as UTF-8; coverage is incomplete.`;
           if (filesOnly) {
             if (
-              !lockNames.has(basename(scoped)) &&
+              primaryScaFormat(scoped) === null &&
               additionalScaFormat(scoped) === null
             )
               continue;
@@ -672,7 +682,7 @@ export async function discoverScaInputs(
   const candidates = files
     .filter(
       (path) =>
-        lockNames.has(basename(path)) || additionalScaFormat(path) !== null,
+        primaryScaFormat(path) !== null || additionalScaFormat(path) !== null,
     )
     .map(slash)
     .sort();
@@ -702,8 +712,7 @@ export async function discoverScaInputs(
       const input: ScaInput = {
         path: slash(candidate),
         sha256: "",
-        format:
-          additional ?? (basename(path) === "pnpm-lock.yaml" ? "pnpm" : "npm"),
+        format: additional ?? primaryScaFormat(path)!,
         status: "scanned",
         reason: null,
       };
@@ -739,7 +748,7 @@ export async function discoverScaInputs(
         const content = await readFile(path);
         input.sha256 = digest(content);
         if (
-          basename(path) === "package-lock.json" &&
+          scaInputBasename(path) === "package-lock.json" &&
           (await lstat(join(dirname(path), "npm-shrinkwrap.json")).then(
             () => true,
             (error: NodeJS.ErrnoException) => {
@@ -755,7 +764,13 @@ export async function discoverScaInputs(
           const shrinkwrap = slash(
             relative(repository, join(dirname(path), "npm-shrinkwrap.json")),
           );
-          if (!candidates.includes(shrinkwrap)) {
+          if (
+            !candidates.some(
+              (candidate) =>
+                dirname(candidate) === dirname(shrinkwrap) &&
+                scaInputBasename(candidate) === "npm-shrinkwrap.json",
+            )
+          ) {
             input.status = "unsupported";
             input.reason =
               "An npm-shrinkwrap.json outside the selected file scope takes precedence; the package-lock.json cannot be assessed as effective input.";

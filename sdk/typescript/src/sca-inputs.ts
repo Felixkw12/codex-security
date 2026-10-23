@@ -37,10 +37,22 @@ const filenames = new Map<string, AdditionalScaFormat>([
   ["composer.lock", "composer"],
   ["packages.lock.json", "nuget"],
 ]);
+const windowsFilenames = new Map(
+  [...filenames].map(([name, format]) => [name.toLowerCase(), format]),
+);
+
+export function scaInputBasename(path: string): string {
+  const name = basename(path);
+  return process.platform === "win32" ? name.toLowerCase() : name;
+}
 
 export function additionalScaFormat(path: string): AdditionalScaFormat | null {
   const name = basename(path);
-  const known = filenames.get(name);
+  const known =
+    filenames.get(name) ??
+    (process.platform === "win32"
+      ? windowsFilenames.get(name.toLowerCase())
+      : undefined);
   if (known) return known;
   const requirementsName =
     process.platform === "win32" ? name.toLowerCase() : name;
