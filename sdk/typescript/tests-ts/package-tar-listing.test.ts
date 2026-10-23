@@ -268,6 +268,8 @@ function runPackageCommand(
   environment: NodeJS.ProcessEnv,
 ): Promise<{ status: number; stderr: string }> {
   return new Promise((resolve, reject) => {
+    const startedAt = performance.now();
+    const timeoutMs = 30_000;
     execFile(
       command,
       args,
@@ -275,10 +277,10 @@ function runPackageCommand(
         cwd: root,
         env: environment,
         encoding: "utf8",
-        timeout: 30_000,
+        timeout: timeoutMs,
         windowsHide: true,
       },
-      (error, _stdout, stderr) => {
+      (error, stdout, stderr) => {
         if (error === null) {
           resolve({ status: 0, stderr });
         } else if (
@@ -288,6 +290,12 @@ function runPackageCommand(
         ) {
           resolve({ status: error.code, stderr });
         } else {
+          Object.assign(error, {
+            stdout,
+            stderr,
+            elapsedMs: performance.now() - startedAt,
+            timeoutMs,
+          });
           reject(error);
         }
       },
