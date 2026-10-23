@@ -1,7 +1,8 @@
 import { Codex } from "@openai/codex-sdk";
 import { afterEach, expect, test } from "bun:test";
-import { access, mkdir } from "node:fs/promises";
+import { access, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { estimateScanCost, type ScanUsageMeasurement } from "../src/cost.js";
 import { ScanInterruptedError } from "../src/errors.js";
 import {
@@ -11,6 +12,7 @@ import {
 } from "../src/operation-telemetry.js";
 import { TestClient } from "./support/api-client.js";
 import { preparedRuntime } from "./support/api-events.js";
+import { nodeCommand } from "./support/shell.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures(
@@ -37,6 +39,9 @@ test.each([
   "invalid schema",
   "valid no_change",
   "canceled after completion",
+  "canceled on completion",
+  "nonzero exit after completion",
+  "nonzero exit before completion",
   "null usage",
   "absent usage",
 ] as const)("preserves completed SDK patch usage with %s", async (ending) => {
@@ -57,7 +62,7 @@ test.each([
   const usage =
     ending === "null usage"
       ? null
-      : ending === "absent usage"
+      : ending === "absent usage" || ending === "nonzero exit before completion"
         ? undefined
         : receipt;
   const response =
@@ -68,6 +73,31 @@ test.each([
             ? { ...noChange, verificationReport: " " }
             : noChange,
         );
+  const canceled =
+    ending === "canceled after completion" ||
+    ending === "canceled on completion";
+  const failedExit = ending.startsWith("nonzero exit");
+  const childScript = join(root, "patch-child.mjs");
+  await writeFile(
+    childScript,
+    [
+      "for await (const _chunk of process.stdin) {}",
+      "const send = (event) => console.log(JSON.stringify(event));",
+      'send({ type: "thread.started", thread_id: "patch-usage-thread" });',
+      `send(${JSON.stringify({ type: "item.completed", item: { id: "result", type: "agent_message", text: response } })});`,
+      ...(ending === "nonzero exit before completion"
+        ? []
+        : [`send(${JSON.stringify({ type: "turn.completed", usage })});`]),
+      ...(canceled
+        ? ["setInterval(() => {}, 1_000);", "await new Promise(() => {});"]
+        : failedExit
+          ? [
+              'process.stderr.write("Synthetic patch child exit diagnostic.\\n");',
+              "process.exit(17);",
+            ]
+          : ["process.exit(0);"]),
+    ].join("\n"),
+  );
   let executions = 0;
   await using client = new TestClient(
     { codexOverrides: { model, analytics: { enabled: false } } },
@@ -82,28 +112,38 @@ test.each([
       createCodex: (options) => {
         const codex = new Codex({
           ...options,
-          codexPathOverride: process.execPath,
+          codexPathOverride: nodeCommand().command,
+          env: {
+            ...options.env,
+            NODE_OPTIONS: `--import=${pathToFileURL(childScript).href}`,
+          },
         });
         return {
           startThread: (options) => {
             const thread = codex.startThread(options);
-            const executable = thread as unknown as {
-              _exec: { run(): AsyncGenerator<string> };
-            };
-            executable._exec.run = async function* () {
+            const runStreamed = thread.runStreamed.bind(thread);
+            thread.runStreamed = async (...args) => {
               executions++;
-              yield JSON.stringify({
-                type: "thread.started",
-                thread_id: "patch-usage-thread",
-              });
-              yield JSON.stringify({
-                type: "item.completed",
-                item: { id: "result", type: "agent_message", text: response },
-              });
-              yield JSON.stringify({ type: "turn.completed", usage });
-              if (ending === "canceled after completion") {
-                controller.abort(new Error("Synthetic cancellation."));
-              }
+              const { events } = await runStreamed(...args);
+              return {
+                events: (async function* () {
+                  for await (const event of events) {
+                    if (
+                      event.type === "turn.completed" &&
+                      ending === "canceled on completion"
+                    ) {
+                      controller.abort(new Error("Synthetic cancellation."));
+                    }
+                    yield event;
+                    if (
+                      event.type === "turn.completed" &&
+                      ending === "canceled after completion"
+                    ) {
+                      controller.abort(new Error("Synthetic cancellation."));
+                    }
+                  }
+                })(),
+              };
             };
             return thread;
           },
@@ -119,10 +159,13 @@ test.each([
     onTelemetry: (event) => observed.push(event),
     onMeasurement: (measurement) => measurements.push(measurement),
   });
-  const canceled = ending === "canceled after completion";
   const invalid = ending === "invalid JSON" || ending === "invalid schema";
   if (canceled) {
     await expect(pending).rejects.toBeInstanceOf(ScanInterruptedError);
+  } else if (failedExit) {
+    await expect(pending).rejects.toThrow(
+      "Codex Exec exited with code 17: Synthetic patch child exit diagnostic.",
+    );
   } else if (invalid) {
     await expect(pending).rejects.toThrow(
       "Finding patch returned an invalid result.",
@@ -150,7 +193,7 @@ test.each([
   );
   const terminal = saved.events.at(-1)!;
   expect(terminal.outcome).toBe(
-    canceled ? "canceled" : invalid ? "failed" : "completed",
+    canceled ? "canceled" : invalid || failedExit ? "failed" : "completed",
   );
   expect(terminal.measurement).toEqual(measurements.at(-1));
   expect(terminal.measurement).toMatchObject({

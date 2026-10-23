@@ -1186,6 +1186,8 @@ export class CodexSecurity {
         thread,
         events,
         onEvent: (event) => {
+          if (event.type === "turn.completed")
+            finalUsage = event["usage"] ?? null;
           throwIfPatchAborted(signal, repository);
           if (
             event.type === "thread.started" &&
