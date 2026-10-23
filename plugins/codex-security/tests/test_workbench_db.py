@@ -90,6 +90,7 @@ EXPECTED_TABLES = {
     "scan_severity_assessments",
     "finding_workflows",
     "findings",
+    "scan_admissions",
     "scan_artifacts",
     "scan_comparison_matches",
     "scan_comparisons",
