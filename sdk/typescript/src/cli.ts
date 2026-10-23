@@ -9047,8 +9047,9 @@ export function skillCommandFailure(
   // Numeric statuses need an HTTP/status label; the original diagnostic is retained below.
   const diagnosticDetail = detail.replace(/\bhttps?:\/\/[^\s"'<>]+/giu, "");
   const classificationDetail = diagnosticDetail.replace(
-    /\b(?:(?:http(?:\/\d+(?:\.\d+)?)?(?:[ \t]*(?:response(?:[ \t]+|[_-])?code|error(?:[ \t]+code)?|status(?:[ _-]?code)?|code))?|response(?:[ \t]+|[_-])?code|status(?:[ _-]?code)?)(?:["']?[ \t]*[:=][ \t]*|[ \t]+)["']?(401|403|429)|(401|403|429))\b/giu,
-    (match, status: string | undefined) => (status ? match : ""),
+    /\b(?:(?:http(?:\/\d+(?:\.\d+)?)?(?:[ \t]*(?:response(?:[ \t]+|[_-])?code|error(?:[ \t]+code)?|status(?:[ _-]?code)?|code))?|response(?:[ \t]+|[_-])?code|status(?:[ _-]?code)?)(?:["']?[ \t]*[:=][ \t]*|[ \t]+)["']?(401|403|429)|(?<![\w./\\-])response(?:[ \t]+|[_-])?status(?:["']?[ \t]*[:=][ \t]*|[ \t]+)["']?(401|403|429)(?![\w/\\-]|\.(?=\S))|(401|403|429))\b/giu,
+    (match, status: string | undefined, responseStatus: string | undefined) =>
+      status || responseStatus ? match : "",
   );
   const classification = classifyConnectionFailure(classificationDetail);
   let advice: string | undefined;

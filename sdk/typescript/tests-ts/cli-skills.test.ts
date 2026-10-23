@@ -1516,6 +1516,7 @@ process.stdout.write(JSON.stringify({
         "permission denied opening model cache",
         "model 'synthetic'\nconfiguration entry not found",
         "Safety policy: request refused.",
+        "permission denied opening /synthetic/response_status=403/cache",
       ].map((detail) => [command, detail, null] as const),
     ),
     ...(["validate", "patch", "verify-fix"] as const).flatMap((command) =>
@@ -1528,6 +1529,19 @@ process.stdout.write(JSON.stringify({
             "The selected model is unavailable for the current credentials.",
           ],
           ["responseCode=429", "The request was rate limited. Wait and retry."],
+          ["responseStatus=401", "Authentication failed."],
+          [
+            "response_status=403",
+            "The selected model is unavailable for the current credentials.",
+          ],
+          [
+            "HTTP responseStatus=429",
+            "The request was rate limited. Wait and retry.",
+          ],
+          [
+            '{"response_status":"429"}',
+            "The request was rate limited. Wait and retry.",
+          ],
         ] as const
       ).map(([detail, advice]) => [command, detail, advice] as const),
     ),
@@ -1746,6 +1760,8 @@ process.stdout.write(JSON.stringify({
         `response_code=${status}`,
         `response-code=${status}`,
         `responseCode=${status}`,
+        `responseStatus=${status}`,
+        `response_status=${status}`,
         `HTTP response_code=${status}`,
         `status code ${status}`,
         `status_code=${status}`,
@@ -1762,10 +1778,21 @@ process.stdout.write(JSON.stringify({
         `response_code_cache=${status}`,
         `response-code-count ${status}`,
         `responseCodeCount=${status}`,
+        `responseStatusCount=${status}`,
+        `response_status_cache=${status}`,
         `${status} bytes read`,
         status,
       ].map((detail) => [detail, null] as const),
     ]),
+    ["database responseStatus=401", null],
+    ["sqlite3 response_status=403", null],
+    ["workbench responseStatus=429", null],
+    ["permission denied opening /synthetic/response_status=403/cache", null],
+    [
+      "permission denied opening C:\\synthetic\\response_status=403\\cache",
+      null,
+    ],
+    ["could not open responseStatus=401/cache", null],
     ["401 Unauthorized", "Authentication failed"],
     ["403 Forbidden", "selected model is unavailable"],
     ["429 Too Many Requests", "rate limited"],
@@ -1802,23 +1829,26 @@ process.stdout.write(JSON.stringify({
     expect(message).toContain(detail);
   });
 
-  test.each(["response_code=401", "response-code=403", "responseCode=429"])(
-    "keeps response-code URL components separate from advice: %s",
-    (code) => {
-      for (const url of [
-        `https://example.test/v1?${code}`,
-        `https://example.test/v1#${code}`,
-      ]) {
-        const detail = `error sending request for url (${url})`;
-        const message = skillCommandFailure("validate", 7, detail);
-        expect(message).toContain(detail);
-        expect(message).toContain("could not connect");
-        expect(message).not.toContain("Authentication failed");
-        expect(message).not.toContain("selected model is unavailable");
-        expect(message).not.toContain("rate limited");
-      }
-    },
-  );
+  test.each([
+    "response_code=401",
+    "response-code=403",
+    "responseCode=429",
+    "responseStatus=401",
+    "response_status=403",
+  ])("keeps response-code URL components separate from advice: %s", (code) => {
+    for (const url of [
+      `https://example.test/v1?${code}`,
+      `https://example.test/v1#${code}`,
+    ]) {
+      const detail = `error sending request for url (${url})`;
+      const message = skillCommandFailure("validate", 7, detail);
+      expect(message).toContain(detail);
+      expect(message).toContain("could not connect");
+      expect(message).not.toContain("Authentication failed");
+      expect(message).not.toContain("selected model is unavailable");
+      expect(message).not.toContain("rate limited");
+    }
+  });
 
   test("retains raw diagnostic lines until the terminal boundary", () => {
     const detail = "raw detail \u001b[31m\rnext\nline café C1 \u009b2J";
