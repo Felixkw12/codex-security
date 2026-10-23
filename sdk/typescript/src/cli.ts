@@ -6621,6 +6621,7 @@ export async function main(
               filesChanged: files.length,
               files,
             };
+            if (patchRun.error !== undefined) throw patchRun.error;
             if (exitCode !== 0 || files.length === 0) {
               throw new PatchCommandError(
                 exitCode === 0 ? "NO_PATCH_APPLIED" : "PATCH_FAILED",
@@ -10455,6 +10456,7 @@ async function runFindingPatches(
   exitCode: number;
   files: string[];
   preparationCompleted: boolean;
+  error?: unknown;
 }> {
   if (selected.findings.length === 0) {
     stderr.write("No matching open findings to patch.\n");
@@ -10619,31 +10621,41 @@ async function runFindingPatches(
       }
     }
 
-    if (patch.status === "verified") {
-      const files = verifiedPatchFiles(selected, [patch]).map((file) =>
-        canonicalPatchPath(selected.repository, patchPathKey(file)),
-      );
-      const root =
-        base !== undefined && !(base instanceof Map)
-          ? base.root
-          : selected.repository;
-      const changes = changedKeys.map((file) =>
-        relativePatchPath(
-          repositoryKey,
-          resolve(rootKey, canonicalPatchPath(root, file)),
-        ),
-      );
-      if (
-        !files.some((file) =>
-          changes.some(
-            (changed) => !isOutsidePath(relativePatchPath(file, changed)),
-          ),
-        )
-      )
-        patch = failed(
-          "Patch verification did not identify any changed files.",
-          changedFiles,
+    try {
+      if (patch.status === "verified") {
+        const files = verifiedPatchFiles(selected, [patch]).map((file) =>
+          canonicalPatchPath(selected.repository, patchPathKey(file)),
         );
+        const root =
+          base !== undefined && !(base instanceof Map)
+            ? base.root
+            : selected.repository;
+        const changes = changedKeys.map((file) =>
+          relativePatchPath(
+            repositoryKey,
+            resolve(rootKey, canonicalPatchPath(root, file)),
+          ),
+        );
+        if (
+          !files.some((file) =>
+            changes.some(
+              (changed) => !isOutsidePath(relativePatchPath(file, changed)),
+            ),
+          )
+        )
+          patch = failed(
+            "Patch verification did not identify any changed files.",
+            changedFiles,
+          );
+      }
+    } catch (error) {
+      return {
+        patches: [...patches, patch],
+        exitCode: 2,
+        files: [...knownFiles].sort(),
+        preparationCompleted,
+        error,
+      };
     }
 
     const title = safePatchText(finding.title);
@@ -12648,6 +12660,7 @@ async function executeScan(
       );
       patches = patchRun.patches;
       scanData = { ...scanData, patchSeverity: patchThreshold, patches };
+      if (patchRun.error !== undefined) throw patchRun.error;
       if (patchRun.exitCode === 130 || patchRun.exitCode === 143)
         return finishResult(patchRun.exitCode);
       if (publication && patchExitCode(patches) === 0) {

@@ -1815,6 +1815,103 @@ describe("scan and patch workflow", () => {
     }
   });
 
+  test.each(["--assess-patch-risk", "--create-pr"])(
+    "retains actual edits when saved patch scope validation fails for %s",
+    async (flag) => {
+      const root = await repositories.create("patch-invalid-scope-");
+      const repository = join(root, "repository");
+      const remote = join(root, "remote.git");
+      await mkdir(repository);
+      const git = repositoryGit(repository);
+      git("init", "--initial-branch=main");
+      git("config", "user.name", "Synthetic User");
+      git("config", "user.email", "synthetic@example.test");
+      await writeFile(join(repository, "app.ts"), "unsafe\n");
+      git("add", ".");
+      git("commit", "-m", "Synthetic baseline");
+      git("init", "--bare", remote);
+      git("remote", "add", "origin", remote);
+      const head = git("rev-parse", "HEAD");
+      const index = await readFile(join(repository, ".git/index"));
+      const result = resultWithFindings(["high"]);
+      result.findings.findings[0]!.locations = [
+        { path: "app.ts", startLine: 1 },
+      ];
+      let modelCalls = 0;
+      let assessments = 0;
+      const writes: string[] = [];
+      const outcome = await runWorkflow(
+        ["patch", "--scan", "scan-1", flag, "--json"],
+        {
+          currentDirectory: repository,
+          result,
+          onWorkbench: () => savedScan(result, "scan-1", repository),
+          onRepositoryCommand: (command, args, cwd, options) => {
+            if (
+              args.some((arg) =>
+                ["switch", "checkout", "commit", "push", "create"].includes(
+                  arg,
+                ),
+              )
+            )
+              writes.push(`${command} ${args.join(" ")}`);
+            return command === "git"
+              ? runGitRepositoryCommand(command, args, cwd, options)
+              : "[]";
+          },
+          onCodex: async (_args, output) => {
+            modelCalls++;
+            await writeFile(join(repository, "app.ts"), "fixed\n");
+            output?.stdout.write(
+              JSON.stringify({
+                patches: [
+                  {
+                    occurrenceId: "occ_1",
+                    status: "verified",
+                    files: ["../outside.ts"],
+                    verification: "Focused checks passed.",
+                  },
+                ],
+              }),
+            );
+            return 0;
+          },
+        },
+        {
+          configure: (current) => {
+            current.assessPatchRisk = async () => {
+              assessments++;
+              return patchRiskAssessment();
+            };
+          },
+        },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(2);
+      expect(JSON.parse(outcome.stdout)).toMatchObject({
+        ok: false,
+        applied: true,
+        filesChanged: 1,
+        files: ["app.ts"],
+        patches: [{ status: "verified", files: ["../outside.ts"] }],
+        error: {
+          code: "PATCH_FAILED",
+          message: "Patch files must remain inside the scanned repository.",
+        },
+      });
+      expect(modelCalls).toBe(1);
+      expect(assessments).toBe(0);
+      expect(writes).toEqual([]);
+      expect(git("rev-parse", "HEAD")).toBe(head);
+      expect(git("branch", "--show-current")).toBe("main");
+      expect(await readFile(join(repository, ".git/index"))).toEqual(index);
+      expect(repositoryGit(remote)("for-each-ref")).toBe("");
+      expect(await readFile(join(repository, "app.ts"), "utf8")).toBe(
+        "fixed\n",
+      );
+      expect(existsSync(join(root, "outside.ts"))).toBe(false);
+    },
+  );
+
   test("does not publish blocked, unchanged, or repository-external patches", async () => {
     for (const status of ["blocked", "no_change", "outside"] as const) {
       let commandStarted = false;
