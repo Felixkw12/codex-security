@@ -160,9 +160,12 @@ function referenceVersionMatches(
 }
 
 function alternateNpmTarball(value: string): boolean {
+  const registry = /^(https?:\/\/registry\.npmjs\.org(?::\d+)?)(?:\/|$)/iu.exec(
+    value,
+  );
   return (
     /^https?:\/\//iu.test(value) &&
-    !/^https?:\/\/registry\.npmjs\.org(?:\/|$)/iu.test(value)
+    (registry === null || URL.parse(registry[1]!)?.port !== "")
   );
 }
 
