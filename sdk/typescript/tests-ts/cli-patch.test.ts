@@ -851,7 +851,7 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
         "remote",
         "add",
         "origin",
-        `https://${provider === "gitlab" ? "gitlab.com" : "forge.example.test"}/example/repository.git`,
+        `https://${provider === "gitlab" ? "gitlab.com" : apiHost}/example/repository.git`,
       );
       if (context === "ssh+git")
         git(
@@ -1097,7 +1097,6 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
         result,
         onWorkbench: () => savedScan(result),
         onRepositoryCommand: (_command, args) => {
-          if (args.includes("--absolute-git-dir")) return CURRENT_REPOSITORY;
           if (args.includes("add") && !modelStarted) {
             snapshotHadProgress = stderr
               .text()
@@ -3011,7 +3010,9 @@ process.exitCode = await main(["patch", "Synthetic issue", "--create-pr"], proce
           },
           onRepositoryCommand: (command, args, _cwd, options) => {
             if (command === "git" && args.includes("--absolute-git-dir"))
-              return directory;
+              return options?.encoding === "base64"
+                ? Buffer.from(directory).toString("base64")
+                : directory;
             commandStarted ||=
               (command !== "git" && args[1] !== "list") ||
               ["checkout", "commit", "push"].includes(args[0]!);
