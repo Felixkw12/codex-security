@@ -271,12 +271,16 @@ export async function prepareNativeScan(
         input.scan.targetPath,
         ...(input.scan.targetProtectionRoots ?? []),
         ...(await gitProtectionRoots(input.scan.targetPath, signal)),
-        ...(typeof executionPaths["model_instructions_file"] === "string"
-          ? await gitProtectionRoots(
+        ...(
+          await Promise.all(
+            [
               executionPaths["model_instructions_file"],
-              signal,
-            )
-          : []),
+              executionPaths["experimental_compact_prompt_file"],
+            ].map((path) =>
+              typeof path === "string" ? gitProtectionRoots(path, signal) : [],
+            ),
+          )
+        ).flat(),
         ...(knowledgeBaseSnapshot?.protectedRoots ??
           (await Promise.all(
             (knowledgeBaseSnapshot?.sources ?? []).map(

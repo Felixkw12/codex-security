@@ -2898,6 +2898,14 @@ test(
             root,
             `instructions-${id}-${capturedInputs ? "A" : "B"}.md`,
           ),
+          compactPromptFile: join(
+            root,
+            `compact-${id}-${capturedInputs ? "B" : "A"}.md`,
+          ),
+          laterCompactPromptFile: join(
+            root,
+            `compact-${id}-${capturedInputs ? "A" : "B"}.md`,
+          ),
           developerInstructions: `Selected synthetic guidance ${id}.`,
           parentAccess: id === "a" || id === "c" ? "read" : "write",
           parentDeniedPath: join(root, `parent-private-${id}`),
@@ -2962,6 +2970,7 @@ test(
         fixture.selectedConfigText = stringifyToml({
           developer_instructions: fixture.developerInstructions,
           model_instructions_file: fixture.instructionsFile,
+          experimental_compact_prompt_file: fixture.compactPromptFile,
           ...(id === "c"
             ? {
                 model: fixture.model,
@@ -2983,9 +2992,13 @@ test(
         await writeFile(join(fixture.home, "config.toml"), fixture.configText);
         await writeFile(fixture.selectedConfigPath, fixture.selectedConfigText);
         await Promise.all(
-          [fixture.instructionsFile, fixture.laterInstructionsFile].map(
-            (path) =>
-              writeFile(path, `Synthetic instruction-file guidance ${id}.\n`),
+          [
+            fixture.instructionsFile,
+            fixture.laterInstructionsFile,
+            fixture.compactPromptFile,
+            fixture.laterCompactPromptFile,
+          ].map((path) =>
+            writeFile(path, `Synthetic instruction-file guidance ${id}.\n`),
           ),
         );
         if (!capturedInputs) {
@@ -3001,6 +3014,8 @@ test(
           const laterSelectedConfig = parseToml(fixture.selectedConfigText);
           laterSelectedConfig.model_instructions_file =
             fixture.laterInstructionsFile;
+          laterSelectedConfig.experimental_compact_prompt_file =
+            fixture.laterCompactPromptFile;
           fixture.selectedConfigText = stringifyToml(laterSelectedConfig);
           await writeFile(
             fixture.selectedConfigPath,
@@ -3067,6 +3082,8 @@ test(
           laterSelectedConfig.developer_instructions = `Later synthetic guidance ${id}.`;
           laterSelectedConfig.model_instructions_file =
             fixture.laterInstructionsFile;
+          laterSelectedConfig.experimental_compact_prompt_file =
+            fixture.laterCompactPromptFile;
           laterSelectedConfig.model = `later-selected-model-${id}`;
           laterSelectedConfig.model_reasoning_effort = `later-selected-effort-${id}`;
           laterSelectedConfig.model_providers.openai.name = `Later synthetic provider ${id}`;
@@ -3330,6 +3347,10 @@ test(
                 assert.equal(
                   config.model_instructions_file,
                   fixture.instructionsFile,
+                );
+                assert.equal(
+                  config.experimental_compact_prompt_file,
+                  fixture.compactPromptFile,
                 );
                 if (knowledge) {
                   assert.equal(observed.knowledge, knowledge.path);
@@ -3750,6 +3771,11 @@ test("sealed native publication defers executable selection while retaining ambi
           model_instructions_file: join(
             root,
             "missing-instructions",
+            "guide.md",
+          ),
+          experimental_compact_prompt_file: join(
+            root,
+            "missing-compact-prompt",
             "guide.md",
           ),
         },
