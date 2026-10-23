@@ -8589,6 +8589,8 @@ async function githubPatchRepository(
   if (isNetworkPatchRemote(pushRemote)) {
     const uri = pushRemote.includes("://");
     const url = uri ? new URL(pushRemote) : patchScpRemote(pushRemote)!;
+    if (url.protocol === "https:" && url.port !== requestUrl.port)
+      return undefined;
     const ssh = ["ssh:", "git+ssh:", "ssh+git:"].includes(url.protocol);
     let hostname =
       url.hostname.toLowerCase() === "ssh.github.com"
