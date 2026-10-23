@@ -8,6 +8,7 @@ import {
 } from "./support/fake-codex-fixture.ts";
 import { readJson, writeJson } from "./support/json.ts";
 import { randomUUID } from "node:crypto";
+import { writeSync } from "node:fs";
 import { loadWorkbenchProcess } from "./support/workbench-process.ts";
 import { finding, workerDraft } from "./scan-draft-fixture.ts";
 import {
@@ -51,20 +52,47 @@ import { testDeepScanContextSnapshots } from "./deep_scan_context_snapshot_cases
 import { workerTelemetryFixture } from "./deep_scan_worker_telemetry_fixture.ts";
 import { testWorkerCyberAccessSettings } from "./deep_scan_worker_settings_cases.ts";
 
+function executorMarker(phase: string, name: string): void {
+  try {
+    writeSync(process.stderr.fd, `[executor fixture] ${phase}: ${name}\n`);
+  } catch {
+    // Optional diagnostics must not replace the fixture's result.
+  }
+}
+
+async function executorCase<Result>(
+  operation: () => Promise<Result>,
+  name = operation.name,
+): Promise<Result> {
+  executorMarker("begin", name);
+  try {
+    const result = await operation();
+    executorMarker("end", name);
+    return result;
+  } catch (error) {
+    executorMarker("failure", name);
+    throw error;
+  }
+}
+
 const executorSource = new URL("../src/deep-scan/executor.ts", import.meta.url);
 const { bundledCodexSdkEnvironment } =
   process.platform === "win32"
     ? {}
-    : await importModule({
-        entryPoints: [
-          fileURLToPath(
-            new URL(
-              "../../../../sdk/typescript/src/codex-sdk-environment.ts",
-              import.meta.url,
-            ),
-          ),
-        ],
-      });
+    : await executorCase(
+        () =>
+          importModule({
+            entryPoints: [
+              fileURLToPath(
+                new URL(
+                  "../../../../sdk/typescript/src/codex-sdk-environment.ts",
+                  import.meta.url,
+                ),
+              ),
+            ],
+          }),
+        "bundled SDK environment",
+      );
 
 const {
   CodexSdkWorkerExecutor,
@@ -76,21 +104,25 @@ const {
   DeepScanNonRetryableError,
   isCodexCybersecurityPolicyRefusal,
   parseDeepScan,
-} = await importModule({
-  define: {
-    "import.meta.url": JSON.stringify(executorSource.href),
-  },
-  stdin: {
-    // Expose the environment snapshot only for tests.
-    contents: `${await readFile(executorSource, "utf8")}
+} = await executorCase(
+  async () =>
+    importModule({
+      define: {
+        "import.meta.url": JSON.stringify(executorSource.href),
+      },
+      stdin: {
+        // Expose the environment snapshot only for tests.
+        contents: `${await readFile(executorSource, "utf8")}
 export { snapshotWorkerEnvironment, appendItemDiagnostic };
 export * from "./errors.js";
 export { parseDeepScan } from "./response.js";`,
-    loader: "ts",
-    resolveDir: path.dirname(fileURLToPath(executorSource)),
-    sourcefile: fileURLToPath(executorSource),
-  },
-});
+        loader: "ts",
+        resolveDir: path.dirname(fileURLToPath(executorSource)),
+        sourcefile: fileURLToPath(executorSource),
+      },
+    }),
+  "executor module",
+);
 
 const temporaryDirectories = createTemporaryDirectories(true);
 const fakeCodexFixture = createFakeCodexFixture.bind(
@@ -103,64 +135,87 @@ const ipcFrameError =
 
 try {
   testCodeModeFrameDiagnosticBoundaries();
-  await testLargeScopeTransport();
-  await testOpenAiCredentialsReachWorker();
-  await testWorkerCancellation();
+  await executorCase(testLargeScopeTransport);
+  await executorCase(testOpenAiCredentialsReachWorker);
+  await executorCase(testWorkerCancellation);
   testUsageLimitClassification();
-  await testWorkerTerminalEvents();
-  await testWorkerRuntimeSettings();
-  await testUnsupportedProviderSnapshotFailsBeforeLaunch();
-  await testWorkerCyberAccessSettings({
-    CodexSdkWorkerExecutor,
-    fakeCodexFixture,
-    parentSandbox: trustedParentSandbox,
-    workerRequest,
-    assertConfigOverrides,
-    assertReadOnlyWorkerPolicy,
-    assertWorkerSubagentPolicy,
-    restoreEnv,
-  });
-  await testCompletedWorkerSettlesWithoutWaitingForProcessExit();
+  await executorCase(testWorkerTerminalEvents);
+  await executorCase(testWorkerRuntimeSettings);
+  await executorCase(testUnsupportedProviderSnapshotFailsBeforeLaunch);
+  await executorCase(
+    () =>
+      testWorkerCyberAccessSettings({
+        CodexSdkWorkerExecutor,
+        fakeCodexFixture,
+        parentSandbox: trustedParentSandbox,
+        workerRequest,
+        assertConfigOverrides,
+        assertReadOnlyWorkerPolicy,
+        assertWorkerSubagentPolicy,
+        restoreEnv,
+      }),
+    "testWorkerCyberAccessSettings",
+  );
+  await executorCase(testCompletedWorkerSettlesWithoutWaitingForProcessExit);
   if (process.platform !== "win32") {
-    await testDeepScanContextSnapshots({
-      CodexSdkWorkerExecutor,
-      fakeCodexFixture,
-      parentSandbox: trustedParentSandbox,
-    });
-    await testMissingParentSandboxFailsBeforeWorkerLaunch();
-    await testDisallowedWorkerProfileFailsBeforeWorkerLaunch();
-    await testRuntimePermissionProfileFallbackStopsAndDiscards();
-    await testWorkerLaunchesWithoutGlobalCodex();
-    await testPreflightBindsExecutableAndHomeBeforeChangingCwd();
-    await testConcurrentWorkerExecutableAliases({
-      CodexSdkWorkerExecutor,
-      fakeCodexFixture,
-      parentSandbox: trustedParentSandbox,
-      bundledCodexSdkEnvironment,
-      assertReadOnlyWorkerPolicy,
-    });
-    await testSdkInvocationAndThreadCapture();
-    await testBedrockCredentialsReachWorker();
-    await testBedrockCredentialsReachWorker("oidc");
-    await testExternalProviderCredentialsReachWorker();
-    await testArtifactServerUsesExtendedStartupTimeout();
-    await testZeroSubagentsPreservesHostRestrictions();
-    await testSdkResumesExistingThread();
-    await testRetryNotificationDoesNotInterruptTurn();
-    await testSandboxNamespaceDiagnosticIsPreserved();
-    await testOwnedArtifactToolFailureDiagnosticIsPreserved();
+    await executorCase(
+      () =>
+        testDeepScanContextSnapshots({
+          CodexSdkWorkerExecutor,
+          fakeCodexFixture,
+          parentSandbox: trustedParentSandbox,
+        }),
+      "testDeepScanContextSnapshots",
+    );
+    await executorCase(testMissingParentSandboxFailsBeforeWorkerLaunch);
+    await executorCase(testDisallowedWorkerProfileFailsBeforeWorkerLaunch);
+    await executorCase(testRuntimePermissionProfileFallbackStopsAndDiscards);
+    await executorCase(testWorkerLaunchesWithoutGlobalCodex);
+    await executorCase(testPreflightBindsExecutableAndHomeBeforeChangingCwd);
+    await executorCase(
+      () =>
+        testConcurrentWorkerExecutableAliases({
+          CodexSdkWorkerExecutor,
+          fakeCodexFixture,
+          parentSandbox: trustedParentSandbox,
+          bundledCodexSdkEnvironment,
+          assertReadOnlyWorkerPolicy,
+        }),
+      "testConcurrentWorkerExecutableAliases",
+    );
+    await executorCase(testSdkInvocationAndThreadCapture);
+    await executorCase(
+      () => testBedrockCredentialsReachWorker(),
+      "testBedrockCredentialsReachWorker (static)",
+    );
+    await executorCase(
+      () => testBedrockCredentialsReachWorker("oidc"),
+      "testBedrockCredentialsReachWorker (oidc)",
+    );
+    await executorCase(testExternalProviderCredentialsReachWorker);
+    await executorCase(testArtifactServerUsesExtendedStartupTimeout);
+    await executorCase(testZeroSubagentsPreservesHostRestrictions);
+    await executorCase(testSdkResumesExistingThread);
+    await executorCase(testRetryNotificationDoesNotInterruptTurn);
+    await executorCase(testSandboxNamespaceDiagnosticIsPreserved);
+    await executorCase(testOwnedArtifactToolFailureDiagnosticIsPreserved);
     for (const reference of ["discovery:\0" + "0", "😀".repeat(1300)]) {
-      await testArtifactDiagnosticSurvivesWorkerRetries(reference);
+      await executorCase(
+        () => testArtifactDiagnosticSurvivesWorkerRetries(reference),
+        reference.includes("\0")
+          ? "artifact retry (NUL reference)"
+          : "artifact retry (Unicode reference)",
+      );
     }
-    await testCodeModeFrameDiagnosticSurvivesSuccessfulTurn();
-    await testStreamTerminationWithoutTerminalEventFails();
-    await testAbortPropagation();
-    await testUnstructuredConfigurationFailureRemainsRetryable();
-    await testUnstructuredThreadStartFailureRemainsRetryable();
-    await testPolicyFailuresRemainWorkerErrors();
-    await testMalformedCommandEventsRemainRetryable();
-    await testRateLimitPolicyFailureRemainsRetryable();
-    await testArtifactStartupTimeoutClassification();
+    await executorCase(testCodeModeFrameDiagnosticSurvivesSuccessfulTurn);
+    await executorCase(testStreamTerminationWithoutTerminalEventFails);
+    await executorCase(testAbortPropagation);
+    await executorCase(testUnstructuredConfigurationFailureRemainsRetryable);
+    await executorCase(testUnstructuredThreadStartFailureRemainsRetryable);
+    await executorCase(testPolicyFailuresRemainWorkerErrors);
+    await executorCase(testMalformedCommandEventsRemainRetryable);
+    await executorCase(testRateLimitPolicyFailureRemainsRetryable);
+    await executorCase(testArtifactStartupTimeoutClassification);
   }
   assert.equal(
     resolveCodexPath({}, "darwin"),
@@ -223,18 +278,27 @@ try {
   testOsErrorCodesRemainRetryable();
   testTextualMissingPathErrorsRemainRetryable();
   testWorkerErrorClassificationPreservesExplicitFailures();
-  await testWindowsAppsCodexFallsBackToRelocatedBinary();
-  await testWindowsNpmPackageResolution();
-  await testWindowsNpmPackageResolution("managed");
+  await executorCase(testWindowsAppsCodexFallsBackToRelocatedBinary);
+  await executorCase(
+    () => testWindowsNpmPackageResolution(),
+    "testWindowsNpmPackageResolution (global)",
+  );
+  await executorCase(
+    () => testWindowsNpmPackageResolution("managed"),
+    "testWindowsNpmPackageResolution (managed)",
+  );
   if (process.platform === "win32") {
-    await testWindowsLongExecutableLaunches();
-    await testWindowsRootRelativePathsStayBoundToOriginalDrive();
-    await testWindowsWorkerEnvironmentPreservesMixedCaseKeys();
-    await testWindowsLauncherSkipsExtensionlessNpmShim();
+    await executorCase(testWindowsLongExecutableLaunches);
+    await executorCase(testWindowsRootRelativePathsStayBoundToOriginalDrive);
+    await executorCase(testWindowsWorkerEnvironmentPreservesMixedCaseKeys);
+    await executorCase(testWindowsLauncherSkipsExtensionlessNpmShim);
   }
 } finally {
   restoreEnv("FAKE_CODEX_MARKER", previousMarker);
-  await temporaryDirectories.cleanup();
+  await executorCase(
+    () => temporaryDirectories.cleanup(),
+    "temporary directory cleanup",
+  );
 }
 
 function testOsErrorCodesRemainRetryable() {
@@ -3373,10 +3437,16 @@ async function testAbortPropagation() {
 }
 
 async function testCompletedWorkerSettlesWithoutWaitingForProcessExit() {
-  await completedWorkerSettlesWithoutWaitingForProcessExit();
+  await executorCase(
+    () => completedWorkerSettlesWithoutWaitingForProcessExit(),
+    "completed worker (unprofiled)",
+  );
   for (const kind of ["discovery", "dedup"] as const) {
     for (const resumed of [false, true]) {
-      await completedWorkerSettlesWithoutWaitingForProcessExit(kind, resumed);
+      await executorCase(
+        () => completedWorkerSettlesWithoutWaitingForProcessExit(kind, resumed),
+        `completed worker (${kind}, ${resumed ? "resumed" : "fresh"})`,
+      );
     }
   }
 }
@@ -3881,71 +3951,75 @@ async function testWorkerCancellation() {
       "COMPLETE_THEN_HANG",
       "FAIL_THEN_HANG",
     ]) {
-      await writeFile(promptPath, `${prompt}\n`);
-      const controller = new AbortController();
-      const cancellation = new Error(
-        "coordinator canceled its remaining workers",
-      );
-      // Exercise cancellation inside the real SDK's iterator cleanup, before kill returns.
-      cancelDuringCleanup =
-        prompt === "COMPLETE_THEN_HANG"
-          ? () => controller.abort(cancellation)
-          : undefined;
-      const deadline = new Promise<never>((_, reject) => {
-        timeout = setTimeout(
-          () => reject(new Error(`${prompt} worker did not settle`)),
-          10_000,
+      await executorCase(async () => {
+        await writeFile(promptPath, `${prompt}\n`);
+        const controller = new AbortController();
+        const cancellation = new Error(
+          "coordinator canceled its remaining workers",
         );
-      });
-      const execution = Promise.race([
-        run(controller, () => {
-          if (prompt === "BLOCK_AFTER_START") controller.abort(cancellation);
-        }),
-        deadline,
-      ]);
-      if (prompt === "BLOCK_AFTER_START") {
-        await assert.rejects(
-          execution,
-          (error: Error) =>
-            error?.name === "AbortError" ||
-            /abort|SIGTERM/i.test(error?.message ?? ""),
-        );
-        assert(workerSignal);
-        assert.equal(workerSignal.aborted, true);
-        assert.equal(workerSignal.reason, cancellation);
-      } else {
-        if (prompt === "FAIL_THEN_HANG") {
-          await assert.rejects(execution, /fixture worker failed/);
-          controller.abort(cancellation);
-        } else {
-          const result = await execution;
-          assert.equal(result.threadId, "fixture-thread-id");
-        }
-        assert.equal(controller.signal.aborted, true);
-        assert(workerSignal);
-        assert.equal(workerSignal.aborted, false);
-      }
-      assert.equal(
-        (await readdir(fixture.root)).some((name) => name.startsWith("scope-")),
-        false,
-      );
-      assert.notEqual(workerSignal, controller.signal);
-      const currentWorker = worker as ChildProcess | undefined;
-      assert(currentWorker);
-      assert.equal(currentWorker.killed, true);
-      if (
-        currentWorker.exitCode === null &&
-        currentWorker.signalCode === null
-      ) {
-        await Promise.race([
-          new Promise<void>((resolve) =>
-            worker!.once("close", () => resolve()),
-          ),
+        // Exercise cancellation inside the real SDK's iterator cleanup, before kill returns.
+        cancelDuringCleanup =
+          prompt === "COMPLETE_THEN_HANG"
+            ? () => controller.abort(cancellation)
+            : undefined;
+        const deadline = new Promise<never>((_, reject) => {
+          timeout = setTimeout(
+            () => reject(new Error(`${prompt} worker did not settle`)),
+            10_000,
+          );
+        });
+        const execution = Promise.race([
+          run(controller, () => {
+            if (prompt === "BLOCK_AFTER_START") controller.abort(cancellation);
+          }),
           deadline,
         ]);
-      }
-      clearTimeout(timeout);
-      cancelDuringCleanup = undefined;
+        if (prompt === "BLOCK_AFTER_START") {
+          await assert.rejects(
+            execution,
+            (error: Error) =>
+              error?.name === "AbortError" ||
+              /abort|SIGTERM/i.test(error?.message ?? ""),
+          );
+          assert(workerSignal);
+          assert.equal(workerSignal.aborted, true);
+          assert.equal(workerSignal.reason, cancellation);
+        } else {
+          if (prompt === "FAIL_THEN_HANG") {
+            await assert.rejects(execution, /fixture worker failed/);
+            controller.abort(cancellation);
+          } else {
+            const result = await execution;
+            assert.equal(result.threadId, "fixture-thread-id");
+          }
+          assert.equal(controller.signal.aborted, true);
+          assert(workerSignal);
+          assert.equal(workerSignal.aborted, false);
+        }
+        assert.equal(
+          (await readdir(fixture.root)).some((name) =>
+            name.startsWith("scope-"),
+          ),
+          false,
+        );
+        assert.notEqual(workerSignal, controller.signal);
+        const currentWorker = worker as ChildProcess | undefined;
+        assert(currentWorker);
+        assert.equal(currentWorker.killed, true);
+        if (
+          currentWorker.exitCode === null &&
+          currentWorker.signalCode === null
+        ) {
+          await Promise.race([
+            new Promise<void>((resolve) =>
+              worker!.once("close", () => resolve()),
+            ),
+            deadline,
+          ]);
+        }
+        clearTimeout(timeout);
+        cancelDuringCleanup = undefined;
+      }, `worker cancellation (${prompt})`);
     }
   } finally {
     clearTimeout(timeout);
