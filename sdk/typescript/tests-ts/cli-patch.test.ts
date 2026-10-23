@@ -32,6 +32,7 @@ import { throwing } from "./support/errors.js";
 import { createCliTest } from "./support/cli-run.js";
 import {
   setupPatchWorkflowFixtures,
+  patchDependencies,
   CURRENT_REPOSITORY,
   SAVED_REPOSITORY,
   STATE_DIRECTORY,
@@ -65,7 +66,7 @@ describe("scan and patch workflow", () => {
       let modelStarted = false;
       const setInterval = mock(() => ({}) as NodeJS.Timeout);
       const clearInterval = mock();
-      const current = dependencies({
+      const current = patchDependencies({
         currentDirectory: CURRENT_REPOSITORY,
         result,
         onWorkbench: () => savedScan(result),
@@ -121,7 +122,7 @@ describe("scan and patch workflow", () => {
         }),
         { isTTY: true },
       );
-      const current = dependencies({
+      const current = patchDependencies({
         currentDirectory: CURRENT_REPOSITORY,
         result,
         onWorkbench: () => savedScan(result),
@@ -162,7 +163,7 @@ describe("scan and patch workflow", () => {
 
       Object.assign(stderr.stream, { columns: 36 });
       let now = 0;
-      const current = dependencies({
+      const current = patchDependencies({
         currentDirectory: CURRENT_REPOSITORY,
         result,
         onWorkbench: () => savedScan(result),
@@ -204,7 +205,7 @@ describe("scan and patch workflow", () => {
       let now = 0;
       let index = 0;
       const timers = new Map<NodeJS.Timeout, () => void>();
-      const current = dependencies({
+      const current = patchDependencies({
         currentDirectory: CURRENT_REPOSITORY,
         result,
         onWorkbench: () => savedScan(result),

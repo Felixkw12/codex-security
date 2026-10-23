@@ -299,16 +299,13 @@ export function dependencies(
       const output =
         command === "gh" && args[0] === "pr" && args[1] === "list"
           ? "[]"
-          : args.includes("--show-toplevel") &&
-              options.currentDirectory !== undefined
-            ? repository
-            : args.includes("--name-only")
-              ? (
-                  options.result?.findings.findings.flatMap((finding) =>
-                    finding.locations.map((location) => location.path),
-                  ) ?? ["src/finding-1.ts"]
-                ).join("\0") + "\0"
-              : "";
+          : args.includes("--name-only")
+            ? (
+                options.result?.findings.findings.flatMap((finding) =>
+                  finding.locations.map((location) => location.path),
+                ) ?? ["src/finding-1.ts"]
+              ).join("\0") + "\0"
+            : "";
       return commandOptions?.encoding === "base64"
         ? Buffer.from(output).toString("base64")
         : output;
