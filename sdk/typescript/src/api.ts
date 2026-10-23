@@ -676,6 +676,10 @@ interface ClientDependencies {
   matchFindings?: typeof matchScanFindingsInternal;
   runOsvScan?: typeof runOsvScan;
   sourceSnapshot?: FindingWorkflow["sourceSnapshot"];
+  chooseDependencyAuthentication?: (
+    auth: ScanAuthMode | undefined,
+    signal: AbortSignal,
+  ) => Promise<ScanAuthMode | undefined>;
   runDeepScan?: typeof runDeepScan;
   canRunDirectDeepScan?: () => boolean;
 }
@@ -991,9 +995,17 @@ export class CodexSecurity {
       // Authentication is deliberately deferred until deterministic evidence is durable.
       try {
         if ("error" in source) throw source.error;
+        const auth =
+          this.#dependencies.chooseDependencyAuthentication === undefined
+            ? options.auth
+            : await this.#dependencies.chooseDependencyAuthentication(
+                options.auth,
+                signal,
+              );
+        throwIfAborted(signal, outputDir);
         const session = await this.#prepareSession(
           inputs,
-          options,
+          { ...options, auth },
           signal,
           temporaryRoot,
         );
@@ -1023,7 +1035,7 @@ export class CodexSecurity {
             CODEX_SECURITY_PLUGIN_ROOT: runtime.plugin.pluginRoot,
             CODEX_SECURITY_SURFACE: this.#surface,
           },
-          options.auth,
+          auth,
           undefined,
           {
             ...policyCodexConfig(session.sessionConfig),

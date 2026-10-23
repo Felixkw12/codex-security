@@ -23,7 +23,7 @@ import {
 import Ajv from "ajv";
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
-import type { JsonObject } from "../src/config.js";
+import { FIREWORKS_CODEX_PROVIDER, type JsonObject } from "../src/config.js";
 import { codexSecurityPrivatePaths } from "../src/auth.js";
 import { createProfileCodex } from "../src/provider-profile.js";
 import { estimateScanCost, ScanCostTracker } from "../src/cost.js";
@@ -47,6 +47,18 @@ import { TestClient } from "./support/api-client.js";
 import { preparedRuntime } from "./support/api-events.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { main } from "../src/cli.js";
+import {
+  dependencies as cliDependencies,
+  FakeSignals,
+} from "./cli-fixtures.js";
+import { createCliTest, selectionPrompt } from "./support/cli-run.js";
+import type { DependencyScanOptions } from "../src/index.js";
+
+type DependencyAuthChooser = (
+  auth: DependencyScanOptions["auth"],
+  signal: AbortSignal,
+) => Promise<DependencyScanOptions["auth"]>;
 
 const { create: temporaryDirectory, cleanup } = createTemporaryDirectories();
 afterEach(cleanup);
@@ -159,6 +171,7 @@ function triage(): TriageFinding {
 }
 async function fixture(
   options: {
+    chooseDependencyAuthentication?: DependencyAuthChooser;
     matched?: boolean;
     turns?: (
       | "completed"
@@ -339,6 +352,7 @@ process.exit(child.status ?? 1);
     },
     {
       environment,
+      chooseDependencyAuthentication: options.chooseDependencyAuthentication,
       repositoryRevision: async () => {
         if (options.abortAt === "revision")
           options.controller!.abort("cancel during revision lookup");
@@ -2512,5 +2526,239 @@ test.each(["completed", "malformed", "truncated"] as const)(
       await readFile(join(f.outputDir, "sca-result.json"), "utf8"),
     );
     expect(saved.assessments).toEqual(result.assessments);
+  },
+);
+
+test.each([
+  { label: "ChatGPT choice", choice: "chatgpt", prompts: 1 },
+  { label: "API-key choice", choice: "api-key", prompts: 1 },
+  {
+    label: "explicit ChatGPT",
+    flags: ["--auth", "chatgpt"],
+    choice: "chatgpt",
+    prompts: 0,
+  },
+  {
+    label: "explicit API key",
+    flags: ["--auth", "api-key"],
+    choice: "api-key",
+    prompts: 0,
+  },
+  { label: "JSON", flags: ["--json"], choice: "api-key", prompts: 0 },
+  {
+    label: "JSONL",
+    flags: ["--format", "jsonl"],
+    choice: "api-key",
+    prompts: 0,
+  },
+  { label: "non-TTY", terminal: false, choice: "api-key", prompts: 0 },
+  {
+    label: "noninteractive input",
+    input: false,
+    choice: "api-key",
+    prompts: 0,
+  },
+  { label: "no stored sign-in", stored: false, choice: "api-key", prompts: 0 },
+  { label: "no API key", key: false, choice: "chatgpt", prompts: 0 },
+  { label: "external provider", external: true, choice: "api-key", prompts: 0 },
+] satisfies {
+  label: string;
+  choice: "chatgpt" | "api-key";
+  prompts: number;
+  flags?: string[];
+  terminal?: boolean;
+  input?: boolean;
+  stored?: boolean;
+  key?: boolean;
+  external?: boolean;
+}[])(
+  "dependency CLI chooses authentication lazily: $label",
+  async (scenario) => {
+    let choose: DependencyAuthChooser | undefined;
+    const external = "external" in scenario && scenario.external;
+    const f = await fixture({
+      chooseDependencyAuthentication: (auth, signal) =>
+        choose?.(auth, signal) ?? Promise.resolve(auth),
+      ...(external
+        ? {
+            codexOverrides: {
+              model_provider: "fireworks",
+              model_providers: { fireworks: { ...FIREWORKS_CODEX_PROVIDER } },
+            },
+          }
+        : {}),
+    });
+    if ("key" in scenario && scenario.key === false)
+      Reflect.deleteProperty(f.environment, "OPENAI_API_KEY");
+    if (external)
+      Object.assign(f.environment, {
+        FIREWORKS_API_KEY: "synthetic-fireworks-key",
+      });
+    const originalEnvironment = { ...f.environment };
+    const deps = cliDependencies({ environment: f.environment });
+    deps.createDependencySecurity = (_config, chooser) => {
+      choose = chooser;
+      return f.client;
+    };
+    let probes = 0;
+    let prompts = 0;
+    deps.hasStoredChatGPTSignIn = async () => {
+      probes++;
+      const saved: ScaResult = JSON.parse(
+        await readFile(join(f.outputDir, "sca-result.json"), "utf8"),
+      );
+      expect(saved.matches).toHaveLength(1);
+      expect(saved.assessments[0]!.status).toBe("not_started");
+      expect(f.calls).toEqual({ scanner: 1, runtime: 0, model: 0 });
+      return scenario.stored !== false;
+    };
+    deps.scanAuthenticationPrompt = selectionPrompt(
+      async (_message, choices) => {
+        prompts++;
+        return choices.find((item) => item.value === scenario.choice)!.value;
+      },
+      () => scenario.input !== false,
+    );
+    const { stderr, runCli } = createCliTest(main, {
+      stderr: !("terminal" in scenario) || scenario.terminal,
+    });
+    const flags = external
+      ? ["--provider", "fireworks", "--model", "synthetic-model"]
+      : "flags" in scenario
+        ? (scenario.flags ?? [])
+        : [];
+    expect(
+      await runCli(
+        [
+          "scan",
+          "dependencies",
+          f.repository,
+          "--output-dir",
+          f.outputDir,
+          ...flags,
+        ],
+        deps,
+      ),
+      stderr.text(),
+    ).toBe(0);
+    expect(prompts).toBe(scenario.prompts);
+    expect(probes).toBe(
+      scenario.prompts === 1 || scenario.label === "no stored sign-in" ? 1 : 0,
+    );
+    expect(f.captured.codex?.apiKey).toBe(
+      scenario.choice === "api-key" && !external
+        ? "synthetic-sca-key"
+        : undefined,
+    );
+    expect(f.captured.codex?.env?.["OPENAI_API_KEY"]).toBeUndefined();
+    if (external)
+      expect(f.captured.codex?.env?.["FIREWORKS_API_KEY"]).toBe(
+        "synthetic-fireworks-key",
+      );
+    expect(f.environment).toEqual(originalEnvironment);
+    expect(
+      JSON.parse(await readFile(join(f.outputDir, "sca-result.json"), "utf8"))
+        .status,
+    ).toBe("completed");
+  },
+);
+
+test("dependency CLI zero-match scans do not discover or choose credentials", async () => {
+  let choose: DependencyAuthChooser | undefined;
+  const f = await fixture({
+    matched: false,
+    chooseDependencyAuthentication: (auth, signal) =>
+      choose?.(auth, signal) ?? Promise.resolve(auth),
+  });
+  const deps = cliDependencies({ environment: f.environment });
+  deps.createDependencySecurity = (_config, chooser) => {
+    choose = chooser;
+    return f.client;
+  };
+  deps.hasStoredChatGPTSignIn = async () => {
+    throw new Error("Unexpected credential discovery");
+  };
+  deps.scanAuthenticationPrompt = selectionPrompt(async () => {
+    throw new Error("Unexpected authentication prompt");
+  });
+  const { stderr, runCli } = createCliTest(main, { stderr: true });
+  expect(
+    await runCli(
+      ["scan", "dependencies", f.repository, "--output-dir", f.outputDir],
+      deps,
+    ),
+    stderr.text(),
+  ).toBe(0);
+  expect(f.calls).toEqual({ scanner: 1, runtime: 0, model: 0 });
+});
+
+test.each([
+  "lookup error",
+  "selection error",
+  "lookup abort",
+  "selection abort",
+  "client close",
+] as const)(
+  "dependency CLI preserves scanner evidence after authentication %s",
+  async (stage) => {
+    let choose: DependencyAuthChooser | undefined;
+    const f = await fixture({
+      chooseDependencyAuthentication: (auth, signal) =>
+        choose?.(auth, signal) ?? Promise.resolve(auth),
+    });
+    const signals = new FakeSignals();
+    const deps = cliDependencies({ environment: f.environment, signals });
+    deps.createDependencySecurity = (_config, chooser) => {
+      choose = chooser;
+      return f.client;
+    };
+    let observedSignal: AbortSignal | undefined;
+    const interrupt = async (
+      signal: AbortSignal | undefined,
+    ): Promise<never> => {
+      observedSignal = signal;
+      const saved: ScaResult = JSON.parse(
+        await readFile(join(f.outputDir, "sca-result.json"), "utf8"),
+      );
+      expect(saved.matches).toHaveLength(1);
+      expect(saved.assessments[0]!.status).toBe("not_started");
+      if (stage.endsWith("error"))
+        throw new Error(`Synthetic authentication ${stage}`);
+      if (stage === "client close") void f.client.close();
+      else signals.emit("SIGINT");
+      return new Promise<never>(() => {});
+    };
+    deps.hasStoredChatGPTSignIn = async (signal) =>
+      stage.startsWith("lookup") || stage === "client close"
+        ? interrupt(signal)
+        : true;
+    deps.scanAuthenticationPrompt = selectionPrompt(
+      async (_message, _choices, _presentation, signal) => interrupt(signal),
+    );
+    const { stderr, runCli } = createCliTest(main, { stderr: true });
+    expect(
+      await runCli(
+        ["scan", "dependencies", f.repository, "--output-dir", f.outputDir],
+        deps,
+      ),
+      stderr.text(),
+    ).toBe(stage.endsWith("abort") ? 130 : 2);
+    const saved: ScaResult = JSON.parse(
+      await readFile(join(f.outputDir, "sca-result.json"), "utf8"),
+    );
+    expect(saved.matches).toHaveLength(1);
+    expect(saved.components).toHaveLength(1);
+    expect(saved.coverage.status).toBe("complete");
+    expect(saved.assessments[0]!.status).toBe(
+      stage.endsWith("error") ? "failed" : "cancelled",
+    );
+    expect(f.calls).toEqual({ scanner: 1, runtime: 0, model: 0 });
+    if (stage.endsWith("error"))
+      expect(saved.diagnostics.join("\n")).toContain(
+        `Synthetic authentication ${stage}`,
+      );
+    else expect(observedSignal?.aborted).toBe(true);
+    expect(signals.listeners.get("SIGINT")?.size).toBe(0);
+    expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
   },
 );
