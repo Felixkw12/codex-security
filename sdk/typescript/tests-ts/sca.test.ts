@@ -4231,6 +4231,108 @@ test.each([
   },
 );
 
+test.each([
+  { label: "fully assessed", missing: false },
+  { label: "missing assessment", missing: true },
+])(
+  "dependency CLI continuation authentication: $label checkpoint",
+  async ({ missing }) => {
+    let choose: DependencyAuthChooser | undefined;
+    const authentication = { choices: 0, lookups: 0, prompts: 0 };
+    const f = await fixture({
+      turns: ["completed", "completed"],
+      chooseDependencyAuthentication: (auth, signal) => {
+        if (choose === undefined) return Promise.resolve(auth);
+        authentication.choices++;
+        return choose(auth, signal);
+      },
+    });
+    await using security = f.client;
+    const perTurn = estimateScanCost("gpt-5.6-sol", {
+      input_tokens: 1000,
+      cache_write_input_tokens: 0,
+      output_tokens: 1000,
+    })!.estimatedUsd;
+    await expect(
+      security.scanDependencies({
+        repositoryPath: f.repository,
+        outputDir: f.outputDir,
+        maxCostUsd: perTurn * 1.5,
+      }),
+    ).rejects.toBeInstanceOf(ScanCostLimitExceededError);
+    const path = join(f.outputDir, "sca-result.json");
+    const checkpoint: ScaResult = JSON.parse(await readFile(path, "utf8"));
+    expect(checkpoint.status).toBe("partial");
+    expect(checkpoint.coverage.status).toBe("complete");
+    expect(checkpoint.model.costPending).toBe(false);
+    expect(checkpoint.matches).toHaveLength(2);
+    expect(checkpoint.assessments).toHaveLength(2);
+    expect(
+      checkpoint.assessments.every((item) => item.status === "completed"),
+    ).toBe(true);
+    const missingMatch = missing
+      ? checkpoint.assessments.pop()!.matchId
+      : undefined;
+    if (missing) await writeFile(path, JSON.stringify(checkpoint));
+    const previousCalls = { ...f.calls };
+    expect(previousCalls).toEqual({ runtime: 1, model: 1, scanner: 1 });
+    expect(f.turns).toHaveLength(2);
+
+    const deps = cliDependencies({ environment: f.environment });
+    deps.createDependencySecurity = (_config, chooser) => {
+      choose = chooser;
+      return security;
+    };
+    deps.hasStoredChatGPTSignIn = async () => {
+      authentication.lookups++;
+      expect(f.calls).toEqual(previousCalls);
+      expect(f.turns).toHaveLength(2);
+      return true;
+    };
+    deps.scanAuthenticationPrompt = selectionPrompt(
+      async (_message, choices) => {
+        authentication.prompts++;
+        expect(f.calls).toEqual(previousCalls);
+        return choices.find((item) => item.value === "api-key")!.value;
+      },
+    );
+    const { stderr, runCli } = createCliTest(main, { stderr: true });
+    expect(
+      await runCli(
+        ["scan", "dependencies", f.repository, "--output-dir", f.outputDir],
+        deps,
+      ),
+      stderr.text(),
+    ).toBe(0);
+    const result: ScaResult = JSON.parse(await readFile(path, "utf8"));
+    expect(result.status).toBe("completed");
+    expect(result.assessments).toHaveLength(2);
+    expect(result.assessments[0]).toEqual(checkpoint.assessments[0]);
+    expect(
+      result.assessments.every((item) => item.status === "completed"),
+    ).toBe(true);
+    expect(authentication).toEqual(
+      missing
+        ? { choices: 1, lookups: 1, prompts: 1 }
+        : { choices: 0, lookups: 0, prompts: 0 },
+    );
+    expect(f.calls).toEqual(
+      missing ? { runtime: 2, model: 2, scanner: 1 } : previousCalls,
+    );
+    expect(f.turns).toHaveLength(missing ? 3 : 2);
+    if (missing) {
+      expect(f.turns.at(-1)!.prompt).toContain(
+        `Assess only match ${JSON.stringify(missingMatch)}`,
+      );
+      expect(f.captured.codex?.apiKey).toBe("synthetic-sca-key");
+    } else {
+      expect(result.assessments).toEqual(checkpoint.assessments);
+      expect(result.model).toEqual(checkpoint.model);
+      expect(result.assessmentContext).toEqual(checkpoint.assessmentContext);
+    }
+  },
+);
+
 test("dependency CLI zero-match scans do not discover or choose credentials", async () => {
   let choose: DependencyAuthChooser | undefined;
   const f = await fixture({
