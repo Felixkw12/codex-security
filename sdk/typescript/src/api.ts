@@ -1009,6 +1009,8 @@ export class CodexSecurity {
         thread,
         events,
         onEvent: (event) => {
+          if (event.type === "turn.completed")
+            finalUsage = event["usage"] ?? null;
           if (
             event.type === "thread.started" &&
             typeof event["thread_id"] === "string"
