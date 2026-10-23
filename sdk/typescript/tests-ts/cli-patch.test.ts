@@ -5,6 +5,7 @@ import { parse as parseToml } from "smol-toml";
 import { afterEach, describe, expect, test, mock } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { hash } from "node:crypto";
+import { existsSync } from "node:fs";
 import {
   chmod,
   mkdir,
