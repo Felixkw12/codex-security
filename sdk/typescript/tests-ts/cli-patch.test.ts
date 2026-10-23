@@ -6186,10 +6186,14 @@ describe("patch publication integrity", () => {
     const applied = !administrationChanged && (changed || shallow);
     expect(assessments, diagnostics).toBe(applied ? 1 : 0);
     expect(outcome.exitCode, diagnostics).toBe(applied ? 0 : 2);
-    expect(JSON.parse(outcome.stdout), diagnostics).toMatchObject(
+    const result = JSON.parse(outcome.stdout);
+    if (administrationChanged) {
+      expect(result, diagnostics).not.toHaveProperty("applied");
+      expect(result, diagnostics).not.toHaveProperty("filesChanged");
+    }
+    expect(result, diagnostics).toMatchObject(
       administrationChanged
         ? {
-            applied: false,
             files: [],
             error: {
               code: "PATCH_FAILED",
