@@ -29,6 +29,7 @@ import type { ScanSessionEvent } from "../src/cost.js";
 import type { ScanActivity } from "../src/scan-activity.js";
 import {
   runWorkbench,
+  resolvePluginPython,
   type WorkbenchCommandOptions as RequiredWorkbenchCommandOptions,
 } from "../src/runtime.js";
 import { publishDraft } from "./support/scan-publication.js";
@@ -224,6 +225,7 @@ async function nativeScanFactory() {
 function testDeepCompositionCases<
   T extends {
     instructionFile?: string;
+    ambientInstruction?: string;
     native?: "discovery" | "sealed";
     queuedNativeKnowledge?: boolean;
     provider?: JsonObject;
@@ -236,6 +238,7 @@ function testDeepCompositionCases<
         name.replace("%j", JSON.stringify(scenario)),
         () => run(scenario),
         scenario.instructionFile !== undefined ||
+          scenario.ambientInstruction !== undefined ||
           (scenario.native === "discovery" &&
             (scenario.queuedNativeKnowledge === true ||
               (scenario.provider !== undefined &&
@@ -307,6 +310,16 @@ testDeepCompositionCases([
     native: "discovery",
     instructionFile: "sealed child missing",
   },
+  ...(["discovery", "reducer"] as const).flatMap((instructionBoundary) =>
+    (["introduced", "unchanged", "legacy"] as const).map(
+      (ambientInstruction) => ({
+        budget: false,
+        native: "discovery" as const,
+        instructionBoundary,
+        ambientInstruction,
+      }),
+    ),
+  ),
   { budget: false, native: "discovery", queuedNativeKnowledge: true },
   {
     budget: false,
@@ -348,6 +361,8 @@ testDeepCompositionCases([
   queuedNativeKnowledge?: boolean;
   missingReplay?: "publish" | "follow-up" | "wrong-claim" | "unsealed";
   instructionPathForm?: "relative" | "profile" | "home";
+  instructionBoundary?: "discovery" | "reducer";
+  ambientInstruction?: "introduced" | "unchanged" | "legacy";
   instructionFile?:
     | "changed"
     | "unchanged"
@@ -377,12 +392,20 @@ testDeepCompositionCases([
     missingReplay,
     instructionFile,
     instructionPathForm,
+    instructionBoundary,
+    ambientInstruction,
   }) => {
+    const hasInstructionScenario =
+      instructionFile !== undefined || ambientInstruction !== undefined;
+    const legacyInstructions =
+      instructionFile === "legacy changed" || ambientInstruction === "legacy";
     const instructionCostRecovery =
       instructionFile === "reducer changed" ||
-      instructionFile === "new child changed";
-    const python = Bun.which("python3") ?? Bun.which("python");
-    if (python === null) throw new Error("Python is required for this test.");
+      instructionFile === "new child changed" ||
+      ambientInstruction !== undefined;
+    const reducerInputRecovery =
+      instructionFile === "reducer changed" ||
+      instructionBoundary === "reducer";
     const root = await temporaryDirectory();
     const repo = join(root, "repo");
     const codexHome = join(root, "codex");
@@ -477,6 +500,11 @@ testDeepCompositionCases([
             CODEX_API_KEY: customProvider ? undefined : "synthetic-native-key",
           }),
     };
+    const python =
+      ambientInstruction === undefined
+        ? (Bun.which("python3") ?? Bun.which("python"))
+        : await resolvePluginPython({ environment, protectedRoot: repo });
+    if (python === null) throw new Error("Python is required for this test.");
     const instructionPath = join(root, "instructions.md");
     const instructionText =
       instructionFile === "empty"
@@ -494,8 +522,8 @@ testDeepCompositionCases([
       continued: boolean;
       followUp: boolean;
       cwd: string;
-      path: string;
-      bytes?: string;
+      path: string | null;
+      bytes?: string | null;
       error?: { code: string; message: string };
     }> = [];
     const instructionProbe = `
@@ -508,6 +536,20 @@ try {
   process.exitCode = 1;
 }
 `;
+    // Observe actual child input and current home bytes. This synthetic child
+    // models the native origin rules separately checked by config/read probes.
+    const ambientInstructionProbe = `
+const { readFileSync } = require("node:fs");
+const { join, resolve } = require("node:path");
+const config = JSON.parse(process.argv[1]);
+const { parse } = require(process.argv[2]);
+const home = process.env.CODEX_HOME;
+const inherited = parse(readFileSync(join(home, "config.toml"), "utf8"));
+const selected = config.model_instructions_file;
+const raw = selected === undefined ? inherited.model_instructions_file : selected;
+const file = typeof raw === "string" ? resolve(selected === undefined ? home : process.cwd(), raw) : null;
+process.stdout.write(JSON.stringify({cwd:process.cwd(),path:file,bytes:file === null ? null : readFileSync(file,"utf8")}));
+`;
     const inheritedSettings = {
       openai_base_url: "https://endpoint.example.test/v1",
       web_search: "cached",
@@ -518,7 +560,9 @@ try {
         "team.tag": "synthetic-composed-scan",
         codex_security_integration: "github_action",
       },
-      model_instructions_file: instructionPath,
+      ...(ambientInstruction === undefined
+        ? { model_instructions_file: instructionPath }
+        : {}),
       experimental_compact_prompt_file: "compact.md",
       model_catalog_json: "models.json",
       sqlite_home: "sqlite",
@@ -527,7 +571,9 @@ try {
       inheritedSettings;
     const expectedSettings = () => ({
       ...inheritedConfig,
-      model_instructions_file: instructionPath,
+      ...(ambientInstruction === undefined
+        ? { model_instructions_file: instructionPath }
+        : {}),
       experimental_compact_prompt_file: join(scanDir, "compact.md"),
       model_catalog_json: join(scanDir, "models.json"),
       sqlite_home: join(scanDir, "sqlite"),
@@ -709,7 +755,7 @@ process.exit(0);
             },
             recipe:
               queuedNativeKnowledge ||
-              (instructionFile !== undefined && nativeRecipe === undefined)
+              (hasInstructionScenario && nativeRecipe === undefined)
                 ? undefined
                 : (nativeRecipe ?? {
                     postScanPrompt:
@@ -751,7 +797,7 @@ process.exit(0);
               ? { maxCostUsd: 1, requireCost: true }
               : {}),
             ...(queuedNativeKnowledge ||
-            (instructionFile !== undefined && nativeRecipe === undefined)
+            (hasInstructionScenario && nativeRecipe === undefined)
               ? {
                   postScanPrompt:
                     (missingReplay && missingReplay !== "follow-up") ||
@@ -817,7 +863,7 @@ process.exit(0);
             // Older saved recipes have no instruction digest. Use the real workbench
             // to persist that historical shape before exercising public resume.
             if (
-              instructionFile === "legacy changed" &&
+              legacyInstructions &&
               nativeRecipe === undefined &&
               args[0] === "register-cli-scan" &&
               !args.includes("--parent-scan-id")
@@ -845,17 +891,17 @@ process.exit(0);
               if (
                 (result["recipe"] as JsonObject)["mode"] === "deep" &&
                 (!prepareNative ||
-                  instructionFile !== undefined ||
+                  hasInstructionScenario ||
                   queuedNativeKnowledge)
               ) {
                 expect(
                   (result["recipe"] as JsonObject)["scanInputs"],
                 ).toMatchObject({
-                  ...(instructionFile === "legacy changed"
+                  ...(legacyInstructions || ambientInstruction !== undefined
                     ? {}
                     : { modelInstructionsFileSha256: instructionDigest }),
                 });
-                if (instructionFile === "legacy changed")
+                if (legacyInstructions)
                   expect(
                     (result["recipe"] as JsonObject)["scanInputs"],
                   ).not.toHaveProperty("modelInstructionsFileSha256");
@@ -870,13 +916,13 @@ process.exit(0);
             ) {
               const checkpoint = JSON.parse(input!);
               if (
-                instructionFile === "reducer changed"
+                reducerInputRecovery
                   ? checkpoint.passes.some(
                       (pass: { completed?: boolean }) => pass.completed,
                     ) &&
                     checkpoint.mergeStarted !== true &&
                     checkpoint.aggregate === null
-                  : instructionFile === "new child changed"
+                  : instructionCostRecovery
                     ? checkpoint.mergedScanIds.length === 1 &&
                       checkpoint.passes.length === 1
                     : checkpoint.terminalReason !== undefined &&
@@ -1018,7 +1064,7 @@ process.exit(0);
                   }
                   const record = registrations.get(id)!;
                   const mode = record["mode"] as string;
-                  if (instructionFile !== undefined) {
+                  if (hasInstructionScenario) {
                     if (mode === "standard" && instructionCostRecovery) {
                       const checkpoint = JSON.parse(
                         await readFile(
@@ -1036,8 +1082,21 @@ process.exit(0);
                       runtimeNode,
                       [
                         "-e",
-                        instructionProbe,
-                        options.config!["model_instructions_file"] as string,
+                        ambientInstruction === undefined
+                          ? instructionProbe
+                          : ambientInstructionProbe,
+                        ...(ambientInstruction === undefined
+                          ? [
+                              options.config![
+                                "model_instructions_file"
+                              ] as string,
+                            ]
+                          : [
+                              JSON.stringify(options.config),
+                              createRequire(import.meta.url).resolve(
+                                "smol-toml",
+                              ),
+                            ]),
                       ],
                       {
                         cwd: threadOptions.workingDirectory!,
@@ -1047,7 +1106,12 @@ process.exit(0);
                     );
                     expect(child.error).toBeUndefined();
                     const observed = JSON.parse(child.stdout);
-                    expect(observed.path).toBe(instructionPath);
+                    if (ambientInstruction === undefined)
+                      expect(observed.path).toBe(instructionPath);
+                    if (ambientInstruction !== undefined)
+                      expect(options.config).not.toHaveProperty(
+                        "model_instructions_file",
+                      );
                     instructionExecutions.push({
                       scanId: id,
                       mode,
@@ -1738,7 +1802,9 @@ process.exit(0);
         });
         expect(
           instructionExecutions.every(
-            (sample) => sample.bytes === instructionText,
+            (sample) =>
+              sample.bytes ===
+              (ambientInstruction === undefined ? instructionText : null),
           ),
         ).toBe(true);
         expect(interruptedCheckpoint.passes.length).toBeGreaterThan(0);
@@ -1781,7 +1847,7 @@ process.exit(0);
           }
         }
         if (instructionCostRecovery) {
-          if (instructionFile === "reducer changed") {
+          if (reducerInputRecovery) {
             expect(interruptedCheckpoint).toMatchObject({
               aggregate: null,
               mergedScanIds: [],
@@ -1805,10 +1871,20 @@ process.exit(0);
             expect(interruptedCheckpoint.aggregate).not.toBeNull();
             expect(turns.map(({ mode }) => mode)).toEqual(["standard", "deep"]);
           }
-          await writeFile(
-            instructionPath,
-            "Changed synthetic model instructions.\n",
-          );
+          if (ambientInstruction !== undefined) {
+            if (ambientInstruction !== "unchanged") {
+              ambientConfig = stringifyToml({
+                ...nativeSettings,
+                model_instructions_file: relative(codexHome, instructionPath),
+              });
+              await writeFile(join(codexHome, "config.toml"), ambientConfig);
+            }
+          } else {
+            await writeFile(
+              instructionPath,
+              "Changed synthetic model instructions.\n",
+            );
+          }
         } else {
           if (instructionFile === "aggregate missing") {
             expect(interruptedCheckpoint.aggregate).not.toBeNull();
@@ -1836,13 +1912,17 @@ process.exit(0);
         const countBefore = instructionExecutions.length;
         const commandsBefore = commands.length;
         let rejectedChildId: string | undefined;
-        if (instructionCostRecovery) {
+        if (
+          instructionCostRecovery &&
+          (ambientInstruction === undefined ||
+            ambientInstruction === "introduced")
+        ) {
           await expect(run()).rejects.toBeInstanceOf(DeepScanRecoveryError);
           expect(instructionExecutions).toHaveLength(countBefore);
           const rejectedCheckpoint = JSON.parse(
             await readFile(checkpointPath, "utf8"),
           );
-          if (instructionFile === "reducer changed") {
+          if (reducerInputRecovery) {
             expect(rejectedCheckpoint).toMatchObject({
               aggregate: null,
               mergedScanIds: [],
@@ -1919,7 +1999,10 @@ process.exit(0);
                   command === "fail-scan" || command === "cancel-scan",
               ),
           ).toEqual([]);
-          await writeFile(instructionPath, instructionText);
+          if (ambientInstruction === "introduced") {
+            ambientConfig = stringifyToml(nativeSettings);
+            await writeFile(join(codexHome, "config.toml"), ambientConfig);
+          } else await writeFile(instructionPath, instructionText);
         }
         const result = await run();
         expect(result.manifest.scan.id).toBe(scanId);
@@ -1965,10 +2048,17 @@ process.exit(0);
           expect(
             instructionExecutions
               .slice(countBefore)
-              .every((sample) => sample.bytes === instructionText),
+              .every(
+                (sample) =>
+                  sample.bytes ===
+                  (ambientInstruction === undefined ||
+                  ambientInstruction === "legacy"
+                    ? instructionText
+                    : null),
+              ),
           ).toBe(true);
           expect(instructionExecutions[countBefore]!.mode).toBe(
-            instructionFile === "new child changed" ? "standard" : "deep",
+            reducerInputRecovery ? "deep" : "standard",
           );
         }
         const recipe = (
@@ -1978,9 +2068,19 @@ process.exit(0);
             scanId,
           ])
         )["recipe"] as JsonObject;
-        expect(recipe["scanInputs"]).toMatchObject({
-          modelInstructionsFileSha256: instructionDigest,
-        });
+        if (ambientInstruction === "legacy")
+          expect(recipe["scanInputs"]).not.toHaveProperty(
+            "modelInstructionsFileSha256",
+          );
+        else
+          expect(recipe["scanInputs"]).toMatchObject({
+            modelInstructionsFileSha256:
+              ambientInstruction === undefined ? instructionDigest : null,
+          });
+        if (ambientInstruction !== undefined)
+          expect(recipe["config"]).not.toHaveProperty(
+            "model_instructions_file",
+          );
         const complete = await runWorkbench(commandOptions, [
           "get-scan",
           "--scan-id",
