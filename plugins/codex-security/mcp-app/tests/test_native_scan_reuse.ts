@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -64,6 +65,14 @@ for (const change of [
   "removed developer instructions",
   "equivalent developer instructions",
   "unchanged model instructions file",
+  "content changed model instructions file",
+  "unchanged home model instructions file",
+  "content changed home model instructions file",
+  "unchanged relative model instructions file",
+  "content changed relative model instructions file",
+  "legacy model instructions file",
+  "empty model instructions file",
+  "missing model instructions file",
   "changed model instructions file",
   "removed model instructions file",
   "empty knowledge environment",
@@ -97,7 +106,8 @@ for (const change of [
       selectedProfile ||
       change === "selected model" ||
       change === "selected effort";
-    const initialSelectedConfig = modelInstructionsFile
+    let instructionFileReference = modelInstructionsPath;
+    let initialSelectedConfig = modelInstructionsFile
       ? `model = "synthetic-model-a"\nmodel_reasoning_effort = "synthetic-effort-a"\ndeveloper_instructions = "Follow synthetic guidance A."\nmodel_instructions_file = ${JSON.stringify(modelInstructionsPath)}\n`
       : developerInstructions
         ? 'model = "synthetic-model-a"\nmodel_reasoning_effort = "synthetic-effort-a"\ndeveloper_instructions = "Follow synthetic guidance A."\n'
@@ -112,6 +122,8 @@ for (const change of [
           }
         : {};
     const environment = {
+      HOME: root,
+      USERPROFILE: root,
       CODEX_SECURITY_SCAN_ROOT: path.join(root, "scans"),
       CODEX_SECURITY_STATE_DIR: path.join(root, "state"),
       CODEX_HOME: path.join(root, "home"),
@@ -202,7 +214,9 @@ for (const change of [
       if (modelInstructionsFile) {
         await writeFile(
           modelInstructionsPath,
-          "Synthetic model instructions A.\n",
+          change === "empty model instructions file"
+            ? ""
+            : "Synthetic model instructions A.\n",
         );
         await writeFile(
           otherModelInstructionsPath,
@@ -256,6 +270,20 @@ for (const change of [
           : []),
       ]);
       const { scanId, scanDir, handoffClaimToken } = begun.scan;
+      if (
+        change.includes(" home model instructions file") ||
+        change.includes(" relative model instructions file")
+      ) {
+        instructionFileReference = change.includes(" home ")
+          ? "~/model-instructions-a.md"
+          : path.relative(scanDir, modelInstructionsPath);
+        initialSelectedConfig = initialSelectedConfig.replace(
+          JSON.stringify(modelInstructionsPath),
+          JSON.stringify(instructionFileReference),
+        );
+        await writeFile(selectedConfigPath, initialSelectedConfig);
+        savedConfig.model_instructions_file = instructionFileReference;
+      }
       const recipe = {
         repository,
         mode: "deep",
@@ -265,7 +293,17 @@ for (const change of [
         ...(change === "legacy recipe"
           ? {}
           : {
-              scanInputs: scanInputIdentity(userContext.trim(), knowledge),
+              scanInputs: {
+                ...scanInputIdentity(userContext.trim(), knowledge),
+                ...(modelInstructionsFile &&
+                change !== "legacy model instructions file"
+                  ? {
+                      modelInstructionsFileSha256: createHash("sha256")
+                        .update(await readFile(modelInstructionsPath))
+                        .digest("hex"),
+                    }
+                  : {}),
+              },
               deepScan: deep,
               deepScanResolved: true,
             }),
@@ -286,7 +324,7 @@ for (const change of [
         assert.equal(
           workbench(["get-scan-recipe", "--scan-id", scanId]).recipe.config
             .model_instructions_file,
-          modelInstructionsPath,
+          instructionFileReference,
         );
       }
       workbench([
@@ -338,6 +376,10 @@ for (const change of [
         handoffClaimToken,
       ]);
       // A running, sealed saved scan does not need current semantic inputs.
+      const originalInstructionBytes = modelInstructionsFile
+        ? await readFile(modelInstructionsPath)
+        : undefined;
+      if (modelInstructionsFile) await rm(modelInstructionsPath);
       await rm(knowledgePath);
       if (change !== "legacy recipe")
         await writeFile(configPath, "invalid TOML [");
@@ -348,6 +390,8 @@ for (const change of [
           handoffClaimToken,
         }),
       );
+      if (originalInstructionBytes !== undefined)
+        await writeFile(modelInstructionsPath, originalInstructionBytes);
       await writeFile(knowledgePath, "Original security guidance.\n");
       await writeFile(configPath, "[deep_scan]\nworkers = 2\nsubagents = 1\n");
       if (selectedConfig)
@@ -416,6 +460,11 @@ for (const change of [
           selectedConfigPath,
           'profile = "scan"\ndeveloper_instructions = "Inactive root guidance."\n[profiles.scan]\nmodel = "synthetic-model-a"\nmodel_reasoning_effort = "synthetic-effort-a"\ndeveloper_instructions = "Follow synthetic guidance A."\n',
         );
+      if (change.startsWith("content changed") && modelInstructionsFile)
+        await writeFile(
+          modelInstructionsPath,
+          "Changed same-path synthetic model instructions.\n",
+        );
       if (change === "changed model instructions file")
         await writeFile(
           selectedConfigPath,
@@ -432,6 +481,8 @@ for (const change of [
             "",
           ),
         );
+      if (change === "missing model instructions file")
+        await rm(modelInstructionsPath);
       client = await connect();
       // The public explicit identity remains authoritative after the restart.
       assert.equal(
@@ -458,11 +509,17 @@ for (const change of [
           "unchanged developer instructions",
           "equivalent developer instructions",
           "unchanged model instructions file",
+          "unchanged home model instructions file",
+          "unchanged relative model instructions file",
+          "empty model instructions file",
         ].includes(change)
       ) {
         assert.equal(successful(response).scanId, scanId);
         assert.equal(workbench(["list-scans"]).scans.length, 1);
-      } else if (change === "missing knowledge") {
+      } else if (
+        change === "missing knowledge" ||
+        change === "missing model instructions file"
+      ) {
         assert.equal(response.isError, true);
         assert.match(response.content[0].text, /knowledge|ENOENT/i);
         assert.equal(workbench(["list-scans"]).scans.length, 1);

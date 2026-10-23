@@ -2320,6 +2320,10 @@ export class CodexSecurity {
         scan: options,
         parentScanRole: this.#parentScanRole,
         recipe,
+        modelInstructionsFile:
+          typeof workerConfig["model_instructions_file"] === "string"
+            ? workerConfig["model_instructions_file"]
+            : undefined,
         expectation,
         scanDir,
         archivedScanDir,

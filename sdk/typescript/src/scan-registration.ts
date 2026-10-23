@@ -6,6 +6,7 @@ import { CodexSecurityError } from "./errors.js";
 import { findScanSession } from "./scan-logs.js";
 import { join } from "node:path";
 import { workflowDigest } from "./finding-workflow.js";
+import { modelInstructionsFileDigest } from "./scan-inputs.js";
 
 /** Bind registration and resume metadata to this prepared execution. */
 export async function registerScan(options: {
@@ -20,6 +21,7 @@ export async function registerScan(options: {
   >;
   parentScanRole?: "deep_pass";
   recipe: JsonObject;
+  modelInstructionsFile?: string;
   expectation: ScanExpectation;
   scanDir: string;
   archivedScanDir: string | null;
@@ -48,6 +50,18 @@ export async function registerScan(options: {
           ])
         )["recipe"],
       ));
+  if (
+    !resumed &&
+    expectation.mode === "deep" &&
+    options.modelInstructionsFile !== undefined
+  ) {
+    recipe["scanInputs"] = {
+      ...(recipe["scanInputs"] as JsonObject),
+      modelInstructionsFileSha256: await modelInstructionsFileDigest(
+        options.modelInstructionsFile,
+      ),
+    };
+  }
   const registration =
     scanOptions.resumeScanId !== undefined &&
     scanOptions.registeredScan === undefined

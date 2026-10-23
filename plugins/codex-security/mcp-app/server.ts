@@ -995,6 +995,7 @@ export function createCodexSecurityServer(): McpServer {
           semanticInputs = await readNativeScanSemanticInputs(
             abortSignalFromExtra(extra),
             modelSettings,
+            begun.scan.scanDir as string,
           );
           begun = await runWorkbench(
             [
@@ -1011,6 +1012,8 @@ export function createCodexSecurityServer(): McpServer {
                   semanticInputs.config["developer_instructions"] ?? null,
                 modelInstructionsFile:
                   semanticInputs.config["model_instructions_file"] ?? null,
+                modelInstructionsFileSha256:
+                  semanticInputs.modelInstructionsFileSha256,
               }),
             ],
             normalizedUserContext,

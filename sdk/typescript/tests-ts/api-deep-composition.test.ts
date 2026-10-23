@@ -1,7 +1,7 @@
 import * as ownerArtifacts from "../src/scan-owner-suggestions.js";
 import { restoreReplayProfile } from "../src/provider-profile.js";
 import type { SemanticScan, SemanticFinding } from "../src/semantic-models.js";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import * as childProcess from "node:child_process";
 import { existsSync } from "node:fs";
 import {
@@ -233,6 +233,11 @@ test.each([
   { budget: true },
   { budget: true, firstChildBudget: true },
   { budget: false, native: "discovery" },
+  ...(["changed", "missing", "empty"] as const).map((instructionFile) => ({
+    budget: false,
+    native: "discovery",
+    instructionFile,
+  })),
   { budget: false, native: "discovery", queuedNativeKnowledge: true },
   {
     budget: false,
@@ -273,6 +278,7 @@ test.each([
   native?: "discovery" | "sealed";
   queuedNativeKnowledge?: boolean;
   missingReplay?: "publish" | "follow-up" | "wrong-claim" | "unsealed";
+  instructionFile?: "changed" | "missing" | "empty";
 }[])(
   "Deep composes sealed ordinary scans and preserves a budgeted parent: %j",
   async ({
@@ -287,6 +293,7 @@ test.each([
     native,
     queuedNativeKnowledge,
     missingReplay,
+    instructionFile,
   }) => {
     const python = Bun.which("python3") ?? Bun.which("python");
     if (python === null) throw new Error("Python is required for this test.");
@@ -380,6 +387,15 @@ test.each([
             CODEX_API_KEY: customProvider ? undefined : "synthetic-native-key",
           }),
     };
+    const instructionPath = join(root, "instructions.md");
+    const instructionText =
+      instructionFile === "empty"
+        ? ""
+        : "Synthetic composed-scan model instructions.\n";
+    await writeFile(instructionPath, instructionText);
+    const instructionDigest = createHash("sha256")
+      .update(instructionText)
+      .digest("hex");
     const inheritedSettings = {
       openai_base_url: "https://endpoint.example.test/v1",
       web_search: "cached",
@@ -390,7 +406,7 @@ test.each([
         "team.tag": "synthetic-composed-scan",
         codex_security_integration: "github_action",
       },
-      model_instructions_file: "instructions.md",
+      model_instructions_file: instructionPath,
       experimental_compact_prompt_file: "compact.md",
       model_catalog_json: "models.json",
       sqlite_home: "sqlite",
@@ -399,7 +415,7 @@ test.each([
       inheritedSettings;
     const expectedSettings = () => ({
       ...inheritedConfig,
-      model_instructions_file: join(scanDir, "instructions.md"),
+      model_instructions_file: instructionPath,
       experimental_compact_prompt_file: join(scanDir, "compact.md"),
       model_catalog_json: join(scanDir, "models.json"),
       sqlite_home: join(scanDir, "sqlite"),
@@ -555,18 +571,22 @@ process.exit(0);
               targetPath: repo,
               userContext: "Inspect the synthetic source.",
             },
-            recipe: queuedNativeKnowledge
-              ? undefined
-              : (nativeRecipe ?? {
-                  postScanPrompt:
-                    missingReplay && missingReplay !== "follow-up"
-                      ? ""
-                      : "Post-scan instructions once.",
-                  cyberAccessProgram: "daybreak_blue",
-                  ...(customProvider
-                    ? { safetyIdentifier: environment.CODEX_SAFETY_IDENTIFIER }
-                    : {}),
-                }),
+            recipe:
+              queuedNativeKnowledge ||
+              (instructionFile !== undefined && nativeRecipe === undefined)
+                ? undefined
+                : (nativeRecipe ?? {
+                    postScanPrompt:
+                      missingReplay && missingReplay !== "follow-up"
+                        ? ""
+                        : "Post-scan instructions once.",
+                    cyberAccessProgram: "daybreak_blue",
+                    ...(customProvider
+                      ? {
+                          safetyIdentifier: environment.CODEX_SAFETY_IDENTIFIER,
+                        }
+                      : {}),
+                  }),
             savedDeepScanSettings: {
               workers: 1,
               subagents: 3,
@@ -590,7 +610,8 @@ process.exit(0);
           }
           nativeOptions = {
             ...prepared.options,
-            ...(queuedNativeKnowledge
+            ...(queuedNativeKnowledge ||
+            (instructionFile !== undefined && nativeRecipe === undefined)
               ? {
                   postScanPrompt:
                     missingReplay && missingReplay !== "follow-up"
@@ -668,6 +689,18 @@ process.exit(0);
                 mode: (result["recipe"] as JsonObject)["mode"] as string,
               });
               workbenches.set(scanId, options);
+              if (
+                (result["recipe"] as JsonObject)["mode"] === "deep" &&
+                (!prepareNative ||
+                  instructionFile !== undefined ||
+                  queuedNativeKnowledge)
+              ) {
+                expect(
+                  (result["recipe"] as JsonObject)["scanInputs"],
+                ).toMatchObject({
+                  modelInstructionsFileSha256: instructionDigest,
+                });
+              }
             }
             if (args[0] === "get-cli-scan-resume")
               workbenches.set(result["scanId"] as string, options);
@@ -1616,6 +1649,12 @@ process.exit(0);
               expect(await readFile(join(scanDir, path))).toEqual(bytes);
           return;
         }
+        if (instructionFile === "changed")
+          await writeFile(
+            instructionPath,
+            "Changed synthetic model instructions.\n",
+          );
+        else if (instructionFile !== undefined) await rm(instructionPath);
         client = await makeClient();
         if (native === "discovery") {
           const sessionPath = join(
@@ -1672,6 +1711,22 @@ process.exit(0);
         completedTurnsBeforeOwnerResume = turns.length;
       }
       const result = await run();
+      if (
+        !prepareNative ||
+        instructionFile !== undefined ||
+        queuedNativeKnowledge
+      ) {
+        const savedRecipe = await runWorkbench(commandOptions, [
+          "get-scan-recipe",
+          "--scan-id",
+          result.manifest.scan.id,
+        ]);
+        expect(
+          (savedRecipe["recipe"] as JsonObject)["scanInputs"],
+        ).toMatchObject({
+          modelInstructionsFileSha256: instructionDigest,
+        });
+      }
       if (completedTurnsBeforeOwnerResume !== undefined)
         expect(turns).toHaveLength(completedTurnsBeforeOwnerResume);
       if (ownerOutcome) {

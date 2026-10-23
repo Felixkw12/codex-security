@@ -9,7 +9,10 @@ import {
 } from "../../../../sdk/typescript/src/codex-home.js";
 import { hasSealedScanArtifacts } from "../../../../sdk/typescript/src/scan-publication.js";
 import { join } from "node:path";
-import { restoreScanKnowledge } from "../../../../sdk/typescript/src/scan-inputs.js";
+import {
+  modelInstructionsFileDigest,
+  restoreScanKnowledge,
+} from "../../../../sdk/typescript/src/scan-inputs.js";
 import {
   CodexSecurity,
   type ScanOptions,
@@ -51,6 +54,7 @@ import type { NativeParentSandbox } from "./native-permissions.js";
 import {
   prepareAmbientExecution,
   nativeScanConfiguration,
+  resolveExecutionPaths,
   readOnlyFilesystem,
 } from "../../../../sdk/typescript/src/execution-preparation.js";
 export { nativeScanConfiguration } from "../../../../sdk/typescript/src/execution-preparation.js";
@@ -63,6 +67,7 @@ export interface NativeScanSemanticInputs {
   deepScanSettings: Required<DeepScanOptions>;
   config: JsonObject;
   modelSettings: ScanModelConfiguration;
+  modelInstructionsFileSha256?: string | null;
 }
 
 export interface NativeScanInput {
@@ -167,6 +172,7 @@ function nativeDeepScanConfigPath(environment: NodeJS.ProcessEnv): string {
 export async function readNativeScanSemanticInputs(
   signal?: AbortSignal,
   modelSettings: Pick<NativeScanInput, "model" | "reasoningEffort"> = {},
+  completedScanDir?: string,
 ): Promise<NativeScanSemanticInputs> {
   const environment = await snapshotNativeEnvironment();
   const knowledgeBasePath = environmentValue(
@@ -188,8 +194,21 @@ export async function readNativeScanSemanticInputs(
     modelSettings,
     deepScanSettings.subagents,
   );
+  const completedConfig =
+    completedScanDir === undefined
+      ? undefined
+      : resolveExecutionPaths(config, completedScanDir, environment);
   return {
     config,
+    modelInstructionsFileSha256:
+      completedConfig === undefined
+        ? undefined
+        : await modelInstructionsFileDigest(
+            typeof completedConfig["model_instructions_file"] === "string"
+              ? completedConfig["model_instructions_file"]
+              : undefined,
+            signal,
+          ),
     modelSettings: scanModelConfiguration(
       await mergedCodexConfig({ codexOverrides: config }),
     ),
