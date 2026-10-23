@@ -1908,6 +1908,98 @@ def test_semantic_scan_comparison_rejects_cross_target_scans(tmp_path: Path) -> 
         assert "same repository target" in rejected["stderr"]
 
 
+@pytest.mark.parametrize(
+    ("before_origin", "after_origin", "same_repository"),
+    [
+        ("alice@example.test:project.git", "bob@example.test:project.git", False),
+        ("alice@example.test:project.git", "alice@EXAMPLE.test:project", True),
+        ("Alice@example.test:project.git", "alice@example.test:project.git", False),
+        ("alice@example.test:project.git", "alice@example.test:/project.git", False),
+        ("ssh://alice@example.test/~/project.git", "ssh://bob@example.test/~/project.git", False),
+        ("alice@example.test:/project.git", "bob@example.test:/project.git", True),
+        ("ssh://alice@example.test/project.git", "bob@example.test:/project.git", True),
+        ("alice@example.test:~owner/project.git", "bob@example.test:~owner/project.git", True),
+        ("git@github.com:example/project.git", "https://github.com/example/project", True),
+        ("git@gitlab.com:example/project.git", "https://gitlab.com/example/project", True),
+        ("git@bitbucket.org:example/project.git", "https://bitbucket.org/example/project", True),
+        ("git@example.test:project.git", "https://example.test/project.git", False),
+        ("git@github.com:example/project.git", "alice@github.com:example/project.git", False),
+        (
+            "git@gitlab.com:example/project.git",
+            "ssh://git@gitlab.com:2222/example/project.git",
+            False,
+        ),
+    ],
+)
+def test_scan_comparison_preserves_ssh_repository_identity(
+    tmp_path: Path, before_origin: str, after_origin: str, same_repository: bool
+) -> None:
+    state_dir = tmp_path / "state"
+    before_repository = tmp_path / "before"
+    after_repository = tmp_path / "after"
+    initialize_git_repository(before_repository)
+    (before_repository / "src").mkdir()
+    (before_repository / "src" / "extract.py").write_text("destination.write_bytes(entry.read())\n")
+    subprocess.run(["git", "-C", str(before_repository), "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", str(before_repository), "commit", "-qm", "Add reviewed source"], check=True
+    )
+    revision = subprocess.check_output(
+        ["git", "-C", str(before_repository), "rev-parse", "HEAD"], text=True
+    ).strip()
+    subprocess.run(
+        ["git", "clone", "-q", str(before_repository), str(after_repository)], check=True
+    )
+    subprocess.run(
+        ["git", "-C", str(before_repository), "remote", "add", "origin", before_origin], check=True
+    )
+    subprocess.run(
+        ["git", "-C", str(after_repository), "remote", "set-url", "origin", after_origin],
+        check=True,
+    )
+    before = create_cli_scan(
+        state_dir,
+        tmp_path / "before-results",
+        before_repository,
+        target_revision=revision,
+        identity_anchor="before-origin-fixture",
+    )
+    after = create_cli_scan(
+        state_dir,
+        tmp_path / "after-results",
+        after_repository,
+        target_revision=revision,
+        identity_anchor="after-origin-fixture",
+    )
+    listed = run_workbench(state_dir, "list-scans", "--repository", str(after_repository))
+    assert len(listed["scans"]) == (2 if same_repository else 1)
+    if same_repository:
+        compared = compare_scan_pair(state_dir, before, after)
+        assert compared["summary"]["persisting"] == 1
+        saved = save_scan_matches(state_dir, before, after)
+        assert saved["summary"]["persisting"] == 1
+        assert compare_scan_pair(state_dir, before, after, "--require-matches") == saved
+    else:
+        for command, arguments in (
+            ("compare-scans", ()),
+            ("save-scan-comparison", ("--matches-json", '{"matches":[],"uncertain":[]}')),
+        ):
+            rejected = run_workbench(
+                state_dir,
+                command,
+                "--before-scan-id",
+                before["scanId"],
+                "--after-scan-id",
+                after["scanId"],
+                *arguments,
+                check=False,
+            )
+            assert rejected["returncode"] != 0
+            assert "same repository target" in rejected["stderr"]
+        with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+            assert connection.execute("SELECT COUNT(*) FROM scan_comparisons").fetchone() == (0,)
+
+
 def test_semantic_scan_comparison_accepts_linked_git_worktrees(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     repository = tmp_path / "repository"

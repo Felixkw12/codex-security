@@ -72,6 +72,7 @@ def repository_origin(target: Path) -> tuple[str, str] | None:
     remote = git_output(target, "remote", "get-url", "origin")
     if remote is None:
         return None
+    account = None
     if "://" in remote:
         try:
             parsed = urlsplit(remote)
@@ -82,6 +83,8 @@ def repository_origin(target: Path) -> tuple[str, str] | None:
             return None
         if parsed.query or parsed.fragment:
             return None
+        if parsed.scheme == "ssh" and (parsed.path == "/~" or parsed.path.startswith("/~/")):
+            account = parsed.username
         host = parsed.hostname
         if port is not None and port != {"https": 443, "ssh": 22}[parsed.scheme]:
             host = f"{host}:{port}"
@@ -90,9 +93,18 @@ def repository_origin(target: Path) -> tuple[str, str] | None:
         authority, separator, path = remote.partition(":")
         if not separator or "?" in path or "#" in path:
             return None
-        host = authority.rsplit("@", 1)[-1]
+        account, at, host = authority.rpartition("@")
+        if not at:
+            account, host = None, authority
+        elif path.startswith("/") or (
+            path.startswith("~") and path != "~" and not path.startswith("~/")
+        ):
+            account = None
     path = path.strip("/").removesuffix(".git")
-    return (host.lower(), path) if host and path else None
+    host = host.lower()
+    if account and not (account == "git" and host in {"github.com", "gitlab.com", "bitbucket.org"}):
+        host = f"{account}@{host}"
+    return (host, path) if host and path else None
 
 
 def git_bytes(
