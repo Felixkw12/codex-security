@@ -123,7 +123,7 @@ function finding(index: number): TriageFinding {
       claimed_source: "unknown",
       claimed_sink: "unknown",
       claimed_control: "unknown",
-      affected_version_or_path: "1.0.0",
+      affected_version_or_path: "1.0.0 in package-lock.json",
       preconditions: [],
       impact: "synthetic impact",
       references: [`SYNTHETIC-${index}`],
@@ -239,6 +239,104 @@ describe("SCA static triage contract", () => {
       expect(result.matches).toEqual(matches);
     },
   );
+
+  test.each([
+    ["package", { vulnerable_component: "synthetic-package-3" }],
+    ["version", { affected_version_or_path: "2.0.0 in package-lock.json" }],
+    [
+      "source",
+      { affected_version_or_path: "1.0.0 in other/package-lock.json" },
+    ],
+    ["advisory", { references: ["SYNTHETIC-3"] }],
+    ["package suffix", { vulnerable_component: "synthetic-package-2-extra" }],
+    ["package scope", { vulnerable_component: "@other/synthetic-package-2" }],
+    [
+      "version prefix",
+      { affected_version_or_path: "11.0.0 in package-lock.json" },
+    ],
+    [
+      "version build",
+      { affected_version_or_path: "1.0.0+other in package-lock.json" },
+    ],
+    [
+      "source suffix",
+      { affected_version_or_path: "1.0.0 in package-lock.json.backup" },
+    ],
+    [
+      "source prefix",
+      { affected_version_or_path: "1.0.0 in other\\package-lock.json" },
+    ],
+    ["advisory suffix", { references: ["SYNTHETIC-20"] }],
+    [
+      "reference without identity",
+      { references: ["https://advisory.example.invalid/details"] },
+    ],
+  ] as const)(
+    "rejects mismatched %s identity while retaining independent assessments",
+    (_label, identity) => {
+      const result = fixture();
+      const originalMatches = structuredClone(result.matches);
+      const invalid = finding(2);
+      Object.assign(invalid.normalized_input, identity);
+      invalid.verdict = "not_actionable";
+      const assessments = contract.parse(
+        response([finding(1), invalid, finding(3)]),
+        result,
+      );
+      expect(assessments.map(({ status }) => status)).toEqual([
+        "completed",
+        "failed",
+        "completed",
+      ]);
+      expect(assessments[1]).toMatchObject({
+        verdict: null,
+        triage: null,
+        error:
+          "Dependency triage assessment does not identify the selected package, version, source, and advisory.",
+      });
+      expect(assessments[0]!.triage).toEqual(finding(1));
+      expect(assessments[2]!.triage).toEqual(finding(3));
+      expect(result.matches).toEqual(originalMatches);
+    },
+  );
+
+  test.each([
+    ["ID", "SYNTHETIC-1"],
+    ["alias", "SYNTHETIC-ALIAS-1"],
+    ["ID URL", "https://advisory.example.invalid/SYNTHETIC-1"],
+    ["alias URL", "https://advisory.example.invalid/SYNTHETIC-ALIAS-1"],
+  ])(
+    "accepts a scoped package@version and matched advisory %s",
+    (_label, reference) => {
+      const result = fixture();
+      result.components[0]!.name = "@synthetic/package";
+      result.components[0]!.version = "1.2.3+build.4";
+      result.components[0]!.sourcePath = "packages/service/package-lock.json";
+      result.matches[0]!.aliases = ["SYNTHETIC-ALIAS-1"];
+      const valid = finding(1);
+      Object.assign(valid.normalized_input, {
+        vulnerable_component: "@synthetic/package@1.2.3+build.4",
+        affected_version_or_path: "packages/service/package-lock.json:12",
+        references: [reference],
+      });
+      const assessment = contract.parse(response([valid]), result)[0]!;
+      expect(assessment.status).toBe("completed");
+      expect(assessment.triage).toEqual(valid);
+    },
+  );
+
+  test("does not invent a resolved version for a component with a null version", () => {
+    const result = fixture();
+    result.components[0]!.version = null;
+    const valid = finding(1);
+    valid.normalized_input.affected_version_or_path =
+      "package-lock.json (version unknown)";
+    expect(contract.parse(response([valid]), result)[0]!.status).toBe(
+      "completed",
+    );
+    valid.normalized_input.references = ["SYNTHETIC-OTHER"];
+    expect(contract.parse(response([valid]), result)[0]!.status).toBe("failed");
+  });
 
   test("marks duplicate input IDs unavailable without discarding independent results", () => {
     const assessments = contract.parse(
@@ -362,6 +460,8 @@ describe("SCA static triage contract", () => {
       JSON.stringify(join(result.outputDir, "sca-result.json")),
     ])
       expect(prompt).toContain(value);
+    expect(prompt).toContain("exact sourcePath in affected_version_or_path");
+    expect(prompt).toContain("advisoryIds or aliases in references");
     expect(contract.skillDigest).toMatch(/^[a-f0-9]{64}$/);
   });
 });

@@ -6,10 +6,46 @@ import { jsonForPrompt } from "./codex-prompt.js";
 import { ContractValidationError } from "./errors.js";
 import type {
   ScaAssessment,
+  ScaComponent,
   ScaMatch,
   ScaResult,
   TriageFinding,
 } from "./sca-types.js";
+
+function hasIdentity(text: string, value: string, characters: string): boolean {
+  const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(^|[^${characters}])${escaped}($|[^${characters}])`).test(
+    text,
+  );
+}
+
+function correspondsToMatch(
+  triage: TriageFinding,
+  match: ScaMatch,
+  component: ScaComponent | undefined,
+): boolean {
+  if (component === undefined) return false;
+  const input = triage.normalized_input;
+  return (
+    hasIdentity(input.vulnerable_component, component.name, "A-Za-z0-9_./+-") &&
+    (component.version === null ||
+      hasIdentity(
+        `${input.vulnerable_component} ${input.affected_version_or_path}`,
+        component.version,
+        "A-Za-z0-9_.+-",
+      )) &&
+    hasIdentity(
+      input.affected_version_or_path,
+      component.sourcePath,
+      "A-Za-z0-9_./\\\\-",
+    ) &&
+    [...match.advisoryIds, ...match.aliases].some((id) =>
+      input.references.some((reference) =>
+        hasIdentity(reference, id, "A-Za-z0-9_-"),
+      ),
+    )
+  );
+}
 
 // Codex structured output requires explicit types and every object property in
 // required. The canonical v0 contract remains compatible with optional revision.
@@ -149,6 +185,17 @@ export async function dependencyTriageContract(pluginRoot: string) {
           error = "Dependency triage returned a non-advisory source type.";
         else if ((itemIdCounts.get(triage.triage_item_id) ?? 0) !== 1)
           error = "Dependency triage reused this assessment ID.";
+        else if (
+          !correspondsToMatch(
+            triage,
+            match,
+            result.components.find(
+              (component) => component.id === match.componentId,
+            ),
+          )
+        )
+          error =
+            "Dependency triage assessment does not identify the selected package, version, source, and advisory.";
         else
           return {
             matchId: match.id,
@@ -178,6 +225,7 @@ export function dependencyTriagePrompt(
     `Use the bundled $codex-security:triage-finding skill at ${jsonForPrompt(skillPath)}.`,
     `Assess only match ${jsonForPrompt(match.id)} against repository ${jsonForPrompt(result.repository.path)} at revision ${jsonForPrompt(result.repository.revision)}.`,
     `Read the complete scanner evidence from ${jsonForPrompt(join(result.outputDir, "sca-result.json"))}, including coverage, diagnostics, components, and matches. Select the match with id ${jsonForPrompt(match.id)}, use that ID as both input_id and triage_item_id, and use source_type "advisory". Resolve its componentId against components[].id and use its sourceAdvisories as the advisory evidence.`,
+    "In normalized_input, include the selected component's exact name in vulnerable_component and its exact sourcePath in affected_version_or_path. Include its resolved version, when non-null, in either of those fields. Include at least one of the selected match's advisoryIds or aliases in references, as an ID or within a reference URL; a URL without a matched ID or alias does not identify the advisory.",
     "Work inline using static source and configuration inspection only. Do not execute application or dependency code, install packages, reproduce vulnerabilities, spawn subagents, start scans, patch files, or contact external services. The host saves your response.",
     "Return only triage-finding/v0 JSON with exactly one finding for the selected match. Preserve the scanner match separately from evidence about application use. Respect coverage limitations: manifest declarations do not establish installed versions or a complete dependency graph.",
     "Assign ranks within this single-match result only; retained ranks do not order matches across the scan.",
