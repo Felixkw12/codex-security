@@ -312,7 +312,7 @@ try {
   fs.writeSync(2, "Native fd1: " + JSON.stringify({ mode: String(fd.mode), dev: String(fd.dev), ino: String(fd.ino) }) + "\\n");
 } catch (error) { fs.writeSync(2, "Native fd1 error: " + String(error.code) + "\\n"); }
 fs.writeSync(2, "Native stdout bytes: " + Buffer.byteLength(payload) + "\\n");
-process.stdout.write(payload, error => fs.writeSync(2, "Native stdout callback: " + String(error) + "\\n"));
+fs.writeSync(1, payload);
 fs.writeSync(2, "Native probe reached end of script.\\n");
 `,
       );
