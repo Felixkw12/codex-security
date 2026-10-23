@@ -36,19 +36,15 @@ test("OpenGrep keeps native evidence and incomplete-run metadata without an asse
     source_data: {
       report: {
         version: input.version,
-        configuration: input.configuration,
       },
       scan_error_count: input.errors.length,
       results: input.results,
     },
   });
   expect(output.findings[0]!.evidence).not.toHaveProperty("assessment");
-  expect(
-    output.findings[0]!.evidence.source_data!["report"],
-  ).not.toHaveProperty("paths");
-  expect(
-    output.findings[0]!.evidence.source_data!["report"],
-  ).not.toHaveProperty("time");
+  expect(output.findings[0]!.evidence.source_data!["report"]).toEqual({
+    version: input.version,
+  });
   const { results: _results, ...report } = original;
   expect(output.report).toEqual(report);
   expect(input).toEqual(original);
@@ -175,6 +171,27 @@ test("large run diagnostics do not consume each finding's evidence budget", () =
   const sourceData = output.findings[0]!.evidence.source_data!;
   expect(sourceData["report"]).not.toHaveProperty("errors");
   expect(sourceData["scan_error_count"]).toBe(2000);
+});
+
+test("scan-wide matching explanations stay outside each finding's evidence budget", () => {
+  const input = {
+    ...opengrepJson(),
+    explanations: [
+      {
+        op: "pattern",
+        children: [],
+        matches: [],
+        pattern: "x".repeat(300_000),
+      },
+    ],
+  };
+  const output = normalize(input, options);
+  expect(output.excluded).toEqual([]);
+  expect(output.findings).toHaveLength(1);
+  expect(output.report!["explanations"]).toEqual(input.explanations);
+  expect(output.findings[0]!.evidence.source_data!["report"]).toEqual({
+    version: input.version,
+  });
 });
 
 test("ignored matches remain visible as unassessed source evidence", () => {

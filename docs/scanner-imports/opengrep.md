@@ -80,8 +80,9 @@ The JSON preview and result retain the native report envelope, without `results`
 in `report`, including diagnostics and path metadata for an empty local report.
 Individual stored findings retain the original observations in
 `source_data.results` and a `source_data.scan_error_count`. Their compact
-`source_data.report` omits scan-wide diagnostics, `paths`, and `time` inventories
-so these do not consume each finding's evidence budget. Full report metadata is
+`source_data.report` retains only the scanner version, keeping scan-wide metadata
+such as diagnostics and matching explanations outside each finding's evidence
+budget. Full report metadata is
 returned by the SDK and CLI; it is not saved as a separate durable scan record.
 Keep the original JSON if you need the complete run metadata later.
 Add OpenGrep's `--verbose` when collecting
