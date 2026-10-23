@@ -299,7 +299,8 @@ export function dependencies(
       const output =
         command === "gh" && args[0] === "pr" && args[1] === "list"
           ? "[]"
-          : args.includes("--show-toplevel")
+          : args.includes("--show-toplevel") &&
+              options.currentDirectory !== undefined
             ? repository
             : args.includes("--name-only")
               ? (
