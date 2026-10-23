@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 from pathlib import Path
@@ -13,6 +14,20 @@ FINALIZER = load_script("finalize_scan_contract")
 def test_sparse_sealed_report_remains_readable_and_exportable(tmp_path: Path) -> None:
     example = Path(__file__).resolve().parent.parent / "examples" / "completed-scan"
     shutil.copytree(example, tmp_path, dirs_exist_ok=True)
+    findings_path = tmp_path / "findings.json"
+    findings = json.loads(findings_path.read_text())
+    for finding in findings["findings"]:
+        finding.pop("codeEvidence", None)
+        finding.pop("rootCause", None)
+        finding["validation"] = None
+        finding["attackPath"] = None
+    findings_path.write_text(json.dumps(findings) + "\n")
+    manifest_path = tmp_path / "scan-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    for artifact in manifest["scan"]["artifacts"]:
+        if artifact["path"] == "findings.json":
+            artifact["sha256"] = hashlib.sha256(findings_path.read_bytes()).hexdigest()
+    manifest_path.write_text(json.dumps(manifest) + "\n")
     before = {path.name: path.read_bytes() for path in tmp_path.glob("*.json")}
     original = json.loads(before["findings.json"])
     assert "codeEvidence" not in original["findings"][0]
