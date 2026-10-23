@@ -22,7 +22,10 @@ export function setupPatchWorkflowFixtures() {
         CURRENT_REPOSITORY,
         SAVED_REPOSITORY,
         resolve(CURRENT_REPOSITORY, "../other/repository"),
-      ].map((directory) => mkdir(directory, { recursive: true })),
+      ].map(async (directory) => {
+        await mkdir(directory, { recursive: true });
+        repositoryGit(directory)("init", "--initial-branch=main");
+      }),
     );
   });
   afterEach(workflowDirectories.cleanup);
@@ -137,12 +140,20 @@ export function patchDependencies(
       if (
         output !== undefined ||
         command !== "git" ||
-        !args.includes("--show-toplevel")
+        !args.includes("rev-parse") ||
+        !args.some((argument) =>
+          [
+            "--show-toplevel",
+            "--absolute-git-dir",
+            "--git-common-dir",
+            "--git-dir",
+            "--git-path",
+            "--resolve-git-dir",
+          ].includes(argument),
+        )
       )
         return output;
-      return commandOptions?.encoding === "base64"
-        ? Buffer.from(repository).toString("base64")
-        : repository;
+      return runGitRepositoryCommand(command, args, repository, commandOptions);
     },
   });
 }
