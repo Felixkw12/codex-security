@@ -6,6 +6,7 @@ import { completedTurn } from "./support/api-events.js";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 
 import { execFileSync } from "node:child_process";
+import { createRequire } from "node:module";
 
 import { pathToFileURL } from "node:url";
 
@@ -56,6 +57,7 @@ import {
 
 import {
   createExecutionCodex,
+  executionModelInstructionsFile,
   prepareExecutionSource,
   prepareDiscoveryExecution,
   prepareMergeExecution,
@@ -64,6 +66,13 @@ import {
   type ExecutionPolicy,
   type PreparedExecution,
 } from "../src/execution-preparation.js";
+
+import {
+  createProfileCodex,
+  createProviderProfile,
+} from "../src/provider-profile.js";
+import { modelInstructionsFileDigest } from "../src/scan-inputs.js";
+import { nodeCommand } from "./support/shell.js";
 
 import { readCodexTurn } from "../src/scan-events.js";
 
@@ -1338,6 +1347,8 @@ describe("Deep worker terminal lifecycle", () => {
       subagents: number;
       environment: Record<string, string>;
       permissions: ScanPermissions;
+      preserveCodexHomeConfig?: boolean;
+      providerProfile?: boolean;
     },
     validateScanInputs?: PreparedExecution["validateScanInputs"],
   ): Promise<CodexClientLike> {
@@ -1368,7 +1379,20 @@ describe("Deep worker terminal lifecycle", () => {
     const session: PreparedExecution = {
       policy,
       source,
-      runtime: preparedRuntime(codexHome),
+      runtime: {
+        ...preparedRuntime(codexHome),
+        ...(settings?.preserveCodexHomeConfig === undefined
+          ? {}
+          : { preserveCodexHomeConfig: settings.preserveCodexHomeConfig }),
+        ...(settings?.providerProfile
+          ? {
+              providerProfile: await createProviderProfile(
+                codexHome,
+                configuration,
+              ),
+            }
+          : {}),
+      },
       runtimeHome: codexHome,
       effectiveConfig: {},
       preflightConfig: {},
@@ -1397,6 +1421,351 @@ describe("Deep worker terminal lifecycle", () => {
       )
     ).codex;
   }
+
+  type InstructionWorkerSample = {
+    argv: string[];
+    home: string;
+    userHome: string;
+    cwd: string;
+    path: string | null;
+    text: string | null;
+    profile: JsonObject | null;
+  };
+
+  async function instructionWorker(
+    root: string,
+    policy: "discovery" | "merge",
+    configuration: JsonObject,
+    expectedFile: string | undefined,
+    options: {
+      environment: Record<string, string>;
+      preserveHome?: boolean;
+      providerProfile?: boolean;
+      beforeValidate?: () => Promise<void>;
+    },
+  ) {
+    const capture = join(root, "instruction-children.jsonl");
+    const preload = join(root, "instruction-child.mjs");
+    const workingDirectory = join(root, policy);
+    await mkdir(workingDirectory);
+    const completed: ThreadEvent[] = [];
+    for await (const event of completedEvents()) completed.push(event);
+    // The real SDK/profile client supplies argv and env. This synthetic child
+    // reads those inputs using the native-observed instruction path origins;
+    // it does not claim to exercise the native model or configuration loader.
+    await writeFile(
+      preload,
+      [
+        'import { appendFileSync, readFileSync } from "node:fs";',
+        'import { join, resolve } from "node:path";',
+        'import { createRequire } from "node:module";',
+        `const { parse } = createRequire(import.meta.url)(${JSON.stringify(createRequire(import.meta.url).resolve("smol-toml"))});`,
+        "await new Promise((resolve) => { process.stdin.once('end', resolve); process.stdin.resume(); });",
+        "const argv = process.argv;",
+        "const home = process.env.CODEX_HOME;",
+        "const userHome = process.env.HOME || process.env.USERPROFILE;",
+        "const cwd = argv.includes('--cd') ? argv[argv.indexOf('--cd') + 1] : process.cwd();",
+        "const homeConfig = parse(readFileSync(join(home, 'config.toml'), 'utf8'));",
+        "const profile = argv.includes('--profile') ? parse(readFileSync(join(home, argv[argv.indexOf('--profile') + 1] + '.config.toml'), 'utf8')) : null;",
+        "let selected = homeConfig.model_instructions_file;",
+        "let origin = home;",
+        "if (profile && Object.hasOwn(profile, 'model_instructions_file')) selected = profile.model_instructions_file;",
+        "for (let index = 0; index < argv.length; index++) {",
+        "  if (argv[index] !== '--config' && argv[index] !== '-c') continue;",
+        "  const config = parse(argv[++index]);",
+        "  if (Object.hasOwn(config, 'model_instructions_file')) { selected = config.model_instructions_file; origin = cwd; }",
+        "}",
+        "const expanded = typeof selected === 'string' && selected.startsWith('~/') ? join(userHome, selected.slice(2)) : selected;",
+        "const path = typeof expanded === 'string' ? resolve(origin, expanded) : null;",
+        "const text = path === null ? null : readFileSync(path, 'utf8');",
+        `appendFileSync(${JSON.stringify(capture)}, JSON.stringify({ argv, home, userHome, cwd, path, text, profile }) + '\\n');`,
+        ...completed.map(
+          (event) =>
+            `process.stdout.write(${JSON.stringify(JSON.stringify(event) + "\n")});`,
+        ),
+        "process.exit(0);",
+      ].join("\n"),
+    );
+    const expectedDigest = await modelInstructionsFileDigest(expectedFile);
+    const attempted: boolean[] = [];
+    const selected: Array<string | undefined> = [];
+    const emitted: JsonObject[] = [];
+    const executable = nodeCommand().command;
+    const codex = await execution(
+      root,
+      policy,
+      options.preserveHome === false,
+      (settings) => {
+        const nativeOptions = { ...settings, codexPathOverride: executable };
+        return settings.nativeProfile === undefined
+          ? new Codex(nativeOptions)
+          : createProfileCodex(nativeOptions, settings.nativeProfile);
+      },
+      {
+        configuration,
+        subagents: 2,
+        permissions: {
+          filesystem: { ":root": "read" },
+          network: { enabled: false },
+        },
+        preserveCodexHomeConfig: options.preserveHome !== false,
+        providerProfile: options.providerProfile,
+        environment: {
+          ...options.environment,
+          NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
+        },
+      },
+      async (config, signal, hasAttemptedExecution, context) => {
+        attempted.push(hasAttemptedExecution);
+        emitted.push(config);
+        await options.beforeValidate?.();
+        const path = await executionModelInstructionsFile(
+          config,
+          context,
+          signal,
+        );
+        selected.push(path);
+        if (
+          (await modelInstructionsFileDigest(path, signal)) !== expectedDigest
+        )
+          throw new Error("Synthetic instruction input changed.");
+      },
+    );
+    return {
+      home: join(root, "codex-home"),
+      attempted,
+      selected,
+      emitted,
+      async run(resume: boolean) {
+        const thread = resume
+          ? codex.resumeThread!("thread-1", { workingDirectory })
+          : codex.startThread({ workingDirectory });
+        const { events } = await thread.runStreamed(
+          "Synthetic instruction fixture.",
+          {},
+        );
+        return readCodexTurn({ thread, events });
+      },
+      async samples(): Promise<InstructionWorkerSample[]> {
+        const text = await readFile(capture, "utf8").catch(
+          (error: NodeJS.ErrnoException) => {
+            if (error.code === "ENOENT") return "";
+            throw error;
+          },
+        );
+        return text.trim() === ""
+          ? []
+          : text
+              .trim()
+              .split("\n")
+              .map((line) => JSON.parse(line));
+      },
+    };
+  }
+
+  test.each(
+    (["discovery", "merge"] as const).flatMap((policy) =>
+      (
+        [
+          "override",
+          "selected-profile",
+          "null-relative",
+          "home-path",
+          "provider-profile",
+        ] as const
+      ).map((selection) => ({ policy, selection })),
+    ),
+  )(
+    "keeps effective instruction inputs at fresh and resumed worker launches: %j",
+    async ({ policy, selection }) => {
+      const root = await temporaryDirectory();
+      const userHome = join(root, "user-home");
+      await mkdir(userHome);
+      const selectedPath = join(root, "selected.md");
+      const inheritedPath = join(userHome, "instructions.md");
+      await writeFile(selectedPath, "Synthetic selected instructions.\n");
+      await writeFile(inheritedPath, "Synthetic inherited instructions.\n");
+      const explicit =
+        selection === "override" || selection === "selected-profile";
+      const configuration: JsonObject =
+        selection === "selected-profile"
+          ? {
+              model_instructions_file: inheritedPath,
+              profile: "selected",
+              profiles: { selected: { model_instructions_file: selectedPath } },
+            }
+          : selection === "override"
+            ? { model_instructions_file: selectedPath }
+            : selection === "null-relative"
+              ? { model_instructions_file: null }
+              : {};
+      if (selection === "provider-profile") {
+        configuration["model_provider"] = "synthetic";
+        configuration["model_providers"] = {
+          synthetic: { name: "Synthetic", wire_api: "responses" },
+        };
+      }
+      const original = structuredClone(configuration);
+      const worker = await instructionWorker(
+        root,
+        policy,
+        configuration,
+        explicit ? selectedPath : inheritedPath,
+        {
+          environment: { HOME: userHome, USERPROFILE: userHome },
+          providerProfile: selection === "provider-profile",
+        },
+      );
+      const homeSelection =
+        selection === "home-path"
+          ? "~/instructions.md"
+          : "../user-home/instructions.md";
+      const homeConfig = `model_instructions_file = ${JSON.stringify(homeSelection)}\n`;
+      await writeFile(join(worker.home, "config.toml"), homeConfig);
+      for (const resume of [false, true])
+        await expect(worker.run(resume)).resolves.toMatchObject({
+          status: "completed",
+        });
+      const observed = await worker.samples();
+      expect(observed).toHaveLength(2);
+      expect(worker.attempted).toEqual([false, true]);
+      expect(worker.selected).toEqual([
+        explicit ? selectedPath : inheritedPath,
+        explicit ? selectedPath : inheritedPath,
+      ]);
+      expect(observed.map((sample) => sample.argv.includes("resume"))).toEqual([
+        false,
+        true,
+      ]);
+      for (const sample of observed) {
+        expect(sample.home).toBe(worker.home);
+        expect(sample.userHome).toBe(userHome);
+        expect(sample.path).toBe(explicit ? selectedPath : inheritedPath);
+        expect(sample.text).toBe(
+          explicit
+            ? "Synthetic selected instructions.\n"
+            : "Synthetic inherited instructions.\n",
+        );
+        expect(sample.cwd).toBe(join(root, policy));
+        if (selection === "provider-profile") {
+          expect(sample.argv).toContain("--profile");
+          expect(sample.profile).toEqual({
+            model_providers: configuration["model_providers"],
+          });
+        } else expect(sample.profile).toBeNull();
+      }
+      for (const config of worker.emitted) {
+        expect(config).not.toHaveProperty("profile");
+        expect(config).not.toHaveProperty("profiles");
+        if (explicit)
+          expect(config["model_instructions_file"]).toBe(selectedPath);
+        else expect(config).not.toHaveProperty("model_instructions_file");
+      }
+      expect(await readFile(join(worker.home, "config.toml"), "utf8")).toBe(
+        homeConfig,
+      );
+      expect(configuration).toEqual(original);
+    },
+  );
+
+  test.each(["discovery", "merge"] as const)(
+    "does not inherit stale generated-home instructions at worker launches: %s",
+    async (policy) => {
+      const root = await temporaryDirectory();
+      const worker = await instructionWorker(root, policy, {}, undefined, {
+        preserveHome: false,
+        environment: { HOME: root, USERPROFILE: root },
+      });
+      for (const resume of [false, true]) {
+        // The managed overlay replaces this file. Input validation must not
+        // try to interpret its stale contents before that existing write.
+        await writeFile(join(worker.home, "config.toml"), "invalid = [\n");
+        await expect(worker.run(resume)).resolves.toMatchObject({
+          status: "completed",
+        });
+      }
+      expect(worker.selected).toEqual([undefined, undefined]);
+      expect(worker.attempted).toEqual([false, true]);
+      expect(
+        (await worker.samples()).map(({ path, text }) => ({ path, text })),
+      ).toEqual([
+        { path: null, text: null },
+        { path: null, text: null },
+      ]);
+    },
+  );
+
+  test.each(["discovery", "merge"] as const)(
+    "isolates instruction homes across simultaneous worker clients: %s",
+    async (policy) => {
+      const ready = Promise.withResolvers<void>();
+      let arrivals = 0;
+      const workers = await Promise.all(
+        ["first", "second"].map(async (name) => {
+          const root = await temporaryDirectory();
+          const userHome = join(root, "user-home");
+          await mkdir(userHome);
+          const file = join(userHome, "instructions.md");
+          await writeFile(file, `Synthetic ${name} instructions.\n`);
+          const environment = { HOME: userHome, USERPROFILE: userHome };
+          const worker = await instructionWorker(root, policy, {}, file, {
+            environment,
+            beforeValidate: async () => {
+              if (arrivals < 2) {
+                if (++arrivals === 2) ready.resolve();
+                await ready.promise;
+              }
+            },
+          });
+          await writeFile(
+            join(worker.home, "config.toml"),
+            'model_instructions_file = "~/instructions.md"\n',
+          );
+          return { worker, root, file, userHome, environment, name };
+        }),
+      );
+      // Mutation of the caller's original environment cannot retarget either
+      // already-created worker's captured environment or instruction selection.
+      workers[0]!.environment.HOME = workers[1]!.userHome;
+      workers[0]!.environment.USERPROFILE = workers[1]!.userHome;
+      await Promise.all(workers.map(({ worker }) => worker.run(false)));
+      for (const { worker, file, userHome, name } of workers) {
+        expect(await worker.samples()).toMatchObject([
+          { path: file, userHome, text: `Synthetic ${name} instructions.\n` },
+        ]);
+      }
+      await writeFile(join(workers[0]!.worker.home, "config.toml"), "");
+      const results = await Promise.allSettled(
+        workers.map(({ worker }) => worker.run(true)),
+      );
+      expect(results[0]).toMatchObject({
+        status: "rejected",
+        reason: new Error("Synthetic instruction input changed."),
+      });
+      expect(results[1]).toMatchObject({
+        status: "fulfilled",
+        value: { status: "completed" },
+      });
+      expect(await workers[0]!.worker.samples()).toHaveLength(1);
+      expect(await workers[1]!.worker.samples()).toHaveLength(2);
+      expect(workers[0]!.worker.selected).toEqual([
+        workers[0]!.file,
+        undefined,
+      ]);
+      expect(workers[1]!.worker.selected).toEqual([
+        workers[1]!.file,
+        workers[1]!.file,
+      ]);
+      await writeFile(
+        join(workers[0]!.worker.home, "config.toml"),
+        'model_instructions_file = "~/instructions.md"\n',
+      );
+      await expect(workers[0]!.worker.run(true)).resolves.toMatchObject({
+        status: "completed",
+      });
+      expect(await workers[0]!.worker.samples()).toHaveLength(2);
+    },
+  );
 
   test.each(["discovery", "merge"] as const)(
     "validates Deep inputs before configuration changes and execution: %s",
