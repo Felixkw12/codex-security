@@ -355,6 +355,7 @@ describe("scan dependencies CLI", () => {
     let now = 0;
     let redraw = () => {};
     let captured: DependencyScanOptions | undefined;
+    let artifactReadyLine: string | undefined;
     const cost = estimateScanCost("gpt-5.6-sol", {
       input_tokens: 1000,
       output_tokens: 1000,
@@ -362,7 +363,14 @@ describe("scan dependencies CLI", () => {
     const deps = dependencies({
       onScanDependencies: async (options) => {
         captured = options;
+        now = 1_500;
         options.onOutputDirReady?.(result.outputDir);
+        artifactReadyLine = stripVTControlCharacters(
+          stderr
+            .text()
+            .split(/[\r\n]/)
+            .at(-1)!,
+        );
         options.onProgress?.({
           phase: "matching",
           inputsTotal: 2,
@@ -428,6 +436,7 @@ describe("scan dependencies CLI", () => {
     expect(
       await runCli(["scan", "dependencies", "--json", "--show-cost"], deps),
     ).toBe(0);
+    expect(artifactReadyLine).toContain("last event 0s");
     expect(JSON.parse(stdout.text())).toEqual(result);
     expect(stderr.text()).toContain("Saving dependency results");
     expect(stderr.text()).toContain("\u001b[?25h");

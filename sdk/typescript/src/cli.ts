@@ -7372,6 +7372,7 @@ async function runDependencyScan(
       },
       onOutputDirReady: (directory) =>
         notify(() => {
+          lastObservedAt = dependencies.now();
           if (verbose || progress.interactive)
             milestone(`Artifacts: ${directory}`);
         }),
