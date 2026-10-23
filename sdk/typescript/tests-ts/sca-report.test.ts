@@ -285,6 +285,77 @@ describe("SCA report", () => {
     );
   });
 
+  test.each([
+    { groups: ["dev", "build"] },
+    { groups: ["<!--"] },
+    { groups: ["Synthetic group\n\n# Synthetic group heading\n\n<!--"] },
+    {
+      groups: [
+        "Synthetic `group`\r\n\r\n```\r\n# Synthetic group heading\r\n<!--",
+      ],
+    },
+    { groups: ["<span hidden>Synthetic group</span>"] },
+    { groups: [] },
+  ])(
+    "keeps scanner dependency groups literal in saved reports: %j",
+    async ({ groups }) => {
+      const result = fixture();
+      result.outputDir = await temporaryDirectory("sca-report-groups-");
+      const raw = {
+        results: [
+          {
+            source: { path: "package-lock.json", type: "lockfile" },
+            packages: ["synthetic-package", "synthetic-later-package"].map(
+              (name, index) => ({
+                package: { name, version: "1.0.0", ecosystem: "npm" },
+                dependency_groups: index === 0 ? groups : ["production"],
+                vulnerabilities: [
+                  {
+                    id:
+                      index === 0 ? "SYNTHETIC-1" : "SYNTHETIC-LATER-ADVISORY",
+                  },
+                ],
+              }),
+            ),
+          },
+        ],
+      };
+      const rawBefore = JSON.stringify(raw);
+      const normalized = normalizeOsvOutput(raw, {
+        repositoryPath: result.repository.path,
+        inputs: result.coverage.inputs,
+      });
+      expect(normalized.diagnostics).toEqual([]);
+      result.components = normalized.components;
+      result.matches = normalized.matches;
+      const before = JSON.stringify(result);
+      renderScaReport(result);
+      expect(JSON.stringify(result)).toBe(before);
+      await saveDependencyScan(result);
+      const saved = JSON.parse(
+        await readFile(join(result.outputDir, "sca-result.json"), "utf8"),
+      ) as ScaResult;
+      expect(saved).toEqual(result);
+      expect(saved.components[0]!.dependencyGroups).toEqual([...groups]);
+      expect(JSON.stringify(raw)).toBe(rawBefore);
+      const report = await readFile(
+        join(result.outputDir, "report.md"),
+        "utf8",
+      );
+      const html = Bun.markdown.html(report);
+      expect(html).not.toContain("<h1>Synthetic group heading</h1>");
+      expect(html).not.toContain("<!--");
+      expect(html).not.toContain("<span hidden>");
+      expect(html.match(/<p>Next action:/g)).toHaveLength(2);
+      expect(html).toContain("<code>SYNTHETIC-LATER-ADVISORY</code>");
+      expect(html).toContain("<h2>Retained evidence</h2>");
+      for (const group of groups)
+        expect(report).toContain(
+          /[\r\n]/u.test(group) ? JSON.stringify(group) : group,
+        );
+    },
+  );
+
   test.skipIf(process.platform === "win32").each(
     [
       "selected\n# Synthetic clean result\n<!--/requirements.txt",
