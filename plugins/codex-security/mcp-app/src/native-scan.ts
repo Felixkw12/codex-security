@@ -408,18 +408,19 @@ export async function prepareNativeScan(
         input,
         deep.settings.subagents,
       )));
-  const instructionsPath = publicationOnly
-    ? undefined
-    : resolveExecutionPaths(config, input.scan.scanDir, inheritedEnvironment)[
-        "model_instructions_file"
-      ];
+  const executionPaths = publicationOnly
+    ? {}
+    : resolveExecutionPaths(config, input.scan.scanDir, inheritedEnvironment);
   const protectedRoots = [
     input.scan.scanDir,
     ...(await Promise.all(
       [
         input.scan.targetPath,
         ...(options.knowledgeBasePaths ?? []),
-        ...(typeof instructionsPath === "string" ? [instructionsPath] : []),
+        ...[
+          executionPaths["model_instructions_file"],
+          executionPaths["experimental_compact_prompt_file"],
+        ].filter((path): path is string => typeof path === "string"),
       ].map(async (path) => {
         const source = expandHome(path, inheritedEnvironment);
         return (await gitMarkerRoot(source, signal, "outermost")) ?? source;

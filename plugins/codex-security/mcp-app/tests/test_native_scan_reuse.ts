@@ -568,14 +568,20 @@ for (const change of [
   });
 }
 
-for (const scenario of [
-  "instruction-repository-PATH",
-  "saved-instruction-repository-PATH",
-  "target-repository-PATH",
-  "explicit-external",
-] as const) {
+for (const [promptFile, scenario] of [
+  "model_instructions_file",
+  "experimental_compact_prompt_file",
+].flatMap((promptFile) =>
+  [
+    "instruction-repository-PATH",
+    "saved-instruction-repository-PATH",
+    "running-instruction-repository-PATH",
+    "target-repository-PATH",
+    "explicit-external",
+  ].map((scenario) => [promptFile, scenario] as const),
+)) {
   test(
-    `public MCP instruction executable boundary: ${scenario}`,
+    `public MCP prompt executable boundary: ${promptFile}, ${scenario}`,
     {
       skip:
         process.platform === "win32"
@@ -632,7 +638,7 @@ for (const scenario of [
         await chmod(executable, 0o700);
         await writeFile(
           configPath,
-          `model = "synthetic-proof-model"\nmodel_provider = "synthetic"\nmodel_instructions_file = ${JSON.stringify(path.join(guidance, "instructions.md"))}\n[model_providers.synthetic]\nname = "Synthetic"\nbase_url = "https://provider.example.test/v1"\nenv_key = "SYNTHETIC_PROVIDER_KEY"\nrequires_openai_auth = false\nwire_api = "responses"\n`,
+          `model = "synthetic-proof-model"\nmodel_provider = "synthetic"\n${promptFile} = ${JSON.stringify(path.join(guidance, "instructions.md"))}\n[model_providers.synthetic]\nname = "Synthetic"\nbase_url = "https://provider.example.test/v1"\nenv_key = "SYNTHETIC_PROVIDER_KEY"\nrequires_openai_auth = false\nwire_api = "responses"\n`,
         );
         const environment: Record<string, string> = Object.fromEntries(
           Object.entries(process.env).filter(
@@ -657,7 +663,10 @@ for (const scenario of [
           environment.CODEX_CLI_PATH = executable;
         let savedScanId: string | undefined;
         let savedClaimToken: string | undefined;
-        if (scenario === "saved-instruction-repository-PATH") {
+        if (
+          scenario === "saved-instruction-repository-PATH" ||
+          scenario === "running-instruction-repository-PATH"
+        ) {
           const workbench = (args: string[], input?: Record<string, unknown>) =>
             JSON.parse(
               execFileSync(
@@ -701,10 +710,7 @@ for (const scenario of [
                 target: { kind: "repository", paths: [] },
                 config: {
                   model: "synthetic-proof-model",
-                  model_instructions_file: path.join(
-                    guidance,
-                    "instructions.md",
-                  ),
+                  [promptFile]: path.join(guidance, "instructions.md"),
                 },
               },
             },
@@ -712,7 +718,7 @@ for (const scenario of [
           // Saved instructions take precedence over a changed ambient selection.
           await writeFile(
             configPath,
-            `model_instructions_file = ${JSON.stringify(path.join(trusted, "ignored.md"))}\n`,
+            `${promptFile} = ${JSON.stringify(path.join(trusted, "ignored.md"))}\n`,
           );
         }
         client = new Client({
@@ -731,7 +737,8 @@ for (const scenario of [
           {
             name: "start_codex_security_deep_scan",
             arguments:
-              savedScanId === undefined
+              savedScanId === undefined ||
+              scenario === "running-instruction-repository-PATH"
                 ? { targetPath: target }
                 : { scanId: savedScanId, handoffClaimToken: savedClaimToken },
             _meta: {

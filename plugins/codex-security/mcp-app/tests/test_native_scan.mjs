@@ -953,7 +953,7 @@ test("native preparation excludes scan output and knowledge sources from executa
   }
 });
 
-test("native instruction sources follow selected and saved path semantics before executable selection", async () => {
+test("native prompt sources follow selected and saved path semantics before executable selection", async () => {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "native-instructions-")),
   );
@@ -1011,41 +1011,46 @@ test("native instruction sources follow selected and saved path semantics before
     ])
       delete process.env[key];
     process.env.CODEX_SECURITY_STATE_DIR = join(root, "ambient-state");
-    const managedProfile = await createProviderProfile(managedHome, {
-      model_instructions_file: instructions,
-    });
-    const savedProfile = await createProviderProfile(home, {
-      model_instructions_file: instructions,
-    });
-    for (const scenario of [
-      "selected relative",
-      "selected profile",
-      "selected home",
-      "saved relative",
-      "saved profile",
-      "saved managed profile",
-    ]) {
+    for (const [promptFile, scenario] of [
+      "model_instructions_file",
+      "experimental_compact_prompt_file",
+    ].flatMap((promptFile) =>
+      [
+        "selected relative",
+        "selected profile",
+        "selected home",
+        "saved relative",
+        "saved profile",
+        "saved managed profile",
+      ].map((scenario) => [promptFile, scenario]),
+    )) {
+      const managedProfile = await createProviderProfile(managedHome, {
+        [promptFile]: instructions,
+      });
+      const savedProfile = await createProviderProfile(home, {
+        [promptFile]: instructions,
+      });
       const saved = scenario.startsWith("saved");
       await writeFile(
         selected,
         stringifyToml(
           saved
-            ? { model_instructions_file: join(external, "ignored.md") }
+            ? { [promptFile]: join(external, "ignored.md") }
             : scenario === "selected profile"
               ? {
-                  model_instructions_file: join(external, "ignored.md"),
+                  [promptFile]: join(external, "ignored.md"),
                   profile: "guidance",
                   profiles: {
                     guidance: {
-                      model_instructions_file: "guidance/docs/instructions.md",
+                      [promptFile]: "guidance/docs/instructions.md",
                     },
                     ignored: {
-                      model_instructions_file: join(external, "ignored.md"),
+                      [promptFile]: join(external, "ignored.md"),
                     },
                   },
                 }
               : {
-                  model_instructions_file:
+                  [promptFile]:
                     scenario === "selected home"
                       ? "~/guidance/docs/instructions.md"
                       : "guidance/docs/instructions.md",
@@ -1063,8 +1068,7 @@ test("native instruction sources follow selected and saved path semantics before
                 config:
                   scenario === "saved relative"
                     ? {
-                        model_instructions_file:
-                          "../guidance/docs/instructions.md",
+                        [promptFile]: "../guidance/docs/instructions.md",
                       }
                     : {},
                 ...(scenario.endsWith("profile")
@@ -1105,7 +1109,7 @@ test("native instruction sources follow selected and saved path semantics before
         scenario,
       );
       assert.equal(
-        prepared.client.config.codexOverrides.model_instructions_file,
+        prepared.client.config.codexOverrides[promptFile],
         scenario === "saved relative"
           ? "../guidance/docs/instructions.md"
           : instructions,

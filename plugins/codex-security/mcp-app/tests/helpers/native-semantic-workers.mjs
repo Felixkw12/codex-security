@@ -94,6 +94,10 @@ export async function nativeSemanticWorkers({
     selectedInstructionFile: join(root, fixture.id, "selected.md"),
     savedInstructionFile: join(root, fixture.id, "saved.md"),
     laterInstructionFile: join(root, fixture.id, "later.md"),
+    ambientCompactFile: join(root, fixture.id, "home", "ambient-compact.md"),
+    selectedCompactFile: join(root, fixture.id, "selected-compact.md"),
+    savedCompactFile: join(root, fixture.id, "saved-compact.md"),
+    laterCompactFile: join(root, fixture.id, "later-compact.md"),
     deepConfig: join(root, fixture.id, "deep.toml"),
     capture: join(root, `${fixture.id}.jsonl`),
   }));
@@ -128,9 +132,11 @@ const knowledge = process.env.CODEX_SECURITY_KNOWLEDGE_BASE;
   for (let i = 0; i < process.argv.length; i++)
     if (["-c", "--config"].includes(process.argv[i])) Object.assign(config, parse(process.argv[++i]));
   const instructionFile = config.model_instructions_file;
+  const compactFile = config.experimental_compact_prompt_file;
 fs.appendFileSync(process.env.NATIVE_PROFILE_CAPTURE, JSON.stringify({
   kind: "exec", argv: process.argv.slice(2), marker: process.env.NATIVE_PROFILE_MARKER,
     instructionFile, instructionText: instructionFile && fs.readFileSync(instructionFile, "utf8"),
+    compactFile, compactText: compactFile && fs.readFileSync(compactFile, "utf8"),
   knowledgePath: knowledge,
   documents: knowledge ? Object.fromEntries(fs.readdirSync(knowledge).map(name => [name, fs.readFileSync(path.join(knowledge, name), "utf8")])) : {},
 }) + "\\n");
@@ -147,11 +153,16 @@ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, c
       await mkdir(fixture.home, { recursive: true });
       await mkdir(fixture.repository);
       await mkdir(fixture.scanDir, { mode: 0o700 });
-      for (const kind of ["ambient", "selected", "saved", "later"])
+      for (const kind of ["ambient", "selected", "saved", "later"]) {
         await writeFile(
           fixture[`${kind}InstructionFile`],
           `Synthetic ${fixture.id} ${kind} model instructions.\n`,
         );
+        await writeFile(
+          fixture[`${kind}CompactFile`],
+          `Synthetic ${fixture.id} ${kind} compact prompt.\n`,
+        );
+      }
       await writeFile(
         join(fixture.home, "config.toml"),
         stringifyToml({
@@ -162,6 +173,9 @@ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, c
             : {
                 model_instructions_file: basename(
                   fixture.ambientInstructionFile,
+                ),
+                experimental_compact_prompt_file: basename(
+                  fixture.ambientCompactFile,
                 ),
               }),
         }),
@@ -177,6 +191,9 @@ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, c
                 developer_instructions: fixture.selectedInstructions,
                 model_instructions_file: basename(
                   fixture.selectedInstructionFile,
+                ),
+                experimental_compact_prompt_file: basename(
+                  fixture.selectedCompactFile,
                 ),
               }),
         }),
@@ -218,6 +235,7 @@ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, c
         const profile = await createProviderProfile(fixture.home, {
           developer_instructions: "Synthetic saved recipe instructions.",
           model_instructions_file: fixture.savedInstructionFile,
+          experimental_compact_prompt_file: fixture.savedCompactFile,
         });
         fixture.recipe = {
           auth: "api-key",
@@ -251,7 +269,10 @@ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, c
           developer_instructions: "Synthetic later ambient instructions.",
           ...(fixture.id === "absent"
             ? {}
-            : { model_instructions_file: fixture.laterInstructionFile }),
+            : {
+                model_instructions_file: fixture.laterInstructionFile,
+                experimental_compact_prompt_file: fixture.laterCompactFile,
+              }),
         }),
       );
       await writeFile(
@@ -262,6 +283,7 @@ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, c
           model_reasoning_summary: "auto",
           developer_instructions: "Synthetic later selected instructions.",
           model_instructions_file: fixture.laterInstructionFile,
+          experimental_compact_prompt_file: fixture.laterCompactFile,
         }),
       );
       await writeFile(
@@ -401,6 +423,15 @@ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, c
               observed.instructionText,
               instructionKind &&
                 `Synthetic ${fixture.id} ${instructionKind} model instructions.\n`,
+            );
+            assert.equal(
+              observed.compactFile,
+              instructionKind && fixture[`${instructionKind}CompactFile`],
+            );
+            assert.equal(
+              observed.compactText,
+              instructionKind &&
+                `Synthetic ${fixture.id} ${instructionKind} compact prompt.\n`,
             );
             const fragments = [];
             for (let i = 0; i < observed.argv.length; i++)
