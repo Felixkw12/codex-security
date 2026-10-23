@@ -218,7 +218,9 @@ test("CLI imports OpenGrep evidence locally without assessing it", async () => {
       f.deps,
     ),
   ).toBe(0);
-  expect(JSON.parse(imported.stdout.text()).counts).toEqual({
+  const result = JSON.parse(imported.stdout.text());
+  expect(result.report.errors).toEqual(report.errors);
+  expect(result.counts).toEqual({
     created: 1,
     updated: 0,
     unchanged: 0,
@@ -244,8 +246,8 @@ test("CLI imports OpenGrep evidence locally without assessing it", async () => {
       source_data: {
         report: {
           version: report.version,
-          errors: report.errors,
         },
+        scan_error_count: report.errors.length,
         results: report.results,
       },
     },
