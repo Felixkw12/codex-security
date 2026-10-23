@@ -42,7 +42,12 @@ export function additionalScaFormat(path: string): AdditionalScaFormat | null {
   const name = basename(path);
   const known = filenames.get(name);
   if (known) return known;
-  if (name.endsWith(".txt") && name.includes("requirements"))
+  const requirementsName =
+    process.platform === "win32" ? name.toLowerCase() : name;
+  if (
+    requirementsName.endsWith(".txt") &&
+    requirementsName.includes("requirements")
+  )
     return "requirements";
   if (name.endsWith(".pom")) return "maven";
   return null;
