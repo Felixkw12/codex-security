@@ -1,0 +1,98 @@
+name: native-stdout-diagnostic
+
+on:
+  push:
+    branches: [mdangelo/codex/native-stdout-probe-20261023]
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  CODEX_SECURITY_INTEGRATION: "0"
+  CODEX_SECURITY_ALLOW_MACHINE_POLICY_TEST: "false"
+
+jobs:
+  observe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 873c7199b9d20d7d32466fde52f2c2b5899ea96e
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22.13.0"
+      - uses: ./.github/actions/setup-tools
+        with:
+          setup-node: false
+          cache-dependency-path: |
+            sdk/typescript/pnpm-lock.yaml
+            plugins/codex-security/mcp-app/pnpm-lock.yaml
+      - name: Restore the immutable native payload
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api repos/openai/codex-security/actions/artifacts/12469347486/zip > "$RUNNER_TEMP/native.zip"
+          printf '%s  %s\n' 81845d5129e1397cf600722b08e4f9ded46064ce27de2d07643123619ba40a0c "$RUNNER_TEMP/native.zip" | sha256sum --check
+          mkdir -p plugins/codex-security/native/prebuilt
+          unzip -qo "$RUNNER_TEMP/native.zip" -d plugins/codex-security/native/prebuilt
+      - name: Set up the pinned Bun runtime
+        shell: bash
+        run: |
+          npm install --prefix "$RUNNER_TEMP/bun" --ignore-scripts --no-audit --no-fund @oven/bun-linux-x64@1.4.2-canary.20261008.1
+          echo "$RUNNER_TEMP/bun/node_modules/@oven/bun-linux-x64/bin" >> "$GITHUB_PATH"
+      - name: Install dependencies
+        run: |
+          pnpm --dir sdk/typescript install --frozen-lockfile
+          pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
+      - name: Set up the Ubuntu sandbox and trace tool
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap apparmor-profiles strace
+          sudo apparmor_parser -r /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
+      - name: Build the plugin
+        run: pnpm --dir sdk/typescript run build:plugin
+      - name: Compare ordinary and observed execution
+        working-directory: sdk/typescript
+        env:
+          CODEX_SECURITY_TEST_TIMEOUT_MS: "30000"
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+          TMPDIR: ${{ runner.temp }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 022
+          mkdir -p reports/native-stdout
+          test "$(git rev-parse HEAD)" = 873c7199b9d20d7d32466fde52f2c2b5899ea96e
+          test "$(node --version)" = v22.13.0
+          test "$(bun --revision)" = 1.4.3-canary.1+620b50f6a
+          {
+            git rev-parse HEAD
+            node --version
+            bun --revision
+            git --version
+            strace --version
+            uname -srmo
+            bun -e 'import { resolveCodexCommand } from "./src/runtime.ts"; import { readFileSync, realpathSync } from "node:fs"; import { createHash } from "node:crypto"; import { execFileSync } from "node:child_process"; const path = realpathSync(resolveCodexCommand().command); console.log(JSON.stringify({ codexExecutable: path, sha256: createHash("sha256").update(readFileSync(path)).digest("hex"), version: execFileSync(path, ["--version"], { encoding: "utf8" }).trim() }));'
+            sha256sum tests-ts/cli-patch-inactive-hook-references.test.ts tests-ts/multiscan.test.ts src/cli.ts
+          } > reports/native-stdout/provenance.txt
+          ordinary_status=0
+          bun test --timeout 30000 --parallel=2 --seed=1 tests-ts/cli-patch-inactive-hook-references.test.ts tests-ts/multiscan.test.ts > reports/native-stdout/ordinary.log 2>&1 || ordinary_status=$?
+          observed_status=0
+          strace -f -qq -yy -s 0 -e trace=read,readv,write,writev,recvfrom,recvmsg,sendto,sendmsg,close,dup,dup2,dup3 -o reports/native-stdout/syscalls.log bun test --timeout 30000 --parallel=2 --seed=1 tests-ts/cli-patch-inactive-hook-references.test.ts tests-ts/multiscan.test.ts > reports/native-stdout/observed.log 2>&1 || observed_status=$?
+          printf 'ordinary=%s\nobserved=%s\n' "$ordinary_status" "$observed_status" > reports/native-stdout/status.txt
+          cat reports/native-stdout/status.txt
+          test "$ordinary_status" -eq 0 && test "$observed_status" -eq 0
+      - name: Preserve diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: native-stdout-observation
+          path: sdk/typescript/reports/native-stdout/
+          if-no-files-found: error
+          retention-days: 7
