@@ -2228,6 +2228,54 @@ packages:
       expect(result.matches).toHaveLength(matched ? 1 : 0);
     },
   );
+  test.each(
+    [
+      "https://pypi.org:443/simple",
+      "http://pypi.python.org:80/simple/",
+    ].flatMap((url) => [
+      {
+        path: "uv.lock",
+        content: `version=1\n[[package]]\nname="synthetic-lib"\nversion="1.2.0"\nsource={registry="${url}"}\n`,
+      },
+      {
+        path: "poetry.lock",
+        content: `[[package]]\nname="synthetic-lib"\nversion="1.2.0"\nsource={type="legacy",url="${url}"}\n`,
+      },
+      {
+        path: "Pipfile.lock",
+        content: JSON.stringify({
+          _meta: { sources: [{ name: "public", url }] },
+          default: {
+            "synthetic-lib": { version: "==1.2.0", index: "public" },
+          },
+        }),
+      },
+    ]),
+  )(
+    "keeps $path public default-port coverage complete (case %#)",
+    async ({ path, content }) => {
+      const { repository, output } = await setup();
+      await writeFile(join(repository, path), content);
+      const raw = rawOutput(path, []);
+      raw.results[0]!.packages[0]!.package.ecosystem = "PyPI";
+      const result = await runOsvScan(
+        { repositoryPath: repository, outputDir: output },
+        {
+          executable: process.execPath,
+          runProcess: async (_exe, argv) => ({
+            stdout: argv[0] === "--version" ? "2.6.0" : JSON.stringify(raw),
+            stderr: "",
+            exitCode: 0,
+          }),
+        },
+      );
+      expect(result.status).toBe("completed");
+      expect(result.coverage.status).toBe("complete");
+      expect(result.coverage.unresolvedPackages).toBe(0);
+      expect(result.components).toHaveLength(1);
+      expect(result.matches).toEqual([]);
+    },
+  );
   test.each([false, true])(
     "keeps relative Composer archive coverage incomplete with advisory matches: %p",
     async (matched) => {
